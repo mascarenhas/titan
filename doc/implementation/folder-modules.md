@@ -299,7 +299,7 @@ canonical main's single generated `*.titan.h`; out-of-line bodies enter its
 single C/object pair. The callback-symbol and UCN top-level-entry changes are
 native ABI reasons for 0.23, not contributor identities or new folder metadata.
 ABI 0.24 likewise leaves folder composition unchanged; its boundary is the
-extended generic declaration metadata, not contributor identity. ABI 0.25
+extended generic declaration metadata, not contributor identity. ABI 0.26
 again leaves folder composition unchanged; its boundary is the changed public
 `titan.fs` and `titan.async` signatures.
 

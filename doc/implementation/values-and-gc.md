@@ -113,8 +113,9 @@ Three helper families in `coder.lua` mediate between C variables and
 * `setboxed(ctx, typ, dst, src)` and the corresponding unbox/mixed-read
   helpers cross a representation domain. Records and unions already are their
   Lua-visible Udata, but Arrays are not: boxing maps an internal backing
-  `Table*` to its canonical proxy Udata, while unboxing validates that proxy
-  and recovers the backing. Map keys/values, `value`, generic calls, and Lua
+  `Table*` to its qualifier-exact canonical proxy Udata, while unboxing
+  validates the target qualifier and recovers the backing. Map keys/values,
+  `value`, generic calls, and Lua
   results use the boxed domain. Typed slots and exact calls retain the
   internal domain. This split replaces the old representation-blind
   `setwrapped`/`copyslotwrapped` model; see
@@ -148,14 +149,15 @@ nil, and ordinary foreign pointers need none.
 ### Array proxies and function closures
 
 An Array has two simultaneously live objects. Titan's native `Table *` points
-at the backing Table; the backing key 0 points to the canonical proxy Udata.
-The proxy has exactly two traced user values: `uv[0]` points back to the
-backing Table and `uv[1]` holds the module-cached genuine-Lua writer closure.
-The closure in turn traces its owning module Udata. `titan_array_new` roots
-the writer, backing, and proxy independently while it allocates and links
-them, installs the two user values through Lua's API, and applies the backing
-Table's back barrier after the key-0 reverse link. No user-value edge is
-untraced.
+at the backing Table; the backing key 0 points to the exact mutable or const
+canonical proxy Udata. The proxy has exactly two traced user values: `uv[0]`
+points back to the backing Table; mutable `uv[1]` holds the module-cached
+genuine-Lua writer closure, while const `uv[1]` is nil. The mutable closure in
+turn traces its owning module Udata. `titan_array_new` and
+`titan_const_array_new` root the writer-or-nil, backing, and proxy independently
+while they allocate and link them, install the two user values through Lua's
+API, and apply the backing Table's back barrier after the key-0 reverse link.
+No user-value edge is untraced.
 
 A canonical Titan **source** function is a `CClosure`. Its header is `_mod`,
 canonical function-type tag, native-entry pointer, and opaque closure brand;
@@ -218,7 +220,7 @@ The layout:
   declaration order by the checker — `types.Field` in
   `checker.lua`. Inside Titan code a record value *is* this udata
   (`ctype` = `Udata*`), so field access is an indexed load — `p.x`
-  compiles to `fltvalue(&((_param_p)->uv[0].uv))` — and a field write is
+  compiles to `fltvalue(&((_param_p)->uv[0].uv))` — and a mutable field write is
   `setslot` into `&(_recobj->uv[i].uv)` plus a **back** barrier when the
   field type is GC-able (a userdata owner uses `luaC_barrierback`, see
   [write barriers](#5-write-barriers-back-for-userdata-and-tables-forward-for-closures)).
@@ -356,10 +358,13 @@ the protected `"Titan union <fqtn>"` identity for diagnostics.
 
 An Interface value is a full `Udata` whose metatable is the exact nominal
 Interface identity. Its opaque payload is a declaration-order array of
-`TitanInterfaceMethod` function-pointer storage, while its two traced user
-values retain the concrete owner's module Udata and the concrete record/union
-receiver. The payload is copied from a process-static pair array and is not a
-GC graph; both user-value stores need ordinary Udata backward barriers.
+`TitanInterfaceMethod` function-pointer storage, while its `2 + field_count`
+traced user values retain the concrete owner's module Udata, the concrete
+record/union receiver, and target-typed field snapshots in Interface field
+order. The payload is copied from a nonempty process-static pair array and is
+not a GC graph; every collectable user-value store needs an ordinary Udata
+backward barrier. Field-only wrappers have zero payload bytes and no pair-array
+copy.
 
 For every pair whose static wrapper construction is emitted, initialization
 may also store a one-upvalue witness closure in the concrete metatable under
@@ -372,7 +377,7 @@ root table or untraced cache.
 Wrapper allocation follows the fresh-object rule below: the concrete source is
 frozen once in an untraced C temporary while its ordinary provenance remains
 live, and the new Udata receives its own root immediately before its metatable
-and two traced edges are published. The lowering conservatively treats
+and `2 + field_count` traced edges are published. The lowering conservatively treats
 `luaS_newudata` as a stack-rebase point, saves `_base` as an offset, and restores
 it immediately after allocation. This protects stack-slot addresses; the
 non-moving collector keeps the source and new Udata heap objects stable. A bound
@@ -387,10 +392,11 @@ dispatch contract.
 
 When the witness is called, its concrete input already occupies a traced
 argument slot. The new Interface Udata replaces that slot before its metatable
-and uservalues are published; user value 1 then retains the input. No special
-root is needed for either object beyond that VM slot and the wrapper's normal
-strong edge. `luaS_newudata` may grow the stack, so saved offsets are restored
-before slot access even though Lua heap objects themselves do not move.
+and owner/receiver uservalues are published; user value 1 then retains the
+input. Field adjustments use traced temporaries and store each snapshot with a
+barrier before publication. `luaS_newudata` may grow the stack, so saved offsets
+are restored before slot access even though Lua heap objects themselves do not
+move.
 
 ## The module userdata
 
@@ -409,7 +415,7 @@ There is **no reserved user value**: the module table was removed
 entirely, so member slots are 0-based. The user values hold, in
 allocation order: the importer-reconstructible public prefix (exported module
 variables, ordinary-function canonical closures, then public nominal statics),
-then the shared Array-metatable cache, one immutable lightuserdata
+then the consecutive mutable/const Array-metatable cache, one immutable lightuserdata
 physical-provider identity token, and fixed AST-order private slots for
 locals/imports, remaining canonical closures, and nominal namespace tables.
 A direct source importer verifies that token against its exact linked producer

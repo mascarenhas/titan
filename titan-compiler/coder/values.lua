@@ -197,7 +197,7 @@ function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:string]
             }
         ]], {
             EXP = exp,
-            META = array_metatable(ctx),
+            META = array_metatable(ctx, typ),
             VAR = cvar,
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
@@ -461,11 +461,23 @@ function coder._checked_dynamic_plan_impl(plan, typ, use, seen, root)
     assert(plan.op == expected,
         (use or "dynamic boundary") .. " has unknown/mismatched operation "
             .. tostring(plan.op))
-    if plan.op == "option" then
+    if plan.op == "array" then
+        assert(plan.isconst == target.isconst
+               and type(plan.isconst) == "boolean",
+            (use or "dynamic boundary")
+                .. " has a mismatched Array const qualifier")
+    elseif plan.op == "option" then
+        assert(plan.isconst == nil,
+            (use or "dynamic boundary")
+                .. " has an unexpected Array const qualifier")
         coder._checked_dynamic_plan_impl(
             plan.inner, target.base,
             (use or "dynamic boundary") .. " Option present value",
             seen, false)
+    else
+        assert(plan.isconst == nil,
+            (use or "dynamic boundary")
+                .. " has an unexpected Array const qualifier")
     end
     seen[plan].active = false
     return plan
@@ -491,7 +503,7 @@ function setboxed(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]])
         ]], {
             DST = dst,
             SRC = src,
-            META = array_metatable(ctx),
+            META = array_metatable(ctx, typ),
         })
     elseif typ._tag == "Type.Option"
            and typ.base._tag == "Type.Array" then
@@ -509,7 +521,7 @@ function setboxed(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]])
         ]], {
             DST = dst,
             SRC = src,
-            META = array_metatable(ctx),
+            META = array_metatable(ctx, typ.base),
         })
     elseif typ._tag == "Type.Nominal" then
         -- A record value IS the Udata; hand Lua the udata directly ($SRC is a
@@ -554,7 +566,7 @@ function copyboxed(ctx, typ, dst, src)
         ]], {
             DST = dst,
             SRC = src,
-            META = array_metatable(ctx),
+            META = array_metatable(ctx, typ),
         })
     elseif typ._tag == "Type.Option"
            and typ.base._tag == "Type.Array" then
@@ -569,7 +581,7 @@ function copyboxed(ctx, typ, dst, src)
         ]], {
             DST = dst,
             SRC = src,
-            META = array_metatable(ctx),
+            META = array_metatable(ctx, typ.base),
         })
     end
     return render([[
@@ -827,17 +839,27 @@ function checked_gradual_guard(plan, typ, use, seen, root)
         use .. " has unknown/mismatched guard operation "
             .. tostring(plan.op))
     if expected == "array" then
+        assert(plan.isconst == target.isconst
+               and type(plan.isconst) == "boolean",
+            use .. " has a mismatched Array const qualifier")
         checked_gradual_guard(
             plan.element, target.elem, use .. " Array element", seen, false)
     elseif expected == "map" then
+        assert(plan.isconst == nil,
+            use .. " has an unexpected Array const qualifier")
         checked_gradual_guard(
             plan.key, target.keys, use .. " Map key", seen, false)
         checked_gradual_guard(
             plan.value, target.values, use .. " Map value", seen, false)
     elseif expected == "option" then
+        assert(plan.isconst == nil,
+            use .. " has an unexpected Array const qualifier")
         checked_gradual_guard(
             plan.inner, target.base, use .. " Option present value",
             seen, false)
+    else
+        assert(plan.isconst == nil,
+            use .. " has an unexpected Array const qualifier")
     end
     return plan
 end
@@ -1516,6 +1538,22 @@ function coder._checked_written_cast_plan(
                and (target_owner._tag == "Type.Record"
                     or target_owner._tag == "Type.Union"),
             use .. " has a mismatched Interface downcast")
+    elseif cast.op == "array_freeze" then
+        assert(source._tag == "Type.Array"
+               and target._tag == "Type.Array"
+               and source.isconst == false
+               and target.isconst == true
+               and (cast.mode == "copy" or cast.mode == "freeze")
+               and cast.allocation_free_test == true,
+            use .. " has a malformed Array freeze operation")
+        if types.equals(source.elem, target.elem) then
+            assert(cast.element_view == false,
+                use .. " exact Array freeze has an element view")
+        else
+            coder._checked_adjustment_plan(
+                cast.element_view, source.elem, target.elem,
+                use .. " Array element view")
+        end
     else
         error(use .. " has unknown operation " .. tostring(cast.op))
     end
@@ -1751,7 +1789,7 @@ function coder._strictcheckandgetmixed(
             }
         ]], {
             EXP = exp,
-            META = array_metatable(ctx),
+            META = array_metatable(ctx, typ),
             VAR = cvar,
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
@@ -1765,7 +1803,8 @@ function coder._strictcheckandgetmixed(
         return render([[
             if (ttistable($EXP)) {
                 Udata *_titan_proxy =
-                    titan_array_try_proxy(hvalue($EXP), $META);
+                    titan_array_try_proxy_either(
+                        hvalue($EXP), $MUTABLE_META, $CONST_META);
                 if (_titan_proxy != NULL) {
                     setuvalue(L, &$VAR, _titan_proxy);
                 } else {
@@ -1776,7 +1815,8 @@ function coder._strictcheckandgetmixed(
             }
         ]], {
             EXP = exp,
-            META = array_metatable(ctx),
+            MUTABLE_META = array_metatable_kind(ctx, false),
+            CONST_META = array_metatable_kind(ctx, true),
             VAR = cvar,
         })
     elseif typ._tag == "Type.Option" then
@@ -1828,7 +1868,7 @@ function coder._emit_array_writers(tlcontext, sigs, code, initfuncs)
     for _, entry in ipairs(tlcontext.array_writer_list) do
         local loc = {
             filename = "<Lua write to "
-                .. types.tostring(types.Array(entry.elem)) .. ">",
+                .. types.tostring(types.Array(entry.elem, false)) .. ">",
             line = 1,
             col = 1,
         }

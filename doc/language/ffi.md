@@ -659,8 +659,10 @@ Bitfields are parsed and typed, but they remain C bitfields: assignment follows
 the C compiler's rules. Anonymous fields are not exposed as Titan members.
 
 Named file-scope tag-only aggregates are available as `c.Tag` without a C
-typedef. Every local requires an initializer; use `c.Tag.new()` at a direct
-local sink to request zeroed automatic storage. See
+typedef. Such an aggregate local requires an initializer because the type does
+not admit nil; use `c.Tag.new()` at a direct local sink to request zeroed
+automatic storage. An explicitly typed mutable C pointer local may omit its
+initializer and starts as `NULL`. See
 [C FFI declarations and expressions](c-ffi-expressions.md).
 
 A Titan [union](unions.md) is unrelated to a C `union`: it is nominal tagged

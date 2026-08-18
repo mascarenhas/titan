@@ -1,7 +1,7 @@
 # The Titan grammar
 
 This chapter is the reference grammar of Titan as implemented by the
-0.25 prototype compiler: lexical conventions, the complete syntactic
+0.26 prototype compiler: lexical conventions, the complete syntactic
 grammar, operator precedence, and the restrictions the EBNF alone does
 not show. It replaces the old manual's stale grammar.
 
@@ -151,6 +151,7 @@ for a folder module only its main source may contain that initializer. Its `bloc
 ```
 program  ::= {tldecl} [moduleinit]
 tldecl   ::= tlmethod | tlrecfunc | tlfunc | tlforeignfunc | tlvar
+           | tlconstvar
            | tlrecord | tlunion | tlinterface | tltype | tlimport
            | tlforeignimport
 tlmethod ::= [local] function Name ':' Name [typeparams]
@@ -161,14 +162,17 @@ tlfunc   ::= [local] function Name [typeparams]
              '(' [parlist] ')' [':' rettype] block end
 tlforeignfunc ::= foreign function Name '(' [parlist] ')' [':' rettype] block end
 tlvar    ::= [local] decl '=' exp
+tlconstvar ::= [local] const decl ['=' exp]
 tlrecord ::= [local] record Name [typeparams] {recordfield} end
 tlunion  ::= [local] union Name [typeparams] unionvariant {unionvariant} end
 tlinterface ::= interface Name [typeparams]
-                interfacemethod {interfacemethod} end
+                interfacemember {interfacemember} end
+interfacemember ::= interfacemethod | interfacefield
 interfacemethod ::= function Name [typeparams]
                     '(' [parlist] ')' [':' rettype]
+interfacefield ::= Name ':' type [';']
 tltype   ::= [local] type Name '=' type
-recordfield     ::= [local] Name ['?'] ':' type [';']
+recordfield     ::= [local] [const] Name ['?'] ':' type [';']
 unionvariant    ::= [local] Name [':' type] [';']
 tlimport        ::= local Name '=' import importname
 tlforeignimport ::= local Name '=' foreign import importname
@@ -225,11 +229,13 @@ Notes on the top level:
 * A `union` must contain at least one variant and synthesizes one
   positional-only static constructor per variant. An empty variant takes no
   parameter; a payload variant takes one. See [Unions](unions.md).
-* An `interface` is a nonempty, public, top-level type declaration. Its
-  body contains bodyless `function` signatures only: there is no `local`
-  Interface, nested Interface, method body, receiver colon, field, static, or
-  member-level `end`. See [Interfaces](interfaces.md).
-* A module variable's initializer is a full expression; after `=`, the
+* An `interface` is a nonempty, public, top-level type declaration. Its body
+  may mix implicitly const `name: type` fields with bodyless `function`
+  signatures. There is no `local` Interface, nested Interface, method body,
+  receiver colon, static, or member-level `end`. See
+  [Interfaces](interfaces.md).
+* A mutable module variable requires a full initializer expression. A const
+  module variable may omit it subject to the nil-bearing type rule; after `=`, the
   keywords `import` and `foreign import` mark an import instead.
 * The optional `moduleinit` is the sole executable root construct. It runs
   once per Lua state after all logical-module declarations, including folder
@@ -241,7 +247,6 @@ Notes on the top level:
 decl       ::= Name ['?'] [':' type]
 decllist   ::= decl {',' decl}
 qualifiedtype ::= Name '.' Name
-automaticlocaldecl ::= Name ':' qualifiedtype ['[' ['-'] Numeral ']']
 type       ::= simpletype
             |  funargtypes '->' rettype
             |  simpletype '->' rettype
@@ -254,6 +259,7 @@ basictype  ::= nil | boolean | integer | float | string | value
             |  Name [typeargs]
             |  '{' type ':' type '}'
             |  '{' type '}'
+            |  const '{' type '}'
 ownedtype  ::= owned '*' cownedpayload
             |  owned cownedpayload '[' ']'
 cownedpayload ::= nil | boolean | integer | float | string | value
@@ -296,8 +302,9 @@ module. Generic owners and forwarding aliases to a bare generic owner take
 `typeargs`; a concrete alias is already closed. Declaration `typeparams` may constrain a parameter to a named Interface
 application. See [Generics](generics.md).
 
-`{T}` is an
-array, `{K: V}` a map, `T?` an option type, and `t -> t` a function type. A
+`{T}` is a mutable Array, `const { T }` a const Array, `{K: V}` a Map,
+`T?` an option type, and `t -> t` a function type. `const` does not qualify a
+Map. A
 function type may end its argument list with
 `...: T` to describe a variadic function value, and a parenthesized result
 list may end with `...: T` to describe a flexible result run. The two tails
@@ -370,8 +377,8 @@ statement  ::= ';'
             |  case exp casearm {casearm} [else block] end
             |  for decl '=' exp ',' exp [',' exp] do block end
             |  for decllist in explist do block end
-            |  local automaticlocaldecl
-            |  local decllist '=' explist
+            |  [local] const decllist '=' explist
+            |  local decllist ['=' explist]
             |  varlist '=' explist
             |  functioncall
             |  break
@@ -396,14 +403,12 @@ variant, but does not require exhaustive coverage. See
 An lvalue (`var`) is a plain name or a suffixed expression whose *last*
 suffix is an index or a field selection — `f()[1] = v`, `m[k][1] = v`,
 and `f().x = v` are assignable, as is reading `f().x`; a bare call is
-not. Multiple assignment and multiple initialized `local`
-declarations mirror Lua. The one no-initializer production is restricted to a
-single qualified C type (optionally with one source-written extent), such as
-`local options: c.Options` or `local storage: c.Item[3]`; the checker then
-requires an eligible complete C aggregate and a positive integer extent. See
-[C FFI declarations and expressions](c-ffi-expressions.md). Any other local
-declaration requires an initializer, so plain `local x: integer` is a syntax
-error. `return`
+not. Multiple assignment and multiple initialized `local` declarations mirror
+Lua. A mutable local may omit the expression list only when every declaration
+has an explicit type that admits missing nil; the checker synthesizes one nil
+per slot. Const locals always require `= explist`. Direct C aggregates and
+fixed arrays do not admit nil and require an initialized allocation expression.
+`return`
 takes zero or more expressions, only as the last statement of a block.
 In a zero-return function (`(...) -> ()`), a bare `return` returns zero
 values. Written return expressions are evaluated but their values are
@@ -594,11 +599,10 @@ confused rule is not syntax at all:
 6. **Lvalues cannot be parenthesized.** `(x) = 1` is a syntax error
    (`Expected a valid lvalue in the left side of assignment but found
    a regular expression.`).
-7. **Every declaration needs an initializer.** Module variables and `local`
-   statements require `= explist`, including C aggregates and arrays. The
-   declaration-only `module.CType[N]` and `module.CType[]` spellings select a
-   fixed automatic array or borrowed view only when initialized directly by
-   `.new_array(...)`.
+7. **Only nil-bearing mutable locals may omit an initializer.** Every name
+   still needs an explicit nil-bearing type. Const locals always require
+   `= explist`; mutable module variables require `= exp`; only const module
+   variables may omit their initializer under the same nil-bearing rule.
 8. **Parenthesizing a call truncates it.** `(f())` adjusts a
    multiple-value call to exactly its first value, as in Lua. See
    [Functions](functions.md).

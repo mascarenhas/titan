@@ -222,6 +222,14 @@ function defs.constcptrtype(pos, subtype)
     return ast.TypeCPointer(pos, subtype, true)
 end
 
+function defs.arraytype(pos, subtype)
+    return ast.TypeArray(pos, subtype, false)
+end
+
+function defs.constarraytype(pos, subtype)
+    return ast.TypeArray(pos, subtype, true)
+end
+
 function defs.cownedscalartype(pos, subtype)
     return ast.TypeCOwned(pos, subtype, false)
 end
@@ -498,14 +506,37 @@ function defs.toplevelfuncdecl(pos, islocal, name, typeparams, params,
         flexrettype, block, typeparams)
 end
 
-function defs.interfacedecl(pos, name, typeparams, methods)
-    return ast.TopLevelInterface(pos, name, methods, typeparams)
+function defs.toplevelvardecl(pos, islocal, decl, value)
+    return ast.TopLevelVar(pos, islocal, false, decl, value)
+end
+
+function defs.toplevelconstvardecl(pos, islocal, decl, value)
+    decl.isconst = true
+    return ast.TopLevelVar(pos, islocal, true, decl, value)
+end
+
+function defs.interfacedecl(pos, name, typeparams, members)
+    local fields, methods = {}, {}
+    for _, member in ipairs(members) do
+        if member._tag == "Ast.InterfaceMethod" then
+            methods[#methods + 1] = member
+        else
+            assert(member._tag == "Ast.Decl")
+            fields[#fields + 1] = member
+        end
+    end
+    return ast.TopLevelInterface(pos, name, members, fields, methods,
+        typeparams)
 end
 
 function defs.interfacemethoddecl(pos, name, typeparams, params, rettypes,
                                   flexrettype)
     return ast.InterfaceMethod(pos, name, params, rettypes, flexrettype,
         typeparams)
+end
+
+function defs.interfacefielddecl(pos, name, type)
+    return ast.Decl(pos, name, type, false, true)
 end
 
 local function has_local_field(fields)
@@ -526,7 +557,8 @@ end
 function defs.recorddecl(pos, islocal, name, typeparams, fields)
     local params, initlist = {}, {}
     for _, field in ipairs(fields) do
-        table.insert(params, ast.Decl(field.loc, field.name, field.type, false))
+        table.insert(params,
+            ast.Decl(field.loc, field.name, field.type, false, false))
         table.insert(initlist, ast.Field(field.loc, field.name,
             ast.ExpVar(field.loc, ast.VarName(field.loc, field.name))))
     end
@@ -564,7 +596,7 @@ function defs.uniondecl(pos, islocal, name, typeparams, variants)
         local value = false
         if variant.payload then
             local param = ast.Decl(
-                variant.loc, "__union_payload", variant.payload, false)
+                variant.loc, "__union_payload", variant.payload, false, false)
             params[1] = param
             value = ast.ExpVar(
                 variant.loc,
@@ -595,18 +627,18 @@ function defs.uniondecl(pos, islocal, name, typeparams, variants)
 end
 
 function defs.recordfielddecl(pos, name, type)
-    local decl = ast.Decl(pos, name, type, false)
+    local decl = ast.Decl(pos, name, type, false, false)
     return decl
 end
 
 function defs.localrecordfielddecl(pos, name, type)
-    local decl = ast.Decl(pos, name, type, false)
+    local decl = ast.Decl(pos, name, type, false, false)
     decl.islocal = true
     return decl
 end
 
 function defs.optionrecordfielddecl(pos, name, type)
-    return ast.Decl(pos, name, ast.TypeOption(type.loc, type), false)
+    return ast.Decl(pos, name, ast.TypeOption(type.loc, type), false, false)
 end
 
 function defs.localoptionrecordfielddecl(pos, name, type)
@@ -615,24 +647,51 @@ function defs.localoptionrecordfielddecl(pos, name, type)
     return decl
 end
 
+function defs.constrecordfielddecl(pos, name, type)
+    return ast.Decl(pos, name, type, false, true)
+end
+
+function defs.localconstrecordfielddecl(pos, name, type)
+    local decl = defs.constrecordfielddecl(pos, name, type)
+    decl.islocal = true
+    return decl
+end
+
+function defs.constoptionrecordfielddecl(pos, name, type)
+    return ast.Decl(pos, name, ast.TypeOption(type.loc, type), false, true)
+end
+
+function defs.localconstoptionrecordfielddecl(pos, name, type)
+    local decl = defs.constoptionrecordfielddecl(pos, name, type)
+    decl.islocal = true
+    return decl
+end
+
 function defs.typeddecl(pos, name, type)
-    return ast.Decl(pos, name, type, false)
+    return ast.Decl(pos, name, type, false, false)
 end
 
 function defs.optiondecl(pos, name, type)
     if type then
-        return ast.Decl(pos, name, ast.TypeOption(type.loc, type), false)
+        return ast.Decl(pos, name, ast.TypeOption(type.loc, type), false, false)
     else
-        return ast.Decl(pos, name, false, true)
+        return ast.Decl(pos, name, false, true, false)
     end
 end
 
 function defs.inferreddecl(pos, name)
-    return ast.Decl(pos, name, false, false)
+    return ast.Decl(pos, name, false, false, false)
 end
 
 function defs.casebinding(pos, name)
-    return ast.Decl(pos, name, false, false)
+    return ast.Decl(pos, name, false, false, false)
+end
+
+function defs.constlocalvardecl(pos, decls, exps)
+    for _, decl in ipairs(decls) do
+        decl.isconst = true
+    end
+    return ast.StatDecl(pos, decls, exps)
 end
 
 -- A variadic parameter `...: t` (or, for lambdas only, an untyped `...`):
@@ -643,7 +702,7 @@ end
 -- The `type` capture is absent (nil) for the untyped lambda form; normalise it
 -- to `false`.
 function defs.varargdecl(pos, type)
-    return ast.Decl(pos, false, type or false, false)
+    return ast.Decl(pos, false, type or false, false, false)
 end
 
 -- A trailing `...` field in an array constructor: `{ a, ... }`. Encoded as a
@@ -746,6 +805,7 @@ local grammar = re.compile([[
                               / foreignfunc
                               / toplevelfunc
                               / topleveltype
+                              / toplevelconstvar
                               / toplevelvar
                               / toplevelrecord
                               / toplevelunion
@@ -778,9 +838,13 @@ local grammar = re.compile([[
                            ASSIGN^AssignTypeAlias
                            type^TypeTypeAlias)                   -> TopLevelTypeAlias
 
+    toplevelconstvar
+                    <- (P localopt CONST decl
+                           ((ASSIGN exp^ExpVarDec)? -> opt))    -> toplevelconstvardecl
+
     toplevelvar     <- (P localopt decl ASSIGN^AssignVar
                            !(IMPORT / FOREIGN)
-                           exp^ExpVarDec)                        -> TopLevelVar
+                           exp^ExpVarDec)                        -> toplevelvardecl
 
     toplevelrecord  <- (P  localopt RECORD NAME^NameRecord
                            typeparamsopt
@@ -799,16 +863,20 @@ local grammar = re.compile([[
                     <- (P  (LOCAL INTERFACE %{LocalInterface} / INTERFACE)
                            NAME^NameInterface
                            typeparamsopt
-                           interfacemethods
+                           interfacemembers
                            (END
                             / (!. %{EndInterface})
                             / %{MemberInterface}))               -> interfacedecl
 
-    -- Unlike parameter and expression lists, the repeated method declaration
+    -- Unlike parameter and expression lists, the repeated member declaration
     -- list has no arbitrary source-level length limit.
-    interfacemethods
-                    <- {| interfacemethod^MethodInterface
-                           interfacemethod* |}
+    interfacemembers
+                    <- {| interfacemember^InterfaceMember
+                           interfacemember* |}
+
+    interfacemember <- interfacemethod
+                     / interfacefield
+                     / (P  LOCAL %{LocalInterfaceField})
 
     interfacemethod <- (P  LOCAL FUNCTION %{LocalInterfaceMethod})
                      / (P  FUNCTION NAME^NameInterfaceMethod
@@ -816,6 +884,9 @@ local grammar = re.compile([[
                            LPAREN^LParInterfaceMethod paramlist
                            RPAREN^RParInterfaceMethod
                            interfacerettypeopt)                  -> interfacemethoddecl
+
+    interfacefield <- (P  NAME COLON^ColonInterfaceField
+                           type^TypeInterfaceField SEMICOLON?)   -> interfacefielddecl
 
     localopt        <- (LOCAL)?                                  -> boolopt
 
@@ -962,6 +1033,11 @@ local grammar = re.compile([[
                            cownedpayload^OwnedPayload)           -> cownedscalartype
                      / (P  OWNED %{COwnedShape})
 
+    constarray      <- (P  CONST LCURLY
+                           type^TypeConstArray
+                           (!COLON / %{ConstMap})
+                           RCURLY^RCurlyType)                    -> constarraytype
+
     simpletype      <- ((((P  NIL)                               -> TypeNil
                      / (P  BOOLEAN)                              -> TypeBoolean
                      / (P  INTEGER)                              -> TypeInteger
@@ -969,6 +1045,7 @@ local grammar = re.compile([[
                      / (P  STRING)                               -> TypeString
                      / (P  VALUE)                                -> TypeValue
                      / ownedtype
+                     / constarray
                      / (P  CONST MUL simpletype^TypeType)        -> constcptrtype
                      / (P  MUL simpletype^TypeType)              -> cptrtype
                      / namedtype
@@ -977,7 +1054,7 @@ local grammar = re.compile([[
                            type^TypeType
                            RCURLY^RCurlyType)                    -> TypeMap
                      / (P  LCURLY type^TypeType
-                           RCURLY^RCurlyType)                    -> TypeArray)
+                           RCURLY^RCurlyType)                    -> arraytype)
                                                   (OPT -> '?')?) -> typeopt)
                         (!LBRACKET / %{CArrayOnlyAutomatic})
 
@@ -1041,7 +1118,15 @@ local grammar = re.compile([[
 
     recordfields    <- {| recordfield* |}                        -- produces {Decl}
 
-    recordfield     <- (P  LOCAL NAME OPT COLON^ColonRecordField
+    recordfield     <- (P  LOCAL CONST NAME OPT COLON^ColonRecordField
+                           type^TypeRecordField SEMICOLON?)      -> localconstoptionrecordfielddecl
+                     / (P  LOCAL CONST NAME COLON^ColonRecordField
+                           type^TypeRecordField SEMICOLON?)      -> localconstrecordfielddecl
+                     / (P  CONST NAME OPT COLON^ColonRecordField
+                           type^TypeRecordField SEMICOLON?)      -> constoptionrecordfielddecl
+                     / (P  CONST NAME COLON^ColonRecordField
+                           type^TypeRecordField SEMICOLON?)      -> constrecordfielddecl
+                     / (P  LOCAL NAME OPT COLON^ColonRecordField
                            type^TypeRecordField SEMICOLON?)      -> localoptionrecordfielddecl
                      / (P  LOCAL NAME COLON^ColonRecordField
                            type^TypeRecordField SEMICOLON?)      -> localrecordfielddecl
@@ -1080,9 +1165,12 @@ local grammar = re.compile([[
                            elseifstats elseopt END^EndIf)        -> ifstat
                      / casestat
                      / forstat
-                     / (P  LOCAL localdecllist^DeclLocal
+                     / (P  (LOCAL? CONST) localdecllist^DeclLocal
                                  ASSIGN^AssignLocal
-                                 explist^ExpLocal)                 -> StatDecl
+                                 explist^ExpLocal)                 -> constlocalvardecl
+                     / (P  LOCAL localdecllist^DeclLocal
+                                 ((ASSIGN explist^ExpLocal)? -> listopt))
+                                                                  -> StatDecl
                      / (P  varlist ASSIGN^AssignAssign
                                explist^ExpAssign)                    -> StatAssign
                      / &(exp ASSIGN) %{AssignNotLValue}

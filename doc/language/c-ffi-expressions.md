@@ -84,8 +84,7 @@ both `struct stat` and a function named `stat`, and Titan supports both:
 ```lua
 local c = foreign import "sys/stat.h"
 
-local function inspect(path: string): integer
-    local info: c.stat
+local function inspect(path: string, info: *c.stat): integer
     return c.stat(path, info)
 end
 ```
@@ -220,9 +219,20 @@ Titan first takes the permitted address and then emits the validated C cast.
 
 ## Target-directed C allocation
 
-Every local declaration has an initializer. This includes C structures,
-unions, and fixed arrays: the former initializer-less C-local form no longer
-exists. Use `.new()` or `.new_array(...)` to ask for zeroed storage explicitly.
+An ordinary mutable local may omit its initializer only with an explicit type
+whose representation admits nil. A C object or function pointer is in that
+domain, so `local p: *c.Point` starts as `NULL`. C structures, unions, fixed
+arrays, numeric scalars, and enums do not admit nil and still require an
+initializer. Use `.new()` or `.new_array(...)` to ask for zeroed aggregate
+storage explicitly.
+
+A const local always has an initializer. Constness on direct inline C
+structure, union, or fixed-array storage is shallow but effective: the binding
+cannot be replaced, its inline fields/elements cannot be mutated, and it cannot
+take a mutable address or mutable automatic-decay path. Reaching separately
+owned storage through a pointer ends that inline walk, so the pointee keeps the
+mutability promised by the pointer type. This Titan binding rule is separate
+from the C pointee qualifier in `const *T`.
 
 The constructor's representation is selected at its direct local declaration
 sink. The checker records one allocation plan there; moving the call to a

@@ -22,7 +22,8 @@ A declaration is one of:
 * an **import**: `local m = import "modname"`;
 * a **foreign import**: `local h = foreign import "header.h"` (see
   [the C FFI](ffi.md));
-* a **module variable** declaration: `[local] name [: type] = exp`;
+* a **module variable** declaration: `[local] name [: type] = exp` or
+  `[local] const name [: type] [= exp]`;
 * a **function** declaration: `[local] function name(...) ... end`;
 * a **type alias** declaration: `[local] type Name = type` (see
   [Type aliases](type-aliases.md));
@@ -79,8 +80,8 @@ than that sequence, with one deliberate frontier for module variables:
 * **Records, unions, Interfaces, type aliases, and callable declarations are
   order-independent.**
   A nominal type, ordinary function, method, or nominal function may be declared
-  before or after any of the others. Signatures, Interface method signatures,
-  record fields, union
+  before or after any of the others. Signatures, Interface field and method
+  signatures, record fields, union
   payloads, and alias targets may use nominal types, aliases, and imports
   declared later in the logical
   order. Synthesized record and union constructors are likewise available
@@ -176,6 +177,12 @@ contributor declaration. It may call contributor-local functions because all
 files share one module scope. Ordinary nested `do` statements remain legal in
 every source file.
 
+The block is also the sole assignment region for an initializer-less const
+module variable owned by this logical module. Permission follows this root
+function frame through nested blocks, but does not flow into a function or
+lambda called or created from it. A direct source import does not grant an
+importer's initializer authority over the producer's const slots.
+
 ## Module variables
 
 A module-variable declaration has the form
@@ -183,20 +190,30 @@ A module-variable declaration has the form
 ```lua
 -- Titan
 [local] <name> [: <type>] = <expression>
+[local] const <name> [: <type>] [= <expression>]
 ```
 
-The type annotation is optional; without it the type is inferred from
-the initializer. With an annotation, the usual
+The type annotation is optional when an initializer is present; without it the
+type is inferred from the initializer. With an annotation, the usual
 [assignment adjustments](types.md#relations-and-boundaries-no-subtyping)
 apply, so `pi: float = 3` declares a float-typed variable holding `3.0`.
+
+An initialized const module variable is never assignable. A const declaration
+may omit its initializer only with an explicit type that admits the missing nil
+representation; the slot starts as nil/NULL and can be assigned only while code
+executes directly in its owning root module initializer. Nested callables and
+other modules' initializers do not inherit that permission. The owner
+initializer may assign it conditionally or repeatedly; it becomes read-only
+when initialization finishes. See
+[Const values](const-values.md#const-module-variables).
 
 A `local` variable is hidden from the public module interface; it is available
 inside its owner and through a qualified [direct source collaboration
 import](source-import-visibility.md). A variable without `local` is *exported*:
-modules that import this one can read
-and write it through their import alias, and Lua code that `require`s
-the module can read and write it as a member of the module value (which
-is a userdata; writes from Lua are type-checked at run time — see
+modules that import this one can read it through their import alias, and can
+write it when it is mutable. Lua code that `require`s the module likewise sees
+it as a member of the module value; mutable writes are type-checked at run time
+and const writes are rejected — see
 [Module variables from Lua](lua-interop.md#module-variables-from-lua)).
 
 ### Initializers must be constant
@@ -304,10 +321,11 @@ function g(): float
 end
 ```
 
-Exported variables of the imported module can be both read and
-assigned (`geom.origin.x = 0.0` above); writes from Titan are
-statically checked and compile to direct stores, with no run-time type
-check. Exported record and union declarations serve two roles: their types are
+Exported mutable variables of the imported module can be both read and
+assigned (`geom.origin.x = 0.0` above); writes from Titan are statically
+checked and compile to direct stores, with no run-time type check. Exported
+const variables are readable but not assignable. Exported record and union
+declarations serve two roles: their types are
 referenced as `alias.Name` in annotations, and their run-time nominal
 functions as `alias.Name.new(...)`, `alias.Name.make(...)`, or a union variant
 constructor. An exported type alias to a record or union preserves both roles:
@@ -521,8 +539,8 @@ the structure of the generated C is in
   directory, as described above.
 * **Compiled modules** are looked up along the *binary search path*: a
   semicolon-separated list of plain directories taken from
-  `TITAN_PATH_0_25`, or `TITAN_PATH` if that is unset. Otherwise the default
-  is `.;<root>/lib/titan/0.25`. An installed `titanc` recovers `<root>` from
+  `TITAN_PATH_0_26`, or `TITAN_PATH` if that is unset. Otherwise the default
+  is `.;<root>/lib/titan/0.26`. An installed `titanc` recovers `<root>` from
   the first literal `package.cpath` entry ending in
   `/lib/lua/5.5/?.so`. For logical `a.b.c`, the default performs a complete
   pass over `a.so`, `a/b.so`, and exact `a/b/c.so`, then a complete pass over
@@ -571,14 +589,14 @@ Lua's `require`, for its part, finds a generated logical loader through
 `package.cpath`, loads it globally, and invokes the module's exact
 `luaopen_*` entry (see [Requiring a Titan
 module](lua-interop.md#requiring-a-titan-module)). Titan's installed Lua
-default includes `<root>/lib/titan/0.25/?.so` and the standard loader root.
+default includes `<root>/lib/titan/0.26/?.so` and the standard loader root.
 A qualified standard name such as `titan.os` therefore runs
 `<root>/share/lua/5.5/titan/os.lua`, which opens the canonical DSO
-`<root>/lib/titan/0.25/titan.so`. Default Titan imports select that same
+`<root>/lib/titan/0.26/titan.so`. Default Titan imports select that same
 physical file by validating the `titan.os` callable metadata; `--static`
 prefers the paired self-describing `titan.a`. Installation creates no child
 DSOs, parent-level or `lib/lua` copies, symbolic links, or hard links.
-ABI 0.25 does not migrate or clean up a separately installed 0.24 provider;
+ABI 0.26 does not migrate or clean up a separately installed 0.25 provider;
 that versioned directory remains preserved prior-version state and is not on
 the active default path.
 
@@ -672,7 +690,7 @@ dynamic. Qualified standard-library dependencies therefore use the installed
 `titan.so` by default, while `--static` prefers `titan.a`.
 After `luaL_openlibs`, the executable parses the
 inherited `package.cpath` for its `/lib/lua/5.5/?.so` entry, adds
-`<root>/lib/titan/0.25/?.so` if it is absent, and initializes the Titan module
+`<root>/lib/titan/0.26/?.so` if it is absent, and initializes the Titan module
 path from that same root. Deploy the standard provider and loaders as described
 under [where modules are found](#where-modules-are-found). `args[1]` onward
 contain only the user-supplied arguments; index 0 is absent and the executable
@@ -739,11 +757,11 @@ Titan's configured search paths with:
 
 ```sh
 export LUA_PATH_5_5="$ROCKS_TREE/share/lua/5.5/?.lua;$ROCKS_TREE/share/lua/5.5/?/init.lua;;"
-export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.25/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
+export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.26/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
 ```
 
 The ordinary `/lib/lua/5.5/?.so` template is Titan's root-discovery anchor. If
 it is omitted, also set
-`TITAN_PATH_0_25="$ROCKS_TREE/lib/titan/0.25"`. Titan still targets the exact
+`TITAN_PATH_0_26="$ROCKS_TREE/lib/titan/0.26"`. Titan still targets the exact
 Lua 5.5 runtime ABI and internals; using the stock loader does not make a module
 compatible with another Lua version or configuration.

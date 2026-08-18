@@ -19,7 +19,8 @@ Lua error (see [Error handling](error-handling.md)).
 | floats | `float` | below |
 | strings | `string` | below |
 | the dynamic type | `value` | [in depth below](#the-value-type-in-depth) |
-| arrays | `{ t }` | [Arrays and maps](arrays-maps.md) |
+| mutable arrays | `{ t }` | [Arrays and maps](arrays-maps.md) |
+| const arrays | `const { t }` | [Const values](const-values.md#const-arrays) |
 | maps | `{ k : v }` | [Arrays and maps](arrays-maps.md) |
 | records | `Point`, `mod.Point` | [Records](records.md) |
 | unions | `Message`, `mod.Message` | [Unions](unions.md) |
@@ -48,13 +49,13 @@ local b: boolean = true
 
 ### Arrays and maps
 
-An array type is written `{ t }` for any element type `t` (including
-other compound types — `{ {integer} }` is an array of arrays of
-integers); a map type is written `{ k : v }`. Arrays are dense-capacity
-containers represented at the Lua boundary by canonical Titan userdata
-proxies, while maps are ordinary Lua tables. Both can cross the Lua boundary,
-but an Array requires the exact proxy created by Titan rather than an arbitrary
-Lua table; the full account is in
+An Array type is written `{ t }` for a mutable container or `const { t }` for
+a read-only container (including nested compound types); a Map type is written
+`{ k : v }`. Arrays are dense-capacity containers represented at the Lua
+boundary by canonical Titan userdata proxies, while Maps are ordinary Lua
+tables. Both can cross the Lua boundary, but an Array requires the exact
+qualified proxy created by Titan rather than an arbitrary Lua table; the full
+account is in
 [Arrays and maps](arrays-maps.md).
 
 The type syntax does not promise that every FFI representation supports every
@@ -184,7 +185,8 @@ Titan's types are *structural* except for records, unions, and Interfaces, which
 *nominal*:
 
 * Two basic types are equal only if they are the same type.
-* `{t1}` equals `{t2}` exactly when `t1` equals `t2`; likewise maps
+* two Arrays are equal types exactly when their qualifiers match and their
+  element types are equal; likewise maps
   compare key and value types pointwise, and function types compare
   fixed parameter and return lists pointwise, including the presence and
   element type of any input-variadic or flexible-result tail.
@@ -241,7 +243,7 @@ operations:
 
 * **consistent** is the symmetric, non-transitive relation of gradual typing.
   Equal types are consistent. A guardable type is consistent with `value`,
-  and consistency descends pointwise through Arrays, Maps, Options, and
+  and consistency descends pointwise through same-qualified Arrays, Maps, Options, and
   aligned Function components. Records, unions, and Interfaces remain nominal. For
   example, `{integer}` is consistent with `{value}`, and `{value}` with
   `{float}`, but `{integer}` is not consistent with `{float}`. This is the
@@ -295,19 +297,20 @@ back to this matrix rather than defining competing conversion rules.
 | Context or operation | Rule | What happens at run time |
 | --- | --- | --- |
 | Ordinary typed Titan declaration, assignment, argument, return, or constructor slot | Exact identity, one direct outer coercion, a gradual view, or a directional callable adjustment must exist. Ordinary coercions never lift through an Array, Map, Function, or nominal member. | The checker-selected direct conversion is performed; a same-representation Array/Map gradual view preserves the object. An exact Function edge preserves its source closure; a non-exact one follows the conditional wrapper row below. |
+| Written mutable `{S}` `as const { T }` | The sole cross-Array-qualifier conversion; `S` and `T` must be equal or gradually consistent. It is never an implicit assignment adjustment. | Make a shallow const copy preserving holes, length, and element identities. A sound linear last-use proof may freeze in place only when no mutable source or alias can be observed afterward. |
 | Statically known non-exact Function `A -> B` adjustment (implicit or written `as`) | One checker-frozen directional `CallablePlan`, including only its named argument/result/tail actions and strict component operations. | Evaluate the operand once. An exact branded Titan `A` closure with upvalue room becomes a fresh target-`B` wrapper; other values stay unchanged for generic dispatch. No cache or equality unwrapping is used. |
 | Implicit `value -> T` in a typed Titan context | Strict gradual projection; `T` must be guardable. This is not the broad dynamic coercion used by written casts or Lua. | The exact tag, shape, or nominal identity required for `T` is checked, subject to the compiler-witnessed Interface row below. No integral-float narrowing, integer-to-float conversion, truthiness, Option introduction/force, or pointer assertion is added by the guard. A Function target preserves the boxed value and creates no static adjustment wrapper. |
 | Typed Titan Array element or Map value read | Strict target guard, regardless of which static view was used to write the slot or whether a Map value came from a raw entry, Lua, or `__index`. The checker rejects a read whose optional result type is not guardable. | An accepted read either produces the requested value or raises before Titan uses it. Array reads never invoke the Array's Lua writer. Map reads do not track write provenance, and an `__index` result receives the same strict guard, including the named Interface witness rule, rather than general dynamic conversion. |
 | Written `v as T` / `v is T` with `v: value` | Shared dynamic coercion, except for the explicitly unsafe raw-C-pointer rule below. | `as` converts or raises; `is` tests acceptance without returning the converted value or raising for a mismatch. Both evaluate `v` once. A Function target remains unwrapped and defers callability. |
-| Genuine Lua function argument, exported module-variable write, public record-field write, non-nil Array-element write, or result from a non-Titan Lua callable entering Titan | The same dynamic coercion as the preceding row. | Equal target types accept, reject, and convert the same values at all of these boundaries. |
-| Lua writes `nil` to an Array proxy | Deletion is recognized before element conversion. | The position is removed; the writer is not called, and an out-of-capacity deletion does not allocate. |
-| Array passes through `value`, Lua, an import, a return, a nested box, or another consistent static view | Preserve the canonical proxy, backing, and construction-time writer. | No target-view writer is synthesized, compared, or installed. The writer describes future genuine-Lua writes, not the current contents. |
+| Genuine Lua function argument, mutable exported module-variable write, mutable public record-field write, non-nil mutable-Array-element write, or result from a non-Titan Lua callable entering Titan | The same dynamic coercion as the preceding row. | Equal target types accept, reject, and convert the same values at all of these boundaries. Const storage rejects the write before conversion. |
+| Lua writes `nil` to a mutable Array proxy | Deletion is recognized before element conversion. | The position is removed; the writer is not called, and an out-of-capacity deletion does not allocate. A const Array has no write path. |
+| Array passes through `value`, Lua, an import, a return, a nested box, or another same-qualified consistent static view | Preserve the canonical proxy, backing, qualified tag, and (for mutable Arrays) construction-time writer. | No target-view writer is synthesized, compared, or installed. A mutable writer describes future genuine-Lua writes, not the current contents; a const proxy has no writer. |
 | Exact native Titan function call | Exact function tag and static type. | Call the native entry directly; for a realized wrapper this is its target adapter. No Lua-stack boundary conversion occurs. |
 | Branded Titan call after an exact-tag mismatch (dynamic Function view or wrapper-ineligible/later non-exact view) | Strict Titan-generic entry selected through the function's brand and trailer. | Ordinary closures use their declaration strict entry; wrappers use their consumer-local target relay and adapter. Arguments and observed results use strict gradual actions and the static demand. |
 | Genuine Lua call of a Titan function or realized wrapper | The closure's coercive Lua entry. | An ordinary closure uses its source contract. A wrapper copies `source->f`, preserving whatever Lua surface its immediate source value already carries—ultimately the original declaration's—rather than synthesizing target `B`'s entry. |
 | Titan call of a non-Titan Lua callable | Ordinary Lua call, followed by the dynamic boundary for results entering Titan. | Callability follows Lua, including `__call`; requested result types use dynamic coercion. |
 | `value as/is` a raw C pointer | Written, explicitly unsafe pointer assertion only. Implicit gradual projection, typed container reads, callable adjustment, and non-Titan Lua-result conversion to a raw pointer are rejected. | The written operation may accept the lightuserdata/nil representation, but cannot prove the pointee type. See [the FFI policy](ffi.md#casts-and-coercions). |
-| Interface target | A statically known satisfying record/union-to-Interface edge constructs a fresh wrapper and causes its generated module to advertise that pair at initialization. Strict and dynamic observation accept an existing exact wrapper or bare full userdata whose metatable has a non-nil compiler-witnessed entry under the target Interface metatable (or nil for an option). | A witnessed entry is called to construct a fresh wrapper; `is` tests only entry presence. No structural method search occurs at run time, and ordinary wrapper construction still does not lift through containers or callable components. See [Interfaces](interfaces.md). |
+| Interface target | A statically known satisfying record/union-to-Interface edge constructs a fresh wrapper, snapshots every required field, and causes its generated module to advertise that pair at initialization. A union cannot satisfy a field-bearing Interface. Strict and dynamic observation accept an existing exact wrapper or bare full userdata whose metatable has a non-nil compiler-witnessed entry under the target Interface metatable (or nil for an option). | A witnessed entry is called to construct a fresh wrapper and its field snapshots; `is` tests only entry presence. No structural member search occurs at run time, and ordinary wrapper construction still does not lift through containers or callable components. See [Interfaces](interfaces.md). |
 
 For every row marked **dynamic coercion**, the target rules are the same:
 
@@ -319,10 +322,10 @@ For every row marked **dynamic coercion**, the target rules are the same:
   category or nominal metatable. An Interface target first accepts its exact
   wrapper, then may raw-discover a compiler-witnessed wrapper entry on a bare
   full userdata's metatable. This is registered nominal evidence, not a
-  structural method search.
-* an Array target validates the canonical Titan proxy; a Map target validates
-  a table. Neither operation walks contents, and later typed reads remain
-  strict.
+  structural member search.
+* an Array target validates the exact mutable or const canonical Titan proxy
+  selected by the target qualifier; a Map target validates a table. Neither
+  operation walks contents, and later typed reads remain strict.
 * a Function target preserves the boxed value and defers callability and
   signature enforcement until the call.
 * an Option target accepts nil first and otherwise recursively applies the
@@ -499,8 +502,10 @@ operator semantics are in [Expressions](expressions.md).
 
 ## Type inference
 
-A declaration without a type annotation takes its type from its
-initializer:
+An initialized declaration without a type annotation takes its type from its
+initializer. An initializer-less mutable local instead requires an explicit
+nil-bearing type, and an initializer-less const module variable has the same
+requirement; see [Const values](const-values.md#binding-declarations).
 
 ```lua
 local n = 10            -- integer
@@ -662,6 +667,14 @@ conditional fresh wrapper as an implicit callable adjustment. Its corresponding
 `value -> Function` edge remains a dynamic boxed projection and creates no
 wrapper. See [Interfaces](interfaces.md#concrete-tests-and-downcasts) and
 [Closure adjustment wrappers](closure-adjustment-wrappers.md#implicit-adjustment-as-and-is).
+
+A written mutable-Array-to-const-Array cast is the one qualifier-changing
+Array operation. It makes a shallow copy and admits only equal or gradually
+consistent element types; it cannot apply a scalar conversion to every
+element. The corresponding static `is` is an allocation-free admission test.
+Const-to-mutable casts are rejected, and a dynamic `value as/is` Array checks
+the exact qualified run-time tag. See
+[Const Arrays](const-values.md#const-arrays).
 
 For C FFI types, regular `as <type>` is also the explicit cast mechanism:
 C integers can be cast to `integer`, C floats can be cast to `float`, Titan

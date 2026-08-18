@@ -13,7 +13,7 @@ return typedecl("Ast", {
         TypeCPointer    = {"loc", "subtype", "const"},
         TypeCArray      = {"loc", "base", "length"},
         TypeCOwned      = {"loc", "subtype", "count"},
-        TypeArray       = {"loc", "subtype"},
+        TypeArray       = {"loc", "subtype", "isconst"},
         TypeMap         = {"loc", "keystype", "valuestype"},
         TypeFunction    = {"loc", "argtypes", "rettypes", "varargtype", "flexrettype"},
         TypeForeignFunction = {"loc", "argtypes", "rettypes", "varargtype", "flexrettype"},
@@ -25,11 +25,11 @@ return typedecl("Ast", {
         TopLevelStatic  = {"loc", "class", "name", "params", "rettypes", "flexrettype", "block", "typeparams"},
         TopLevelFunc    = {"loc", "islocal", "name", "params", "rettypes", "flexrettype", "block", "typeparams"},
         TopLevelForeignFunc = {"loc", "name", "params", "rettypes", "flexrettype", "block"},
-        TopLevelVar     = {"loc", "islocal", "decl", "value"},
+        TopLevelVar     = {"loc", "islocal", "isconst", "decl", "value"},
         TopLevelTypeAlias = {"loc", "islocal", "name", "type"},
         TopLevelRecord  = {"loc", "name", "fields", "typeparams"},
         TopLevelUnion   = {"loc", "name", "variants", "typeparams"},
-        TopLevelInterface = {"loc", "name", "methods", "typeparams"},
+        TopLevelInterface = {"loc", "name", "members", "fields", "methods", "typeparams"},
         TopLevelImport  = {"loc", "localname", "modname"},
         TopLevelForeignImport = {"loc", "localname", "headername"},
     },
@@ -39,7 +39,7 @@ return typedecl("Ast", {
     },
 
     Decl = {
-        Decl = {"loc", "name", "type", "option"},
+        Decl = {"loc", "name", "type", "option", "isconst"},
     },
 
     Union = {

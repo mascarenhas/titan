@@ -203,6 +203,72 @@ describe("typechecker rehydration of .so-only imports", function()
         assert.truthy(#bad >= 1)
     end)
 
+    it("rehydrates const module, record, and Interface fields", function()
+        local dep = { name = "const_rh_owner", src = [[
+            const answer = 42
+
+            record Box
+                const label: string
+                count: integer
+            end
+
+            interface View
+                label: string
+                function total(): integer
+            end
+
+            function Box:total(): integer
+                return self.count
+            end
+
+            function make(): Box
+                return Box.new("fixed", 3)
+            end
+
+            function view(box: Box): View
+                return box
+            end
+        ]] }
+
+        local good = so_check({ dep }, "const_rh_consumer", [[
+            local owner = import "const_rh_owner"
+
+            function read(): integer
+                local box = owner.make()
+                local view = owner.view(box)
+                if box.label == view.label then
+                    return owner.answer + view:total()
+                end
+                return 0
+            end
+        ]])
+        assert.equal(0, #good, table.concat(good, "\n"))
+
+        local record = assert(types.registry["const_rh_owner.Box"])
+        assert.equal("label", record.fields[1].name)
+        assert.is_true(record.fields[1].isconst)
+        local interface = assert(types.registry["const_rh_owner.View"])
+        assert.equal("label", interface.fields[1].name)
+        assert.is_true(interface.fields[1].isconst)
+
+        local bad = so_check({ dep }, "const_rh_consumer", [[
+            local owner = import "const_rh_owner"
+
+            function overwrite(): nil
+                local box = owner.make()
+                local view = owner.view(box)
+                owner.answer = 0
+                box.label = "changed"
+                view.label = "changed"
+                return nil
+            end
+        ]])
+        assert.equal(3, #bad, table.concat(bad, "\n"))
+        local message = table.concat(bad, "\n")
+        assert.match("cannot assign to const module variable 'answer'", message)
+        assert.match("cannot assign to const field 'label'", message)
+    end)
+
     it("rehydrates only the public surface of records with local members", function ()
         local dep = { name = "lrecfoo", src = [[
             record Box
@@ -634,7 +700,8 @@ describe("typechecker rehydration of .so-only imports", function()
         local owner_parameter = types.Parameter(
             owner_scope, 1, "T", false)
         local owner = types.Record("generic_owner.Box", {
-            types.Field("generic_owner.Box", "item", owner_parameter, 0),
+            types.Field(
+                "generic_owner.Box", "item", owner_parameter, 0, false),
         }, {
             new = types.StaticMethod("generic_owner.Box", "new",
                 {owner_parameter}, {
@@ -692,7 +759,8 @@ describe("typechecker rehydration of .so-only imports", function()
             "owner", "record")
         local parameter = types.Parameter(owner_scope, 1, "T", false)
         local owner = types.Record("generic_bad_owner.Box", {
-            types.Field("generic_bad_owner.Box", "item", parameter, 0),
+            types.Field(
+                "generic_bad_owner.Box", "item", parameter, 0, false),
         }, {
             new = types.StaticMethod("generic_bad_owner.Box", "new",
                 {parameter}, {

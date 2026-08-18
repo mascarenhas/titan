@@ -3,7 +3,7 @@
 Static compiled modules extend the compiled-module loader and native-output
 pipeline without giving archives a different logical interface or native
 calling convention from DSOs. The static-provider feature shipped within ABI
-0.16; current artifacts carry ABI 0.25. One checked interface can now come
+0.16; current artifacts carry ABI 0.26. One checked interface can now come
 from a DSO's callable metadata or from a canonical section embedded in an
 archive member.
 
@@ -68,7 +68,7 @@ feed the callable `_types` entry and:
 -- Titan archive module metadata v1
 return {
     ["pkg.left"] = {
-        abi = "0.25",
+        abi = "0.26",
         types = "Module('pkg.left', ...)",
     },
 }
@@ -350,9 +350,9 @@ removal. Titan never scans a directory and never removes an unrecognized Lua
 file.
 
 The canonical standard installation places `titan.so` and `titan.a` together
-under `lib/titan/0.25`. Post-install recognizes bootstrap-only and complete-pair
+under `lib/titan/0.26`. Post-install recognizes bootstrap-only and complete-pair
 predecessor states within that active namespace. Separately versioned 0.17
-through 0.24 installations are preserved, not migrated, cleaned up, or treated
+through 0.25 installations are preserved, not migrated, cleaned up, or treated
 as active-layout predecessors.
 
 ABI 0.17 keeps the serialized `Array(...)` text and exact `Table *` /
@@ -391,7 +391,9 @@ archive is rejected before those incompatible symbols can reach the link. ABI
 changing the metadata container. ABI 0.25 changes the serialized public
 standard-module signatures for `titan.fs.stat`/`lstat` and
 `titan.async.suspend`, again without changing the container; a 0.24 archive is
-rejected before decoding.
+rejected before decoding. ABI 0.26 retains the container while changing
+serialized const/member state, Interface wrapper slots, and qualified Array
+runtime state; a 0.25 archive is rejected before decoding or linking.
 
 Bundled libuv enters as shared `-X` provider payload and is present in both
 native forms. System libuv remains a repeated final-link setting and never

@@ -4,8 +4,8 @@ This chapter describes the machinery at the Lua↔Titan boundary: the
 coercive source entry used by genuine Lua calls, the strict Lua-stack entries
 used after branded exact-tag mismatches, the target adapter/consumer relay used
 by realized callable wrappers, the shared per-type lowering plans, the
-metatables that serve records and module variables to Lua, the Array writer
-carried in each proxy, the registry entries holding it all together,
+metatables that serve records and module variables to Lua, the qualified Array
+proxy pair and mutable writer, the registry entries holding it all together,
 the dynamic loader, the error handler, the standalone-executable
 entrypoint, and the safety argument. Value representations (records and
 the module state `_mod` as a single tagged `Udata` each) are in
@@ -230,7 +230,7 @@ The historical `checkandget`/`checkandset` split is now only a destination
 detail. Both consume the same checker-built `DynamicCoercionPlan`; a native C
 local and a `TValue` slot cannot disagree about which sources a target type
 accepts. This common path serves genuine-Lua function arguments,
-module-variable and record-field writes from Lua, non-nil Array writes,
+mutable module-variable and record-field writes from Lua, non-nil mutable Array writes,
 written `value as/is T`, and non-Titan callable results.
 
 The generated helper family renders the plan into either a C local or a
@@ -246,7 +246,8 @@ raised as run-time errors via `luaL_error`:
 | `boolean` | **anything**, by Lua truthiness: `l_isfalse(exp) ? 0 : 1` | never fails |
 | `nil` | only nil (`ttisnil`) | `type error, expected nil but found %s` |
 | `string` | only strings (`ttisstring`); no number→string coercion | `type error, expected string but found %s` |
-| `{T}` | a structurally valid canonical Array proxy Udata; elements are *not* checked here | `type error, expected array but found %s` |
+| `{T}` | a structurally valid canonical mutable Array proxy Udata; elements are *not* checked here | `type error, expected array but found %s` |
+| `const { T }` | a structurally valid canonical const Array proxy Udata; elements are *not* checked here | `type error, expected array but found %s` |
 | `{K:V}` | **any table** (`ttistable`); elements are *not* checked here | `type error, expected table but found %s` |
 | `value` | anything, copied with `setobj2t` | never fails |
 | `T?` | nil, otherwise the same dynamic plan as `T`; in particular `boolean?` uses Lua truthiness for every non-nil value | the base type's message |
@@ -320,8 +321,8 @@ does not: its strict integer guard accepts only a Lua integer tag.
 
 ### Native-local and `TValue` destinations
 
-The `TValue`-destination renderer serves module-variable writes from Lua,
-record-field writes from Lua, Array writers, and Option payloads. It has the
+The `TValue`-destination renderer serves mutable module-variable writes from
+Lua, mutable record-field writes from Lua, mutable Array writers, and Option payloads. It has the
 same dynamic matrix as the native-local renderer:
 
 * **Booleans use truthiness everywhere on a dynamic boundary.**
@@ -429,12 +430,14 @@ already its own Udata, handed out directly. Unknown keys raise
 `field '%s' not found in record '%s'`, located at the record
 declaration.
 
-### `__newindex`: checked writes
+### `__newindex`: checked mutable writes and const rejection
 
 `<module>_\u2133_<rec>_\u2131_meta_newindex` does the same receiver re-validation and fieldmap
 lookup, but additionally requires the hit to be an **integer** — so
 assigning to a method name (`p.move = 2`) raises the same "not found"
-error; methods are not assignable. The write consumes the field's
+error; methods are not assignable. Each generated field arm first checks the
+descriptor's required `isconst` boolean. A const arm raises the const-field
+write error without conversion or mutation. A mutable arm consumes the field's
 `DynamicCoercionPlan` into a temporary and, only after conversion succeeds,
 stores that value followed by a GC
 [write barrier](values-and-gc.md#5-write-barriers-back-for-userdata-and-tables-forward-for-closures):
@@ -451,9 +454,9 @@ luaC_barrierback(L, obj2gco(_rec), _dst);
 ```
 
 The barrier is the **back** barrier now that `_rec` is a `Udata`, not the forward
-barrier the old `CClosure` record used. Record-field
-writes from Lua are thus **coerced and type-enforced by the same matrix as
-function arguments**. Records with zero
+barrier the old `CClosure` record used. Mutable record-field writes from Lua
+are thus **coerced and type-enforced by the same matrix as function
+arguments**, while const fields remain readable but cannot be replaced. Records with zero
 fields get stub `__index`/`__newindex` that always error, with an
 unquoted message variant (`field %s not found in record %s`).
 
@@ -470,14 +473,14 @@ local record functions are not inserted into the Lua-visible table.
 
 ## Arrays from Lua
 
-Every Array proxy uses one shared per-state metatable, so an outer Array guard
-remains a direct metatable-pointer comparison even for nested Arrays. The
-proxy has exactly two traced user values: user value 1 is the private backing
-Table and user value 2 is the Lua writer closure chosen from the final
-constructed element type. The backing Table retains its key-0 reverse link to
-the proxy.
+Every Array proxy uses one of the canonical mutable/const per-state metatable
+pair, so an outer guard remains a direct qualifier-exact metatable comparison
+even for nested Arrays. The proxy has exactly two traced user values: user
+value 1 is the private backing Table; mutable user value 2 is the Lua writer
+closure chosen from the final constructed element type, while const user value
+2 is nil. The backing Table retains its key-0 reverse link to the proxy.
 
-The shared `__newindex` handles nil first: nil deletes the backing entry
+Mutable `__newindex` handles nil first: nil deletes the backing entry
 without invoking an element conversion, which is essential for
 `{boolean}` because Lua truthiness would otherwise turn deletion into
 `true`. For a non-nil source it calls the carried writer while holding stable
@@ -487,15 +490,21 @@ length/capacity/content and perform the table barrier, refreshing the converted
 result from its stack index after a resize that may move the stack. A failing
 conversion therefore leaves the Array unchanged.
 
+The const metatable has `__index` and `__len` but no `__newindex`. Lua
+assignment and mutating `table.*` paths therefore fail without invoking a
+writer or modifying the backing. Nested read callbacks recognize either tag,
+but strict/dynamic recovery still requires the qualifier named by the target
+type.
+
 Each generated module emits and caches one writer closure per constructed
-element type. The closure captures the owning `_mod` needed by nominal and C
+mutable element type. The closure captures the owning `_mod` needed by nominal and C
 conversions; it is behavior, not an Array type tag, and is never interned or
 registered globally. Views such as `{integer}` observed as `{value}` keep the
 same proxy and therefore the construction writer. Titan writes already have a
 statically checked source and mutate the backing Table directly; only genuine
 Lua writes enter `__newindex`.
 
-Titan Array reads ignore the writer and use the strict element `GuardPlan`.
+Titan Array reads of either qualifier ignore the writer slot and use the strict element `GuardPlan`.
 Map values are likewise checked strictly on every typed read, regardless of
 whether Lua might have written the raw Table. See
 [Dense Arrays](dense-arrays.md) for construction, GC, and nested-Array
@@ -521,8 +530,9 @@ inspect or mutate their representation.
 ## Interfaces from Lua
 
 An Interface wrapper is a protected full userdata whose `__index` map exposes
-the Interface's public methods and whose `__newindex` rejects every write. The
-method closure first applies the exact-or-witnessed Interface conversion to its
+its read-only field snapshots and public methods and whose `__newindex` rejects
+every write. A field name boxes user value `2 + field_index`; a method closure
+first applies the exact-or-witnessed Interface conversion to its
 receiver, applies the Interface signature's dynamic argument plans, and then
 loads the declaration-order payload entry. It invokes that entry with wrapper
 user value 0 as the concrete owner's `_mod` and user value 1 as the concrete
@@ -531,7 +541,9 @@ receiver.
 Lua can retain and call a wrapper produced by Titan, pass it back through a
 sink expecting the same nominal Interface, or pass bare full userdata whose
 metatable advertises a compiler-witnessed pair. The generated witness recovers
-the already checked mapping rather than rediscovering methods. A bare
+the already checked field and method mappings rather than rediscovering
+members, applies each field adjustment once in declaration order, and stores
+the snapshots before publishing the wrapper. A bare
 record/union with no initialized witness still fails.
 Bound Interface methods use the same three-role closure split as other Titan
 functions, with the wrapper captured before the strict trailer. See
@@ -570,10 +582,10 @@ module table**. Every member access — exported functions, exported
 variables, and per-nominal static-namespace tables — flows through a
 metatable installed on the `Udata`, driven by a single **member map**
 (name→slot) shared by `__index`/`__newindex`. Functions and nominal
-namespaces live in their own `_mod` user-value slots and are served
-read-only; exported variables also live in `_mod` slots (so Titan reads
-them as direct slot accesses), are boxed on reads, and are dynamically coerced
-on Lua writes. The generated
+namespaces live in their own `_mod` user-value slots and are served read-only;
+exported variables also live in `_mod` slots (so Titan reads them as direct
+slot accesses) and are boxed on reads. Mutable variables are dynamically
+coerced on Lua writes; const-variable arms explicitly reject replacement. The generated
 `__index` for exported `x` (slot 1):
 
 ```c
@@ -613,13 +625,14 @@ on the slot index: variable reads go through `copyboxed` (a record-typed
 variable remains its Udata; an Array backing becomes its canonical proxy),
 while
 functions and nominal namespaces are pushed read-only from their slots.
-`__newindex` allows only variable writes, through the variable's
+`__newindex` allows only mutable-variable writes, through the variable's
 `DynamicCoercionPlan` plus the
 **back** barrier `luaC_barrierback(L, obj2gco(_mod), slot)` for GC-able
-types (a userdata owner) — so module-variable writes from Lua are
+types (a userdata owner) — so mutable module-variable writes from Lua are
 coerced and type-checked exactly like genuine-Lua function arguments, located
-at the variable's declaration; assigning to a
-function or nominal namespace errors. The metatable (registry name
+at the variable's declaration. A public const variable remains readable but
+its generated arm raises a const-write error before conversion; assigning to a
+function or nominal namespace also errors. The metatable (registry name
 `"Titan module interop metatable"`, `__metatable` protected with the
 string `"Titan module interop"`) is created whenever the module exports
 **any** member — functions now route through it too, so essentially every
@@ -642,7 +655,8 @@ inventory:
 | `"Titan module <modname> metatable"` | the module `Udata`'s member metatable (only if the module exports anything) |
 | `"Titan record <fqtn> metatable"` | the record metatable (`luaL_newmetatable`) — also the record's type identity (a type check compares `uvalue(v)->metatable`) |
 | `"Titan union <fqtn> metatable"` | the union metatable and exact nominal identity; its `__index` exposes only methods and its `__newindex` rejects writes |
-| `TITAN_ARRAY_METATABLE` (`"Titan array metatable"`) | the one shared per-state Array proxy metatable; generated modules cache its Table pointer in their own `_mod` slot |
+| `TITAN_ARRAY_METATABLE_PAIR` (`"Titan array metatable pair"`) | the canonical pair table containing the mutable and const proxy metatables; generated modules cache both Table pointers in consecutive `_mod` slots |
+| `TITAN_ARRAY_METATABLE` / `TITAN_CONST_ARRAY_METATABLE` | named mutable/const projections repaired from the canonical pair for ordinary registry lookup |
 | the metatable pointer itself (via `lua_rawsetp`) | the FQTN string — the reverse map, metatable → name, used only in error messages |
 | `TITAN_ROOT_KEY` (`"9efb91a8-4a1b-4bdb-aa6b-b84d9ed1dd77"`) | the normalized Titan SDK/rocks-tree root cached by `titan_init_paths`/`pushroot`; current supported installs discover it through the equal Lua `PREFIX` |
 | `TITAN_PATH_KEY` (`"ec10e486-d8fd-11e7-87f4-e7e9581a929c"`) | the resolved Titan search path (cached by `pushpath`) |
@@ -669,7 +683,7 @@ entry itself roots the closure and its emitting-module upvalue.
 
 ## Four shared-library loading paths
 
-The current 0.25 layout retains the four deliberately separate paths
+The current 0.26 layout retains the four deliberately separate paths
 established by 0.20. They share the ordinary
 per-logical-module symbols but differ in selection, flags, cache, and whether
 module initialization runs.
@@ -706,8 +720,8 @@ Udata* (*some_dep_init)(lua_State *L) =
         loadsym(L, some_dep_handle, "some_dep_init"));
 ```
 
-`loadlib` consults `TITAN_LIBS_KEY`, then walks `TITAN_PATH_0_25`,
-`TITAN_PATH`, or `".;<root>/lib/titan/0.25"`, with `;;` splicing the
+`loadlib` consults `TITAN_LIBS_KEY`, then walks `TITAN_PATH_0_26`,
+`TITAN_PATH`, or `".;<root>/lib/titan/0.26"`, with `;;` splicing the
 ordinary default. It maps `dir/file` with `RTLD_LAZY | RTLD_GLOBAL`, caches
 the handle by relative provider for the state, invalidates native backtrace
 state, and never calls `dlclose`. Two logical modules in one image reuse the
@@ -744,7 +758,7 @@ eager load. A second Lua state repeats its own cache insertion and promotion
 request while the operating-system loader may reuse the mapped image.
 
 The installed standard layout has paired providers at
-`<root>/lib/titan/0.25/{titan.so,titan.a}` and eighteen generated shims below
+`<root>/lib/titan/0.26/{titan.so,titan.a}` and eighteen generated shims below
 `<root>/share/lua/5.5/titan/`; the shims use the DSO form. A direct-libuv
 extension explicitly imports
 `uv` and foreign-imports `uv.h`; Titan runtime initialization loads the
@@ -852,7 +866,7 @@ bundled-mode extension DSOs leave their `uv_*` calls unresolved:
   state and runs `luaL_openlibs`. `titan_init_paths` then parses the inherited
   `package.cpath` for the first `/lib/lua/5.5/?.so` entry, initializes the
   Titan module-path default from that root, and ensures
-  `<root>/lib/titan/0.25/?.so` is present in `package.cpath`. The
+  `<root>/lib/titan/0.26/?.so` is present in `package.cpath`. The
   prefix-configured Titan-owned Lua already places that template before its
   `lib/lua` entries. It then
   registers the module's `luaopen_` function in

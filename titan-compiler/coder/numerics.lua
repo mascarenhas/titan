@@ -593,7 +593,7 @@ function coder._code_dynamic_predicate(ctx, plan, target, source)
              || titan_array_try_backing($SOURCE, $META) != NULL)
         ]], {
             SOURCE = source,
-            META = array_metatable(ctx),
+            META = array_metatable(ctx, resolved),
         })
     elseif op == "nil" then
         return "", render("ttisnil($SOURCE)", { SOURCE = source })
@@ -677,7 +677,7 @@ function coder._code_strict_predicate(ctx, plan, target, source)
              || titan_array_try_backing($SOURCE, $META) != NULL)
         ]], {
             SOURCE = source,
-            META = array_metatable(ctx),
+            META = array_metatable(ctx, resolved),
         })
     elseif op == "map" then
         return "", render("ttistable($SOURCE)", { SOURCE = source })

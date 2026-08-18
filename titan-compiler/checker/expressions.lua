@@ -178,7 +178,8 @@ checkexp = util.make_visitor({
         if expected == "Type.Array" then
             if shape == "empty" or shape == "positional" then
                 check_positional_constructor(node, st, errors, expected, nil,
-                    context and context.elem, operation)
+                    context and context.elem, operation,
+                    context and context.isconst or false)
             else
                 for _, field in ipairs(node.fields) do
                     if shape == "named" then
@@ -191,7 +192,7 @@ checkexp = util.make_visitor({
                     end
                 end
                 check_rejected_constructor_fields(node, st, errors)
-                node._type = context or types.Array(types.Integer())
+                node._type = context or types.Array(types.Integer(), false)
             end
         elseif expected == "Type.Map" then
             if shape == "computed" then

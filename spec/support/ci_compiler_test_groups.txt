@@ -2,6 +2,7 @@
 # Fields: shard spec_file last_observed_seconds
 # Timings are from Linux CI run 31917621820; rebalance with longest-first
 # assignment when compiler test costs change materially.
+# The two const_values entries were measured in a fresh local ABI-0.26 prefix.
 2 spec/abi_spec.lua 1.746
 1 spec/cdeclarator_spec.lua 0.046
 4 spec/cdefines_spec.lua 0.070
@@ -17,6 +18,7 @@
 3 spec/checker/checker_spec.lua 27.103
 3 spec/checker/closure_adjustment_wrappers_spec.lua 1.083
 3 spec/checker/closures_spec.lua 6.034
+4 spec/checker/const_values_spec.lua 0.220
 2 spec/checker/contextual_value_calls_spec.lua 3.317
 4 spec/checker/declaration_order_spec.lua 0.916
 1 spec/checker/defer_spec.lua 0.844
@@ -51,6 +53,7 @@
 3 spec/coder/closure_adjustment_wrappers_spec.lua 12.585
 1 spec/coder/closures_spec.lua 13.522
 4 spec/coder/coder_spec.lua 65.724
+1 spec/coder/const_values_spec.lua 1.220
 4 spec/coder/contextual_value_calls_spec.lua 4.527
 2 spec/coder/defer_spec.lua 1.607
 4 spec/coder/dense_arrays_spec.lua 8.576

@@ -321,12 +321,13 @@ documented `void *` identity cast.
 
 ## Unions and Interfaces
 
-A union can satisfy an [Interface](interfaces.md) through its visible public or
-module-local methods, exactly as a record can. The union does not carry an
-`implements` annotation. At each statically known conversion site, every
-required Interface method must be visible and satisfy the Interface signature
-under directional callable adjustment; variants, constructors, payloads, and
-union functions do not count.
+A union can satisfy a method-only [Interface](interfaces.md) through its visible
+public or module-local methods. It cannot satisfy an Interface that declares a
+field, because a variant-dependent payload is not a stable record slot. The
+union does not carry an `implements` annotation. At each statically known
+conversion site, every required method must be visible and satisfy the
+Interface signature under directional callable adjustment; variants,
+constructors, payloads, and union functions do not count.
 
 An accepted `U -> I` conversion constructs a fresh Interface wrapper retaining
 the union value. It is a direct coercion rather than subtyping or gradual

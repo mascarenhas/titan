@@ -30,7 +30,7 @@ local m = require "sum"
 print(m.sum_list(m.sample())) --> 10
 ```
 
-This is the reference for the language as implemented by the Titan 0.25
+This is the reference for the language as implemented by the Titan 0.26
 prototype compiler in this repository. It replaces the old single-file
 manual. For how the compiler itself works — including how each construct
 is translated to C — see the
@@ -49,9 +49,10 @@ use the chapters below for the normative language reference.
 | --- | --- |
 | [Design philosophy and history](philosophy.md) | Why Titan exists, its core commitments, the project's history and design principles. |
 | [The type system](types.md) | All Titan types; equality, symmetric non-transitive consistency, direct coercions, gradual views, callable adjustment, the normative boundary matrix, inference, and `value`. |
+| [Const values](const-values.md) | Const locals and module variables, nil initialization, const record and Interface fields, Interface snapshots, and const-qualified Arrays with explicit shallow-copy conversion. |
 | [Generics](generics.md) | Explicit type parameters and Interface constraints, applied nominal types, local instantiation, rigid-body capabilities, constraint erasure, shallow run-time checks, eligible FFI arguments, and generic Tasks. |
 | [Type aliases](type-aliases.md) | Transparent compile-time type names, preserved record/union static namespaces, visibility, nominal re-exports, and alias cycles. |
-| [Interfaces](interfaces.md) | Nominal behavioral types, structural satisfaction by records and unions, wrapper conversions, compiler-witnessed dynamic discovery, method calls, options, casts, Lua interoperation, and separate compilation. |
+| [Interfaces](interfaces.md) | Nominal behavioral/data views, const field snapshots and method dispatch, structural satisfaction, wrapper conversions, compiler-witnessed dynamic discovery, options, casts, Lua interoperation, and separate compilation. |
 | [Option types](option-types.md) | `T?`: nil-tolerant types — syntax, semantics, defaulting with `or`, and how `nil` flows through arrays, maps, and the Lua boundary. |
 | [Expressions](expressions.md) | Literals and escapes, operators and precedence, Lua-faithful arithmetic, concatenation, `and`/`or`, explicit casts with `as`, non-raising type tests with `is`, constructors, calls. |
 | [Statements](statements.md) | Declarations and inference, assignment and multiple assignment, control flow, the numeric `for`, `defer`, `return`. |
@@ -64,7 +65,7 @@ use the chapters below for the normative language reference.
 | [Flexible returns](flexible-returns.md) | Runtime-sized homogeneous result tails, finite option projection, open sinks, contextual calls through `value`, surplus adjustment, and directional callable adjustment. |
 | [Records](records.md) | Nominal record types, constructors, fields, methods, record functions, and records as seen from Lua. |
 | [Unions](unions.md) | Nominal tagged unions, positional variant constructors, full-block `when` arms, optional case coverage with closed-union control-flow proof, payload binding, and Lua visibility. |
-| [Arrays and maps](arrays-maps.md) | Distinct structural containers: positive-only, holed Arrays with deterministic highest-present length and canonical Lua userdata proxies; ordinary Maps, positional integer-Map construction, metamethod-aware integer-Map length, conversions, and performance. |
+| [Arrays and maps](arrays-maps.md) | Mutable and const-qualified positive-only, holed Arrays with deterministic highest-present length and distinct canonical Lua userdata tags; ordinary Maps, positional integer-Map construction, metamethod-aware integer-Map length, conversions, and performance. |
 | [Modules](modules.md) | Logical modules, `import`, visibility, module variables, initialization, and the compilation model (shared libraries, executables, search paths). |
 | [Visibility through source imports](source-import-visibility.md) | Direct source collaboration over local declarations, direct-only Titan permission, normalized use-driven C declaration origins, and the public-only binary/Lua boundary. |
 | [Multi-module libraries](multi-module-libraries.md) | Separating logical modules from physical providers: common-prefix library output, prefix lookup, generated Lua loaders, and the combined standard library. |
@@ -96,12 +97,12 @@ use the chapters below for the normative language reference.
 
 ## Status and limitations
 
-Titan is a working prototype, version 0.25. The language documented here is
+Titan is a working prototype, version 0.26. The language documented here is
 implemented and covered by the compiler's test suite. Its boundaries are
 mostly missing features, plus a handful of constructs the compiler rejects
 with a clean error; each links to the chapter that documents it in full.
 
-Interfaces were introduced in ABI 0.20 and remain part of ABI 0.25. A record
+Interfaces were introduced in ABI 0.20 and remain part of ABI 0.26. A record
 or union satisfies an Interface structurally at a statically known conversion
 site, but the conversion constructs a fresh wrapper; it is not subtyping or
 gradual consistency and does not lift through containers or functions. Dynamic

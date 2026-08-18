@@ -157,7 +157,7 @@ describe("contextual calls through value (typechecker)", function()
         local stat = find_function(tree, "collect").block.stats[1]
         local array = stat._result_adjustment.fixed[1]
         local call = array._positional_adjustment.open_source
-        assert.same(types.Array(types.Value()), stat.decls[1]._type)
+        assert.same(types.Array(types.Value(), false), stat.decls[1]._type)
         assert.same(types.Value(), call._callee_type.flexrettype)
         assert.same("open", call._flex_result_demand)
     end)

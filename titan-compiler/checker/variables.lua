@@ -114,6 +114,16 @@ checkvar = util.make_visitor({
         end
         node.exp = tryforce(node.exp)
         local ltype = node.exp._type
+        if ltype._tag == "Type.Parameter"
+           and ltype.erased_constraint ~= false
+           and ltype.erased_constraint._tag == "Type.Nominal" then
+            local constraint = generic_applied_owner_view(
+                ltype.erased_constraint, errors, node.loc)
+            if constraint and constraint._tag == "Type.Interface" then
+                node._rigid_receiver_type = ltype
+                ltype = ltype.erased_constraint
+            end
+        end
         if node._contextual_c_name
            and ltype._tag ~= "Type.CModule"
            and not types.is_direct_c(ltype)
@@ -255,9 +265,19 @@ checkvar = util.make_visitor({
                     "union value of type '%s' has no fields; use a case statement",
                     ltype.fqtn)
             elseif type._tag == "Type.Interface" then
-                node._type = invalid(errors, node.loc,
-                    "interface value of type '%s' has no fields; use an interface method",
-                    ltype.fqtn)
+                local field = type.fields and type.fields[node.name]
+                if field then
+                    node._decl = field
+                    node._type = field.type
+                    node._interface = type
+                    node._interface_field = field
+                    node._interface_field_index = field.index
+                    nominal_field_projection = true
+                else
+                    node._type = invalid(errors, node.loc,
+                        "field '%s' not found in interface '%s'",
+                        node.name, ltype.fqtn)
+                end
             elseif type._tag ~= "Type.Record" then
                 node._type = invalid(errors, node.loc,
                     "trying to access field '%s' of type '%s' that is not a record but '%s'",
@@ -395,6 +415,10 @@ checkvar = util.make_visitor({
                 operation, node, {
                     _type = true,
                     _decl = true,
+                    _interface = true,
+                    _interface_field = true,
+                    _interface_field_index = true,
+                    _rigid_receiver_type = true,
                     _assignment_adjustment = function(value)
                         return generic_finalize_adjustment_annotation(
                             operation, value)

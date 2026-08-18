@@ -90,8 +90,8 @@ The URL root adds one logical protocol, archive metadata key, generated shim,
 and `luaopen_titan_url` entry to the coordinated provider. The later addition
 of the independent `titan.test` module makes the current image eighteen logical
 modules and shims with nineteen DSO openers including bare `luaopen_titan`.
-ABI 0.25 publishes that complete image in its own namespace; it does not migrate
-or clean up the preserved ABI-0.24 provider.
+ABI 0.26 publishes that complete image in its own namespace; it does not migrate
+or clean up the preserved ABI-0.25 provider.
 
 The non-LuaCov URL suite carries the accepted and rejected URI matrix,
 normalization cases, tuple exclusivity, exact `Error` fields, and the separate

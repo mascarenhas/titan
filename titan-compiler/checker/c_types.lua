@@ -1395,6 +1395,47 @@ c_assignment_base_has_storage = function(exp)
     return true
 end
 
+-- Return the originating const local when an lvalue descends only through
+-- inline C aggregate storage. Pointer/owned dereferences deliberately stop the
+-- walk: binding constness is shallow and does not freeze an independent
+-- pointee.
+function const_inline_c_storage_decl(exp)
+    if not exp then return nil end
+    local value_type = exp._type and c_resolve(exp._type)
+    if value_type and (value_type._tag == "Type.CPointer"
+                       or value_type._tag == "Type.COwned") then
+        return nil
+    end
+    if exp._tag == "Ast.ExpVar" then exp = exp.var end
+
+    if exp._tag == "Ast.VarName" then
+        local decl = exp._decl
+        local typ = decl and decl._type and c_resolve(decl._type)
+        if decl and decl._tag == "Ast.Decl" and decl.isconst and typ
+           and (typ._tag == "Type.CStruct"
+                or typ._tag == "Type.CUnion"
+                or typ._tag == "Type.CArray") then
+            return decl
+        end
+        return nil
+    elseif exp._tag == "Ast.VarDot" and exp._decl
+           and exp._decl._tag == "Type.CField" then
+        local owner = exp.exp and exp.exp._type
+            and c_resolve(exp.exp._type)
+        if owner and (owner._tag == "Type.CStruct"
+                      or owner._tag == "Type.CUnion"
+                      or owner._tag == "Type.CArray") then
+            return const_inline_c_storage_decl(exp.exp)
+        end
+    elseif exp._tag == "Ast.VarBracket" and exp.exp1 then
+        local owner = exp.exp1._type and c_resolve(exp.exp1._type)
+        if owner and owner._tag == "Type.CArray" then
+            return const_inline_c_storage_decl(exp.exp1)
+        end
+    end
+    return nil
+end
+
 function check_c_assignment_storage(var, errors)
     local base
     if var._tag == "Ast.VarDot" and var._decl
@@ -1404,6 +1445,14 @@ function check_c_assignment_storage(var, errors)
            and var.exp1._type and types.is_direct_c(var.exp1._type) then
         base = var.exp1
     else
+        return
+    end
+
+    local const_decl = const_inline_c_storage_decl(base)
+    if const_decl then
+        checker.typeerror(errors, var.loc,
+            "cannot mutate inline C storage of const local '%s'",
+            const_decl.name)
         return
     end
 

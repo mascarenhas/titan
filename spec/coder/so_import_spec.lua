@@ -502,6 +502,102 @@ describe(".so-only cross-module imports", function()
         assert.truthy(rok, out)
     end)
 
+    it("preserves const values through .so-only metadata and Lua", function()
+        local ok, err = build_so_chain({
+            { name = "const_so_owner", src = [[
+                const answer = 42
+
+                record Box
+                    local hidden: integer
+                    const label: string
+                    count: integer
+                end
+
+                interface View
+                    label: string
+                    function total(): integer
+                end
+
+                function Box:total(): integer
+                    return self.count
+                end
+
+                function make(): Box
+                    return Box.new(99, "fixed", 3)
+                end
+
+                function view(box: Box): View
+                    return box
+                end
+
+                function numbers(): const { integer }
+                    return { 10, 20 }
+                end
+            ]] },
+            { name = "const_so_consumer", src = [[
+                local owner = import "const_so_owner"
+
+                function read(): integer
+                    local box = owner.make()
+                    local view = owner.view(box)
+                    local numbers = owner.numbers()
+                    if view.label == box.label then
+                        return owner.answer + view:total() + numbers[2]
+                    end
+                    return 0
+                end
+
+                function box(): owner.Box
+                    return owner.make()
+                end
+
+                function view(): owner.View
+                    return owner.view(owner.make())
+                end
+
+                function imported_view(): owner.View
+                    local box = owner.make()
+                    return box
+                end
+
+                function numbers(): const { integer }
+                    return owner.numbers()
+                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+
+        local rok, out = call("const_so_consumer", [[
+            local owner = require "const_so_owner"
+            assert(const_so_consumer.read() == 65)
+
+            assert(owner.answer == 42)
+            assert(not pcall(function() owner.answer = 0 end))
+            assert(owner.answer == 42)
+
+            local box = const_so_consumer.box()
+            assert(box.label == "fixed" and box.count == 3)
+            box.count = 4
+            assert(not pcall(function() box.label = "changed" end))
+            assert(box.label == "fixed" and box.count == 4)
+
+            local view = const_so_consumer.view()
+            assert(view.label == "fixed" and view:total() == 3)
+            assert(not pcall(function() view.label = "changed" end))
+
+            local imported_view = const_so_consumer.imported_view()
+            assert(imported_view.label == "fixed" and
+                imported_view:total() == 3)
+            assert(not pcall(function() imported_view.label = "changed" end))
+
+            local numbers = const_so_consumer.numbers()
+            assert(#numbers == 2 and numbers[1] == 10)
+            assert(not pcall(function() numbers[1] = 99 end))
+            assert(numbers[1] == 10)
+        ]])
+        assert.truthy(rok, out)
+    end)
+
     it("constructs and uses a record from a .so-only module", function ()
         local ok, err = build_so_chain({
             { name = "rfoo", src = [[

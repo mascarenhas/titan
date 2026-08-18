@@ -145,7 +145,7 @@ omitted from the field lists for brevity.
 | `TypeCPointer` | `subtype`, `const` | `*c.T` or `const *c.T`; `const` records the written pointee qualifier |
 | `TypeCArray` | `base`, `length` | fixed C array annotation `c.T[N]`; `length` is an integer expression node |
 | `TypeCOwned` | `subtype`, `count` | `owned *c.T` when `count == false`, or `owned c.T[]` when true |
-| `TypeArray` | `subtype` | `{T}` |
+| `TypeArray` | `subtype`, `isconst` | `{T}` or `const { T }`; `isconst` is an exact parser boolean |
 | `TypeMap` | `keystype`, `valuestype` | `{K: V}` |
 | `TypeFunction` | `argtypes`, `rettypes`, `varargtype`, `flexrettype` | dense fixed lists plus independent optional input/output tail element types (`false` when absent) |
 | `TypeOption` | `basetype` | the `?` suffix, `T?` |
@@ -157,9 +157,9 @@ omitted from the field lists for brevity.
 | `TopLevelFunc` | `islocal`, `name`, `params`, `rettypes`, `flexrettype`, `block`, `typeparams` | fixed result list plus a separate optional output tail |
 | `TopLevelMethod` | `class`, `name`, `params`, `rettypes`, `flexrettype`, `block`, `typeparams` | `function Class:name(...)`; parser decorates `islocal` |
 | `TopLevelStatic` | `class`, `name`, `params`, `rettypes`, `flexrettype`, `block`, `typeparams` | `function Class.name(...)`, synthesized record `Class.new`, and synthesized union variant constructors; parser decorates `islocal` and marks synthesized forms |
-| `TopLevelVar` | `islocal`, `decl`, `value` | module variable |
+| `TopLevelVar` | `islocal`, `isconst`, `decl`, `value` | module variable; `value == false` preserves an omitted initializer until checking |
 | `TopLevelTypeAlias` | `islocal`, `name`, `type` | compile-time-only `[local] type Name = T` |
-| `TopLevelInterface` | `name`, `methods`, `typeparams` | top-level, non-local, nonempty Interface declaration |
+| `TopLevelInterface` | `name`, `members`, `fields`, `methods`, `typeparams` | top-level, non-local, nonempty Interface declaration; `members` preserves mixed source order and the other lists are ordered projections |
 | `TopLevelRecord` | `name`, `fields`, `typeparams` | `fields` is a list of `Decl`; parser decorates `islocal` |
 | `TopLevelUnion` | `name`, `variants`, `typeparams` | `variants` is a source-order list of `UnionVariant`; parser decorates `islocal` |
 | `TopLevelImport` | `localname`, `modname` | `local m = import "x.y"` |
@@ -195,20 +195,22 @@ variant through `_union_variant`. Its body returns
 is never published as named-call metadata. Unlike `Rec.new`, variant
 constructors are positional-only.
 
-`TopLevelInterface.methods` is a declaration-order list of
-`InterfaceMethod {name, params, rettypes, flexrettype}` nodes. An Interface
+`TopLevelInterface.fields` and `.methods` are independent declaration-order
+lists projected from `.members`. A field is a const `Decl`; a method is an
+`InterfaceMethod {name, params, rettypes, flexrettype}` node. An Interface
 method reuses the ordinary parameter and fixed/flexible result carriers but
 has no body, receiver declaration, locality flag, or per-method `end`. The
 checker turns these nodes into ordered `Type.Method` metadata; see
 [Interfaces](interfaces.md#frontend-representation).
 
-### Declarations and the `option` flag
+### Declarations and the `option`/`isconst` flags
 
-`Decl = {loc, name, type, option}` is used for locals, numeric and
+`Decl = {loc, name, type, option, isconst}` is used for locals, numeric and
 generic `for` control variables, function parameters, record fields, and
 `TopLevelVar`. The
 `type` field is an `Ast.Type*` node *or `false`* (type to be inferred),
-and `option` is a boolean marking the bare-`?` inference form:
+`option` is a boolean marking the bare-`?` inference form, and `isconst` is an
+exact boolean for ordinary declarations:
 
 | Source | `type` field | `option` field |
 | --- | --- | --- |
@@ -239,7 +241,7 @@ without an annotation is not accepted. A record field `Decl` may carry
 | `StatFor` | `decl`, `start`, `finish`, `inc`, `block` | `inc` is `false` when the step is omitted; the checker fills in a literal `1`/`1.0` |
 | `StatForIn` | `decls`, `exps`, `block` | generic `for decllist in explist`; the checker pads/elaborates `exps` as the iterator tuple |
 | `StatAssign` | `vars`, `exps` | multiple assignment lists |
-| `StatDecl` | `decls`, `exps` | `local` with lists; initializers are mandatory |
+| `StatDecl` | `decls`, `exps` | mutable `local` may have an empty `exps` list for checked nil synthesis; const declarations always have a nonempty initializer list |
 | `StatCall` | `callexp` | a call in statement position |
 | `StatReturn` | `exps` | zero or more; `return` can only be the last statement of a block |
 
@@ -331,7 +333,7 @@ encodes three field forms:
 | `[keyexp] = exp` | the key *expression node* |
 
 At the semantic-type layer every Titan/Lua `Type.Function` shape carries a
-separate `flexrettype` and keeps its ABI-0.25 third constructor position as a
+separate `flexrettype` and keeps its ABI-0.26 third constructor position as a
 required reserved `false`; Titan input tails live in `varargtype`. A direct
 foreign module member instead retains the independent `Type.CFunction` shape,
 with C's single-result model and `vararg` bit, and a C function pointer is
@@ -359,14 +361,17 @@ of these are declared anywhere; this table is the inventory.
 | `_foreign_function_pointer` | `ExpVar` | checker | coder | a direct C declaration was contextually decayed to its exactly compatible `CPointer(CFunction)` target; stores the bare C spelling to cast |
 | `_c_pointer_call` | `ExpCall` | checker | coder | authoritative `Type.CFunction` pointee for an indirect C call, including synthesized generic-for iterator/close calls |
 | `_implicit_coercion` | `ExpCast` synthesized by `trycoerce` | checker | coder | distinguishes a demanded sink conversion from a user-written `as`; finite flexible-return lowering may suppress only the sink conversion after its result budget is exhausted |
+| `_written_cast` | written `ExpCast`/`ExpIs` | checker | coder, linear-use pass | frozen written-cast plan; mutable-to-const Array casts carry `array_freeze` with `copy` or proven `freeze` mode |
+| `_linear_array_freeze` | mutable-to-const `ExpCast` | post-typecheck linear-use pass | coder, specs | marks the conservative last-use proof that authorizes in-place retagging; absence means shallow copy |
 | `_decl` | `VarName`, `VarDot` | checker | checker, coder | what the name resolved to: an `Ast.Decl` (local/param/`self`), a top-level AST node, a `Type.ModuleMember`/`Type.ModuleVariable`, a `Type.Field`/`Type.StaticMethod`, or the syntax-bound `Checker.CPseudoNew` allocation descriptor |
 | `_used` | `Decl`, top-level nodes (via `_decl`) | checker, on every read: `ExpVar`, `VarDot` receivers, call callees | coder | "this variable is read somewhere"; unused locals get no C variable — their initializer is evaluated and cast to `(void)` |
 | `_assigned` | `Decl` (via `_decl`) | checker, in `StatAssign` on `VarName` targets | coder | "this variable is reassigned"; GC-bearing parameters and `self` get a semantic local stack home only when assignment/spill requires it (otherwise they remain C formals and borrow existing allocation/result/semantic/VM provenance—native callers add no argument root; see [values and the GC](values-and-gc.md)) |
 | `_record_constructor` | synthesized `TopLevelStatic` | parser record desugaring | checker | identifies the adjacent synthesized `Rec.new`; explicit record functions, including an explicit `Rec.new`, do not carry it |
 | `_union_constructor`, `_union_variant` | synthesized `TopLevelStatic` | parser union desugaring | checker | identify an adjacent positional-only variant constructor and its `UnionVariant`; explicit union functions do not carry the markers |
-| `_interface_conversion` | coercion-bearing expression, call adjustment, or written cast/test | checker | coder | frozen concrete-to-Interface wrapper plan, including declaration-order method mappings and any adapter graphs; the coder must not rerun structural matching |
+| `_interface_conversion` | coercion-bearing expression, call adjustment, or written cast/test | checker | coder | frozen concrete-to-Interface wrapper plan, including ordered field snapshots, method mappings, and adapter graphs; the coder must not rerun structural matching |
 | `_interface_test`, `_interface_downcast` | `ExpIs`/`ExpCast` | checker | coder | respectively a statically proven concrete-to-Interface test and an exact Interface-wrapper-to-concrete payload check |
 | `_interface`, `_interface_method`, `_interface_method_index`, `_interface_bound` | Interface method call/reference | checker | coder | resolved Interface descriptor, method descriptor, declaration-order payload slot, and bound-reference marker |
+| `_interface_field`, `_interface_field_index` | Interface field read | checker | coder | resolved target field descriptor and declaration-order snapshot user-value index |
 | `_contextual_c_name` | `VarDot`, `TypeQualName` | parser, when the selector came from `CNAME` | checker | admits the raw keyword spelling only when the qualifier resolves to a C module/owner; coder emits the stored `name` unchanged |
 | `_toplevel_order` | every AST root node | checker duplicate prepass | checker, symbol table | 1-based position in the unchanged flat/combined AST; drives duplicate winners and the module-variable import/variable visibility frontier |
 | `_ignore` | top-level nodes | checker declaration stages: duplicate declarations, a duplicate record's synthesized constructor, and record functions/methods whose declaration fails (missing record, name clash, redeclaration) | body checker, `makemoduletype`, coder (`generate`, `allocate_upvalues`) | "pretend this node does not exist"; every later traversal must skip it |
@@ -381,6 +386,8 @@ of these are declared anywhere; this table is the inventory.
 | `_named_arg_order`, `_named_call_kind` | checked named `ExpCall` | checker | coder | formal indexes of explicit expressions in lexical order, plus `"titan"` or `"foreign"`; the `Args*` payload itself has already been normalized to formal order |
 | `_named_omitted` | synthesized nil fill in a named call or record constructor | checker | coder assertions for named calls; specs | distinguishes checked omissions from explicit expressions while source-order lowering runs first |
 | `_field` | `Field` (record constructors) | checker | coder | the resolved `Type.Field` descriptor; its `index` is the record `Udata` user-value slot (`uv[index].uv`) the field occupies, including synthesized omitted fields |
+| `_omitted_initializer` | mutable `StatDecl` | checker | specs | the source omitted the expression list; checked nil expressions were synthesized for all declared slots |
+| `_initializerless_const` | const `TopLevelVar` | checker | assignment authorization, coder | the source omitted the module initializer and passed the explicit nil-bearing-type rule; only its owner root initializer frame may assign it |
 | `_forcontrol` | `Decl` | checker | checker | marks numeric and generic `for` control variables as read-only assignment targets |
 | `_tuple_decls` | `StatForIn` | checker | coder | four hidden `Decl`s for iterator, state, initial control and close slots |
 | `_result_decls` | `StatForIn` | checker | coder | hidden `Decl`s for the iterator return tuple, reused by the initial and update calls |
@@ -419,8 +426,9 @@ returns it as a source type, so annotations, aliases, `as`, and `is` may name
 the union but not `Union.variant`.
 
 Interfaces likewise use `Type.Nominal(fqtn)` in value-facing positions.
-`Type.Interface(name, methods)` and its ordered `Type.Method` entries are
-registry and serialized-module descriptors, not structural value types. This
+`Type.Interface(name, fields, methods, scope, typeparams)`, its ordered const
+`Type.Field` entries, and its ordered `Type.Method` entries are registry and
+serialized-module descriptors, not structural value types. This
 keeps nominal Interface identity separate from the direct structural
 satisfaction predicate.
 

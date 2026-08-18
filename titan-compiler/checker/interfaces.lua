@@ -46,6 +46,9 @@ function interface_relation_policy(st, options)
     policy.method_visible = function(method)
         return is_nominal_member_visible_from(st, method)
     end
+    policy.field_visible = function(field)
+        return is_nominal_member_visible_from(st, field)
+    end
     policy.interface_coercion = function(source, target, received)
         policy.interface_failure = false
         local concrete = source._tag == "Type.Nominal"
@@ -66,9 +69,9 @@ function interface_relation_policy(st, options)
                 concrete, interface, received)
         policy.interface_failure = failure or false
         if implementation then
-            implementation.methods._surface_concrete = concrete
-            implementation.methods._surface_interface = interface
-            return implementation.methods
+            implementation._surface_concrete = concrete
+            implementation._surface_interface = interface
+            return implementation
         end
         return false
     end
@@ -121,8 +124,12 @@ local function freeze_interface_guard(plan, target, seen)
     local tag = target._tag
     if tag == "Type.Array" then
         interface_adapter_assert(
-            plan.op == "array" and plan.element,
+            plan.op == "array"
+                and plan.isconst == target.isconst
+                and type(plan.isconst) == "boolean"
+                and plan.element,
             "Array guard has the wrong shape")
+        frozen.isconst = target.isconst
         frozen.element = freeze_interface_guard(
             plan.element, target.elem, seen)
     elseif tag == "Type.Map" then
@@ -1290,18 +1297,93 @@ function checker.freeze_callable_adapter(
     return interface_adapters.freeze(raw, source, target, loc, nil)
 end
 
-function make_interface_conversion(source, target, adjustment)
+local freeze_interface_implementation
+
+local function interface_conversion_assert(condition, message)
+    if not condition then
+        error("invalid checker Interface conversion plan: " .. message, 2)
+    end
+end
+
+-- Interface field snapshots are ordinary assignment conversions, but their
+-- complete plan is stored inside the enclosing Interface implementation rather
+-- than on a source expression. Freeze every callable view and recursively
+-- discovered Interface implementation now, while the checker still owns all
+-- relation decisions. Code generation may only consume this closed graph.
+local function freeze_interface_field_adjustment(adjustment, seen)
+    if type(adjustment) ~= "table" or seen[adjustment] then return end
+    seen[adjustment] = true
+
+    if adjustment.kind == "callable" then
+        checker.freeze_callable_adapter(
+            adjustment, adjustment.source, adjustment.target,
+            location.new(string.format(
+                "[interface field callable %s -> %s].titan",
+                types.tostring(adjustment.source),
+                types.tostring(adjustment.target)), 1, 1))
+    end
+
+    if find_interface_wrapper(adjustment) then
+        adjustment.interface_conversion = assert(
+            make_interface_conversion(
+                adjustment.source, adjustment.target, adjustment, seen),
+            "nested Interface field adjustment lost its conversion")
+        return
+    end
+    freeze_interface_field_adjustment(adjustment.coercion, seen)
+    freeze_interface_field_adjustment(adjustment.inner, seen)
+    freeze_interface_field_adjustment(adjustment.element_view, seen)
+end
+
+freeze_interface_implementation = function(implementation, seen)
+    seen = seen or {}
+    if seen[implementation] then return end
+    seen[implementation] = true
+    interface_conversion_assert(
+        type(implementation) == "table"
+            and implementation.kind == "interface_implementation"
+            and implementation.concrete
+            and implementation.interface
+            and type(implementation.fields) == "table"
+            and type(implementation.methods) == "table",
+        "conversion lacks its complete implementation")
+
+    local concrete = implementation.concrete
+    local interface = implementation.interface
+    for index, mapping in ipairs(implementation.fields) do
+        interface_conversion_assert(
+            mapping.required and mapping.concrete
+                and mapping.required == interface.fields[index]
+                and mapping.required.name == mapping.name
+                and mapping.required.index == mapping.target_index
+                and mapping.concrete.index == mapping.source_index
+                and mapping.concrete.fqtn == concrete.name
+                and mapping.source and mapping.target
+                and types.equals(mapping.source, mapping.concrete.type)
+                and types.equals(mapping.target, mapping.required.type)
+                and type(mapping.adjustment) == "table",
+            "field mapping does not match its source and target slots")
+        freeze_interface_field_adjustment(mapping.adjustment, seen)
+    end
+    for _, mapping in ipairs(implementation.methods) do
+        interface_adapters.make(concrete, interface, mapping)
+    end
+end
+
+function make_interface_conversion(source, target, adjustment, seen)
     local wrapper = find_interface_wrapper(adjustment)
     if not wrapper then return nil end
-    local concrete = wrapper.methods._surface_concrete
+    local implementation = assert(wrapper.implementation,
+        "Interface coercion lacks its implementation plan")
+    local concrete = implementation._surface_concrete
+        or implementation.concrete
         or types.registry[wrapper.source.fqtn]
-    local interface = wrapper.methods._surface_interface
+    local interface = implementation._surface_interface
+        or implementation.interface
         or types.registry[wrapper.target.fqtn]
-    local exact = true
-    for _, mapping in ipairs(wrapper.methods or {}) do
-        interface_adapters.make(concrete, interface, mapping)
-        exact = exact and mapping.exact
-    end
+    implementation.concrete = concrete
+    implementation.interface = interface
+    freeze_interface_implementation(implementation, seen or {})
     local root = adjustment.coercion or adjustment
     return {
         kind = "interface_conversion",
@@ -1311,8 +1393,10 @@ function make_interface_conversion(source, target, adjustment)
         interface = interface,
         concrete_type = wrapper.source,
         interface_type = wrapper.target,
-        methods = wrapper.methods,
-        exact = exact,
+        fields = implementation.fields,
+        methods = implementation.methods,
+        implementation = implementation,
+        exact = implementation.exact,
         option = root.op or "interface_wrapper",
         source_optional = source._tag == "Type.Option",
         target_optional = target._tag == "Type.Option",
@@ -1474,7 +1558,35 @@ function report_interface_failure(errors, loc, failure)
     local prefix = string.format(
         "%s '%s' does not implement interface '%s'",
         concrete_kind, concrete.name, interface.name)
-    if failure.reason == "missing" then
+    local field = failure.member_kind == "field"
+    if failure.reason == "fields_require_record" then
+        checker.typeerror(errors, loc,
+            "%s: interface fields require a record implementation; field '%s' cannot be supplied by a union",
+            prefix, failure.name)
+    elseif failure.reason == "missing" and field then
+        checker.typeerror(errors, loc,
+            "%s: const field '%s' is missing",
+            prefix, failure.name)
+    elseif failure.reason == "not_field" then
+        checker.typeerror(errors, loc,
+            "%s: member '%s' is not a field",
+            prefix, failure.name)
+    elseif failure.reason == "mutable" then
+        checker.typeerror(errors, loc,
+            "%s: field '%s' is mutable; a const field is required",
+            prefix, failure.name)
+    elseif failure.reason == "inaccessible" and field then
+        checker.typeerror(errors, loc,
+            "%s: field '%s' is local to module '%s'",
+            prefix, failure.name,
+            nominal_module(failure.member.fqtn))
+    elseif failure.reason == "incompatible" and field then
+        checker.typeerror(errors, loc,
+            "%s: field '%s' has incompatible type '%s'; expected '%s'",
+            prefix, failure.name,
+            types.tostring(failure.concrete_type),
+            types.tostring(failure.required_type))
+    elseif failure.reason == "missing" then
         checker.typeerror(errors, loc,
             "%s: method '%s' is missing",
             prefix, failure.name)
@@ -1592,6 +1704,9 @@ function generic_constraint_satisfied(
             visibility = st.modname,
             method_visible = function(method)
                 return is_nominal_member_visible_from(st, method)
+            end,
+            field_visible = function(field)
+                return is_nominal_member_visible_from(st, field)
             end,
         }
     end

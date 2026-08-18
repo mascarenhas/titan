@@ -666,7 +666,7 @@ describe("unions (typechecker)", function()
         local box_name = box_module_name .. ".Box"
         local box_nominal = types.Nominal(box_name)
         local field = types.Field(
-            box_name, "item", types.Integer(), 0)
+            box_name, "item", types.Integer(), 0, false)
         local box_constructor = types.StaticMethod(
             box_name, "new", {types.Integer()}, {box_nominal},
             false, false, {"item"})

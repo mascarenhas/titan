@@ -144,7 +144,10 @@ The following Titan facilities are unavailable in a foreign body:
 * `...`, flexible results, `is`, concatenation, and Titan `and`/`or`/`not`;
 * Lua-owned `.new()` and `.new_array()` allocation.
 
-Every local needs an initializer and must have a direct C type. A non-void
+Every local must have a direct C type. A mutable local may omit its initializer
+only when that explicit type admits nil, such as a C object or function
+pointer; the compiler supplies `NULL`. Direct C aggregates and scalars still
+need an initializer, and every const local needs an initializer. A non-void
 foreign function must return one C value on every path; a void function may
 fall through or use bare `return`.
 
@@ -258,7 +261,7 @@ are part of the ABI-0.23 clean boundary. ABI-0.22 providers and objects must be
 rebuilt rather than mixed with an ABI-0.23 compiler/runtime. ABI 0.24 retains
 these native names but extends serialized interfaces for generics, so ABI-0.23
 providers likewise remain preserved prior-version state and cannot be mixed
-with the active compiler/runtime. ABI 0.25 retains the native FFI naming while
+with the active compiler/runtime. ABI 0.26 retains the native FFI naming while
 changing the public `titan.fs` and `titan.async` interfaces and exact native
 signatures; ABI-0.24 providers are preserved and rejected before metadata is
 decoded.

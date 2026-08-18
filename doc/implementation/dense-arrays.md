@@ -5,9 +5,11 @@ dense backing while preserving its native C representation as `Table *`.
 ABI 0.20 kept that hot representation and one shared proxy metatable, but
 added a construction-selected Lua writer as the proxy's second traced user
 value. ABI 0.21 retained that representation while advancing the embedded
-Lua contract to 5.5.1, and ABIs 0.22 through 0.25 retain it. Typed Titan reads are strict;
-non-nil writes through Lua's `__newindex` run the writer's target-directed
-dynamic coercion before any mutation.
+Lua contract to 5.5.1, and ABIs 0.22 through 0.25 retained it. ABI 0.26 changes
+the semantic constructor to `Type.Array(T, isconst)` and adds a distinct const
+proxy tag while keeping `Table *` for both exact native forms. Typed Titan reads
+are strict. Only mutable proxies provide `__newindex`; their non-nil Lua writes
+run the writer's target-directed dynamic coercion before mutation.
 
 This chapter describes the runtime protocol, checker elaboration, generated-C
 lowering, GC rules, and ABI boundary. Language-visible behavior is specified
@@ -20,23 +22,25 @@ An Array consists of two ordinary stock-Lua objects:
 1. a normal `Table` used as the exact/native backing; and
 2. a zero-payload full `Udata` used as the canonical boxed proxy.
 
-The backing and proxy form a strong cycle, and the proxy additionally owns the
-writer policy:
+The backing and proxy form a strong cycle. The proxy's second user value carries
+the writer policy only for a mutable Array:
 
 ```text
 backing Table hash key 0 ───────────────► proxy Udata
           ▲                                  │
           └──────────── user value 1 ◄───────┤
                                              └── user value 2 ──► writer CClosure ──► _mod
+                                                              or nil for const
 ```
 
-The proxy has exactly two user values and the shared per-state
-`"Titan array metatable"`. User value 1 is the backing; user value 2 is the
-module-local writer closure selected by the Array's final construction
-element type. The writer is behavior for genuine Lua writes, not a type tag or
-proof of current contents. The backing table has no metatable. Integer key 0
-is private and is the table's only live hash entry; every user position is a
-positive index in the array part.
+The proxy has exactly two user values and one of two canonical per-state
+metatables. User value 1 (C user-value index 0) is the backing. Mutable user
+value 2 (index 1) is the module-local writer closure selected by the Array's
+final construction element type; const user value 2 is nil. The metatable—not
+the writer—is the exact mutable/const tag. The writer is behavior for genuine
+Lua writes, not proof of current contents. The backing table has no metatable.
+Integer key 0 is private and is the table's only live hash entry; every user
+position is a positive index in the array part.
 
 For backing table `t`:
 
@@ -54,7 +58,8 @@ The maintained invariants are:
 - no positive or negative user index is stored in the hash;
 - hash key 0 points to the canonical proxy;
 - proxy user value 1 points to the same backing; and
-- proxy user value 2 contains the constructing module's writer closure;
+- proxy user value 2 contains the constructing module's writer closure for a
+  mutable Array and nil for a const Array;
 - the backing has no metatable.
 
 Logical length is therefore the highest present positive index, not an element
@@ -79,11 +84,16 @@ before it returns a native `Table *`:
 10. insert `0 -> proxy` in the already-sized hash; and
 11. apply the stock barriers and publish only after every edge exists.
 
+`titan_const_array_new(L, const_metatable, capacity)` uses the same internal
+constructor but requires the const canonical metatable and stores nil in user
+value 2. A constructor checked under a const Array target calls this helper
+directly and never creates a transient mutable proxy.
+
 The empty case deliberately requests `luaH_resize(L, t, 0, 1)`. Its array part
 has size zero, but its non-dummy one-node hash still owns key 0.
 
-Both objects and the writer stay in independent scanned roots across every
-allocation.
+Both objects and the writer-or-nil slot stay in independent scanned roots
+across every allocation.
 This is necessary even though the links eventually form a cycle:
 `luaH_resize` can allocate before either edge exists, and `luaH_setint` can
 force an emergency full collection under Lua's `HARDMEMTESTS` before the
@@ -102,7 +112,7 @@ or manual free path:
 
 - the Table owns and frees its ordinary array block and one-node hash;
 - the Udata owns its ordinary header and two user values;
-- the strong cycle and writer edge are traversed by stock
+- the strong cycle and any mutable writer edge are traversed by stock
   Table/Udata/CClosure marking;
 - incremental and generational collectors handle unreachable cycles; and
 - state close frees both objects through Lua's normal object switch.
@@ -112,14 +122,14 @@ Every edge uses the ordinary barrier for its actual owner:
 | Store | Owner to barrier |
 | --- | --- |
 | proxy user value 1 → backing Table | proxy Udata |
-| proxy user value 2 → writer CClosure | proxy Udata |
+| mutable proxy user value 2 → writer CClosure | proxy Udata |
 | writer upvalue 0 → constructing `_mod` | writer CClosure |
 | backing key 0 → proxy Udata | backing Table |
 | backing positive slot → collectable element | backing Table |
 | compiler slot → backing Table | the existing module/record/closure owner |
 
 The hot Array-element store barriers `obj2gco(backing)`, never the proxy.
-The writer closure is first cached in a module user value with the module's
+The mutable writer closure is first cached in a module user value with the module's
 back barrier; `lua_pushcclosure` installs its `_mod` upvalue during
 construction, and the proxy user-value API applies the corresponding Udata
 barrier. Across a resize, generated code roots the backing, a collectable
@@ -169,35 +179,40 @@ integer truncation can occur. Later resizes never shrink an Array.
 
 ## Canonical proxy and module cache
 
-`titan_array_metatable` creates or recovers one shared registry metatable per
-Lua state. It installs closures for:
+`titan_array_metatables` creates or recovers the mutable/const registry pair
+per Lua state. Both install closures for:
 
 - `__index`, which accepts exactly an integral numeric key, returns nil below
   1, and reads only the positive array slot;
-- `__newindex`, which validates a positive integral index, handles nil as
-  deletion, and otherwise invokes the receiver-carried writer before native
-  growth/hole/length transitions;
 - `__len`, which reads the guarded authoritative length; and
-- protected `__name`/`__metatable` text `"Titan array metatable"`.
+- protected qualifier-specific `__name`/`__metatable` text.
 
-Creation is build-then-publish: the runtime fills a private table completely
-and writes the registry entry only after every allocating setup step succeeds.
-An error therefore cannot leave a partially initialized canonical table for a
-later load, and a pre-existing non-table registry value is rejected.
+Only the mutable metatable installs `__newindex`, which validates a positive
+integral index, handles nil as deletion, and otherwise invokes the
+receiver-carried writer before native growth/hole/length transitions. The
+const metatable has no write path.
 
-There is no `__pairs`. The callbacks capture the canonical metatable, so a
-nested-backing probe does not query the registry on each access.
+Creation is build-then-publish: the runtime fills both private metatables and
+publishes one canonical pair table only after every allocating setup step
+succeeds. The legacy named entries are projections repaired from that pair.
+No callback can observe one canonical identity before the other is complete,
+and a malformed pre-existing pair is rejected.
 
-Every generated module reserves one unconditional private user-value slot for
-this metatable. Slot allocation places it after the
+There is no `__pairs`. The read callbacks capture both canonical identities,
+so nested boxing can recognize either qualifier without querying the registry
+on each access. The mutable write callback captures its mutable identity.
+
+Every generated module reserves two consecutive unconditional private
+user-value slots for the mutable and const metatables. Slot allocation places
+them after the
 importer-reconstructed public prefix—exported variables and canonical exported
 function closures—and before other private caches. Cold initialization stores
-the metatable immediately after the module Udata is registry-anchored and
+both metatables immediately after the module Udata is registry-anchored and
 before imports, record setup, or `INITVARS`; module-variable initializers may
 construct or box Arrays. Recovered modules already carry the slot.
 
-For every distinct final element type of an Array constructor emitted by a
-module, the coder also allocates one private module slot and generates one
+For every distinct final element type of a mutable Array constructor emitted by
+a module, the coder also allocates one private module slot and generates one
 writer `CClosure`. The checker has already attached the element's canonical
 `DynamicCoercionPlan`; the generated writer captures `_mod`, converts its one
 incoming Lua value into the element's internal/boxed slot representation, and
@@ -209,14 +224,15 @@ the cached closure and passes it to `titan_array_new`.
 There is no global writer registry, interning, or "first one wins" identity.
 Two modules may generate distinct but extensionally equivalent writers for
 `{integer}`. Projection through `value`, alternate gradual views, imports,
-returns, and nested boxing preserve the existing canonical proxy and writer;
-no operation compares or replaces writer identity.
+returns, and nested boxing preserve the existing qualified canonical proxy and,
+for a mutable Array, its writer; no operation compares or replaces writer
+identity.
 
-The metatable cache is used by proxy construction and boxing/unboxing checks.
+The metatable pair cache is used by proxy construction and boxing/unboxing checks.
 A normal typed Array read, write, or length operation touches only the backing
 Table and does not load the writer. In particular, a nested Array check still
-uses one direct shared-metatable pointer comparison rather than chasing a
-per-type marker.
+uses direct comparison with one of the two canonical metatables rather than
+chasing a per-type marker.
 
 ### Structural validation
 
@@ -225,6 +241,8 @@ Boundary helpers validate both directions:
 - `titan_array_try_proxy(backing, metatable)` nonthrowingly checks key 0,
   full-Udata shape, zero payload, exactly two user values, canonical metatable,
   reverse link, and `length <= asize`;
+- `titan_array_try_proxy_either(backing, mutable_metatable, const_metatable)`
+  recognizes either canonical tag for nested/raw-backing recovery;
 - `titan_array_require_proxy` raises on a failed required conversion;
 - `titan_array_try_backing(value, metatable)` checks the proxy shape, Table
   user value, absent Table metatable, reverse key-0 link, and guarded length;
@@ -235,20 +253,22 @@ The nonthrowing backing probe is essential when a dynamic value happens to be
 an ordinary Map Table: "not an Array backing" is a normal negative result, not
 corruption.
 
-Ordinary validation deliberately does not inspect user value 2. Only the
-shared `__newindex` loads and invokes it for a non-nil Lua write. Supported
-code never mutates either ownership link or the writer. Debug-library or
+Ordinary validation deliberately does not inspect user value 2. Only mutable
+`__newindex` loads and invokes it for a non-nil Lua write; the const constructor
+and freeze helper maintain the nil invariant. Supported code never mutates
+either ownership link, qualifier, or writer. Debug-library or
 C-level forgery/corruption is programmer-responsible and outside the
 untrusted-code contract; the helpers do not add writer-identity checks or
 attempt to repair arbitrary damaged Lua objects.
 
 ## Internal and boxed representations
 
-The compiler distinguishes storage domains by semantic Titan type:
+The compiler distinguishes storage domains and qualifier by semantic Titan
+type:
 
-- `I(Array)` is compiler-owned typed/internal storage: a backing `Table *` or
+- `I(Array(T, isconst))` is compiler-owned typed/internal storage: a backing `Table *` or
   a Table-tagged `TValue`;
-- `B(Array)` is Lua-canonical storage: the proxy `Udata *` or a
+- `B(Array(T, isconst))` is Lua-canonical storage: the exact qualified proxy `Udata *` or a
   Udata-tagged `TValue`.
 
 | Context | Array representation |
@@ -277,6 +297,10 @@ Consequences:
 - union construction/extraction likewise keeps the backing Table in `uv[1]`
   rather than passing through the Lua proxy.
 
+The shared `Table *` carrier never determines mutability. Boxing, unboxing,
+strict guards, dynamic conversion, generic descriptors, and Interface field
+adjustments select the mutable or const tag from `Type.Array.isconst`.
+
 Array and Map share the C type `Table *`, while `Option(Array)`, `value`, and
 Function can all use `TValue`. Representation selection therefore cannot
 dispatch on C type alone. The coder uses semantically typed boxing, copying,
@@ -291,7 +315,9 @@ proxy through the outer Array's writer; the writer validates/unboxes it and
 returns the internal backing representation before the shared callback
 commits the store.
 
-A typed nested read accepts either:
+A typed nested read first accepts either structural backing tag, then recovers
+the exact proxy required by the requested nested qualifier. Its physical fast
+paths are:
 
 - a structurally validated raw backing fast path; or
 - a canonical proxy that is validated and unboxed.
@@ -302,9 +328,27 @@ entry—pass through the nonthrowing probe unchanged.
 
 ## Checker elaboration
 
-The type schema is unchanged: `Type.Array(elem)` and `Type.Map(keys, values)`
-remain distinct structural constructors, indexed reads remain optional, and
-indexed lvalues remain nil-capable.
+The ABI-0.26 schema is `Type.Array(elem, isconst)`, where `isconst` is a
+required exact boolean. `Type.Map(keys, values)` remains unqualified. Array
+equality, consistency, substitution, rewriting, erasure, guard/dynamic plans,
+and serialization all retain the qualifier. Indexed reads remain optional;
+only mutable Array indices are lvalues.
+
+Ordinary assignment and gradual consistency never change the qualifier.
+`types.written_cast` alone admits mutable `Array(S, false)` to const
+`Array(T, true)` when the elements are equal or gradually consistent. The
+default `array_freeze` mode is a shallow copy; const-to-mutable is absent. A
+static matching `is` returns the admitted result without lowering the
+conversion, while a source `value` checks the exact qualified runtime tag.
+
+After typechecking, `checker/linear.lua` may change a copy plan to in-place
+freeze for one un-rebound local initialized from a fresh mutable constructor.
+Before its terminal same-block cast, loops and structured builder statements
+may use its length and indexed reads/writes; unrelated calls and closures that
+do not reference the Array are harmless. Passing, storing, returning, aliasing,
+rebinding, or actually capturing the Array, hiding the consuming cast inside
+control flow, or any later source/alias use keeps the copy. The coder consumes
+this annotation and never recomputes escape or liveness facts.
 
 ### Length
 
@@ -330,8 +374,9 @@ is `Map(Integer, V)`—the checker:
 3. checks/coerces each fixed scalar and open tail once;
 4. preserves left-to-right evaluation, discard, and error order;
 5. records the result as `_positional_adjustment`; and
-6. for an Array, freezes the final element type and its
-   `DynamicCoercionPlan` as the construction writer annotation.
+6. for an Array, freezes the final element type, qualifier, and
+   `DynamicCoercionPlan`; mutable construction uses it as the future Lua writer
+   policy, while const construction does not install a writer.
 
 This shared annotation is representation-neutral. Array code generation
 creates the backing/proxy protocol; positional integer-Map generation creates
@@ -380,6 +425,10 @@ compared.
 
 ### Array writes
 
+The checker rejects an indexed lvalue whose resolved Array type has
+`isconst == true`, before assignment bookkeeping. Generated mutation code is
+therefore reachable only for a mutable Array; the coder asserts this invariant.
+
 The generic `_materialize_assignment_lvalue` path handles both single and
 multiple assignments. For an Array-element target it delegates to
 `_materialize_array_lvalue`, which evaluates the Array and index exactly once
@@ -426,17 +475,35 @@ contents unchanged. The resulting rooted value survives any resize before
 ### Constructors
 
 The positional materializer preserves every fixed/open producer and roots its
-values. Array lowering consumes the checker writer annotation, inventories or
-recovers the module-cached writer, computes the actual produced count,
-validates the exact capacity, constructs the complete backing/proxy/writer
-graph, copies positions into the array part, applies element barriers, and
-records the highest non-nil position.
+values. Array lowering consumes the checker qualifier and element annotation,
+computes the actual produced count, and validates exact capacity. A mutable
+target inventories/recovers its module-cached writer and calls
+`titan_array_new`; a const target calls `titan_const_array_new` with the const
+metatable and no writer. Both copy positions into the array part, apply element
+barriers, and record the highest non-nil position.
 
 Positional integer-Map lowering reuses the expression-run adjustment but
 allocates an ordinary Table, preallocates its array part to the produced
 count, and assigns keys `1..N`. It has no explicit highest-present length.
 Both keyed and positional Map stores box an Array key/value before placing it
 in raw-visible Map storage.
+
+### Mutable-to-const lowering
+
+A copy-mode `array_freeze` calls `titan_array_shallow_copy`. The helper
+validates the source's mutable canonical proxy, roots its backing across
+destination allocation, and preallocates the destination array part to the
+source's physical `asize` exactly. It copies only present slots through the
+source's logical length, barriers every collectable destination value, and
+then restores that logical length. Spare physical capacity remains empty;
+holes and trailing-length semantics are preserved.
+
+A checker-proven freeze-mode plan calls `titan_array_freeze`. It validates the
+mutable proxy, installs the const canonical metatable through Lua's metatable
+API so the object barrier is applied, clears user value 2 to nil, and returns
+the unchanged `Table *`. Neither helper performs an element conversion. The
+in-place path is sound only because the checker proved that no mutable
+reference remains observable.
 
 ### Length
 
@@ -461,18 +528,19 @@ descriptor: TitanVargArrayOrMap
 
 Lua entries, contextual calls through `value`, branded exact-tag-mismatch
 function calls, raw Map storage, and exported accessors are boxed boundaries.
-Outgoing Arrays become proxies; incoming Array positions require and unwrap
-canonical proxies. Options apply the selected strict or dynamic policy
-recursively.
+Outgoing Arrays become proxies selected by `Type.Array.isconst`; incoming
+Array positions require and unwrap the exact target-qualified canonical proxy.
+Options apply the selected strict or dynamic policy recursively.
 
 Function values still dispatch through exact native, branded mismatch, and
 non-Titan routes. A statically known non-exact callable edge may first create a
 fresh target-tagged wrapper: its exact native adapter applies strict Array
-component boxing/unboxing without replacing the carried writer. An ineligible
+component boxing/unboxing without replacing the carried qualifier or mutable
+writer. An ineligible
 branded value uses the strict trailing stack entry; a non-Titan callable uses
 Lua's ordinary path and dynamic result conversion. A wrapper's genuine-Lua
-`CClosure.f` remains the source entry. None of these routes compares or replaces
-an Array's carried writer.
+`CClosure.f` remains the source entry. None of these routes changes an Array's
+qualifier or compares/replaces its mutable writer.
 
 Dispatch is based on semantic Titan type, not descriptor family:
 `TitanVargArrayOrMap` cannot reveal whether a `Table **` element is an Array
@@ -498,7 +566,7 @@ module's Lua entry wrapper. The wrapper validates/unboxes it before calling
 the exact native `main` with `Table *`. Consequently the executable name is
 not in the Array, `args[0]` is nil, and `#args == argc - 1`.
 
-## ABI 0.17, 0.20, 0.21, 0.22, 0.23, 0.24, and 0.25 boundaries
+## ABI 0.17, 0.20, 0.21, 0.22, 0.23, 0.24, 0.25, and 0.26 boundaries
 
 ABI 0.17 is a semantic and boundary-protocol break even though serialized
 `Array(...)` text, native pointer width, exact `Table *` signatures, and
@@ -530,11 +598,15 @@ satisfaction remains an outer scalar coercion: it does not make `{R}` and
 Interface element.
 ABI 0.21 retained the ABI-0.20 Array and function layouts while advancing the
 matched Lua internal-header/runtime contract to 5.5.1. ABIs 0.22 and 0.23
-retained those Array, function, and Lua layouts, and ABIs 0.24 and 0.25 retain
-them again. Current providers live under `lib/titan/0.25` and use
-`TITAN_PATH_0_25`; an ABI-0.25 compiler/runtime rejects ABI-0.24 DSOs and
+retained those Array, function, and Lua layouts, and ABIs 0.24 and 0.25 retained
+them again. ABI 0.26 requires the boolean-qualified Array descriptor, adds the
+distinct const tag/metatable and two-slot module cache, and exports const
+construction plus shallow-copy/in-place-freeze operations while retaining the
+dense backing and exact `Table *` native contract. Current
+providers live under `lib/titan/0.26` and use `TITAN_PATH_0_26`; an ABI-0.26
+compiler/runtime rejects ABI-0.25 DSOs and
 archives before any Array or function value can cross the provider boundary.
-Separately installed 0.17 through 0.24 trees remain versioned predecessors and
+Separately installed 0.17 through 0.25 trees remain versioned predecessors and
 are not migrated, cleaned up, or treated as compatible.
 
 ## Failure and performance boundaries
@@ -545,12 +617,15 @@ are not migrated, cleaned up, or treated as compatible.
 - Tail deletion is O(1) without preceding holes and O(n) when it must scan
   backward over them.
 - Boxing, unboxing, and structural validation are O(1) boundary operations.
-- Every Array pays for one Udata, two user values, one live hash entry, and a
-  reference to a module-cached writer closure in addition to its Table array
-  storage. Closures are reused per constructed element type within a module.
+- Every Array pays for one Udata, two user values, and one live hash entry in
+  addition to its Table array storage. A mutable Array also references a
+  module-cached writer closure; a const Array's second user value is nil.
+  Closures are reused per constructed element type within a module.
+- Shallow copy is O(source physical capacity allocation plus logical-range
+  copying); a proven linear freeze is O(1).
 - Oversized construction/growth fails before narrowing or Table overflow.
 - The backing/length contract introduced in ABI 0.17 and retained through ABI
-  0.25 has no shrinking resize.
+  0.26 has no shrinking resize.
 
 ### Raw and stock table-library boundary
 
@@ -558,9 +633,10 @@ A Titan Array is table-like but not a Lua Table. Lua's raw functions
 `rawget`, `rawset`, and base-library `rawlen` reject the proxy as a non-Table.
 Stock Lua 5.5's `table` library is intentionally different: its `checktab`
 path accepts a non-table whose raw metatable provides the required `__index`,
-`__newindex`, and `__len` fields. Applicable `table.*` operations therefore
-run through the Array proxy callbacks. This is stock behavior, not a Titan
-wrapper or Lua patch.
+`__index`, `__newindex`, and `__len` fields. Applicable `table.*` operations
+therefore run through mutable proxy callbacks. A const proxy has only
+`__index`/`__len`, so read-only operations can work while a mutating operation
+fails. This is stock behavior, not a Titan wrapper or Lua patch.
 
 The debug library and C API can reveal or corrupt the private cycle, writer
 user value, and `lenhint`. Preserving Titan invariants is the programmer's
@@ -575,12 +651,14 @@ flag, custom collector hook, or recovery path.
 Lua internals and verifies:
 
 - exact capacities, growth boundaries, key-0 survival, and hint restoration;
-- positive-only reads/writes, holes, tail backscan, and exactly two proxy user
-  values in backing/writer order;
+- positive-only reads/writes, holes, tail backscan, distinct mutable/const
+  tags, and exactly two proxy user values in backing/writer-or-nil order;
 - writer dispatch, nil bypass, conversion-before-mutation, and writer/_mod
   survival under full and generational GC;
 - proxy callbacks, nested backing boxing, and ordinary Map pass-through;
-- structural validation and per-state metatable identity;
+- structural validation and atomic per-state metatable-pair identity;
+- exact-capacity shallow copy, holes/length/barriers, and in-place
+  retag/writer-clear freeze;
 - proxy-only, backing-only, and unreachable-cycle behavior in incremental and
   generational modes;
 - old backing → young collectable barriers and stable collection envelope;
@@ -590,6 +668,7 @@ Lua internals and verifies:
 Checker and generated-C behavior live in
 `spec/checker/dense_arrays_spec.lua` and `spec/coder/dense_arrays_spec.lua`.
 Those suites cover module-local writer caching, strict Titan reads versus
-coercive Lua writes, alternate construction/static views, open constructors,
-C-valued elements, `table.*` mutation, and construction from more than one
-module.
+coercive mutable Lua writes, const write rejection, qualifier-exact dynamic
+views, alternate construction/static views, open constructors, C-valued
+elements, `table.*` behavior, and construction from more than one module. The
+const-value checker/coder suites add written casts and linear builder elision.

@@ -159,6 +159,9 @@ function checktype(typ, loc, errors, seen)
         for _, typeparam in ipairs(typ.typeparams or {}) do
             checktype(typeparam, loc, errors, seen)
         end
+        for _, field in ipairs(typ.fields or {}) do
+            checktype(field.type, loc, errors, seen)
+        end
         for _, method in ipairs(typ.methods or {}) do
             checktype(method, loc, errors, seen)
         end

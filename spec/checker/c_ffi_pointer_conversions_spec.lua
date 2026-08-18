@@ -450,6 +450,62 @@ describe("contextual unsafe C object-pointer conversions", function()
         end)
     end)
 
+    it("keeps inline C storage of a const local read-only", function()
+        with_header([[
+            typedef int ffi_int;
+            typedef struct ffi_box {
+                int field;
+                int *pointer;
+            } ffi_box;
+            extern ffi_box ffi_make_box(void);
+            extern void ffi_observe_box(const ffi_box *box);
+            extern void ffi_mutate_box(ffi_box *box);
+            extern void ffi_observe_ints(const int *items);
+            extern void ffi_mutate_ints(int *items);
+        ]], function(header)
+            local ok, err = h.run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                local function accepted()
+                    const box: c.ffi_box = c.ffi_make_box()
+                    c.ffi_observe_box(box)
+                    box.pointer[0] = 7
+
+                    const items: c.ffi_int[2] =
+                        c.ffi_int.new_array(2)
+                    c.ffi_observe_ints(items)
+                end
+            ]])
+            assert.truthy(ok, err)
+
+            ok, err = h.run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                local function rejected()
+                    const box: c.ffi_box = c.ffi_make_box()
+                    box.field = 1
+                    c.ffi_mutate_box(box)
+
+                    const items: c.ffi_int[2] =
+                        c.ffi_int.new_array(2)
+                    items[0] = 1
+                    c.ffi_mutate_ints(items)
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match(
+                "cannot mutate inline C storage of const local 'box'", err)
+            assert.match(
+                "cannot take a mutable C address of inline storage from const local 'box'",
+                err)
+            assert.match(
+                "cannot mutate inline C storage of const local 'items'", err)
+            assert.match(
+                "cannot take a mutable C address of inline storage from const local 'items'",
+                err)
+        end)
+    end)
+
     it("retains const and volatile array qualification through decay",
     function()
         with_header([[

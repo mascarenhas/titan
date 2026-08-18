@@ -35,9 +35,10 @@ value — whose members you access exactly like table fields (`m.f`, `m.v`,
   constructor when it is public, so `mod.Point.new(2, 3)` works from Lua for a
   public `new` or union-variant constructors (see [Records](records.md) and
   [Unions](unions.md));
-* **exported module variables**, read and written through the metatable
-  so that reads always see the current value and writes are dynamically converted
-  (see [Module variables from Lua](#module-variables-from-lua) below).
+* **exported module variables**, read through the metatable so that reads
+  always see the current value; writes to mutable variables are dynamically
+  converted, while writes to const variables are rejected (see
+  [Module variables from Lua](#module-variables-from-lua) below).
 
 An exported [Interface](interfaces.md) is type-only and adds no member or
 namespace to the Lua module value. Lua can receive Interface wrappers produced
@@ -110,13 +111,13 @@ The same qualified Lua identity applies to every standard module, including
 and HTTP use the documented short Titan imports alongside the other public
 modules; math, Lua loading, iteration, and GC retain qualified Titan imports. Requiring
 `titan.string` does not mutate Lua's `string` table or string metatable. In an
-installed Titan 0.25 tree, generated
+installed Titan 0.26 tree, generated
 loaders under `<root>/share/lua/5.5/titan/` all open the DSO form
-`<root>/lib/titan/0.25/titan.so` and invoke their own exact Lua entries. Titan
+`<root>/lib/titan/0.26/titan.so` and invoke their own exact Lua entries. Titan
 imports may instead select the paired self-describing `titan.a`; both forms
 expose the same logical-module ABI/types. The installation does not create
 child DSOs, parent-level or `lib/lua` copies, symbolic links, or hard links.
-Separately versioned ABI-0.24 providers remain preserved; the active 0.25
+Separately versioned ABI-0.25 providers remain preserved; the active 0.26
 loader neither migrates nor cleans them up.
 
 ## How values map between the two languages
@@ -136,7 +137,8 @@ declared type:
 | `boolean` | **any value**, converted by truthiness — see below | `true` or `false` |
 | `string` | a Lua string only — numbers are *not* coerced | the same string |
 | `nil` | only `nil` | `nil` |
-| `{T}` (array) | a canonical Titan Array proxy from the same Lua state; elements are **not** checked here | the *same* userdata proxy — aliased, not copied |
+| `{T}` (mutable array) | a canonical mutable Titan Array proxy from the same Lua state; elements are **not** checked here | the *same* mutable userdata proxy — aliased, not copied |
+| `const { T }` (const array) | a canonical const Titan Array proxy from the same Lua state; elements are **not** checked here | the *same* const userdata proxy — aliased, not copied |
 | `{K:V}` (map) | any table; the contents are **not** checked here | the *same* table — aliased, not copied |
 | record type | a userdata created by that same record type (from any module instance) | a userdata carrying the record's metatable |
 | union type | a userdata created by that exact union type | the same opaque union userdata |
@@ -181,9 +183,9 @@ Notes on the entries that deserve them:
 * **Strings are not coerced from numbers.** Where Lua's standard library
   often accepts a number and converts it, a Titan `string` parameter
   raises `type error, expected string but found number`.
-* **Arrays and maps have distinct boundary representations.** Arrays are
-  canonical Titan userdata proxies; maps are ordinary Lua tables. Both retain
-  identity and are shared rather than copied — see
+* **Arrays and maps have distinct boundary representations.** Mutable and
+  const Arrays use distinct canonical Titan userdata tags; maps are ordinary
+  Lua tables. All retain identity and are shared rather than copied — see
   [Sharing arrays and maps](#sharing-arrays-and-maps-with-lua).
 * **Records are userdata, not tables** — see
   [Records from Lua](#records-from-lua).
@@ -224,9 +226,9 @@ The shared dynamic conversion runs at exactly these places:
 1. **The coercive Lua entry of a Titan function, once per argument** —
    including the receiver of a
    method call (`self` is checked like any other nominal argument).
-2. **Writes to exported module variables from Lua** (`mod.x = v`).
-3. **Writes to record fields from Lua** (`rec.x = v`).
-4. **Non-nil writes through an Array proxy's `__newindex`**, using the
+2. **Writes to mutable exported module variables from Lua** (`mod.x = v`).
+3. **Writes to mutable record fields from Lua** (`rec.x = v`).
+4. **Non-nil writes through a mutable Array proxy's `__newindex`**, using the
    construction-time writer carried by that Array.
 5. **Results entering Titan from a non-Titan Lua callable.**
 6. **A written `value as/is T`**, which explicitly requests the same dynamic
@@ -248,10 +250,11 @@ And, just as importantly, where they do *not* happen:
   every typed read inside Titan strictly checks the requested element type, so
   a wrongly-typed element produces a
   run-time error *later*, deterministically, at the Titan code that reads
-  it — never silent misbehavior. Raw Lua can freely mutate a Map. An Array
-  instead intercepts every ordinary Lua write and dynamically converts a
-  non-nil element before committing it; a later read still performs its
-  independent strict guard for the current static view.
+  it — never silent misbehavior. Raw Lua can freely mutate a Map. A mutable
+  Array instead intercepts every ordinary Lua write and dynamically converts a
+  non-nil element before committing it; a const Array rejects the write. A
+  later read still performs its independent strict guard for the current
+  static view.
 * **Not as genuine-Lua conversion on native Titan calls.** A direct
   Titan-to-Titan call, including across modules, needs no boundary checks when
   the types are exact. A realized adjustment wrapper also has the target tag
@@ -355,11 +358,11 @@ m.foo = "wat"
 test.f(m)  --> error: test.titan:...: type error, expected integer but found string
 ```
 
-An Array instead reaches Lua as userdata with a protected
-`"Titan array metatable"` metatable value. Lua may use positive integer
-indexing, assignment, and `#` through its `__index`, `__newindex`, and `__len`
-callbacks. The proxy preserves holes and reports the deterministic highest
-present positive index:
+An Array instead reaches Lua as userdata with a protected qualified Array
+metatable. Mutable and const Arrays have distinct canonical tags. Both support
+positive integer indexing and `#` through `__index` and `__len`; only a
+mutable proxy has `__newindex`. The proxy preserves holes and reports the
+deterministic highest present positive index:
 
 ```titan
 -- arrays.titan
@@ -377,33 +380,39 @@ xs[3] = nil
 assert(#xs == 1)
 ```
 
-A plain Lua table is not an Array and is rejected for an `{T}` parameter.
-Likewise, a forged or structurally invalid userdata is rejected; Lua obtains a
-valid Array only from Titan code. Nested Array elements cross as their
-canonical proxies, while nested Maps remain tables.
+A plain Lua table is not an Array and is rejected for either qualifier. A
+mutable proxy is also rejected for a `const { T }` parameter and a const proxy
+for `{T}`: boundary conversion preserves the exact qualifier rather than
+copying or freezing. Likewise, a forged or structurally invalid userdata is
+rejected; Lua obtains a valid Array only from Titan code. Nested Array elements
+cross as their exact qualified canonical proxies, while nested Maps remain
+tables.
 
-A non-nil Lua write through the Array proxy is dynamically converted by the
-writer closure installed when that Array was constructed. A `{integer}`
+A non-nil Lua write through a mutable Array proxy is dynamically converted by
+the writer closure installed when that Array was constructed. A `{integer}`
 construction therefore converts `2.0` to an integer, while an inadmissible
 value raises before capacity, length, or contents change. Nil deletes before
 conversion and never invokes the writer. Passing the Array through `value`,
 another static view, an import, or a nested container preserves the same
 canonical proxy and writer; the new view does not replace the construction
 policy. A later typed Titan read remains strict and does not consult that
-writer.
+writer. A const proxy has no writer and rejects every Lua assignment without
+changing its backing.
 
 An Array is table-like, but it is not a Lua table. Stock Lua 5.5's `table.*`
-functions operate on the Array proxy through its `__index`, `__newindex`, and
-`__len` callbacks, so operations such as insertion, removal, movement,
-sorting, and concatenation use the public Array behavior. In contrast,
-`rawget`, `rawset`, and `rawlen` require an actual table and reject the
-userdata proxy. This distinction is a property of stock Lua 5.5's table
-library, not a second Array representation.
+functions operate on a proxy through the metamethods that operation requires.
+Read-only operations such as concatenation and unpacking can use either
+qualifier. Insert, remove, move, sort, or any other operation that attempts a
+write works through the mutable proxy's checked writer and fails on a const
+proxy. In contrast, `rawget`, `rawset`, and `rawlen` require an actual table and
+reject either userdata proxy. This distinction is a property of stock Lua
+5.5's table library, not a second Array representation.
 
 For both container kinds, checking every element on each crossing would make
 the boundary cost proportional to container size. Titan instead validates the
-container representation at the edge, converts intercepted non-nil Lua Array
-writes one element at a time, and strictly checks each element when typed code
+container representation and exact Array qualifier at the edge, converts
+intercepted non-nil mutable Array writes one element at a time, and strictly
+checks each element when typed code
 reads it. A bad element therefore cannot be used at the wrong type. See
 [Arrays and maps](arrays-maps.md) for the complete container semantics.
 
@@ -417,10 +426,10 @@ like an object:
 
 * **Field reads** (`p.x`) return a public field's value; record-typed fields
   arrive as their own userdata.
-* **Field writes** (`p.x = v`) use the same target-directed dynamic
-  conversion as a function formal, module variable, or Array writer, with the standard
-  `file:line:col: type error, expected X but found Y` message on
-  mismatch.
+* **Mutable-field writes** (`p.x = v`) use the same target-directed dynamic
+  conversion as a function formal, mutable module variable, or mutable Array
+  writer, with the standard `file:line:col: type error, expected X but found Y`
+  message on mismatch. A write to a const field is rejected before conversion.
 * **Methods** are called with the usual colon syntax (`p:move(2, 3)`) when
   they are public.
   Method names are not assignable fields: `p.move = 2` raises the
@@ -497,10 +506,11 @@ Titan code through `case`.
 ## Interfaces from Lua
 
 An Interface wrapper is userdata with one protected metatable per fully
-qualified Interface in a Lua state. It exposes public Interface methods through
-ordinary lookup and no fields, constructors, statics, implementation names, or
-vtable reflection. Lua may read a method as a callable or invoke it with colon
-syntax; every write to the wrapper is rejected.
+qualified Interface in a Lua state. It exposes its declared read-only field
+snapshots and public Interface methods through ordinary lookup, but no
+constructors, statics, implementation names, or vtable reflection. Lua may
+read a snapshot, read a method as a callable, or invoke it with colon syntax;
+every write to the wrapper is rejected.
 
 Lua obtains such a wrapper directly from a statically checked conversion, or
 indirectly by sending bare userdata through an Interface sink after a loaded
@@ -541,12 +551,13 @@ are programmer-responsible and inherit ordinary Lua call behavior. See
 
 ## Module variables from Lua
 
-Exported (non-`local`) module variables are readable and writable from
-Lua as members of the module value, as in the `counter` example above.
+Exported (non-`local`) module variables are readable from Lua as members of the
+module value, as in the `counter` example above. Mutable variables are also
+writable; const variables reject every Lua write.
 Reads always observe the current value — including changes made by Titan
-code — and writes made from Lua are immediately visible to Titan, because
-both sides share one storage location. Writes use the target-directed dynamic
-conversion at run time:
+code — and writes to a mutable variable made from Lua are immediately visible
+to Titan, because both sides share one storage location. Those mutable writes
+use the target-directed dynamic conversion at run time:
 
 ```lua
 -- counter.titan          -- Titan
@@ -573,8 +584,10 @@ Accessing a module member that does not exist raises
 returning `nil`. (Exception: a module that exports *nothing at all* has
 no metatable, so it has no members to reach.)
 
-Module variables declared `local` are not members of the module value at
-all; they are private to the module (see [Modules](modules.md)).
+Module variables declared `local` are not members of the module value at all;
+they are private to the module. Public const variables remain members and keep
+their current readable value, including a value assigned by their owning root
+initializer, but cannot be replaced by Lua (see [Modules](modules.md)).
 
 ## Calling Lua from Titan
 
@@ -703,3 +716,6 @@ lives inside one Lua state. Consequently:
   a nominal value or Interface wrapper created by one module instance is
   accepted by any other code in the same state that knows that exact qualified
   type, even when the modules were loaded separately.
+* Each state has one canonical mutable Array metatable and one canonical const
+  Array metatable. A proxy belongs to exactly one state and keeps its exact
+  qualifier across every Lua-visible round trip.

@@ -529,21 +529,35 @@ function type2metatable(ctx, typ --[[:table]])
     return entry.slot
 end
 
--- Every ABI-0.17-or-newer module reserves one private uservalue slot for the canonical
--- per-state Array proxy metatable.  Importers reconstruct only the public
--- variable/function prefix and never need this private slot.  Array's native
--- representation remains Table*: only boxed/Lua-facing conversions consult
--- this cached pointer.
-function array_metatable(ctx)
-    if ctx.interface_adapter_array_metatable then
-        return ctx.interface_adapter_array_metatable
+-- Every ABI-0.26-or-newer module reserves consecutive private uservalue slots
+-- for the canonical mutable and const Array proxy metatables. Importers
+-- reconstruct only the public variable/function prefix and never need these
+-- private slots. Array's native representation remains Table*: only boxed/
+-- Lua-facing conversions and mutable-to-const casts consult the cached tags.
+function array_metatable_kind(ctx, isconst)
+    assert(type(isconst) == "boolean",
+        "Array metatable lookup requires a const qualifier")
+    if ctx.interface_adapter_array_metatables then
+        return assert(ctx.interface_adapter_array_metatables[isconst],
+            "Interface adapter lacks the requested Array metatable")
     end
     local tlcontext = ctx.tlcontext or ctx
-    assert(tlcontext.array_metatable_upvalue,
-        "Array metatable slot was not allocated")
+    local slot = isconst
+        and tlcontext.const_array_metatable_upvalue
+        or tlcontext.array_metatable_upvalue
+    assert(slot, "Array metatable slot was not allocated")
     return render("hvalue(&_mod->uv[$INDEX].uv)", {
-        INDEX = c_integer_literal(tlcontext.array_metatable_upvalue),
+        INDEX = c_integer_literal(slot),
     })
+end
+
+function array_metatable(ctx, typ)
+    typ = assert(types.normalize(typ),
+        "Array metatable lookup has an unnormalizable type")
+    assert(typ._tag == "Type.Array"
+           and type(typ.isconst) == "boolean",
+        "Array metatable lookup requires a qualified Array type")
+    return array_metatable_kind(ctx, typ.isconst)
 end
 
 -- Return the module-local Lua-writer entry for an Array element type,

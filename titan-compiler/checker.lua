@@ -10,6 +10,7 @@ require "titan-compiler.checker.calls"
 require "titan-compiler.checker.expressions"
 require "titan-compiler.checker.declarations"
 require "titan-compiler.checker.imports"
+require "titan-compiler.checker.linear"
 require "titan-compiler.checker.lowering"
 require "titan-compiler.checker.entry"
 

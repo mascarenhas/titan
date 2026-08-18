@@ -482,6 +482,155 @@ describe("interfaces (end-to-end)", function()
         ]])
     end)
 
+    it("copies shallow const-field snapshots in Interface order", function()
+        h.run_coder([[
+            record Payload
+                number: integer
+            end
+
+            interface View
+                label: string
+                total: float
+                payload: Payload
+                function get(): integer
+            end
+
+            record Source
+                const total: integer
+                const payload: Payload
+                const label: string
+            end
+
+            function Source:get(): integer
+                return self.total
+            end
+
+            function make(): (Source, View)
+                local source = Source.new(
+                    42, Payload.new(7), "answer")
+                local view: View = source
+                return source, view
+            end
+
+            function read(view: View): (string, float, integer)
+                return view.label, view.total, view.payload.number
+            end
+        ]], [[
+            local source, view = test.make()
+            local label, total, payload = test.read(view)
+            assert(label == "answer")
+            assert(total == 42.0)
+            assert(payload == 7)
+            assert(view.label == "answer")
+            assert(view.total == 42.0)
+            assert(view:get() == 42)
+
+            -- The field slot is a snapshot, but nominal referents are shared.
+            source.payload.number = 9
+            assert(view.payload.number == 9)
+            source = nil
+            collectgarbage("collect")
+            collectgarbage("generational")
+            collectgarbage("collect")
+            assert(view.label == "answer")
+            assert(view.payload.number == 9)
+
+            local ok, err = pcall(function()
+                view.total = 0
+            end)
+            assert(not ok)
+            assert(tostring(err):match("cannot assign member 'total'"))
+        ]])
+    end)
+
+    it("converts nested Interface and callable field snapshots", function()
+        h.run_coder([[
+            interface Leaf
+                amount: float
+            end
+
+            interface Bundle
+                leaf: Leaf
+                apply: (integer) -> value
+            end
+
+            record LeafRecord
+                const amount: integer
+            end
+
+            record BundleRecord
+                const apply: (value) -> integer
+                const leaf: LeafRecord
+            end
+
+            function plus_one(input: value): integer
+                return (input as integer) + 1
+            end
+
+            function bare(): BundleRecord
+                return BundleRecord.new(
+                    plus_one, LeafRecord.new(41))
+            end
+
+            function make(): Bundle
+                return bare()
+            end
+
+            function as_bundle(input: value): Bundle
+                return input as Bundle
+            end
+        ]], [[
+            local direct = test.make()
+            assert(direct.leaf.amount == 41.0)
+            assert(direct.apply(41) == 42)
+
+            -- Exercise the per-state witness wrapper, whose field conversions
+            -- use the same roots, barriers, and nested pair inventory.
+            local discovered = test.as_bundle(test.bare())
+            collectgarbage("collect")
+            collectgarbage("generational")
+            collectgarbage("step")
+            collectgarbage("collect")
+            assert(discovered.leaf.amount == 41.0)
+            assert(discovered.apply(41) == 42)
+        ]])
+    end)
+
+    it("preserves generic Interface field carriers", function()
+        h.run_coder([[
+            interface View<T>
+                item: T
+            end
+
+            record Box<T>
+                const item: T
+            end
+
+            function integer_view(): View<integer>
+                return Box<integer>.new(42)
+            end
+
+            function string_view(): View<string>
+                return Box<string>.new("forty-two")
+            end
+
+            function integer_item(view: View<integer>): integer
+                return view.item
+            end
+
+            function string_item(view: View<string>): string
+                return view.item
+            end
+        ]], [[
+            local integer = test.integer_view()
+            local string = test.string_view()
+            assert(integer.item == 42)
+            assert(string.item == "forty-two")
+            assert(test.integer_item(integer) == 42)
+            assert(test.string_item(string) == "forty-two")
+        ]])
+    end)
+
     it("discovers witnessed records and unions through dynamic Interface checks",
     function()
         local source = [[
@@ -1227,7 +1376,10 @@ describe("interfaces (end-to-end)", function()
             "titan_ensure_stack%(L,(%d+)%)", definition)))
         local rooted = tonumber(assert(csrc:match(
             "L%->top%.p%+=(%d+);", definition)))
-        assert.equal(rooted + 3, reserved)
+        -- The adapter's traced roots stay unchanged. Its transient reserve
+        -- now includes the eight slots required to initialize/recover the
+        -- canonical mutable/const Array metatable pair.
+        assert.equal(rooted + 8, reserved)
         local demand_guard = assert(
             csrc:find("_flexout==NULL", definition, true))
         local negative_guard = assert(
@@ -1865,6 +2017,7 @@ describe("interfaces (end-to-end)", function()
     function()
         h.compile_and_read_c([[
             interface Getter
+                item: integer
                 function get(): integer
                 function adapt(x: value): value
             end
@@ -1872,7 +2025,7 @@ describe("interfaces (end-to-end)", function()
             offset: integer = 1
 
             record Box
-                item: integer
+                const item: integer
             end
 
             function Box:get(): integer
@@ -1922,10 +2075,12 @@ static void exercise(int mode) {
     lua_gc(L, mode);
     if (luaL_dostring(L,
             "local i = test.make(42);"
+            "assert(i.item == 42);"
             "assert(i:get() == 42);"
             "assert(i:adapt(1) == 44);"
             "local f = test.bind(i);"
             "local a = test.bind_adjust(i);"
+            "assert(not pcall(function() i.item = 0 end));"
             "i = nil;"
             "collectgarbage('collect');"
             "assert(f() == 42);"

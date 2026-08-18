@@ -259,13 +259,15 @@ authoritative-length protocol is in [Dense Arrays](dense-arrays.md).
 
 ### Constructor (`codearray`)
 
-`codearray` consumes the checker's `_positional_adjustment`. It evaluates
-every retained scalar and open-tail producer in lexical order, asks the
-module-local writer inventory for the constructor's final element type,
-passes that cached closure to `titan_array_new` with the exact initial
-capacity, and fills only positive array-part slots. The writer, backing, and
-proxy are independently rooted across allocation; collectable element stores
-barrier the backing Table.
+`codearray` consumes the checker's `_positional_adjustment`. It evaluates every
+retained scalar and open-tail producer in lexical order, asks the module-local
+writer inventory for the constructor's final element type, and chooses the
+qualified constructor from the checked Array context. A mutable constructor
+passes the cached writer to `titan_array_new`; a const constructor calls
+`titan_const_array_new`, whose second proxy user value is nil. Both receive the
+exact initial capacity and fill only positive array-part slots. The
+writer-or-nil, backing, and proxy are independently rooted across allocation;
+collectable element stores barrier the backing Table.
 
 The final logical length is the highest non-nil produced position, so trailing
 nils do not inflate `#array`. A final open producer (`...`, a flexible-return
@@ -301,8 +303,10 @@ hole. It never consults the hash part. The mixed-domain converter then
 consumes the static element's strict `GuardPlan`: numeric and boolean tags are
 not coerced, Option recurses on its present arm, and C/nominal/container
 categories have explicit guards. Nested Array reads additionally accept either
-an internal backing Table or a canonical proxy written by Lua. The direct
-shared-metatable test does not inspect the proxy's writer user value.
+an internal backing Table or the exact qualified canonical proxy written by
+Lua. Runtime recovery recognizes either Array tag as a proxy before enforcing
+the target qualifier; it never infers mutability from a structurally similar
+userdata.
 
 ### Write (`codeassignment`, VarBracket on an array)
 
@@ -331,10 +335,11 @@ scan when deleting the tail, and barriers collectable elements against the
 backing Table. `#arr` reads the guarded authoritative `lenhint`; it never calls
 `luaH_getn`.
 
-This is the typed Titan path and bypasses the proxy writer. The shared Lua
-`__newindex` path instead treats nil as deletion, or calls the construction
-writer's checker-provided `DynamicCoercionPlan` before any growth or store.
-Writer failure leaves length, capacity, and contents unchanged.
+Const Array assignment is rejected by the checker and cannot reach this
+lowering. This is the mutable typed Titan path and bypasses the proxy writer.
+The shared Lua `__newindex` path instead treats nil as deletion, or calls the
+construction writer's checker-provided `DynamicCoercionPlan` before any growth
+or store. Writer failure leaves length, capacity, and contents unchanged.
 
 ## Maps
 
@@ -824,6 +829,10 @@ the stored plan rather than treating every unequal pair as a scalar cast:
     Lua-internal `Udata *` accepts full userdata or nil and rejects
     lightuserdata. Ordinary already-native pointer conversions can remain a
     plain C cast ([FFI internals](ffi-internals.md)).
+13. **mutable Array → const Array** consumes the `array_freeze` plan. Its
+    default lowering calls `titan_array_shallow_copy`; only a checker-authored
+    `_linear_array_freeze` annotation may call `titan_array_freeze` and retag
+    the original proxy in place. The coder performs no liveness analysis.
 
 ## Type tests: `ExpIs`
 

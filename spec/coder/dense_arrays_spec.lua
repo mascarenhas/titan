@@ -215,7 +215,7 @@ describe("dense Array code generation and boundaries", function()
         local registry_anchor = assert(csrc:find(
             "lua_setfield(L, LUA_REGISTRYINDEX", 1, true))
         local cache_init = assert(csrc:find(
-            "titan_array_metatable(L)", 1, true))
+            "titan_array_metatables(", 1, true))
         assert.is_true(registry_anchor < cache_init)
     end)
 
@@ -1517,5 +1517,139 @@ describe("dense Array code generation and boundaries", function()
                     return 0
                 ]], 0)
         end)
+    end)
+
+    it("uses distinct const tags and lowers copy and linear freeze casts",
+    function()
+        local source = [[
+            function mutable_with_inner(): {value}
+                local inner: {integer} = { 7 }
+                return { 1, inner, nil, 4 }
+            end
+
+            function copied(source: {value}): const {value}
+                return source as const {value}
+            end
+
+            function linear(): const {value}
+                local linear_value: {value} = { 5, nil, 6 }
+                return linear_value as const {value}
+            end
+
+            local function increment(number: integer): integer
+                return number + 1
+            end
+
+            function builder(count: integer): const {integer}
+                local items: {integer} = {}
+                for index = 1, count do
+                    items[#items + 1] = increment(index)
+                end
+                local delta = count - count
+                local unrelated: () -> integer = function(): integer
+                    return delta
+                end
+                if #items ~= count + unrelated() then
+                    raise "builder length mismatch"
+                end
+                return items as const {integer}
+            end
+
+            function direct(): const {value}
+                return { 8, nil, 9 }
+            end
+
+            function admitted(source: {value}): boolean
+                return source is const {value}
+            end
+
+            function mutable_as_value(source: {value}): value
+                return source
+            end
+
+            function const_as_value(source: const {value}): value
+                return source
+            end
+
+            function mutable_from_value(source: value): {value}
+                return source as {value}
+            end
+
+            function const_from_value(source: value): const {value}
+                return source as const {value}
+            end
+        ]]
+        local csrc = generate(source)
+        local copied = generated_function(
+            csrc, "test_\\u2133_copied_titan(lua_State *L")
+        local linear = generated_function(
+            csrc, "test_\\u2133_linear_titan(lua_State *L")
+        local builder = generated_function(
+            csrc, "test_\\u2133_builder_titan(lua_State *L")
+        local direct = generated_function(
+            csrc, "test_\\u2133_direct_titan(lua_State *L")
+        local admitted = generated_function(
+            csrc, "test_\\u2133_admitted_titan(lua_State *L")
+
+        assert.match("titan_array_shallow_copy", copied)
+        assert.not_match("titan_array_freeze", copied)
+        assert.match("titan_array_freeze", linear)
+        assert.not_match("titan_array_shallow_copy", linear)
+        assert.match("titan_array_freeze", builder)
+        assert.not_match("titan_array_shallow_copy", builder)
+        assert.match("titan_const_array_new", direct)
+        assert.not_match("titan_array_new", direct)
+        assert.not_match("titan_array_shallow_copy", admitted)
+        assert.not_match("titan_array_freeze", admitted)
+        assert.match("titan_array_metatables", csrc)
+        assert.match("_const_array_metatable", csrc)
+
+        h.run_coder(source, [[
+            local function fails(f)
+                local ok = pcall(f)
+                assert(not ok)
+            end
+
+            local mutable = test.mutable_with_inner()
+            local copied = test.copied(mutable)
+            assert(getmetatable(mutable) == "Titan array metatable")
+            assert(getmetatable(copied) == "Titan const array metatable")
+            assert(copied ~= mutable)
+            assert(#copied == 4 and copied[3] == nil)
+            assert(copied[1] == 1 and copied[4] == 4)
+            assert(copied[2] == mutable[2])
+            mutable[1] = 11
+            assert(mutable[1] == 11 and copied[1] == 1)
+            mutable[2][1] = 12
+            assert(copied[2][1] == 12)
+            fails(function() copied[1] = 13 end)
+
+            local linear = test.linear()
+            local builder = test.builder(3)
+            local direct = test.direct()
+            assert(getmetatable(linear) == "Titan const array metatable")
+            assert(getmetatable(builder) == "Titan const array metatable")
+            assert(getmetatable(direct) == "Titan const array metatable")
+            fails(function() linear[1] = 14 end)
+            assert(#builder == 3)
+            assert(builder[1] == 2 and builder[2] == 3
+                   and builder[3] == 4)
+            fails(function() builder[1] = 15 end)
+            fails(function() direct[1] = 15 end)
+            assert(test.admitted(mutable))
+
+            assert(test.const_from_value(
+                test.const_as_value(copied)) == copied)
+            assert(test.mutable_from_value(
+                test.mutable_as_value(mutable)) == mutable)
+            fails(function()
+                return test.mutable_from_value(
+                    test.const_as_value(copied))
+            end)
+            fails(function()
+                return test.const_from_value(
+                    test.mutable_as_value(mutable))
+            end)
+        ]])
     end)
 end)

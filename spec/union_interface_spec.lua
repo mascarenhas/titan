@@ -22,9 +22,9 @@ local function canonical_record_module()
     local fqtn = "sample.Box"
     local nominal = types.Nominal(fqtn)
     local first = types.Field(
-        fqtn, "first", types.Integer(), 0)
+        fqtn, "first", types.Integer(), 0, false)
     local second = types.Field(
-        fqtn, "second", types.String(), 1)
+        fqtn, "second", types.String(), 1, false)
     local constructor = types.StaticMethod(
         fqtn, "new", {types.Integer(), types.String()}, {nominal},
         false, false, {"first", "second"})
@@ -56,7 +56,7 @@ local function canonical_interface_module()
     local close = types.Method(
         fqtn, "close", {}, {},
         false, false, {})
-    local interface = types.Interface(fqtn, {read, close})
+    local interface = types.Interface(fqtn, {}, {read, close})
     return types.Module("sample", {}, {
         Stream = interface,
     }), interface
@@ -67,7 +67,7 @@ local function canonical_generic_module()
         "sample", "sample.Show", false, "owner", "interface")
     local show_parameter = types.Parameter(
         show_scope, 1, "E", false)
-    local show = types.Interface("sample.Show", {
+    local show = types.Interface("sample.Show", {}, {
         types.Method("sample.Show", "show", {show_parameter},
             {types.String()}, false, false, {"value"}),
     }, show_scope, {types.TypeParameter("E", false)})
@@ -96,7 +96,7 @@ local function canonical_generic_module()
                 types.Nominal("sample.Show", {box_parameter})),
         })
     local box = types.Record("sample.Box", {
-        types.Field("sample.Box", "item", box_parameter, 0),
+        types.Field("sample.Box", "item", box_parameter, 0, false),
     }, {
         new = types.StaticMethod("sample.Box", "new", {box_parameter},
             {box_nominal}, false, false, {"item"}),
@@ -242,20 +242,20 @@ describe("union module interfaces", function()
             return types.Variant(fqtn, "quit", false, 0)
         end
         local wrappers = {
-            types.Field(fqtn, "field", escaped(), 0),
+            types.Field(fqtn, "field", escaped(), 0, false),
             types.Method(fqtn, "method", {escaped()}, {},
                 false, false, {"value"}),
             types.StaticMethod(fqtn, "static", {escaped()}, {},
                 false, false, {"value"}),
             types.ModuleMember("sample", "nested", escaped(), false),
-            types.ModuleVariable("sample", "nested", escaped()),
+            types.ModuleVariable("sample", "nested", escaped(), false),
         }
 
         for index, wrapper in ipairs(wrappers) do
             local module = types.Module("sample", {
                 types.ModuleMember(
                     "sample", "bad" .. index,
-                    types.Array(wrapper), false),
+                    types.Array(wrapper, false), false),
             })
             local ok, err =
                 driver.validate_module_interface(module, "sample")
@@ -388,7 +388,7 @@ describe("union module interfaces", function()
         local map = types.Map(
             types.String(), types.Option(types.Integer()))
         local module = types.Module("sample", {
-            types.ModuleVariable("sample", "lookup", map),
+            types.ModuleVariable("sample", "lookup", map, false),
         })
         local ok, err =
             driver.validate_module_interface(module, "sample")
@@ -439,7 +439,7 @@ describe("union module interfaces", function()
 
         module = types.Module("sample", {}, {
             Bad = types.Field(
-                "sample.Bad", "value", types.Integer(), 0),
+                "sample.Bad", "value", types.Integer(), 0, false),
         })
         ok, err = driver.validate_module_interface(module, "sample")
         assert.falsy(ok)
@@ -450,7 +450,7 @@ describe("union module interfaces", function()
 
         local _, record = canonical_record_module()
         module = types.Module("sample", {
-            types.ModuleVariable("sample", "Box", record),
+            types.ModuleVariable("sample", "Box", record, false),
         })
         ok, err = driver.validate_module_interface(module, "sample")
         assert.falsy(ok)
@@ -473,12 +473,93 @@ describe("union module interfaces", function()
             }) do
             module = types.Module("sample", {
                 types.ModuleVariable(
-                    "sample", "bad_nominal", types.Nominal(fqtn)),
+                    "sample", "bad_nominal", types.Nominal(fqtn), false),
             })
             ok, err = driver.validate_module_interface(module, "sample")
             assert.falsy(ok, fqtn)
             assert.match(
                 "nominal type has an invalid qualified name", err)
+        end
+    end)
+
+    it("round-trips every ABI-visible const descriptor axis", function()
+        local record_name = "sample.Box"
+        local record_nominal = types.Nominal(record_name)
+        local item = types.Field(
+            record_name, "item", types.Integer(), 0, true)
+        local record = types.Record(record_name, {item}, {
+            new = types.StaticMethod(record_name, "new", {
+                types.Integer(),
+            }, {record_nominal}, false, false, {"item"}),
+        }, {}, 1)
+        local interface_name = "sample.BoxView"
+        local interface = types.Interface(interface_name, {
+            types.Field(
+                interface_name, "item", types.Integer(), 0, true),
+        }, {})
+        local module = types.Module("sample", {
+            types.ModuleMember("sample", "Box", record, false),
+            types.ModuleVariable("sample", "frozen",
+                types.Array(types.String(), true), true),
+        }, {
+            BoxView = interface,
+        })
+
+        local ok, err = driver.validate_module_interface(module, "sample")
+        assert.truthy(ok, err)
+        local rebuilt, decode_error = driver.decode_module_interface(
+            types.serialize(module), "sample", "const-roundtrip")
+        assert.truthy(rebuilt, decode_error)
+        assert.is_true(rebuilt.members.Box.type.fields[1].isconst)
+        assert.is_true(rebuilt.members.frozen.isconst)
+        assert.is_true(rebuilt.members.frozen.type.isconst)
+        assert.is_true(rebuilt.type_members.BoxView.fields.item.isconst)
+    end)
+
+    it("rejects missing or non-boolean serialized const qualifiers",
+    function()
+        local cases = {
+            {
+                pattern = "module variable 'lookup'.*const qualifier",
+                make = function()
+                    return types.Module("sample", {
+                        types.ModuleVariable("sample", "lookup",
+                            types.Map(types.String(), types.Integer()),
+                            false),
+                    })
+                end,
+                mutate = function(module)
+                    module.members.lookup.isconst = nil
+                end,
+            },
+            {
+                pattern = "array type.*const qualifier",
+                make = function()
+                    return types.Module("sample", {
+                        types.ModuleVariable("sample", "items",
+                            types.Array(types.Integer(), false), false),
+                    })
+                end,
+                mutate = function(module)
+                    module.members.items.type.isconst = "false"
+                end,
+            },
+            {
+                pattern = "record field has an invalid schema",
+                make = canonical_record_module,
+                mutate = function(module)
+                    module.members.Box.type.fields[1].isconst = nil
+                end,
+            },
+        }
+
+        for _, case in ipairs(cases) do
+            local module = case.make()
+            case.mutate(module)
+            local ok, err =
+                driver.validate_module_interface(module, "sample")
+            assert.falsy(ok, case.pattern)
+            assert.match(case.pattern, err)
         end
     end)
 
@@ -644,7 +725,7 @@ describe("union module interfaces", function()
     function()
         local fqtn = "sample.Partial"
         local shown = types.Field(
-            fqtn, "shown", types.String(), 1)
+            fqtn, "shown", types.String(), 1, false)
         local record = types.Record(
             fqtn, {shown}, {}, {}, 2)
         local module = types.Module("sample", {
@@ -680,6 +761,78 @@ describe("union module interfaces", function()
                 recovered.methods.close == recovered.methods[2])
             assert.same({"count"},
                 recovered.methods.read.paramnames)
+        end)
+
+        it("rejects hostile Interface field projections", function()
+            local function canonical()
+                local fqtn = "sample.Named"
+                local field = types.Field(
+                    fqtn, "name", types.String(), 0, true)
+                local interface = types.Interface(fqtn, {field}, {})
+                return types.Module("sample", {}, {
+                    Named = interface,
+                }), interface
+            end
+            local cases = {
+                {
+                    pattern = "does not reference its ordered descriptor",
+                    mutate = function(interface)
+                        interface.fields.name = types.Field(
+                            interface.name, "name",
+                            types.String(), 0, true)
+                    end,
+                },
+                {
+                    pattern = "field list is sparse",
+                    mutate = function(interface)
+                        interface.fields[2] = interface.fields[1]
+                        interface.fields[1] = nil
+                    end,
+                },
+                {
+                    pattern = "different owner",
+                    mutate = function(interface)
+                        interface.fields[1].fqtn = "other.Named"
+                    end,
+                },
+                {
+                    pattern = "index, const qualifier, or locality",
+                    mutate = function(interface)
+                        interface.fields[1].index = 1
+                    end,
+                },
+                {
+                    pattern = "index, const qualifier, or locality",
+                    mutate = function(interface)
+                        interface.fields[1].isconst = false
+                    end,
+                },
+                {
+                    pattern = "index, const qualifier, or locality",
+                    mutate = function(interface)
+                        interface.fields[1].islocal = true
+                    end,
+                },
+                {
+                    pattern = "interface member 'name' is duplicated",
+                    mutate = function(interface)
+                        local method = types.Method(
+                            interface.name, "name", {}, {},
+                            false, false, {})
+                        interface.methods[1] = method
+                        interface.methods.name = method
+                    end,
+                },
+            }
+
+            for _, case in ipairs(cases) do
+                local module, interface = canonical()
+                case.mutate(interface)
+                local ok, err =
+                    driver.validate_module_interface(module, "sample")
+                assert.falsy(ok, case.pattern)
+                assert.match(case.pattern, err)
+            end
         end)
 
         it("rejects noncanonical owners and private decorations",
@@ -790,7 +943,7 @@ describe("union module interfaces", function()
 
             _, interface = canonical_interface_module()
             module = types.Module("sample", {}, {
-                Alias = types.Array(interface),
+                Alias = types.Array(interface, false),
             })
             ok, err = driver.validate_module_interface(module, "sample")
             assert.falsy(ok)
@@ -892,7 +1045,7 @@ describe("union module interfaces", function()
             local _, interface = canonical_interface_module()
             local module = types.Module("sample", {
                 types.ModuleVariable(
-                    "sample", "Stream", types.Integer()),
+                    "sample", "Stream", types.Integer(), false),
             }, {
                 Stream = interface,
             })

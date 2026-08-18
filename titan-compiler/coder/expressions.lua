@@ -166,10 +166,24 @@ function codevar(ctx, node)
     if node._tag == "Ast.VarDot" then
         if node._decl._tag == "Type.Field" then
             local cstats, cexp = codeexp(ctx, node.exp)
+            local index = node._decl.index
+            if node._interface_field then
+                assert(node._interface
+                       and node._interface._tag == "Type.Interface"
+                       and node._interface.fields[index + 1]
+                            == node._interface_field
+                       and node._interface_field_index == index,
+                    "Interface field read lacks its canonical snapshot slot")
+                -- uv[0]/uv[1] retain the concrete owner and value. Interface
+                -- fields are immutable target-typed snapshots in the
+                -- remaining uservalues, independently of the concrete
+                -- record's physical field order.
+                index = 2 + index
+            end
             return cstats,
                 getslot(node._type, nil, render("&(($EXP)->uv[$INDEX].uv)", {
                     EXP = cexp,
-                    INDEX = node._decl.index
+                    INDEX = c_integer_literal(index),
                 }))
         elseif node._decl._tag == "Type.CField" then
             return codecfield(ctx, node)
@@ -364,9 +378,27 @@ function codearray(ctx, node, target)
         "Array construction lacks its normalized checker element type")
     assert(types.equals(writer_elem, types.normalize(elemtype)),
         "Array construction writer element disagrees with final Array type")
-    local writer = coder._array_writer(
-        ctx, writer_elem, node._array_writer_plan)
+    assert(type(node._type.isconst) == "boolean",
+        "Array construction lacks a const qualifier")
+    local writer
+    if not node._type.isconst then
+        writer = coder._array_writer(
+            ctx, writer_elem, node._array_writer_plan)
+    end
     local function initarray(capacity)
+        if node._type.isconst then
+            return render([[
+                $TMPNAME = titan_const_array_new(
+                    L, $META, $CAPACITY);
+                _base = restorestack(L, _base_off);
+                sethvalue(L, $TMPSLOT, $TMPNAME);
+            ]], {
+                TMPNAME = tmpname,
+                TMPSLOT = tmpslot,
+                META = array_metatable(ctx, node._type),
+                CAPACITY = capacity,
+            })
+        end
         return render([[
             $TMPNAME = titan_array_new(
                 L, $META, $CAPACITY, &_mod->uv[$WRITER].uv);
@@ -375,7 +407,7 @@ function codearray(ctx, node, target)
         ]], {
             TMPNAME = tmpname,
             TMPSLOT = tmpslot,
-            META = array_metatable(ctx),
+            META = array_metatable(ctx, node._type),
             CAPACITY = capacity,
             WRITER = c_integer_literal(writer.slot),
         })
@@ -1981,6 +2013,38 @@ function coder._inner_assignment(source, target, inner)
     }
 end
 
+function coder._code_array_freeze(ctx, node)
+    local cast = coder._checked_written_cast_plan(
+        node._written_cast, node.exp._type, node._type,
+        "mutable-to-const Array cast")
+    assert(cast.op == "array_freeze"
+           and (cast.mode == "copy" or cast.mode == "freeze"),
+        "Array freeze cast lacks a checker-selected lowering mode")
+    local source_stats, source = materialize(ctx, node.exp)
+    local target_decl, target_name, target_slot =
+        newtmp(ctx, node._type, true)
+    local helper = cast.mode == "freeze"
+        and "titan_array_freeze" or "titan_array_shallow_copy"
+    ctx.uses_base_off = true
+    return render([[
+        $SOURCE_STATS
+        $TARGET_DECL
+        $TARGET = $HELPER(
+            L, $SOURCE, $MUTABLE_META, $CONST_META);
+        _base = restorestack(L, _base_off);
+        sethvalue(L, $TARGET_SLOT, $TARGET);
+    ]], {
+        SOURCE_STATS = source_stats,
+        TARGET_DECL = target_decl,
+        TARGET = target_name,
+        HELPER = helper,
+        SOURCE = source,
+        MUTABLE_META = array_metatable(ctx, node.exp._type),
+        CONST_META = array_metatable(ctx, node._type),
+        TARGET_SLOT = target_slot,
+    }), target_name
+end
+
 -- Generate code for expression 'node'
 -- 'iscondition' is 'true' if expression is used not for value but for
 --    controlling conditinal execution
@@ -2071,6 +2135,10 @@ function codeexp_dispatch(ctx, node, iscondition, target)
         return coder._code_interface_conversion(ctx, node)
     elseif tag == "Ast.ExpCast" and node._interface_downcast then
         return coder._code_interface_downcast(ctx, node, false)
+    elseif tag == "Ast.ExpCast"
+           and node._written_cast
+           and node._written_cast.op == "array_freeze" then
+        return coder._code_array_freeze(ctx, node)
     elseif tag == "Ast.ExpCast" and types.equals(node.exp._type, node._type) then
         return codeexp(ctx, node.exp, iscondition, target)
     elseif tag == "Ast.ExpCast"

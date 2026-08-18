@@ -52,7 +52,9 @@ no closure or module-state value and decays only to an exactly compatible
 
 Local Interfaces are not supported. A local concrete method that is visible
 through a direct source import may, however, satisfy an ordinary public
-Interface at that cast site.
+Interface at that cast site. The same applies to a visible local const record
+field required by an Interface; binary or transitive consumers cannot use the
+hidden member.
 
 ## Visibility is direct, not transitive
 
@@ -125,6 +127,7 @@ ABI 0.23 retains those layout rules while adding source-defined foreign
 collaboration and separating module, nominal owner, and member in native
 callable names. ABI 0.24 retains those visibility and native-layout rules while
 extending generic declaration metadata. ABI 0.25 retains the same rules while
-changing the public `titan.fs` and `titan.async` signatures. A 0.24 binary
-remains public-only and is rejected by the 0.25 toolchain; older providers must
+changing the public `titan.fs` and `titan.async` signatures. ABI 0.26 retains
+the visibility model while extending const and Interface metadata. A 0.25
+binary remains public-only and is rejected by the 0.26 toolchain; older providers must
 be rebuilt and no migration is performed.

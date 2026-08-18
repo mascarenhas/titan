@@ -4,11 +4,12 @@ Interfaces add one nominal, type-only declaration and one run-time wrapper
 representation. A record or union does not acquire an Interface supertype.
 Instead, the checker may authorize one direct concrete-to-Interface coercion
 at a statically known use site, and the coder lowers that coercion to a fresh
-wrapper containing the concrete receiver, its owning module, and an ordered
-method table. Code generation also advertises every emitted pair on the
+wrapper containing the concrete receiver, its owning module, an ordered method
+table, and declaration-order field snapshots. Code generation also advertises every emitted pair on the
 concrete metatable so later strict/dynamic Interface observations can construct
-that same wrapper after type erasure. This discovery extension changes no
-checker relation or serialized type information.
+that same wrapper after type erasure. ABI 0.26 extends the serialized Interface
+schema and wrapper user-value count for fields; dynamic discovery still adds no
+new relation.
 
 The language-visible contract is in
 [Interfaces](../language/interfaces.md). This chapter describes the parser,
@@ -21,38 +22,47 @@ loader contract, and ABI.
 positions still accept the spelling as a C typedef, field, module member, or
 prototype parameter.
 
-The parser admits only a top-level, non-local, nonempty declaration. It emits:
+The parser admits only a top-level, non-local, nonempty declaration whose body
+may mix fields and bodyless methods. It emits:
 
 ```lua
-Ast.TopLevelInterface(loc, name, methods)
+Ast.TopLevelInterface(loc, name, members, fields, methods, typeparams)
+Ast.Decl(loc, name, type, false, true) -- Interface field
 Ast.InterfaceMethod(loc, name, params, rettypes, flexrettype)
 ```
 
-An `InterfaceMethod` has no body. Its parameter list uses the ordinary
+`members` retains source order, while `fields` and `methods` are the dense
+ordered projections consumed by checking. Interface fields use `name: T` and
+are represented as exact-const declarations; the record-only optional-name
+shorthand is not admitted. An `InterfaceMethod` has no body. Its parameter list uses the ordinary
 fixed/named and optional typed-tail representation; its result list likewise
 uses the existing fixed and flexible-result nodes. Parser-specific diagnostics
-cover local or nested declarations, an empty body, local methods, missing
-names/parentheses/types, unexpected members, and a missing final `end`.
+cover local or nested declarations, an empty body, local members, duplicate or
+cross-kind names, missing names/parentheses/types, unexpected members, and a
+missing final `end`.
 
 The checked descriptors are:
 
 ```lua
-Type.Interface(name, methods)
+Type.Interface(name, fields, methods, scope, typeparams)
+Type.Field(fqtn, name, type, index, true)
 Type.Method(fqtn, name, params, rettypes,
             varargtype, flexrettype, paramnames)
 ```
 
 `name` and `fqtn` are the same fully qualified Interface identity.
-`Interface.methods` is a hybrid ordered list and name map: numeric entries
-retain declaration order, while `methods[name]` points to the same descriptor.
-The public constructor accepts only a nonempty dense numeric list, rejects
-duplicate names and mismatched owners, and derives the string keys itself.
-`types.validate_interface_descriptor` rechecks that canonical projection
-after construction.
+`Interface.fields` and `Interface.methods` are independent hybrid ordered lists
+and name maps. Numeric entries retain declaration order within their kind,
+while `list[name]` points to the same descriptor. The public constructor accepts
+only two dense numeric lists whose combined length is nonzero, rejects
+duplicate and cross-kind names and mismatched owners, requires canonical
+zero-based field indices and `isconst == true`, and derives the string keys
+itself. `types.validate_interface_descriptor` rechecks those projections after
+construction.
 
-Declaration order is ABI-significant. Serialization writes the numeric method
-list in order and reconstructs the name map through `types.Interface`; it
-does not sort methods by name.
+Field and method order are ABI-significant. Serialization writes both numeric
+lists in order and reconstructs the name maps through `types.Interface`; it
+does not sort either kind by name.
 
 ## Declaration staging and publication
 
@@ -63,35 +73,45 @@ conflict regardless of source order; Interfaces and aliases otherwise retain
 the existing first-declaration-wins policy.
 
 The signature pass runs imports and aliases first, then record/union
-descriptors, then Interfaces. This makes every nominal used in a method
+descriptors, then Interfaces. This makes every nominal used in a member
 signature available without changing the AST's source order. Checking an
 Interface:
 
-1. builds each `Type.Method` in declaration order;
-2. records fixed parameter names for named calls;
-3. rejects duplicate method and parameter names;
-4. checks every fixed/tail component with the ordinary type validator;
-5. rejects exported C FFI types and local nominal types; and
-6. registers the completed descriptor under its fully qualified name in
+1. reserves the complete shared member namespace in source order;
+2. builds each `Type.Field` in field order and each `Type.Method` in method
+   order;
+3. records fixed parameter names for named calls;
+4. rejects duplicate/cross-kind member names and duplicate parameter names;
+5. checks every field and callable component with the ordinary type validator;
+6. rejects exported C FFI types and local nominal types; and
+7. registers the completed descriptor under its fully qualified name in
    `types.registry`.
 
 Interfaces have no value declaration, constructor, module accessor, or public
 module-userdata slot. `checker.makemoduletype` publishes them directly in
 `Type.Module.type_members`, alongside type aliases. Imported module
-registration installs all direct Interface descriptors before traversing
-their signatures, so mutually referring Interfaces and transitive nominal
-owners are available while recovering a compiled module.
+registration installs all direct Interface descriptors before traversing their
+field and method signatures, so mutually referring Interfaces and transitive
+nominal owners are available while recovering a compiled module.
 
 ## Direct structural satisfaction
 
 `types.interface_implementation(concrete, interface, policy)` is a dedicated
 predicate, not a branch of gradual consistency or a subtyping relation. The
-checker supplies the cast-site module and method-visibility callback in
+checker supplies the cast-site module and member-visibility callback in
 `policy`; the generic relation layer does not resolve nominal descriptors or
 decide visibility.
 
-The predicate scans the Interface's numeric method list. For each slot it
-requires:
+The predicate first rejects a union when the Interface field list is nonempty.
+It then scans both ordered projections. For each field slot it requires:
+
+- a same-named visible `Type.Field` on the concrete record;
+- no collision with a method or static;
+- `isconst == true`; and
+- an ordinary automatic assignment plan from the concrete field type to the
+  required Interface field type.
+
+For each method slot it requires:
 
 - a same-named `Type.Method` on the concrete record or union;
 - no collision with a field, record/union function, or union variant;
@@ -109,15 +129,19 @@ projection takes precedence. `component_adjustment` does not consult ordinary
 coercion, so numeric, Option, C, and concrete-to-Interface coercions do not lift
 through a method signature.
 
-The result retains one ordered mapping per Interface slot:
+The result retains independent ordered field and method mappings. A field
+mapping freezes the source/target indices, descriptors, types, and assignment
+plan; a method mapping retains:
 
 ```text
 slot, name, required Interface Method, concrete Method,
 source function shape, target function shape, adjustment, exactness
 ```
 
-A failure identifies the first declaration-order slot and classifies the
-problem as missing, non-method collision, inaccessible, or incompatible.
+A failure identifies the first failing required field in field order or, after
+all fields pass, the first failing method in method order. It classifies the
+problem as missing, wrong-kind collision, inaccessible, mutable field,
+incompatible field type, or incompatible callable.
 
 The scalar coercion path sees only `Type.Nominal` endpoints. At an ordinary
 target-typed use site, the checker passes a policy callback to
@@ -136,9 +160,17 @@ coercion from implying `{R} -> {I}` or `() -> R` to `() -> I`.
 
 The checker attaches `_interface_conversion` to every accepted wrapper
 construction. The annotation retains the exact concrete and Interface
-descriptors, their nominal value types, the ordered mappings, pair exactness,
-and any outer Option operation. It is the coder's authority to allocate; the
+descriptors, their nominal value types, the independent ordered field/method
+mappings, pair exactness, and any outer Option operation. It is the coder's authority to allocate; the
 coder does not rerun structural matching.
+
+Each field mapping freezes its ordinary assignment adjustment before code
+generation. Unlike method-component matching, a field's scalar adjustment may
+itself construct an Interface or callable wrapper. Concrete/Interface pair
+inventory therefore runs a deterministic growing worklist to a fixpoint over
+all nested field adjustments before bytewise pair sorting and emission. The
+emitter never discovers or appends a pair while iterating an already frozen
+inventory.
 
 An exact mapping needs no adapter. For a non-exact mapping, the generalized
 freezer supplies the same closed, relation-free callable action subgraph used
@@ -158,7 +190,8 @@ method invocation backend. The shared callable operations are limited to:
   hidden surplus results.
 
 The checker explicitly rejects a nested concrete-to-Interface conversion in
-this graph. The Interface adapter records a minimal fixed/open root inventory:
+this *method-component* graph. Field adjustments use the separate frozen path
+above. The Interface adapter records a minimal fixed/open root inventory:
 native input-source inventories are empty, fresh nested callable destinations
 get immediate roots, and every live GC-bearing fixed/open native source result
 is rooted immediately after return. Its rebase ledger includes only operations
@@ -180,7 +213,7 @@ fixed concrete results before asking the concrete flexible tail for more.
 Discarded concrete tail values therefore remain unevaluated by the gradual
 guard; `LUA_MULTRET` still forwards an open demand unchanged.
 
-Concrete/Interface pair obligations are collected on demand only in a
+Concrete/Interface pair obligations are collected by that worklist only in a
 translation unit that constructs the wrapper. Their key is the fully qualified
 concrete name followed by the fully qualified Interface name. The list is
 sorted bytewise before emission, and private adapter symbols encode both names
@@ -197,9 +230,9 @@ Every Interface value is a full `Udata` with:
 
 - opaque payload length
   `method_count * sizeof(TitanInterfaceMethod)`;
-- exactly two traced user values;
+- exactly `2 + field_count` traced user values;
 - the canonical metatable for the fully qualified Interface; and
-- no public fields or mutable state.
+- no mutable state.
 
 The layout is:
 
@@ -207,6 +240,7 @@ The layout is:
 payload[0 .. method_count-1]  copied native method entries
 user value 0                  concrete type's owning module Udata
 user value 1                  concrete record/union Udata
+user value 2 + i              target-typed snapshot of Interface field i
 metatable                     exact Interface identity
 ```
 
@@ -215,30 +249,33 @@ metatable                     exact Interface identity
 to and from that storage through `titan_cast_func`; the payload never contains
 data pointers and is not a GC graph.
 
-One process-static pair array is emitted per used concrete/Interface pair.
+Method-only wrappers therefore retain the old two-user-value layout.
+Field-only wrappers request a zero-byte payload; code generation does not emit
+a zero-length C pair array or call `memcpy` with one.
+
+One process-static pair array is emitted per used concrete/Interface pair that
+has at least one method.
 After imported native symbols have been recovered, initialization fills each
 slot with either the exact concrete method or the private adjustment entry.
 This happens on both module-initialization branches and before a user module
-initializer can construct a wrapper. Each wrapper copies the complete array
-with `memcpy`; pair arrays and wrappers are not interned.
+initializer can construct a wrapper. Each method-bearing wrapper copies the
+complete array with `memcpy`; pair arrays and wrappers are not interned.
 
 The same pair emits one private `lua_CFunction` witness. It captures the
 emitting module in upvalue 0 and receives a bare concrete Udata in stack slot
-1. Using Lua internals rather than the public Lua API, it allocates the same
-two-uservalue Interface representation, replaces slot 1 with the result,
-publishes the target Interface metatable, concrete-owner module, and original
-concrete self with the ordinary barriers, copies the filled pair array, and
-returns one value. The incoming argument remains traced through allocation.
-The result then replaces that argument slot before its metatable and uservalues
-are published; no GC-capable operation occurs between that replacement and the
-direct store of the concrete into user value 1. No parallel rooting scheme is
-needed. Saved stack offsets, rather than stale `StkId` pointers, span the
-allocation.
+1. Using Lua internals rather than the public Lua API, it invokes the pair's
+shared allocator for `2 + field_count` user values, replaces slot 1 with the
+result, publishes the target Interface metatable, concrete-owner module,
+original concrete self, and adjusted field snapshots with ordinary barriers,
+copies a nonempty filled pair array, and returns one value. The incoming
+argument remains traced through allocation. Field adjustments that allocate
+use traced temporaries and restored stack offsets; no stale `StkId` spans a
+possible rebase.
 
 Wrapper construction evaluates the concrete value exactly once into an untraced
 C temporary, relying on its ordinary allocation/result/semantic/VM provenance.
 It resolves the concrete-owner module, obtains the Interface metatable from the
-emitting module's cache, and allocates the full userdata with `luaS_newudata`.
+emitting module's cache, and invokes the same per-pair full-userdata allocator.
 This path conservatively treats that allocation as a stack-rebase point: it
 saves `_base_off`, restores `_base` immediately after the call, and publishes
 the new Udata to its own initial root before any later allocation or traced-edge
@@ -248,7 +285,16 @@ keep the destination root address valid if the stack array moves. It then:
 1. installs the Interface metatable;
 2. stores the concrete module in user value 0 and applies the Udata barrier;
 3. stores the concrete value in user value 1 and applies the Udata barrier;
-4. copies the ordered pair array into the opaque payload.
+4. evaluates every concrete field exactly once in Interface field order,
+   applies its checker-frozen adjustment, stores it in user value `2 + i`, and
+   applies a barrier for each collectable snapshot; and
+5. copies the ordered pair array into the opaque payload when methods exist.
+
+The wrapper stays rooted before the first field adjustment. Nested Interface or
+callable construction can allocate and rebase the stack, so sources,
+destinations, and wrapper homes are recovered from offsets after each such
+operation. The allocator checks the runtime integer bound for
+`2 + field_count` before calling `luaS_newudata`.
 
 The concrete module is `_mod` when the concrete type belongs to the current
 module. Otherwise the translation unit retains or recovers the concrete
@@ -328,12 +374,19 @@ concrete owner.
 
 ## Four dispatch paths
 
+Interface field access does not dispatch through the method payload. A native
+read validates the exact `2 + field_count` user-value shape, loads user value
+`2 + target_index`, and unboxes it under the required target type. Lua
+`__index` distinguishes a declared field from a method name and boxes the same
+snapshot slot. Both paths read the conversion-time value; all assignment paths
+classify an Interface field as const and reject the write.
+
 ### Direct Titan method calls
 
 For `wrapper:method(...)`, generated code evaluates the wrapper once into an
 untraced C temporary before later argument effects. It creates no native input
-root. It checks that
-the payload contains exactly the Interface's method count, loads the
+root. It checks that the payload contains exactly the Interface's method count
+and that the wrapper has exactly `2 + field_count` user values, loads the
 declaration-order slot, casts it to the method signature, and calls it with:
 
 ```text
@@ -401,8 +454,9 @@ Each Interface owner initializes one protected metatable per Lua state under:
 Titan interface <fully-qualified-name> metatable
 ```
 
-It contains a read-only `__index` method map, a rejecting `__newindex`, and the
-protected display string `Titan interface <fully-qualified-name>`. The owner
+It contains a read-only `__index` member map, a rejecting `__newindex`, and the
+protected display string `Titan interface <fully-qualified-name>`. Field names
+select snapshot user values; method names select their generic closures. The owner
 caches the metatable in a private module user value. Importing modules allocate
 their own private cache slot and recover the exact registry metatable during
 initialization. Interfaces consume no importer-reconstructed public-prefix
@@ -466,14 +520,18 @@ The driver's closed validator requires:
 
 - the Interface owner name to match its module and type-member key;
 - public/non-local locality;
-- the canonical nonempty list/name-map projection;
-- each entry to be a public `Type.Method` owned by that Interface;
+- canonical dense field and method list/name-map projections whose combined
+  length is nonzero and whose names are disjoint;
+- each field to be an owned `Type.Field` with canonical zero-based index,
+  required boolean `isconst == true`, and a recursively valid value-facing
+  type;
+- each method to be a public `Type.Method` owned by that Interface;
 - a dense fixed parameter/result list;
 - dense, unique parameter-name metadata matching fixed arity; and
 - recursively valid value-facing parameter, result, input-tail, and
   flexible-result types.
 
-`Type.Interface` and `Type.Method` wrappers are rejected in arbitrary
+`Type.Interface`, `Type.Field`, and `Type.Method` descriptors are rejected in arbitrary
 value-facing positions in recovered metadata. The value graph is closed:
 error-recovery/no-value markers, nested modules, C FFI descriptors, legacy
 wrappers, and unknown tags are rejected as well. A recovered Titan function
@@ -500,7 +558,7 @@ concrete method symbols.
 Static-provider and library preflight inventories the three exported bound
 method symbols from recovered Interface type members, in addition to ordinary
 module and nominal symbols. Interface artifacts follow the native hierarchy
-introduced in ABI 0.23 and retained through ABI 0.25:
+introduced in ABI 0.23 and retained through ABI 0.26:
 `<module>_\u2133_<owner>_\u2131_<member><role>`, matching record and
 union callables. Pair arrays and adjustment entries are private to
 the translation unit that needs a concrete/Interface conversion; its witness
@@ -528,21 +586,19 @@ function entry. ABI 0.21 retained those layouts while advancing the matched
 Lua runtime to 5.5.1. ABI 0.22 retains those layouts; ABI 0.23 also retains
 them while renaming the native bound and metatable entry families. ABI 0.24
 retains their erased representation while extending generic metadata, and ABI
-0.25 retains that Interface representation while changing only the affected
-public `titan.fs` and `titan.async` signatures. The generalized callable
-action graph, `nil_fill_result`, and first-class closure wrappers add no
-Interface schema/payload slot or provider symbol. Target wrapper adapters and
-strict relays are consumer-private and use existing signatures, so there is no
-new native-layout bump. Dynamic discovery likewise adds only private witness
-code, ordinary one-upvalue closures, and raw per-state metatable entries, so it
-requires no ABI bump. A 0.24 provider is rejected before its metadata is
-decoded or any native value crosses the ABI-0.25 boundary; there is no
-compatibility adapter, migration, or cleanup path, and separately versioned
-0.20 through 0.24 artifacts remain preserved.
+0.25 retained that Interface representation while changing only the affected
+public `titan.fs` and `titan.async` signatures. ABI 0.26 adds ordered field
+descriptors and const booleans, field adjustment mappings, and one wrapper user
+value per field. The generalized callable action graph, `nil_fill_result`, and
+first-class closure wrappers still add no provider symbol. Target wrapper
+adapters, field allocators, witnesses, and strict relays are consumer-private.
+A 0.25 provider is rejected before its older metadata or wrapper layout is
+used; there is no compatibility adapter, migration, or cleanup path, and
+separately versioned prior-ABI artifacts remain preserved.
 
-The wrapper, concrete module, and concrete value use stock Lua reachability.
-The two user values are strong traced edges with ordinary backward barriers;
-the opaque vtable is untraced native data. Every new Interface Udata receives
+The wrapper, concrete module, concrete value, and field snapshots use stock Lua
+reachability. All `2 + field_count` user values are strong traced edges with
+ordinary backward barriers; the opaque vtable is untraced native data. Every new Interface Udata receives
 its own immediate root, and bound closures strongly retain the wrapper through
 upvalue 4. Native adapters keep inputs in C, root newly allocated converted
 objects individually, and root every live GC-bearing fixed/open native source
@@ -553,8 +609,10 @@ A witness closure strongly retains its emitting module; that module's traced
 uservalues retain imported owners and cached metatables, while the Lua registry
 owns every canonical nominal metatable. During a witness call the bare input is
 an argument stack value, the new wrapper replaces that same traced slot, and
-its user value 1 retains the input before return. The discovery protocol needs
-no additional GC root beyond these existing edges.
+its user value 1 retains the input before return. Snapshot temporaries and the
+destination wrapper remain traced across allocating adjustments; collectable
+snapshot stores receive Udata barriers. The discovery protocol needs no
+additional long-lived root beyond these existing edges.
 
 All type mismatches raise through the ordinary Titan/Lua error path. Wrapper
 allocation can fail before publication without leaving external native
@@ -571,10 +629,10 @@ The main regression suites are:
   boundaries;
 - `spec/types_spec.lua` for descriptor, relation, matching, and plan laws;
 - `spec/checker/interfaces_spec.lua` for staging, visibility, conversions,
-  diagnostics, named methods, options, and casts;
+  field/method matching, diagnostics, named methods, options, and casts;
 - `spec/coder/interfaces_spec.lua` for wrapper layout, exact/adjusted
-  dispatch, bound closures, Lua behavior, GC, traces, and four-module
-  separation;
+  dispatch, field snapshots, field-only wrappers, bound closures, Lua behavior,
+  GC, traces, and four-module separation;
 - `spec/union_interface_spec.lua` for hostile serialized schemas;
 - the compiled-module and static-provider suites for DSO/archive recovery and
   symbol preflight; and

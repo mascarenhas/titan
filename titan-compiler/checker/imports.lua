@@ -140,6 +140,7 @@ function register_referenced_nominals(
         visibility = exposing_module and tostring(exposing_module)
             or "<recovered-interface>",
         method_visible = function(method) return not method.islocal end,
+        field_visible = function(field) return not field.islocal end,
         generic_scope_bindings = {},
     }
     constraint_policy.generic_scope_bindings =
@@ -375,6 +376,12 @@ function register_referenced_nominals(
     elseif tag == "Type.Interface" then
         ok, err = register_scope(t.scope, t.typeparams)
         if ok then ok, err = visit_binders(t.typeparams) end
+        if ok then
+            for _, field in ipairs(t.fields or {}) do
+                ok, err = visit(field.type)
+                if not ok then break end
+            end
+        end
         if ok then ok, err = visit_list(t.methods) end
     end
 
@@ -479,6 +486,10 @@ function first_local_nominal_type(typ, seen)
         if typ.islocal then return typ end
         for _, typeparam in ipairs(typ.typeparams or {}) do
             local found = first_local_nominal_type(typeparam, seen)
+            if found then return found end
+        end
+        for _, field in ipairs(typ.fields or {}) do
+            local found = first_local_nominal_type(field.type, seen)
             if found then return found end
         end
         for _, method in ipairs(typ.methods or {}) do
@@ -615,6 +626,9 @@ function checker.register_module_interface(
             policy.method_visible = function(method)
                 return not method.islocal
             end
+            policy.field_visible = function(field)
+                return not field.islocal
+            end
         end
         for _, member in ipairs(view) do
             local registered, register_error = register_referenced_nominals(
@@ -628,6 +642,9 @@ function checker.register_module_interface(
         if view_index == 1 then
             policy.method_visible = function(method)
                 return not method.islocal
+            end
+            policy.field_visible = function(field)
+                return not field.islocal
             end
         end
         for _, member in pairs(view) do
@@ -676,7 +693,8 @@ function makemoduletype(modname, modast, st)
                 -- Imports are compile-time declarations, not module members.
             elseif tag == "Ast.TopLevelVar" then
                 local member = types.ModuleVariable(
-                    modname, tlnode.decl.name, tlnode._type)
+                    modname, tlnode.decl.name, tlnode._type,
+                    tlnode.isconst and true or false)
                 if tlnode.islocal then
                     add_source_member(member)
                 else

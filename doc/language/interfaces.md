@@ -1,10 +1,12 @@
 # Interfaces
 
-An Interface is a nominal, type-only contract made of method signatures. A
-record or union satisfies that contract structurally at a use site: no
+An Interface is a nominal, type-only contract made of read-only fields and
+method signatures. A record, or a union for a method-only Interface, satisfies
+that contract structurally at a use site: no
 `implements` declaration is written on the concrete type. When the compiler
 accepts a concrete value where an Interface is expected, it constructs a fresh
-Interface wrapper whose method entries call that concrete value.
+Interface wrapper whose method entries call that concrete value and whose
+fields are shallow snapshots taken at conversion time.
 
 ```titan
 interface Reader
@@ -43,15 +45,18 @@ record interchangeable with the Interface type.
 
 ## Declaring an Interface
 
-An Interface declaration is a nonempty list of bodyless method signatures:
+An Interface declaration is a nonempty list of fields and bodyless method
+signatures:
 
 ```text
 interface-declaration =
     "interface" Name
-        interface-method
-        { interface-method }
+        interface-member
+        { interface-member }
     "end"
 
+interface-member = interface-field | interface-method
+interface-field = Name ":" type
 interface-method =
     "function" Name "(" parameter-list? ")" return-annotation?
 ```
@@ -60,6 +65,7 @@ For example:
 
 ```titan
 interface Stream
+    name: string
     function close()
     function write(data: string): integer
     function write_many(prefix: string, ...: string): (integer, ...: string)
@@ -67,8 +73,16 @@ end
 ```
 
 The declaration is allowed only at module top level. Neither the Interface nor
-one of its methods may be `local`. There must be at least one method, and
-method names must be unique.
+one of its members may be `local`. There must be at least one member, and field
+and method names share one declaration-order namespace: duplicate fields,
+duplicate methods, and field/method collisions are rejected.
+
+Interface fields are implicitly const. Their syntax is `name: T`; use
+`name: T?` for an optional field because the record-only `name?: T` shorthand
+does not apply here. A field can be read with ordinary dot syntax, but cannot
+be assigned through an Interface value. Constness is shallow: if a field
+contains a mutable reference value, that referenced object retains its own
+mutability. See [Const values](const-values.md#interface-fields).
 
 An Interface method has:
 
@@ -79,8 +93,8 @@ An Interface method has:
 
 It has no body and no individual `end`. There is no receiver colon in the
 declaration: write `function read(...)`, not `function Reader:read(...)`.
-Fields, constructors, static functions, record/union functions, method bodies,
-and default methods are not Interface members.
+Constructors, static functions, record/union functions, method bodies, and
+default methods are not Interface members.
 
 `interface` is a reserved word. Longer names such as `interfaces` and
 `interfaced` remain ordinary identifiers. A C declaration may still use
@@ -117,8 +131,8 @@ Interface, type alias, record, or union. A transparent type alias can name an
 Interface, but it remains the same nominal Interface rather than defining a
 new identity.
 
-Each fully qualified Interface declaration is distinct. Identical method
-lists do not relate two Interfaces:
+Each fully qualified Interface declaration is distinct. Identical member lists
+do not relate two Interfaces:
 
 ```titan
 interface LeftReader
@@ -140,35 +154,56 @@ implicit extension relation.
 
 ## Structural satisfaction at the coercion site
 
-A record or union can be coerced directly to an Interface when every
-Interface method is satisfied in declaration order. For each method, Titan
-requires:
+A record or union can be coerced directly to an Interface when every member is
+satisfied in declaration order. A union cannot satisfy an Interface that has a
+field. For each Interface field, a record must provide:
+
+1. a field with the same name;
+2. visibility at the coercion site;
+3. a const field rather than a mutable one; and
+4. a field type that can be automatically assignment-adjusted to the
+   Interface field type.
+
+For each method, Titan requires:
 
 1. a method with the same name on the concrete record or union;
 2. that method to be visible at the coercion site; and
 3. the concrete method's self-removed function type to be directionally
    adjustable to the Interface method's self-removed function type.
 
-Only methods count. A same-named field, module function, record/union function,
-or generated union constructor does not satisfy an Interface method. Extra
-concrete methods are irrelevant.
+Member kinds must match. A same-named field cannot satisfy a method, and a
+method cannot satisfy a field. Module functions, record/union functions, and
+generated union constructors do not satisfy Interface methods. Extra concrete
+fields and methods are irrelevant.
 
 Visibility is checked where the wrapper is constructed. A `local` concrete
 method may satisfy an Interface for a coercion inside its defining module, but
 the same concrete/Interface pair is rejected in an importing module where
 that method is hidden.
 
-This is deliberately a cast-site visibility rule, not a requirement that
-every satisfying method be public. Interface v1 does not yet permit local
-Interfaces or local Interface methods, but the matching rule does not bake in
-a public-only assumption that would prevent such declarations in a future
-version.
+This is deliberately a cast-site visibility rule, not a requirement that every
+satisfying record member be public. A local const record field or local method
+can participate inside its defining source module but is hidden from an
+importing module.
 
-When satisfaction fails, the diagnostic names the first Interface method in
-declaration order and distinguishes a missing method, a same-named local
-method that is inaccessible at this site, and an incompatible callable shape.
-Titan does not choose the failure by iterating an unordered concrete member
-map.
+When satisfaction fails, the diagnostic names the first failing field in field
+order or, once fields pass, the first failing method in method order. It
+distinguishes missing, wrong-kind, inaccessible, mutable-field,
+incompatible-field-type, and incompatible-callable failures. Titan does not
+choose a failure by iterating an unordered concrete member map.
+
+### Field snapshots
+
+An accepted conversion reads and adjusts each required field once, in
+Interface declaration order, and stores the target-typed result in the fresh
+wrapper. Later reads return that snapshot rather than rereading the concrete
+record field. The snapshot is shallow: a reference-valued field retains the
+same referent, so mutations through that object's own mutable operations remain
+visible. The concrete field itself must be const, which prevents a second alias
+from replacing the snapshotted slot after conversion.
+
+Unions can still satisfy method-only Interfaces, but their variant-dependent
+payload cannot provide Interface fields.
 
 ### Parameter names do not determine satisfaction
 
@@ -294,8 +329,8 @@ For an Interface `I`:
 | --- | --- | --- |
 | `I` | the same `I` | identity; no allocation |
 | `I` | a distinct Interface `J` | rejected |
-| satisfying record/union `R` | `I` | direct coercion; construct a fresh wrapper |
-| non-satisfying record/union | `I` | rejected with the first declaration-order method failure |
+| satisfying record/union `R` | `I` | direct coercion; construct a fresh wrapper and snapshot fields |
+| non-satisfying record/union | `I` | rejected with the first declaration-order member failure |
 | `value` | `I` | strict implicit projection or explicit dynamic check; an exact existing `I` wrapper, or bare full userdata whose metatable advertises a compiler-witnessed `R -> I` wrapper |
 | `I` | `value` | gradual boxed injection |
 | `I` | record/union `R` | no implicit relation; only the explicit concrete test/downcast described below |
@@ -576,14 +611,16 @@ their Option combinations are compile-time errors. Distinct nominal
 Interfaces are also incomparable. Convert both sides explicitly to the same
 representation before comparing.
 
-The wrapper strongly retains both the concrete value and the concrete
-type's owning module state. A consumer can therefore dispatch safely even when
+The wrapper strongly retains the concrete value, the concrete type's owning
+module state, and every field snapshot. A consumer can therefore dispatch safely even when
 it imports only the Interface owner and receives a wrapper constructed in a
 different module. Native providers remain loaded by Titan's ordinary loader;
 the retained module object supplies the correct per-Lua-state concrete context.
 
-These are exactly the wrapper's two hidden user values: the first holds the
-concrete owner's module object, and the second holds the concrete `self`. Both
+The wrapper's first two hidden user values hold the concrete owner's module
+object and the concrete `self`; each required field then occupies one more
+hidden user value in Interface declaration order. Method-only Interfaces keep
+the two-value layout. Both
 exact entries and adjustment entries receive that first value, the
 concrete-owner module, as their hidden `_mod` argument. The Interface owner
 still supplies the identities needed to check and box the Interface signature
@@ -595,9 +632,10 @@ emitted an adjustment entry are likewise irrelevant to this ownership rule.
 
 An Interface wrapper is userdata with one protected metatable per fully
 qualified Interface in a Lua state. All implementers of that Interface share
-the metatable. Public Interface methods are available through `__index`; every
-write is rejected. There are no fields, constructors, statics, implementation
-names, or vtable-reflection members.
+the metatable. Required fields and public Interface methods are available
+through `__index`; every write is rejected. A field read returns the stored
+snapshot. There are no constructors, statics, implementation names, or
+vtable-reflection members.
 
 Lua can obtain a wrapper either directly from a static Titan conversion or by
 passing bare Titan userdata through a dynamic Interface sink after some loaded
@@ -711,34 +749,36 @@ retains the provider module and concrete value. Its compiled conversion also
 registers a per-state witness, so a bare `provider.Counter` erased to `value`
 can later cross an `api.Scorer` boundary in `consumer` without `consumer`
 importing `provider`. The serialized `api.Scorer`
-descriptor supplies nominal identity, method order, and signatures; the
-Interface owner supplies the canonical per-state metatable; and the wrapper
+descriptor supplies nominal identity, field and method order, and signatures;
+the Interface owner supplies the canonical per-state metatable; and the wrapper
 payload supplies the exact or adjusted concrete entries. This contract is the
 same for source dependencies, individual shared providers, regular static
 archives, multi-module prefix providers, and standalone executables.
 
-Interface method order is ABI-significant and is preserved in compiled module
+Interface field and method order is ABI-significant and is preserved in compiled module
 metadata. Interfaces entered the compiled-module contract in ABI 0.20 together
 with the two-user-value Array proxy and strict generic function-entry protocol.
 ABI 0.21 retained that model while advancing the matched Lua runtime to
 5.5.1; ABI 0.23 retains the metadata and value layouts while renaming
 Interface bound and metatable entries into the separated nominal callable
 family. ABI 0.24 retains that representation while extending generic declaration
-metadata, including applied Interface constraints. ABI 0.25 retains that
+metadata, including applied Interface constraints. ABI 0.25 retained that
 Interface representation while changing the public `titan.fs` and
-`titan.async` interfaces and exact signatures. Compiler-witnessed discovery
-adds only private generated functions and per-state metatable entries; it does
-not change the serialized schema, wrapper layout, exported symbols, or ABI.
-Older same-ABI objects remain loadable but do not advertise pairs they were
-not compiled to witness. Prior-ABI providers are rejected rather than adapted
-in place.
+`titan.async` interfaces and exact signatures. ABI 0.26 adds ordered Interface
+field metadata and one traced snapshot user value per field; it also makes
+field-adjustment mappings part of each concrete-to-Interface plan. Providers
+from ABI 0.25 are rejected before their older descriptor or wrapper layout can
+be used. Compiler-witnessed discovery still adds only private generated
+functions and per-state metatable entries. Prior-ABI providers are rejected
+rather than adapted in place.
 
 ## Version-one boundaries
 
 Interface v1 deliberately does not add:
 
 - local or nested Interfaces, or local Interface methods;
-- fields, constructors, static functions, method bodies, or default methods;
+- mutable Interface fields, constructors, static functions, method bodies, or
+  default methods;
 - embedding, inheritance, extension, intersections, or anonymous Interface
   types;
 - an explicit `implements` declaration;
@@ -754,10 +794,10 @@ Interface v1 deliberately does not add:
 - whole-container or general callable adapters;
 - a C-compatible struct/vtable layout;
 - a source-level vtable or unsafe Interface-construction API;
-- readonly record fields; or
-- in-place migration of an ABI-0.19 installation.
+- recursively immutable field referents; or
+- in-place migration of a prior-ABI installation.
 
 Interfaces do not change the existing rules for record and union declarations.
 A concrete type satisfies an Interface only at a statically known coercion
-site, using the visible methods and the directional callable rules described
-above.
+site, using visible const fields, visible methods, field adjustments, and the
+directional callable rules described above.

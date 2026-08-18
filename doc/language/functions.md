@@ -487,7 +487,7 @@ additional traced source-closure link, but Titan does not lower the source
 capture limit: an already-full closure (or a wrapper chain that becomes full)
 uses the generic fallback at the next edge. ABI 0.20 added the fixed brand and
 strict trailer; ABI 0.21 retained that layout while advancing the matched Lua
-runtime to 5.5.1, and ABIs 0.22 through 0.25 retain it. Adjustment wrappers change no fixed
+runtime to 5.5.1, and ABIs 0.22 through 0.26 retain it. Adjustment wrappers change no fixed
 slot or native signature and require no further ABI bump. A prior-ABI provider
 is rejected before function values can be exchanged.
 

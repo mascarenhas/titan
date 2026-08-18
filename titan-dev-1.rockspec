@@ -93,6 +93,7 @@ build = {
       ["titan-compiler.checker.expressions"] = "titan-compiler/checker/expressions.lua",
       ["titan-compiler.checker.imports"] = "titan-compiler/checker/imports.lua",
       ["titan-compiler.checker.interfaces"] = "titan-compiler/checker/interfaces.lua",
+      ["titan-compiler.checker.linear"] = "titan-compiler/checker/linear.lua",
       ["titan-compiler.checker.lowering"] = "titan-compiler/checker/lowering.lua",
       ["titan-compiler.checker.statements"] = "titan-compiler/checker/statements.lua",
       ["titan-compiler.checker.type_syntax"] = "titan-compiler/checker/type_syntax.lua",

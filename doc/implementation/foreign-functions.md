@@ -68,8 +68,11 @@ local view: c.Item[] = c.Item.new_array(count)
 Its `length` is an `Ast.ExpInteger` for the fixed form and `false` for the
 unsized form. The latter is a target spelling, not a C incomplete-array local;
 the checker lowers it to `Type.CPointer(element)`. Neither form enters the
-general type grammar. The old special initializer-less local production is
-gone, so every local follows the ordinary `local ... = ...` AST shape.
+general type grammar. The old special initializer-less C-array production is
+gone, so either form follows the initialized `local ... = ...` AST shape. The
+general parser separately admits an omitted RHS for mutable locals with an
+explicit nil-bearing type, but a restricted foreign-function body rejects that
+form and every const local requires an expression list.
 
 As with every new `_tag`, the checker visitors, top-level duplicate/name passes,
 source-interface builder, coder traversal, and AST debugging paths explicitly
@@ -549,9 +552,10 @@ interfaces for generics; its marker, `_0_24`, `TITAN_PATH_0_24`,
 `lib/titan/0.24`, `share/titan/0.24`, and `stdlib_0_24` reject and preserve the
 0.23 provider without migration or cleanup. ABI 0.25 retains those native
 names, callback locations, and generic layouts while changing the public
-`titan.fs` and `titan.async` interfaces and exact signatures; `_0_25`,
-`TITAN_PATH_0_25`, `lib/titan/0.25`, `share/titan/0.25`, and `stdlib_0_25`
-reject and preserve the 0.24 provider without migration or cleanup.
+`titan.fs` and `titan.async` interfaces and exact signatures. ABI 0.26 retains
+those native names while `_0_26`, `TITAN_PATH_0_26`, `lib/titan/0.26`,
+`share/titan/0.26`, and `stdlib_0_26` reject and preserve the 0.25 provider
+without migration or cleanup.
 
 Foreign declarations, allocation plans, and generated headers remain
 compiler-local. They add no public type descriptor or module-state slot, so the

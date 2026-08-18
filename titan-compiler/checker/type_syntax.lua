@@ -231,7 +231,8 @@ typefromnode = util.make_visitor({
     ["Ast.TypeArray"] = function(node, st, errors,
                                      defer_c_enum_carrier)
         return types.Array(deoptionize(typefromnode(
-            node.subtype, st, errors, defer_c_enum_carrier)))
+            node.subtype, st, errors, defer_c_enum_carrier)),
+            node.isconst and true or false)
     end,
 
     ["Ast.TypeMap"] = function(node, st, errors,
@@ -565,6 +566,7 @@ function is_mutable_c_address_source(source)
     end
     local decl = source.var._decl
     return decl and decl._tag == "Ast.Decl"
+        and not decl.isconst
         and not decl._captured
         and types.is_direct_c(source._type)
 end
@@ -581,6 +583,25 @@ function c_pointer_is_const(target)
     target = types.resolve_c_typedef(target)
     if not target or target._tag ~= "Type.CPointer" then return false end
     return types.c_pointer_has_qual(target, "const")
+end
+
+-- Binding constness on an inline C aggregate is shallow but still covers the
+-- bytes owned by that declaration.  It may be passed by value or borrowed
+-- through a pointer-to-const; it must never regain a mutable address through
+-- array decay, an out-parameter adjustment, or an explicit reinterpretation.
+function reject_const_c_mutable_address(source, target, errors, use)
+    local target_resolved = types.resolve_c_typedef(target)
+    if not target_resolved
+       or target_resolved._tag ~= "Type.CPointer"
+       or c_pointer_is_const(target) then
+        return false
+    end
+    local decl = const_inline_c_storage_decl(source)
+    if not decl then return false end
+    checker.typeerror(errors, source.loc,
+        "cannot take a mutable C address of inline storage from const local '%s'%s",
+        decl.name, use and (" in " .. use) or "")
+    return true
 end
 
 function failed_c_adjustment(source, target)
@@ -725,6 +746,10 @@ end
 
 function trycoerce(source, target, errors, use,
                          precomputed_adjustment)
+    if reject_const_c_mutable_address(
+            source, target, errors, use) then
+        return failed_c_adjustment(source, target), false, true
+    end
     if is_mutable_c_address_source(source)
        and types.c_mutable_address_coerceable(source._type, target)
        and not types.c_address_coerceable(source._type, target) then

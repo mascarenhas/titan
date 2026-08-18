@@ -133,7 +133,8 @@ and detects cycles with a `resolving` state.
    symbol-table history.
 4. Aliases are resolved, then every record and union is built and registered
    in `types.registry`. Interfaces are built next in declaration order, so all
-   nominal owners are available while their method signatures are checked.
+   nominal owners are available while their field types and method signatures
+   are checked.
    Each synthesized constructor is then attached to its complete nominal
    namespace. Record fields and union payloads share
    `types.has_tvalue_representation`: Titan function values are legal, while
@@ -149,6 +150,16 @@ and detects cycles with a `resolving` state.
    other declaration kinds remain module-wide. The type annotation and RHS are
    checked under the same frontier, followed by the ordinary constant-expression
    validation.
+
+Constness is retained as an exact boolean on local declarations, record
+fields, module variables, and Array types. An omitted mutable-local initializer
+is normalized to a checked nil expression list only when every written type
+passes `types.accepts_missing_nil`; const locals always arrive with an RHS.
+An initializer-less const module variable uses that same narrow nil-bearing
+predicate, then may be assigned only by the directly executing root
+initializer of its owning module. Nested blocks retain that authority, but a
+nested callable or an importer does not. See
+[Const-value implementation](const-values.md#checker-rules-for-declarations).
 
 Methods and nominal functions still perform their own conflict checks against
 fields, variants, and one another. Every failed or duplicate top-level declaration is
@@ -221,6 +232,16 @@ The checker-facing summary is:
   equality policy; and
 - `types.gradual_guard`/`types.has_sound_gradual_guard` keep boxability
   separate from a type that can actually be re-established later.
+
+Array consistency requires the same qualifier before descending through the
+element type. General assignment never changes it. The sole cross-qualifier
+plan is a written mutable-to-const `array_freeze`, whose semantic mode is a
+shallow copy. After all bodies typecheck, `select_linear_array_freezes` may
+select in-place freezing for one fresh, nonescaping builder local whose
+terminal same-block cast is its final use. Indexed reads/writes and length
+queries may span loops; unrelated element-producing calls and closures that do
+not actually reference the binding remain harmless. Passing, storing,
+aliasing, capturing, rebinding, or any post-cast use keeps the copy plan.
 
 `types.equals` remains the exact structural/nominal identity test used inside
 these classifiers. It does not answer whether an operation is permitted.
@@ -761,6 +782,12 @@ nil-accepting result-bearing target through the checker-frozen callable plan.
   border when `__len` is absent, or metamethod dispatch followed by an exact
   integer result guard when it is present. The metatable behavior changes no
   checker type or admissibility rule.
+* **Const lvalues.** Assignment rejects const locals, const module members,
+  const record or Interface fields, and indices of `const { T }`. The
+  synthesized record constructor remains the one initialization path for
+  const fields. C lvalue analysis also rejects mutation or mutable
+  address/decay through a const binding's inline aggregate or array storage;
+  pointer and owner pointees remain shallowly mutable.
 * **Record constructor omissions.** In a Nominal record context, explicit
   visible fields are checked in source order. Each absent field then gets the
   same `nil_can_adjust_to` test as an omitted named formal; an accepted field is
@@ -964,7 +991,7 @@ Two real loaders exist in `driver.lua`:
   deterministically ordered map, so aliases rehydrate without becoming runtime
   members. Exported `ModuleMember`, `Method`, and `StaticMethod` descriptors
   likewise serialize callable tail shape and formal `paramnames`; names remain
-  absent from structural `Type.Function` values. In ABIs 0.23 through 0.25 the
+  absent from structural `Type.Function` values. In ABIs 0.23 through 0.26 the
   five-position
   `Function(params, rettypes, false, varargtype, flexrettype)` constructor keeps
   its third position as a required reserved-false sentinel; C variadicity never

@@ -323,6 +323,47 @@ end
         })
     end)
 
+    it("parses initialized and initializer-less const module variables",
+    function()
+        local program = assert_parses_successfuly([[
+            const answer: integer = 42
+            local const cache: string?
+            const inferred = answer
+        ]])
+
+        assert_is_subset({
+            {
+                _tag = "Ast.TopLevelVar",
+                islocal = false,
+                isconst = true,
+                decl = {
+                    name = "answer",
+                    isconst = true,
+                    type = { _tag = "Ast.TypeInteger" },
+                },
+                value = { _tag = "Ast.ExpInteger", value = 42 },
+            },
+            {
+                _tag = "Ast.TopLevelVar",
+                islocal = true,
+                isconst = true,
+                decl = {
+                    name = "cache",
+                    isconst = true,
+                    type = { _tag = "Ast.TypeOption" },
+                },
+                value = false,
+            },
+            {
+                _tag = "Ast.TopLevelVar",
+                islocal = false,
+                isconst = true,
+                decl = { name = "inferred", isconst = true, type = false },
+                value = { _tag = "Ast.ExpVar" },
+            },
+        }, program)
+    end)
+
     it("can parse local var declarations", function()
         assert_statements_ast([[ local x=17 ]], {
             { _tag = "Ast.StatDecl",
@@ -343,6 +384,47 @@ end
             { _tag = "Ast.StatDecl",
                 decls = { { name = "x", type = { _tag = "Ast.TypeOption", basetype = {_tag = "Ast.TypeInteger"} }, option = false } } }
         })
+
+        assert_statements_ast([[ local pending: integer? ]], {
+            { _tag = "Ast.StatDecl",
+                decls = { {
+                    name = "pending",
+                    isconst = false,
+                    type = { _tag = "Ast.TypeOption" },
+                } },
+                exps = {}, }
+        })
+    end)
+
+    it("parses const local declarations with and without local", function()
+        assert_statements_ast([[
+            const x, y: integer = first, second
+            local const z: string = "ready"
+        ]], {
+            {
+                _tag = "Ast.StatDecl",
+                decls = {
+                    { name = "x", isconst = true, type = false },
+                    { name = "y", isconst = true,
+                        type = { _tag = "Ast.TypeInteger" } },
+                },
+                exps = {
+                    { _tag = "Ast.ExpVar" },
+                    { _tag = "Ast.ExpVar" },
+                },
+            },
+            {
+                _tag = "Ast.StatDecl",
+                decls = {
+                    { name = "z", isconst = true,
+                        type = { _tag = "Ast.TypeString" } },
+                },
+                exps = { { _tag = "Ast.ExpString", value = "ready" } },
+            },
+        })
+
+        assert_statements_syntax_error("const x", "AssignLocal")
+        assert_statements_syntax_error("local const x =", "ExpLocal")
     end)
 
     it("parses constructor-initialized fixed and borrowed C array locals",
@@ -461,14 +543,27 @@ end
             assert_program_syntax_error(program, "CArrayOnlyAutomatic")
         end
 
+        assert_statements_ast([[
+            local object: ffi.Item
+            local fixed: ffi.Item[3]
+            local borrowed: ffi.Item[]
+        ]], {
+            { _tag = "Ast.StatDecl", exps = {}, decls = {
+                { name = "object", type = { _tag = "Ast.TypeQualName" } },
+            } },
+            { _tag = "Ast.StatDecl", exps = {}, decls = {
+                { name = "fixed", type = { _tag = "Ast.TypeCArray" } },
+            } },
+            { _tag = "Ast.StatDecl", exps = {}, decls = {
+                { name = "borrowed", type = { _tag = "Ast.TypeCArray" } },
+            } },
+        })
+
         for _, declaration in ipairs({
-            "local object: ffi.Item",
-            "local fixed: ffi.Item[3]",
-            "local borrowed: ffi.Item[]",
             "local optional: ffi.Item[3]? = source",
             "local nested: ffi.Item[3][4] = source",
         }) do
-            assert_statements_syntax_error(declaration, "AssignLocal")
+            assert_statements_syntax_error(declaration, "EndFunc")
         end
     end)
 
@@ -1014,13 +1109,108 @@ end
 
     it("can parse array types", function()
         assert_type_ast("{int}",
-            { _tag = "Ast.TypeArray", subtype =
+            { _tag = "Ast.TypeArray", isconst = false, subtype =
                 {_tag = "Ast.TypeName", name = "int" } } )
 
         assert_type_ast("{{int}}",
-            { _tag = "Ast.TypeArray", subtype =
-                { _tag = "Ast.TypeArray", subtype =
+            { _tag = "Ast.TypeArray", isconst = false, subtype =
+                { _tag = "Ast.TypeArray", isconst = false, subtype =
                     {_tag = "Ast.TypeName", name = "int" } } } )
+
+        assert_type_ast("const {int}", {
+            _tag = "Ast.TypeArray",
+            isconst = true,
+            subtype = { _tag = "Ast.TypeName", name = "int" },
+        })
+        assert_type_ast("const {{int}}", {
+            _tag = "Ast.TypeArray",
+            isconst = true,
+            subtype = {
+                _tag = "Ast.TypeArray",
+                isconst = false,
+                subtype = { _tag = "Ast.TypeName", name = "int" },
+            },
+        })
+        assert_type_ast("{const {int}}", {
+            _tag = "Ast.TypeArray",
+            isconst = false,
+            subtype = {
+                _tag = "Ast.TypeArray",
+                isconst = true,
+                subtype = { _tag = "Ast.TypeName", name = "int" },
+            },
+        })
+        assert_type_ast("const {const {int}}", {
+            _tag = "Ast.TypeArray",
+            isconst = true,
+            subtype = {
+                _tag = "Ast.TypeArray",
+                isconst = true,
+                subtype = { _tag = "Ast.TypeName", name = "int" },
+            },
+        })
+    end)
+
+    it("keeps const Array, Option, and C pointer qualifiers independent",
+    function()
+        assert_type_ast("const {integer}?", {
+            _tag = "Ast.TypeOption",
+            basetype = {
+                _tag = "Ast.TypeArray",
+                isconst = true,
+                subtype = { _tag = "Ast.TypeInteger" },
+            },
+        })
+        assert_type_ast("const {integer?}", {
+            _tag = "Ast.TypeArray",
+            isconst = true,
+            subtype = {
+                _tag = "Ast.TypeOption",
+                basetype = { _tag = "Ast.TypeInteger" },
+            },
+        })
+
+        -- This is the pre-existing mutable Array of const C pointers.
+        assert_type_ast("{const *ffi.Item}", {
+            _tag = "Ast.TypeArray",
+            isconst = false,
+            subtype = {
+                _tag = "Ast.TypeCPointer",
+                const = true,
+                subtype = { _tag = "Ast.TypeQualName", name = "Item" },
+            },
+        })
+        assert_type_ast("const {*ffi.Item}", {
+            _tag = "Ast.TypeArray",
+            isconst = true,
+            subtype = {
+                _tag = "Ast.TypeCPointer",
+                const = false,
+                subtype = { _tag = "Ast.TypeQualName", name = "Item" },
+            },
+        })
+        assert_type_ast("const {const *ffi.Item}", {
+            _tag = "Ast.TypeArray",
+            isconst = true,
+            subtype = {
+                _tag = "Ast.TypeCPointer",
+                const = true,
+                subtype = { _tag = "Ast.TypeQualName", name = "Item" },
+            },
+        })
+
+        assert_type_ast("const {{integer: string}}", {
+            _tag = "Ast.TypeArray",
+            isconst = true,
+            subtype = { _tag = "Ast.TypeMap" },
+        })
+    end)
+
+    it("rejects the obsolete const Array placement and const Maps", function()
+        assert_type_syntax_error("{const integer}", "TypeType")
+        assert_type_syntax_error("const {integer: string}", "ConstMap")
+        assert_type_syntax_error("const {}", "TypeConstArray")
+        assert_type_syntax_error("const {integer", "RCurlyType")
     end)
 
     it("can parse map types", function()
@@ -1560,7 +1750,7 @@ end
         })
     end)
 
-    it("requires lhs and rhs of local variable declaration", function()
+    it("requires local binders and complete present initializers", function()
         assert_statements_syntax_error([[
             local  = 10
         ]], "DeclLocal")
@@ -2284,6 +2474,28 @@ end
                     },
                 } } } },
         })
+
+        assert_program_ast([[
+            record Snapshot
+                const id: integer
+                local const hidden: string
+                const next?: Snapshot
+                local const payload?: value
+            end
+        ]], {
+            { _tag = "Ast.TopLevelRecord",
+              name = "Snapshot",
+              fields = {
+                { name = "id", isconst = true, islocal = nil,
+                  type = { _tag = "Ast.TypeInteger" } },
+                { name = "hidden", isconst = true, islocal = true,
+                  type = { _tag = "Ast.TypeString" } },
+                { name = "next", isconst = true,
+                  type = { _tag = "Ast.TypeOption" } },
+                { name = "payload", isconst = true, islocal = true,
+                  type = { _tag = "Ast.TypeOption" } },
+              } },
+        })
     end)
 
     it("parses unions and synthesizes adjacent positional constructors",
@@ -2580,6 +2792,49 @@ end
         assert.are.equal("same", parsed[1].methods[2].name)
     end)
 
+    it("parses field-only and mixed interfaces in source order", function()
+        local parsed = assert_parses_successfuly([[
+            interface Snapshot
+                id: integer
+                function render(prefix: string): string
+                label: string?
+            end
+
+            interface Position
+                x: float
+                y: float
+            end
+        ]])
+
+        assert_is_subset({
+            {
+                _tag = "Ast.TopLevelInterface",
+                fields = {
+                    { _tag = "Ast.Decl", name = "id", isconst = true,
+                        type = { _tag = "Ast.TypeInteger" } },
+                    { _tag = "Ast.Decl", name = "label", isconst = true,
+                        type = { _tag = "Ast.TypeOption" } },
+                },
+                methods = {
+                    { _tag = "Ast.InterfaceMethod", name = "render" },
+                },
+                members = {
+                    { _tag = "Ast.Decl", name = "id" },
+                    { _tag = "Ast.InterfaceMethod", name = "render" },
+                    { _tag = "Ast.Decl", name = "label" },
+                },
+            },
+            {
+                _tag = "Ast.TopLevelInterface",
+                fields = {
+                    { name = "x", isconst = true },
+                    { name = "y", isconst = true },
+                },
+                methods = {},
+            },
+        }, parsed)
+    end)
+
     it("does not apply the parameter/expression list cap to interface methods",
     function()
         local source = { "interface Many" }
@@ -2602,7 +2857,7 @@ end
             {
                 [[interface Empty
 end]],
-                "MethodInterface",
+                "InterfaceMember",
             },
             {
                 [[local interface Local
@@ -2632,10 +2887,21 @@ end]],
             },
             {
                 [[interface I
-function f()
-value: integer
+local value: integer
 end]],
-                "MemberInterface",
+                "LocalInterfaceField",
+            },
+            {
+                [[interface I
+item integer
+end]],
+                "ColonInterfaceField",
+            },
+            {
+                [[interface I
+item:
+end]],
+                "TypeInterfaceField",
             },
             {
                 [[interface I
@@ -3475,7 +3741,7 @@ end]])
 
         assert_statements_syntax_error([[
             local x  3
-        ]], "AssignLocal")
+        ]], "ExpStat")
 
         assert_statements_syntax_error([[
             local x =

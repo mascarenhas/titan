@@ -437,12 +437,26 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
     coder._emit_array_writers(
         tlcontext, sigs, code, array_writer_inits)
 
-    -- Interface pair payloads are process-static function-pointer arrays.
+    -- Prepare the complete concrete/Interface pair inventory before sorting or
+    -- emitting it. A field-snapshot conversion can itself construct a nested
+    -- Interface or callable view, so this growing drain is the one fixpoint
+    -- that discovers every wrapper/adaptor obligation deterministically.
+    do
+        local i = 1
+        while i <= #tlcontext.interface_pair_list do
+            coder._prepare_interface_pair_wrapper(
+                tlcontext, tlcontext.interface_pair_list[i])
+            i = i + 1
+        end
+    end
+
+    -- Interface method payloads are process-static function-pointer arrays.
     -- Exact slots point at concrete methods; adjusted slots point at private
     -- relation-free adapters emitted from checker-frozen action graphs. They
     -- are filled only after imported native symbols have been recovered, on
     -- both module-initialization branches, and before user initializers can
-    -- construct a wrapper. The wrapper copies the complete array by sizeof.
+    -- construct a wrapper. Field-only Interfaces need no zero-length C array;
+    -- their wrapper payload is empty and their snapshots live in uservalues.
     local interface_pair_inits = {}
     local emitted_adapter_cap_assert = false
     table.sort(tlcontext.interface_pair_list, function(left, right)
@@ -468,12 +482,14 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
                 table.insert(code, adapter_body)
             end
         end
-        table.insert(sigs, render([[
-            static TitanInterfaceMethod $ID[$COUNT];
-        ]], {
-            ID = pair.id,
-            COUNT = c_integer_literal(#pair.methods),
-        }))
+        if #pair.methods > 0 then
+            table.insert(sigs, render([[
+                static TitanInterfaceMethod $ID[$COUNT];
+            ]], {
+                ID = pair.id,
+                COUNT = c_integer_literal(#pair.methods),
+            }))
+        end
         local wrapper_sig, wrapper_body =
             coder._emit_interface_pair_wrapper(pair)
         table.insert(sigs, wrapper_sig)
@@ -793,13 +809,24 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         }),
         INITARRAYMETA = render([[
             {
-                Table *_array_metatable = titan_array_metatable(L);
-                sethvalue(L, &_mod->uv[$INDEX].uv, _array_metatable);
+                Table *_array_metatable;
+                Table *_const_array_metatable;
+                titan_array_metatables(
+                    L, &_array_metatable, &_const_array_metatable);
+                sethvalue(L, &_mod->uv[$MUTABLE_INDEX].uv,
+                    _array_metatable);
                 luaC_barrierback(L, obj2gco(_mod),
-                    &_mod->uv[$INDEX].uv);
+                    &_mod->uv[$MUTABLE_INDEX].uv);
+                sethvalue(L, &_mod->uv[$CONST_INDEX].uv,
+                    _const_array_metatable);
+                luaC_barrierback(L, obj2gco(_mod),
+                    &_mod->uv[$CONST_INDEX].uv);
             }
         ]], {
-            INDEX = c_integer_literal(tlcontext.array_metatable_upvalue),
+            MUTABLE_INDEX = c_integer_literal(
+                tlcontext.array_metatable_upvalue),
+            CONST_INDEX = c_integer_literal(
+                tlcontext.const_array_metatable_upvalue),
         }),
         CREATEMETA = create_meta,
         MODULEINIT = moduleinit,

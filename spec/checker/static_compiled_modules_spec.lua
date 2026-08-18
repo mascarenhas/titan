@@ -368,10 +368,10 @@ end
         local owner = owner_interface("right.owner", "Box")
         local bridge_record = public_record("middle.bridge.Link", {
             types.Field("middle.bridge.Link", "box",
-                types.Nominal("right.owner.Box"), 0),
+                types.Nominal("right.owner.Box"), 0, false),
         })
         local bridge_interface = types.Interface(
-            "middle.bridge.BoxConsumer", {
+            "middle.bridge.BoxConsumer", {}, {
                 types.Method(
                     "middle.bridge.BoxConsumer", "consume",
                     {types.Nominal("right.owner.Box")}, {},
@@ -436,7 +436,7 @@ end
        function()
         local leaf_record = public_record("chain.leaf.Box", {
             types.Field("chain.leaf.Box", "back",
-                types.Nominal("chain.mid.Link"), 0),
+                types.Nominal("chain.mid.Link"), 0, false),
         })
         local leaf = types.Module("chain.leaf", {
             types.ModuleMember(
@@ -444,7 +444,7 @@ end
         })
         local mid_record = public_record("chain.mid.Link", {
             types.Field("chain.mid.Link", "box",
-                types.Nominal("chain.leaf.Box"), 0),
+                types.Nominal("chain.leaf.Box"), 0, false),
         })
         local mid = types.Module("chain.mid", {
             types.ModuleMember("chain.mid", "Link", mid_record, false),

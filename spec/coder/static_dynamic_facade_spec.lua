@@ -74,7 +74,7 @@ local function compiler_argv(workspace, source_root, ...)
         "-u", "LUA_PATH", "-u", "LUA_PATH_5_5",
         "-u", "LUA_CPATH", "-u", "LUA_CPATH_5_5",
         "CCACHE_DISABLE=1",
-        "TITAN_PATH_0_25=" .. workspace,
+        "TITAN_PATH_0_26=" .. workspace,
         "TITAN_PATH=",
     }
     if PREFIX then

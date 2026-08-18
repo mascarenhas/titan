@@ -14,7 +14,7 @@ if direct then
     package.path = source_root .. "/?.lua;" ..
         source_root .. "/?/init.lua;" .. package.path
     package.cpath = cli_stage .. "/?.so;" ..
-        cli_root .. "/lib/titan/0.25/?.so;" ..
+        cli_root .. "/lib/titan/0.26/?.so;" ..
         cli_root .. "/lib/lua/5.5/?.so;" .. package.cpath
 end
 
@@ -564,14 +564,14 @@ function installer.publish(options)
         options.image_validator or validate_native_pair, options)
     if not valid then return nil, validation_err end
 
-    local abi_dir = join(root, "lib/titan/0.25")
+    local abi_dir = join(root, "lib/titan/0.26")
     local shim_dir = join(root, "share/lua/5.5/titan")
     local shim_root = join(root, "share/lua/5.5")
     local lua_cdir = join(root, "lib/lua/5.5")
     local public_dso = join(abi_dir, "titan.so")
     local public_archive = join(abi_dir, "titan.a")
     local public_test_source =
-        join(root, "share/titan/0.25/src/titan/test.titan")
+        join(root, "share/titan/0.26/src/titan/test.titan")
 
     local destination_ok, destination_err =
         validate_public_native_destination(public_dso)
@@ -634,7 +634,7 @@ function installer.publish(options)
             join(abi_dir, "titan/" .. module .. ".so"),
             join(abi_dir, module .. ".so"),
             join(lua_cdir, "titan/" .. module .. ".so"),
-            join(lua_cdir, "titan/stdlib_0_25/" .. module .. ".so"),
+            join(lua_cdir, "titan/stdlib_0_26/" .. module .. ".so"),
         }) do
             stale[#stale + 1] = path
             stale[#stale + 1] = path .. ".dSYM"

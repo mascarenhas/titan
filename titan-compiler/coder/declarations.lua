@@ -1866,20 +1866,35 @@ function codevardec(ctx, initvars, switch_get, switch_set, gvar_map, node)
             COPYSLOT = copyboxed(ctx, node._type,
                 "s2v(L->top.p - 1)", node._slot)
         }))
-        table.insert(switch_set, render([[
-            case $I: {
-                $SETSLOT;
-                $BARRIER
-                break;
-            }
-        ]], {
-            I = c_integer_literal(node._upvalue),
-            SETSLOT = coder._dynamiccheckandset(
-                ctx, node._lua_write_dynamic_plan, node._type,
-                node._slot, "_value", node.loc, "Lua module-variable write"),
-            BARRIER = types.is_gc(node._type)
-                      and "luaC_barrierback(L, obj2gco(_mod), " .. node._slot .. ");" or ""
-        }))
+        if node.isconst then
+            table.insert(switch_set, render([[
+                case $I: {
+                    return luaL_error(L,
+                        "cannot assign const variable '%s' in Titan module '%s'",
+                        lua_tostring(L, 2), $MODULE);
+                }
+            ]], {
+                I = c_integer_literal(node._upvalue),
+                MODULE = c_string_literal(ctx.module),
+            }))
+        else
+            table.insert(switch_set, render([[
+                case $I: {
+                    $SETSLOT;
+                    $BARRIER
+                    break;
+                }
+            ]], {
+                I = c_integer_literal(node._upvalue),
+                SETSLOT = coder._dynamiccheckandset(
+                    ctx, node._lua_write_dynamic_plan, node._type,
+                    node._slot, "_value", node.loc,
+                    "Lua module-variable write"),
+                BARRIER = types.is_gc(node._type)
+                          and "luaC_barrierback(L, obj2gco(_mod), "
+                              .. node._slot .. ");" or ""
+            }))
+        end
     end
 end
 

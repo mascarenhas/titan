@@ -105,7 +105,7 @@ function coder._validate_interface_frozen_guard(
     coder._interface_closed_record(guard, {
         kind = true, op = true, target = true,
         element = true, key = true, value = true,
-        inner = true, name = true,
+        inner = true, name = true, isconst = true,
     }, use)
     assert(guard.kind == "gradual_guard"
            and guard.target
@@ -118,6 +118,8 @@ function coder._validate_interface_frozen_guard(
     local tag = target._tag
     if tag == "Type.Array" then
         assert(guard.op == "array"
+               and guard.isconst == target.isconst
+               and type(guard.isconst) == "boolean"
                and guard.element
                and guard.key == nil and guard.value == nil
                and guard.inner == nil and guard.name == nil,
@@ -126,6 +128,7 @@ function coder._validate_interface_frozen_guard(
             guard.element, target.elem, use .. " Array element", seen)
     elseif tag == "Type.Map" then
         assert(guard.op == "map"
+               and guard.isconst == nil
                and guard.key and guard.value
                and guard.element == nil
                and guard.inner == nil and guard.name == nil,
@@ -136,6 +139,7 @@ function coder._validate_interface_frozen_guard(
             guard.value, target.values, use .. " Map value", seen)
     elseif tag == "Type.Option" then
         assert(guard.op == "option"
+               and guard.isconst == nil
                and guard.inner
                and guard.element == nil
                and guard.key == nil and guard.value == nil
@@ -148,6 +152,7 @@ function coder._validate_interface_frozen_guard(
            or tag == "Type.Union" then
         local name = target.fqtn or target.name
         assert(guard.op == "nominal" and guard.name == name
+               and guard.isconst == nil
                and guard.element == nil
                and guard.key == nil and guard.value == nil
                and guard.inner == nil,
@@ -156,6 +161,7 @@ function coder._validate_interface_frozen_guard(
         local expected = types.is_c_tvalue(target)
             and "c_tvalue" or coder._gradual_op_for_tag[tag]
         assert(expected and guard.op == expected
+               and guard.isconst == nil
                and guard.element == nil
                and guard.key == nil and guard.value == nil
                and guard.inner == nil and guard.name == nil,
@@ -1232,7 +1238,9 @@ function coder._interface_adapter_collect_identity(
     typ = types.normalize(typ)
     if not typ then return end
     if typ._tag == "Type.Array" then
-        inventory.array = true
+        assert(type(typ.isconst) == "boolean",
+            "Interface adapter Array identity lacks a const qualifier")
+        inventory.arrays[typ.isconst] = true
     elseif typ._tag == "Type.Option" then
         coder._interface_adapter_collect_identity(
             inventory, typ.base)
@@ -1249,7 +1257,7 @@ end
 
 function coder._interface_adapter_identity_inventory(adapter)
     local inventory = {
-        array = false,
+        arrays = {},
         nominals = {},
         owned_c = {},
     }
@@ -1280,16 +1288,23 @@ function coder._interface_adapter_identity_prelude(
         coder._interface_adapter_identity_inventory(adapter)
     local code = {}
     -- A registry lookup needs one API result slot. First creation of the
-    -- shared Array metatable needs three: the table, its retained callback
-    -- upvalue, and the closure being installed by luaL_setfuncs.
-    local scratch_slots = inventory.array and 3 or 0
+    -- canonical Array-metatable pair can temporarily hold both metatables,
+    -- their pair table, and callback closure operands.
+    local has_array = inventory.arrays[false] or inventory.arrays[true]
+    local scratch_slots = has_array and 8 or 0
     ctx.interface_adapter_nominal_metatables = {}
     ctx.interface_adapter_owned_c_metatables = {}
-    if inventory.array then
-        ctx.interface_adapter_array_metatable =
-            "_ia_array_metatable"
-        code[#code + 1] =
-            "Table *_ia_array_metatable = titan_array_metatable(L);"
+    if has_array then
+        ctx.interface_adapter_array_metatables = {
+            [false] = "_ia_array_metatable",
+            [true] = "_ia_const_array_metatable",
+        }
+        code[#code + 1] = [[
+            Table *_ia_array_metatable;
+            Table *_ia_const_array_metatable;
+            titan_array_metatables(
+                L, &_ia_array_metatable, &_ia_const_array_metatable);
+        ]]
     end
 
     local nominal_names = {}
@@ -2165,19 +2180,29 @@ function coder._interface_symbol_fragment(name)
     return table.concat(bytes)
 end
 
--- Emit the common two-uservalue Interface wrapper body. Static conversions
--- and dynamic-discovery witnesses differ only in how they name the fresh
--- Udata and address its traced result slot; keep the representation, barriers,
--- and vtable copy identical here.
+-- Emit the common Interface wrapper body. uv[0]/uv[1] retain the concrete
+-- owner module and concrete value; uv[2+i] retains Interface field i's
+-- immutable, target-typed snapshot. Static conversions and dynamic-discovery
+-- witnesses differ only in how they prepare those snapshots, name the fresh
+-- Udata, and address its traced result slot.
 function coder._render_interface_wrapper_allocation(args)
+    local vtable_size = args.vtable
+        and "sizeof(" .. args.vtable .. ")" or "0"
+    local copy_vtable = args.vtable and render([[
+        memcpy(getudatamem($WRAPPER), $VTABLE, sizeof($VTABLE));
+    ]], {
+        WRAPPER = assert(args.wrapper),
+        VTABLE = args.vtable,
+    }) or ""
     return render([[
         $SOURCE_STATS
         $WRAPPER_DECL
         {
             Udata *_titan_interface_concrete_module = $CONCRETE_MODULE;
             Table *_titan_interface_metatable = $INTERFACE_METATABLE;
+            $FIELD_STATS
             $WRAPPER = luaS_newudata(
-                L, sizeof($VTABLE), 2);
+                L, $VTABLE_SIZE, $USERVALUE_COUNT);
             $AFTER_ALLOCATION
             setuvalue(L, $WRAPPER_SLOT, $WRAPPER);
             $WRAPPER->metatable = _titan_interface_metatable;
@@ -2188,7 +2213,8 @@ function coder._render_interface_wrapper_allocation(args)
             setuvalue(L, &$WRAPPER->uv[1].uv, $CONCRETE_VALUE);
             luaC_barrierback(L, obj2gco($WRAPPER),
                 &$WRAPPER->uv[1].uv);
-            memcpy(getudatamem($WRAPPER), $VTABLE, sizeof($VTABLE));
+            $FIELD_STORES
+            $COPY_VTABLE
         }
     ]], {
         SOURCE_STATS = args.source_stats or "",
@@ -2198,15 +2224,94 @@ function coder._render_interface_wrapper_allocation(args)
         CONCRETE_MODULE = assert(args.concrete_module),
         CONCRETE_VALUE = assert(args.concrete_value),
         INTERFACE_METATABLE = assert(args.interface_metatable),
+        FIELD_STATS = args.field_stats or "",
+        FIELD_STORES = args.field_stores or "",
+        VTABLE_SIZE = vtable_size,
+        USERVALUE_COUNT = c_integer_literal(
+            2 + assert(args.field_count)),
         AFTER_ALLOCATION = args.after_allocation or "",
-        VTABLE = assert(args.vtable),
+        COPY_VTABLE = copy_vtable,
     })
+end
+
+-- Consume the checker's complete field mappings in Interface declaration
+-- order. Every target value is frozen before wrapper allocation, and any
+-- freshly allocated nested Interface/callable view is published in a traced
+-- temporary until the wrapper uservalue takes ownership.
+local function concrete_field_for_mapping(concrete, mapping)
+    -- Compiled Record metadata omits local fields but preserves every public
+    -- field's absolute Udata slot. The visible list can therefore be sparse in
+    -- physical-index space; never treat source_index as a Lua list position.
+    for _, field in ipairs(concrete.fields or {}) do
+        if field.index == mapping.source_index
+           and field.name == mapping.name then
+            return field
+        end
+    end
+    return nil
+end
+
+function coder._code_interface_field_snapshots(
+        ctx, pair, concrete_value, wrapper_value, loc)
+    local stats, stores = {}, {}
+    for index, mapping in ipairs(pair.fields) do
+        local required = pair.interface.fields[index]
+        local concrete = concrete_field_for_mapping(pair.concrete, mapping)
+        assert(mapping.required == required
+               and concrete
+               and mapping.concrete == concrete
+               and mapping.name == required.name
+               and mapping.target_index == required.index
+               and mapping.source_index == concrete.index
+               and concrete.isconst == true
+               and types.equals(mapping.source, concrete.type)
+               and types.equals(mapping.target, required.type),
+            "Interface field snapshot has a malformed mapping at slot "
+                .. tostring(index - 1))
+        coder._checked_adjustment_plan(
+            mapping.adjustment, mapping.source, mapping.target,
+            "Interface field snapshot adjustment")
+
+        local source = getslot(mapping.source, nil, render(
+            "&(($CONCRETE)->uv[$INDEX].uv)", {
+                CONCRETE = concrete_value,
+                INDEX = c_integer_literal(mapping.source_index),
+            }))
+        local result_root
+        if coder._adjustment_allocates_gc(mapping.adjustment) then
+            result_root = newslot(ctx)
+        end
+        local conversion_stats, converted =
+            coder._code_adjustment_value(
+                ctx, mapping.adjustment, mapping.source, mapping.target,
+                source, loc, nil, result_root)
+        local frozen_stats, frozen = coder._freeze_code(
+            ctx, mapping.target, conversion_stats, converted)
+        stats[#stats + 1] = frozen_stats
+
+        local destination = render("&$WRAPPER->uv[$INDEX].uv", {
+            WRAPPER = wrapper_value,
+            INDEX = c_integer_literal(2 + mapping.target_index),
+        })
+        stores[#stores + 1] = setslot(
+            mapping.target, destination, frozen)
+        if types.is_gc(mapping.target) then
+            stores[#stores + 1] = render([[
+                luaC_barrierback(L, obj2gco($WRAPPER),
+                    $DESTINATION);
+            ]], {
+                WRAPPER = wrapper_value,
+                DESTINATION = destination,
+            })
+        end
+    end
+    return table.concat(stats, "\n"), table.concat(stores, "\n")
 end
 
 -- Validate and inventory one concrete/Interface pair. Exact slots point
 -- directly at the concrete method; adjusted slots carry one checker-frozen
 -- adapter plan and receive a deterministic private adapter symbol.
-function coder._interface_pair(ctx, conversion)
+function coder._interface_pair(ctx, conversion, loc)
     local use = "concrete-to-Interface conversion"
     assert(conversion and conversion.kind == "interface_conversion",
         use .. " lacks its checker annotation")
@@ -2230,6 +2335,9 @@ function coder._interface_pair(ctx, conversion)
     assert(type(conversion.methods) == "table"
            and #conversion.methods == #interface.methods,
         use .. " has a noncanonical ordered method mapping")
+    assert(type(conversion.fields) == "table"
+           and #conversion.fields == #interface.fields,
+        use .. " has a noncanonical ordered field mapping")
     local tlcontext = ctx.tlcontext
     local key = concrete.name .. "\0" .. interface.name
     local prior = tlcontext.interface_pairs[key]
@@ -2254,14 +2362,20 @@ function coder._interface_pair(ctx, conversion)
                 tlcontext.module, concrete_fragment)
                 .. "_\\u2131_" .. interface_fragment
                 .. "_\\u2131_wrapper",
+            allocator_id = coder._function_prefix(
+                tlcontext.module, concrete_fragment)
+                .. "_\\u2131_" .. interface_fragment
+                .. "_\\u2131_allocate",
             concrete = concrete,
             interface = interface,
             concrete_module =
                 coder._interface_owner_module_expr(ctx, concrete),
             concrete_metatable_slot = concrete_metatable_slot,
             interface_metatable_slot = interface_metatable_slot,
+            fields = conversion.fields,
             methods = conversion.methods,
             adapter_ids = {},
+            loc = assert(loc, use .. " has no source location"),
         }
         tlcontext.interface_pairs[key] = entry
         table.insert(tlcontext.interface_pair_list, entry)
@@ -2272,11 +2386,43 @@ function coder._interface_pair(ctx, conversion)
                     == type2metatable(ctx, conversion.concrete_type)
                and entry.interface_metatable_slot
                     == type2metatable(ctx, conversion.interface_type)
+               and #entry.fields == #conversion.fields
                and #entry.methods == #conversion.methods,
             use .. " disagrees with an existing pair obligation")
     end
 
     local all_exact = true
+    for index, mapping in ipairs(conversion.fields) do
+        local required = interface.fields[index]
+        local field = concrete_field_for_mapping(concrete, mapping)
+        assert(mapping.target_index == index - 1
+               and mapping.name == required.name
+               and mapping.required == required
+               and mapping.concrete == field
+               and field
+               and field._tag == "Type.Field"
+               and field.fqtn == concrete.name
+               and field.isconst == true
+               and types.equals(mapping.source, field.type)
+               and types.equals(mapping.target, required.type),
+            use .. " has a malformed field mapping at slot "
+                .. tostring(index - 1))
+        coder._checked_adjustment_plan(
+            mapping.adjustment, mapping.source, mapping.target,
+            use .. " field slot " .. tostring(index - 1))
+        assert(mapping.exact == types.equals(
+                mapping.source, mapping.target),
+            use .. " has an inconsistent field exactness marker")
+        all_exact = all_exact and mapping.exact
+        if prior then
+            local old = prior.fields[index]
+            assert(old.concrete == mapping.concrete
+                   and old.required == mapping.required
+                   and old.exact == mapping.exact,
+                use .. " disagrees with an existing field mapping at slot "
+                    .. tostring(index - 1))
+        end
+    end
     for index, mapping in ipairs(conversion.methods) do
         local required = interface.methods[index]
         assert(mapping.index == index - 1
@@ -2347,28 +2493,121 @@ function coder._interface_pair(ctx, conversion)
     return entry
 end
 
--- Emit the private Lua-stack witness advertised from the concrete metatable.
--- Its only upvalue is the emitting module. The incoming concrete Udata already
--- occupies stack slot 1; replace that same traced slot with the fresh Interface
--- value and return it without going through the public Lua API.
-function coder._emit_interface_pair_wrapper(pair)
-    local signature = render("static int $NAME(lua_State *L);", {
-        NAME = pair.wrapper_id,
-    })
+-- Prepare the private Lua-stack witness advertised from the concrete
+-- metatable. This is a growing inventory pass: lowering a field snapshot may
+-- discover nested Interface pairs or callable adapters, all of which must be
+-- known before deterministic file-scope emission begins.
+function coder._prepare_interface_pair_wrapper(tlcontext, pair)
+    if pair.wrapper_body then return end
+    assert(not pair.preparing, "recursive Interface pair preparation")
+    pair.preparing = true
+
+    -- Preserve the established method-only witness exactly: it needs no
+    -- snapshot conversion helper or private stack frame.
+    if #pair.fields == 0 then
+        local allocation = coder._render_interface_wrapper_allocation({
+            wrapper_decl =
+                "Udata *_titan_interface_wrapper = NULL;",
+            wrapper = "_titan_interface_wrapper",
+            wrapper_slot =
+                "s2v(restorestack(L, _titan_interface_result))",
+            concrete_module = pair.concrete_module,
+            concrete_value = "_titan_interface_concrete",
+            interface_metatable = render(
+                "hvalue(&_mod->uv[$SLOT].uv)", {
+                    SLOT = c_integer_literal(
+                        pair.interface_metatable_slot),
+                }),
+            field_count = 0,
+            vtable = pair.id,
+        })
+        pair.wrapper_sig = render(
+            "static int $NAME(lua_State *L);", {
+                NAME = pair.wrapper_id,
+            })
+        pair.wrapper_body = render([[
+            static int $NAME(lua_State *L) {
+                StkId _titan_interface_func = L->ci->func.p;
+                CClosure *_titan_interface_witness =
+                    clCvalue(s2v(_titan_interface_func));
+                Udata *_mod =
+                    uvalue(&_titan_interface_witness->upvalue[0]);
+                Udata *_titan_interface_concrete =
+                    uvalue(s2v(_titan_interface_func + 1));
+                ptrdiff_t _titan_interface_result =
+                    savestack(L, _titan_interface_func + 1);
+                $ALLOCATION
+                return 1;
+            }
+        ]], {
+            NAME = pair.wrapper_id,
+            ALLOCATION = allocation,
+        })
+        pair.preparing = nil
+        return
+    end
+
+    local ctx = newcontext(tlcontext)
+    local wrapper = "_titan_interface_wrapper"
+    local wrapper_root = newslot(ctx)
+    local field_stats, field_stores =
+        coder._code_interface_field_snapshots(
+            ctx, pair, "_titan_interface_concrete", wrapper, pair.loc)
     local allocation = coder._render_interface_wrapper_allocation({
-        wrapper_decl = "Udata *_titan_interface_wrapper = NULL;",
-        wrapper = "_titan_interface_wrapper",
-        wrapper_slot =
-            "s2v(restorestack(L, _titan_interface_result))",
+        wrapper_decl = "Udata *" .. wrapper .. " = NULL;",
+        wrapper = wrapper,
+        wrapper_slot = wrapper_root,
         concrete_module = pair.concrete_module,
         concrete_value = "_titan_interface_concrete",
         interface_metatable = render("hvalue(&_mod->uv[$SLOT].uv)", {
             SLOT = c_integer_literal(pair.interface_metatable_slot),
         }),
-        vtable = pair.id,
+        field_count = #pair.fields,
+        field_stats = field_stats,
+        field_stores = field_stores,
+        after_allocation = "_base = restorestack(L, _base_off);",
+        vtable = #pair.methods > 0 and pair.id or nil,
     })
-    local body = render([[
-        static int $NAME(lua_State *L) {
+
+    local reserve = ""
+    if ctx.nslots > 0 then
+        reserve = render([[
+            titan_ensure_stack(L, $NSLOTS);
+            StkId _base = L->top.p;
+            L->top.p += $NSLOTS;
+            for (StkId _slot = L->top.p - 1;
+                 _base <= _slot; _slot--) {
+                setnilvalue2s(_slot);
+            }
+        ]], {
+            NSLOTS = c_integer_literal(ctx.nslots),
+        })
+    else
+        reserve = "StkId _base = L->top.p;"
+    end
+    pair.wrapper_sig = render([[
+        static Udata *$ALLOCATOR(
+            lua_State *L, Udata *_mod,
+            Udata *_titan_interface_concrete);
+        static int $WRAPPER(lua_State *L);
+    ]], {
+        ALLOCATOR = pair.allocator_id,
+        WRAPPER = pair.wrapper_id,
+    })
+    pair.wrapper_body = render([[
+        static Udata *$ALLOCATOR(
+                lua_State *L, Udata *_mod,
+                Udata *_titan_interface_concrete) {
+            $RESERVE
+            ptrdiff_t _base_off = savestack(L, _base);
+            $ALLOCATION
+            Udata *_titan_interface_result_value =
+                _titan_interface_wrapper;
+            L->top.p = restorestack(L, _base_off);
+            return _titan_interface_result_value;
+        }
+
+        static int $WRAPPER(lua_State *L) {
             StkId _titan_interface_func = L->ci->func.p;
             CClosure *_titan_interface_witness =
                 clCvalue(s2v(_titan_interface_func));
@@ -2378,23 +2617,36 @@ function coder._emit_interface_pair_wrapper(pair)
                 uvalue(s2v(_titan_interface_func + 1));
             ptrdiff_t _titan_interface_result =
                 savestack(L, _titan_interface_func + 1);
-            $ALLOCATION
+            Udata *_titan_interface_wrapper = $ALLOCATOR(
+                L, _mod, _titan_interface_concrete);
+            setuvalue(L,
+                s2v(restorestack(L, _titan_interface_result)),
+                _titan_interface_wrapper);
             return 1;
         }
     ]], {
-        NAME = pair.wrapper_id,
+        ALLOCATOR = pair.allocator_id,
+        WRAPPER = pair.wrapper_id,
+        RESERVE = reserve,
         ALLOCATION = allocation,
     })
-    return signature, body
+    pair.preparing = nil
 end
 
--- Build the exact two-uservalue wrapper from an already authorized scalar
--- conversion. Freeze the concrete source once in C for lexical stability; its
--- ordinary traced home (or immediate allocation/result root) remains live while
--- the fresh wrapper allocation establishes its own root.
+function coder._emit_interface_pair_wrapper(pair)
+    assert(pair.wrapper_sig and pair.wrapper_body
+           and not pair.preparing,
+        "Interface pair wrapper was not prepared before emission")
+    return pair.wrapper_sig, pair.wrapper_body
+end
+
+-- Build a wrapper from an already authorized scalar conversion. The shared
+-- pair allocator owns field conversion, rooting, barriers, and recursive pair
+-- calls; the enclosing expression only freezes its concrete source and
+-- publishes the returned value in its caller-owned traced result slot.
 function coder._code_interface_wrapper(
-        ctx, conversion, source_stats, source_exp, result_root)
-    local pair = coder._interface_pair(ctx, conversion)
+        ctx, conversion, source_stats, source_exp, result_root, loc)
+    local pair = coder._interface_pair(ctx, conversion, loc)
     local frozen_stats, concrete_value = coder._freeze_code(
         ctx, conversion.concrete_type, source_stats, source_exp)
     local wrapper_decl, wrapper, wrapper_slot
@@ -2409,22 +2661,48 @@ function coder._code_interface_wrapper(
             newtmp(ctx, conversion.interface_type, true)
     end
 
-    -- luaS_newudata may relocate the Lua stack. The fresh destination root is
-    -- addressed by saved offset, so force the ordinary `_base_off` preamble and
-    -- rebase immediately after allocation before publishing it.
+    if #pair.fields == 0 then
+        -- Keep the established method-only lowering inline and byte-layout
+        -- compatible. Field-bearing pairs use the shared allocator below to
+        -- make recursive snapshot conversions finite at code-generation time.
+        ctx.uses_base_off = true
+        return coder._render_interface_wrapper_allocation({
+            source_stats = frozen_stats,
+            wrapper_decl = wrapper_decl,
+            wrapper = wrapper,
+            wrapper_slot = wrapper_slot,
+            concrete_module = pair.concrete_module,
+            concrete_value = concrete_value,
+            interface_metatable = render(
+                "hvalue(&_mod->uv[$SLOT].uv)", {
+                    SLOT = c_integer_literal(
+                        pair.interface_metatable_slot),
+                }),
+            field_count = 0,
+            after_allocation =
+                "_base = restorestack(L, _base_off);",
+            vtable = pair.id,
+        }), wrapper
+    end
+
+    -- The allocator may resize the Lua stack. Rebase the caller before
+    -- addressing its result slot, then publish without another allocating
+    -- operation in between.
     ctx.uses_base_off = true
-    return coder._render_interface_wrapper_allocation({
-        source_stats = frozen_stats,
-        wrapper_decl = wrapper_decl,
-        wrapper = wrapper,
-        wrapper_slot = wrapper_slot,
-        concrete_module = pair.concrete_module,
-        concrete_value = concrete_value,
-        interface_metatable = render("hvalue(&_mod->uv[$SLOT].uv)", {
-            SLOT = c_integer_literal(pair.interface_metatable_slot),
-        }),
-        after_allocation = "_base = restorestack(L, _base_off);",
-        vtable = pair.id,
+    return render([[
+        $SOURCE_STATS
+        $WRAPPER_DECL
+        $WRAPPER = $ALLOCATOR(L, _mod, $CONCRETE);
+        _base = restorestack(L, _base_off);
+        $ANCHOR
+    ]], {
+        SOURCE_STATS = frozen_stats,
+        WRAPPER_DECL = wrapper_decl,
+        WRAPPER = wrapper,
+        ALLOCATOR = pair.allocator_id,
+        CONCRETE = concrete_value,
+        ANCHOR = setslot(
+            conversion.interface_type, wrapper_slot, wrapper),
     }), wrapper
 end
 
@@ -2445,7 +2723,8 @@ function coder._code_interface_conversion(ctx, node)
             "scalar Interface wrapper has optional endpoints")
         local source_stats, source_exp = codeexp(ctx, node.exp)
         return coder._code_interface_wrapper(
-            ctx, conversion, source_stats, source_exp, result_root)
+            ctx, conversion, source_stats, source_exp, result_root,
+            node.loc)
     end
 
     assert(conversion.option == "option_map"
@@ -2461,7 +2740,8 @@ function coder._code_interface_conversion(ctx, node)
         local source_stats, source_exp = codeexp(ctx, node.exp)
         local wrapper_stats, wrapper =
             coder._code_interface_wrapper(
-                ctx, conversion, source_stats, source_exp, result_root)
+                ctx, conversion, source_stats, source_exp, result_root,
+                node.loc)
         local result_decl, result = newtmp(ctx, node._type)
         return render([[
             $WRAPPER_STATS
@@ -2481,7 +2761,7 @@ function coder._code_interface_conversion(ctx, node)
         newtmp(ctx, conversion.concrete_type)
     local wrapper_stats, wrapper =
         coder._code_interface_wrapper(
-            ctx, conversion, "", concrete, result_root)
+            ctx, conversion, "", concrete, result_root, node.loc)
     local result_decl, result = newtmp(ctx, node._type)
     local nil_arm
     local present_store

@@ -843,6 +843,9 @@ function codeassignment(ctx, var, cexp, etype, lvalue)
     local vtag = var._tag
     if vtag == "Ast.VarName" or (vtag == "Ast.VarDot" and var._decl) then
         if vtag == "Ast.VarDot" and var._decl._tag == "Type.Field" then
+            assert(var._decl.isconst == false
+                   and not var._interface_field,
+                "const field lvalue reached code generation")
             local lstats, lexp
             if lvalue then
                 lstats, lexp = "", assert(lvalue.record)
@@ -968,6 +971,8 @@ function codeassignment(ctx, var, cexp, etype, lvalue)
     elseif vtag == "Ast.VarBracket" then
         local exp1type = var.exp1._type._tag
         if exp1type == "Type.Array" then
+            assert(var.exp1._type.isconst == false,
+                "const Array assignment reached code generation")
             local arr = var.exp1
             local idx = var.exp2
             local castats, caexp, cistats, ciexp
@@ -1208,6 +1213,8 @@ function coder._materialize_assignment_lvalue(ctx, var)
 
     local basetype = var.exp1._type
     if basetype._tag == "Type.Array" then
+        assert(basetype.isconst == false,
+            "const Array lvalue reached code generation")
         return coder._materialize_array_lvalue(ctx, var)
     elseif basetype._tag == "Type.Map" then
         local mapstats, mapexp = codeexp(ctx, var.exp1)

@@ -58,8 +58,8 @@ describe("dense Array and positional integer-Map checking", function()
         assert.truthy(ok, err)
 
         local stats = find_function(tree, "use").block.stats
-        assert.same(types.Array(types.Integer()), stats[1].decls[1]._type)
-        assert.same(types.Array(types.Nil()), stats[2].decls[1]._type)
+        assert.same(types.Array(types.Integer(), false), stats[1].decls[1]._type)
+        assert.same(types.Array(types.Nil(), false), stats[2].decls[1]._type)
         assert.same(types.Map(types.Integer(), types.Integer()),
             stats[3].decls[1]._type)
         assert.truthy(local_initializer(stats[1])._positional_adjustment)
