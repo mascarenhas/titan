@@ -911,7 +911,9 @@ function generic_lower_expression(node, state)
             return generic_reclassify_written_expression(
                 node, lowered, surface_target, state)
         end
-        if generic_adjustment then
+        if generic_adjustment
+           or (node._adjustment
+               and not types.equals(types.erase(node._adjustment.source), types.erase(lowered._type))) then
             return generic_erased_boundary_expression(
                 lowered, types.erase(surface_target), state,
                 "erased generic implicit cast")

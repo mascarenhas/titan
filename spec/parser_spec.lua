@@ -1206,11 +1206,47 @@ end
         })
     end)
 
+    it("can parse const? (maybe-const) Array types", function()
+        assert_type_ast("const? {int}", {
+            _tag = "Ast.TypeArray",
+            isconst = "maybe",
+            subtype = { _tag = "Ast.TypeName", name = "int" },
+        })
+        assert_type_ast("const? {{int}}", {
+            _tag = "Ast.TypeArray",
+            isconst = "maybe",
+            subtype = {
+                _tag = "Ast.TypeArray",
+                isconst = false,
+                subtype = { _tag = "Ast.TypeName", name = "int" },
+            },
+        })
+        assert_type_ast("const? {integer}?", {
+            _tag = "Ast.TypeOption",
+            basetype = {
+                _tag = "Ast.TypeArray",
+                isconst = "maybe",
+                subtype = { _tag = "Ast.TypeInteger" },
+            },
+        })
+        assert_type_ast("const? {integer?}", {
+            _tag = "Ast.TypeArray",
+            isconst = "maybe",
+            subtype = {
+                _tag = "Ast.TypeOption",
+                basetype = { _tag = "Ast.TypeInteger" },
+            },
+        })
+    end)
+
     it("rejects the obsolete const Array placement and const Maps", function()
         assert_type_syntax_error("{const integer}", "TypeType")
         assert_type_syntax_error("const {integer: string}", "ConstMap")
+        assert_type_syntax_error("const? {integer: string}", "ConstMap")
         assert_type_syntax_error("const {}", "TypeConstArray")
+        assert_type_syntax_error("const? {}", "TypeConstArray")
         assert_type_syntax_error("const {integer", "RCurlyType")
+        assert_type_syntax_error("const? {integer", "RCurlyType")
     end)
 
     it("can parse map types", function()

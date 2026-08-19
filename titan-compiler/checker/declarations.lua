@@ -196,6 +196,9 @@ function checkfuncbody(node, st, errors, opts)
                 #signature.rettypes)
         end
     end
+    if #errors == 0 and (node._tag == "Ast.TopLevelFunc" or node._tag == "Ast.TopLevelMethod" or node._tag == "Ast.TopLevelStatic") then
+        annotate_linear_function_returns(node)
+    end
     table.remove(func_stack)
     return ret, frame
 end

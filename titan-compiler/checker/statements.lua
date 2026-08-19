@@ -941,6 +941,7 @@ checkstat_visitor = util.make_visitor({
                     decl._type = types.Invalid()
                 end
             end
+            decl._init_exp = exp
             declare(decl, st, errors)
         end
         node.exps = adjusted.exps

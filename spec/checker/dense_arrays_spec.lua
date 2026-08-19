@@ -387,4 +387,190 @@ describe("dense Array and positional integer-Map checking", function()
         assert.match("integer%-keyed map", errs[3])
         assert.match("integer%-keyed map", errs[4])
     end)
+
+    it("accepts mutable, const, and const? Arrays for const? Array targets",
+    function()
+        assert_type_check([[
+            function sum(xs: const? {integer}): integer
+                local total = 0
+                for i = 1, #xs do
+                    total = total + (xs[i] or 0)
+                end
+                return total
+            end
+
+            function use(
+                m: {integer},
+                c: const {integer},
+                mc: const? {integer}
+            ): integer
+                local a: const? {integer} = m
+                local b: const? {integer} = c
+                local d: const? {integer} = mc
+                return sum(m) + sum(c) + sum(mc) + sum(a) + sum(b) + sum(d)
+            end
+        ]])
+    end)
+
+    it("propagates const? array subtyping through Option types", function()
+        assert_type_check([[
+            function process(opt: const? {integer}?): integer
+                if not opt then
+                    return 0
+                end
+                local arr = opt
+                return #arr
+            end
+
+            function use(m: {integer}?, c: const {integer}?): integer
+                local a: const? {integer}? = m
+                local b: const? {integer}? = c
+                return process(m) + process(c) + process(a) + process(b)
+            end
+        ]])
+    end)
+
+    it("typechecks generic functions accepting const? arrays", function()
+        assert_type_check([[
+            function map<A, B>(
+                xs: const? {A},
+                f: (A, integer) -> B
+            ): {B}
+                local res: {B} = {}
+                for i = #xs, 1, -1 do
+                    res[i] = f(xs[i], i)
+                end
+                return res
+            end
+
+            function use(
+                nums: {integer},
+                const_nums: const {integer}
+            ): nil
+                local strings = map(nums, function(x: integer, i: integer): string
+                    return "item"
+                end)
+                local const_strings = map(const_nums, function(x: integer, i: integer): string
+                    return "const_item"
+                end)
+                return nil
+            end
+        ]])
+    end)
+
+    it("rejects assigning const? arrays to mutable or const arrays without cast",
+    function()
+        local errs = check_errs([[
+            function bad_assign(xs: const? {integer}): nil
+                local m: {integer} = xs
+                local c: const {integer} = xs
+                return nil
+            end
+        ]])
+        assert.same(2, #errs)
+        assert.match("type error", errs[1])
+        assert.match("type error", errs[2])
+    end)
+
+    it("rejects mutating elements of a const? array", function()
+        local errs = check_errs([[
+            function bad_write(xs: const? {integer}): nil
+                xs[1] = 10
+                return nil
+            end
+        ]])
+        assert.same(1, #errs)
+        assert.match("cannot assign to an element of const Array", errs[1])
+    end)
+
+    it("accepts explicit written casts to mutable or const arrays", function()
+        assert_type_check([[
+            function cast_it(xs: const? {integer}): ({integer}, const {integer})
+                local m = xs as {integer}
+                local c = xs as const {integer}
+                local up = m as const? {integer}
+                return m, c
+            end
+        ]])
+    end)
+
+    it("infers linear mutable array returns and lowers caller freeze", function()
+        local ok, err, tree = run_checker([[
+            function make_fresh(): {integer}
+                return { 1, 2, 3 }
+            end
+
+            function make_builder(): {integer}
+                local a: {integer} = {}
+                a[1] = 10
+                a[2] = 20
+                return a
+            end
+
+            function use(): nil
+                local c1: const {integer} = make_fresh()
+                local c2: const {integer} = make_builder()
+                return nil
+            end
+        ]])
+        assert.truthy(ok, err)
+
+        local fn_fresh = find_function(tree, "make_fresh")
+        local fn_builder = find_function(tree, "make_builder")
+        assert.truthy(fn_fresh._signature.rettypes[1].linear)
+        assert.truthy(fn_builder._signature.rettypes[1].linear)
+
+        local use_stats = find_function(tree, "use").block.stats
+        local cast1 = use_stats[1].exps[1]
+        local cast2 = use_stats[2].exps[1]
+        assert.same("written_cast", cast1._adjustment.kind)
+        assert.same("freeze", cast1._adjustment.mode)
+        assert.same("written_cast", cast2._adjustment.kind)
+        assert.same("freeze", cast2._adjustment.mode)
+    end)
+
+    it("does not infer linear returns when mutable array escapes", function()
+        local ok, err, tree = run_checker([[
+            function escape_via_alias(sink: {{integer}}): {integer}
+                local a: {integer} = {}
+                sink[1] = a
+                return a
+            end
+
+            function use(sink: {{integer}}): nil
+                local c: const {integer} = escape_via_alias(sink) as const {integer}
+                return nil
+            end
+        ]])
+        assert.truthy(ok, err)
+
+        local fn_esc = find_function(tree, "escape_via_alias")
+        assert.falsy(fn_esc._signature.rettypes[1].linear)
+
+        local use_stats = find_function(tree, "use").block.stats
+        local cast = use_stats[1].exps[1]
+        assert.same("written_cast", cast._written_cast.kind)
+        assert.same("copy", cast._written_cast.mode)
+    end)
+
+    it("strips linear flag from first-class function values", function()
+        local ok, err, tree = run_checker([[
+            function producer(): {integer}
+                return { 1, 2, 3 }
+            end
+
+            function use(): () -> {integer}
+                local f = producer
+                return f
+            end
+        ]])
+        assert.truthy(ok, err)
+
+        local fn_prod = find_function(tree, "producer")
+        assert.truthy(fn_prod._signature.rettypes[1].linear)
+
+        local fn_use = find_function(tree, "use")
+        local f_decl = fn_use.block.stats[1].decls[1]
+        assert.falsy(f_decl._type.rettypes[1].linear)
+    end)
 end)

@@ -1,6 +1,26 @@
 local core = require "titan-compiler.checker.core"
 local _ENV = core
 
+local function strip_linear_from_type(t)
+    if not t or type(t) ~= "table" then return t end
+    if t._tag == "Type.Array" and t.linear then
+        local stripped = types.Array(t.elem, t.isconst)
+        return stripped
+    elseif t._tag == "Type.Function" then
+        local new_rets = {}
+        local changed = false
+        for i, ret in ipairs(t.rettypes) do
+            local stripped = strip_linear_from_type(ret)
+            new_rets[i] = stripped
+            if stripped ~= ret then changed = true end
+        end
+        if changed then
+            return types.Function(t.params, new_rets, t.vararg, t.varargtype, t.flexrettype)
+        end
+    end
+    return t
+end
+
 -- Typechecks an expression
 --   node: Exp_* AST node
 --   st: symbol table
@@ -272,7 +292,7 @@ checkexp = util.make_visitor({
             local closed = generic_instantiate_first_class_variable(
                 node, node.var, texp, context, st, errors)
             if closed then
-                node._type = closed
+                node._type = strip_linear_from_type(closed)
                 local decl = node.var._decl
                 if decl and decl._tag == "Ast.TopLevelFunc" then
                     decl._valref = true
@@ -284,7 +304,7 @@ checkexp = util.make_visitor({
             end
         elseif texp._tag == "Type.Function" then
             -- Every Type.Function is a first-class Titan/Lua callable value.
-            node._type = texp
+            node._type = strip_linear_from_type(texp)
             -- Mark a referenced *local* function declaration so the coder
             -- builds its canonical closure (exported functions and statics
             -- always get one; a function-typed local is already a value).

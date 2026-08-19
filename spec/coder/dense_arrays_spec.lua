@@ -1662,4 +1662,108 @@ describe("dense Array code generation and boundaries", function()
             end)
         ]])
     end)
+
+    it("executes const? (maybe-const) Arrays, explicit casts, and linear returns",
+    function()
+        local source = [[
+            function make_mutable(): {integer}
+                return { 10, 20, 30 }
+            end
+
+            function sum(xs: const? {integer}): integer
+                local total = 0
+                for i = 1, #xs do
+                    total = total + (xs[i] or 0)
+                end
+                return total
+            end
+
+            function maybe_from_value(v: value): const? {integer}
+                return v as const? {integer}
+            end
+
+            function maybe_to_value(xs: const? {integer}): value
+                return xs as value
+            end
+
+            function cast_to_mutable(xs: const? {integer}): {integer}
+                return xs as {integer}
+            end
+
+            function cast_to_const(xs: const? {integer}): const {integer}
+                return xs as const {integer}
+            end
+
+            function map<A, B>(
+                array: const? {A},
+                f: (A, integer) -> B
+            ): {B}
+                local mapped: {B} = {}
+                for i = #array, 1, -1 do
+                    mapped[i] = f(array[i], i)
+                end
+                return mapped
+            end
+
+            function map_and_freeze(xs: const? {integer}): const {integer}
+                local ys: const {integer} = map(xs, function(x: integer, i: integer): integer
+                    return x * 10
+                end)
+                return ys
+            end
+        ]]
+
+        local csrc = h.compile_and_read_c(source)
+        local map_and_freeze_c = generated_function(
+            csrc, "test_\\u2133_map_and_freeze_titan(lua_State *L")
+
+        assert.match("titan_array_try_backing_either", csrc)
+        assert.match("titan_array_freeze", map_and_freeze_c)
+        assert.not_match("titan_array_shallow_copy", map_and_freeze_c)
+
+        h.run_coder(source, [[
+            local function fails(f)
+                local ok = pcall(f)
+                assert(not ok)
+            end
+
+            local mutable = test.make_mutable()
+            local const_arr = test.map_and_freeze(mutable)
+            assert(getmetatable(mutable) == "Titan array metatable")
+            assert(getmetatable(const_arr) == "Titan const array metatable")
+
+            -- sum accepts both mutable and const arrays
+            assert(test.sum(mutable) == 60)
+            assert(test.sum(const_arr) == 600)
+
+            -- maybe_from_value dynamically accepts both mutable and const
+            assert(test.sum(test.maybe_from_value(mutable)) == 60)
+            assert(test.sum(test.maybe_from_value(const_arr)) == 600)
+            fails(function() return test.maybe_from_value(123) end)
+            fails(function() return test.maybe_from_value("abc") end)
+
+            -- maybe_to_value preserves exact proxy
+            assert(test.maybe_to_value(mutable) == mutable)
+            assert(test.maybe_to_value(const_arr) == const_arr)
+
+            -- cast_to_mutable succeeds on mutable, fails on const
+            assert(test.cast_to_mutable(mutable) == mutable)
+            fails(function() return test.cast_to_mutable(const_arr) end)
+
+            -- cast_to_const succeeds on const, fails on mutable
+            assert(test.cast_to_const(const_arr) == const_arr)
+            fails(function() return test.cast_to_const(mutable) end)
+
+            -- generic map with in-place freeze
+            local mapped_mutable = test.map_and_freeze(mutable)
+            assert(getmetatable(mapped_mutable) == "Titan const array metatable")
+            assert(#mapped_mutable == 3)
+            assert(mapped_mutable[1] == 100 and mapped_mutable[2] == 200 and mapped_mutable[3] == 300)
+
+            local mapped_const = test.map_and_freeze(const_arr)
+            assert(getmetatable(mapped_const) == "Titan const array metatable")
+            assert(#mapped_const == 3)
+            assert(mapped_const[1] == 1000 and mapped_const[2] == 2000 and mapped_const[3] == 3000)
+        ]])
+    end)
 end)

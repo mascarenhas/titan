@@ -500,6 +500,21 @@ static l_inline Table *titan_array_try_backing(const TValue *value,
   return NULL;
 }
 
+static l_inline Table *titan_array_try_backing_either(
+    const TValue *value, Table *mutable_metatable, Table *const_metatable) {
+  if (mutable_metatable == NULL || const_metatable == NULL ||
+      mutable_metatable == const_metatable)
+    return NULL;
+  if (ttisfulluserdata(value)) {
+    Udata *maybe_proxy = uvalue(value);
+    if (TITAN_LIKELY(maybe_proxy->metatable == mutable_metatable ||
+                     maybe_proxy->metatable == const_metatable)) {
+      return hvalue(&maybe_proxy->uv[0].uv);
+    }
+  }
+  return NULL;
+}
+
 static l_inline Table *titan_array_require_backing(const TValue *value) {
   lua_assert(ttisfulluserdata(value));
   return hvalue(&uvalue(value)->uv[0].uv);

@@ -50,8 +50,8 @@ local types = typedecl("Type", {
 -- serialized metadata from being silently normalized to mutable.
 local raw_Array = types.Array
 function types.Array(elem, isconst)
-    if type(isconst) ~= "boolean" then
-        error("Array const qualifier must be a boolean", 2)
+    if type(isconst) ~= "boolean" and isconst ~= "maybe" then
+        error("Array const qualifier must be a boolean or 'maybe'", 2)
     end
     return raw_Array(elem, isconst)
 end
@@ -1801,8 +1801,10 @@ type_equals = function(t1, t2, seen)
            and t1._tag == "Type.Interface" then
             return types.validate_interface_descriptor(t1) ~= nil
         elseif type(t1) == "table"
-           and (t1._tag == "Type.Array"
-                or t1._tag == "Type.Field"
+           and t1._tag == "Type.Array" then
+            return type(t1.isconst) == "boolean" or t1.isconst == "maybe"
+        elseif type(t1) == "table"
+           and (t1._tag == "Type.Field"
                 or t1._tag == "Type.ModuleVariable") then
             return type(t1.isconst) == "boolean"
         elseif type(t1) == "table"
@@ -1856,7 +1858,7 @@ type_equals = function(t1, t2, seen)
            and same_typeparams(t1.typeparams, t2.typeparams, seen)
     elseif tag1 == "Type.Array" then
         return t1.isconst == t2.isconst
-           and type(t1.isconst) == "boolean"
+           and (type(t1.isconst) == "boolean" or t1.isconst == "maybe")
            and type_equals(t1.elem, t2.elem, seen)
     elseif tag1 == "Type.Map" then
         return type_equals(t1.keys, t2.keys, seen) and
@@ -2147,8 +2149,8 @@ end
 function types.canonical_array(elem, isconst)
     assert(type(elem) == "table" and elem._tag,
         "array element must be a type")
-    assert(type(isconst) == "boolean",
-        "array const qualifier must be a boolean")
+    assert(type(isconst) == "boolean" or isconst == "maybe",
+        "array const qualifier must be a boolean or 'maybe'")
     return types.Array(deoptionized(elem), isconst)
 end
 
@@ -2308,6 +2310,7 @@ local function rewrite_type(root, policy)
             out = types.canonical_option(rewrite(typ.base))
         elseif tag == "Type.Array" then
             out = types.canonical_array(rewrite(typ.elem), typ.isconst)
+            if typ.linear then out.linear = true end
         elseif tag == "Type.Map" then
             out = types.canonical_map(
                 rewrite(typ.keys), rewrite(typ.values))
@@ -3424,7 +3427,7 @@ consistent_impl = function(left, right, context)
     elseif left._tag == "Type.Array"
        and right._tag == "Type.Array" then
         result = left.isconst == right.isconst
-            and type(left.isconst) == "boolean"
+            and (type(left.isconst) == "boolean" or left.isconst == "maybe")
             and consistent_impl(left.elem, right.elem, context)
     elseif left._tag == "Type.Map"
        and right._tag == "Type.Map" then
@@ -4194,24 +4197,61 @@ function types.written_cast(source, target, policy)
     -- always a shallow copy. `is` shares this admission plan but consumes only
     -- its allocation-free test metadata.
     if source._tag == "Type.Array"
-       and target._tag == "Type.Array"
-       and source.isconst == false
-       and target.isconst == true
-       and (types.equals(source.elem, target.elem)
-            or relation_consistent(source.elem, target.elem)) then
-        local element_view = false
-        if not types.equals(source.elem, target.elem) then
-            element_view = gradual_view_plan(source.elem, target.elem)
-            if not element_view then return false end
+       and target._tag == "Type.Array" then
+        if source.isconst == false
+           and target.isconst == true
+           and (types.equals(source.elem, target.elem)
+                or relation_consistent(source.elem, target.elem)) then
+            local element_view = false
+            if not types.equals(source.elem, target.elem) then
+                element_view = gradual_view_plan(source.elem, target.elem)
+                if not element_view then return false end
+            end
+            local mode = (source.linear == true) and "freeze" or "copy"
+            return plan("written_cast", {
+                op = "array_freeze",
+                source = source,
+                target = target,
+                mode = mode,
+                element_view = element_view,
+                allocation_free_test = true,
+            })
+        elseif source.isconst == "maybe"
+           and (target.isconst == false or target.isconst == true)
+           and (types.equals(source.elem, target.elem)
+                or relation_consistent(source.elem, target.elem)) then
+            local element_view = false
+            if not types.equals(source.elem, target.elem) then
+                element_view = gradual_view_plan(source.elem, target.elem)
+                if not element_view then return false end
+            end
+            local op = (target.isconst == false)
+                and "maybe_array_cast_mutable"
+                or "maybe_array_cast_const"
+            return plan("written_cast", {
+                op = op,
+                source = source,
+                target = target,
+                element_view = element_view,
+                allocation_free_test = false,
+            })
+        elseif (source.isconst == false or source.isconst == true)
+           and target.isconst == "maybe"
+           and (types.equals(source.elem, target.elem)
+                or relation_consistent(source.elem, target.elem)) then
+            local element_view = false
+            if not types.equals(source.elem, target.elem) then
+                element_view = gradual_view_plan(source.elem, target.elem)
+                if not element_view then return false end
+            end
+            return plan("written_cast", {
+                op = "maybe_array_cast_upcast",
+                source = source,
+                target = target,
+                element_view = element_view,
+                allocation_free_test = true,
+            })
         end
-        return plan("written_cast", {
-            op = "array_freeze",
-            source = source,
-            target = target,
-            mode = "copy",
-            element_view = element_view,
-            allocation_free_test = true,
-        })
     end
 
     if source._tag == "Type.Value" then
@@ -4385,6 +4425,62 @@ function types.assignment_adjustment(source, target, policy)
         return types.callable_adjustment(source, target, policy)
     end
 
+    -- Array assignment rules
+    if source._tag == "Type.Array" and target._tag == "Type.Array" then
+        -- In-place freeze for unaliased linear array
+        if source.isconst == false and source.linear == true and target.isconst == true
+           and (types.equals(source.elem, target.elem) or relation_consistent(source.elem, target.elem)) then
+            local element_view = false
+            if not types.equals(source.elem, target.elem) then
+                element_view = gradual_view_plan(source.elem, target.elem)
+                if not element_view then return false end
+            end
+            return plan("written_cast", {
+                op = "array_freeze",
+                source = source,
+                target = target,
+                mode = "freeze",
+                element_view = element_view,
+                allocation_free_test = true,
+            })
+        end
+
+        -- Maybe-const target admits mutable, const, or maybe-const source
+        if target.isconst == "maybe" and (source.isconst == false or source.isconst == true or source.isconst == "maybe") then
+            if types.equals(source.elem, target.elem) then
+                return plan("identity", { source = source, target = target })
+            elseif relation_consistent(source.elem, target.elem) then
+                local view = gradual_view_plan(source, target)
+                if view then return view end
+            end
+            return false
+        end
+
+        -- Maybe-const source cannot be assigned to mutable or const target
+        if source.isconst == "maybe" and target.isconst ~= "maybe" then
+            return false
+        end
+    end
+
+    -- Option(Array) assignment
+    if source._tag == "Type.Option" and target._tag == "Type.Option" then
+        if source.base._tag == "Type.Array" and target.base._tag == "Type.Array" then
+            local inner = types.assignment_adjustment(source.base, target.base, policy)
+            if inner then
+                if inner.kind == "identity" then
+                    return plan("identity", { source = source, target = target })
+                else
+                    return plan("option_adjustment", {
+                        source = source,
+                        target = target,
+                        inner = inner,
+                    })
+                end
+            end
+            return false
+        end
+    end
+
     if relation_consistent(source, target) then
         local view = gradual_view_plan(source, target)
         if view then return view end
@@ -4470,8 +4566,13 @@ function types.tostring(t)
     elseif tag == "Type.Value"       then return "value"
     elseif tag == "Type.Invalid"     then return "invalid type"
     elseif tag == "Type.Array" then
-        return (t.isconst and "const " or "") ..
-            "{ " .. types.tostring(t.elem) .. " }"
+        local prefix = ""
+        if t.isconst == true then
+            prefix = "const "
+        elseif t.isconst == "maybe" then
+            prefix = "const? "
+        end
+        return prefix .. "{ " .. types.tostring(t.elem) .. " }"
     elseif tag == "Type.Map" then
         return "{ " .. types.tostring(t.keys) .. " : " .. types.tostring(t.values) .. " }"
     elseif tag == "Type.Pointer" then
@@ -4765,11 +4866,15 @@ function types.serialize(t)
             types.serialize(t.target_scope) .. "," ..
             serialize_type_list(t.typeparams) .. ")"
     elseif tag == "Type.Array" then
-        if type(t.isconst) ~= "boolean" then
+        local const_repr
+        if t.isconst == "maybe" then
+            const_repr = '"maybe"'
+        elseif type(t.isconst) == "boolean" then
+            const_repr = tostring(t.isconst)
+        else
             error("cannot serialize malformed Array const qualifier")
         end
-        return "Array(" .. types.serialize(t.elem) .. "," ..
-            tostring(t.isconst) .. ")"
+        return "Array(" .. types.serialize(t.elem) .. "," .. const_repr .. ")"
     elseif tag == "Type.Map" then
         return "Map(" .. types.serialize(t.keys) .. ", " .. types.serialize(t.values) .. ")"
     elseif tag == "Type.ModuleMember" then

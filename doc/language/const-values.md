@@ -257,21 +257,60 @@ tag. Direct mutable/const Array comparison is rejected; both sides can be
 explicitly viewed as `value` when ordinary boxed identity comparison is
 intended.
 
-### Copy elision is unobservable
+### Maybe-const Arrays
+
+`const? { T }` names a read-only view type that can accept both mutable `{ T }`
+and const `const { T }` Arrays:
+
+```titan
+function sum(items: const? { integer }): integer
+    local total = 0
+    for i = 1, #items do
+        total = total + (items[i] or 0)
+    end
+    return total
+end
+```
+
+`const? { T }` permits indexed reads and `#` length, but forbids indexed element
+writes (`xs[i] = v` is a compile-time error).
+
+#### Assignment and Option propagation
+
+- Mutable `{ T }`, const `const { T }`, and maybe-const `const? { T }` can all
+  be assigned to `const? { T }` (provided the element types are equal or
+  gradually consistent).
+- Option versions propagate consistently: `({ T })?` and `(const { T })?` can
+  both be assigned to `(const? { T })?`.
+- A `const? { T }` source cannot be implicitly assigned to a mutable `{ T }` or
+  `const { T }` target.
+
+#### Explicit casts
+
+A `const? { T }` value can be explicitly cast using `as`:
+- `xs as { T }`: succeeds at runtime if `xs` is a mutable array proxy; raises a
+  runtime error if `xs` is a const array.
+- `xs as const { T }`: succeeds at runtime if `xs` is a const array proxy; raises
+  a runtime error if `xs` is a mutable array.
+- `xs is { T }` and `xs is const { T }` perform non-allocating runtime type
+  guards.
+
+### Copy elision and linear returns
 
 The language semantics are always the shallow copy above. The compiler may
 freeze the original proxy in place only when a conservative linear-use proof
 shows that the allocation has not escaped before the cast and that neither the
-source binding nor any mutable alias is used afterward. The optimized builder
-shape starts with one local initialized from a fresh mutable Array. Before its
-terminal cast, structured control flow and loops may query its length and read
-or write its indexed elements; unrelated calls may compute values for those
-writes. Creating an unrelated closure is harmless; the closure blocks elision
-only when its body actually references the Array or an alias. The Array itself
-must never be rebound, passed to a call, returned, stored in an
-aggregate/module/field/container, aliased, or captured. Parameters,
-imports, fields, module variables, call results, a cast hidden in control flow,
-or any post-cast use retain the copy path.
+source binding nor any mutable alias is used afterward.
+
+1. **Local builder pattern:** Starts with one local initialized from a fresh
+   mutable Array `{}`. Structured control flow and loops may query `#` and read
+   or write elements. If the local does not escape before being cast or returned
+   to a `const` target, the compiler emits in-place `titan_array_freeze`.
+2. **Linear function returns:** When all return paths of a function return a
+   freshly constructed array or an unaliased local builder array, the function's
+   return type is marked linear. Directly assigning or casting the call result to
+   `const { T }` (e.g. `local res: const { B } = map(xs, f)`) freezes the
+   returned array in place without copying.
 
 Code must not depend on whether this optimization fires. If both the mutable
 source and const result could still be observed, the proof is not valid and

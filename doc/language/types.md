@@ -21,6 +21,7 @@ Lua error (see [Error handling](error-handling.md)).
 | the dynamic type | `value` | [in depth below](#the-value-type-in-depth) |
 | mutable arrays | `{ t }` | [Arrays and maps](arrays-maps.md) |
 | const arrays | `const { t }` | [Const values](const-values.md#const-arrays) |
+| maybe-const arrays | `const? { t }` | [Const values](const-values.md#maybe-const-arrays) |
 | maps | `{ k : v }` | [Arrays and maps](arrays-maps.md) |
 | records | `Point`, `mod.Point` | [Records](records.md) |
 | unions | `Message`, `mod.Message` | [Unions](unions.md) |

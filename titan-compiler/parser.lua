@@ -230,6 +230,10 @@ function defs.constarraytype(pos, subtype)
     return ast.TypeArray(pos, subtype, true)
 end
 
+function defs.maybeconstarraytype(pos, subtype)
+    return ast.TypeArray(pos, subtype, "maybe")
+end
+
 function defs.cownedscalartype(pos, subtype)
     return ast.TypeCOwned(pos, subtype, false)
 end
@@ -1033,7 +1037,11 @@ local grammar = re.compile([[
                            cownedpayload^OwnedPayload)           -> cownedscalartype
                      / (P  OWNED %{COwnedShape})
 
-    constarray      <- (P  CONST LCURLY
+    constarray      <- (P  CONST OPT LCURLY
+                           type^TypeConstArray
+                           (!COLON / %{ConstMap})
+                           RCURLY^RCurlyType)                    -> maybeconstarraytype
+                     / (P  CONST LCURLY
                            type^TypeConstArray
                            (!COLON / %{ConstMap})
                            RCURLY^RCurlyType)                    -> constarraytype

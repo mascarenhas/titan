@@ -2052,6 +2052,78 @@ function coder._code_array_freeze(ctx, node)
     ]], args), target_name
 end
 
+function coder._code_maybe_array_cast(ctx, node)
+    local cast = coder._checked_written_cast_plan(
+        node._written_cast, node.exp._type, node._type,
+        "maybe-array cast")
+    local op = cast.op
+    local source_stats, source = materialize(ctx, node.exp)
+    local target_decl, target_name, target_slot, target_stack_slot =
+        newtmp(ctx, node._type, true)
+    local loc = node.loc
+    if op == "maybe_array_cast_upcast" then
+        return render([[
+            $SOURCE_STATS
+            $TARGET_DECL
+            $TARGET = $SOURCE;
+            sethvalue(L, $TARGET_SLOT, $TARGET);
+        ]], {
+            SOURCE_STATS = source_stats,
+            TARGET_DECL = target_decl,
+            TARGET = target_name,
+            SOURCE = source,
+            TARGET_SLOT = target_slot,
+        }), target_name
+    elseif op == "maybe_array_cast_mutable" then
+        return render([[
+            $SOURCE_STATS
+            if (TITAN_UNLIKELY(titan_array_try_proxy($SOURCE, $MUTABLE_META) == NULL)) {
+                $THROW
+            }
+            $TARGET_DECL
+            $TARGET = $SOURCE;
+            sethvalue(L, $TARGET_SLOT, $TARGET);
+        ]], {
+            SOURCE_STATS = source_stats,
+            TARGET_DECL = target_decl,
+            TARGET = target_name,
+            SOURCE = source,
+            MUTABLE_META = array_metatable_kind(ctx, false),
+            TARGET_SLOT = target_slot,
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            THROW = codethrow(loc,
+                "%s:%d:%d: type error, expected mutable array but found const array",
+                { "$FILE", "$LINE", "$COL" }),
+        }), target_name
+    elseif op == "maybe_array_cast_const" then
+        return render([[
+            $SOURCE_STATS
+            if (TITAN_UNLIKELY(titan_array_try_proxy($SOURCE, $CONST_META) == NULL)) {
+                $THROW
+            }
+            $TARGET_DECL
+            $TARGET = $SOURCE;
+            sethvalue(L, $TARGET_SLOT, $TARGET);
+        ]], {
+            SOURCE_STATS = source_stats,
+            TARGET_DECL = target_decl,
+            TARGET = target_name,
+            SOURCE = source,
+            CONST_META = array_metatable_kind(ctx, true),
+            TARGET_SLOT = target_slot,
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            THROW = codethrow(loc,
+                "%s:%d:%d: type error, expected const array but found mutable array",
+                { "$FILE", "$LINE", "$COL" }),
+        }), target_name
+    end
+    error("unexpected maybe_array_cast op " .. tostring(op))
+end
+
 -- Generate code for expression 'node'
 -- 'iscondition' is 'true' if expression is used not for value but for
 --    controlling conditinal execution
@@ -2146,6 +2218,12 @@ function codeexp_dispatch(ctx, node, iscondition, target)
            and node._written_cast
            and node._written_cast.op == "array_freeze" then
         return coder._code_array_freeze(ctx, node)
+    elseif tag == "Ast.ExpCast"
+           and node._written_cast
+           and (node._written_cast.op == "maybe_array_cast_mutable"
+                or node._written_cast.op == "maybe_array_cast_const"
+                or node._written_cast.op == "maybe_array_cast_upcast") then
+        return coder._code_maybe_array_cast(ctx, node)
     elseif tag == "Ast.ExpCast" and types.equals(node.exp._type, node._type) then
         return codeexp(ctx, node.exp, iscondition, target)
     elseif tag == "Ast.ExpCast"

@@ -3641,6 +3641,49 @@ describe("Titan types", function()
             assert.equal(types.serialize(scheme),
                 types.serialize(reload(scheme)))
         end)
+
+        it("serializes and rehydrates const? Array types", function()
+            local maybe_arr = types.Array(types.Integer(), "maybe")
+            assert.equal("const? { integer }", types.tostring(maybe_arr))
+            local serialized = types.serialize(maybe_arr)
+            assert.match('"maybe"', serialized)
+            local rehydrated = assert(load(
+                "return " .. serialized, "test", "t", types))()
+            assert.is_true(types.equals(maybe_arr, rehydrated))
+            assert.equal("maybe", rehydrated.isconst)
+        end)
+
+        it("validates assignment adjustment rules for const? and linear arrays", function()
+            local mutable_int = types.Array(types.Integer(), false)
+            local const_int = types.Array(types.Integer(), true)
+            local maybe_int = types.Array(types.Integer(), "maybe")
+            local linear_int = types.Array(types.Integer(), false)
+            linear_int.linear = true
+
+            -- mutable, const, and maybe to maybe-const target
+            assert.truthy(types.assignment_adjustment(mutable_int, maybe_int))
+            assert.truthy(types.assignment_adjustment(const_int, maybe_int))
+            assert.truthy(types.assignment_adjustment(maybe_int, maybe_int))
+
+            -- maybe-const source to mutable or const target is rejected
+            assert.falsy(types.assignment_adjustment(maybe_int, mutable_int))
+            assert.falsy(types.assignment_adjustment(maybe_int, const_int))
+
+            -- linear mutable array to const target produces in-place freeze
+            local freeze_adj = types.assignment_adjustment(linear_int, const_int)
+            assert.truthy(freeze_adj)
+            assert.equal("written_cast", freeze_adj.kind)
+            assert.equal("freeze", freeze_adj.mode)
+
+            -- option propagation
+            local opt_mutable = types.Option(mutable_int)
+            local opt_const = types.Option(const_int)
+            local opt_maybe = types.Option(maybe_int)
+            assert.truthy(types.assignment_adjustment(opt_mutable, opt_maybe))
+            assert.truthy(types.assignment_adjustment(opt_const, opt_maybe))
+            assert.falsy(types.assignment_adjustment(opt_maybe, opt_mutable))
+            assert.falsy(types.assignment_adjustment(opt_maybe, opt_const))
+        end)
     end)
 
 end)

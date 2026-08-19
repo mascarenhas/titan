@@ -22,8 +22,7 @@ local _ENV = core
 -- conservatively keeps the shallow-copy lowering.
 
 local function syntax_children(node, visit, seen)
-    if type(node) ~= "table" or seen[node] then return end
-    seen[node] = true
+    if type(node) ~= "table" then return end
     if not node._tag then
         for _, item in ipairs(node) do
             if type(item) == "table" then visit(item, seen) end
@@ -63,10 +62,13 @@ local function count_decl_uses(root, decl)
     return count
 end
 
-local function builder_uses_are_non_escaping(root, decl)
+local function builder_uses_are_non_escaping(root, decl, ret_stat)
     local function visit(node, context, seen)
         if type(node) ~= "table" or seen[node] then return true end
         seen[node] = true
+        if ret_stat and node == ret_stat then
+            return true
+        end
 
         if node._tag == "Ast.VarName" and node._decl == decl then
             return context == "array_base" or context == "length_operand"
@@ -117,6 +119,23 @@ local function builder_uses_are_non_escaping(root, decl)
     return visit(root, "ordinary", {})
 end
 
+local function is_fresh_mutable_array_exp(exp)
+    while exp and exp._tag == "Ast.ExpAdjust" do exp = exp.exp end
+    while exp and exp._tag == "Ast.ExpCast" and exp._implicit_coercion do
+        exp = exp.exp
+    end
+    if not exp or not exp._type or exp._type._tag ~= "Type.Array"
+       or exp._type.isconst ~= false then
+        return false
+    end
+    if exp._tag == "Ast.ExpInitList" then
+        return true
+    elseif exp._type.linear == true then
+        return true
+    end
+    return false
+end
+
 local function fresh_mutable_array_declaration(stat)
     if stat._tag ~= "Ast.StatDecl"
        or #stat.decls ~= 1
@@ -129,15 +148,7 @@ local function fresh_mutable_array_declaration(stat)
        or decl._captured then
         return nil
     end
-    local exp = stat.exps[1]
-    while exp and exp._tag == "Ast.ExpAdjust" do exp = exp.exp end
-    while exp and exp._tag == "Ast.ExpCast" and exp._implicit_coercion do
-        exp = exp.exp
-    end
-    if not exp or exp._tag ~= "Ast.ExpInitList"
-       or not exp._type
-       or exp._type._tag ~= "Type.Array"
-       or exp._type.isconst ~= false then
+    if not is_fresh_mutable_array_exp(stat.exps[1]) then
         return nil
     end
     return decl
@@ -191,6 +202,94 @@ local function select_block_linear_array_freezes(block)
                     -- This statement may have published or rebound the Array;
                     -- no later cast can prove unique mutable ownership.
                     break
+                end
+            end
+        end
+    end
+end
+
+local function is_linear_returned_value(block, ret_stat, exp)
+    while exp and exp._tag == "Ast.ExpAdjust" do exp = exp.exp end
+    while exp and exp._tag == "Ast.ExpCast" and exp._implicit_coercion do
+        exp = exp.exp
+    end
+    if not exp or not exp._type or exp._type._tag ~= "Type.Array"
+       or exp._type.isconst ~= false then
+        return false
+    end
+
+    if exp._tag == "Ast.ExpInitList" then
+        return true
+    end
+
+    if exp._type.linear == true then
+        return true
+    end
+
+    if exp._tag == "Ast.ExpVar"
+       and exp.var and exp.var._tag == "Ast.VarName"
+       and exp.var._decl then
+        local decl = exp.var._decl
+        if decl._tag == "Ast.Decl" and not decl._captured and decl._init_exp then
+            if is_fresh_mutable_array_exp(decl._init_exp) then
+                if builder_uses_are_non_escaping(block, decl, ret_stat) then
+                    if count_decl_uses(ret_stat, decl) == 1 then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+
+    return false
+end
+
+function annotate_linear_function_returns(node)
+    if not node.rettypes or #node.rettypes == 0
+       or not node._signature or not node._signature.rettypes
+       or #node._signature.rettypes == 0 then
+        return
+    end
+
+    local returns = {}
+    local function find_returns(n, seen)
+        if type(n) ~= "table" or seen[n] then return end
+        seen[n] = true
+        if n._tag == "Ast.ExpFunction" then
+            return
+        end
+        if n._tag == "Ast.StatReturn" then
+            table.insert(returns, n)
+        end
+        syntax_children(n, find_returns, seen)
+    end
+    find_returns(node.block, {})
+
+    if #returns == 0 then
+        return
+    end
+
+    for ret_idx = 1, #node._signature.rettypes do
+        local rettype = node._signature.rettypes[ret_idx]
+        if rettype._tag == "Type.Array" and rettype.isconst == false then
+            local all_linear = true
+            for _, ret_stat in ipairs(returns) do
+                local exp = ret_stat.exps and ret_stat.exps[ret_idx]
+                if not exp or not is_linear_returned_value(node.block, ret_stat, exp) then
+                    all_linear = false
+                    break
+                end
+            end
+            if all_linear then
+                local linear_array = types.Array(rettype.elem, false)
+                linear_array.linear = true
+                node._signature.rettypes[ret_idx] = linear_array
+                if node._type and node._type._tag == "Type.FunctionScheme"
+                   and node._type.signature and node._type.signature.rettypes then
+                    node._type.signature.rettypes[ret_idx] = linear_array
+                elseif node._type and node._type._tag == "Type.Function"
+                   and node._type.rettypes then
+                    node._type.rettypes[ret_idx] = linear_array
                 end
             end
         end

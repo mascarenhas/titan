@@ -230,9 +230,13 @@ typefromnode = util.make_visitor({
 
     ["Ast.TypeArray"] = function(node, st, errors,
                                      defer_c_enum_carrier)
+        local isconst = node.isconst
+        if isconst ~= "maybe" then
+            isconst = isconst and true or false
+        end
         return types.Array(deoptionize(typefromnode(
             node.subtype, st, errors, defer_c_enum_carrier)),
-            node.isconst and true or false)
+            isconst)
     end,
 
     ["Ast.TypeMap"] = function(node, st, errors,
@@ -836,6 +840,14 @@ function trycoerce(source, target, errors, use,
         local n = ast.ExpCast(source.loc, source, target)
         n._implicit_coercion = true
         n._adjustment = adjustment
+        n._interface_conversion = interface_conversion
+        n._type = target
+        return n, adjustment
+    elseif adjustment.kind == "written_cast" then
+        local n = ast.ExpCast(source.loc, source, target)
+        n._implicit_coercion = true
+        n._adjustment = adjustment
+        n._written_cast = adjustment
         n._interface_conversion = interface_conversion
         n._type = target
         return n, adjustment
