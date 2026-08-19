@@ -143,7 +143,7 @@ Only a call may be used as an expression statement.
 | scalar values | `boolean`, `integer`, `float`, `string` |
 | dynamic Lua-shaped slot | `value` |
 | optional value | `T?` |
-| mutable / const Array | `{T}` / `const { T }` |
+| mutable / const / maybe-const Array | `{T}` / `const { T }` / `const? { T }` |
 | Map | `{K: V}` |
 | function | `(A, B) -> R`, `() -> ()`, `(A) -> (R1, R2)` |
 | variadic input | `(...: T) -> R` or fixed prefix plus `...: T` |
@@ -221,9 +221,14 @@ integer -> integer?               accepted
 () -> integer -> () -> integer?  rejected
 ```
 
-Array constness never changes implicitly. `{T}` and `const { T }` are distinct
-invariant types; only a written mutable-to-const `as const { T }` is admitted,
-and there is no const-to-mutable cast.
+`{T}` and `const { T }` are distinct invariant types. `const? { T }` is a
+maybe-const view type: `{T}`, `const { T }`, and `const? { T }` can all be
+implicitly assigned to `const? { T }` (and `({T})?` / `(const {T})?` to
+`(const? {T})?`). `const? { T }` cannot be implicitly assigned back to `{T}`
+or `const { T }`, but can be explicitly downcast with `as {T}` or `as const {T}`
+(which perform runtime metatable checks). A direct `as const { T }` from a
+mutable `{T}` performs an explicit shallow snapshot (or in-place freeze when
+linear).
 
 Put the scalar expression in the scalar target instead:
 
@@ -520,10 +525,39 @@ end
 
 Mutable and const Arrays have distinct canonical Lua proxy tags. Lua may read
 and take `#` of either; the const proxy has no writer, so assignment and
-mutating `table.*` operations fail. Dynamic `value`/Lua checks require the
-exact target qualifier rather than treating const as a subtype.
+mutating `table.*` operations fail.
 
-The sole cross-qualifier operation is an explicit shallow snapshot:
+`const? { T }` is a maybe-const Array view type. It allows a function or data
+structure to accept both mutable `{T}` and const `const { T }` Arrays with
+zero overhead and zero conversions:
+
+```titan
+function sum(items: const? { integer }): integer
+  local total = 0
+  for i = 1, #items do
+    total = total + (items[i] or 0)
+  end
+  return total
+end
+```
+
+- `const? { T }` supports `#` and indexed reads, but rejects indexed writes
+  (`items[i] = v` is a compile error).
+- `{T}`, `const { T }`, and `const? { T }` can all be assigned to
+  `const? { T }` (provided element types are consistent).
+- Option versions propagate consistently: `({T})?` and `(const {T})?` can both
+  be assigned to `(const? {T})?`.
+- `const? { T }` cannot be implicitly assigned to `{T}` or `const { T }`.
+- `items as { T }` and `items as const { T }` explicitly downcast a `const?`
+  Array at runtime, verifying the proxy metatable and raising if the qualifier
+  mismatches.
+- `items is { T }` and `items is const { T }` perform non-allocating qualifier
+  tests.
+- Dynamic `value -> const? { T }` unboxing checks both mutable and const
+  metatables in $O(1)$.
+
+Cross-qualifier conversion from mutable `{T}` to `const { T }` uses an explicit
+shallow snapshot:
 
 ```titan
 function finish(items: {string}): const { string }
@@ -532,15 +566,22 @@ end
 ```
 
 Semantically this copies the Array container, preserving length, holes, and
-element identities. The compiler may freeze the original proxy in place only
-for one fresh mutable builder local that never escapes and whose terminal
-same-block cast is its final use. Before that cast, loops and structured code
-may use `#items` and indexed reads/writes; unrelated calls may compute element
-values, and creating a closure is harmless unless its body actually references
-the binding or an alias. Passing, returning, storing, aliasing, rebinding, or
-actually capturing the Array, hiding the consuming cast inside control flow,
-or using the source afterward retains the copy. Code cannot observe which path
-was selected.
+element identities. The compiler optimizes this by freezing the original proxy
+in place (`titan_array_freeze`) without copying or allocating when conservative
+linear-use analysis proves the mutable allocation is unique and unaliased:
+
+1. **Local builder pattern:** A fresh mutable builder local `{}` whose
+   references are non-escaping reads/writes (loops, `#`, indexing), with no
+   closure captures, frozen in place at its terminal same-block cast or return.
+2. **Linear function returns:** When all return paths of a function return a
+   freshly constructed array or an unaliased local builder array, the function's
+   return type is marked linear. Callers directly assigning or casting the call
+   result to a `const` target (e.g. `local res: const { B } = map(xs, f)`)
+   freeze the returned array in place without memory allocation.
+
+Passing, storing in an outer aggregate/container, aliasing, rebinding, or
+capturing the Array, or using the source afterward retains the copy. Code cannot
+observe which path was selected.
 
 Container value types are de-optionized: `{integer?}` means `{integer}`, and
 `{string: integer?}` means `{string: integer}`. Nil means absence, not a stored
