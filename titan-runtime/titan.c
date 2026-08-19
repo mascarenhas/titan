@@ -1225,6 +1225,41 @@ void titan_check_abi(lua_State *L, void *lib, const char *sym,
     lua_settop(L, top);
 }
 
+void titan_check_types(lua_State *L, void *lib, const char *sym,
+                       const char *file, const char *expected) {
+    typedef int (*titan_types_fn)(lua_State *);
+    void *raw;
+    titan_types_fn fn;
+    int top = lua_gettop(L);
+    int nresults;
+    const char *actual;
+    dlerror();  /* clear stale error */
+    raw = dlsym(lib, sym);
+    if (raw == NULL) {
+        const char *err = dlerror();
+        luaL_error(L,
+            "Titan compiled module '%s' is missing types symbol '%s': %s",
+            file, sym, err ? err : "symbol not found");
+    }
+    fn = titan_cast_func(titan_types_fn, raw);
+    nresults = fn(L);
+    if (nresults != 1 || !lua_isstring(L, -1)) {
+        lua_settop(L, top);
+        luaL_error(L,
+            "Titan compiled module '%s' has an invalid types marker '%s'",
+            file, sym);
+    }
+    actual = lua_tostring(L, -1);
+    if (strcmp(actual, expected) != 0) {
+        luaL_error(L,
+            "Titan compiled module '%s' type manifest mismatch: "
+            "the loaded provider '%s' has a different module interface "
+            "than the one this module was compiled against",
+            file, sym);
+    }
+    lua_settop(L, top);
+}
+
 /* Returns nonzero (and clears the pin) if the trace slot is pinned, i.e. a
 ** pending re-raise asked errorhandler to KEEP the existing TITAN_BACKTRACE_KEY
 ** slot rather than regenerate it. A fresh (unpinned) error regenerates. */

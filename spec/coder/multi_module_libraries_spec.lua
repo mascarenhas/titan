@@ -885,10 +885,38 @@ end
         assert.falsy(generated:find('loadlib(L, "pkg/right.so")', 1, true))
         assert.truthy(generated:find('"pkg_left_abi"', 1, true), generated)
         assert.truthy(generated:find('"pkg_right_abi"', 1, true), generated)
+        assert.truthy(generated:find('"pkg_left_types"', 1, true), generated)
+        assert.truthy(generated:find('"pkg_right_types"', 1, true), generated)
 
         ok, output = run_lua(workspace, [[
 local consumer = require "consumer"
 assert(consumer.run() == 1224)
+]])
+        assert.truthy(ok, output)
+    end)
+
+    it("aborts when a multi-module DSO has a manifest mismatch for one of its members",
+       function()
+        -- Recompile pkg.so with an incompatible type interface for pkg.left while keeping pkg.right
+        write_file(source_root .. "/pkg/left.titan", [[
+local common = import "pkg.shared"
+function read(): string
+    return "incompatible"
+end
+]])
+        local ok, output, why, code =
+            compile(workspace, source_root, "pkg.left", "pkg.right", "pkg.shared")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+
+        -- Attempting to run consumer (which was compiled expecting integer from left.read())
+        -- must fail with manifest mismatch on pkg_left_types from pkg.so.
+        ok, output = run_lua(workspace, [[
+local ok, err = pcall(require, "consumer")
+assert(not ok, "expected require to fail")
+assert(err:find("type manifest mismatch", 1, true), err)
+assert(err:find("pkg.so", 1, true), err)
+assert(err:find("pkg_left_types", 1, true), err)
 ]])
         assert.truthy(ok, output)
     end)

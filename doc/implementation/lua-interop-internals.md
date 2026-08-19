@@ -717,6 +717,8 @@ Generated code loads that exact selected provider through
 ```c
 void *some_dep_handle = loadlib(L, "some/provider.so");
 titan_check_abi(L, some_dep_handle, "some_dep_abi", "some/provider.so");
+titan_check_types(L, some_dep_handle, "some_dep_types", "some/provider.so",
+    "Module(...)");
 Udata* (*some_dep_init)(lua_State *L) =
     titan_cast_func(Udata* (*)(lua_State*),
         loadsym(L, some_dep_handle, "some_dep_init"));
@@ -727,8 +729,9 @@ Udata* (*some_dep_init)(lua_State *L) =
 ordinary default. It maps `dir/file` with `RTLD_LAZY | RTLD_GLOBAL`, caches
 the handle by relative provider for the state, invalidates native backtrace
 state, and never calls `dlclose`. Two logical modules in one image reuse the
-handle and resolve different mangled entries. `titan_check_abi` validates the
-logical marker before native use; `loadsym` resolves handle-local symbols;
+handle and resolve different mangled entries. `titan_check_abi` and
+`titan_check_types` validate the logical ABI marker and complete type/layout
+manifest before native use; `loadsym` resolves handle-local symbols;
 `loadglobalsym` uses `RTLD_DEFAULT` only after explicit providers initialize,
 for entries owned through re-exported record aliases.
 

@@ -156,13 +156,18 @@ function import_module(loadmods, initmods, sigs, mprefixes,
         -- container. Its transient file field records that physical provider;
         -- logical symbol names remain derived from modname below.
         local file = node._type.file
+        local expected_type = rawget(node, "_declared_type") or node._type
+        local expected_types = types.serialize(expected_type)
         table.insert(loadmods, render([[
             void *$HANDLE = loadlib(L, $FILE);
             titan_check_abi(L, $HANDLE, "$ABI", $FILE);
+            titan_check_types(L, $HANDLE, "$TYPES", $FILE, $EXPECTED);
         ]], {
             HANDLE = mprefix .. "handle",
             FILE = c_string_literal(file),
             ABI = mprefix .. "abi",
+            TYPES = mprefix .. "types",
+            EXPECTED = c_string_literal(expected_types),
         }))
         table.insert(initmods, render([[
             {

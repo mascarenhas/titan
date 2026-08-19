@@ -1018,7 +1018,7 @@ be tested before reinstalling.
 
 It also declares the dynamic-loading and error functions exported by
 `titan.c`: `loadlib`, `loadsym`, `loadglobalsym`,
-`titan_check_abi`, and `errorhandler`.
+`titan_check_abi`, `titan_check_types`, and `errorhandler`.
 
 ### `titan.c`: the dynamic loader
 

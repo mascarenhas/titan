@@ -449,12 +449,13 @@ The compiler and runtime therefore agree on:
 
 Every generated module also exports `<mangled>_abi`, a Lua C function
 returning `TITAN_VER`. DSO rehydration checks that marker before trusting
-`<mangled>_types`, and generated dynamic imports call `titan_check_abi` after
-`loadlib` and before `dlsym`ing native entries. Static-provider rehydration
-checks the same ABI value in the canonical embedded metadata before decoding
-its types. A missing DSO marker or missing exact archive entry is rejected;
-this protects the unversioned `.` component of the default path from silently
-loading stale build artifacts.
+`<mangled>_types`, and generated dynamic imports call `titan_check_abi` and
+`titan_check_types` after `loadlib` and before `dlsym`ing native entries.
+Static-provider rehydration checks the same ABI value in the canonical
+embedded metadata before decoding its types. A missing DSO marker, missing
+exact archive entry, or type manifest mismatch is rejected; this protects the
+unversioned `.` component of the default path from silently loading stale build
+artifacts.
 
 `spec/abi_spec.lua` pins the compiler/runtime agreement and rejection of
 markerless legacy `.so` files.
