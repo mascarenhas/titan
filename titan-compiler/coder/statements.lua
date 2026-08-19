@@ -1002,34 +1002,34 @@ function codeassignment(ctx, var, cexp, etype, lvalue)
                     if (TITAN_UNLIKELY(_k < 1)) {
                         $BADINDEX
                     }
-                    lua_Unsigned _actual_i = l_castS2U(_k) - 1u;
+                    lua_Unsigned _actual_i = l_castS2U(_k);
                     unsigned _asize = _t->asize;
                     if (_actual_i < _asize) {
                         unsigned _length = cast_uint(titan_array_length(_t));
                         obj2arr(_t, cast_uint(_actual_i), &_vv);
                         $BARRIER
                         if (ttisnil(&_vv)) {
-                            if (l_castS2U(_k) == _length) {
+                            if (_actual_i == _length) {
                                 while (_length > 0 &&
-                                       tagisempty(*getArrTag(_t, _length - 1u)))
+                                       tagisempty(*getArrTag(_t, _length)))
                                     _length--;
                                 titan_array_set_length(_t, _length);
                             }
-                        } else if (l_castS2U(_k) > _length) {
-                            titan_array_set_length(_t, l_castS2U(_k));
+                        } else if (_actual_i > _length) {
+                            titan_array_set_length(_t, _actual_i);
                         }
                     } else if (!ttisnil(&_vv)) {
                         sethvalue(L, $ARRROOT, _t);
                         setobj2t(L, $VALROOT, &_vv);
                         unsigned _newasize =
-                            titan_array_growth(L, l_castS2U(_k));
+                            titan_array_growth(L, _actual_i);
                         titan_array_resize(L, _t, _newasize);
                         _base = restorestack(L, _base_off);
                         _t = hvalue($ARRROOT);
                         setobj(L, &_vv, $VALROOT);
                         obj2arr(_t, cast_uint(_actual_i), &_vv);
                         $BARRIER
-                        titan_array_set_length(_t, l_castS2U(_k));
+                        titan_array_set_length(_t, _actual_i);
                     }
                 }
             ]], {

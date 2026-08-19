@@ -26,7 +26,7 @@ The backing and proxy form a strong cycle. The proxy's second user value carries
 the writer policy only for a mutable Array:
 
 ```text
-backing Table hash key 0 ───────────────► proxy Udata
+backing Table array slot 0 ──────────────► proxy Udata
           ▲                                  │
           └──────────── user value 1 ◄───────┤
                                              └── user value 2 ──► writer CClosure ──► _mod
@@ -39,24 +39,26 @@ value 2 (index 1) is the module-local writer closure selected by the Array's
 final construction element type; const user value 2 is nil. The metatable—not
 the writer—is the exact mutable/const tag. The writer is behavior for genuine
 Lua writes, not proof of current contents. The backing table has no metatable.
-Integer key 0 is private and is the table's only live hash entry; every user
-position is a positive index in the array part.
+Array slot 0 is private and holds the canonical proxy Udata; the table's hash part
+is empty (`nhsize = 0`), and every user element position `k` (`1..N`) maps directly
+to array slot `k` without offset arithmetic.
 
 For backing table `t`:
 
 ```c
-capacity(t) = t->asize;
-length(t)   = t->asize == 0 ? 0 : *lenhint(t);
+capacity(t) = t->asize - 1; /* slots 1..asize-1 for elements, slot 0 for proxy */
+length(t)   = *lenhint(t);
 ```
 
 The maintained invariants are:
 
 - `0 <= length <= capacity`;
-- every slot in `[length, capacity)` is empty;
-- when `length > 0`, slot `length - 1` is non-nil;
-- lower slots may be holes;
-- no positive or negative user index is stored in the hash;
-- hash key 0 points to the canonical proxy;
+- physical `asize` is `capacity + 1` (with `asize >= 1` always, so `lenhint(t)` is never NULL);
+- array slot 0 points to the canonical proxy Udata;
+- every slot in `(length, capacity]` is empty (tag is empty);
+- when `length > 0`, slot `length` is non-nil;
+- lower positive slots may be holes;
+- the table hash part is empty (`nhsize = 0`);
 - proxy user value 1 points to the same backing; and
 - proxy user value 2 contains the constructing module's writer closure for a
   mutable Array and nil for a const Array;
@@ -75,33 +77,29 @@ stack slot distinct from the rooted writer:
 1. assert the compiler-guaranteed metatable, writer, capacity, and result-slot
    preconditions;
 2. allocate the table and publish it in `result`;
-3. call `luaH_resize(L, backing, capacity, 1)`;
-4. initialize logical length to zero, without dereferencing `lenhint` when
-   `asize == 0`;
+3. call `luaH_resize(L, backing, capacity + 1, 0)`;
+4. initialize logical length to zero with `titan_array_set_length(backing, 0)`;
 5. allocate a zero-byte, two-uservalue Udata with `luaS_newudata`;
 6. write its metatable, backing, and writer fields directly;
-7. temporarily publish the proxy in `result`;
-8. insert `0 -> proxy` in the already-sized hash;
-9. apply the stock barriers and restore the backing to `result`; and
-10. poll the collector only after the complete cycle is rooted.
+7. insert `proxy` into array slot 0 via `obj2arr(backing, 0, &proxy_value)` and
+   barrier `luaC_barrierback(L, obj2gco(backing), &proxy_value)`; and
+8. poll the collector only after the complete cycle is rooted.
 
 `titan_const_array_new(L, const_metatable, capacity, result)` uses the same
 internal constructor but requires the const canonical metatable and stores nil
 in user value 2. A constructor checked under a const Array target calls this
 helper directly and never creates a transient mutable proxy.
 
-The empty case deliberately requests `luaH_resize(L, t, 0, 1)`. Its array part
-has size zero, but its non-dummy one-node hash still owns key 0.
+The empty case requests `luaH_resize(L, t, 1, 0)`. Its array part has size 1
+to hold the proxy at slot 0, with an empty hash part.
 Bundled Lua 5.5 has no capacity-taking variant of `luaH_new`; this
 `luaH_new`-then-`luaH_resize` sequence is the same internal construction shape
 used by Lua's own table-creation paths, without involving the public stack API.
 
-The caller keeps the mutable writer rooted. The one result slot first roots the
-backing, then the proxy whose first user value already traces that backing, and
-finally the completed backing/proxy cycle. This ordering is necessary because
-`luaH_resize` can allocate before either edge exists and `luaH_setint` can force
-an emergency full collection under Lua's `HARDMEMTESTS`. A C local `Table *`,
-`Udata *`, or `TValue` is not a GC root. The helper never changes `L->top`.
+The caller keeps the mutable writer rooted. The one result slot roots the
+backing table across the `luaS_newudata` allocation. `luaH_new`, `luaH_resize`,
+and `luaS_newudata` do not relocate the Lua stack, eliminating unnecessary
+`savestack`/`restorestack` churn. The helper never changes `L->top`.
 
 Constructor lowering fills the positive array slots after the pair exists.
 It then stores the highest non-nil produced position as the final length.
@@ -147,9 +145,10 @@ Lua 5.5 stores its table-length search hint in an unsigned word immediately
 beside the array allocation. Titan uses that stock word as authoritative
 Array state through `lenhint(t)`.
 
-`titan_array_length` guards `asize == 0` before dereferencing the word.
-`titan_array_set_length` asserts `length <= asize`. Generated `#array` reads
-the guarded hint directly; it never calls `luaH_getn`.
+Since physical `asize` is always at least 1 (holding the canonical proxy at slot 0),
+`t->array` is never NULL, so `titan_array_length(t)` directly dereferences `*lenhint(t)`.
+`titan_array_set_length(t, len)` stores `*lenhint(t) = cast_uint(len)`. Generated `#array`
+reads the hint directly; it never calls `luaH_getn`.
 
 This distinction matters because Lua treats `lenhint` as a mutable search
 cache. `luaH_getn` may select any valid border in a holed ordinary table and
@@ -164,93 +163,37 @@ border after every write:
 
 `luaH_resizearray` internally resets the hint to `newasize / 2`. Therefore
 `titan_array_resize` saves the logical length, calls the stock resize, and
-restores the saved value immediately. The stock resize also rebuilds the hash
-and reinserts key 0 while preserving its logical one-node size.
+restores the saved value immediately.
 
 Growth selects the smallest power of two strictly greater than the requested
-logical index. `TITAN_ARRAY_MAX_CAPACITY` mirrors pinned Lua 5.5's private
-`MAXASIZE` expression exactly:
+logical index in $O(1)$ using `__builtin_clzll`:
+
+```c
+unsigned titan_array_growth(lua_State *L, lua_Unsigned index) {
+    int clz = __builtin_clzll(index);
+    unsigned capacity = (clz >= 33) ? (1u << (64 - clz)) : (TITAN_ARRAY_MAX_CAPACITY + 1u);
+    if (TITAN_UNLIKELY(capacity > TITAN_ARRAY_MAX_CAPACITY))
+        luaL_error(L, "array index too large");
+    return capacity;
+}
+```
+
+`TITAN_ARRAY_MAX_CAPACITY` mirrors pinned Lua 5.5's private `MAXASIZE` expression:
 
 ```c
 min(1u << (l_numbits(int) - 1),
     MAX_SIZET / (sizeof(Value) + 1))
 ```
 
-Capacity is checked in `lua_Unsigned` before narrowing to `unsigned`.
-Unsupported growth raises `array index too large` before a hash fallback or
-integer truncation can occur. Later resizes never shrink an Array.
-
-## Canonical proxy and module cache
-
-`titan_array_metatables` creates or recovers the mutable/const registry pair
-per Lua state. Both install closures for:
-
-- `__index`, which accepts exactly an integral numeric key, returns nil below
-  1, and reads only the positive array slot;
-- `__len`, which reads the guarded authoritative length; and
-- protected qualifier-specific `__name`/`__metatable` text.
-
-Only the mutable metatable installs `__newindex`, which validates a positive
-integral index, handles nil as deletion, and otherwise invokes the
-receiver-carried writer before native growth/hole/length transitions. The
-const metatable has no write path.
-
-Creation is build-then-publish: the runtime fills both private metatables and
-publishes one canonical pair table only after every allocating setup step
-succeeds. The legacy named entries are projections repaired from that pair.
-No callback can observe one canonical identity before the other is complete,
-and a malformed pre-existing pair is rejected.
-
-There is no `__pairs`. The read callbacks capture both canonical identities,
-so nested boxing can recognize either qualifier without querying the registry
-on each access. The mutable write callback captures its mutable identity.
-
-Every generated module reserves two consecutive unconditional private
-user-value slots for the mutable and const metatables. Slot allocation places
-them after the
-importer-reconstructed public prefix—exported variables and canonical exported
-function closures—and before other private caches. Cold initialization stores
-both metatables immediately after the module Udata is registry-anchored and
-before imports, record setup, or `INITVARS`; module-variable initializers may
-construct or box Arrays. Recovered modules already carry the slot.
-
-For every distinct final element type of a mutable Array constructor emitted by
-a module, the coder also allocates one private module slot and generates one
-writer `CClosure`. The checker has already attached the element's canonical
-`DynamicCoercionPlan`; the generated writer captures `_mod`, converts its one
-incoming Lua value into the element's internal/boxed slot representation, and
-returns the converted `TValue`. Writer closures initialize after imports,
-record caches, and function-type tag publication, but **before `INITVARS`**,
-so a module-variable initializer can construct an Array. Construction loads
-the cached closure and passes it to `titan_array_new`.
-
-There is no global writer registry, interning, or "first one wins" identity.
-Two modules may generate distinct but extensionally equivalent writers for
-`{integer}`. Projection through `value`, alternate gradual views, imports,
-returns, and nested boxing preserve the existing qualified canonical proxy and,
-for a mutable Array, its writer; no operation compares or replaces writer
-identity.
-
-The metatable pair cache is used by proxy construction and boxing/unboxing checks.
-A normal typed Array read, write, or length operation touches only the backing
-Table and does not load the writer. In particular, a nested Array check still
-uses direct comparison with one of the two canonical metatables rather than
-chasing a per-type marker.
-
 ### Structural validation
 
-Boundary helpers validate both directions:
+Boundary helpers are inlined fast paths in `titan.h`:
 
-- `titan_array_try_proxy(backing, metatable)` nonthrowingly checks key 0,
-  full-Udata shape, zero payload, exactly two user values, canonical metatable,
-  reverse link, and `length <= asize`;
-- `titan_array_try_proxy_either(backing, mutable_metatable, const_metatable)`
-  recognizes either canonical tag for nested/raw-backing recovery;
-- `titan_array_require_proxy` raises on a failed required conversion;
-- `titan_array_try_backing(value, metatable)` checks the proxy shape, Table
-  user value, absent Table metatable, reverse key-0 link, and guarded length;
-  and
-- `titan_array_require_backing` raises for a non-Array proxy.
+- `titan_array_require_proxy(backing)` extracts the proxy directly from `backing->array[0]` (`gco2u(getArrVal(backing, 0)->gc)`);
+- `titan_array_try_proxy(backing, metatable)` checks `backing->asize > 0`, retrieves slot 0, and tests `proxy->metatable == metatable`;
+- `titan_array_try_proxy_either(backing, mutable_metatable, const_metatable)` recognizes either canonical tag for nested/raw-backing recovery;
+- `titan_array_try_backing(value, metatable)` tests full-userdata and `proxy->metatable == metatable`, returning `hvalue(&proxy->uv[0].uv)`;
+- `titan_array_require_backing(value)` extracts `hvalue(&uvalue(value)->uv[0].uv)` directly.
 
 The nonthrowing backing probe is essential when a dynamic value happens to be
 an ordinary Map Table: "not an Array backing" is a normal negative result, not
@@ -261,7 +204,7 @@ Ordinary validation deliberately does not inspect user value 2. Only mutable
 and freeze helper maintain the nil invariant. Supported code never mutates
 either ownership link, qualifier, or writer. Debug-library or
 C-level forgery/corruption is programmer-responsible and outside the
-untrusted-code contract; the helpers do not add writer-identity checks or
+untrusted-code contract; the helpers do not add defensive checks or
 attempt to repair arbitrary damaged Lua objects.
 
 ## Internal and boxed representations

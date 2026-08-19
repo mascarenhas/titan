@@ -466,14 +466,14 @@ function codearray(ctx, node, target)
                 TValue $VSLOT = {0};
                 for (int _vj = 0; _vj < _vacount; _vj++) {
                     $SETWRAPPED
-                    obj2arr($TMPNAME, $NPREFIX + _vj, &$VSLOT);
+                    obj2arr($TMPNAME, $NPREFIX + 1 + _vj, &$VSLOT);
                     $BARRIER
                 }
                 unsigned _array_length =
                     cast_uint($NPREFIX + _vacount);
                 while (_array_length > 0 &&
                        tagisempty(*getArrTag($TMPNAME,
-                                            _array_length - 1u)))
+                                            _array_length)))
                     _array_length--;
                 titan_array_set_length($TMPNAME, _array_length);
                 $CLEANUP
@@ -497,7 +497,7 @@ function codearray(ctx, node, target)
                     local slot = slots[i]
                     table.insert(ps, render([[
                         obj2arr($TMPNAME, $INDEX, $SLOT);
-                    ]], { TMPNAME = tmpname, INDEX = c_integer_literal(i - 1), SLOT = slot }))
+                    ]], { TMPNAME = tmpname, INDEX = c_integer_literal(i), SLOT = slot }))
                     if types.is_gc(elemtype) then
                         table.insert(ps, render([[
                             luaC_barrierback(L, obj2gco($TMPNAME), $SLOT);
@@ -515,7 +515,7 @@ function codearray(ctx, node, target)
             obj2arr($TMPNAME, $INDEX, $SLOT);
         ]], {
             TMPNAME = tmpname,
-            INDEX = i-1,
+            INDEX = i,
             SLOT = slot
         }))
         if types.is_gc(elemtype) then
@@ -531,7 +531,7 @@ function codearray(ctx, node, target)
         {
             unsigned _array_length = $SIZE;
             while (_array_length > 0 &&
-                   tagisempty(*getArrTag($TMPNAME, _array_length - 1u)))
+                   tagisempty(*getArrTag($TMPNAME, _array_length)))
                 _array_length--;
             titan_array_set_length($TMPNAME, _array_length);
         }
@@ -1682,7 +1682,7 @@ function codeindexarray(ctx, node)
             if (_k < 1) {
                 setnilvalue(&_av);
             } else {
-                lua_Unsigned _actual_i = l_castS2U(_k) - 1u;
+                lua_Unsigned _actual_i = l_castS2U(_k);
                 if (_actual_i < _t->asize) {
                     arr2obj(_t, cast_uint(_actual_i), &_av);
                     if (tagisempty(ttypetag(&_av)))

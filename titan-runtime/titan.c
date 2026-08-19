@@ -72,93 +72,10 @@ static Table *titan_array_callback_metatable(lua_State *L, int index) {
     return hvalue(&value);
 }
 
-lua_Unsigned titan_array_length(const Table *backing) {
-    if (backing->asize == 0)
-        return 0;
-    lua_assert(*lenhint(backing) <= backing->asize);
-    return *lenhint(backing);
-}
-
-void titan_array_set_length(Table *backing, lua_Unsigned length) {
-    if (backing->asize == 0) {
-        lua_assert(length == 0);
-        return;
-    }
-    lua_assert(length <= backing->asize);
-    *lenhint(backing) = cast_uint(length);
-}
-
-static int titan_array_valid_length(const Table *backing) {
-    return backing->asize == 0 || *lenhint(backing) <= backing->asize;
-}
-
-Udata *titan_array_try_proxy(Table *backing, Table *metatable) {
-    TValue value;
-    Udata *proxy;
-
-    if (backing == NULL || metatable == NULL ||
-        backing->metatable != NULL || !titan_array_valid_length(backing))
-        return NULL;
-    if (tagisempty(luaH_getint(backing, 0, &value)) ||
-        !ttisfulluserdata(&value))
-        return NULL;
-    proxy = uvalue(&value);
-    if (proxy->len != 0 || proxy->nuvalue != 2 ||
-        proxy->metatable != metatable ||
-        !ttistable(&proxy->uv[0].uv) ||
-        hvalue(&proxy->uv[0].uv) != backing)
-        return NULL;
-    return proxy;
-}
-
-Udata *titan_array_require_proxy(lua_State *L, Table *backing,
-                                 Table *metatable) {
-    Udata *proxy = titan_array_try_proxy(backing, metatable);
-    if (proxy == NULL)
-        luaL_error(L, "invalid Titan array backing");
-    return proxy;
-}
-
-Table *titan_array_try_backing(const TValue *value, Table *metatable) {
-    Udata *proxy;
-    Table *backing;
-    TValue cycle;
-
-    if (metatable == NULL || !ttisfulluserdata(value))
-        return NULL;
-    proxy = uvalue(value);
-    if (proxy->len != 0 || proxy->nuvalue != 2 ||
-        proxy->metatable != metatable ||
-        !ttistable(&proxy->uv[0].uv))
-        return NULL;
-    backing = hvalue(&proxy->uv[0].uv);
-    if (backing->metatable != NULL || !titan_array_valid_length(backing))
-        return NULL;
-    if (tagisempty(luaH_getint(backing, 0, &cycle)) ||
-        !ttisfulluserdata(&cycle) || uvalue(&cycle) != proxy)
-        return NULL;
-    return backing;
-}
-
-Table *titan_array_require_backing(lua_State *L, const TValue *value,
-                                   Table *metatable) {
-    Table *backing = titan_array_try_backing(value, metatable);
-    if (backing == NULL)
-        luaL_error(L, "expected Titan array");
-    return backing;
-}
-
 unsigned titan_array_growth(lua_State *L, lua_Unsigned index) {
-    unsigned capacity = 2;
-
-    if (index < 1)
-        luaL_error(L, "Titan array index must be positive");
-    while ((lua_Unsigned)capacity <= index) {
-        if (capacity > TITAN_ARRAY_MAX_CAPACITY / 2u)
-            luaL_error(L, "array index too large");
-        capacity *= 2u;
-    }
-    if (capacity > TITAN_ARRAY_MAX_CAPACITY)
+    int clz = __builtin_clzll(index);
+    unsigned capacity = (clz >= 33) ? (1u << (64 - clz)) : (TITAN_ARRAY_MAX_CAPACITY + 1u);
+    if (TITAN_UNLIKELY(capacity > TITAN_ARRAY_MAX_CAPACITY))
         luaL_error(L, "array index too large");
     return capacity;
 }
@@ -167,37 +84,34 @@ void titan_array_resize(lua_State *L, Table *backing,
                         lua_Unsigned capacity) {
     lua_Unsigned length;
 
-    if (capacity > TITAN_ARRAY_MAX_CAPACITY)
-        luaL_error(L, "array index too large");
-    if (capacity < backing->asize)
-        luaL_error(L, "cannot shrink Titan array backing");
+    lua_assert(capacity <= TITAN_ARRAY_MAX_CAPACITY);
+    lua_assert(capacity >= backing->asize);
     if (capacity == backing->asize)
         return;
     length = titan_array_length(backing);
-    lua_assert(length <= capacity);
     luaH_resizearray(L, backing, cast_uint(capacity));
     titan_array_set_length(backing, length);
 }
 
 lu_byte titan_array_get(Table *backing, lua_Integer index, TValue *result) {
-    lua_Unsigned offset;
+    lua_Unsigned logical_index;
     lu_byte tag;
 
     if (index < 1) {
         setnilvalue(result);
         return LUA_VNIL;
     }
-    offset = l_castS2U(index) - 1u;
-    if (offset >= backing->asize) {
+    logical_index = l_castS2U(index);
+    if (logical_index >= backing->asize) {
         setnilvalue(result);
         return LUA_VNIL;
     }
-    tag = *getArrTag(backing, cast_uint(offset));
+    tag = *getArrTag(backing, cast_uint(logical_index));
     if (tagisempty(tag)) {
         setnilvalue(result);
         return LUA_VNIL;
     }
-    farr2val(backing, cast_uint(offset), tag, result);
+    farr2val(backing, cast_uint(logical_index), tag, result);
     return tag;
 }
 
@@ -206,7 +120,6 @@ void titan_array_set_stack(lua_State *L, Table *backing, lua_Integer index,
     TValue value;
     lua_Unsigned logical_index;
     lua_Unsigned length;
-    unsigned offset;
 
     if (index < 1)
         luaL_error(L, "Titan array index must be positive");
@@ -214,19 +127,14 @@ void titan_array_set_stack(lua_State *L, Table *backing, lua_Integer index,
     value = lua_totvalue(L, value_index);
     length = titan_array_length(backing);
 
-    if (logical_index > backing->asize) {
+    if (logical_index >= backing->asize) {
         if (ttisnil(&value))
             return;
         titan_array_resize(L, backing, titan_array_growth(L, logical_index));
-        /*
-        ** The value remains rooted at value_index while resize can allocate
-        ** and move the Lua stack. Refresh the copy after that allocation.
-        */
         value = lua_totvalue(L, value_index);
     }
 
-    offset = cast_uint(logical_index - 1u);
-    obj2arr(backing, offset, &value);
+    obj2arr(backing, cast_uint(logical_index), &value);
     luaC_barrierback(L, obj2gco(backing), &value);
 
     if (ttisnil(&value)) {
@@ -234,7 +142,7 @@ void titan_array_set_stack(lua_State *L, Table *backing, lua_Integer index,
             do {
                 length--;
             } while (length > 0 &&
-                     tagisempty(*getArrTag(backing, cast_uint(length - 1u))));
+                     tagisempty(*getArrTag(backing, cast_uint(length))));
             titan_array_set_length(backing, length);
         }
     }
@@ -247,8 +155,7 @@ static int titan_array_lua_index(lua_State *L) {
     Table *metatable = titan_array_callback_metatable(L, 1);
     Table *other_metatable = titan_array_callback_metatable(L, 2);
     TValue receiver = lua_totvalue(L, 1);
-    Table *backing =
-        titan_array_require_backing(L, &receiver, metatable);
+    Table *backing = titan_array_require_backing(&receiver);
     lua_Integer index;
     TValue result;
 
@@ -272,10 +179,8 @@ static int titan_array_lua_index(lua_State *L) {
 }
 
 static int titan_array_lua_newindex(lua_State *L) {
-    Table *metatable = titan_array_callback_metatable(L, 1);
     TValue receiver = lua_totvalue(L, 1);
-    Table *backing =
-        titan_array_require_backing(L, &receiver, metatable);
+    Table *backing = titan_array_require_backing(&receiver);
     Udata *proxy = uvalue(&receiver);
     lua_Integer index;
     lua_Unsigned logical_index;
@@ -289,52 +194,29 @@ static int titan_array_lua_newindex(lua_State *L) {
     if (index < 1)
         return luaL_error(L, "Titan array index must be positive");
 
-    /*
-    ** Nil is the representation-independent deletion operation. In
-    ** particular, deleting beyond the current capacity remains an
-    ** allocation-free no-op and never invokes the type-directed writer.
-    */
     if (lua_isnil(L, 3)) {
         titan_array_set_stack(L, backing, index, 3);
         return 0;
     }
 
-    /*
-    ** Classify an oversized positive write before running user-visible
-    ** conversion code. titan_array_growth is a pure preflight here; the
-    ** actual resize happens only after the writer succeeds.
-    */
     logical_index = l_castS2U(index);
-    if (logical_index > backing->asize)
+    if (logical_index >= backing->asize)
         cast_void(titan_array_growth(L, logical_index));
 
-    /*
-    ** Construction installed a generated CClosure in uv[1]. Ordinary Array
-    ** validation deliberately never reads that slot: the shared metatable and
-    ** uv[0]/key-0 cycle remain the hot Array identity check. The debug library
-    ** can violate this private invariant, as it can other Titan invariants.
-    */
     if (!lua_checkstack(L, 2))
         return luaL_error(L, "stack overflow writing Titan array");
     lua_pushtvalue(L, proxy->uv[1].uv);
     lua_pushvalue(L, 3);
     lua_call(L, 1, 1);
 
-    /*
-    ** The converted result is stack-rooted across any resize. No backing
-    ** mutation, capacity change, length change, or barrier occurs until this
-    ** point, so a writer error leaves the Array untouched.
-    */
     titan_array_set_stack(L, backing, index, -1);
     lua_pop(L, 1);
     return 0;
 }
 
 static int titan_array_lua_len(lua_State *L) {
-    Table *metatable = titan_array_callback_metatable(L, 1);
     TValue receiver = lua_totvalue(L, 1);
-    Table *backing =
-        titan_array_require_backing(L, &receiver, metatable);
+    Table *backing = titan_array_require_backing(&receiver);
     lua_pushinteger(L, cast_Integer(titan_array_length(backing)));
     return 1;
 }
@@ -537,7 +419,6 @@ Table *titan_array_new_impl(lua_State *L, Table *metatable,
                             lua_Unsigned capacity,
                             const TValue *writer, int mutable,
                             StkId result) {
-    ptrdiff_t result_offset;
     Table *backing;
     Udata *proxy;
     TValue proxy_value;
@@ -556,42 +437,26 @@ Table *titan_array_new_impl(lua_State *L, Table *metatable,
     }
     lua_assert(capacity <= TITAN_ARRAY_MAX_CAPACITY);
 
-    result_offset = savestack(L, result);
     backing = luaH_new(L);
-    result = restorestack(L, result_offset);
     sethvalue2s(L, result, backing);
-    /* Exact positive capacity plus the reserved integer hash key 0. */
-    luaH_resize(L, backing, cast_uint(capacity), 1);
+    /* Physical array capacity is capacity + 1 (slot 0 for proxy), hash size is 0. */
+    luaH_resize(L, backing, cast_uint(capacity + 1u), 0);
     titan_array_set_length(backing, 0);
 
     proxy = luaS_newudata(L, 0, 2);
-    result = restorestack(L, result_offset);
     proxy->metatable = metatable;
     sethvalue(L, &proxy->uv[0].uv, backing);
     setobj(L, &proxy->uv[1].uv, &writer_value);
-    /*
-    ** Root the proxy before installing key 0. luaH_setint may force a full
-    ** collection under HARDMEMTESTS; the proxy then traces the backing and
-    ** writer, while the backing becomes the reverse owner at key 0.
-    */
-    setuvalue(L, s2v(result), proxy);
     luaC_objbarrier(L, proxy, metatable);
     luaC_checkfinalizer(L, obj2gco(proxy), metatable);
     luaC_barrierback(L, obj2gco(proxy), &proxy->uv[0].uv);
-    luaC_barrierback(L, obj2gco(proxy), &proxy->uv[1].uv);
+    if (mutable)
+        luaC_barrierback(L, obj2gco(proxy), &proxy->uv[1].uv);
 
     setuvalue(L, &proxy_value, proxy);
-    luaH_setint(L, backing, 0, &proxy_value);
-    /*
-    ** luaH_setint leaves the value barrier to its caller. Refreshing the local
-    ** TValue is unnecessary for object identity (Lua's GC is non-moving), but
-    ** keeps the barrier operand's liveness check explicit after a forced GC.
-    */
-    setuvalue(L, &proxy_value, proxy);
+    obj2arr(backing, 0, &proxy_value);
     luaC_barrierback(L, obj2gco(backing), &proxy_value);
 
-    result = restorestack(L, result_offset);
-    sethvalue2s(L, result, backing);
     luaC_checkGC(L);
     lua_assert(titan_array_try_proxy(backing, metatable) == proxy);
     lua_assert(mutable ? ttisCclosure(&proxy->uv[1].uv)
@@ -599,18 +464,12 @@ Table *titan_array_new_impl(lua_State *L, Table *metatable,
     return backing;
 }
 
-Table *titan_array_new(lua_State *L, Table *metatable,
-                       lua_Unsigned capacity, const TValue *writer,
-                       StkId result) {
-    return titan_array_new_impl(L, metatable, capacity, writer, 1, result);
-}
-
 Table *titan_array_shallow_copy(lua_State *L, Table *source,
                                 Table *mutable_metatable,
                                 Table *const_metatable,
                                 StkId result) {
     lua_Unsigned length;
-    lua_Unsigned offset;
+    lua_Unsigned i;
     Table *target;
     TValue value;
 
@@ -622,17 +481,16 @@ Table *titan_array_shallow_copy(lua_State *L, Table *source,
     /*
     ** Preserve the source's physical allocation as well as its logical
     ** length. Copying only the logical prefix below still leaves any spare
-    ** capacity empty, so later read behavior is unchanged and the conversion
-    ** itself never needs a growth path.
+    ** capacity empty. Note source->asize includes slot 0 (capacity + 1).
     */
     target = titan_const_array_new(L, const_metatable,
-                                   (lua_Unsigned)source->asize, result);
+                                   (lua_Unsigned)(source->asize - 1u), result);
 
-    for (offset = 0; offset < length; offset++) {
-        lu_byte tag = *getArrTag(source, cast_uint(offset));
+    for (i = 1; i <= length; i++) {
+        lu_byte tag = *getArrTag(source, cast_uint(i));
         if (!tagisempty(tag)) {
-            farr2val(source, cast_uint(offset), tag, &value);
-            obj2arr(target, cast_uint(offset), &value);
+            farr2val(source, cast_uint(i), tag, &value);
+            obj2arr(target, cast_uint(i), &value);
             luaC_barrierback(L, obj2gco(target), &value);
         }
     }
@@ -649,8 +507,10 @@ Table *titan_array_freeze(lua_State *L, Table *backing,
 
     lua_assert(mutable_metatable != NULL && const_metatable != NULL);
     lua_assert(mutable_metatable != const_metatable);
-    proxy = titan_array_try_proxy(backing, mutable_metatable);
-    lua_assert(proxy != NULL && ttisCclosure(&proxy->uv[1].uv));
+    lua_assert(backing != NULL && backing->asize > 0);
+    proxy = gco2u(getArrVal(backing, 0)->gc);
+    lua_assert(proxy->metatable == mutable_metatable);
+    lua_assert(ttisCclosure(&proxy->uv[1].uv));
 
     proxy->metatable = const_metatable;
     luaC_objbarrier(L, proxy, const_metatable);

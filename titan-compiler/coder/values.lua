@@ -504,14 +504,12 @@ function setboxed(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]])
     if typ._tag == "Type.Array" then
         return render([[
             {
-                Udata *_titan_proxy =
-                    titan_array_require_proxy(L, $SRC, $META);
+                Udata *_titan_proxy = titan_array_require_proxy($SRC);
                 setuvalue(L, $DST, _titan_proxy);
             }
         ]], {
             DST = dst,
             SRC = src,
-            META = array_metatable(ctx, typ),
         })
     elseif typ._tag == "Type.Option"
            and typ.base._tag == "Type.Array" then
@@ -522,14 +520,13 @@ function setboxed(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]])
                     setnilvalue($DST);
                 } else {
                     Udata *_titan_proxy = titan_array_require_proxy(
-                        L, hvalue(&_titan_v), $META);
+                        hvalue(&_titan_v));
                     setuvalue(L, $DST, _titan_proxy);
                 }
             } while (0);
         ]], {
             DST = dst,
             SRC = src,
-            META = array_metatable(ctx, typ.base),
         })
     elseif typ._tag == "Type.Nominal" then
         -- A record value IS the Udata; hand Lua the udata directly ($SRC is a
@@ -568,13 +565,12 @@ function copyboxed(ctx, typ, dst, src)
         return render([[
             {
                 Udata *_titan_proxy = titan_array_require_proxy(
-                    L, hvalue($SRC), $META);
+                    hvalue($SRC));
                 setuvalue(L, $DST, _titan_proxy);
             }
         ]], {
             DST = dst,
             SRC = src,
-            META = array_metatable(ctx, typ),
         })
     elseif typ._tag == "Type.Option"
            and typ.base._tag == "Type.Array" then
@@ -583,13 +579,12 @@ function copyboxed(ctx, typ, dst, src)
                 setnilvalue($DST);
             } else {
                 Udata *_titan_proxy = titan_array_require_proxy(
-                    L, hvalue($SRC), $META);
+                    hvalue($SRC));
                 setuvalue(L, $DST, _titan_proxy);
             }
         ]], {
             DST = dst,
             SRC = src,
-            META = array_metatable(ctx, typ.base),
         })
     end
     return render([[

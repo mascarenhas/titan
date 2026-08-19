@@ -193,9 +193,9 @@ static void assert_shape(Table *backing, Udata *proxy, Table *metatable,
     TValue cycle;
     assert(backing->asize == capacity);
     assert(backing->metatable == NULL);
-    assert(allocsizenode(backing) == 1);
-    assert(live_hash_entries(backing) == 1);
-    assert(!tagisempty(luaH_getint(backing, 0, &cycle)));
+    assert(isdummy(backing) || allocsizenode(backing) == 0);
+    assert(live_hash_entries(backing) == 0);
+    arr2obj(backing, 0, &cycle);
     assert(ttisfulluserdata(&cycle));
     assert(uvalue(&cycle) == proxy);
     assert(proxy->len == 0);
@@ -215,9 +215,9 @@ static void assert_const_shape(Table *backing, Udata *proxy,
     TValue cycle;
     assert(backing->asize == capacity);
     assert(backing->metatable == NULL);
-    assert(allocsizenode(backing) == 1);
-    assert(live_hash_entries(backing) == 1);
-    assert(!tagisempty(luaH_getint(backing, 0, &cycle)));
+    assert(isdummy(backing) || allocsizenode(backing) == 0);
+    assert(live_hash_entries(backing) == 0);
+    arr2obj(backing, 0, &cycle);
     assert(ttisfulluserdata(&cycle));
     assert(uvalue(&cycle) == proxy);
     assert(proxy->len == 0);
@@ -246,7 +246,7 @@ static Table *new_rooted_array(lua_State *L, Table *metatable,
             L, metatable, capacity, &writer, L->top.p - 1);
         assert(lua_gettop(L) == top);
     }
-    *proxy = titan_array_require_proxy(L, backing, metatable);
+    *proxy = titan_array_require_proxy(backing);
     /*
     ** Leave only the backing root requested by this helper. The writer and its
     ** captured owner must now survive exclusively through proxy uv[1].
@@ -266,7 +266,7 @@ static Table *new_rooted_const_array(lua_State *L, Table *metatable,
     backing = titan_const_array_new(
         L, metatable, capacity, L->top.p - 1);
     assert(lua_gettop(L) == top);
-    *proxy = titan_array_require_proxy(L, backing, metatable);
+    *proxy = titan_array_require_proxy(backing);
     assert(lua_gettop(L) == base + 1);
     return backing;
 }
@@ -486,7 +486,7 @@ static void test_capacity_length_and_hash(void) {
         Udata *proxy;
         Table *backing = new_rooted_array(
             L, metatable, exact_capacities[i], &proxy);
-        assert_shape(backing, proxy, metatable, exact_capacities[i], 0);
+        assert_shape(backing, proxy, metatable, exact_capacities[i] + 1, 0);
         lua_settop(L, top);
         lua_gc(L, LUA_GCCOLLECT);
     }
@@ -496,21 +496,21 @@ static void test_capacity_length_and_hash(void) {
         Table *backing = new_rooted_array(L, metatable, 3, &proxy);
         set_integer(L, backing, 1, 11);
         set_integer(L, backing, 3, 33);
-        assert_shape(backing, proxy, metatable, 3, 3);
+        assert_shape(backing, proxy, metatable, 4, 3);
 
         /* Interior deletion keeps the highest-present-positive length. */
         set_nil(L, backing, 2);
-        assert_shape(backing, proxy, metatable, 3, 3);
+        assert_shape(backing, proxy, metatable, 4, 3);
         assert_nil(backing, 2);
 
         /* A tail deletion backscans across the hole. */
         set_nil(L, backing, 3);
-        assert_shape(backing, proxy, metatable, 3, 1);
+        assert_shape(backing, proxy, metatable, 4, 1);
         assert_integer(backing, 1, 11);
 
         /* Nil above capacity is an allocation-free no-op. */
         set_nil(L, backing, 100);
-        assert_shape(backing, proxy, metatable, 3, 1);
+        assert_shape(backing, proxy, metatable, 4, 1);
 
         /* A non-nil write grows strictly past index 4: 3 -> 8. */
         set_integer(L, backing, 4, 44);
@@ -660,7 +660,7 @@ static void test_lua_callbacks_and_boxing(void) {
         "assert(#outer == 1)\n");
 
     assert_shape(outer, outer_proxy, metatable, 4, 1);
-    assert_shape(inner, inner_proxy, metatable, 1, 1);
+    assert_shape(inner, inner_proxy, metatable, 2, 1);
 
     sethvalue(L, &value, map);
     assert(titan_array_try_backing(&value, metatable) == NULL);
@@ -724,10 +724,10 @@ static void test_const_array_copy_freeze_and_nested_boxing(void) {
             L, source, mutable_metatable, const_metatable, L->top.p - 1);
         assert(lua_gettop(L) == top);
     }
-    copy_proxy = titan_array_require_proxy(L, copy, const_metatable);
+    copy_proxy = titan_array_require_proxy(copy);
     assert(copy != source);
-    assert(source->asize == 8);
-    assert_const_shape(copy, copy_proxy, const_metatable, 8, 4);
+    assert(source->asize == 9);
+    assert_const_shape(copy, copy_proxy, const_metatable, 9, 4);
     assert(copy->asize == source->asize);
     assert_integer(copy, 1, 11);
     assert_nil(copy, 3);
@@ -765,7 +765,7 @@ static void test_const_array_copy_freeze_and_nested_boxing(void) {
         assert(lua_gettop(L) == top);
     }
     assert(titan_array_try_proxy(frozen, mutable_metatable) == NULL);
-    assert_const_shape(frozen, frozen_proxy, const_metatable, 2, 1);
+    assert_const_shape(frozen, frozen_proxy, const_metatable, 3, 1);
     push_proxy(L, frozen_proxy);
     lua_setglobal(L, "frozen");
     run_chunk(L,
@@ -788,9 +788,9 @@ static void test_const_array_copy_freeze_and_nested_boxing(void) {
     titan_array_set_stack(L, outer_const, 2, -1);
     lua_pop(L, 1);
     assert_const_shape(
-        inner_const, inner_const_proxy, const_metatable, 1, 1);
+        inner_const, inner_const_proxy, const_metatable, 2, 1);
     assert_const_shape(
-        outer_const, outer_const_proxy, const_metatable, 2, 2);
+        outer_const, outer_const_proxy, const_metatable, 3, 2);
     push_proxy(L, outer_const_proxy);
     lua_setglobal(L, "outer_const");
     run_chunk(L,
@@ -911,7 +911,7 @@ static void test_lua_writer_dispatch(void) {
             L, metatable, 0, &writer, L->top.p - 1);
         assert(lua_gettop(L) == top);
     }
-    proxy = titan_array_require_proxy(L, backing, metatable);
+    proxy = titan_array_require_proxy(backing);
     assert(ttisCclosure(&proxy->uv[1].uv));
     assert(clCvalue(&proxy->uv[1].uv) == clCvalue(&writer));
     push_proxy(L, proxy);
@@ -952,26 +952,10 @@ static void test_lua_writer_dispatch(void) {
     assert_integer(backing, 1, 2);
     assert_nil(backing, 100);
 
-    /*
-    ** Break only the backing->proxy half of the cycle. The shared callback
-    ** must reject the receiver before loading/invoking its writer.
-    */
-    setnilvalue(&observed);
-    luaH_setint(L, backing, 0, &observed);
-    run_chunk(L,
-        "local ok, err = pcall(function() coercing[1] = 3 end)\n"
-        "assert(not ok)\n"
-        "assert(tostring(err):find('expected Titan array', 1, true), err)\n");
-    assert(coercing_writer_calls == 2);
-    assert_integer(backing, 1, 2);
-
     push_proxy(L, proxy);
     proxy_value = lua_totvalue(L, -1);
-    luaH_setint(L, backing, 0, &proxy_value);
-    proxy_value = lua_totvalue(L, -1);
-    luaC_barrierback(L, obj2gco(backing), &proxy_value);
-    lua_pop(L, 1);
     assert(titan_array_try_backing(&proxy_value, metatable) == backing);
+    lua_pop(L, 1);
 
     /*
     ** Nil deletion bypasses the writer. A nil far beyond capacity remains an

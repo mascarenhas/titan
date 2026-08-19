@@ -4147,7 +4147,7 @@ static int pmain(lua_State *L) {
             L, array_metatable, nargs, &writer, L->top.p - 1);
         lua_remove(L, -2);              /* discard writer, keep backing */
         Udata *proxy =
-            titan_array_require_proxy(L, arguments, array_metatable);
+            titan_array_require_proxy(arguments);
 
         /* Root the canonical proxy/backing cycle before allocating argv
          * strings. The program name is deliberately excluded: Titan's
