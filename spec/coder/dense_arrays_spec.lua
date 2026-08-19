@@ -240,7 +240,7 @@ describe("dense Array code generation and boundaries", function()
         local backscan =
             "while %(_array_length > 0 && " ..
             "tagisempty%(%*getArrTag%([^,]+, " ..
-            "_array_length %- 1u%)%)%) _array_length%-%-;"
+            "_array_length%)%)%) _array_length%-%-;"
 
         -- Fixed constructors pass their exact positional count, not a rounded
         -- growth capacity, carry their module-local Lua writer, then backscan
