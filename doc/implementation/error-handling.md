@@ -35,9 +35,12 @@ handler's rule is:
 This prevents stale-trace reuse while still supporting bare re-raise.
 When a Titan catch re-raises the original error, codegen first writes the
 saved catch-local `traceback` back to `TITAN_BACKTRACE_KEY`, sets the pin,
-pushes the saved `error`, and calls `lua_error`. The handler sees the pin
-and preserves the original deep trace. A fresh `raise <exp>` leaves the
-pin clear, so the handler captures a new trace at the new raise site.
+places the saved `error` in the single top slot required by Lua's error ABI,
+and calls `lua_error`. The registry writes use `luaH_*` and the registry
+`Table` directly; they neither call the public stack API nor change
+`L->top`. The handler sees the pin and preserves the original deep trace. A
+fresh `raise <exp>` leaves the pin clear, so the handler captures a new trace
+at the new raise site.
 
 Coroutines use one extra registry slot, `TITAN_TRACE_APPEND_KEY`, for
 uncaught errors in a dead coroutine. The coroutine entry stages its own
@@ -52,7 +55,14 @@ When a boundary catches an error for a Titan `catch`, it snapshots the
 trace into a reserved stack slot and then clears both the trace slot and
 the pin. A fully handled catch therefore leaves `titan.backtrace()` as
 `nil`; the handled trace is available only through the catch-local
-`traceback`.
+`traceback`. Snapshot and clear also access `G(L)->l_registry` through the
+internal table machinery without pushing registry keys or values. String-key
+lookup can allocate while interning the fixed key, so generated recovery
+restores `_base` from its saved offset before it writes any reserved slot.
+The lookup tag is checked before its result: an absent trace (for example on
+an exceptional low-level error path that did not populate the registry) falls
+back to the empty traceback string without inspecting an uninitialized
+`TValue`.
 
 ### libbacktrace and frame merging
 
@@ -361,7 +371,7 @@ therefore not itself a stack-relocation hazard.
 
 ## ABI and search path
 
-The current compiled-module ABI is `0.25`. The error-handling control-flow
+The current compiled-module ABI is `0.26`. The error-handling control-flow
 machinery did not by itself require an ABI bump. The earlier ABI-0.10 change
 changed the `TitanVargX` structs from inline flexible-array backing
 objects to descriptor structs with an `args` pointer. That layout change
@@ -421,17 +431,19 @@ contract. ABI 0.24 retains the machinery again while extending serialized
 interfaces for generic declarations. ABI 0.25 retains all of this error
 machinery while changing the public `titan.fs.stat`/`lstat` results and
 `titan.async.suspend` parameter in serialized metadata and exact native
-signatures. Errors raised by an Interface adapter,
+signatures. ABI 0.26 retains the same error machinery while advancing the
+serialized and generated boundary for const descriptors, Interface fields,
+and qualified Array runtime tags. Errors raised by an Interface adapter,
 strict guard, dynamic conversion, or failed exact downcast still use the same
 Titan error handler; all wrapper and adapter roots are ordinary Lua-traced
 values, so unwinding requires no resource-specific cleanup path.
 
 The compiler and runtime therefore agree on:
 
-* `TITAN_VER "0.25"`
-* `TITAN_VER_SUFFIX "_0_25"`
-* versioned binary path variable `TITAN_PATH_0_25`
-* default binary path `.;<root>/lib/titan/0.25`, with `<root>` recovered from
+* `TITAN_VER "0.26"`
+* `TITAN_VER_SUFFIX "_0_26"`
+* versioned binary path variable `TITAN_PATH_0_26`
+* default binary path `.;<root>/lib/titan/0.26`, with `<root>` recovered from
   the Lua `PREFIX`'s `package.cpath` in the currently supported layout where
   that path also names the equal Titan `ROCKS_TREE`
 

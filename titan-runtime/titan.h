@@ -10,6 +10,7 @@
 #include "llimits.h"
 #include "lobject.h"
 #include "lstring.h"
+#include "ltable.h"
 #include "luaconf.h"
 #include "lvm.h"
 
@@ -162,9 +163,14 @@ typedef struct lua_longjmp {
    0.24 -> 0.25: titan.fs stat/lstat results become optional and titan.async
    suspend gains an optional synchronous cancellation action. Their serialized
    public interfaces and exact native call signatures change, so 0.24 and 0.25
-   standard providers must not be mixed. */
-#define TITAN_VER "0.25"
-#define TITAN_VER_SUFFIX "_0_25"
+   standard providers must not be mixed.
+   0.25 -> 0.26: serialized Array, Field, ModuleVariable, and Interface
+   descriptors gain const/member-shape state; Interface wrappers gain field
+   uservalues; and generated module state/runtime support distinguish mutable
+   and const Array tags. The descriptor, wrapper, and runtime layouts are not
+   compatible, so 0.25 and 0.26 providers must not be mixed. */
+#define TITAN_VER "0.26"
+#define TITAN_VER_SUFFIX "_0_26"
 #define TITAN_PATH_VAR "TITAN_PATH"
 #define TITAN_PATH_SEP "/"
 #define TITAN_ROOT_DEFAULT "/usr/local"
@@ -221,6 +227,7 @@ typedef struct lua_longjmp {
 ** fallback.
 */
 #define TITAN_ARRAY_METATABLE "Titan array metatable"
+#define TITAN_CONST_ARRAY_METATABLE "Titan const array metatable"
 #define TITAN_ARRAY_MAX_CAPACITY                                             \
   (((1u << (l_numbits(int) - 1)) < (MAX_SIZET / (sizeof(Value) + 1)))         \
        ? (1u << (l_numbits(int) - 1))                                        \
@@ -423,18 +430,120 @@ LUAI_FUNC const void *titan_publish_function_type_tag(
 
 /*
 ** Dense Array runtime. A backing Table has no metatable, uses only its array
-** part for positive indices, and stores its logical length in lenhint. Its
-** reserved integer hash key 0 points at a canonical zero-payload Udata proxy;
-** proxy uservalue 1 points back at the backing table and uservalue 2 carries
-** the generated type-directed Lua writer CClosure. The writer operand passed
-** to titan_array_new must remain rooted for the duration of the call.
+** part (with slot 0 reserved for the canonical Udata proxy and slots 1..N
+** for elements), an empty hash part (nhsize = 0), and stores its logical
+** length in lenhint. Mutable proxy uservalue 2 carries the generated
+** type-directed Lua writer CClosure; const proxy uservalue 2 is nil.
 */
+LUAI_FUNC void titan_array_metatables(lua_State *L, Table **mutable_out,
+                                      Table **const_out);
+/* Read the already-initialized canonical pair without changing L->top. */
+LUAI_FUNC void titan_array_cached_metatables(lua_State *L,
+                                             Table **mutable_out,
+                                             Table **const_out);
 LUAI_FUNC Table *titan_array_metatable(lua_State *L);
-LUAI_FUNC Table *titan_array_new(lua_State *L, Table *metatable,
-                                 lua_Unsigned capacity,
-                                 const TValue *writer);
-LUAI_FUNC lua_Unsigned titan_array_length(const Table *backing);
-LUAI_FUNC void titan_array_set_length(Table *backing, lua_Unsigned length);
+static l_inline Table *titan_const_array_metatable(lua_State *L) {
+  Table *mutable_metatable;
+  Table *const_metatable;
+  titan_array_metatables(L, &mutable_metatable, &const_metatable);
+  cast_void(mutable_metatable);
+  return const_metatable;
+}
+
+static l_inline lua_Unsigned titan_array_length(const Table *backing) {
+  return *lenhint(backing);
+}
+
+static l_inline void titan_array_set_length(Table *backing, lua_Unsigned length) {
+  *lenhint(backing) = cast_uint(length);
+}
+
+static l_inline Udata *titan_array_require_proxy(Table *backing) {
+  lua_assert(backing != NULL && backing->asize > 0);
+  lua_assert(*getArrTag(backing, 0) == ctb(LUA_VUSERDATA));
+  return gco2u(getArrVal(backing, 0)->gc);
+}
+
+static l_inline Udata *titan_array_try_proxy(Table *backing, Table *metatable) {
+  if (TITAN_LIKELY(backing->asize > 0)) {
+    TValue value;
+    arr2obj(backing, 0, &value);
+    if (TITAN_LIKELY(ttisfulluserdata(&value))) {
+      Udata *maybe_proxy = uvalue(&value);
+      if (TITAN_LIKELY(maybe_proxy->metatable == metatable)) {
+        return maybe_proxy;
+      }
+    }
+  }
+  return NULL;
+}
+
+/* Reject a null/collapsed tag pair before testing either exact identity. */
+static l_inline Udata *titan_array_try_proxy_either(
+    Table *backing, Table *mutable_metatable, Table *const_metatable) {
+  Udata *proxy;
+  if (mutable_metatable == NULL || const_metatable == NULL ||
+      mutable_metatable == const_metatable)
+    return NULL;
+  proxy = titan_array_try_proxy(backing, mutable_metatable);
+  return proxy != NULL ? proxy : titan_array_try_proxy(backing, const_metatable);
+}
+
+static l_inline Table *titan_array_try_backing(const TValue *value,
+                                               Table *metatable) {
+  if (ttisfulluserdata(value)) {
+    Udata *maybe_proxy = uvalue(value);
+    if (TITAN_LIKELY(maybe_proxy->metatable == metatable)) {
+      return hvalue(&maybe_proxy->uv[0].uv);
+    }
+  }
+  return NULL;
+}
+
+static l_inline Table *titan_array_try_backing_either(
+    const TValue *value, Table *mutable_metatable, Table *const_metatable) {
+  if (mutable_metatable == NULL || const_metatable == NULL ||
+      mutable_metatable == const_metatable)
+    return NULL;
+  if (ttisfulluserdata(value)) {
+    Udata *maybe_proxy = uvalue(value);
+    if (TITAN_LIKELY(maybe_proxy->metatable == mutable_metatable ||
+                     maybe_proxy->metatable == const_metatable)) {
+      return hvalue(&maybe_proxy->uv[0].uv);
+    }
+  }
+  return NULL;
+}
+
+static l_inline Table *titan_array_require_backing(const TValue *value) {
+  lua_assert(ttisfulluserdata(value));
+  return hvalue(&uvalue(value)->uv[0].uv);
+}
+
+LUAI_FUNC Table *titan_array_new_impl(lua_State *L, Table *metatable,
+                                      lua_Unsigned capacity,
+                                      const TValue *writer, int mutable,
+                                      StkId result);
+
+static l_inline Table *titan_array_new(lua_State *L, Table *metatable,
+                                       lua_Unsigned capacity,
+                                       const TValue *writer, StkId result) {
+  return titan_array_new_impl(L, metatable, capacity, writer, 1, result);
+}
+
+static l_inline Table *titan_const_array_new(lua_State *L, Table *metatable,
+                                             lua_Unsigned capacity,
+                                             StkId result) {
+  return titan_array_new_impl(L, metatable, capacity, NULL, 0, result);
+}
+
+LUAI_FUNC Table *titan_array_shallow_copy(lua_State *L, Table *source,
+                                          Table *mutable_metatable,
+                                          Table *const_metatable,
+                                          StkId result);
+LUAI_FUNC Table *titan_array_freeze(lua_State *L, Table *backing,
+                                    Table *mutable_metatable,
+                                    Table *const_metatable);
 LUAI_FUNC unsigned titan_array_growth(lua_State *L, lua_Unsigned index);
 LUAI_FUNC void titan_array_resize(lua_State *L, Table *backing,
                                   lua_Unsigned capacity);
@@ -442,14 +551,6 @@ LUAI_FUNC lu_byte titan_array_get(Table *backing, lua_Integer index,
                                   TValue *result);
 LUAI_FUNC void titan_array_set_stack(lua_State *L, Table *backing,
                                      lua_Integer index, int value_index);
-LUAI_FUNC Udata *titan_array_try_proxy(Table *backing, Table *metatable);
-LUAI_FUNC Udata *titan_array_require_proxy(lua_State *L, Table *backing,
-                                           Table *metatable);
-LUAI_FUNC Table *titan_array_try_backing(const TValue *value,
-                                         Table *metatable);
-LUAI_FUNC Table *titan_array_require_backing(lua_State *L,
-                                             const TValue *value,
-                                             Table *metatable);
 
 int errorhandler(lua_State *L);
 

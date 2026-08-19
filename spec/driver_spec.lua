@@ -31,7 +31,7 @@ end
 describe("compiler installation discovery", function()
     it("uses the first literal Lua 5.5 C-module prefix", function()
         local cpath = table.concat({
-            "/first prefix/lib/titan/0.25/?.so",
+            "/first prefix/lib/titan/0.26/?.so",
             "/wrong/lib/lua/5.4/?.so",
             "/also-wrong/lib/lua/5.5/?.dylib",
             "/first prefix/lib/lua/5.5/?.so",
@@ -65,14 +65,14 @@ describe("compiler installation discovery", function()
     it("derives the ABI-owned probe cache from an explicit prefix first",
        function()
         local cpath = "/installed/lib/lua/5.5/?.so"
-        assert.equal("/explicit/var/cache/titan-probes/0.25",
-            driver.probe_cache_directory(cpath, "/explicit", "0.25"))
-        assert.equal("/installed/var/cache/titan-probes/0.25",
-            driver.probe_cache_directory(cpath, "", "0.25"))
-        assert.equal("/var/cache/titan-probes/0.25",
+        assert.equal("/explicit/var/cache/titan-probes/0.26",
+            driver.probe_cache_directory(cpath, "/explicit", "0.26"))
+        assert.equal("/installed/var/cache/titan-probes/0.26",
+            driver.probe_cache_directory(cpath, "", "0.26"))
+        assert.equal("/var/cache/titan-probes/0.26",
             driver.probe_cache_directory(
-                "/lib/lua/5.5/?.so", nil, "0.25"))
-        assert.is_nil(driver.probe_cache_directory(nil, nil, "0.25"))
+                "/lib/lua/5.5/?.so", nil, "0.26"))
+        assert.is_nil(driver.probe_cache_directory(nil, nil, "0.26"))
     end)
 
     it("honors the test-only persistent-probe-cache disable switch",
@@ -129,10 +129,10 @@ assert(driver.PROBE_CACHE_DIRECTORY == nil)
             libtitan = "/opt/titan/lib/libtitan.a",
             libbacktrace = "/opt/titan/lib/libbacktrace.a",
             liblua = "/opt/titan/lib/liblua.a",
-            titan_bin = "/opt/titan/lib/titan/0.25",
-            lua_cpath = "/opt/titan/lib/titan/0.25/?.so",
+            titan_bin = "/opt/titan/lib/titan/0.26",
+            lua_cpath = "/opt/titan/lib/titan/0.26/?.so",
             test_source =
-                "/opt/titan/share/titan/0.25/src/titan/test.titan",
+                "/opt/titan/share/titan/0.26/src/titan/test.titan",
         }, paths)
 
         assert.same({
@@ -1629,6 +1629,7 @@ describe("compiler module loader", function()
                         I = {
                             _tag = "Type.Interface",
                             name = "archive_bad.I",
+                            fields = {},
                             methods = {},
                         },
                     })
@@ -1651,7 +1652,7 @@ describe("compiler module loader", function()
             assert.falsy(ok)
             assert.match(archive, message, 1, true)
             assert.match("archive_bad", message, 1, true)
-            assert.match("interface method list is empty", message, 1, true)
+            assert.match("interface has no members", message, 1, true)
             assert.is_false(dynamic_probed)
             assert.is_nil(driver.imported.archive_bad)
         end)
@@ -1877,11 +1878,12 @@ describe("compiler module loader", function()
                         I = {
                             _tag = "Type.Interface",
                             name = "meta.interface_schema.I",
+                            fields = {},
                             methods = {},
                         },
                     })]]
                 end,
-                expected = "interface method list is empty",
+                expected = "interface has no members",
                 retains_claim = true,
             },
         }

@@ -91,7 +91,7 @@ Ast.ExpCall(loc, exp, args, typeargs)
 
 Ast.TopLevelRecord(loc, name, fields, typeparams)
 Ast.TopLevelUnion(loc, name, variants, typeparams)
-Ast.TopLevelInterface(loc, name, methods, typeparams)
+Ast.TopLevelInterface(loc, name, members, fields, methods, typeparams)
 Ast.TopLevelFunc(loc, islocal, name, params, rettypes, flexrettype,
                  block, typeparams)
 Ast.TopLevelMethod(loc, class, name, params, rettypes, flexrettype,
@@ -100,6 +100,9 @@ Ast.TopLevelStatic(loc, class, name, params, rettypes, flexrettype,
                    block, typeparams)
 Ast.InterfaceMethod(loc, name, params, rettypes, flexrettype, typeparams)
 ```
+
+Interface fields reuse `Ast.Decl` with `isconst == true`; the `members` list
+keeps their source order relative to `Ast.InterfaceMethod` children.
 
 Every absent `typeparams` or public `ExpCall.typeargs` list is `{}`. The only
 false sentinel is an absent `TypeParam.constraint`; no downstream visitor
@@ -206,7 +209,7 @@ Type.GenericAlias(module, name, locality, target_owner_fqtn,
 
 Type.Record(name, fields, functions, methods, nfields, scope, typeparams)
 Type.Union(name, variants, functions, methods, nvariants, scope, typeparams)
-Type.Interface(name, methods, scope, typeparams)
+Type.Interface(name, fields, methods, scope, typeparams)
 Type.Method(fqtn, name, params, rettypes, varargtype, flexrettype,
             paramnames, scope, typeparams)
 Type.StaticMethod(fqtn, name, params, rettypes, varargtype, flexrettype,
@@ -288,18 +291,20 @@ A rigid unconstrained `Parameter` is not `Type.Value` during this pass. The
 relation layer admits only identical-parameter transport and storage, ordinary
 Option operations, same-parameter Array/Map operations, uniform equality,
 conversion to/from its constraint carrier, and written `as`/`is`. A constrained
-parameter additionally exposes exactly its applied Interface methods. It does
-not inherit operations from a possible future binding. Distinct parameters do
-not become equal merely because erasure later gives them the same carrier.
+parameter additionally exposes exactly its applied Interface's read-only
+fields and methods. It does not inherit operations from a possible future
+binding. Distinct parameters do not become equal merely because erasure later
+gives them the same carrier.
 
 Generic Interface satisfaction is checked on the surface schemes. After owner
-substitution, an implementation method must have the same callable-local binder
-arity as the required method. Corresponding binder constraints are compared by
-alpha-equivalence, and the existing directional method-callable compatibility
-check runs under the matched rigid parameters. Parameter names are irrelevant;
-missing, inaccessible, differently constrained, or incompatible methods fail
-before erasure. The erased signature is never used to make two incompatible
-generic methods appear equal.
+substitution, every required field needs a visible same-name const record field
+with the ordinary assignment adjustment, and an implementation method must
+have the same callable-local binder arity as the required method. Corresponding
+binder constraints are compared by alpha-equivalence, and the existing
+directional method-callable compatibility check runs under the matched rigid
+parameters. Missing, inaccessible, mutable, differently constrained, or
+incompatible members fail before erasure. The erased signature is never used
+to make two incompatible generic methods appear equal.
 
 Generic source visibility is ordinary source visibility. Direct source imports
 can select a local owner, scheme, or forwarding alias through their existing
@@ -627,8 +632,11 @@ must not compare the original callback with its adjusted wrapper.
 
 An unconstrained generic Array `{T}` erases to `{value}` and selects the
 existing permissive `value` writer. For a binder `T: I`, `{T}` erases to
-`{erase(I)}` and selects the corresponding existing Interface writer. Maps use
-the same ordinary erased key/value behavior. No new writer family is generated.
+`{erase(I)}` and selects the corresponding existing Interface writer. Array
+erasure preserves the outer qualifier, so `const { T }` becomes
+`const { value }` or `const { erase(I) }` and selects the canonical const tag
+without a writer. Maps use the same ordinary erased key/value behavior. No new
+element-writer family is generated.
 
 A literal `value` store into unconstrained dependent storage writes the raw
 `TValue` and returns normally. A read that remains in the same erased carrier
@@ -779,7 +787,9 @@ schema. An ABI-0.23 provider is rejected by its ABI entry before 0.24 types are
 decoded. ABI 0.25 retains this generic schema and erased implementation; its
 boundary instead changes the public `titan.fs` and `titan.async` interfaces and
 exact signatures, so an ABI-0.24 provider is rejected before current metadata
-is decoded. Prior-version state is preserved; generics add no cross-ABI
+is decoded. ABI 0.26 extends generic Interface metadata with fields while
+retaining erased implementation; 0.25 providers are rejected before decoding.
+Prior-version state is preserved; generics add no cross-ABI
 migration, cleanup, or compatibility provider.
 
 Metadata retains precise declared applications while native provenance remains

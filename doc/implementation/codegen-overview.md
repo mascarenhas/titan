@@ -381,7 +381,7 @@ It comes **immediately after `_mod` and before the method `self`**, and
 *every* Titan function takes it even when the body never reads it: the
 fast value-call path dispatches purely on the function-type tag, so all
 native entries of a given `Type.Function` must share one ABI. This type is
-exclusively a boxed Titan/Lua callable; its ABI-0.25 third constructor
+exclusively a boxed Titan/Lua callable; its ABI-0.26 third constructor
 position remains reserved `false`, not C variadicity. Its value at a call site
 depends on the
 path:
@@ -689,16 +689,12 @@ The checker computes, for each `ExpFunction`, the ordered de-duplicated
 list of enclosing-function declarations it captures (see
 [the type checker](checker.md#closures-capture-analysis-and-lambda-inference)); the coder
 turns that list into the `upvalue[4 + i]` slots in agreed order. At the
-use site the closure is built by pushing the four header upvalues then,
-in capture-list order, each capture — the box `Udata*` for a boxed
-capture, or the copied value for a by-value capture — followed by the strict
-entry trailer, and calling
-`lua_pushcclosure` (preceded by
-`titan_ensure_stack(L, 5 + ncaptured)`, which raises if
-`lua_checkstack` cannot reserve the capacity, since the capture pushes are raw
-transient stack pushes, not
-slot-reserved). `lua_pushcclosure` moves the pushed upvalues into the new
-white closure, so no barrier is needed at construction.
+use site the coder allocates the exact closure with `luaF_newCclosure`, fills
+the four header upvalues, captures, and strict-entry trailer directly while the
+closure is white, then publishes it into its traced result slot before paying
+the allocation's GC debt. No capture transits through `L->top`, and no barrier
+is needed before publication. The post-publication collector poll may relocate
+the Lua stack, so generated code restores `_base` from `_base_off` afterward.
 
 Lua permits at most 255 C-closure upvalues. Five structural source slots leave
 **250 captures**; the checker rejects the first larger capture list so code
@@ -872,21 +868,23 @@ public standard-module interfaces and exact entries for `titan.fs.stat` and
 `TValue` optional cancellation-action parameter to `titan.async.suspend`. All
 other ABI-0.24 serialized layouts, generated layouts, and runtime contracts are
 retained.
-Compiler-witnessed dynamic Interface discovery retains ABI 0.25 as well. It
+Compiler-witnessed dynamic Interface discovery was added within ABI 0.25. It
 adds only translation-unit-private wrapper functions, ordinary one-upvalue
 closures, and raw entries in per-state nominal metatables; the serialized type
 graph, wrapper/vtable layout, exported symbols, and module-userdata prefix are
-unchanged. Older ABI-0.25 objects remain loadable but do not advertise pairs
-they were not compiled to witness.
-The active marker is `_0_25`, the search variable is `TITAN_PATH_0_25`, and the
-provider namespace is `lib/titan/0.25`; older providers are rejected before
-interface rehydration. Existing 0.24 artifacts remain separately versioned and
+unchanged. Earlier ABI-0.25 objects remained loadable within that boundary but
+did not advertise pairs they were not compiled to witness. ABI 0.26 changes
+serialized const/member state, Interface wrappers, the module-state Array
+metatable cache, and qualified Array runtime support.
+The active marker is `_0_26`, the search variable is `TITAN_PATH_0_26`, and the
+provider namespace is `lib/titan/0.26`; older providers are rejected before
+interface rehydration. Existing 0.25 artifacts remain separately versioned and
 are not migrated or cleaned up.
 
 Closure adjustment wrappers reuse the fixed CClosure header and `function_sig`
-shapes retained through ABI 0.25; their target adapters and strict relays are
+shapes retained through ABI 0.26; their target adapters and strict relays are
 private consumer artifacts, with no serialized field, provider symbol, or
-module-state slot. A consumer may therefore wrap an ordinary ABI-0.25
+module-state slot. A consumer may therefore wrap an ordinary ABI-0.26
 source/DSO/archive function. Any implementation that needed another fixed slot
 or signature would instead require a coordinated ABI advance.
 
@@ -916,7 +914,7 @@ Udata *counter_init(lua_State *L) {
         _initialized = 1;
         /* create and register _mod (luaS_newudata(L, 0, NUPVALS));
            $INITSOURCEIDENTITY (this translation unit's immutable token),
-           $INITARRAYMETA (shared Array metatable/cache),
+           $INITARRAYMETA (canonical mutable/const Array metatable caches),
            $LOADMODULES1 (dlopen dynamic deps), $INITMODULES (dep inits),
            $LOADGLOBALS (symbols published by transitive RTLD_GLOBAL deps),
            $INITRECORDS (record, union, and Interface metatables),
@@ -1150,9 +1148,10 @@ prefix entirely from the serialized interface:
 
 The producer stamps the corresponding AST declarations and an importer walks
 the same layout, so an imported constructor or nominal function is the exact
-canonical first-class closure. The unconditional per-module Array metatable
-cache is the first private slot. One fixed lightuserdata slot containing the
-source producer's immutable physical-provider token follows it, before the
+canonical first-class closure. The unconditional mutable and const Array
+metatable caches occupy the first two private slots. One fixed lightuserdata
+slot containing the source producer's immutable physical-provider token
+follows them, before the
 fixed AST-order allocation for local variables/imports, referenced local
 ordinary-function closures, every static not already in the public prefix, and
 each nominal owner's private static-namespace table. A direct source importer
@@ -1174,7 +1173,7 @@ bound-method closure and must copy a live exact tag into it. First-use private
 objects are filled by `init_data_from_other_modules` or the module
 initializer. Thus all private slots, beginning with the Array cache and fixed
 provider-identity token, come *after* the importer-visible public prefix. Their
-fixed header was introduced in ABI 0.22 and is retained through 0.25, while later
+fixed header was introduced in ABI 0.22 and is retained through 0.26, while later
 inventory/first-use slots remain
 coder-private and do not perturb the public importer slot math.
 

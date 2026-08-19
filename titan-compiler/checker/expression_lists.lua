@@ -780,7 +780,7 @@ end
 
 function generic_finish_positional_constructor(node, st, errors, container_tag,
                                                keytype, elem_context, adjusted,
-                                               operation)
+                                               operation, array_isconst)
     generic_close_contextual_constructor_components(adjusted)
     if operation then
         generic_refresh_finalized_argument_projections(adjusted)
@@ -791,7 +791,7 @@ function generic_finish_positional_constructor(node, st, errors, container_tag,
         operation, keytype, true)
 
     if container_tag == "Type.Array" then
-        node._type = types.Array(etype)
+        node._type = types.Array(etype, array_isconst and true or false)
         annotate_array_writer(node, etype, errors)
     else
         node._type = types.Map(assert(closed_keytype), etype)
@@ -874,7 +874,8 @@ function generic_finish_positional_constructor(node, st, errors, container_tag,
 end
 
 function check_positional_constructor(node, st, errors, container_tag,
-                                              keytype, elem_context, operation)
+                                              keytype, elem_context, operation,
+                                              array_isconst)
     local exps = {}
     for _, field in ipairs(node.fields) do
         assert(constructor_field_kind(field) == "positional")
@@ -956,16 +957,16 @@ function check_positional_constructor(node, st, errors, container_tag,
         local provisional_key = generic_substitute_constructor_type(
             operation, keytype, false)
         node._type = container_tag == "Type.Array"
-            and types.Array(etype)
+            and types.Array(etype, array_isconst and true or false)
             or types.Map(assert(provisional_key), etype)
         node._positional_adjustment = adjusted
         generic_add_inference_finalizer(operation, function()
             generic_finish_positional_constructor(node, st, errors, container_tag,
-                keytype, elem_context, adjusted, operation)
+                keytype, elem_context, adjusted, operation, array_isconst)
         end)
     else
         generic_finish_positional_constructor(node, st, errors, container_tag,
-            keytype, elem_context, adjusted, false)
+            keytype, elem_context, adjusted, false, array_isconst)
     end
 end
 
@@ -1597,7 +1598,8 @@ function generic_check_direct_positional_constructor(
             return false
         end
         generic_unify_inference(operation.context, pattern,
-            types.Array(typ), "positional constructor first component", loc)
+            types.Array(typ, false),
+            "positional constructor first component", loc)
         local candidate = current_type(pattern, false)
         if candidate._tag ~= "Type.Array" then return false end
         plan.selected = true
@@ -1750,7 +1752,7 @@ function generic_check_direct_positional_constructor(
             local sources = independent_sources(false)
             plan.container_tag = "Type.Array"
             plan.elem = sources[1] and sources[1].type or types.Integer()
-            plan.context = types.Array(plan.elem)
+            plan.context = types.Array(plan.elem, false)
         end
 
         if not plan.rejected then
@@ -1763,7 +1765,7 @@ function generic_check_direct_positional_constructor(
             plan.elem = current_type(plan.elem, false)
             plan.key = current_type(plan.key, false)
             node._type = plan.container_tag == "Type.Array"
-                and types.Array(plan.elem)
+                and types.Array(plan.elem, false)
                 or types.Map(plan.key, plan.elem)
         else
             node._type = candidate
@@ -1799,7 +1801,7 @@ function generic_check_direct_positional_constructor(
         select(closed)
     elseif sources[1] then
         generic_unify_inference(operation.context, pattern,
-            types.Array(sources[1].type),
+            types.Array(sources[1].type, false),
             "positional constructor first component", sources[1].loc)
         select(generic_substitute_inference(
             operation.context, pattern, false))
@@ -1813,7 +1815,7 @@ function generic_check_direct_positional_constructor(
         local ready = independent_sources(true)
         if ready[1] then
             generic_unify_inference(operation.context, pattern,
-                types.Array(ready[1].type),
+                types.Array(ready[1].type, false),
                 "positional constructor first component", ready[1].loc)
             return select(generic_substitute_inference(
                 operation.context, pattern, false))
@@ -1830,7 +1832,7 @@ function generic_check_direct_positional_constructor(
         local equations = independent_sources(false)
         if equations[1] then
             generic_unify_inference(operation.context, pattern,
-                types.Array(equations[1].type),
+                types.Array(equations[1].type, false),
                 "default positional constructor shape", equations[1].loc)
             return select(generic_substitute_inference(
                 operation.context, pattern, false))
@@ -1852,7 +1854,7 @@ function generic_check_direct_positional_constructor(
             if elem
                and not generic_inference_type_has_invalid(elem) then
                 generic_unify_inference(operation.context, pattern,
-                    types.Array(deoptionize(elem)),
+                    types.Array(deoptionize(elem), false),
                     "default positional constructor component", item.exp.loc)
                 return select(generic_substitute_inference(
                     operation.context, pattern, false))
@@ -1878,7 +1880,9 @@ function generic_check_direct_positional_constructor(
         if not plan.rejected then
             generic_finish_positional_constructor(
                 node, st, errors, plan.container_tag, plan.key,
-                current_type(plan.elem, true), adjusted, operation)
+                current_type(plan.elem, true), adjusted, operation,
+                plan.container_tag == "Type.Array"
+                    and plan.context.isconst or false)
         elseif generic_inference_type_has_unresolved(
                 operation.context, node._type) then
             node._type = current_type(node._type, true)
@@ -1908,7 +1912,7 @@ function generic_defer_empty_constructor(
         plan.complete = true
         if candidate._tag == "Type.Array" then
             check_positional_constructor(node, st, errors, "Type.Array", nil,
-                candidate.elem, operation)
+                candidate.elem, operation, candidate.isconst)
         elseif candidate._tag == "Type.Map" then
             check_computed_map_constructor(
                 node, st, errors, candidate, operation)
@@ -1931,7 +1935,8 @@ function generic_defer_empty_constructor(
     generic_add_inference_discovery(operation, function()
         if finish(false) then return true end
         generic_unify_inference(operation.context, pattern,
-            types.Array(types.Integer()), "default empty constructor", node.loc)
+            types.Array(types.Integer(), false),
+            "default empty constructor", node.loc)
         return finish(false)
     end, "default")
     generic_add_inference_finalizer(operation, function()

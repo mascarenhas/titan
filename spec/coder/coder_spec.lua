@@ -20,6 +20,16 @@ local function clean()
     if not h.verbose then os.execute("rm -f *.c") end
 end
 
+local function generated_native_function(csrc, name)
+    local native = "test_\\u2133_" .. name .. "_titan(lua_State *L"
+    local declaration = assert(csrc:find(native, 1, true), native)
+    local definition = assert(csrc:find(native, declaration + 1, true), native)
+    local lua_entry = "static int test_\\u2133_" .. name
+        .. "_titanentry_lua"
+    local boundary = assert(csrc:find(lua_entry, definition, true), lua_entry)
+    return csrc:sub(definition, boundary - 1)
+end
+
 describe("zero-return () functions (code generator)", function()
     after_each(clean)
 
@@ -2727,6 +2737,42 @@ describe("Titan code generator", function()
         ]], [[test.f()]], "expected test.Rec but found test.Point")
     end)
 
+    it("keeps native nominal mismatch diagnostics off the Lua stack",
+    function()
+        local csrc = compile_and_read_c([[
+            record Expected
+            end
+            interface Reader
+                function read(): integer
+            end
+
+            function expect_record(v: value): Expected
+                return v as Expected
+            end
+            function expect_interface(v: value): Reader
+                return v as Reader
+            end
+        ]])
+
+        for _, name in ipairs({ "expect_record", "expect_interface" }) do
+            local native = generated_native_function(csrc, name)
+            assert.truthy(native:find(
+                "hvalue(&G(L)->l_registry)", 1, true), native)
+            assert.truthy(native:find(
+                "getstr(tsvalue(&_titan_nominal_name))", 1, true), native)
+            for _, forbidden in ipairs({
+                "luaL_tolstring(",
+                "luaT_objtypename(",
+                "lua_pushlightuserdata(",
+                "lua_rawget(",
+                "lua_pop(",
+            }) do
+                assert.falsy(native:find(forbidden, 1, true),
+                    name .. " contains " .. forbidden)
+            end
+        end
+    end)
+
     it("casts from value to record unsuccessfully", function ()
         run_coder([[
             record Rec
@@ -2758,6 +2804,60 @@ describe("Titan code generator", function()
             local ok2, e2 = pcall(test.f, io.stdout)
             assert(not ok2)
             assert(e2:find("expected test%.Rec but found"))
+        ]])
+    end)
+
+    it("reports named nominals and does not stringify unknown userdata",
+    function()
+        run_coder([[
+            record Expected
+            end
+            record Actual
+            end
+            interface Reader
+                function read(): integer
+            end
+
+            function expect_record(v: value): Expected
+                return v as Expected
+            end
+            function expect_interface(v: value): Reader
+                return v as Reader
+            end
+            function actual(): Actual
+                return Actual.new()
+            end
+        ]], [[
+            local expect_record = test.expect_record
+            local expect_interface = test.expect_interface
+            local actual = test.actual()
+
+            local function expect_error(f, value, message)
+                local ok, err = pcall(f, value)
+                assert(not ok)
+                err = tostring(err)
+                assert(err:find(message, 1, true), err)
+            end
+
+            expect_error(expect_record, actual,
+                "expected test.Expected but found test.Actual")
+            expect_error(expect_interface, actual,
+                "expected test.Reader but found test.Actual")
+
+            local tostring_calls = 0
+            local opaque = test
+            debug.setmetatable(opaque, {
+                __name = "OpaqueHandle",
+                __tostring = function()
+                    tostring_calls = tostring_calls + 1
+                    return "unexpected __tostring result"
+                end,
+            })
+            expect_error(expect_record, opaque,
+                "expected test.Expected but found userdata")
+            expect_error(expect_interface, opaque,
+                "expected test.Reader but found userdata")
+            assert(tostring_calls == 0)
         ]])
     end)
 

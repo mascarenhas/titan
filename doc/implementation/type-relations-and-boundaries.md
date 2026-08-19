@@ -88,7 +88,8 @@ name is identity normalization, not a transitive relation edge.
 - reflexive and symmetric;
 - deliberately non-transitive (`integer ~ value` and `value ~ string`, but
   not `integer ~ string`);
-- pointwise for Array, Map, and Option constructors;
+- pointwise for Array, Map, and Option constructors, with equal Array
+  qualifiers required before element descent;
 - nominal for records, unions, and Interface descriptors;
 - exact for concrete C types after typedef normalization; and
 - shape-aware for Functions.
@@ -149,6 +150,11 @@ component may be identical, a gradual injection/projection/view, or another
 callable adjustment. Numeric conversion, `T`/`T?` conversion, C conversion, and
 record/union-to-Interface wrapper construction are rejected as callable
 component matches.
+
+Mutable `{T}` and `const { T }` are distinct invariant Array types. No
+assignment adjustment changes the qualifier, even when their elements are
+equal or gradually consistent. The only cross-qualifier relation is the
+explicit mutable-to-const written cast described below.
 
 `nil_fill_result` is emitted only when an expected fixed result has neither a
 fixed nor flexible source and its target passes `accepts_missing_nil` (Nil,
@@ -220,7 +226,7 @@ The initial target matrix is:
 | `nil` | exact nil |
 | `string` | exact string |
 | `value` / C `TValue` | whole-slot copy |
-| Array | validate only the canonical outer Array representation |
+| Array | validate the exact qualified canonical Array representation |
 | Map | validate only the outer table representation |
 | Function | preserve the boxed value; invocation decides callability |
 | record/union | exact nominal metatable |
@@ -235,6 +241,18 @@ Option recursion is intentional. In particular, a present
 nil. The corresponding `is` predicate reports whether that same conversion
 would succeed without returning the converted value. It is not a separate
 tag-only implementation.
+
+The Array row is qualifier-exact: `{T}` and `const { T }` have distinct
+canonical tags. A dynamic value carrying one cannot satisfy a target with the
+other qualifier.
+
+For a statically known mutable Array, `written_cast` returns an `array_freeze`
+plan only toward `const { T }`, and only when the element types are equal or
+gradually consistent. `as` performs a shallow copy by default; a
+checker-authored linear-use annotation may select the observationally
+equivalent in-place freeze. The matching static `is` reports admission without
+copying. Const-to-mutable and all other cross-qualifier Array relations are
+rejected.
 
 The Interface strict and dynamic leaves share one exact-or-witnessed codegen
 operation. An exact wrapper succeeds immediately. Otherwise a full userdata's
@@ -329,6 +347,8 @@ This table controls which of the two run-time policies a lowering may use:
 | branded exact-tag-mismatch callable arguments/results | declaration/relay-attached argument/vararg guards and call-attached result guards | strict generic path; the raw `CallablePlan` establishes that the view is admissible |
 | written `value as T` | `WrittenCastPlan(dynamic)` | dynamic coercion or normal error |
 | written `value is T` | same dynamic plan | non-raising dynamic predicate |
+| written mutable Array `as const { T }` | `WrittenCastPlan(array_freeze)` | shallow copy, or checker-proven linear in-place freeze |
+| written mutable Array `is const { T }` | same admitted static plan | evaluate once and report true without conversion |
 | Lua call into a Titan function | per-formal `DynamicCoercionPlan` | dynamic coercion |
 | Lua module/record field write | per-slot `DynamicCoercionPlan` | dynamic coercion |
 | non-nil Lua Array write | construction-selected writer plan | dynamic coercion before mutation |
@@ -360,6 +380,8 @@ written/Lua boundary but fails an implicit gradual projection to boolean.
   guard exists, the checker rejects the read rather than storing an unavailable
   plan for code generation;
 - written `as`/`is` nodes carry `_written_cast`;
+- a proven terminal mutable-to-const Array cast additionally carries
+  `_linear_array_freeze`; the coder never repeats escape or last-use analysis;
 - equality nodes carry `_comparison`;
 - strict function formals, variadic elements, fixed results, and open results
   carry their parallel GuardPlan annotations;

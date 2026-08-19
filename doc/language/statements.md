@@ -52,29 +52,44 @@ local x, _ = f()   -- keep the first result, ignore the second
 
 ## Local declarations
 
-A local variable is declared with `local`, an optional type annotation,
-and a mandatory initializer:
+A mutable local variable is declared with `local`, an optional type
+annotation, and an optional initializer expression list:
 
 ```lua
 local x: integer = 10
 local s = "hello"        -- type inferred: string
 ```
 
-Unlike Lua, an ordinary declaration *must* have an initializer —
-`local x: integer` by itself is a compile-time syntax error
-(`Expected '=' after variable declaration.`). The narrow exception is an
-explicit complete C aggregate or fixed-array local, whose missing right-hand
-side requests C `{0}` initialization; see
-[zero-initialized automatic C objects](c-ffi-expressions.md#target-directed-c-allocation).
-There is no implicit `nil` default for Titan values; if you want a variable
-that starts out as "no value yet", give it an
-[option type](option-types.md) and initialize it with `nil`:
+When the expression list is omitted, every name must have an explicit type
+that admits a missing nil representation (`nil`, `value`, an Option, or an
+existing nullable pointer domain). The compiler supplies one typed nil per
+slot. General assignment conversion is deliberately not consulted, so
+truthiness does not make `local ready: boolean` valid and a declaration with
+no annotation has no type to infer. For example:
 
 ```lua
-local found: string? = nil
+local found: string?
+local dynamic: value
 ```
 
-When the annotation is omitted the type is inferred from the initializer.
+Writing `= nil` explicitly has the same run-time value. Direct C aggregates
+and fixed arrays do not admit nil and still require `.new()` or
+`.new_array(...)` at their direct initialized local sink; see
+[target-directed C allocation](c-ffi-expressions.md#target-directed-c-allocation).
+
+Const locals use `const` or `local const` and always require an initializer:
+
+```titan
+const limit: integer = 10
+local const low, high = bounds()
+```
+
+Constness applies to the complete declaration list, and none of the declared
+names can be assigned afterward, including from a capturing lambda. See
+[Const values](const-values.md#const-locals).
+
+When an initialized declaration omits its annotation, the type is inferred
+from the initializer.
 Inference never produces an option type: if the initializer is an option
 (for example an array read, which has type `T?`), it is implicitly
 unwrapped, with a run-time check, and the variable gets the base type. Ask
@@ -150,6 +165,11 @@ variables; module-level variables must be declared at the top level (see
 [Modules](modules.md)). Functions and modules are not assignable: `f = 2`
 where `f` is a function is the compile-time error `trying to assign to a
 function`.
+
+Assignment also rejects const locals, const module variables outside their
+owner initialization region, const record or Interface fields, and const
+Array indices. These are shallow storage rules; see
+[Const values](const-values.md).
 
 ## Multiple assignment
 

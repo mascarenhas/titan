@@ -7,8 +7,10 @@ require "titan-compiler.coder.core"
 -- generate C, compile it, and run the result under stock Lua or as a standalone
 -- executable, so they need the full lua-5.5.1 + libbacktrace setup.
 --
--- `raise <exp>` evaluates its operand to a Lua value, pushes it as the error
--- object, and calls lua_error(L). The entry wrapper has errorhandler installed
+-- `raise <exp>` evaluates its operand to a Lua value, places it in the one
+-- error-object slot required by Lua's error ABI, and calls lua_error(L). The
+-- traceback registry bookkeeping itself stays off the Lua stack. The entry
+-- wrapper has errorhandler installed
 -- on L->errfunc, so the longjmp through lua_error builds the unified Lua+Titan
 -- trace. A `raise` from a Titan function caught by Lua `pcall` therefore
 -- surfaces the raised value as the pcall error and records the Titan frames.
@@ -23,6 +25,12 @@ local compile_and_run_app = h.compile_and_run_app
 local function clean()
     os.execute("rm -rf *.o *.so *.dSYM test test__entrypoint.c")
     if not h.verbose then os.execute("rm -f *.c") end
+end
+
+local function native_body(csrc, name)
+    local symbol = coder_names._function_prefix("test", name) .. "_titan"
+    return assert(csrc:match(
+        "[^\n]*" .. symbol .. "%b()%s*(%b{})"), symbol)
 end
 
 describe("raise <exp>", function()
@@ -178,6 +186,79 @@ describe("raise <exp>", function()
             print("OK")
         ]==])
         assert.match("OK", out)
+    end)
+
+    it("keeps native catch and re-raise registry bookkeeping off the Lua stack",
+    function()
+        local csrc = compile_and_read_c([[
+            function reraised(flag: boolean): integer
+                do
+                    if flag then raise "body" end
+                catch
+                    if flag then raise end
+                end
+                return 0
+            end
+
+            local function complete_pending()
+            end
+
+            function pending_finally(): integer
+                defer complete_pending()
+                raise "pending"
+                return 0
+            end
+        ]])
+
+        local forbidden = {
+            "lua_checkstack", "lua_gettop", "lua_settop",
+            "lua_pushliteral", "lua_pushboolean", "lua_pushnil",
+            "lua_pushvalue", "lua_rawget", "lua_rawset",
+        }
+        for _, name in ipairs({ "reraised", "pending_finally" }) do
+            local body = native_body(csrc, name)
+            for _, call in ipairs(forbidden) do
+                assert.falsy(body:find(call .. "(", 1, true),
+                    name .. " used stack API " .. call .. "\n" .. body)
+            end
+            assert.falsy(body:find("luaL_", 1, true), body)
+            for call in body:gmatch("(lua_[%w_]+)%s*%(") do
+                assert.equals("lua_error", call,
+                    name .. " used public API " .. call .. "\n" .. body)
+            end
+            assert.truthy(body:find(
+                "titan_registry_get_string(", 1, true), body)
+            assert.truthy(body:find(
+                "titan_registry_set_string(", 1, true), body)
+            assert.truthy(body:find("lua_error(L);", 1, true), body)
+        end
+
+        local reraised = native_body(csrc, "reraised")
+        assert.truthy(reraised:find(
+            "tagisempty(_caught_trace_tag_", 1, true), reraised)
+        assert.truthy(reraised:find(
+            "titan_ensure_stack(L, 1);", 1, true), reraised)
+        assert.falsy(reraised:find(
+            "titan_ensure_stack(L, 2);", 1, true), reraised)
+        local recover = assert(reraised:find(
+            "luaD_seterrorobj(L,", 1, true))
+        local steady_top = assert(reraised:find(
+            "L->top.p = _base +", recover, true))
+        assert.falsy(reraised:sub(recover, steady_top):find(
+            "titan_ensure_stack(", 1, true), reraised)
+
+        local helper_count = 0
+        for helper in csrc:gmatch(
+                "static TITAN_UNUSED inline [^\n]+" ..
+                "titan_registry_[gs]et_string%b()%s*(%b{})") do
+            helper_count = helper_count + 1
+            assert.falsy(helper:find("L->top", 1, true), helper)
+            assert.falsy(helper:find("luaL_", 1, true), helper)
+            for call in helper:gmatch("(lua_[%w_]+)%s*%(") do
+                assert.equals("lua_assert", call, helper)
+            end
+        end
+        assert.equals(2, helper_count)
     end)
 
     it("rejects a bare raise at compile time", function()

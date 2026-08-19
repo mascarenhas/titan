@@ -66,16 +66,22 @@ function checkfuncbody(node, st, errors, opts)
     st:add_symbol("$function", node) -- for return type
     local signature = assert(call_signature(node._type),
         "function body lacks a callable signature")
-    local frame = { depth = #func_stack + 1, captures = {}, capture_set = {} }
+    local frame = {
+        depth = #func_stack + 1,
+        captures = {},
+        capture_set = {},
+        node = node,
+        module_initializer = opts.module_initializer and st.modname or false,
+    }
     table.insert(func_stack, frame)
     if not opts.foreign then
-        local ldecl = ast.Decl(node.loc, "L", false, false)
+        local ldecl = ast.Decl(node.loc, "L", false, false, false)
         ldecl._type = lua_state_pointer_type(st)
         ldecl._funcdepth = #func_stack
         ldecl._cvar = "L"
         ldecl._readonly = true
         st:add_symbol("L", ldecl)
-        local mdecl = ast.Decl(node.loc, "M", false, false)
+        local mdecl = ast.Decl(node.loc, "M", false, false, false)
         mdecl._type = module_udata_pointer_type(st)
         mdecl._funcdepth = #func_stack
         mdecl._cvar = "_mod"
@@ -190,6 +196,9 @@ function checkfuncbody(node, st, errors, opts)
                 #signature.rettypes)
         end
     end
+    if #errors == 0 and (node._tag == "Ast.TopLevelFunc" or node._tag == "Ast.TopLevelMethod" or node._tag == "Ast.TopLevelStatic") then
+        annotate_linear_function_returns(node)
+    end
     table.remove(func_stack)
     return ret, frame
 end
@@ -214,7 +223,7 @@ function checkinitializer(node, st, errors)
         _type = node._type,
     }
     st:open_block()
-    checkfuncbody(init, st, errors)
+    checkfuncbody(init, st, errors, { module_initializer = true })
     st:close_block()
 end
 
@@ -226,7 +235,8 @@ function checkmethod(node, st, errors)
     return generic_with_declaration_bindings(node, st, function()
         local owner = node._nominal_owner._type
         local self = ast.Decl(node.loc, "self",
-            ast.TypeName(node.loc, node._nominal_owner.name, {}), false)
+            ast.TypeName(node.loc, node._nominal_owner.name, {}), false,
+            false)
         node._self = self
         self._type = types.Nominal(owner.name,
             generic_parameter_arguments(owner))
@@ -391,6 +401,13 @@ function checkbodies(ast, st, errors)
                     end
                 end
             elseif node._tag == "Ast.TopLevelInterface" then
+                for _, field in ipairs(node.fields) do
+                    if field._type and not field._ignore then
+                        check_user_value_slot_type(
+                            "interface", node.name, "field", field.name,
+                            field._type, field.loc, errors)
+                    end
+                end
                 for _, method in ipairs(node.methods) do
                     if method._type and not method._ignore then
                         checktype(method._type, method.loc, errors)
@@ -784,7 +801,42 @@ toplevel_visitor = util.make_visitor({
     end,
 
     ["Ast.TopLevelVar"] = function(node, st, errors)
-        if node.decl.type then
+        node._module_name = st.modname
+        if node.value == false then
+            assert(node.isconst,
+                "only const module variables may omit an initializer")
+            node._initializerless_const = true
+            local value = ast.ExpNil(node.decl.loc)
+            if not node.decl.type then
+                checker.typeerror(errors, node.decl.loc,
+                    "const module variable '%s' without an initializer requires an explicit type",
+                    node.decl.name)
+                node._type = types.Invalid()
+                value._type = node._type
+            else
+                node._type = typefromnode(node.decl.type, st, errors)
+                checktype(node._type,
+                    node.decl.type.loc or node.loc, errors)
+                report_incomplete_c_object(node._type, st,
+                    "declaration of module variable '" ..
+                        node.decl.name .. "'",
+                    node.decl.type.loc or node.loc, errors)
+                if not types.accepts_missing_nil(node._type) then
+                    checker.typeerror(errors, node.decl.loc,
+                        "const module variable '%s' cannot be initialized with nil because type '%s' does not accept nil",
+                        node.decl.name, types.tostring(node._type))
+                    value._type = types.Invalid()
+                else
+                    checkexp(value, st, errors, node._type)
+                    value = coerce_and_check(
+                        value, node._type,
+                        "nil initialization of const module variable " ..
+                            node.decl.name,
+                        errors, node.loc)
+                end
+            end
+            node.value = value
+        elseif node.decl.type then
             node._type = typefromnode(node.decl.type, st, errors)
             checktype(node._type, node.decl.type.loc or node.loc, errors)
             report_incomplete_c_object(node._type, st,
@@ -804,6 +856,7 @@ toplevel_visitor = util.make_visitor({
             node.value = tryforce(node.value)
             node._type = node.value._type
         end
+        node.decl._type = node._type
         -- The public module `__newindex` path is a genuine Lua boundary.  Keep
         -- an explicit unavailable marker for non-reifiable targets so its
         -- generated setter rejects every attempted Lua write.
@@ -822,31 +875,62 @@ toplevel_visitor = util.make_visitor({
     ["Ast.TopLevelInterface"] = function(node, st, errors)
         return generic_with_owner_bindings(node, st, function()
             local fqtn = st.modname .. "." .. node.name
+            local fields = {}
             local methods = {}
-            local method_names = {}
-            if #node.methods == 0 then
+            local member_names = {}
+            if #(node.members or {}) == 0 then
                 checker.typeerror(errors, node.loc,
-                    "interface '%s' must declare at least one method", node.name)
+                    "interface '%s' must declare at least one field or method",
+                    node.name)
                 node._type = types.Invalid()
                 return
             end
+            if #node.fields > 65533 then
+                checker.typeerror(errors, node.loc,
+                    "interface '%s' declares %d fields but at most 65533 are supported",
+                    node.name, #node.fields)
+            end
 
-            for _, method in ipairs(node.methods) do
-                if method_names[method.name] then
-                    checker.typeerror(errors, method.loc,
-                        "redeclaration of method '%s' in interface '%s'",
-                        method.name, node.name)
-                    method._ignore = true
+            for _, member in ipairs(node.members) do
+                local previous = member_names[member.name]
+                if previous then
+                    local kind = member._tag == "Ast.InterfaceMethod"
+                        and "method" or "field"
+                    local previous_kind =
+                        previous._tag == "Ast.InterfaceMethod"
+                            and "method" or "field"
+                    if kind == previous_kind then
+                        checker.typeerror(errors, member.loc,
+                            "redeclaration of %s '%s' in interface '%s'",
+                            kind, member.name, node.name)
+                    else
+                        checker.typeerror(errors, member.loc,
+                            "member '%s' in interface '%s' is declared as both a %s and a %s",
+                            member.name, node.name, previous_kind, kind)
+                    end
+                    member._ignore = true
+                elseif member._tag == "Ast.Decl" then
+                    member_names[member.name] = member
+                    local ftype = typefromnode(member.type, st, errors)
+                    member._type = ftype
+                    local tfield = types.Field(
+                        fqtn, member.name, ftype, #fields, true)
+                    tfield.dynamic_plan =
+                        types.dynamic_coercion(ftype) or false
+                    member._field = tfield
+                    member._dynamic_plan = tfield.dynamic_plan
+                    fields[#fields + 1] = tfield
                 else
-                    method_names[method.name] = method
-                    generic_prepare_generic_binders(method, st, errors, node)
-                    generic_with_generic_binding_map(st, method._generic_bindings,
+                    assert(member._tag == "Ast.InterfaceMethod")
+                    member_names[member.name] = member
+                    generic_prepare_generic_binders(member, st, errors, node)
+                    generic_with_generic_binding_map(st, member._generic_bindings,
                         function()
                             local ptypes, varargtype, paramnames =
-                                param_types(method.params, st, errors)
+                                param_types(member.params, st, errors)
                             local fixed_index = 1
                             local param_names = {}
-                            for _, param in ipairs(method.params) do
+                            for _, param in ipairs(member.params) do
                                 if param.name == false then
                                     param._type = varargtype
                                 else
@@ -855,7 +939,7 @@ toplevel_visitor = util.make_visitor({
                                     if param_names[param.name] then
                                         checker.typeerror(errors, param.loc,
                                             "duplicate parameter '%s' in interface method '%s:%s'",
-                                            param.name, node.name, method.name)
+                                            param.name, node.name, member.name)
                                     else
                                         param_names[param.name] = true
                                     end
@@ -863,27 +947,31 @@ toplevel_visitor = util.make_visitor({
                             end
 
                             local rettypes = {}
-                            for _, rettype in ipairs(method.rettypes) do
+                            for _, rettype in ipairs(member.rettypes) do
                                 rettypes[#rettypes + 1] =
                                     typefromnode(rettype, st, errors)
                             end
                             local flexrettype =
-                                flexible_return_type(method, st, errors)
-                            method._type = types.Method(
-                                fqtn, method.name, ptypes, rettypes,
+                                flexible_return_type(member, st, errors)
+                            member._type = types.Method(
+                                fqtn, member.name, ptypes, rettypes,
                                 varargtype, flexrettype, paramnames,
-                                method._generic_scope,
-                                method._generic_typeparams)
+                                member._generic_scope,
+                                member._generic_typeparams)
                         end)
-                    annotate_lua_function_boundary(method)
-                    methods[#methods + 1] = method._type
+                    annotate_lua_function_boundary(member)
+                    methods[#methods + 1] = member._type
                 end
             end
 
-            node._type = types.Interface(fqtn, methods,
+            node._type = types.Interface(fqtn, fields, methods,
                 node._generic_scope, node._generic_typeparams)
             node._type._generic_parameters = node._generic_parameters
             node._type._source_complete = true
+            node._dynamic_receiver_plan = assert(types.dynamic_coercion(
+                types.Nominal(fqtn,
+                    generic_parameter_arguments(node._type))),
+                "Interface nominal lacks its dynamic receiver plan")
             types.registry[fqtn] = node._type
         end)
     end,
@@ -959,7 +1047,8 @@ toplevel_visitor = util.make_visitor({
                     local ftype = typefromnode(field.type, st, errors)
                     field._type = ftype
                     local tfield = types.Field(
-                        fqtn, field.name, ftype, i - 1)
+                        fqtn, field.name, ftype, i - 1,
+                        field.isconst and true or false)
                     tfield.islocal = field.islocal and true or false
                     tfield.dynamic_plan =
                         types.dynamic_coercion(ftype) or false
@@ -1315,7 +1404,7 @@ function generic_reserve_generic_owner_headers(ast, st, errors)
                 placeholder.variants, placeholder.functions,
                     placeholder.methods, placeholder.nvariants = {}, {}, {}, 0
             else
-                placeholder.methods = {}
+                placeholder.fields, placeholder.methods = {}, {}
             end
             node._type = placeholder
             types.registry[fqtn] = placeholder

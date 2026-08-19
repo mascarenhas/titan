@@ -1610,7 +1610,7 @@ describe("type-relation soundness (end-to-end)", function()
             _tag = "Type.Pointer",
             type = types.Nil(),
         }
-        local gc_array = types.Array(types.Integer())
+        local gc_array = types.Array(types.Integer(), false)
         local counted_char = types.COwned(c_char, true)
         local counted_int = types.COwned(c_integer, true)
 

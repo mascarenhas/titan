@@ -305,6 +305,12 @@ function check_explicit_cast_relation(node, st, errors)
         node._written_cast = false
         return target
     end
+    if reject_const_c_mutable_address(
+            node.exp, target, errors, "explicit C cast") then
+        node._written_cast_failed = true
+        node._written_cast = false
+        return target
+    end
     local cast_plan
     local applied_application, application_plan =
         generic_applied_nominal_adjustment(source, target, st)

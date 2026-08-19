@@ -85,7 +85,7 @@ describe("folder modules through the public compiler", function()
             "-u", "LUA_PATH", "-u", "LUA_CPATH",
             "-u", "LUA_PATH_5_5", "-u", "LUA_CPATH_5_5",
             "CCACHE_DISABLE=1",
-            "TITAN_PATH_0_25=" .. workspace,
+            "TITAN_PATH_0_26=" .. workspace,
             "TITAN_PATH=",
         }
         if USE_CHECKOUT_COMPILER then
@@ -138,6 +138,10 @@ function read(): integer
     return total
 end
 
+function settled_total(): integer
+    return settled
+end
+
 function initial_box_value(): integer
     return initial_box.n
 end
@@ -160,7 +164,8 @@ do
     defer total = total + 0
     raise "expected during initialization"
 catch
-    total = initialize_total()
+    settled = initialize_total()
+    total = settled
 end
 ]]
         write_file(module_folder .. "/foldercase.titan", main_source)
@@ -169,6 +174,8 @@ local support = import "support"
 local probe = foreign import "probe.h"
 
 local type Delta = integer
+
+const settled: integer?
 
 interface Reader
     function read(): integer
@@ -290,6 +297,8 @@ local folder = require "foldercase"
 local consumer = require "consumer"
 assert(type(folder) == "userdata")
 assert(folder.read() == 5)
+assert(folder.settled == 5 and folder.settled_total() == 5)
+assert(not pcall(function() folder.settled = 6 end))
 assert(folder.initial_box_value() == 3)
 assert(folder.bump(2) == 7)
 local box = folder.Box.make(10)

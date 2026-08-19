@@ -216,7 +216,7 @@ enumerated symmetric type pairs:
   Each record/union-to-Interface conversion makes a fresh wrapper, so wrapper
   equality is the identity of that conversion result. An Interface and its
   concrete implementer are incomparable, as are two distinct nominal
-  Interfaces, even when their method sets match.
+  Interfaces, even when their member sets match.
 * **Maps** use ordinary Lua table equality. Identity is the fast result, but
   distinct Map/Map operands can invoke the left table's `__eq`, or the right
   table's when the left has none. The result follows Lua truthiness; see

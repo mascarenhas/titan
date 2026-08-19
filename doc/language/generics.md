@@ -152,9 +152,10 @@ a subtype bound. A closed argument for `C` must be:
 - another rigid parameter with the same applied Interface constraint.
 
 Distinct Interface constraints do not entail one another structurally. Within
-the body, a value of type `C` exposes exactly the methods declared by
-`Container<T>`—not fields, statics, or extra methods of a later concrete
-implementation. Where a concrete record or union is accepted, Titan uses the
+the body, a value of type `C` exposes exactly the fields and methods declared by
+`Container<T>`—not statics or extra members of a later concrete
+implementation. Required Interface fields remain read-only snapshots. Where a
+concrete record or union is accepted, Titan uses the
 ordinary [Interface wrapper conversion](interfaces.md#structural-satisfaction-at-the-coercion-site).
 
 Generic Interface methods are matched under their binders, not by erasing the
@@ -486,7 +487,8 @@ entry on bare full userdata, without structurally inspecting the erased value.
 
 A parameter constrained by `I<...>` has the same transport, Option, container,
 equality, and written-cast operations, but its carrier is the substituted
-Interface and it may call exactly that Interface's methods:
+Interface. It may read exactly that Interface's fields and call exactly its
+methods:
 
 ```titan
 interface Stack<E>
@@ -665,16 +667,18 @@ implementing type checks the Interface wrapper's backing owner.
 ### Arrays, Maps, and dynamic writers
 
 An Array constructed with unconstrained element `T` erases to `{value}` and
-uses the existing permissive `value` writer. A generic-created closed view such
-as `{integer}` can therefore receive a Lua float or another raw value and fail
-only on a later strict integer read. A directly constructed monomorphic
-`{integer}` keeps its ordinary eager writer policy.
+uses the existing permissive `value` writer. A const Array preserves its
+qualifier and erases to `const { value }`; it has no writer. A generic-created
+closed mutable view such as `{integer}` can therefore receive a Lua float or
+another raw value and fail only on a later strict integer read. A directly
+constructed monomorphic `{integer}` keeps its ordinary eager writer policy.
 
 For `T: I`, `{T}` erases to `{I}` and uses the Interface writer: dynamic ingress
 must become the erased Interface before storage, either by already carrying
-the exact wrapper or through a compiler-witnessed metatable entry. Maps follow
-the same constraint-carrier write and strict-read rule. There is no generic
-writer kind and no deep traversal of existing container contents.
+the exact wrapper or through a compiler-witnessed metatable entry.
+`const { T }` similarly erases to `const { I }` without adding a write path.
+Maps follow the same constraint-carrier write and strict-read rule. There is no
+generic writer kind and no deep traversal of existing container contents.
 
 ### Static applications and shared run-time identity
 
@@ -759,7 +763,8 @@ that boundary.
 
 Generics enter the compiled-module contract in ABI 0.24. ABI 0.25 retains that
 schema and erased implementation; its separate boundary changes public
-`titan.fs` and `titan.async` signatures. An older provider is rejected before
+`titan.fs` and `titan.async` signatures. ABI 0.26 extends generic Interface
+metadata with fields while retaining erased implementation. An older provider is rejected before
 its type metadata is decoded; this is a clean rebuild boundary, not a
 compatibility or migration protocol.
 

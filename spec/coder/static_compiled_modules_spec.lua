@@ -100,12 +100,28 @@ interface Dynamic
     function convert(input: value): value
 end
 
+interface SnapshotView
+    label: string
+    function total(): integer
+end
+
 record Box
     n: integer
 end
 
+record Snapshot
+    const label: string
+    count: integer
+end
+
+const frozen_answer = 42
+
 function Box:convert(input: integer): integer
     return self.n + input
+end
+
+function Snapshot:total(): integer
+    return self.count
 end
 
 function answer(): integer
@@ -123,6 +139,19 @@ end
 
 function identity(value_: value): value
     return value_
+end
+
+
+function snapshot(): Snapshot
+    return Snapshot.new("fixed", 3)
+end
+
+function snapshot_view(item: Snapshot): SnapshotView
+    return item
+end
+
+function immutable_numbers(): const { integer }
+    return { 10, 20 }
 end
 ]]
     local filename = workspace .. "/fixture_target.titan"
@@ -612,6 +641,19 @@ exec %s "$@"
 local open = assert(package.loadlib(%q, "luaopen_fixture_target"))
 local target = open()
 assert(target.answer() == 42)
+assert(target.frozen_answer == 42)
+assert(not pcall(function() target.frozen_answer = 0 end))
+local snapshot = target.snapshot()
+assert(snapshot.label == "fixed" and snapshot.count == 3)
+snapshot.count = 4
+assert(not pcall(function() snapshot.label = "changed" end))
+assert(snapshot.label == "fixed" and snapshot.count == 4)
+local view = target.snapshot_view(target.snapshot())
+assert(view.label == "fixed" and view:total() == 3)
+assert(not pcall(function() view.label = "changed" end))
+local numbers = target.immutable_numbers()
+assert(#numbers == 2 and numbers[2] == 20)
+assert(not pcall(function() numbers[1] = 99 end))
 ]], image),
         })
         assert.truthy(executed, execution_output)
@@ -676,6 +718,14 @@ function main(args: {string}): integer
     local nominal: (Box, value) -> Box = dynamic
     if nominal(Box.new(44), "ignored").n ~= 44 then
         return 4
+    end
+    local snapshot = provider.snapshot()
+    local view = provider.snapshot_view(snapshot)
+    local numbers = provider.immutable_numbers()
+    if provider.frozen_answer ~= 42 or snapshot.label ~= "fixed"
+       or view.label ~= "fixed" or view:total() ~= 3
+       or numbers[2] ~= 20 then
+        return 5
     end
     return 0
 end

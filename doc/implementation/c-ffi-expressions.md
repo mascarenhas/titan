@@ -451,7 +451,10 @@ try-spill analysis below.
 The parser adds `Ast.TypeCArray` only to an initialized local target. A fixed
 `T[N]` or uncounted `T[]` is not a general Titan type form. The old
 initializer-less automatic-local production is gone; `.new()` and
-`.new_array(...)` make zero initialization explicit.
+`.new_array(...)` make zero initialization explicit. The ordinary mutable
+local grammar may omit an RHS only for an explicit nil-bearing type; neither a
+direct C aggregate nor a fixed C array is such a type, and every const local
+still requires an expression list.
 
 During `StatDecl` checking, the result-demand callback identifies a direct
 allocation sink. `_plan_c_allocation` records one immutable plan on the call and

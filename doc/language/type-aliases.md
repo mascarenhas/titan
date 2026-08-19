@@ -96,8 +96,8 @@ visible variant constructors and public union functions. Ordinary visibility
 still applies: an alias never makes a local record function or local variant
 constructor public.
 
-Interfaces have methods on values but no static namespace, so an Interface
-alias is usable only as a type. Aliases to non-nominal types likewise do not
+Interfaces have fields and methods on values but no static namespace, so an
+Interface alias is usable only as a type. Aliases to non-nominal types likewise do not
 become expressions. If an ordinary value has the same spelling as an alias,
 ordinary expression lookup selects that value.
 

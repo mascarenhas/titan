@@ -209,7 +209,7 @@ boundaries. The discovery protocol adds private generated functions and
 per-state metatable entries without changing the provider ABI.
 These coordinated representation changes accounted for that ABI advance; ABI
 0.21 retained the language model while advancing the matched Lua runtime to
-5.5.1, and ABIs 0.22 through 0.25 retain that model.
+5.5.1, and ABIs 0.22 through 0.26 retain that model.
 
 ## Principles, distilled
 

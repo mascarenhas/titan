@@ -57,6 +57,351 @@ describe("interfaces (typechecker)", function()
         assert.is_nil(modtype.members.Stream)
     end)
 
+    it("builds independent ordered field and method slots", function()
+        local ok, err, ast = run_checker([[
+            interface Entry<T>
+                first: T
+                function reset()
+                optional: T?
+                function show(): string
+            end
+        ]])
+        assert.truthy(ok, err)
+
+        local declaration = find_toplevel(
+            ast, "Ast.TopLevelInterface", "Entry")
+        local interface = declaration._declared_type
+            or declaration._type
+        assert.equal(2, #interface.fields)
+        assert.equal(2, #interface.methods)
+        assert.equal("first", interface.fields[1].name)
+        assert.equal(0, interface.fields[1].index)
+        assert.is_true(interface.fields[1].isconst)
+        assert.equal("optional", interface.fields[2].name)
+        assert.equal(1, interface.fields[2].index)
+        assert.equal("reset", interface.methods[1].name)
+        assert.equal("show", interface.methods[2].name)
+        assert.is_true(interface.fields.first == interface.fields[1])
+        assert.is_true(interface.methods.show == interface.methods[2])
+        assert.equal("Type.Parameter", interface.fields.first.type._tag)
+        assert.equal("Type.Option", interface.fields.optional.type._tag)
+
+        assert.equal("first", declaration.members[1].name)
+        assert.equal("reset", declaration.members[2].name)
+        assert.equal("optional", declaration.members[3].name)
+        assert.equal("show", declaration.members[4].name)
+    end)
+
+    it("matches const record fields and freezes snapshot adjustments", function()
+        local ok, err, ast = run_checker([[
+            interface Inner
+                amount: float
+            end
+
+            interface Outer
+                inner: Inner
+                label: string?
+                function reset()
+            end
+
+            record InnerRecord
+                const amount: integer
+            end
+
+            record OuterRecord
+                const label: string
+                const inner: InnerRecord
+            end
+
+            function OuterRecord:reset()
+            end
+
+            function wrap(item: OuterRecord): Outer
+                return item
+            end
+
+            function read(view: Outer): (float, string?)
+                return view.inner.amount, view.label
+            end
+
+            function implements(item: OuterRecord): boolean
+                return item is Outer
+            end
+        ]])
+        assert.truthy(ok, err)
+
+        local conversion = find_function(ast, "wrap")
+            .block.stats[1].exps[1]._interface_conversion
+        assert.equal("interface_conversion", conversion.kind)
+        assert.equal(2, #conversion.fields)
+        assert.equal(1, #conversion.methods)
+        assert.is_false(conversion.exact)
+
+        local outer_declaration = find_toplevel(
+            ast, "Ast.TopLevelInterface", "Outer")
+        assert.equal("nominal",
+            outer_declaration._dynamic_receiver_plan.op)
+        assert.equal("nominal",
+            outer_declaration.fields[1]._dynamic_plan.op)
+        assert.equal("option",
+            outer_declaration.fields[2]._dynamic_plan.op)
+
+        local inner = conversion.fields[1]
+        assert.equal("inner", inner.name)
+        assert.equal(1, inner.source_index)
+        assert.equal(0, inner.target_index)
+        assert.equal("direct_coercion", inner.adjustment.kind)
+        assert.equal("interface_conversion",
+            inner.adjustment.interface_conversion.kind)
+        assert.equal("test.InnerRecord",
+            inner.adjustment.interface_conversion.concrete.name)
+        assert.equal("test.Inner",
+            inner.adjustment.interface_conversion.interface.name)
+        local nested = inner.adjustment.coercion
+        assert.equal("interface_wrapper", nested.op)
+        assert.equal("interface_implementation",
+            nested.implementation.kind)
+        assert.equal("amount", nested.fields[1].name)
+        assert.equal(0, nested.fields[1].source_index)
+        assert.equal(0, nested.fields[1].target_index)
+        assert.equal("direct_coercion",
+            nested.fields[1].adjustment.kind)
+
+        local label = conversion.fields[2]
+        assert.equal("label", label.name)
+        assert.equal(0, label.source_index)
+        assert.equal(1, label.target_index)
+        assert.equal("direct_coercion", label.adjustment.kind)
+        assert.equal("option_wrap", label.adjustment.coercion.op)
+
+        local read = find_function(ast, "read").block.stats[1].exps
+        assert.equal("amount", read[1].var._interface_field.name)
+        assert.equal(0, read[1].var._interface_field_index)
+        assert.equal("label", read[2].var._interface_field.name)
+        assert.equal(1, read[2].var._interface_field_index)
+
+        local test = find_function(ast, "implements")
+            .block.stats[1].exps[1]._interface_test
+        assert.equal("interface_implementation_test", test.kind)
+        assert.is_true(test.allocation_free)
+        assert.equal(2, #test.conversion.fields)
+    end)
+
+    it("requires visible compatible const record fields", function()
+        local cases = {
+            {
+                source = [[
+                    interface View
+                        item: integer
+                    end
+                    record Missing
+                    end
+                    function wrap(record_: Missing): View
+                        return record_
+                    end
+                ]],
+                message = "const field 'item' is missing",
+            },
+            {
+                source = [[
+                    interface View
+                        item: integer
+                    end
+                    record Mutable
+                        item: integer
+                    end
+                    function wrap(record_: Mutable): View
+                        return record_
+                    end
+                ]],
+                message = "field 'item' is mutable; a const field is required",
+            },
+            {
+                source = [[
+                    interface View
+                        item: integer
+                    end
+                    record Wrong
+                        const item: string
+                    end
+                    function wrap(record_: Wrong): View
+                        return record_
+                    end
+                ]],
+                message = "field 'item' has incompatible type 'string'; expected 'integer'",
+            },
+            {
+                source = [[
+                    interface View
+                        item: integer
+                    end
+                    record Collision
+                    end
+                    function Collision:item(): integer
+                        return 1
+                    end
+                    function wrap(record_: Collision): View
+                        return record_
+                    end
+                ]],
+                message = "member 'item' is not a field",
+            },
+            {
+                source = [[
+                    interface View
+                        item: integer
+                    end
+                    union Choice
+                        none
+                    end
+                    function wrap(choice: Choice): View
+                        return choice
+                    end
+                ]],
+                message = "interface fields require a record implementation",
+            },
+        }
+        for _, case in ipairs(cases) do
+            local ok, err = run_checker(case.source)
+            assert.falsy(ok)
+            assert.match(case.message, err)
+        end
+
+        local ok, err = run_checker_modules({
+            owner = [[
+                interface View
+                    item: integer
+                end
+                record Record
+                    local const item: integer
+                end
+            ]],
+            consumer = [[
+                local owner = import "owner"
+                function wrap(record_: owner.Record): owner.View
+                    return record_
+                end
+            ]],
+        }, "consumer")
+        assert.falsy(ok)
+        assert.match("field 'item' is local to module 'owner'", err)
+    end)
+
+    it("lowers applied generic Interface field snapshots and reads", function()
+        local ok, err, ast = run_checker([[
+            interface Box<T>
+                contents: T
+            end
+
+            record IntegerBox
+                const contents: integer
+            end
+
+            function wrap(box: IntegerBox): Box<integer>
+                return box
+            end
+
+            function read(box: Box<integer>): integer
+                return box.contents
+            end
+        ]])
+        assert.truthy(ok, err)
+
+        local conversion = find_function(ast, "wrap")
+            .block.stats[1].exps[1]._interface_conversion
+        assert.equal("Type.Value", conversion.fields[1].target._tag)
+        assert.equal("gradual_view",
+            conversion.fields[1].adjustment.kind)
+        assert.equal("inject", conversion.fields[1].adjustment.op)
+
+        local returned = find_function(ast, "read")
+            .block.stats[1].exps[1]
+        assert.equal("Ast.ExpCast", returned._tag)
+        assert.equal("Type.Integer", returned._type._tag)
+        assert.equal("contents",
+            returned.exp.var._interface_field.name)
+        assert.equal(0, returned.exp.var._interface_field_index)
+
+        ok, err, ast = run_checker([[
+            interface Box<T>
+                contents: T
+            end
+
+            record IntegerBox
+                const contents: integer
+            end
+
+            function constrained<T: Box<integer>>(box: T): integer
+                return box.contents
+            end
+
+            function apply(box: IntegerBox): integer
+                return constrained(box)
+            end
+        ]])
+        assert.truthy(ok, err)
+        returned = find_function(ast, "constrained")
+            .block.stats[1].exps[1]
+        assert.equal("Ast.ExpCast", returned._tag)
+        assert.equal("Type.Integer", returned._type._tag)
+        assert.equal("contents",
+            returned.exp.var._interface_field.name)
+    end)
+
+    it("freezes callable Interface field snapshot adapters", function()
+        local ok, err, ast = run_checker([[
+            interface CallbackView
+                callback: (integer) -> integer
+            end
+
+            record CallbackRecord
+                const callback: (value) -> value
+            end
+
+            function wrap(record_: CallbackRecord): CallbackView
+                return record_
+            end
+        ]])
+        assert.truthy(ok, err)
+
+        local mapping = find_function(ast, "wrap")
+            .block.stats[1].exps[1]
+            ._interface_conversion.fields[1]
+        assert.equal("callable", mapping.adjustment.kind)
+        assert.equal("callable_adapter_plan",
+            mapping.adjustment._callable_adapter.kind)
+        assert.equal("gradual_inject",
+            mapping.adjustment._callable_adapter
+                .arguments[1].operation.kind)
+        assert.equal("gradual_guard",
+            mapping.adjustment._callable_adapter
+                .results[1].operation.kind)
+    end)
+
+    it("rejects Interface field writes and cross-kind collisions", function()
+        local ok, err = run_checker([[
+            interface View
+                item: integer
+            end
+            function mutate(view: View)
+                view.item = 2
+            end
+        ]])
+        assert.falsy(ok)
+        assert.match("cannot assign to const field 'item'", err)
+
+        ok, err = run_checker([[
+            interface Duplicate
+                item: integer
+                function item(): integer
+            end
+        ]])
+        assert.falsy(ok)
+        assert.match(
+            "member 'item' in interface 'Duplicate' is declared as both a field and a method",
+            err)
+    end)
+
     it("keeps Interface names out of the value namespace", function()
         local ok, err, _, modtype = run_checker([[
             interface Item
@@ -93,6 +438,7 @@ describe("interfaces (typechecker)", function()
         local modules = {
             api = [[
                 interface Reader
+                    label: string
                     function read(): string
                 end
             ]],
@@ -101,6 +447,10 @@ describe("interfaces (typechecker)", function()
 
                 function accept(reader: api.Reader): api.Reader
                     return reader
+                end
+
+                function label(reader: api.Reader): string
+                    return reader.label
                 end
             ]],
         }
@@ -631,7 +981,7 @@ describe("interfaces (typechecker)", function()
             "parameter 'input' of type integer cannot be omitted", err)
     end)
 
-    it("rejects field access on an Interface value", function()
+    it("rejects access to an undeclared Interface field", function()
         local ok, err = run_checker([[
             interface Item
                 function get(): integer
@@ -643,7 +993,7 @@ describe("interfaces (typechecker)", function()
         ]])
         assert.falsy(ok)
         assert.match(
-            "interface value of type 'test%.Item' has no fields", err)
+            "field 'data' not found in interface 'test%.Item'", err)
     end)
 
     it("retains checked Interface conversions on open result runs", function()
@@ -1062,14 +1412,8 @@ describe("interfaces (typechecker)", function()
             assert.equal(mapping.source, plan.concrete_signature)
             assert.equal("test", plan.concrete_owner_module)
             assert.equal(
-                "interface_wrapper_uservalue_0",
+                "adapter_owner_module",
                 plan.hidden_operands.concrete_owner_module.provenance)
-            assert.is_true(
-                plan.hidden_operands.concrete_owner_module
-                    .forwards_unchanged)
-            assert.is_true(
-                plan.hidden_operands.concrete_owner_module
-                    .emitter_module_is_forbidden)
             assert.equal("NULL",
                 plan.hidden_operands.closure.concrete_call_value)
             assert.is_true(

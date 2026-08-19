@@ -12,6 +12,8 @@ local PKG_CONFIG = "sh spec/fixtures/libuv/fake-pkg-config.sh"
 local UV_MAIN_SOURCE = "titan/uv/uv.titan"
 local STDLIB_TYPES_FIXTURE =
 "spec/fixtures/stdlib/titan_stdlib_types.lua"
+local UV_TYPES_FIXTURE =
+"spec/fixtures/libuv/titan_uv_types.lua"
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "os", "peg", "string", "math", "lua", "iteration", "gc",
@@ -309,13 +311,13 @@ end
 local function installed_stdlib_container()
     local prefix = assert(prefix_from_cpath(package.cpath),
         "cannot find the active Lua prefix in package.cpath")
-    return prefix .. "/lib/titan/0.25/" .. STDLIB_CONTAINER
+    return prefix .. "/lib/titan/0.26/" .. STDLIB_CONTAINER
 end
 
 local function installed_stdlib_archive()
     local prefix = assert(prefix_from_cpath(package.cpath),
         "cannot find the active Lua prefix in package.cpath")
-    return prefix .. "/lib/titan/0.25/" .. STDLIB_STATIC_ARCHIVE
+    return prefix .. "/lib/titan/0.26/" .. STDLIB_STATIC_ARCHIVE
 end
 
 local function quote(word)
@@ -1491,7 +1493,10 @@ describe("libuv Makefile configuration", function()
     it("pins current metadata for all eighteen standard modules",
         function()
             local expected = assert(loadfile(STDLIB_TYPES_FIXTURE))()
+            local expected_uv = assert(loadfile(UV_TYPES_FIXTURE))()
             assert.equal(18, #STDLIB_ROOTS)
+            assert.equal(expected.uv, expected_uv,
+                "standalone titan.uv metadata fixture is stale")
 
             for _, record_name in ipairs({
                 "ChannelReader", "ChannelWriter",
@@ -2214,7 +2219,7 @@ esac
             local build_log = root .. "/build.log"
 
             local payload = assert(staticmetadata.render(
-                "fixture.module", "0.25", "{}"))
+                "fixture.module", "0.26", "{}"))
             local initializer = assert(staticmetadata.c_initializer(payload))
             write_file(source, string.format([[
 #if defined(__APPLE__)
@@ -2330,7 +2335,7 @@ printf 'build\n' >> %s
                     tostring(code) .. ")")
                 assert.equal("build\nbuild\nbuild\n", read_file(build_log))
                 assert.truthy(staticmetadata.scan_archive(static_archive, {
-                    expected_abi = "0.25",
+                    expected_abi = "0.26",
                 }))
 
                 assert.truthy(os.remove(provider))
@@ -3207,7 +3212,7 @@ done
                 '"$shim_dir/peg.lua" "$shim_dir/string.lua"',
                 '"$shim_dir/math.lua" "$shim_dir/lua.lua"',
                 '"$shim_dir/iteration.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"',
-                'test_source=$prefix_rel/share/titan/0.25/src/titan/test.titan',
+                'test_source=$prefix_rel/share/titan/0.26/src/titan/test.titan',
                 '"$test_source"',
                 'rm -f "$test_source"',
                 '"$shim_dir/io.lua"',
@@ -3737,7 +3742,7 @@ done
                 "http os peg string math lua iteration gc test; do",
                 1, true), workflow)
             assert.truthy(workflow:find(
-                "share/titan/0.25/src/titan/test.titan", 1, true), workflow)
+                "share/titan/0.26/src/titan/test.titan", 1, true), workflow)
 
             local groups = read_file("spec/support/ci_test_groups.sh")
             for _, retained in ipairs({
@@ -3867,8 +3872,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 27, 26, 27, 27 }, shard_counts)
-            assert.equal(107, assigned_count)
+            assert.same({ 29, 26, 27, 28 }, shard_counts)
+            assert.equal(110, assigned_count)
 
             assert.equal(1, count_literal(sanitizer_job,
                     "name: sanitizer (ubuntu-24.04, ASan+UBSan)"),

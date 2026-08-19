@@ -127,7 +127,7 @@ function checkfor(node, st, errors)
 end
 
 function hidden_decl(loc, name, typ)
-    local decl = ast.Decl(loc, name, false, false)
+    local decl = ast.Decl(loc, name, false, false, false)
     decl._type = typ
     decl._used = true
     return decl
@@ -764,6 +764,56 @@ function checker._accepts_implicit_nil_result(signature)
         and signature.rettypes[1]._tag == "Type.Nil"
 end
 
+local function const_module_write_authorized(decl, st)
+    if not decl._initializerless_const then return false end
+    local frame = func_stack[#func_stack]
+    return frame
+       and frame.module_initializer == st.modname
+       and decl._module_name == st.modname
+end
+
+local function check_const_assignment(var, st, errors)
+    local decl = var._decl
+    if var._tag == "Ast.VarName" and decl then
+        if decl._tag == "Ast.Decl" and decl.isconst then
+            checker.typeerror(errors, var.loc,
+                "cannot assign to const local '%s'", decl.name)
+            var._const_write_rejected = true
+        elseif decl._tag == "Ast.TopLevelVar" and decl.isconst
+               and not const_module_write_authorized(decl, st) then
+            if decl._initializerless_const
+               and decl._module_name == st.modname then
+                checker.typeerror(errors, var.loc,
+                    "const module variable '%s' may only be assigned in its module initializer",
+                    decl.decl.name)
+            else
+                checker.typeerror(errors, var.loc,
+                    "cannot assign to const module variable '%s'",
+                    decl.decl.name)
+            end
+            var._const_write_rejected = true
+        end
+    elseif var._tag == "Ast.VarDot" and decl then
+        if decl._tag == "Type.ModuleVariable" and decl.isconst then
+            checker.typeerror(errors, var.loc,
+                "cannot assign to const module variable '%s'", decl.name)
+            var._const_write_rejected = true
+        elseif decl._tag == "Type.Field" and decl.isconst then
+            checker.typeerror(errors, var.loc,
+                "cannot assign to const field '%s'", decl.name)
+            var._const_write_rejected = true
+        end
+    elseif var._tag == "Ast.VarBracket"
+       and var.exp1 and var.exp1._type
+       and var.exp1._type._tag == "Type.Array"
+       and var.exp1._type.isconst then
+        checker.typeerror(errors, var.loc,
+            "cannot assign to an element of const Array '%s'",
+            types.tostring(var.exp1._type))
+        var._const_write_rejected = true
+    end
+end
+
 -- Typechecks a statement or declaration
 --   node: A DeclDecl or Stat_* AST node
 --   st: symbol table
@@ -772,14 +822,44 @@ end
 checkstat_visitor = util.make_visitor({
     ["Ast.StatDecl"] = function(node, st, errors)
         if #node.exps == 0 then
-            checker.typeerror(errors, node.loc,
-                "a local declaration requires an initializer")
-            for _, decl in ipairs(node.decls) do
-                decl._type = decl.type
-                    and typefromnode(decl.type, st, errors)
-                    or types.Invalid()
+            node._omitted_initializer = true
+            local nils = {}
+            for index, decl in ipairs(node.decls) do
+                local value = ast.ExpNil(decl.loc)
+                if not decl.type then
+                    checker.typeerror(errors, decl.loc,
+                        "local variable '%s' without an initializer requires an explicit type",
+                        decl.name)
+                    decl._type = types.Invalid()
+                    value._type = decl._type
+                else
+                    checkdecl(decl, st, errors)
+                    if not types.accepts_missing_nil(decl._type) then
+                        checker.typeerror(errors, decl.loc,
+                            "local variable '%s' cannot be initialized with nil because type '%s' does not accept nil",
+                            decl.name, types.tostring(decl._type))
+                        value._type = types.Invalid()
+                    else
+                        checkexp(value, st, errors, decl._type)
+                        value = coerce_and_check(
+                            value, decl._type,
+                            "nil initialization of local variable " ..
+                                decl.name,
+                            errors, decl.loc)
+                    end
+                end
+                nils[index] = value
                 declare(decl, st, errors)
             end
+            node.exps = nils
+            node._result_adjustment = {
+                kind = "expression_list_adjustment",
+                exps = nils,
+                fixed = nils,
+                tail_scalars = {},
+                discards = {},
+                open_source = false,
+            }
             return
         end
 
@@ -861,6 +941,7 @@ checkstat_visitor = util.make_visitor({
                     decl._type = types.Invalid()
                 end
             end
+            decl._init_exp = exp
             declare(decl, st, errors)
         end
         node.exps = adjusted.exps
@@ -989,12 +1070,13 @@ checkstat_visitor = util.make_visitor({
             -- live in a fresh sibling scope so the body's locals are out of
             -- view. Mark them `_used` so the unused-local analysis ignores them.
             st:open_block()
-            local errdecl = ast.Decl(node.loc, "error", false, false)
+            local errdecl = ast.Decl(node.loc, "error", false, false, false)
             errdecl._type = types.Value()
             errdecl._used = true
             errdecl._catch_implicit = true
             declare(errdecl, st, errors)
-            local tbdecl = ast.Decl(node.loc, "traceback", false, false)
+            local tbdecl = ast.Decl(
+                node.loc, "traceback", false, false, false)
             tbdecl._type = types.String()
             tbdecl._used = true
             tbdecl._catch_implicit = true
@@ -1048,6 +1130,7 @@ checkstat_visitor = util.make_visitor({
             -- Nested receivers (as in a[i][j]) are still checked normally
             -- when the outer VarBracket checks its exp1.
             checkvar(var, st, errors, nil, "write")
+            check_const_assignment(var, st, errors)
             check_c_assignment_storage(var, errors)
             if var._type and types.is_c_array(var._type) then
                 checker.typeerror(errors, var.loc,
@@ -1121,7 +1204,9 @@ checkstat_visitor = util.make_visitor({
                                 "cannot assign to catch local '%s'",
                                 var._decl.name)
                         end
-                        var._decl._assigned = true
+                        if not var._const_write_rejected then
+                            var._decl._assigned = true
+                        end
                     end
                     local old = exp
                     exp = coerce_and_check(

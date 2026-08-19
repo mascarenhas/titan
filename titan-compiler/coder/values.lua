@@ -184,8 +184,33 @@ function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:string]
         })
     elseif typ._tag == "Type.Array" then
         -- Lua/value boundaries carry the canonical Array proxy, while the
-        -- exact/native representation remains its backing Table*.  Use the
+        -- exact/native representation remains its backing Table*. Use the
         -- module's cached metatable pointer; never query the registry here.
+        if typ.isconst == "maybe" then
+            return render([[
+                {
+                    Table *_titan_array =
+                        titan_array_try_backing_either($EXP, $MUTABLE_META, $CONST_META);
+                    if (TITAN_LIKELY(_titan_array != NULL)) {
+                        $VAR = _titan_array;
+                    } else {
+                        $THROW
+                    }
+                }
+            ]], {
+                EXP = exp,
+                MUTABLE_META = array_metatable_kind(ctx, false),
+                CONST_META = array_metatable_kind(ctx, true),
+                VAR = cvar,
+                FILE = c_string_literal(loc.filename),
+                LINE = c_integer_literal(loc.line),
+                COL = c_integer_literal(loc.col),
+                THROW = codethrow(loc,
+                    "%s:%d:%d: type error, expected array but found %s",
+                    { "$FILE", "$LINE", "$COL",
+                      "lua_typename(L, ttype($EXP))" }),
+            })
+        end
         return render([[
             {
                 Table *_titan_array = titan_array_try_backing($EXP, $META);
@@ -197,7 +222,7 @@ function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:string]
             }
         ]], {
             EXP = exp,
-            META = array_metatable(ctx),
+            META = array_metatable(ctx, typ),
             VAR = cvar,
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
@@ -249,8 +274,8 @@ function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:string]
             EXP = exp,
             VAR = cvar,
             NAME = types.tostring(typ),
-            THROWNIL = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "luaL_tolstring(L, -1, NULL)" }),
-            THROWUD = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "lua_tostring(L, -1)" }),
+            THROWUNKNOWN = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', '"userdata"' }),
+            THROWNAMED = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "getstr(tsvalue(&_titan_nominal_name))" }),
             THROWPRIM = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "lua_typename(L, ttype($EXP))" })
         }
         if not coder._is_interface_nominal(typ) then
@@ -260,13 +285,18 @@ function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:string]
                   if (TITAN_LIKELY(_ud->metatable == $MT)) {
                     $VAR = _ud;
                   } else {
-                    lua_pushlightuserdata(L, (void*)_ud->metatable);
-                    if (lua_rawget(L, LUA_REGISTRYINDEX) == LUA_TNIL) {
-                        lua_pop(L, 1);
-                        setuvalue(L, s2v(L->top.p), _ud); L->top.p++;
-                        $THROWNIL
+                    TValue _titan_nominal_key;
+                    TValue _titan_nominal_name;
+                    setpvalue(&_titan_nominal_key,
+                        (void *)_ud->metatable);
+                    lu_byte _titan_nominal_name_tag = luaH_get(
+                        hvalue(&G(L)->l_registry),
+                        &_titan_nominal_key, &_titan_nominal_name);
+                    if (tagisempty(_titan_nominal_name_tag)
+                            || !ttisstring(&_titan_nominal_name)) {
+                        $THROWUNKNOWN
                     } else {
-                        $THROWUD
+                        $THROWNAMED
                     }
                   }
                 } else {
@@ -313,16 +343,19 @@ function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:string]
                             L, _titan_interface_call)));
                         $RESTORE_TOP
                     } else {
-                        lua_pushlightuserdata(
-                            L, (void *)_ud->metatable);
-                        if (lua_rawget(
-                                L, LUA_REGISTRYINDEX) == LUA_TNIL) {
-                            lua_pop(L, 1);
-                            setuvalue(L, s2v(L->top.p), _ud);
-                            L->top.p++;
-                            $THROWNIL
+                        TValue _titan_nominal_key;
+                        TValue _titan_nominal_name;
+                        setpvalue(&_titan_nominal_key,
+                            (void *)_ud->metatable);
+                        lu_byte _titan_nominal_name_tag = luaH_get(
+                            hvalue(&G(L)->l_registry),
+                            &_titan_nominal_key,
+                            &_titan_nominal_name);
+                        if (tagisempty(_titan_nominal_name_tag)
+                                || !ttisstring(&_titan_nominal_name)) {
+                            $THROWUNKNOWN
                         } else {
-                            $THROWUD
+                            $THROWNAMED
                         }
                     }
                 }
@@ -461,11 +494,23 @@ function coder._checked_dynamic_plan_impl(plan, typ, use, seen, root)
     assert(plan.op == expected,
         (use or "dynamic boundary") .. " has unknown/mismatched operation "
             .. tostring(plan.op))
-    if plan.op == "option" then
+    if plan.op == "array" then
+        assert(plan.isconst == target.isconst
+               and (type(plan.isconst) == "boolean" or plan.isconst == "maybe"),
+            (use or "dynamic boundary")
+                .. " has a mismatched Array const qualifier")
+    elseif plan.op == "option" then
+        assert(plan.isconst == nil,
+            (use or "dynamic boundary")
+                .. " has an unexpected Array const qualifier")
         coder._checked_dynamic_plan_impl(
             plan.inner, target.base,
             (use or "dynamic boundary") .. " Option present value",
             seen, false)
+    else
+        assert(plan.isconst == nil,
+            (use or "dynamic boundary")
+                .. " has an unexpected Array const qualifier")
     end
     seen[plan].active = false
     return plan
@@ -484,14 +529,12 @@ function setboxed(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]])
     if typ._tag == "Type.Array" then
         return render([[
             {
-                Udata *_titan_proxy =
-                    titan_array_require_proxy(L, $SRC, $META);
+                Udata *_titan_proxy = titan_array_require_proxy($SRC);
                 setuvalue(L, $DST, _titan_proxy);
             }
         ]], {
             DST = dst,
             SRC = src,
-            META = array_metatable(ctx),
         })
     elseif typ._tag == "Type.Option"
            and typ.base._tag == "Type.Array" then
@@ -502,14 +545,13 @@ function setboxed(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]])
                     setnilvalue($DST);
                 } else {
                     Udata *_titan_proxy = titan_array_require_proxy(
-                        L, hvalue(&_titan_v), $META);
+                        hvalue(&_titan_v));
                     setuvalue(L, $DST, _titan_proxy);
                 }
             } while (0);
         ]], {
             DST = dst,
             SRC = src,
-            META = array_metatable(ctx),
         })
     elseif typ._tag == "Type.Nominal" then
         -- A record value IS the Udata; hand Lua the udata directly ($SRC is a
@@ -548,13 +590,12 @@ function copyboxed(ctx, typ, dst, src)
         return render([[
             {
                 Udata *_titan_proxy = titan_array_require_proxy(
-                    L, hvalue($SRC), $META);
+                    hvalue($SRC));
                 setuvalue(L, $DST, _titan_proxy);
             }
         ]], {
             DST = dst,
             SRC = src,
-            META = array_metatable(ctx),
         })
     elseif typ._tag == "Type.Option"
            and typ.base._tag == "Type.Array" then
@@ -563,13 +604,12 @@ function copyboxed(ctx, typ, dst, src)
                 setnilvalue($DST);
             } else {
                 Udata *_titan_proxy = titan_array_require_proxy(
-                    L, hvalue($SRC), $META);
+                    hvalue($SRC));
                 setuvalue(L, $DST, _titan_proxy);
             }
         ]], {
             DST = dst,
             SRC = src,
-            META = array_metatable(ctx),
         })
     end
     return render([[
@@ -827,17 +867,27 @@ function checked_gradual_guard(plan, typ, use, seen, root)
         use .. " has unknown/mismatched guard operation "
             .. tostring(plan.op))
     if expected == "array" then
+        assert(plan.isconst == target.isconst
+               and (type(plan.isconst) == "boolean" or plan.isconst == "maybe"),
+            use .. " has a mismatched Array const qualifier")
         checked_gradual_guard(
             plan.element, target.elem, use .. " Array element", seen, false)
     elseif expected == "map" then
+        assert(plan.isconst == nil,
+            use .. " has an unexpected Array const qualifier")
         checked_gradual_guard(
             plan.key, target.keys, use .. " Map key", seen, false)
         checked_gradual_guard(
             plan.value, target.values, use .. " Map value", seen, false)
     elseif expected == "option" then
+        assert(plan.isconst == nil,
+            use .. " has an unexpected Array const qualifier")
         checked_gradual_guard(
             plan.inner, target.base, use .. " Option present value",
             seen, false)
+    else
+        assert(plan.isconst == nil,
+            use .. " has an unexpected Array const qualifier")
     end
     return plan
 end
@@ -867,7 +917,11 @@ function coder._checked_identity_plan(plan, source_type, target_type, use)
         use .. " has unknown plan kind " .. tostring(plan.kind))
     local source, target =
         coder._checked_plan_pair(plan, source_type, target_type, use)
-    assert(types.equals(source, target),
+    assert(types.equals(source, target)
+           or (source._tag == "Type.Array" and target._tag == "Type.Array"
+               and target.isconst == "maybe"
+               and (source.isconst == false or source.isconst == true or source.isconst == "maybe")
+               and types.equals(source.elem, target.elem)),
         use .. " identity plan changes its operand type")
     return plan
 end
@@ -1340,6 +1394,9 @@ function coder._checked_adjustment_plan_impl(
     elseif kind == "callable" then
         coder._checked_callable_plan_impl(
             adjustment, source, target, use, seen or {})
+    elseif kind == "written_cast" then
+        coder._checked_written_cast_plan(
+            adjustment, source, target, use .. " written cast")
     else
         error(use .. " has unknown plan kind " .. tostring(kind))
     end
@@ -1516,6 +1573,34 @@ function coder._checked_written_cast_plan(
                and (target_owner._tag == "Type.Record"
                     or target_owner._tag == "Type.Union"),
             use .. " has a mismatched Interface downcast")
+    elseif cast.op == "array_freeze" then
+        assert(source._tag == "Type.Array"
+               and target._tag == "Type.Array"
+               and source.isconst == false
+               and target.isconst == true
+               and (cast.mode == "copy" or cast.mode == "freeze")
+               and cast.allocation_free_test == true,
+            use .. " has a malformed Array freeze operation")
+        if types.equals(source.elem, target.elem) then
+            assert(cast.element_view == false,
+                use .. " exact Array freeze has an element view")
+        else
+            coder._checked_adjustment_plan(
+                cast.element_view, source.elem, target.elem,
+                use .. " Array element view")
+        end
+    elseif cast.op == "maybe_array_cast_mutable" then
+        assert(source._tag == "Type.Array" and source.isconst == "maybe"
+               and target._tag == "Type.Array" and target.isconst == false,
+            use .. " has a malformed maybe-array cast to mutable")
+    elseif cast.op == "maybe_array_cast_const" then
+        assert(source._tag == "Type.Array" and source.isconst == "maybe"
+               and target._tag == "Type.Array" and target.isconst == true,
+            use .. " has a malformed maybe-array cast to const")
+    elseif cast.op == "maybe_array_cast_upcast" then
+        assert(source._tag == "Type.Array" and target._tag == "Type.Array"
+               and target.isconst == "maybe",
+            use .. " has a malformed maybe-array upcast")
     else
         error(use .. " has unknown operation " .. tostring(cast.op))
     end
@@ -1733,6 +1818,37 @@ function coder._strictcheckandgetmixed(
             retain_interface_result)
     end
     if typ._tag == "Type.Array" then
+        if typ.isconst == "maybe" then
+            return render([[
+                {
+                    Table *_titan_array = NULL;
+                    if (ttistable($EXP)) {
+                        Table *_titan_candidate = hvalue($EXP);
+                        if (titan_array_try_proxy_either(_titan_candidate, $MUTABLE_META, $CONST_META) != NULL)
+                            _titan_array = _titan_candidate;
+                    } else {
+                        _titan_array = titan_array_try_backing_either($EXP, $MUTABLE_META, $CONST_META);
+                    }
+                    if (TITAN_LIKELY(_titan_array != NULL)) {
+                        $VAR = _titan_array;
+                    } else {
+                        $THROW
+                    }
+                }
+            ]], {
+                EXP = exp,
+                MUTABLE_META = array_metatable_kind(ctx, false),
+                CONST_META = array_metatable_kind(ctx, true),
+                VAR = cvar,
+                FILE = c_string_literal(loc.filename),
+                LINE = c_integer_literal(loc.line),
+                COL = c_integer_literal(loc.col),
+                THROW = codethrow(loc,
+                    "%s:%d:%d: type error, expected array but found %s",
+                    { "$FILE", "$LINE", "$COL",
+                      "lua_typename(L, ttype($EXP))" }),
+            })
+        end
         return render([[
             {
                 Table *_titan_array = NULL;
@@ -1751,7 +1867,7 @@ function coder._strictcheckandgetmixed(
             }
         ]], {
             EXP = exp,
-            META = array_metatable(ctx),
+            META = array_metatable(ctx, typ),
             VAR = cvar,
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
@@ -1765,7 +1881,8 @@ function coder._strictcheckandgetmixed(
         return render([[
             if (ttistable($EXP)) {
                 Udata *_titan_proxy =
-                    titan_array_try_proxy(hvalue($EXP), $META);
+                    titan_array_try_proxy_either(
+                        hvalue($EXP), $MUTABLE_META, $CONST_META);
                 if (_titan_proxy != NULL) {
                     setuvalue(L, &$VAR, _titan_proxy);
                 } else {
@@ -1776,7 +1893,8 @@ function coder._strictcheckandgetmixed(
             }
         ]], {
             EXP = exp,
-            META = array_metatable(ctx),
+            MUTABLE_META = array_metatable_kind(ctx, false),
+            CONST_META = array_metatable_kind(ctx, true),
             VAR = cvar,
         })
     elseif typ._tag == "Type.Option" then
@@ -1828,7 +1946,7 @@ function coder._emit_array_writers(tlcontext, sigs, code, initfuncs)
     for _, entry in ipairs(tlcontext.array_writer_list) do
         local loc = {
             filename = "<Lua write to "
-                .. types.tostring(types.Array(entry.elem)) .. ">",
+                .. types.tostring(types.Array(entry.elem, false)) .. ">",
             line = 1,
             col = 1,
         }

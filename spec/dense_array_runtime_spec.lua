@@ -12,6 +12,19 @@ local function write_file(path, contents)
     assert.truthy(file:close())
 end
 
+local function read_file(path)
+    local file = assert(io.open(path, "rb"))
+    local contents = assert(file:read("*a"))
+    assert.truthy(file:close())
+    return contents
+end
+
+local function c_function_body(source, name)
+    local escaped = name:gsub("(%W)", "%%%1")
+    return assert(source:match(
+        "%f[%w_]" .. escaped .. "%f[^%w_]%s*%b()%s*(%b{})"), name)
+end
+
 local function remove_tree(path)
     local mode = lfs.symlinkattributes(path, "mode")
     if mode == "directory" then
@@ -96,13 +109,13 @@ static void *metatable_fault_allocator(void *userdata, void *block,
     MetatableFaultAllocator *allocator = userdata;
 
     /*
-    ** luaL_setfuncs creates one-upvalue C closures only after the candidate
-    ** metatable has all of its non-callback fields. Reject that exact object
-    ** allocation, including Lua's emergency-GC retry, without perturbing the
-    ** earlier table and string allocations.
+    ** Array metatable construction creates two-upvalue C closures only after
+    ** both candidate metatables have their non-callback fields. Reject that
+    ** exact object allocation, including Lua's emergency-GC retry, without
+    ** perturbing the earlier table and string allocations.
     */
     if (allocator->fail_cclosure && block == NULL &&
-        old_size == LUA_TFUNCTION && new_size == sizeCclosure(1)) {
+        old_size == LUA_TFUNCTION && new_size == sizeCclosure(2)) {
         allocator->failed_cclosures++;
         return NULL;
     }
@@ -180,9 +193,9 @@ static void assert_shape(Table *backing, Udata *proxy, Table *metatable,
     TValue cycle;
     assert(backing->asize == capacity);
     assert(backing->metatable == NULL);
-    assert(allocsizenode(backing) == 1);
-    assert(live_hash_entries(backing) == 1);
-    assert(!tagisempty(luaH_getint(backing, 0, &cycle)));
+    assert(isdummy(backing) || allocsizenode(backing) == 0);
+    assert(live_hash_entries(backing) == 0);
+    arr2obj(backing, 0, &cycle);
     assert(ttisfulluserdata(&cycle));
     assert(uvalue(&cycle) == proxy);
     assert(proxy->len == 0);
@@ -196,6 +209,28 @@ static void assert_shape(Table *backing, Udata *proxy, Table *metatable,
     assert(titan_array_try_backing(&cycle, metatable) == backing);
 }
 
+static void assert_const_shape(Table *backing, Udata *proxy,
+                               Table *metatable, unsigned capacity,
+                               lua_Unsigned length) {
+    TValue cycle;
+    assert(backing->asize == capacity);
+    assert(backing->metatable == NULL);
+    assert(isdummy(backing) || allocsizenode(backing) == 0);
+    assert(live_hash_entries(backing) == 0);
+    arr2obj(backing, 0, &cycle);
+    assert(ttisfulluserdata(&cycle));
+    assert(uvalue(&cycle) == proxy);
+    assert(proxy->len == 0);
+    assert(proxy->nuvalue == 2);
+    assert(proxy->metatable == metatable);
+    assert(ttistable(&proxy->uv[0].uv));
+    assert(hvalue(&proxy->uv[0].uv) == backing);
+    assert(ttisnil(&proxy->uv[1].uv));
+    assert(titan_array_length(backing) == length);
+    assert(titan_array_try_proxy(backing, metatable) == proxy);
+    assert(titan_array_try_backing(&cycle, metatable) == backing);
+}
+
 static Table *new_rooted_array(lua_State *L, Table *metatable,
                                unsigned capacity, Udata **proxy) {
     int base = lua_gettop(L);
@@ -204,14 +239,34 @@ static Table *new_rooted_array(lua_State *L, Table *metatable,
 
     push_identity_writer(L);
     writer = lua_totvalue(L, -1);
-    backing = titan_array_new(L, metatable, capacity, &writer);
-    push_backing(L, backing);
-    *proxy = titan_array_require_proxy(L, backing, metatable);
+    lua_pushnil(L);
+    {
+        int top = lua_gettop(L);
+        backing = titan_array_new(
+            L, metatable, capacity, &writer, L->top.p - 1);
+        assert(lua_gettop(L) == top);
+    }
+    *proxy = titan_array_require_proxy(backing);
     /*
     ** Leave only the backing root requested by this helper. The writer and its
     ** captured owner must now survive exclusively through proxy uv[1].
     */
     lua_remove(L, base + 1);
+    assert(lua_gettop(L) == base + 1);
+    return backing;
+}
+
+static Table *new_rooted_const_array(lua_State *L, Table *metatable,
+                                     unsigned capacity, Udata **proxy) {
+    int base = lua_gettop(L);
+    int top;
+    Table *backing;
+    lua_pushnil(L);
+    top = lua_gettop(L);
+    backing = titan_const_array_new(
+        L, metatable, capacity, L->top.p - 1);
+    assert(lua_gettop(L) == top);
+    *proxy = titan_array_require_proxy(backing);
     assert(lua_gettop(L) == base + 1);
     return backing;
 }
@@ -248,17 +303,6 @@ static int growth_at_limit(lua_State *L) {
     return 0;
 }
 
-static int constructor_one_past(lua_State *L) {
-    Table *metatable = titan_array_metatable(L);
-    TValue writer;
-    push_identity_writer(L);
-    writer = lua_totvalue(L, -1);
-    (void)titan_array_new(
-        L, metatable, (lua_Unsigned)TITAN_ARRAY_MAX_CAPACITY + 1u,
-        &writer);
-    return 0;
-}
-
 static int open_array_metatable(lua_State *L) {
     (void)titan_array_metatable(L);
     return 0;
@@ -278,6 +322,7 @@ static void expect_c_error(lua_State *L, lua_CFunction function,
 static void test_array_metatable_publication(void) {
     lua_State *L = luaL_newstate();
     Table *metatable;
+    Table *const_metatable;
     TValue value;
 
     assert(L != NULL);
@@ -292,11 +337,27 @@ static void test_array_metatable_publication(void) {
 
     lua_pushnil(L);
     lua_setfield(L, LUA_REGISTRYINDEX, TITAN_ARRAY_METATABLE);
-    metatable = titan_array_metatable(L);
+    lua_pushliteral(L, "poisoned const");
+    lua_setfield(L, LUA_REGISTRYINDEX, TITAN_CONST_ARRAY_METATABLE);
+    expect_c_error(L, open_array_metatable,
+                   "invalid Titan array metatable registry entry");
+    lua_getfield(L, LUA_REGISTRYINDEX, TITAN_CONST_ARRAY_METATABLE);
+    assert(lua_type(L, -1) == LUA_TSTRING);
+    assert(strcmp(lua_tostring(L, -1), "poisoned const") == 0);
+    lua_pop(L, 1);
+
+    lua_pushnil(L);
+    lua_setfield(L, LUA_REGISTRYINDEX, TITAN_CONST_ARRAY_METATABLE);
+    titan_array_metatables(L, &metatable, &const_metatable);
     lua_getfield(L, LUA_REGISTRYINDEX, TITAN_ARRAY_METATABLE);
     value = lua_totvalue(L, -1);
     assert(ttistable(&value));
     assert(hvalue(&value) == metatable);
+    lua_pop(L, 1);
+    lua_getfield(L, LUA_REGISTRYINDEX, TITAN_CONST_ARRAY_METATABLE);
+    value = lua_totvalue(L, -1);
+    assert(ttistable(&value));
+    assert(hvalue(&value) == const_metatable);
     lua_pop(L, 1);
     lua_close(L);
 }
@@ -308,6 +369,7 @@ static void test_array_metatable_allocation_retry(void) {
     MetatableFaultAllocator allocator = {0};
     lua_State *L = luaL_newstate();
     Table *metatable;
+    Table *const_metatable;
     TValue value;
     int status;
     unsigned i;
@@ -331,9 +393,12 @@ static void test_array_metatable_allocation_retry(void) {
     assert(lua_getfield(
         L, LUA_REGISTRYINDEX, TITAN_ARRAY_METATABLE) == LUA_TNIL);
     lua_pop(L, 1);
+    assert(lua_getfield(
+        L, LUA_REGISTRYINDEX, TITAN_CONST_ARRAY_METATABLE) == LUA_TNIL);
+    lua_pop(L, 1);
 
-    /* With allocation restored, retry publishes one complete metatable. */
-    metatable = titan_array_metatable(L);
+    /* With allocation restored, retry publishes one complete canonical pair. */
+    titan_array_metatables(L, &metatable, &const_metatable);
     assert(lua_getfield(
         L, LUA_REGISTRYINDEX, TITAN_ARRAY_METATABLE) == LUA_TTABLE);
     value = lua_totvalue(L, -1);
@@ -353,7 +418,32 @@ static void test_array_metatable_allocation_retry(void) {
         lua_pop(L, 1);
     }
     lua_pop(L, 1);
+
+    assert(lua_getfield(
+        L, LUA_REGISTRYINDEX, TITAN_CONST_ARRAY_METATABLE) == LUA_TTABLE);
+    value = lua_totvalue(L, -1);
+    assert(ttistable(&value));
+    assert(hvalue(&value) == const_metatable);
+    lua_getfield(L, -1, "__name");
+    assert(lua_type(L, -1) == LUA_TSTRING);
+    assert(strcmp(lua_tostring(L, -1), TITAN_CONST_ARRAY_METATABLE) == 0);
+    lua_pop(L, 1);
+    lua_getfield(L, -1, "__metatable");
+    assert(lua_type(L, -1) == LUA_TSTRING);
+    assert(strcmp(lua_tostring(L, -1), TITAN_CONST_ARRAY_METATABLE) == 0);
+    lua_pop(L, 1);
+    lua_getfield(L, -1, "__index");
+    assert(lua_iscfunction(L, -1));
+    lua_pop(L, 1);
+    lua_getfield(L, -1, "__newindex");
+    assert(lua_isnil(L, -1));
+    lua_pop(L, 1);
+    lua_getfield(L, -1, "__len");
+    assert(lua_iscfunction(L, -1));
+    lua_pop(L, 2);
+
     assert(titan_array_metatable(L) == metatable);
+    assert(titan_const_array_metatable(L) == const_metatable);
     lua_close(L);
 }
 
@@ -389,7 +479,6 @@ static void test_capacity_length_and_hash(void) {
         L, (lua_Unsigned)TITAN_ARRAY_MAX_CAPACITY - 1u) ==
         TITAN_ARRAY_MAX_CAPACITY);
     expect_c_error(L, growth_at_limit, "array index too large");
-    expect_c_error(L, constructor_one_past, "array index too large");
 
     for (i = 0; i < sizeof(exact_capacities) /
                           sizeof(exact_capacities[0]); i++) {
@@ -397,7 +486,7 @@ static void test_capacity_length_and_hash(void) {
         Udata *proxy;
         Table *backing = new_rooted_array(
             L, metatable, exact_capacities[i], &proxy);
-        assert_shape(backing, proxy, metatable, exact_capacities[i], 0);
+        assert_shape(backing, proxy, metatable, exact_capacities[i] + 1, 0);
         lua_settop(L, top);
         lua_gc(L, LUA_GCCOLLECT);
     }
@@ -407,21 +496,21 @@ static void test_capacity_length_and_hash(void) {
         Table *backing = new_rooted_array(L, metatable, 3, &proxy);
         set_integer(L, backing, 1, 11);
         set_integer(L, backing, 3, 33);
-        assert_shape(backing, proxy, metatable, 3, 3);
+        assert_shape(backing, proxy, metatable, 4, 3);
 
         /* Interior deletion keeps the highest-present-positive length. */
         set_nil(L, backing, 2);
-        assert_shape(backing, proxy, metatable, 3, 3);
+        assert_shape(backing, proxy, metatable, 4, 3);
         assert_nil(backing, 2);
 
         /* A tail deletion backscans across the hole. */
         set_nil(L, backing, 3);
-        assert_shape(backing, proxy, metatable, 3, 1);
+        assert_shape(backing, proxy, metatable, 4, 1);
         assert_integer(backing, 1, 11);
 
         /* Nil above capacity is an allocation-free no-op. */
         set_nil(L, backing, 100);
-        assert_shape(backing, proxy, metatable, 3, 1);
+        assert_shape(backing, proxy, metatable, 4, 1);
 
         /* A non-nil write grows strictly past index 4: 3 -> 8. */
         set_integer(L, backing, 4, 44);
@@ -571,7 +660,7 @@ static void test_lua_callbacks_and_boxing(void) {
         "assert(#outer == 1)\n");
 
     assert_shape(outer, outer_proxy, metatable, 4, 1);
-    assert_shape(inner, inner_proxy, metatable, 1, 1);
+    assert_shape(inner, inner_proxy, metatable, 2, 1);
 
     sethvalue(L, &value, map);
     assert(titan_array_try_backing(&value, metatable) == NULL);
@@ -579,6 +668,167 @@ static void test_lua_callbacks_and_boxing(void) {
     value = lua_totvalue(L, -1);
     assert(titan_array_try_backing(&value, metatable) == NULL);
     lua_pop(L, 1);
+
+    lua_close(L);
+}
+
+static void test_const_array_copy_freeze_and_nested_boxing(void) {
+    lua_State *L = luaL_newstate();
+    Table *mutable_metatable;
+    Table *const_metatable;
+    Table *source;
+    Table *copy;
+    Table *frozen;
+    Table *inner_mutable;
+    Table *inner_const;
+    Table *outer_const;
+    Table *impostor;
+    Udata *source_proxy;
+    Udata *copy_proxy;
+    Udata *frozen_proxy;
+    Udata *inner_mutable_proxy;
+    Udata *inner_const_proxy;
+    Udata *outer_const_proxy;
+    Udata *impostor_proxy;
+    TValue observed;
+
+    assert(L != NULL);
+    luaL_openlibs(L);
+    titan_array_metatables(L, &mutable_metatable, &const_metatable);
+    assert(mutable_metatable != const_metatable);
+    assert(titan_array_metatable(L) == mutable_metatable);
+    assert(titan_const_array_metatable(L) == const_metatable);
+
+    lua_getfield(L, LUA_REGISTRYINDEX, TITAN_CONST_ARRAY_METATABLE);
+    observed = lua_totvalue(L, -1);
+    assert(ttistable(&observed));
+    assert(hvalue(&observed) == const_metatable);
+    lua_getfield(L, -1, "__newindex");
+    assert(lua_isnil(L, -1));
+    lua_pop(L, 2);
+
+    inner_mutable = new_rooted_array(
+        L, mutable_metatable, 1, &inner_mutable_proxy);
+    set_integer(L, inner_mutable, 1, 71);
+    source = new_rooted_array(L, mutable_metatable, 8, &source_proxy);
+    set_integer(L, source, 1, 11);
+    push_backing(L, inner_mutable);
+    titan_array_set_stack(L, source, 2, -1);
+    lua_pop(L, 1);
+    set_integer(L, source, 4, 44);
+
+    lua_pushnil(L);
+    {
+        int top = lua_gettop(L);
+        copy = titan_array_shallow_copy(
+            L, source, mutable_metatable, const_metatable, L->top.p - 1);
+        assert(lua_gettop(L) == top);
+    }
+    copy_proxy = titan_array_require_proxy(copy);
+    assert(copy != source);
+    assert(source->asize == 9);
+    assert_const_shape(copy, copy_proxy, const_metatable, 9, 4);
+    assert(copy->asize == source->asize);
+    assert_integer(copy, 1, 11);
+    assert_nil(copy, 3);
+    assert_integer(copy, 4, 44);
+    set_integer(L, source, 1, 99);
+    assert_integer(source, 1, 99);
+    assert_integer(copy, 1, 11);
+    assert(titan_array_try_proxy_either(
+        source, mutable_metatable, const_metatable) == source_proxy);
+    assert(titan_array_try_proxy_either(
+        copy, mutable_metatable, const_metatable) == copy_proxy);
+
+    push_proxy(L, source_proxy);
+    lua_setglobal(L, "mutable_source");
+    push_proxy(L, copy_proxy);
+    lua_setglobal(L, "const_copy");
+    run_chunk(L,
+        "local ok = pcall(function() const_copy[1] = 22 end)\n"
+        "assert(not ok)\n"
+        "assert(getmetatable(const_copy) == "
+            "'Titan const array metatable')\n"
+        "assert(#const_copy == 4 and const_copy[3] == nil)\n"
+        "assert(const_copy[1] == 11 and mutable_source[1] == 99)\n"
+        "assert(const_copy[2] == mutable_source[2])\n");
+
+    frozen = new_rooted_array(
+        L, mutable_metatable, 2, &frozen_proxy);
+    set_integer(L, frozen, 1, 81);
+    push_proxy(L, frozen_proxy);
+    lua_setglobal(L, "freeze_before");
+    {
+        int top = lua_gettop(L);
+        assert(titan_array_freeze(
+            L, frozen, mutable_metatable, const_metatable) == frozen);
+        assert(lua_gettop(L) == top);
+    }
+    assert(titan_array_try_proxy(frozen, mutable_metatable) == NULL);
+    assert_const_shape(frozen, frozen_proxy, const_metatable, 3, 1);
+    push_proxy(L, frozen_proxy);
+    lua_setglobal(L, "frozen");
+    run_chunk(L,
+        "assert(rawequal(freeze_before, frozen))\n"
+        "local ok = pcall(function() frozen[1] = 82 end)\n"
+        "assert(not ok)\n"
+        "assert(frozen[1] == 81 and #frozen == 1)\n"
+        "assert(getmetatable(frozen) == "
+            "'Titan const array metatable')\n");
+
+    inner_const = new_rooted_const_array(
+        L, const_metatable, 1, &inner_const_proxy);
+    set_integer(L, inner_const, 1, 91);
+    outer_const = new_rooted_const_array(
+        L, const_metatable, 2, &outer_const_proxy);
+    push_backing(L, inner_mutable);
+    titan_array_set_stack(L, outer_const, 1, -1);
+    lua_pop(L, 1);
+    push_backing(L, inner_const);
+    titan_array_set_stack(L, outer_const, 2, -1);
+    lua_pop(L, 1);
+    assert_const_shape(
+        inner_const, inner_const_proxy, const_metatable, 2, 1);
+    assert_const_shape(
+        outer_const, outer_const_proxy, const_metatable, 3, 2);
+    push_proxy(L, outer_const_proxy);
+    lua_setglobal(L, "outer_const");
+    run_chunk(L,
+        "assert(getmetatable(outer_const[1]) == "
+            "'Titan array metatable')\n"
+        "assert(getmetatable(outer_const[2]) == "
+            "'Titan const array metatable')\n"
+        "assert(outer_const[1][1] == 71)\n"
+        "assert(outer_const[2][1] == 91)\n");
+
+    /* Exact identity, not a structurally similar proxy, defines Array tags. */
+    impostor = new_rooted_const_array(
+        L, const_metatable, 0, &impostor_proxy);
+    {
+        int fake_index;
+        int original_index;
+        int set;
+        sethvalue(L, &observed, const_metatable);
+        lua_pushtvalue(L, observed);
+        original_index = lua_gettop(L);
+        lua_newtable(L);
+        fake_index = lua_gettop(L);
+        lua_pushliteral(L, TITAN_CONST_ARRAY_METATABLE);
+        lua_setfield(L, fake_index, "__name");
+        lua_pushliteral(L, TITAN_CONST_ARRAY_METATABLE);
+        lua_setfield(L, fake_index, "__metatable");
+        lua_getfield(L, original_index, "__index");
+        lua_setfield(L, fake_index, "__index");
+        lua_getfield(L, original_index, "__len");
+        lua_setfield(L, fake_index, "__len");
+        push_proxy(L, impostor_proxy);
+        lua_pushvalue(L, fake_index);
+        set = lua_setmetatable(L, -2);
+        assert(set);
+        lua_pop(L, 3);
+    }
+    assert(titan_array_try_proxy_either(
+        impostor, mutable_metatable, const_metatable) == NULL);
 
     lua_close(L);
 }
@@ -654,9 +904,14 @@ static void test_lua_writer_dispatch(void) {
     weak_store(L, 1, &writer);
     weak_store(L, 2, &owner);
 
-    backing = titan_array_new(L, metatable, 0, &writer);
-    push_backing(L, backing);
-    proxy = titan_array_require_proxy(L, backing, metatable);
+    lua_pushnil(L);
+    {
+        int top = lua_gettop(L);
+        backing = titan_array_new(
+            L, metatable, 0, &writer, L->top.p - 1);
+        assert(lua_gettop(L) == top);
+    }
+    proxy = titan_array_require_proxy(backing);
     assert(ttisCclosure(&proxy->uv[1].uv));
     assert(clCvalue(&proxy->uv[1].uv) == clCvalue(&writer));
     push_proxy(L, proxy);
@@ -697,26 +952,10 @@ static void test_lua_writer_dispatch(void) {
     assert_integer(backing, 1, 2);
     assert_nil(backing, 100);
 
-    /*
-    ** Break only the backing->proxy half of the cycle. The shared callback
-    ** must reject the receiver before loading/invoking its writer.
-    */
-    setnilvalue(&observed);
-    luaH_setint(L, backing, 0, &observed);
-    run_chunk(L,
-        "local ok, err = pcall(function() coercing[1] = 3 end)\n"
-        "assert(not ok)\n"
-        "assert(tostring(err):find('expected Titan array', 1, true), err)\n");
-    assert(coercing_writer_calls == 2);
-    assert_integer(backing, 1, 2);
-
     push_proxy(L, proxy);
     proxy_value = lua_totvalue(L, -1);
-    luaH_setint(L, backing, 0, &proxy_value);
-    proxy_value = lua_totvalue(L, -1);
-    luaC_barrierback(L, obj2gco(backing), &proxy_value);
-    lua_pop(L, 1);
     assert(titan_array_try_backing(&proxy_value, metatable) == backing);
+    lua_pop(L, 1);
 
     /*
     ** Nil deletion bypasses the writer. A nil far beyond capacity remains an
@@ -918,13 +1157,22 @@ static void test_per_state_metatables(void) {
     lua_State *first = luaL_newstate();
     lua_State *second = luaL_newstate();
     Table *first_metatable;
+    Table *first_const_metatable;
     Table *second_metatable;
+    Table *second_const_metatable;
     assert(first != NULL && second != NULL);
-    first_metatable = titan_array_metatable(first);
-    second_metatable = titan_array_metatable(second);
+    titan_array_metatables(
+        first, &first_metatable, &first_const_metatable);
+    titan_array_metatables(
+        second, &second_metatable, &second_const_metatable);
     assert(first_metatable != second_metatable);
+    assert(first_const_metatable != second_const_metatable);
+    assert(first_metatable != first_const_metatable);
+    assert(second_metatable != second_const_metatable);
     assert(first_metatable == titan_array_metatable(first));
+    assert(first_const_metatable == titan_const_array_metatable(first));
     assert(second_metatable == titan_array_metatable(second));
+    assert(second_const_metatable == titan_const_array_metatable(second));
     lua_close(first);
     lua_close(second);
 }
@@ -980,6 +1228,7 @@ int main(void) {
     test_array_metatable_allocation_retry();
     test_capacity_length_and_hash();
     test_lua_callbacks_and_boxing();
+    test_const_array_copy_freeze_and_nested_boxing();
 #ifndef TITAN_ARRAY_HARDMEM_PROBE
     test_lua_writer_dispatch();
     test_gc_mode(LUA_GCINC);
@@ -1061,6 +1310,41 @@ local function compile_and_run(hard_memory)
 end
 
 describe("dense Array stock-Lua runtime", function()
+    it("keeps compiler-internal construction helpers off the Lua stack",
+       function()
+        local runtime = read_file("titan-runtime/titan.c")
+        local header = read_file("titan-runtime/titan.h")
+        local source = runtime .. "\n" .. header
+        for _, name in ipairs({
+            "titan_array_try_proxy_either",
+            "titan_const_array_metatable",
+            "titan_const_array_new",
+        }) do
+            assert.matches("static%s+l_inline%s+[^\n]-" .. name ..
+                "%s*%b()%s*%b{}", header)
+            assert.is_nil(runtime:match(
+                "%f[%w_]" .. name .. "%f[^%w_]%s*%b()%s*%b{}"),
+                name .. " must stay in the installed inline header")
+        end
+        for _, name in ipairs({
+            "titan_array_new_impl",
+            "titan_array_new",
+            "titan_const_array_new",
+            "titan_array_shallow_copy",
+            "titan_array_freeze",
+        }) do
+            local body = c_function_body(source, name)
+            local without_asserts = body:gsub("lua_assert%s*%b()", "")
+            assert.is_nil(without_asserts:match(
+                "%f[%w_]lua_[%w_]*%s*%("),
+                name .. " calls the public Lua stack API")
+            assert.is_nil(body:match("%f[%w_]luaL_[%w_]*%s*%("),
+                name .. " raises a public auxiliary-library error")
+            assert.is_nil(body:match("L%s*%-%>%s*top"),
+                name .. " changes the Lua stack directly")
+        end
+    end)
+
     it("preserves capacity, length, proxy, callback, and GC invariants",
        function()
         compile_and_run(false)

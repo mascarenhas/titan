@@ -529,21 +529,32 @@ function type2metatable(ctx, typ --[[:table]])
     return entry.slot
 end
 
--- Every ABI-0.17-or-newer module reserves one private uservalue slot for the canonical
--- per-state Array proxy metatable.  Importers reconstruct only the public
--- variable/function prefix and never need this private slot.  Array's native
--- representation remains Table*: only boxed/Lua-facing conversions consult
--- this cached pointer.
-function array_metatable(ctx)
-    if ctx.interface_adapter_array_metatable then
-        return ctx.interface_adapter_array_metatable
-    end
+-- Every ABI-0.26-or-newer module reserves consecutive private uservalue slots
+-- for the canonical mutable and const Array proxy metatables. Importers
+-- reconstruct only the public variable/function prefix and never need these
+-- private slots. Array's native representation remains Table*: only boxed/
+-- Lua-facing conversions and mutable-to-const casts consult the cached tags.
+function array_metatable_kind(ctx, isconst)
+    assert(type(isconst) == "boolean",
+        "Array metatable lookup requires a const qualifier")
     local tlcontext = ctx.tlcontext or ctx
-    assert(tlcontext.array_metatable_upvalue,
-        "Array metatable slot was not allocated")
+    local slot = isconst
+        and tlcontext.const_array_metatable_upvalue
+        or tlcontext.array_metatable_upvalue
+    assert(slot, "Array metatable slot was not allocated")
     return render("hvalue(&_mod->uv[$INDEX].uv)", {
-        INDEX = c_integer_literal(tlcontext.array_metatable_upvalue),
+        INDEX = c_integer_literal(slot),
     })
+end
+coder.array_metatable_kind = array_metatable_kind
+
+function array_metatable(ctx, typ)
+    typ = assert(types.normalize(typ),
+        "Array metatable lookup has an unnormalizable type")
+    assert(typ._tag == "Type.Array"
+           and type(typ.isconst) == "boolean",
+        "Array metatable lookup requires a qualified Array type")
+    return array_metatable_kind(ctx, typ.isconst)
 end
 
 -- Return the module-local Lua-writer entry for an Array element type,
@@ -600,28 +611,15 @@ function owned_c_metatable(ctx, typ)
     return entry.slot
 end
 
--- Most generated code reaches nominal/owned-C identities through module
--- uservalue slots. A private Interface adapter may be emitted in a third
--- bridge module while its `_mod` operand is deliberately the concrete
--- owner's module. Such an adapter resolves the identities it needs from the
--- per-state registry on entry and supplies stack-neutral local expressions
--- through these two override maps.
+-- Generated code reaches nominal/owned-C identities through module
+-- uservalue slots. Functions and adapters receive their owning module as `_mod`.
 function coder._nominal_metatable_expr(ctx, typ)
-    local overrides = ctx.interface_adapter_nominal_metatables
-    if overrides and overrides[typ.fqtn] then
-        return overrides[typ.fqtn]
-    end
     return render("hvalue(&_mod->uv[$I].uv)", {
         I = c_integer_literal(type2metatable(ctx, typ)),
     })
 end
 
 function coder._owned_c_metatable_expr(ctx, typ)
-    local key = owned_c_metatable_key(typ)
-    local overrides = ctx.interface_adapter_owned_c_metatables
-    if overrides and overrides[key] then
-        return overrides[key]
-    end
     return render("hvalue(&_mod->uv[$I].uv)", {
         I = c_integer_literal(owned_c_metatable(ctx, typ)),
     })

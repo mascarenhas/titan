@@ -12,7 +12,7 @@ local types = typedecl("Type", {
         String      = {},
         Value       = {},
         Function    = {"params", "rettypes", "vararg", "varargtype", "flexrettype"},
-        Array       = {"elem"},
+        Array       = {"elem", "isconst"},
         Map         = {"keys", "values"},
         GenericScope = {"modname", "owner_fqtn", "callable_name", "role", "declaration_kind"},
         TypeParameter = {"name", "constraint"},
@@ -21,13 +21,13 @@ local types = typedecl("Type", {
         GenericAlias = {"module", "name", "locality", "target_owner_fqtn", "target_alias_fqtn", "target_scope", "typeparams"},
         Record      = {"name", "fields", "functions", "methods", "nfields", "scope", "typeparams"},
         Union       = {"name", "variants", "functions", "methods", "nvariants", "scope", "typeparams"},
-        Interface   = {"name", "methods", "scope", "typeparams"},
+        Interface   = {"name", "fields", "methods", "scope", "typeparams"},
         Variant     = {"fqtn", "name", "payload", "index"},
         Nominal     = {"fqtn", "args"},
-        Field       = {"fqtn", "name", "type", "index"},
+        Field       = {"fqtn", "name", "type", "index", "isconst"},
         Method      = {"fqtn", "name", "params", "rettypes", "varargtype", "flexrettype", "paramnames", "scope", "typeparams"},
         ModuleMember = {"modname", "name", "type", "paramnames"},
-        ModuleVariable = {"modname", "name", "type"},
+        ModuleVariable = {"modname", "name", "type", "isconst"},
         StaticMethod = {"fqtn", "name", "params", "rettypes", "varargtype", "flexrettype", "paramnames", "scope", "typeparams"},
         Option       = {"base"},
         CVoid        = {},
@@ -44,6 +44,33 @@ local types = typedecl("Type", {
         CModule      = {"name", "members", "type_members"}
     }
 })
+
+-- Mutability is an ABI-visible axis of an Array, record field, and module
+-- variable. Requiring the exact boolean at construction keeps old or hostile
+-- serialized metadata from being silently normalized to mutable.
+local raw_Array = types.Array
+function types.Array(elem, isconst)
+    if type(isconst) ~= "boolean" and isconst ~= "maybe" then
+        error("Array const qualifier must be a boolean or 'maybe'", 2)
+    end
+    return raw_Array(elem, isconst)
+end
+
+local raw_Field = types.Field
+function types.Field(fqtn, name, typ, index, isconst)
+    if type(isconst) ~= "boolean" then
+        error("Field const qualifier must be a boolean", 2)
+    end
+    return raw_Field(fqtn, name, typ, index, isconst)
+end
+
+local raw_ModuleVariable = types.ModuleVariable
+function types.ModuleVariable(modname, name, typ, isconst)
+    if type(isconst) ~= "boolean" then
+        error("ModuleVariable const qualifier must be a boolean", 2)
+    end
+    return raw_ModuleVariable(modname, name, typ, isconst)
+end
 
 -- ABI 0.22 serialized Function constructors retain their third positional
 -- field. It is a reserved false sentinel, not a callable-shape property: C
@@ -116,68 +143,89 @@ function types.Union(name, variants, functions, methods, nvariants,
         scope, typeparams)
 end
 
--- An interface's methods retain declaration order for their stable payload
--- slots while also supporting namespace lookup by name. Unlike the legacy
--- union constructor above, serialized Interface input is deliberately only a
--- dense numeric list: accepting preexisting keyed decorations would let a
--- hostile descriptor silently replace the canonical list-to-map projection.
+-- An interface's fields and methods retain independent declaration order for
+-- their stable wrapper and payload slots while also supporting namespace
+-- lookup by name. Unlike the legacy union constructor above, serialized
+-- Interface input is deliberately only a pair of dense numeric lists:
+-- accepting preexisting keyed decorations would let hostile metadata silently
+-- replace either canonical list-to-map projection.
 local raw_Interface = types.Interface
 
 local function interface_constructor_error(message)
-    error("invalid Interface methods: " .. message, 3)
+    error("invalid Interface members: " .. message, 3)
 end
 
-local function validate_interface_constructor_input(name, methods)
-    if type(name) ~= "string" then
-        interface_constructor_error("owner name must be a string")
-    elseif type(methods) ~= "table" then
-        interface_constructor_error("expected a dense numeric list")
+local function validate_interface_member_input(name, list, kind, names)
+    if type(list) ~= "table" then
+        interface_constructor_error(
+            kind .. " must be a dense numeric list")
     end
 
     local count = 0
-    for key in pairs(methods) do
+    for key in pairs(list) do
         if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
             interface_constructor_error(
-                "input must contain numeric list keys only")
+                kind .. " input must contain numeric list keys only")
         end
         count = count + 1
     end
-    if count == 0 then
-        interface_constructor_error("at least one method is required")
-    end
 
-    local names = {}
+    local wanted_tag = kind == "fields" and "Type.Field" or "Type.Method"
     for index = 1, count do
-        local method = methods[index]
-        if method == nil then
-            interface_constructor_error("input list must be dense")
-        elseif type(method) ~= "table"
-           or method._tag ~= "Type.Method" then
+        local member = list[index]
+        if member == nil then
+            interface_constructor_error(kind .. " input list must be dense")
+        elseif type(member) ~= "table" or member._tag ~= wanted_tag then
             interface_constructor_error(
-                "entry " .. index .. " is not a method descriptor")
-        elseif method.fqtn ~= name then
+                kind .. " entry " .. index .. " is not a " ..
+                (kind == "fields" and "field" or "method") ..
+                " descriptor")
+        elseif member.fqtn ~= name then
             interface_constructor_error(
-                "method '" .. tostring(method.name) ..
+                kind:sub(1, -2) .. " '" .. tostring(member.name) ..
                 "' belongs to a different owner")
-        elseif type(method.name) ~= "string" then
+        elseif type(member.name) ~= "string" then
             interface_constructor_error(
-                "entry " .. index .. " has no method name")
-        elseif names[method.name] then
+                kind .. " entry " .. index .. " has no name")
+        elseif names[member.name] then
             interface_constructor_error(
-                "duplicate method '" .. method.name .. "'")
+                "duplicate or cross-kind member '" .. member.name .. "'")
+        elseif kind == "fields"
+           and (member.index ~= index - 1 or member.isconst ~= true) then
+            interface_constructor_error(
+                "field '" .. member.name ..
+                "' has a noncanonical index or const qualifier")
         end
-        names[method.name] = true
+        names[member.name] = true
+    end
+    return count
+end
+
+local function validate_interface_constructor_input(name, fields, methods)
+    if type(name) ~= "string" then
+        interface_constructor_error("owner name must be a string")
+    end
+    local names = {}
+    local nfields = validate_interface_member_input(
+        name, fields, "fields", names)
+    local nmethods = validate_interface_member_input(
+        name, methods, "methods", names)
+    if nfields + nmethods == 0 then
+        interface_constructor_error("at least one member is required")
     end
 end
 
-function types.Interface(name, methods, scope, typeparams)
+function types.Interface(name, fields, methods, scope, typeparams)
     if scope == nil then scope = false end
     if typeparams == nil then typeparams = {} end
-    validate_interface_constructor_input(name, methods)
+    validate_interface_constructor_input(name, fields, methods)
+    for _, field in ipairs(fields) do
+        fields[field.name] = field
+    end
     for _, method in ipairs(methods) do
         methods[method.name] = method
     end
-    return raw_Interface(name, methods, scope, typeparams)
+    return raw_Interface(name, fields, methods, scope, typeparams)
 end
 
 -- Validate the canonical hybrid list/map after construction. This is kept
@@ -190,58 +238,85 @@ function types.validate_interface_descriptor(interface)
         return nil, "descriptor is not an interface"
     elseif type(interface.name) ~= "string" then
         return nil, "interface owner name is not a string"
+    elseif type(interface.fields) ~= "table" then
+        return nil, "interface fields are not a table"
     elseif type(interface.methods) ~= "table" then
         return nil, "interface methods are not a table"
     end
 
-    local numeric_count, numeric_max = 0, 0
-    for key in pairs(interface.methods) do
-        if type(key) == "number" then
-            if key < 1 or key % 1 ~= 0 then
-                return nil, "interface method list has a non-list index"
+    local member_names = {}
+    local function validate_projection(list, kind)
+        local singular = kind:sub(1, -2)
+        local numeric_count, numeric_max = 0, 0
+        for key in pairs(list) do
+            if type(key) == "number" then
+                if key < 1 or key % 1 ~= 0 then
+                    return nil, "interface " .. singular ..
+                        " list has a non-list index"
+                end
+                numeric_count = numeric_count + 1
+                numeric_max = math.max(numeric_max, key)
+            elseif type(key) ~= "string" then
+                return nil, "interface " .. kind ..
+                    " have an invalid derived key"
             end
-            numeric_count = numeric_count + 1
-            numeric_max = math.max(numeric_max, key)
-        elseif type(key) ~= "string" then
-            return nil, "interface methods have an invalid derived key"
         end
-    end
-    if numeric_count == 0 then
-        return nil, "interface method list is empty"
-    elseif numeric_count ~= numeric_max then
-        return nil, "interface method list is sparse"
+        if numeric_count ~= numeric_max then
+            return nil, "interface " .. singular .. " list is sparse"
+        end
+
+        local by_name = {}
+        local wanted_tag = kind == "fields" and "Type.Field" or "Type.Method"
+        for index = 1, numeric_count do
+            local member = list[index]
+            if type(member) ~= "table" or member._tag ~= wanted_tag then
+                return nil, "interface " .. singular .. " " ..
+                    index .. " is not a " .. singular ..
+                    " descriptor"
+            elseif member.fqtn ~= interface.name then
+                return nil, "interface " .. singular .. " '" ..
+                    tostring(member.name) .. "' belongs to a different owner"
+            elseif type(member.name) ~= "string" then
+                return nil, "interface " .. singular .. " " ..
+                    index .. " has no name"
+            elseif by_name[member.name] or member_names[member.name] then
+                return nil, "interface member '" .. member.name ..
+                    "' is duplicated"
+            elseif kind == "fields"
+               and (member.index ~= index - 1
+                    or member.isconst ~= true
+                    or member.islocal) then
+                return nil, "interface field '" .. member.name ..
+                    "' has a noncanonical index, const qualifier, or locality"
+            end
+            by_name[member.name] = member
+            member_names[member.name] = member
+        end
+
+        for name, member in pairs(by_name) do
+            if list[name] ~= member then
+                return nil, "interface " .. singular ..
+                    " key '" .. name ..
+                    "' does not reference its ordered descriptor"
+            end
+        end
+        for key in pairs(list) do
+            if type(key) == "string" and not by_name[key] then
+                return nil, "interface " .. kind ..
+                    " have extra derived key '" .. key .. "'"
+            end
+        end
+        return numeric_count
     end
 
-    local by_name = {}
-    for index = 1, numeric_count do
-        local method = interface.methods[index]
-        if type(method) ~= "table"
-           or method._tag ~= "Type.Method" then
-            return nil, "interface method " .. index ..
-                " is not a method descriptor"
-        elseif method.fqtn ~= interface.name then
-            return nil, "interface method '" .. tostring(method.name) ..
-                "' belongs to a different owner"
-        elseif type(method.name) ~= "string" then
-            return nil, "interface method " .. index .. " has no name"
-        elseif by_name[method.name] then
-            return nil, "interface method '" .. method.name ..
-                "' is duplicated"
-        end
-        by_name[method.name] = method
-    end
-
-    for name, method in pairs(by_name) do
-        if interface.methods[name] ~= method then
-            return nil, "interface method key '" .. name ..
-                "' does not reference its ordered descriptor"
-        end
-    end
-    for key in pairs(interface.methods) do
-        if type(key) == "string" and not by_name[key] then
-            return nil, "interface methods have extra derived key '" ..
-                key .. "'"
-        end
+    local nfields, field_error = validate_projection(
+        interface.fields, "fields")
+    if nfields == nil then return nil, field_error end
+    local nmethods, method_error = validate_projection(
+        interface.methods, "methods")
+    if nmethods == nil then return nil, method_error end
+    if nfields + nmethods == 0 then
+        return nil, "interface has no members"
     end
     return interface
 end
@@ -443,7 +518,11 @@ local function find_c_type(t, include_legacy, descend_function_values)
                 if ctyp then return ctyp end
             end
             -- Declaration order is ABI-significant for Interfaces. Traverse
-            -- only the canonical dense list, not its duplicate name map.
+            -- only the canonical dense lists, not their duplicate name maps.
+            for _, field in ipairs(typ.fields) do
+                local ctyp = visit_type(field, seen)
+                if ctyp then return ctyp end
+            end
             for _, method in ipairs(typ.methods) do
                 local ctyp = visit_type(method, seen)
                 if ctyp then return ctyp end
@@ -702,8 +781,9 @@ end
 -- first-class local functions and local nominal statics need canonical closure
 -- slots just like public callables, but those slots must remain outside the
 -- importer-reconstructible ABI prefix. They occupy a deterministic source-only
--- prefix immediately after the unconditional Array-metatable slot. Binary
--- interfaces never have `source_members`, so they expose no such layout.
+-- prefix after the unconditional mutable/const Array-metatable slots and the
+-- source-provider identity. Binary interfaces never have `source_members`, so
+-- they expose no such layout.
 function types.source_module_prefix_layout(modtype)
     assert(modtype and modtype._tag == "Type.Module")
     local layout = {}
@@ -1721,6 +1801,13 @@ type_equals = function(t1, t2, seen)
            and t1._tag == "Type.Interface" then
             return types.validate_interface_descriptor(t1) ~= nil
         elseif type(t1) == "table"
+           and t1._tag == "Type.Array" then
+            return type(t1.isconst) == "boolean" or t1.isconst == "maybe"
+        elseif type(t1) == "table"
+           and (t1._tag == "Type.Field"
+                or t1._tag == "Type.ModuleVariable") then
+            return type(t1.isconst) == "boolean"
+        elseif type(t1) == "table"
            and t1._tag == "Type.Function" then
             return t1.vararg == false
         end
@@ -1770,7 +1857,9 @@ type_equals = function(t1, t2, seen)
            and generic_scope_equals(t1.target_scope, t2.target_scope)
            and same_typeparams(t1.typeparams, t2.typeparams, seen)
     elseif tag1 == "Type.Array" then
-        return type_equals(t1.elem, t2.elem, seen)
+        return t1.isconst == t2.isconst
+           and (type(t1.isconst) == "boolean" or t1.isconst == "maybe")
+           and type_equals(t1.elem, t2.elem, seen)
     elseif tag1 == "Type.Map" then
         return type_equals(t1.keys, t2.keys, seen) and
                type_equals(t1.values, t2.values, seen)
@@ -1842,6 +1931,8 @@ type_equals = function(t1, t2, seen)
         return t1.fqtn == t2.fqtn
            and t1.name == t2.name
            and t1.index == t2.index
+           and t1.isconst == t2.isconst
+           and type(t1.isconst) == "boolean"
            and type_equals(t1.type, t2.type, seen)
     elseif tag1 == "Type.ModuleMember" then
         return t1.modname == t2.modname
@@ -1851,6 +1942,8 @@ type_equals = function(t1, t2, seen)
     elseif tag1 == "Type.ModuleVariable" then
         return t1.modname == t2.modname
            and t1.name == t2.name
+           and t1.isconst == t2.isconst
+           and type(t1.isconst) == "boolean"
            and type_equals(t1.type, t2.type, seen)
     elseif tag1 == "Type.Module" then
         return t1.name == t2.name
@@ -1883,6 +1976,7 @@ type_equals = function(t1, t2, seen)
            and types.validate_interface_descriptor(t2) ~= nil
            and t1.name == t2.name
            and generic_metadata_equals(t1, t2, seen)
+           and same_list(t1.fields, t2.fields, seen)
            and same_list(t1.methods, t2.methods, seen)
     elseif tag1 == "Type.Method" or tag1 == "Type.StaticMethod" then
         return t1.fqtn == t2.fqtn
@@ -2052,10 +2146,12 @@ function types.canonical_option(typ)
     return types.Option(typ)
 end
 
-function types.canonical_array(elem)
+function types.canonical_array(elem, isconst)
     assert(type(elem) == "table" and elem._tag,
         "array element must be a type")
-    return types.Array(deoptionized(elem))
+    assert(type(isconst) == "boolean" or isconst == "maybe",
+        "array const qualifier must be a boolean or 'maybe'")
+    return types.Array(deoptionized(elem), isconst)
 end
 
 function types.canonical_map(keys, values)
@@ -2213,7 +2309,8 @@ local function rewrite_type(root, policy)
         elseif tag == "Type.Option" then
             out = types.canonical_option(rewrite(typ.base))
         elseif tag == "Type.Array" then
-            out = types.canonical_array(rewrite(typ.elem))
+            out = types.canonical_array(rewrite(typ.elem), typ.isconst)
+            if typ.linear then out.linear = true end
         elseif tag == "Type.Map" then
             out = types.canonical_map(
                 rewrite(typ.keys), rewrite(typ.values))
@@ -2230,7 +2327,7 @@ local function rewrite_type(root, policy)
                     or rewrite(typ.flexrettype))
         elseif tag == "Type.Field" then
             out = types.Field(typ.fqtn, typ.name,
-                rewrite(typ.type), typ.index)
+                rewrite(typ.type), typ.index, typ.isconst)
         elseif tag == "Type.Variant" then
             out = types.Variant(typ.fqtn, typ.name,
                 typ.payload == false and false or rewrite(typ.payload),
@@ -2277,6 +2374,7 @@ local function rewrite_type(root, policy)
             local closes = policy.drop_generic
                 or (typ.scope ~= false and policy.closes(typ.scope))
             out = types.Interface(typ.name,
+                rewrite_list(typ.fields, rewrite),
                 rewrite_list(typ.methods, rewrite),
                 (not closes and typ.scope) or false,
                 closes and {} or rewrite_list(
@@ -2286,7 +2384,7 @@ local function rewrite_type(root, policy)
                 rewrite(typ.type), typ.paramnames)
         elseif tag == "Type.ModuleVariable" then
             out = types.ModuleVariable(typ.modname, typ.name,
-                rewrite(typ.type))
+                rewrite(typ.type), typ.isconst)
         elseif tag == "Type.Module" then
             out = types.Module(typ.name,
                 rewrite_list(typ.members, rewrite),
@@ -2796,6 +2894,7 @@ local function guard_plan(target, seen)
         result.op = "value"
     elseif tag == "Type.Array" then
         result.op = "array"
+        result.isconst = target.isconst
         result.element = guard_plan(target.elem, seen)
     elseif tag == "Type.Map" then
         result.op = "map"
@@ -2880,13 +2979,15 @@ local function component_adjustment(source, target, context)
     return false
 end
 
-local function accepts_missing_nil(target)
+function types.accepts_missing_nil(target)
     target = types.normalize(target)
     local tag = target and target._tag
     return tag == "Type.Nil" or tag == "Type.Value"
         or tag == "Type.Option" or tag == "Type.Pointer"
         or tag == "Type.CPointer"
 end
+
+local accepts_missing_nil = types.accepts_missing_nil
 
 callable_adjustment_impl = function(source, target, context)
     source, target = normalized_pair(source, target)
@@ -3325,7 +3426,9 @@ consistent_impl = function(left, right, context)
         end
     elseif left._tag == "Type.Array"
        and right._tag == "Type.Array" then
-        result = consistent_impl(left.elem, right.elem, context)
+        result = left.isconst == right.isconst
+            and (type(left.isconst) == "boolean" or left.isconst == "maybe")
+            and consistent_impl(left.elem, right.elem, context)
     elseif left._tag == "Type.Map"
        and right._tag == "Type.Map" then
         result = consistent_impl(left.keys, right.keys, context)
@@ -3404,6 +3507,25 @@ local function non_method_named(concrete, name)
     return nil
 end
 
+local function concrete_field_named(concrete, name)
+    for _, field in ipairs(concrete.fields or {}) do
+        if field.name == name then return field end
+    end
+    return nil
+end
+
+local function non_field_named(concrete, name)
+    if concrete.methods and concrete.methods[name] then
+        return concrete.methods[name]
+    elseif concrete.functions and concrete.functions[name] then
+        return concrete.functions[name]
+    elseif concrete._tag == "Type.Union"
+       and concrete.variants and concrete.variants[name] then
+        return concrete.variants[name]
+    end
+    return nil
+end
+
 local function interface_method_visible(
         method, concrete, policy)
     if policy.method_visible then
@@ -3413,6 +3535,18 @@ local function interface_method_visible(
     if not method.islocal then return true end
     local owner_module =
         method.fqtn and method.fqtn:match("^(.*)%.[^.]+$")
+    return owner_module == policy.visibility
+end
+
+
+local function interface_field_visible(field, concrete, policy)
+    if policy.field_visible then
+        return policy.field_visible(field, concrete, policy)
+            and true or false
+    end
+    if not field.islocal then return true end
+    local owner_module =
+        field.fqtn and field.fqtn:match("^(.*)%.[^.]+$")
     return owner_module == policy.visibility
 end
 
@@ -3443,14 +3577,92 @@ function types.interface_implementation(concrete, interface, policy)
         return interface_match_failure(
             "invalid_concrete", concrete, interface)
     elseif type(policy) ~= "table"
-       or (type(policy.method_visible) ~= "function"
-           and type(policy.visibility) ~= "string") then
+       or (type(policy.visibility) ~= "string"
+           and ((#interface.fields > 0
+                 and type(policy.field_visible) ~= "function")
+                or (#interface.methods > 0
+                    and type(policy.method_visible) ~= "function"))) then
         return interface_match_failure(
             "missing_visibility", concrete, interface)
     end
 
-    local mappings = {}
+    if #interface.fields > 0 and concrete._tag ~= "Type.Record" then
+        return interface_match_failure(
+            "fields_require_record", concrete, interface,
+            1, interface.fields[1], { member_kind = "field" })
+    end
+
+    local field_mappings, method_mappings = {}, {}
     local all_exact = true
+    for index, required in ipairs(interface.fields) do
+        local field = concrete_field_named(concrete, required.name)
+        if field == nil then
+            local collision = non_field_named(concrete, required.name)
+            if collision then
+                return interface_match_failure(
+                    "not_field", concrete, interface,
+                    index, required, {
+                        member = collision,
+                        member_kind = "field",
+                    })
+            end
+            return interface_match_failure(
+                "missing", concrete, interface, index, required, {
+                    member_kind = "field",
+                })
+        elseif type(field) ~= "table"
+           or field._tag ~= "Type.Field"
+           or field.fqtn ~= concrete.name then
+            return interface_match_failure(
+                "not_field", concrete, interface,
+                index, required, {
+                    member = field,
+                    member_kind = "field",
+                })
+        elseif field.isconst ~= true then
+            return interface_match_failure(
+                "mutable", concrete, interface,
+                index, required, {
+                    member = field,
+                    member_kind = "field",
+                })
+        elseif not interface_field_visible(field, concrete, policy) then
+            return interface_match_failure(
+                "inaccessible", concrete, interface,
+                index, required, {
+                    member = field,
+                    member_kind = "field",
+                })
+        end
+
+        local adjustment = types.assignment_adjustment(
+            field.type, required.type, policy)
+        if not adjustment then
+            return interface_match_failure(
+                "incompatible", concrete, interface,
+                index, required, {
+                    member = field,
+                    member_kind = "field",
+                    concrete_type = field.type,
+                    required_type = required.type,
+                })
+        end
+
+        local exact = types.equals(field.type, required.type)
+        all_exact = all_exact and exact
+        field_mappings[index] = {
+            source_index = field.index,
+            target_index = required.index,
+            name = required.name,
+            required = required,
+            concrete = field,
+            source = field.type,
+            target = required.type,
+            adjustment = adjustment,
+            exact = exact,
+        }
+    end
+
     for index, required in ipairs(interface.methods) do
         local method = concrete.methods[required.name]
         if method == nil then
@@ -3498,7 +3710,7 @@ function types.interface_implementation(concrete, interface, policy)
 
         local exact = types.equals(concrete_type, required_type)
         all_exact = all_exact and exact
-        mappings[index] = {
+        method_mappings[index] = {
             index = index - 1,
             name = required.name,
             required = required,
@@ -3514,7 +3726,8 @@ function types.interface_implementation(concrete, interface, policy)
         kind = "interface_implementation",
         concrete = concrete,
         interface = interface,
-        methods = mappings,
+        fields = field_mappings,
+        methods = method_mappings,
         exact = all_exact,
     }
 end
@@ -3570,6 +3783,20 @@ end
 -- Interface matcher. This shared semantic proof is used both by the source
 -- checker and by closed metadata validation/recovery.
 function types.generic_interface_implementation(concrete, interface, policy)
+    -- Owner-generic applications reach this helper after `types.substitute`
+    -- has rewritten the complete Record/Interface descriptor, including both
+    -- field lists. Keep the surface field descriptors explicit so the
+    -- method-local alpha-closing view below cannot leak into the returned
+    -- lowering map.
+    local original_fields = {}
+    local required_fields = {}
+    for index, required in ipairs(interface.fields or {}) do
+        required_fields[index] = required
+        original_fields[index] = {
+            required = required,
+            concrete = concrete_field_named(concrete, required.name),
+        }
+    end
     local concrete_methods = {}
     for name, method in pairs(concrete.methods or {}) do
         concrete_methods[name] = method
@@ -3611,7 +3838,7 @@ function types.generic_interface_implementation(concrete, interface, policy)
     for key, value in pairs(concrete) do concrete_view[key] = value end
     concrete_view.methods = concrete_methods
     local interface_view = types.Interface(
-        interface.name, required_methods, interface.scope,
+        interface.name, required_fields, required_methods, interface.scope,
         interface.typeparams)
     interface_view.islocal = interface.islocal
 
@@ -3621,7 +3848,12 @@ function types.generic_interface_implementation(concrete, interface, policy)
         if failure then
             failure.concrete = concrete
             failure.interface = interface
-            local original = failure.index and originals[failure.index]
+            local original
+            if failure.index then
+                original = failure.member_kind == "field"
+                    and original_fields[failure.index]
+                    or originals[failure.index]
+            end
             if original then
                 failure.required = original.required
                 failure.member = original.concrete
@@ -3632,6 +3864,13 @@ function types.generic_interface_implementation(concrete, interface, policy)
 
     implementation.concrete = concrete
     implementation.interface = interface
+    for index, mapping in ipairs(implementation.fields) do
+        local original = original_fields[index]
+        if original then
+            mapping.required = original.required
+            mapping.concrete = original.concrete
+        end
+    end
     for index, mapping in ipairs(implementation.methods) do
         local original = originals[index]
         if original then
@@ -3819,11 +4058,20 @@ local function coercion_impl(source, target, policy, seen)
         -- resolution, owner-kind checks, and visibility. A false result leaves
         -- unrelated nominal pairs rejected; a successful result authorizes
         -- only this direct outer wrapper coercion.
-        local methods =
+        local implementation =
             policy.interface_coercion(source, target, policy)
-        if methods then
+        if implementation then
+            local methods = implementation.kind == "interface_implementation"
+                and implementation.methods or implementation
             result = coercion_plan(
-                "interface_wrapper", source, target, { methods = methods })
+                "interface_wrapper", source, target, {
+                    implementation = implementation.kind ==
+                        "interface_implementation" and implementation or nil,
+                    fields = implementation.kind ==
+                        "interface_implementation" and implementation.fields
+                        or {},
+                    methods = methods,
+                })
         end
     end
 
@@ -3862,6 +4110,7 @@ local function dynamic_plan(target, seen)
         result.op = "value"
     elseif tag == "Type.Array" then
         result.op = "array"
+        result.isconst = target.isconst
     elseif tag == "Type.Map" then
         result.op = "map"
     elseif tag == "Type.Function" then
@@ -3939,6 +4188,70 @@ function types.written_cast(source, target, policy)
             source = source,
             target = target,
         })
+    end
+
+    -- Freezing is the sole relation that crosses Array mutability. A shallow
+    -- freeze cannot convert element representations, so the element types
+    -- must be exact or gradually consistent. The checker later refines
+    -- `mode` to `freeze` only after a linear-use proof; the semantic default is
+    -- always a shallow copy. `is` shares this admission plan but consumes only
+    -- its allocation-free test metadata.
+    if source._tag == "Type.Array"
+       and target._tag == "Type.Array" then
+        if source.isconst == false
+           and target.isconst == true
+           and (types.equals(source.elem, target.elem)
+                or relation_consistent(source.elem, target.elem)) then
+            local element_view = false
+            if not types.equals(source.elem, target.elem) then
+                element_view = gradual_view_plan(source.elem, target.elem)
+                if not element_view then return false end
+            end
+            local mode = (source.linear == true) and "freeze" or "copy"
+            return plan("written_cast", {
+                op = "array_freeze",
+                source = source,
+                target = target,
+                mode = mode,
+                element_view = element_view,
+                allocation_free_test = true,
+            })
+        elseif source.isconst == "maybe"
+           and (target.isconst == false or target.isconst == true)
+           and (types.equals(source.elem, target.elem)
+                or relation_consistent(source.elem, target.elem)) then
+            local element_view = false
+            if not types.equals(source.elem, target.elem) then
+                element_view = gradual_view_plan(source.elem, target.elem)
+                if not element_view then return false end
+            end
+            local op = (target.isconst == false)
+                and "maybe_array_cast_mutable"
+                or "maybe_array_cast_const"
+            return plan("written_cast", {
+                op = op,
+                source = source,
+                target = target,
+                element_view = element_view,
+                allocation_free_test = false,
+            })
+        elseif (source.isconst == false or source.isconst == true)
+           and target.isconst == "maybe"
+           and (types.equals(source.elem, target.elem)
+                or relation_consistent(source.elem, target.elem)) then
+            local element_view = false
+            if not types.equals(source.elem, target.elem) then
+                element_view = gradual_view_plan(source.elem, target.elem)
+                if not element_view then return false end
+            end
+            return plan("written_cast", {
+                op = "maybe_array_cast_upcast",
+                source = source,
+                target = target,
+                element_view = element_view,
+                allocation_free_test = true,
+            })
+        end
     end
 
     if source._tag == "Type.Value" then
@@ -4112,6 +4425,62 @@ function types.assignment_adjustment(source, target, policy)
         return types.callable_adjustment(source, target, policy)
     end
 
+    -- Array assignment rules
+    if source._tag == "Type.Array" and target._tag == "Type.Array" then
+        -- In-place freeze for unaliased linear array
+        if source.isconst == false and source.linear == true and target.isconst == true
+           and (types.equals(source.elem, target.elem) or relation_consistent(source.elem, target.elem)) then
+            local element_view = false
+            if not types.equals(source.elem, target.elem) then
+                element_view = gradual_view_plan(source.elem, target.elem)
+                if not element_view then return false end
+            end
+            return plan("written_cast", {
+                op = "array_freeze",
+                source = source,
+                target = target,
+                mode = "freeze",
+                element_view = element_view,
+                allocation_free_test = true,
+            })
+        end
+
+        -- Maybe-const target admits mutable, const, or maybe-const source
+        if target.isconst == "maybe" and (source.isconst == false or source.isconst == true or source.isconst == "maybe") then
+            if types.equals(source.elem, target.elem) then
+                return plan("identity", { source = source, target = target })
+            elseif relation_consistent(source.elem, target.elem) then
+                local view = gradual_view_plan(source, target)
+                if view then return view end
+            end
+            return false
+        end
+
+        -- Maybe-const source cannot be assigned to mutable or const target
+        if source.isconst == "maybe" and target.isconst ~= "maybe" then
+            return false
+        end
+    end
+
+    -- Option(Array) assignment
+    if source._tag == "Type.Option" and target._tag == "Type.Option" then
+        if source.base._tag == "Type.Array" and target.base._tag == "Type.Array" then
+            local inner = types.assignment_adjustment(source.base, target.base, policy)
+            if inner then
+                if inner.kind == "identity" then
+                    return plan("identity", { source = source, target = target })
+                else
+                    return plan("option_adjustment", {
+                        source = source,
+                        target = target,
+                        inner = inner,
+                    })
+                end
+            end
+            return false
+        end
+    end
+
     if relation_consistent(source, target) then
         local view = gradual_view_plan(source, target)
         if view then return view end
@@ -4197,7 +4566,13 @@ function types.tostring(t)
     elseif tag == "Type.Value"       then return "value"
     elseif tag == "Type.Invalid"     then return "invalid type"
     elseif tag == "Type.Array" then
-        return "{ " .. types.tostring(t.elem) .. " }"
+        local prefix = ""
+        if t.isconst == true then
+            prefix = "const "
+        elseif t.isconst == "maybe" then
+            prefix = "const? "
+        end
+        return prefix .. "{ " .. types.tostring(t.elem) .. " }"
     elseif tag == "Type.Map" then
         return "{ " .. types.tostring(t.keys) .. " : " .. types.tostring(t.values) .. " }"
     elseif tag == "Type.Pointer" then
@@ -4491,7 +4866,15 @@ function types.serialize(t)
             types.serialize(t.target_scope) .. "," ..
             serialize_type_list(t.typeparams) .. ")"
     elseif tag == "Type.Array" then
-        return "Array(" ..types.serialize(t.elem) .. ")"
+        local const_repr
+        if t.isconst == "maybe" then
+            const_repr = '"maybe"'
+        elseif type(t.isconst) == "boolean" then
+            const_repr = tostring(t.isconst)
+        else
+            error("cannot serialize malformed Array const qualifier")
+        end
+        return "Array(" .. types.serialize(t.elem) .. "," .. const_repr .. ")"
     elseif tag == "Type.Map" then
         return "Map(" .. types.serialize(t.keys) .. ", " .. types.serialize(t.values) .. ")"
     elseif tag == "Type.ModuleMember" then
@@ -4499,8 +4882,12 @@ function types.serialize(t)
             t.name .. "', " .. types.serialize(t.type) .. ", " ..
             serialize_names(t.paramnames) .. ")"
     elseif tag == "Type.ModuleVariable" then
+        if type(t.isconst) ~= "boolean" then
+            error("cannot serialize malformed ModuleVariable const qualifier")
+        end
         return "ModuleVariable('" .. t.modname .. "', '" ..
-            t.name .. "', " .. types.serialize(t.type) .. ")"
+            t.name .. "', " .. types.serialize(t.type) .. ", " ..
+            tostring(t.isconst) .. ")"
     elseif tag == "Type.Module" then
         local members = {}
         for _, member in ipairs(t.members) do
@@ -4548,9 +4935,13 @@ function types.serialize(t)
         return "Nominal(" .. string.format("%q", t.fqtn) .. "," ..
             serialize_type_list(args) .. ")"
     elseif tag == "Type.Field" then
+        if type(t.isconst) ~= "boolean" then
+            error("cannot serialize malformed Field const qualifier")
+        end
         return "Field('" .. t.fqtn .. "', '" ..
              t.name .. "', " .. types.serialize(t.type) ..
-             ", " .. tostring(t.index) .. ")"
+             ", " .. tostring(t.index) .. ", " ..
+             tostring(t.isconst) .. ")"
     elseif tag == "Type.Variant" then
         return "Variant('" .. t.fqtn .. "', '" .. t.name .. "', " ..
             (t.payload == false and "false"
@@ -4651,11 +5042,15 @@ function types.serialize(t)
             error("cannot serialize malformed Interface descriptor: " ..
                 validation_error)
         end
-        local methods = {}
+        local fields, methods = {}, {}
+        for _, field in ipairs(t.fields) do
+            fields[#fields + 1] = types.serialize(field)
+        end
         for _, method in ipairs(t.methods) do
             methods[#methods + 1] = types.serialize(method)
         end
         return "Interface(" .. string.format("%q", t.name) ..
+            ",{" .. table.concat(fields, ",") .. "}" ..
             ",{" .. table.concat(methods, ",") .. "}" ..
             serialize_generic_tail(t.scope, t.typeparams) .. ")"
     elseif tag == "Type.Option" then

@@ -162,7 +162,7 @@ to reserve the optimization's extra slot.
 Let the immediate source CClosure have `n` upvalues. The wrapper has `n + 1`:
 
 ```text
-0                       source module Udata (copied)
+0                       adapter module Udata (the module creating the wrapper/cast)
 1                       exact target-B function tag (replaced)
 2                       target-B native adapter pointer (replaced)
 3                       Titan function brand (copied)
@@ -173,21 +173,22 @@ CClosure.f              source coercive Lua entry (copied)
 ```
 
 The immediate source closure link is essential. The adapter reads that
-closure's module and native-entry slots and passes the same closure as `A`'s
-`_fn`. For an `A -> B -> C` chain, the C adapter therefore calls the immediate B
-wrapper; B in turn delegates to A. Each layer keeps its own private links and
-capture indexing instead of treating a later wrapper as if it had A's trailer
-position.
+closure's module (`uvalue(&source->upvalue[0])`) and native-entry slots and passes
+the same closure as `A`'s `_fn`. For an `A -> B -> C` chain, the C adapter therefore
+calls the immediate B wrapper; B in turn delegates to A. Each layer keeps its own
+private links and capture indexing instead of treating a later wrapper as if it had
+A's trailer position.
 
 Construction allocates the final object directly with
 `luaF_newCclosure(L, n + 1)`. While that closure is fresh-white, generated code:
 
 1. copies `source->f`;
-2. copies source upvalues `0 .. n-2` with `setobj2n`, substituting the target tag
+2. sets slot 0 to `_mod` (the current module creating the adapter);
+3. copies source upvalues `1 .. n-2` with `setobj2n`, substituting the target tag
    and target adapter in slots 1 and 2 with `setpvalue`;
-3. installs the immediate source link at `n-1` with `setclCvalue`;
-4. installs the target strict relay at `n` with `setfvalue`; and
-5. publishes the finished closure directly into the assigned traced result slot
+4. installs the immediate source link at `n-1` with `setclCvalue`;
+5. installs the target strict relay at `n` with `setfvalue`; and
+6. publishes the finished closure directly into the assigned traced result slot
    with `setclCvalue`.
 
 There is no transient Lua-stack assembly, `lua_pushcclosure`, construction
@@ -216,6 +217,9 @@ The private `static TITAN_NOINLINE` adapter has exactly `function_sig(B)`. It is
 a parameterization of the proven Interface adapter engine with a different
 invocation backend: Interface adapters call a known concrete method with
 `self`, while a closure adapter calls its captured immediate source closure.
+At the adapter's entry, `_mod` is the module that compiled the cast and adapter
+(passed from `wrapper->upvalue[0]`), so all Array, nominal, and owned-C metatables
+are resolved statically from `_mod->uv[slot]` without querying the global Lua registry.
 
 Its order is fixed:
 
@@ -227,7 +231,8 @@ Its order is fixed:
 4. realize contravariant argument actions into A's fixed and tail storage,
    immediately rooting each newly allocated nested wrapper;
 5. recover the penultimate source closure, then obtain its authoritative module
-   and exact native pointer and call `function_sig(A)` with `_fn = source`;
+   (`source_mod = uvalue(&source->upvalue[0])`) and exact native pointer and call
+   `function_sig(A)` with `L, source_mod, source, ...`;
 6. rebase after that native call, then root every live GC-bearing fixed/open A
    source result immediately, including identity results;
 7. realize covariant result actions into B, immediately rooting each newly
@@ -263,7 +268,7 @@ capture/bound-receiver slots and layered source links preserve the source
 body's expectations.
 
 The source declaration's strict trailer cannot simply be copied. Providers from
-ABI 0.22 through 0.25 compile a declaration-specific source-tag check, which
+ABI 0.22 through 0.26 compile a declaration-specific source-tag check, which
 would reject a consumer-created target-tagged wrapper. Instead the creating translation unit
 emits a strict relay for B using the existing strict-entry arity/tail/result and
 error shell plus checker-frozen strict boundary plans.
@@ -271,14 +276,12 @@ error shell plus checker-frozen strict boundary plans.
 The relay validates the wrapper's target tag, target adapter pointer/header
 shape, fixed brand (already selected by `codevaluecall`), and its own final
 trailer. Deliberately, it does not require one declaration-specific
-`CClosure.f`: that field must remain the source Lua entry. Upvalue 0 likewise
-remains the source module, so before checking target nominal, Array, or owned-C
-values the relay recovers the creating consumer's already initialized
-per-state module through its ordinary idempotent init entry. It then invokes
-the B native adapter with the wrapper as `_fn`. Thus a later non-exact branded
-call uses the target B protocol and delegates layer by layer, without relaxing
-every ordinary declaration strict entry or depending on which provider built
-A.
+`CClosure.f`: that field must remain the source Lua entry. Upvalue 0 holds the
+creating adapter's module, so the relay recovers `Udata *_mod = uvalue(&_fn->upvalue[0]);`
+directly without an external init call. It then invokes the B native adapter with
+the wrapper as `_fn`. Thus a later non-exact branded call uses the target B
+protocol and delegates layer by layer, without relaxing every ordinary
+declaration strict entry or depending on which provider built A.
 
 ## Roots, relocation, and errors
 
@@ -333,7 +336,7 @@ existing rules.
 ## ABI and ownership rationale
 
 The wrapper uses the closure header, function tags, native signatures, and
-strict stack shell retained through ABI 0.25. It adds no serialized descriptor
+strict stack shell retained through ABI 0.26. It adds no serialized descriptor
 field,
 provider symbol, module-state slot, or fixed header position. Its target adapter
 and strict relay are consumer-private translation-unit artifacts. A new
@@ -343,7 +346,7 @@ adapter.
 
 Consequently this feature does **not** bump the ABI. If implementation ever
 requires a new fixed slot, changed native signature, or serialized/provider
-contract, that is an ABI change and must not be hidden under 0.25.
+contract, that is an ABI change and must not be hidden under 0.26.
 
 See [Type relations and boundary plans](type-relations-and-boundaries.md),
 [The type checker](checker.md), [Code generator: overview](codegen-overview.md),

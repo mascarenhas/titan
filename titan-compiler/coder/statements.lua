@@ -843,6 +843,9 @@ function codeassignment(ctx, var, cexp, etype, lvalue)
     local vtag = var._tag
     if vtag == "Ast.VarName" or (vtag == "Ast.VarDot" and var._decl) then
         if vtag == "Ast.VarDot" and var._decl._tag == "Type.Field" then
+            assert(var._decl.isconst == false
+                   and not var._interface_field,
+                "const field lvalue reached code generation")
             local lstats, lexp
             if lvalue then
                 lstats, lexp = "", assert(lvalue.record)
@@ -968,6 +971,8 @@ function codeassignment(ctx, var, cexp, etype, lvalue)
     elseif vtag == "Ast.VarBracket" then
         local exp1type = var.exp1._type._tag
         if exp1type == "Type.Array" then
+            assert(var.exp1._type.isconst == false,
+                "const Array assignment reached code generation")
             local arr = var.exp1
             local idx = var.exp2
             local castats, caexp, cistats, ciexp
@@ -997,34 +1002,34 @@ function codeassignment(ctx, var, cexp, etype, lvalue)
                     if (TITAN_UNLIKELY(_k < 1)) {
                         $BADINDEX
                     }
-                    lua_Unsigned _actual_i = l_castS2U(_k) - 1u;
+                    lua_Unsigned _actual_i = l_castS2U(_k);
                     unsigned _asize = _t->asize;
                     if (_actual_i < _asize) {
                         unsigned _length = cast_uint(titan_array_length(_t));
                         obj2arr(_t, cast_uint(_actual_i), &_vv);
                         $BARRIER
                         if (ttisnil(&_vv)) {
-                            if (l_castS2U(_k) == _length) {
+                            if (_actual_i == _length) {
                                 while (_length > 0 &&
-                                       tagisempty(*getArrTag(_t, _length - 1u)))
+                                       tagisempty(*getArrTag(_t, _length)))
                                     _length--;
                                 titan_array_set_length(_t, _length);
                             }
-                        } else if (l_castS2U(_k) > _length) {
-                            titan_array_set_length(_t, l_castS2U(_k));
+                        } else if (_actual_i > _length) {
+                            titan_array_set_length(_t, _actual_i);
                         }
                     } else if (!ttisnil(&_vv)) {
                         sethvalue(L, $ARRROOT, _t);
                         setobj2t(L, $VALROOT, &_vv);
                         unsigned _newasize =
-                            titan_array_growth(L, l_castS2U(_k));
+                            titan_array_growth(L, _actual_i);
                         titan_array_resize(L, _t, _newasize);
                         _base = restorestack(L, _base_off);
                         _t = hvalue($ARRROOT);
                         setobj(L, &_vv, $VALROOT);
                         obj2arr(_t, cast_uint(_actual_i), &_vv);
                         $BARRIER
-                        titan_array_set_length(_t, l_castS2U(_k));
+                        titan_array_set_length(_t, _actual_i);
                     }
                 }
             ]], {
@@ -1208,6 +1213,8 @@ function coder._materialize_assignment_lvalue(ctx, var)
 
     local basetype = var.exp1._type
     if basetype._tag == "Type.Array" then
+        assert(basetype.isconst == false,
+            "const Array lvalue reached code generation")
         return coder._materialize_array_lvalue(ctx, var)
     elseif basetype._tag == "Type.Map" then
         local mapstats, mapexp = codeexp(ctx, var.exp1)
@@ -1823,12 +1830,14 @@ function codereturn(ctx, node)
 end
 
 -- `raise <exp>`: evaluate the (already `value`-coerced) operand into an anchored
--- temp, push it onto the Lua stack as the error object, then `lua_error(L)`. The
+-- temp, place it in the one top slot required by Lua's error ABI, then
+-- `lua_error(L)`. The
 -- entry wrapper ensured `errorhandler` is active on `L->errfunc`, so the longjmp
 -- through `lua_error` runs that handler, which builds the unified Lua+Titan trace before
 -- unwinding. The temp is a `value`-typed (GC) TValue, so `newtmp` anchors it in a
--- reserved stack slot; that anchor keeps it alive across the `lua_checkstack`
--- (which may run the GC and reallocate the stack) before we copy it to the new top.
+-- reserved stack slot; that anchor keeps it alive across the internal raising
+-- stack-growth path (which may run the GC and reallocate the stack) before we
+-- copy it to the new top.
 -- An `emitline` stamps the throw to the raise's exact `.titan` line so the native
 -- frame symbolizes there (mirrors `codethrow`).
 function coderaise(ctx, node)
@@ -1837,24 +1846,31 @@ function coderaise(ctx, node)
         -- Reinstall the catch's saved `traceback` into registry[TITAN_BACKTRACE_KEY]
         -- and SET the pin (TITAN_TRACE_PINNED), so errorhandler KEEPS the ORIGINAL
         -- trace rather than capturing a fresh one at this (shallower) re-raise
-        -- site; then push the saved `error` value and lua_error(L). The enclosing
-        -- catch's implicit locals are threaded through ctx (`ctx.catch_*_decl`).
+        -- site; then place the saved `error` in Lua's error-object slot and call
+        -- lua_error(L). The enclosing catch's implicit locals are threaded
+        -- through ctx (`ctx.catch_*_decl`).
         local errcvar = ctx.catch_error_decl._cvar      -- TValue (the error value)
         local tbcvar = ctx.catch_traceback_decl._cvar   -- TString* (the trace)
+        ctx.raise_id = (ctx.raise_id or 0) + 1
+        local raise_id = ctx.raise_id
+        ctx.uses_base_off = true
         return render([[
-            titan_ensure_stack(L, 2);
-            lua_pushliteral(L, TITAN_BACKTRACE_KEY);
-            setsvalue2s(L, L->top.p, $TB);
-            L->top.p++;
-            lua_rawset(L, LUA_REGISTRYINDEX);
-            lua_pushliteral(L, TITAN_TRACE_PINNED);
-            lua_pushboolean(L, 1);
-            lua_rawset(L, LUA_REGISTRYINDEX);
+            TValue _reraise_trace_$ID;
+            TValue _reraise_pin_$ID = {0};
+            setsvalue(L, &_reraise_trace_$ID, $TB);
+            setbtvalue(&_reraise_pin_$ID);
+            titan_registry_set_string(
+                L, TITAN_BACKTRACE_KEY, &_reraise_trace_$ID);
+            titan_registry_set_string(
+                L, TITAN_TRACE_PINNED, &_reraise_pin_$ID);
+            _base = restorestack(L, _base_off);
+            titan_ensure_stack(L, 1);
             setobj2s(L, L->top.p, &$ERR);
             L->top.p++;
             $LINEDIR
             lua_error(L);
         ]], {
+            ID = raise_id,
             LINEDIR = emitline(node),
             TB = tbcvar,
             ERR = errcvar,
@@ -2007,21 +2023,27 @@ function dispatch_after_finally(ctx, pa_var, frame, d_pa_err, d_pa_tb)
     local break_arm = (ctx.loopstack and #ctx.loopstack > 0)
         and realize_break(ctx) or "/* unreachable: no enclosing loop */ ;"
 
-    -- RAISE arm: reinstall the saved trace + pin (preserve original trace), push
-    -- the saved error, lua_error.
+    -- RAISE arm: reinstall the saved trace + pin (preserve original trace), put
+    -- the saved error in Lua's one required error-object slot, and lua_error.
+    ctx.uses_base_off = true
     local raise_arm = render([[
-        titan_ensure_stack(L, 2);
-        lua_pushliteral(L, TITAN_BACKTRACE_KEY);
-        setsvalue2s(L, L->top.p, tsvalue($PATB));
-        L->top.p++;
-        lua_rawset(L, LUA_REGISTRYINDEX);
-        lua_pushliteral(L, TITAN_TRACE_PINNED);
-        lua_pushboolean(L, 1);
-        lua_rawset(L, LUA_REGISTRYINDEX);
-        setobj2s(L, L->top.p, $PAERR);
+        TValue _pa_trace_$ID;
+        TValue _pa_pin_$ID = {0};
+        TValue _pa_error_$ID;
+        setobj(L, &_pa_trace_$ID, $PATB);
+        setbtvalue(&_pa_pin_$ID);
+        setobj(L, &_pa_error_$ID, $PAERR);
+        titan_registry_set_string(
+            L, TITAN_BACKTRACE_KEY, &_pa_trace_$ID);
+        titan_registry_set_string(
+            L, TITAN_TRACE_PINNED, &_pa_pin_$ID);
+        _base = restorestack(L, _base_off);
+        titan_ensure_stack(L, 1);
+        setobj2s(L, L->top.p, &_pa_error_$ID);
         L->top.p++;
         lua_error(L);
     ]], {
+        ID = frame.id,
         PATB = slotat(d_pa_tb),
         PAERR = slotat(d_pa_err),
     })
@@ -2088,34 +2110,36 @@ function boundary_recover_open(ctx, tag, d_err, d_tb)
             L->errfunc = _olderrfunc_$T;
             _lj_$T.status = luaD_closeprotected(L, _oldtop_$T, _lj_$T.status);
             luaD_seterrorobj(L, _lj_$T.status, restorestack(L, _oldtop_$T));
-            if (TITAN_UNLIKELY(!lua_checkstack(L, 4)))
-                luaD_throw(L, LUA_ERRMEM);
             /* a value-call or another stack-growing operation inside the protected
              * region may have reallocated the stack; recompute _base before
              * touching any reserved slot */
             _base = restorestack(L, _base_off);
-            /* save the error object into its anchored slot, then drop it from the
-             * top; the registry snapshot/clear below pushes within the
-             * lua_checkstack(4) margin established above. */
+            /* Save the error object into its anchored slot, then drop it from the
+             * top. Registry bookkeeping below uses Lua internals directly and
+             * does not borrow the Lua stack. */
             setobj2s(L, $ERRSTACK, s2v(L->top.p - 1));
             L->top.p = restorestack(L, _oldtop_$T);
             /* snapshot registry[TITAN_BACKTRACE_KEY] into the traceback slot */
-            lua_pushliteral(L, TITAN_BACKTRACE_KEY);
-            lua_rawget(L, LUA_REGISTRYINDEX);
-            if (!ttisstring(s2v(L->top.p - 1))) {
-                L->top.p--;
-                lua_pushliteral(L, "");
+            TValue _caught_trace_$T;
+            lu_byte _caught_trace_tag_$T = titan_registry_get_string(
+                L, TITAN_BACKTRACE_KEY, &_caught_trace_$T);
+            if (tagisempty(_caught_trace_tag_$T)
+                    || !ttisstring(&_caught_trace_$T)) {
+                TString *_empty_trace_$T = luaS_newliteral(L, "");
+                setsvalue(L, &_caught_trace_$T, _empty_trace_$T);
             }
-            setobj2s(L, $TBSTACK, s2v(L->top.p - 1));
-            L->top.p--;
+            (void)_caught_trace_tag_$T;
+            _base = restorestack(L, _base_off);
+            setobj2s(L, $TBSTACK, &_caught_trace_$T);
             /* clear slot + pin so a fresh error raised later is captured anew
              * (a bare re-raise re-pins the saved trace) */
-            lua_pushliteral(L, TITAN_BACKTRACE_KEY);
-            lua_pushnil(L);
-            lua_rawset(L, LUA_REGISTRYINDEX);
-            lua_pushliteral(L, TITAN_TRACE_PINNED);
-            lua_pushnil(L);
-            lua_rawset(L, LUA_REGISTRYINDEX);
+            TValue _cleared_trace_$T = {0};
+            setnilvalue(&_cleared_trace_$T);
+            titan_registry_set_string(
+                L, TITAN_BACKTRACE_KEY, &_cleared_trace_$T);
+            titan_registry_set_string(
+                L, TITAN_TRACE_PINNED, &_cleared_trace_$T);
+            _base = restorestack(L, _base_off);
             /* re-establish the function's steady-state reserved top
              * (`_base + nslots`) so any reserved slots used in the recovery sit
              * below L->top.p and are GC-scanned. The literal nslots is patched in

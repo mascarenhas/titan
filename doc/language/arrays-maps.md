@@ -1,15 +1,17 @@
 # Arrays and maps
 
-Titan has two structural container types:
+Titan has two structural container families:
 
-- an **Array**, written `{T}`, is a positive-integer-indexed sequence that may
-  contain holes; and
+- a mutable **Array**, written `{T}`, or const Array, written `const { T }`, is
+  a positive-integer-indexed sequence that may contain holes; and
 - a **Map**, written `{K: V}`, is an ordinary Lua-style key/value dictionary.
 
 They use different run-time protocols and are never interchangeable merely
 because both contain indexed values. Gradual consistency descends only between
-the same container kind: `{value}` is consistent with `{integer}`, but neither
-is consistent with `{integer: value}`. This does not lift ordinary
+the same container kind and, for Arrays, the same qualifier: `{value}` is
+consistent with `{integer}` and `const { value }` with
+`const { integer }`, but mutable and const Arrays are not consistent with each
+other and neither is consistent with `{integer: value}`. This does not lift ordinary
 conversions: `{integer}` cannot be used as `{float}` merely because one
 integer can be converted to one float, and `{R}` cannot be used as `{I}`
 merely because record or union `R` directly satisfies Interface `I`.
@@ -23,11 +25,13 @@ proxy preserves one Array identity without exposing the private backing table.
 
 ### Type and element reads
 
-`{T}` is the type of Arrays whose elements have type `T`. Container types can
-nest:
+`{T}` is the type of mutable Arrays whose elements have type `T`;
+`const { T }` is the corresponding read-only container type. Container types
+can nest:
 
 ```titan
 local rows: {{integer}} = { {1, 2}, {3, 4} }
+local frozen_rows: {const { integer }} = { {1, 2}, {3, 4} }
 local indexes: {{string: integer}} = {
     { ["one"] = 1 },
     { ["two"] = 2 },
@@ -38,7 +42,8 @@ An element type is de-optionized. `{integer?}` denotes the same type as
 `{integer}` because absence is already represented by the indexed read's
 option type. If `a` has type `{T}`, `a[i]` has type `T?`: a missing position
 returns nil. A plain `T` context checks that the value is present, while an
-option declaration, condition, or `or` default can preserve or handle nil:
+option declaration, condition, or `or` default can preserve or handle nil.
+The same read type and guard apply to `const { T }`:
 
 ```titan
 function read(a: {integer}, i: integer): integer
@@ -93,15 +98,18 @@ integer-keyed Map:
 
 ```titan
 local primes: {integer} = {2, 3, 5, 7}
+local fixed: const { integer } = {2, 3, 5, 7}
 local floats: {float} = {1, 2, 3}  -- each value is converted to float
 local inferred = {10, 20}          -- {integer}
 local empty = {}                   -- no context: {integer}
 ```
 
-An expected Array type supplies the element type. Without one, Titan infers
-the element type from the positional expressions; an empty constructor falls
-back to `{integer}`. Each source expression evaluates exactly once, from left
-to right, and its conversion or error occurs before the next expression.
+An expected Array type supplies both the element type and qualifier, so the
+`fixed` constructor above creates a const proxy directly rather than first
+building and copying a mutable one. Without context, Titan infers a mutable
+Array from the positional expressions; an empty constructor falls back to
+`{integer}`. Each source expression evaluates exactly once, from left to right,
+and its conversion or error occurs before the next expression.
 
 The final position is an open result consumer:
 
@@ -155,6 +163,10 @@ a positive-index error before it changes the Array (Titan source reports
 `Titan array index must be positive`). Thus key 0 is not a user position,
 negative entries cannot be retained, and no Array operation falls back to a
 hash entry.
+
+Indexed assignment requires a mutable `{T}` receiver. Every indexed assignment
+through `const { T }` is a compile-time error; Lua writes through its const
+proxy fail at run time without changing the Array.
 
 For a single `base()[index()] = rhs()` assignment, Titan evaluates the Array
 expression, index expression, and right-hand expression exactly once in that
@@ -214,12 +226,15 @@ length.
 
 ### Identity and nested Arrays
 
-Array equality compares identity. Two separately constructed Arrays with the
-same elements are unequal; repeated passage through Lua or `value` preserves
-the same identity.
+Array equality compares identity within one qualifier. Two separately
+constructed Arrays with the same elements are unequal; repeated passage
+through Lua or `value` preserves the same identity and qualifier. Mutable and
+const Array types are directly incomparable; cast both explicitly to `value`
+when boxed identity comparison is intended.
 
-Nested Arrays preserve the same rule. Titan's native path can keep an inner
-Array in its private form, while Lua sees the canonical inner proxy:
+Nested mutable and const Arrays preserve the same rule and their exact
+qualifier. Titan's native path can keep an inner Array in its private form,
+while Lua sees the corresponding canonical inner proxy:
 
 ```titan
 function nested(): {{integer}}
@@ -236,6 +251,40 @@ assert(rows[1] == rows[1])
 
 An Array of `value` does not implicitly unwrap an Array proxy held as a
 dynamic value. The proxy is the canonical representation of that `value`.
+
+### Const conversion and linear copy elision
+
+There is no implicit qualifier change. The written cast from mutable `{S}` to
+`const { T }` is admitted only when `S` and `T` are equal or gradually
+consistent, and it makes a shallow copy that preserves logical length, holes,
+and element identities:
+
+```titan
+function snapshot(values: {string}): const { string }
+    return values as const { string }
+end
+```
+
+It does not run numeric, nominal, or other per-element conversions.
+Const-to-mutable conversion is rejected, including after a `value` round trip.
+The two qualifiers have distinct exact run-time tags. A statically admitted
+`array is const { T }` evaluates the mutable source once and returns true
+without performing the cast; a test from `value` checks the exact qualified
+tag.
+
+The observable semantics are always the shallow copy. The compiler may retag
+the source in place when it proves that one un-rebound local owns a fresh
+mutable Array, the terminal cast is its last use, and the Array never escapes.
+Before that cast, loops and structured builder logic may use `#array` and
+indexed reads or writes. Calls may compute element values, and creating a
+closure that does not reference the Array is harmless. Passing the Array to a
+call, returning or storing it, making an alias, rebinding it, actually
+capturing it in a closure, hiding the cast inside control flow, or using the
+source or an alias afterward retains the copy path. Programs cannot observe
+which lowering was selected.
+
+See [Const values](const-values.md#const-arrays) for the complete qualifier
+rules.
 
 ## Maps
 
@@ -414,27 +463,31 @@ At a Lua-visible boundary the two container kinds are deliberately distinct:
 
 | Titan value | Lua representation |
 | --- | --- |
-| Array `{T}` | canonical full-userdata proxy |
+| mutable Array `{T}` | canonical mutable full-userdata proxy |
+| const Array `const { T }` | canonical const full-userdata proxy |
 | Map `{K: V}` | ordinary Lua table |
-| `T?` containing an Array | nil or the canonical proxy |
-| `value` containing an Array | canonical proxy |
+| `T?` containing an Array | nil or its exact qualified proxy |
+| `value` containing an Array | its exact qualified proxy |
 
 Every Array backing/proxy pair is one-to-one. All Arrays in one Lua state use
-one shared protected proxy metatable, so checking the outer Array kind remains
-a direct metatable-identity test rather than a per-element type lookup.
-Passing an Array repeatedly through module fields, record fields, union
-payloads, functions, `value`, imports, nested boxes, or Lua returns preserves
-the same proxy identity and construction policy. Map keys and values are
-Lua-visible storage, so an Array stored in a Map is stored as that proxy,
-never as its private table.
+one canonical protected mutable metatable and one canonical protected const
+metatable. Checking the outer Array kind and qualifier is therefore a direct
+metatable-identity test rather than a per-element type lookup. Passing an Array
+repeatedly through module fields, record fields, union payloads, functions,
+`value`, imports, nested boxes, or Lua returns preserves the same proxy
+identity, qualifier, and construction policy. Map keys and values are
+Lua-visible storage, so an Array stored in a Map is stored as that proxy, never
+as its private table.
 
 The boundary conversion rules are:
 
 | From | To | Result |
 | --- | --- | --- |
-| Array | `value` or Lua | canonical proxy |
+| mutable Array | `value` or Lua | canonical mutable proxy |
+| const Array | `value` or Lua | canonical const proxy |
 | Map | `value` or Lua | ordinary table |
-| `value` containing canonical proxy | Array | succeeds, preserving identity |
+| `value` containing exact target-qualified proxy | same-qualified Array | succeeds, preserving identity |
+| `value` containing the other Array qualifier | Array | run-time type error |
 | `value` containing plain table | Array | run-time type error |
 | `value` containing plain table | Map | succeeds after the table check |
 | `value` containing Array proxy | Map | run-time type error |
@@ -442,14 +495,17 @@ The boundary conversion rules are:
 | Map | Array | statically rejected |
 
 There is no direct Array-to-Map or Map-to-Array cast. A plain Lua table is a
-valid Map input but is not an Array. To call an Array-typed Titan function
-from Lua, obtain an Array proxy from Titan—for example from a factory or
-exported Array—and pass that proxy back.
+valid Map input but is not an Array. Lua also cannot substitute a mutable proxy
+for a const parameter, or vice versa. To call an Array-typed Titan function
+from Lua, obtain the correct qualified Array proxy from Titan—for example from
+a factory or exported Array—and pass that proxy back.
 
-Lua indexing the proxy requires an integral numeric key. Numeric strings and
-fractional numbers raise. Reads below 1 return nil; writes below 1 raise.
+Lua indexing either proxy requires an integral numeric key. Numeric strings
+and fractional numbers raise. Reads below 1 return nil; mutable writes below 1
+raise, and every write through a const proxy raises before conversion or
+mutation.
 
-Every Array proxy carries the dynamic conversion policy chosen by the
+Every mutable Array proxy carries the dynamic conversion policy chosen by the
 Array's construction-time, context-adjusted element type. A genuine-Lua
 non-nil write runs that policy before mutation. Thus an Array constructed as
 `{integer}` accepts `2.0` from Lua and stores the converted integer, applies
@@ -471,13 +527,15 @@ typed view still pays its strict read guard. The writer is therefore a policy
 for future genuine-Lua writes, not evidence that every current element has one
 particular type.
 
-The representation that carries this policy is fixed:
+The representations are fixed:
 
 * the private backing table's reserved key 0 points to the canonical proxy;
-* proxy user value 1 points back to the backing table; and
-* proxy user value 2 holds the constructing module's writer closure.
+* proxy user value 1 points back to the backing table;
+* mutable proxy user value 2 holds the constructing module's writer closure;
+  and
+* const proxy user value 2 is nil.
 
-Each module generates and caches the closures needed by the Array types it
+Each module generates and caches the closures needed by the mutable Array types it
 actually constructs. There is no global writer registry, no writer interning,
 no “first one wins” rule, and no writer-identity comparison when a static view
 changes. The closure retains its constructing module when nominal or foreign
@@ -487,21 +545,23 @@ conversion data is needed. Standalone programs similarly construct their
 ### Raw and stock table-library behavior
 
 An Array is table-like, but it is not a Lua table. `type(array)` is
-`"userdata"` and `getmetatable(array)` returns the protected string
-`"Titan array metatable"`. Lua's `rawget`, `rawset`, and base-library
+`"userdata"` and `getmetatable(array)` returns the protected string for its
+qualified Titan Array metatable. Lua's `rawget`, `rawset`, and base-library
 `rawlen` reject the proxy because it is not a table. `pairs` support is not
 promised because the proxy has no `__pairs`.
 
 **Stock Lua 5.5 table-library reality.** Its `table` library deliberately
 accepts a non-table object when the object's raw metatable supplies the
-operations a function needs. Because an Array proxy necessarily supplies
-`__index`, `__newindex`, and `__len`, applicable functions such as
-`table.insert`, `table.remove`, `table.move`, `table.sort`, `table.concat`, and
-`table.unpack` operate through those callbacks rather than rejecting the
-proxy. Their effects therefore use the same positive-index and deterministic
-length transitions and the construction-time dynamic writer. A later typed
-read still performs its independent strict target guard. This differs from
-the raw functions above, which do reject.
+operations a function needs. A mutable Array supplies `__index`, `__newindex`,
+and `__len`, so applicable functions such as `table.insert`, `table.remove`,
+`table.move`, `table.sort`, `table.concat`, and `table.unpack` operate through
+those callbacks. Their effects use the same positive-index and deterministic
+length transitions and the construction-time dynamic writer. A const Array
+supplies only `__index` and `__len`: read-only operations such as
+`table.concat` and `table.unpack` can operate, while an operation that attempts
+to mutate fails without changing the Array. A later typed read still performs
+its independent strict target guard. This differs from the raw functions
+above, which reject either proxy.
 
 The Lua debug library can bypass metatable protection and expose or replace
 either private user value. A C module can inspect or mutate Lua's internal
@@ -516,15 +576,18 @@ performed through it.
 
 Array positive reads and in-capacity writes are direct array-slot operations.
 The outer backing-slot access and exact-guard fast paths do not perform a hash
-lookup, metatable dispatch, registry lookup, or length scan. A witnessed
+lookup, metatable dispatch, registry lookup, or length scan. Const Arrays use
+the same read and length paths and have no native write path. A witnessed
 Interface element is the exception after the slot load: its strict guard
 raw-looks up the candidate metatable and may enter the VM to construct a
 wrapper. In every case, a typed read never loads or compares the writer; the
-shared proxy metatable remains the fast outer tag even for nested Arrays.
+qualified proxy metatable remains the fast outer tag even for nested Arrays.
 `#array` is O(1). Growth is amortized; a tail deletion may scan backward over
-holes. The Array's one private hash entry, proxy, second user-value slot, and
-GC edge to the writer (and through it, when needed, the constructing module)
-add a fixed per-Array ownership cost.
+holes. The Array's one private hash entry, proxy, and second user-value slot
+add a fixed per-Array ownership cost. A mutable Array additionally traces its
+writer (and through it, when needed, the constructing module); a const Array's
+writer slot is nil. A mutable-to-const copy is O(length), while a proven linear
+freeze retags in constant time.
 
 Map reads keep Lua's specialized raw table paths selected from the static key
 type. A hit returns immediately; a miss normally ends after a cached
@@ -554,6 +617,8 @@ for the backing/proxy protocol, GC barriers, and lowering details.
 The second proxy user value was an ABI change in Titan 0.20. Providers from ABI
 0.17 through 0.19 use the earlier one-user-value Array layout. ABI 0.21
 retained the two-user-value layout while advancing the matched Lua runtime to
-5.5.1, and ABIs 0.22 through 0.25 retain it. The ordinary
+5.5.1, and ABIs 0.22 through 0.25 retained it. ABI 0.26 extends the boundary
+with a distinct const Array tag and a two-metatable module cache while retaining
+the dense `Table *` backing and two-user-value proxy. The ordinary
 compiled-provider ABI check rejects every prior ABI before either side
 exchanges an Array; Titan does not attempt an in-place compatibility shim.

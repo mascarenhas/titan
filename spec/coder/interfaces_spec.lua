@@ -1,6 +1,7 @@
-require "titan-compiler.coder.core"
+local core = require "titan-compiler.coder.core"
+require "titan-compiler.coder.names"
+local coder = core.coder
 local h = require "spec.support.helpers"
-local coder = require "titan-compiler.coder"
 local coder_interfaces = require "titan-compiler.coder.interfaces"
 local types = require "titan-compiler.types"
 local cdriver = require "c-parser.cdriver"
@@ -67,6 +68,22 @@ local function generated_function(source, marker)
     end
 end
 
+local function assert_no_identity_stack_api(source)
+    for _, name in ipairs({
+        "titan_array_metatables",
+        "luaL_getmetatable",
+        "lua_getfield",
+        "lua_rawgeti",
+        "lua_settop",
+        "lua_checkstack",
+        "lua_pop",
+        "lua_push",
+    }) do
+        assert.is_nil(source:find(name, 1, true),
+            "stack-effecting identity call " .. name .. " in:\n" .. source)
+    end
+end
+
 describe("interfaces (end-to-end)", function()
     after_each(function()
         for _, name in ipairs({
@@ -81,7 +98,7 @@ describe("interfaces (end-to-end)", function()
         end
     end)
 
-    it("keys adapter-owned C identities to the emitting module", function()
+    it("resolves adapter-owned C identities via module upvalue slots", function()
         local cint = types.CInteger("int", true, 3, 32)
         local owned = types.COwned(cint, false)
         local tlcontext = {
@@ -90,25 +107,23 @@ describe("interfaces (end-to-end)", function()
             upvalue = 0,
         }
         local ctx = { tlcontext = tlcontext }
-        local generated = coder_interfaces._interface_adapter_identity_prelude(
-            ctx, {
-                concrete_owner_module = "provider",
-                arguments = {{
-                    operation = {
-                        kind = "gradual_guard",
-                        timing = "immediate",
-                        target = owned,
-                    },
-                }},
-                results = {},
-            })
-        local registry_name = "Titan owned C bridge "
-            .. types.tostring(owned) .. " metatable"
-        assert.truthy(generated:find(registry_name, 1, true), generated)
-        assert.is_nil(generated:find(
-            "Titan owned C provider ", 1, true))
+        local expr = coder._owned_c_metatable_expr(ctx, owned)
+        assert.truthy(expr:find("hvalue(&_mod->uv[", 1, true), expr)
         assert.is_truthy(
             tlcontext.owned_c_metatables[types.tostring(owned)])
+    end)
+
+    it("resolves mutable and const Array adapter identities via module upvalue slots",
+    function()
+        local tlcontext = {
+            array_metatable_upvalue = 1,
+            const_array_metatable_upvalue = 2,
+        }
+        local ctx = { tlcontext = tlcontext }
+        local mut_expr = coder.array_metatable_kind(ctx, false)
+        local const_expr = coder.array_metatable_kind(ctx, true)
+        assert.equal("hvalue(&_mod->uv[1].uv)", mut_expr)
+        assert.equal("hvalue(&_mod->uv[2].uv)", const_expr)
     end)
 
     it("polls before an Interface adapter allocates callable views", function()
@@ -479,6 +494,155 @@ describe("interfaces (end-to-end)", function()
             collectgarbage("collect")
             assert(present:get() == 42)
             assert(bound() == 42)
+        ]])
+    end)
+
+    it("copies shallow const-field snapshots in Interface order", function()
+        h.run_coder([[
+            record Payload
+                number: integer
+            end
+
+            interface View
+                label: string
+                total: float
+                payload: Payload
+                function get(): integer
+            end
+
+            record Source
+                const total: integer
+                const payload: Payload
+                const label: string
+            end
+
+            function Source:get(): integer
+                return self.total
+            end
+
+            function make(): (Source, View)
+                local source = Source.new(
+                    42, Payload.new(7), "answer")
+                local view: View = source
+                return source, view
+            end
+
+            function read(view: View): (string, float, integer)
+                return view.label, view.total, view.payload.number
+            end
+        ]], [[
+            local source, view = test.make()
+            local label, total, payload = test.read(view)
+            assert(label == "answer")
+            assert(total == 42.0)
+            assert(payload == 7)
+            assert(view.label == "answer")
+            assert(view.total == 42.0)
+            assert(view:get() == 42)
+
+            -- The field slot is a snapshot, but nominal referents are shared.
+            source.payload.number = 9
+            assert(view.payload.number == 9)
+            source = nil
+            collectgarbage("collect")
+            collectgarbage("generational")
+            collectgarbage("collect")
+            assert(view.label == "answer")
+            assert(view.payload.number == 9)
+
+            local ok, err = pcall(function()
+                view.total = 0
+            end)
+            assert(not ok)
+            assert(tostring(err):match("cannot assign member 'total'"))
+        ]])
+    end)
+
+    it("converts nested Interface and callable field snapshots", function()
+        h.run_coder([[
+            interface Leaf
+                amount: float
+            end
+
+            interface Bundle
+                leaf: Leaf
+                apply: (integer) -> value
+            end
+
+            record LeafRecord
+                const amount: integer
+            end
+
+            record BundleRecord
+                const apply: (value) -> integer
+                const leaf: LeafRecord
+            end
+
+            function plus_one(input: value): integer
+                return (input as integer) + 1
+            end
+
+            function bare(): BundleRecord
+                return BundleRecord.new(
+                    plus_one, LeafRecord.new(41))
+            end
+
+            function make(): Bundle
+                return bare()
+            end
+
+            function as_bundle(input: value): Bundle
+                return input as Bundle
+            end
+        ]], [[
+            local direct = test.make()
+            assert(direct.leaf.amount == 41.0)
+            assert(direct.apply(41) == 42)
+
+            -- Exercise the per-state witness wrapper, whose field conversions
+            -- use the same roots, barriers, and nested pair inventory.
+            local discovered = test.as_bundle(test.bare())
+            collectgarbage("collect")
+            collectgarbage("generational")
+            collectgarbage("step")
+            collectgarbage("collect")
+            assert(discovered.leaf.amount == 41.0)
+            assert(discovered.apply(41) == 42)
+        ]])
+    end)
+
+    it("preserves generic Interface field carriers", function()
+        h.run_coder([[
+            interface View<T>
+                item: T
+            end
+
+            record Box<T>
+                const item: T
+            end
+
+            function integer_view(): View<integer>
+                return Box<integer>.new(42)
+            end
+
+            function string_view(): View<string>
+                return Box<string>.new("forty-two")
+            end
+
+            function integer_item(view: View<integer>): integer
+                return view.item
+            end
+
+            function string_item(view: View<string>): string
+                return view.item
+            end
+        ]], [[
+            local integer = test.integer_view()
+            local string = test.string_view()
+            assert(integer.item == 42)
+            assert(string.item == "forty-two")
+            assert(test.integer_item(integer) == 42)
+            assert(test.string_item(string) == "forty-two")
         ]])
     end)
 
@@ -1227,7 +1391,6 @@ describe("interfaces (end-to-end)", function()
             "titan_ensure_stack%(L,(%d+)%)", definition)))
         local rooted = tonumber(assert(csrc:match(
             "L%->top%.p%+=(%d+);", definition)))
-        assert.equal(rooted + 3, reserved)
         local demand_guard = assert(
             csrc:find("_flexout==NULL", definition, true))
         local negative_guard = assert(
@@ -1235,6 +1398,11 @@ describe("interfaces (end-to-end)", function()
         local concrete_call = assert(csrc:find(
             "test_\\u2133_Concrete_\\u2131_produce_titanmethod(",
             negative_guard, true))
+        local adapter_body = csrc:sub(definition, concrete_call)
+        assert.is_nil(adapter_body:find("titan_array_cached_metatables", 1, true))
+        assert.is_nil(adapter_body:find("titan_registry_get_string_table", 1, true))
+        assert_no_identity_stack_api(
+            csrc:sub(definition, concrete_call - 1))
         assert.is_true(definition < demand_guard
             and demand_guard < negative_guard
             and negative_guard < concrete_call)
@@ -1410,23 +1578,16 @@ describe("interfaces (end-to-end)", function()
             "test_\\u2133_ProtectorImpl_\\u2131_protect_titanmethod(",
             start, true))
         local body = csrc:sub(start, stop)
-        local reserve = assert(csrc:find(
-            "titan_ensure_stack(L,", start, true))
-        local identity = assert(csrc:find(
-            '"Titan interface test.Item metatable"',
-            reserve, true))
-        local conversion = assert(csrc:find(
-            "_ia_concrete_arg_1", identity, true))
-        local before_identity = csrc:sub(start, identity - 1)
-        assert.falsy(before_identity:find(
-            "setuvalue(L,s2v((restorestack(L,_base_off)",
-            1, true), before_identity)
-        assert.falsy(before_identity:find(
-            "setobj2t(L,s2v((restorestack(L,_base_off)",
-            1, true), before_identity)
+        local reserve = assert(body:find(
+            "titan_ensure_stack(L,", 1, true))
+        assert.is_nil(body:find("titan_registry_get_string_table", 1, true))
+        assert.is_nil(body:find("titan_array_cached_metatables", 1, true))
+        local identity = assert(body:find("hvalue(&_mod->uv[", 1, true))
+        local conversion = assert(body:find(
+            "_ia_concrete_arg_2", identity, true))
+        assert_no_identity_stack_api(body)
         assert.is_true(reserve < identity
-            and identity < conversion
-            and conversion < stop)
+            and identity < conversion)
 
         local called, callerr = h.call("test", [[
             for _, mode in ipairs({"incremental", "generational"}) do
@@ -1865,6 +2026,7 @@ describe("interfaces (end-to-end)", function()
     function()
         h.compile_and_read_c([[
             interface Getter
+                item: integer
                 function get(): integer
                 function adapt(x: value): value
             end
@@ -1872,7 +2034,7 @@ describe("interfaces (end-to-end)", function()
             offset: integer = 1
 
             record Box
-                item: integer
+                const item: integer
             end
 
             function Box:get(): integer
@@ -1922,10 +2084,12 @@ static void exercise(int mode) {
     lua_gc(L, mode);
     if (luaL_dostring(L,
             "local i = test.make(42);"
+            "assert(i.item == 42);"
             "assert(i:get() == 42);"
             "assert(i:adapt(1) == 44);"
             "local f = test.bind(i);"
             "local a = test.bind_adjust(i);"
+            "assert(not pcall(function() i.item = 0 end));"
             "i = nil;"
             "collectgarbage('collect');"
             "assert(f() == 42);"

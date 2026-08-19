@@ -124,8 +124,8 @@ a/b.so
 a/b/c.so
 ```
 
-The binary path comes from `TITAN_PATH_0_25` when set, otherwise `TITAN_PATH`,
-otherwise the default `.;<root>/lib/titan/0.25`. In an override, `;;` inserts
+The binary path comes from `TITAN_PATH_0_26` when set, otherwise `TITAN_PATH`,
+otherwise the default `.;<root>/lib/titan/0.26`. In an override, `;;` inserts
 that default at the same position. Search is **path-root first**: Titan walks
 all candidates in the first path root before moving to the second root. Once
 an earlier root contains a file at a relative candidate such as `a/b.so`, that
@@ -135,7 +135,7 @@ still advance to a deeper candidate such as `a/b/c.so`.
 
 A candidate claims `a.b.c` when it exports either member of the requested
 metadata pair, `a_b_c_abi` and `a_b_c_types`. Once claimed, validation is
-terminal: both entries must exist, the ABI marker must be `0.25`, and the type
+terminal: both entries must exist, the ABI marker must be `0.26`, and the type
 metadata must describe `a.b.c`. Broken, half-present, mismatched, or malformed
 metadata is an error rather than permission to skip to another file. An
 ancestor with neither entry is an unrelated nonclaim; an exact `a/b/c.so`
@@ -236,14 +236,16 @@ injective module/nominal/member native separators. ABI 0.24 extends serialized
 interfaces for generic declarations while retaining the erased native layouts.
 ABI 0.25 changes the public `titan.fs.stat`/`lstat` results and
 `titan.async.suspend` parameter in both serialized interfaces and exact native
-signatures while retaining the other 0.24 layouts. The current marker,
-`TITAN_PATH_0_25`, and `lib/titan/0.25` namespace advance together.
-Conditional [closure adjustment wrappers](closure-adjustment-wrappers.md) reuse the fixed closure header and native signature retained through 0.25:
+signatures while retaining the other 0.24 layouts. ABI 0.26 advances the
+serialized/generated boundary for const descriptors, Interface fields, and
+qualified Array runtime tags. The current marker, `TITAN_PATH_0_26`, and
+`lib/titan/0.26` namespace advance together.
+Conditional [closure adjustment wrappers](closure-adjustment-wrappers.md) reuse the fixed closure header and native signature retained through 0.26:
 target adapters and strict relays are private to the consuming translation unit,
 so they add no provider symbol/schema/slot and require no further native-layout
-bump. Ordinary DSO/archive metadata validation rejects 0.24 before either side
+bump. Ordinary DSO/archive metadata validation rejects 0.25 before either side
 can exchange a value; there is no compatibility adapter, migration, or cleanup
-path. A separately versioned 0.24 installation remains preserved prior-version
+path. A separately versioned 0.25 installation remains preserved prior-version
 state.
 
 ABI 0.19 introduced serialized union/variant schemas and made the module-state
@@ -265,7 +267,10 @@ break changed what the existing native Array pointer slots mean, along with
 generated container code and Lua boundary checks, so 0.16 and 0.17 providers
 could not be mixed. ABI 0.18 and 0.19 preserved its one-user-value proxy;
 ABI 0.20 retained the canonical identity while adding the writer user value;
-ABI 0.21 retained that representation, and ABIs 0.22 through 0.25 retain it.
+ABI 0.21 retained that representation, and ABIs 0.22 through 0.25 retained it.
+ABI 0.26 keeps the dense `Table *` backing and two user values but adds a
+distinct const proxy tag, a paired per-module metatable cache, and the
+copy/freeze runtime operations.
 
 Historically, ABI 0.16 introduced prefix-container discovery: a 0.15 consumer
 recorded only an imported module's exact child-DSO pathname and could not
@@ -278,7 +283,10 @@ initializes its per-state Interface identities, and generated wrappers,
 vtables, and method trampolines use the new layout. The same version therefore
 covers the Interface, relation, Array-writer, and strict-function-entry changes
 as one clean break. A 0.19 artifact has none of these Interface contracts and
-is rejected rather than adapted.
+is rejected rather than adapted. ABI 0.26 extends that schema with
+declaration-order fields and checker-frozen field adjustment mappings. Wrappers
+retain the two owner/receiver user values and add one traced snapshot user
+value per field; method-only wrappers retain the ABI-0.20 two-value shape.
 
 ## Standalone programs
 
@@ -295,8 +303,8 @@ model. One
 paired provider:
 
 ```text
-$ROCKS_TREE/lib/titan/0.25/titan.so
-$ROCKS_TREE/lib/titan/0.25/titan.a
+$ROCKS_TREE/lib/titan/0.26/titan.so
+$ROCKS_TREE/lib/titan/0.26/titan.a
 ```
 
 contains the native support entry plus the independent logical modules
@@ -328,7 +336,7 @@ $ROCKS_TREE/share/lua/5.5/titan/test.lua
 ```
 
 The compiler also installs canonical test support source at
-`$ROCKS_TREE/share/titan/0.25/src/titan/test.titan`; it is compiler data for
+`$ROCKS_TREE/share/titan/0.26/src/titan/test.titan`; it is compiler data for
 `--test` private-source collaboration, not another logical provider.
 
 The DSO is also the installation's one complete dynamic libuv provider; in

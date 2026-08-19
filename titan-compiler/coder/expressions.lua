@@ -166,10 +166,24 @@ function codevar(ctx, node)
     if node._tag == "Ast.VarDot" then
         if node._decl._tag == "Type.Field" then
             local cstats, cexp = codeexp(ctx, node.exp)
+            local index = node._decl.index
+            if node._interface_field then
+                assert(node._interface
+                       and node._interface._tag == "Type.Interface"
+                       and node._interface.fields[index + 1]
+                            == node._interface_field
+                       and node._interface_field_index == index,
+                    "Interface field read lacks its canonical snapshot slot")
+                -- uv[0]/uv[1] retain the concrete owner and value. Interface
+                -- fields are immutable target-typed snapshots in the
+                -- remaining uservalues, independently of the concrete
+                -- record's physical field order.
+                index = 2 + index
+            end
             return cstats,
                 getslot(node._type, nil, render("&(($EXP)->uv[$INDEX].uv)", {
                     EXP = cexp,
-                    INDEX = node._decl.index
+                    INDEX = c_integer_literal(index),
                 }))
         elseif node._decl._tag == "Type.CField" then
             return codecfield(ctx, node)
@@ -349,7 +363,8 @@ function codearray(ctx, node, target)
     -- module-global upvalue is not necessarily remembered until the caller's
     -- post-expression barrier, while constructor/open-run work can allocate.
     -- The caller copies this rooted result into its final owner afterward.
-    local ctmp, tmpname, tmpslot = newtmp(ctx, node._type, true)
+    local ctmp, tmpname, tmpslot, tmpstackslot =
+        newtmp(ctx, node._type, true)
     local inputstats, slots, openrun =
         coder._materialize_positional_inputs(ctx, node, node._type.elem)
     local stats = {}
@@ -364,18 +379,35 @@ function codearray(ctx, node, target)
         "Array construction lacks its normalized checker element type")
     assert(types.equals(writer_elem, types.normalize(elemtype)),
         "Array construction writer element disagrees with final Array type")
-    local writer = coder._array_writer(
-        ctx, writer_elem, node._array_writer_plan)
+    assert(type(node._type.isconst) == "boolean",
+        "Array construction lacks a const qualifier")
+    local writer
+    if not node._type.isconst then
+        writer = coder._array_writer(
+            ctx, writer_elem, node._array_writer_plan)
+    end
     local function initarray(capacity)
+        if node._type.isconst then
+            return render([[
+                $TMPNAME = titan_const_array_new(
+                    L, $META, $CAPACITY, $TMPSTACKSLOT);
+                _base = restorestack(L, _base_off);
+            ]], {
+                TMPNAME = tmpname,
+                TMPSTACKSLOT = tmpstackslot,
+                META = array_metatable(ctx, node._type),
+                CAPACITY = capacity,
+            })
+        end
         return render([[
             $TMPNAME = titan_array_new(
-                L, $META, $CAPACITY, &_mod->uv[$WRITER].uv);
+                L, $META, $CAPACITY, &_mod->uv[$WRITER].uv,
+                $TMPSTACKSLOT);
             _base = restorestack(L, _base_off);
-            sethvalue(L, $TMPSLOT, $TMPNAME);
         ]], {
             TMPNAME = tmpname,
-            TMPSLOT = tmpslot,
-            META = array_metatable(ctx),
+            TMPSTACKSLOT = tmpstackslot,
+            META = array_metatable(ctx, node._type),
             CAPACITY = capacity,
             WRITER = c_integer_literal(writer.slot),
         })
@@ -434,14 +466,14 @@ function codearray(ctx, node, target)
                 TValue $VSLOT = {0};
                 for (int _vj = 0; _vj < _vacount; _vj++) {
                     $SETWRAPPED
-                    obj2arr($TMPNAME, $NPREFIX + _vj, &$VSLOT);
+                    obj2arr($TMPNAME, $NPREFIX + 1 + _vj, &$VSLOT);
                     $BARRIER
                 }
                 unsigned _array_length =
                     cast_uint($NPREFIX + _vacount);
                 while (_array_length > 0 &&
                        tagisempty(*getArrTag($TMPNAME,
-                                            _array_length - 1u)))
+                                            _array_length)))
                     _array_length--;
                 titan_array_set_length($TMPNAME, _array_length);
                 $CLEANUP
@@ -465,7 +497,7 @@ function codearray(ctx, node, target)
                     local slot = slots[i]
                     table.insert(ps, render([[
                         obj2arr($TMPNAME, $INDEX, $SLOT);
-                    ]], { TMPNAME = tmpname, INDEX = c_integer_literal(i - 1), SLOT = slot }))
+                    ]], { TMPNAME = tmpname, INDEX = c_integer_literal(i), SLOT = slot }))
                     if types.is_gc(elemtype) then
                         table.insert(ps, render([[
                             luaC_barrierback(L, obj2gco($TMPNAME), $SLOT);
@@ -483,7 +515,7 @@ function codearray(ctx, node, target)
             obj2arr($TMPNAME, $INDEX, $SLOT);
         ]], {
             TMPNAME = tmpname,
-            INDEX = i-1,
+            INDEX = i,
             SLOT = slot
         }))
         if types.is_gc(elemtype) then
@@ -499,7 +531,7 @@ function codearray(ctx, node, target)
         {
             unsigned _array_length = $SIZE;
             while (_array_length > 0 &&
-                   tagisempty(*getArrTag($TMPNAME, _array_length - 1u)))
+                   tagisempty(*getArrTag($TMPNAME, _array_length)))
                 _array_length--;
             titan_array_set_length($TMPNAME, _array_length);
         }
@@ -1650,7 +1682,7 @@ function codeindexarray(ctx, node)
             if (_k < 1) {
                 setnilvalue(&_av);
             } else {
-                lua_Unsigned _actual_i = l_castS2U(_k) - 1u;
+                lua_Unsigned _actual_i = l_castS2U(_k);
                 if (_actual_i < _t->asize) {
                     arr2obj(_t, cast_uint(_actual_i), &_av);
                     if (tagisempty(ttypetag(&_av)))
@@ -1981,6 +2013,117 @@ function coder._inner_assignment(source, target, inner)
     }
 end
 
+function coder._code_array_freeze(ctx, node)
+    local cast = coder._checked_written_cast_plan(
+        node._written_cast, node.exp._type, node._type,
+        "mutable-to-const Array cast")
+    assert(cast.op == "array_freeze"
+           and (cast.mode == "copy" or cast.mode == "freeze"),
+        "Array freeze cast lacks a checker-selected lowering mode")
+    local source_stats, source = materialize(ctx, node.exp)
+    local target_decl, target_name, target_slot, target_stack_slot =
+        newtmp(ctx, node._type, true)
+    local args = {
+        SOURCE_STATS = source_stats,
+        TARGET_DECL = target_decl,
+        TARGET = target_name,
+        SOURCE = source,
+        MUTABLE_META = array_metatable(ctx, node.exp._type),
+        CONST_META = array_metatable(ctx, node._type),
+        TARGET_SLOT = target_slot,
+        TARGET_STACK_SLOT = target_stack_slot,
+    }
+    if cast.mode == "freeze" then
+        return render([[
+            $SOURCE_STATS
+            $TARGET_DECL
+            $TARGET = titan_array_freeze(
+                L, $SOURCE, $MUTABLE_META, $CONST_META);
+            sethvalue(L, $TARGET_SLOT, $TARGET);
+        ]], args), target_name
+    end
+    return render([[
+        $SOURCE_STATS
+        $TARGET_DECL
+        $TARGET = titan_array_shallow_copy(
+            L, $SOURCE, $MUTABLE_META, $CONST_META,
+            $TARGET_STACK_SLOT);
+        _base = restorestack(L, _base_off);
+    ]], args), target_name
+end
+
+function coder._code_maybe_array_cast(ctx, node)
+    local cast = coder._checked_written_cast_plan(
+        node._written_cast, node.exp._type, node._type,
+        "maybe-array cast")
+    local op = cast.op
+    local source_stats, source = materialize(ctx, node.exp)
+    local target_decl, target_name, target_slot, target_stack_slot =
+        newtmp(ctx, node._type, true)
+    local loc = node.loc
+    if op == "maybe_array_cast_upcast" then
+        return render([[
+            $SOURCE_STATS
+            $TARGET_DECL
+            $TARGET = $SOURCE;
+            sethvalue(L, $TARGET_SLOT, $TARGET);
+        ]], {
+            SOURCE_STATS = source_stats,
+            TARGET_DECL = target_decl,
+            TARGET = target_name,
+            SOURCE = source,
+            TARGET_SLOT = target_slot,
+        }), target_name
+    elseif op == "maybe_array_cast_mutable" then
+        return render([[
+            $SOURCE_STATS
+            if (TITAN_UNLIKELY(titan_array_try_proxy($SOURCE, $MUTABLE_META) == NULL)) {
+                $THROW
+            }
+            $TARGET_DECL
+            $TARGET = $SOURCE;
+            sethvalue(L, $TARGET_SLOT, $TARGET);
+        ]], {
+            SOURCE_STATS = source_stats,
+            TARGET_DECL = target_decl,
+            TARGET = target_name,
+            SOURCE = source,
+            MUTABLE_META = array_metatable_kind(ctx, false),
+            TARGET_SLOT = target_slot,
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            THROW = codethrow(loc,
+                "%s:%d:%d: type error, expected mutable array but found const array",
+                { "$FILE", "$LINE", "$COL" }),
+        }), target_name
+    elseif op == "maybe_array_cast_const" then
+        return render([[
+            $SOURCE_STATS
+            if (TITAN_UNLIKELY(titan_array_try_proxy($SOURCE, $CONST_META) == NULL)) {
+                $THROW
+            }
+            $TARGET_DECL
+            $TARGET = $SOURCE;
+            sethvalue(L, $TARGET_SLOT, $TARGET);
+        ]], {
+            SOURCE_STATS = source_stats,
+            TARGET_DECL = target_decl,
+            TARGET = target_name,
+            SOURCE = source,
+            CONST_META = array_metatable_kind(ctx, true),
+            TARGET_SLOT = target_slot,
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            THROW = codethrow(loc,
+                "%s:%d:%d: type error, expected const array but found mutable array",
+                { "$FILE", "$LINE", "$COL" }),
+        }), target_name
+    end
+    error("unexpected maybe_array_cast op " .. tostring(op))
+end
+
 -- Generate code for expression 'node'
 -- 'iscondition' is 'true' if expression is used not for value but for
 --    controlling conditinal execution
@@ -2071,6 +2214,16 @@ function codeexp_dispatch(ctx, node, iscondition, target)
         return coder._code_interface_conversion(ctx, node)
     elseif tag == "Ast.ExpCast" and node._interface_downcast then
         return coder._code_interface_downcast(ctx, node, false)
+    elseif tag == "Ast.ExpCast"
+           and node._written_cast
+           and node._written_cast.op == "array_freeze" then
+        return coder._code_array_freeze(ctx, node)
+    elseif tag == "Ast.ExpCast"
+           and node._written_cast
+           and (node._written_cast.op == "maybe_array_cast_mutable"
+                or node._written_cast.op == "maybe_array_cast_const"
+                or node._written_cast.op == "maybe_array_cast_upcast") then
+        return coder._code_maybe_array_cast(ctx, node)
     elseif tag == "Ast.ExpCast" and types.equals(node.exp._type, node._type) then
         return codeexp(ctx, node.exp, iscondition, target)
     elseif tag == "Ast.ExpCast"

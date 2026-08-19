@@ -53,6 +53,11 @@ function generic_prepare_erased_registry(surface_registry)
                 field.islocal = source and source.islocal or nil
                 field.dynamic_plan = types.dynamic_coercion(field.type) or false
             end
+        elseif lowered._tag == "Type.Interface" then
+            for _, field in ipairs(lowered.fields) do
+                field.dynamic_plan =
+                    types.dynamic_coercion(field.type) or false
+            end
         elseif lowered._tag == "Type.Union" then
             for index, variant in ipairs(lowered.variants) do
                 local source = owner.variants[index]
@@ -618,7 +623,10 @@ end
 function generic_field_pair(field, state)
     if not field or field._tag ~= "Type.Field" then return nil end
     local owner = state.surface_registry[field.fqtn]
-    if not owner or owner._tag ~= "Type.Record" or owner.scope == false then
+    if not owner
+       or (owner._tag ~= "Type.Record"
+           and owner._tag ~= "Type.Interface")
+       or owner.scope == false then
         return nil
     end
     local canonical = generic_canonical_indexed_member(
@@ -636,15 +644,20 @@ end
 function generic_lower_field_read(node, state)
     local var = node.var
     if not var or var._tag ~= "Ast.VarDot" then return node end
-    local _, carrier = generic_field_pair(var._decl, state)
+    local surface_field, carrier = generic_field_pair(var._decl, state)
     if not carrier then return node end
-    local surface = node._type
+    local surface_type = node._type
     var._decl = carrier
     var._type = carrier.type
+    if var._interface_field then
+        var._interface = state.erased_registry[surface_field.fqtn]
+        var._interface_field = carrier
+        var._interface_field_index = carrier.index
+    end
     node._type = carrier.type
     node._assignment_adjustment = nil
     local projected = generic_erased_boundary_expression(
-        node, types.erase(surface), state,
+        node, types.erase(surface_type), state,
         "projection from erased generic field '" .. carrier.name .. "'")
     if projected ~= node then state.reverse_wrappers[projected] = node end
     return projected
@@ -898,7 +911,9 @@ function generic_lower_expression(node, state)
             return generic_reclassify_written_expression(
                 node, lowered, surface_target, state)
         end
-        if generic_adjustment then
+        if generic_adjustment
+           or (node._adjustment
+               and not types.equals(types.erase(node._adjustment.source), types.erase(lowered._type))) then
             return generic_erased_boundary_expression(
                 lowered, types.erase(surface_target), state,
                 "erased generic implicit cast")
@@ -1160,9 +1175,18 @@ function generic_refresh_erased_annotations(node)
         elseif tag == "Ast.TopLevelVar" then
             value._lua_write_dynamic_plan =
                 types.dynamic_coercion(value._type) or false
-        elseif tag == "Ast.TopLevelRecord" or tag == "Ast.TopLevelUnion" then
+        elseif tag == "Ast.TopLevelRecord" or tag == "Ast.TopLevelUnion"
+               or tag == "Ast.TopLevelInterface" then
             value._dynamic_receiver_plan = types.dynamic_coercion(
                 types.Nominal(value._type.name)) or false
+            if tag == "Ast.TopLevelInterface" then
+                for index, field in ipairs(value.fields or {}) do
+                    local descriptor = value._type.fields[index]
+                    field._field = descriptor
+                    field._dynamic_plan = descriptor
+                        and descriptor.dynamic_plan or false
+                end
+            end
         elseif tag == "Ast.VarBracket" then
             value._read_guard = types.gradual_guard(value._type) or false
         end

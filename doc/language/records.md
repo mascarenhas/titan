@@ -12,15 +12,22 @@ they happen to have.
 ## Declaring a record
 
 A record declaration may only appear at the top level of a module. Each
-field is a name and a type; fields are separated by newlines or
+field is `[local] [const] name [?]: type`; fields are separated by newlines or
 semicolons (a trailing semicolon is fine):
 
 ```lua
 record Point
+    const id: integer
     x: float
     y: float
 end
 ```
+
+A const field is filled during record construction and cannot be replaced
+later. The `?` shorthand remains record-only and composes with const, as in
+`local const cache?: Cache`. Constness is shallow: a const field containing a
+mutable container or record retains that object's ordinary mutability. See
+[Const values](const-values.md#const-record-fields).
 
 Declaring the same field twice is a compile-time error
 (`redeclaration of field 'x' in record 'Point'`).
@@ -206,6 +213,10 @@ particular, assigning one as the right-hand side of a single-assignment
 record field (`o.i = { ... }`), or a local — behaves exactly like the
 initializer form, just as `RecName.new(...)` does.
 
+Construction initializes mutable and const fields alike. These field stores
+are initialization operations, not ordinary assignments, so they do not
+create a post-construction write path for const fields.
+
 The field list is checked at compile time:
 
 * every entry must name a field — `{ x = 1.0, z = 2.0 }` gives
@@ -286,7 +297,8 @@ end
 Reading a field the record does not have, or writing to one, is a
 compile-time error (`field 'z' not found in record 'test.Point'`).
 Assignments use the same assignment adjustments as any other typed target and
-must be accepted at the field's declared type.
+must be accepted at the field's declared type. A const field can be read but
+not assigned after construction.
 
 A record is a *reference* value: assigning it to another variable,
 passing it to a function, or storing it in an array, map, module
@@ -424,9 +436,11 @@ errors and examples are in
 
 A record does not declare that it implements an
 [Interface](interfaces.md). Instead, a statically known conversion site checks
-the record's methods structurally. Every required Interface method must be
-visible at that site and satisfy the Interface signature under directional
-callable adjustment. Fields and record functions do not count.
+the record's required fields and methods structurally. Every required
+Interface field needs a visible, same-name const record field whose type can be
+automatically assignment-adjusted to the required type. Every required method
+must be visible at that site and satisfy the Interface signature under
+directional callable adjustment. Record functions do not count.
 
 Visibility is therefore intentional. A `local` method can satisfy an Interface
 for a conversion inside its defining module, but cannot satisfy the same
@@ -435,7 +449,8 @@ spellings do not participate in satisfaction; named calls through the wrapper
 use the Interface declaration's names.
 
 An accepted `R -> I` conversion constructs a fresh Interface wrapper retaining
-the record. It is one direct coercion, not inheritance, subtyping, or gradual
+the record and shallowly snapshotting its required fields. It is one direct
+coercion, not inheritance, subtyping, or gradual
 consistency, and it does not lift through Arrays, Maps, Options except for the
 named option plans, or Functions. Direct calls on an `R` remain statically
 dispatched; calls through an `I` dispatch through the wrapper selected at
@@ -587,11 +602,12 @@ The details, all run-time behavior:
   functions are public. Missing Lua arguments are padded with `nil` and
   then checked against the field types; surplus positional arguments to a
   fixed-parameter record function are ignored.
-* **Field reads and writes** go through the record's metatable and are
-  fully checked. An unknown field, read or written, raises
+* **Field reads and mutable-field writes** go through the record's metatable
+  and are fully checked. An unknown field, read or written, raises
   `field 'z' not found in record 'test.Point'`; a wrongly-typed write
-  raises `type error, expected float but found string`. Lua code can
-  never put an ill-typed value into a record.
+  raises `type error, expected float but found string`. A write to a const
+  field raises a const-write error. Lua code can never replace a const field
+  or put an ill-typed value into a mutable field.
 * **Methods** can be read (`p.move` is a callable value in Lua) and
   called with `p:move(...)`; `self` is type-checked like any record
   argument. Methods cannot be *assigned*: `p.move = 2` raises the same

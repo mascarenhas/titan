@@ -15,8 +15,8 @@ local driver = {}
 
 driver.imported = {}
 
-driver.TITAN_VER = "0.25"
-driver.TITAN_VER_SUFFIX = "_0_25"
+driver.TITAN_VER = "0.26"
+driver.TITAN_VER_SUFFIX = "_0_26"
 driver.LUA_VERSION = "5.5"
 
 local LUA_CPATH_SUFFIX = "/lib/lua/" .. driver.LUA_VERSION .. "/?.so"
@@ -1269,6 +1269,7 @@ local function validate_record_interface(record, context, seen)
            or field.fqtn ~= record.name
            or not valid_source_identifier(field.name)
            or field.islocal
+           or type(field.isconst) ~= "boolean"
            or type(field.index) ~= "number"
            or math.type(field.index) ~= "integer"
            or field.index < 0 or field.index >= record.nfields
@@ -1431,7 +1432,7 @@ local function validate_declared_interface(interface, context, seen)
     local canonical, canonical_err =
         types.validate_interface_descriptor(interface)
     if not canonical then
-        return nil, "interface method projection is invalid: " ..
+        return nil, "interface member projection is invalid: " ..
             tostring(canonical_err)
     end
 
@@ -1452,6 +1453,11 @@ local function validate_declared_interface(interface, context, seen)
         validation = context.validation,
     }
 
+    for _, field in ipairs(interface.fields) do
+        local ok, err = validate_interface_type(
+            field.type, value_context(owner_context), seen)
+        if not ok then return nil, err end
+    end
     for _, method in ipairs(interface.methods) do
         if type(method.paramnames) ~= "table" then
             return nil,
@@ -1721,6 +1727,9 @@ validate_interface_type = function(typ, context, seen)
         end
         return true
     elseif tag == "Type.Array" then
+        if type(typ.isconst) ~= "boolean" then
+            return nil, "array type has a noncanonical const qualifier"
+        end
         return validate_interface_type(
             typ.elem, value_context(context), seen)
     elseif tag == "Type.Map" then
@@ -1886,6 +1895,11 @@ function driver.validate_module_interface(modtype, modname)
            or type(member.type) ~= "table" or
            type(member.type._tag) ~= "string" then
             return nil, "module member " .. index .. " has an invalid schema"
+        end
+        if member._tag == "Type.ModuleVariable"
+           and type(member.isconst) ~= "boolean" then
+            return nil, "module variable '" .. member.name ..
+                "' has a noncanonical const qualifier"
         end
         if names[member.name] then
             return nil, "module interface contains duplicate member '" ..
@@ -4128,19 +4142,18 @@ static int pmain(lua_State *L) {
         lua_pushlightuserdata(L, &titan_main_array_writer_key);
         lua_pushcclosure(L, titan_main_string_array_writer, 1);
         writer = lua_totvalue(L, -1);
+        lua_pushnil(L);                 /* traced constructor result slot */
         arguments = titan_array_new(
-            L, array_metatable, nargs, &writer);
-        lua_pop(L, 1);
+            L, array_metatable, nargs, &writer, L->top.p - 1);
+        lua_remove(L, -2);              /* discard writer, keep backing */
         Udata *proxy =
-            titan_array_require_proxy(L, arguments, array_metatable);
-        TValue proxy_value;
+            titan_array_require_proxy(arguments);
 
         /* Root the canonical proxy/backing cycle before allocating argv
          * strings. The program name is deliberately excluded: Titan's
          * positive-only argument Array is argv[1..argc-1] at indices
          * 1..argc-1, and index 0 remains the private owner backlink. */
-        setuvalue(L, &proxy_value, proxy);
-        lua_pushtvalue(L, proxy_value);
+        setuvalue(L, s2v(L->top.p - 1), proxy);
         for (i = 1; i < argc; i++) {
             lua_pushstring(L, argv[i]);
             titan_array_set_stack(L, arguments, (lua_Integer)i, -1);

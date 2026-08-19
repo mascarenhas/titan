@@ -44,6 +44,9 @@ function checker.check(modname, ast, subject, filename, loader, options)
         checktoplevel(ast, st, errors, loader)
         checkbodies(ast, st, errors)
         if #errors == 0 then
+            select_linear_array_freezes(ast)
+        end
+        if #errors == 0 then
             validate_union_source_projections(ast, errors)
         end
         reject_exported_c_ffi_types(modname, ast, errors)

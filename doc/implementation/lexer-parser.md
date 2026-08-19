@@ -178,14 +178,24 @@ table (`defs.get_loc` calls `location.from_pos`); since `loc` is the first
 field of every constructor in `ast.lua`, putting `P` first lands the location
 in the right positional argument with no extra plumbing.
 
-The top-level `interface` production commits to a nonempty sequence of
-bodyless `function` signatures and builds `Ast.TopLevelInterface` plus ordered
-`Ast.InterfaceMethod` children. It has dedicated labels for a local/nested or
-empty declaration, local methods, missing method names/parentheses/types,
-unexpected members, and a missing final `end`. `interface` is a Titan keyword,
-but `CNAME` still captures it in contextual C typedef, field/member, and
+The top-level `interface` production commits to a nonempty sequence of field
+declarations and bodyless `function` signatures. It builds one ordered
+`members` list plus `fields` and `methods` projections on
+`Ast.TopLevelInterface`; fields reuse `Ast.Decl`, while methods use
+`Ast.InterfaceMethod`. It has
+dedicated labels for a local/nested or empty declaration, local members,
+missing field types, missing method names/parentheses/types, unexpected
+members, and a missing final `end`. `interface` is a Titan keyword, but
+`CNAME` still captures it in contextual C typedef, field/member, and
 prototype-parameter positions; this mirrors the other C-legal Titan keywords.
 See [Interfaces](interfaces.md#frontend-representation).
+
+The declaration grammar preserves constness on `Ast.Decl`, record fields, and
+`Ast.TopLevelVar`. Const locals commit to an expression list, while mutable
+locals alone use the optional initializer production. Type parsing tries
+`const { T }` as a qualified Array before the existing C `const *T` form, so
+the two meanings of `const` remain syntactically unambiguous. See
+[Const values](const-values.md#frontend-and-ast-contract).
 
 ### Function result-shape carriers
 

@@ -102,7 +102,11 @@ local errors = {
 
    MethodInterface = "Expected at least one method in interface declaration.",
 
+   InterfaceMember = "Expected at least one field or method in interface declaration.",
+
    LocalInterfaceMethod = "Interface methods cannot be local.",
+
+   LocalInterfaceField = "Interface fields cannot be local.",
 
    NameInterfaceMethod = "Expected an interface method name after 'function'.",
 
@@ -112,7 +116,11 @@ local errors = {
 
    TypeInterfaceMethod = "Expected a type in interface method declaration.",
 
-   MemberInterface = "Expected a bodyless interface method declaration or 'end'.",
+   ColonInterfaceField = "Expected ':' after the name of an interface field.",
+
+   TypeInterfaceField = "Expected a type name after ':' in interface field declaration.",
+
+   MemberInterface = "Expected a bodyless interface field or method declaration or 'end'.",
 
    EndInterface = "Expected 'end' to close the interface.",
 
@@ -149,9 +157,13 @@ local errors = {
 
     RBracketCOwned = "Expected ']' to close a counted owned C array type.",
 
-    TypeType = "Expected a type name after '{'.",
+   TypeType = "Expected a type name after '{'.",
 
-    RCurlyType = "Expected '}' to close type specification.",
+   TypeConstArray = "Expected an element type after '{' in const Array type.",
+
+   ConstMap = "The const type qualifier applies to Arrays, not Maps.",
+
+   RCurlyType = "Expected '}' to close type specification.",
 
     TypelistType = "Expected type after ','",
 

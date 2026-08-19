@@ -113,8 +113,9 @@ function coder._public_prefix_layout(modtype)
 end
 
 -- Deterministic compiler-private slots available only on a trusted direct
--- source edge. They follow the public prefix and unconditional Array-metatable
--- slot, and never participate in serialized metadata or Lua member maps.
+-- source edge. They follow the public prefix, both unconditional Array-
+-- metatable slots, and the source-provider identity; they never participate
+-- in serialized metadata or Lua member maps.
 function coder._source_prefix_layout(modtype)
     return types.source_module_prefix_layout(modtype)
 end
@@ -133,7 +134,7 @@ function import_module(loadmods, initmods, sigs, mprefixes,
         assert(not dynamic,
             "trusted source import cannot use dynamic initialization")
         local identity = coder._source_module_identity_name(modname)
-        local identity_index = #public_layout + 1
+        local identity_index = #public_layout + 2
         table.insert(sigs, render([[
             TITAN_SOURCE_LOCAL const void *$IDENTITY(void);
         ]], { IDENTITY = identity }))
@@ -203,9 +204,9 @@ function import_module(loadmods, initmods, sigs, mprefixes,
     end
     if node._source_import then
         for slot, entry in ipairs(coder._source_prefix_layout(node._type)) do
-            -- Public slots occupy 0..N-1, the Array metatable occupies N,
-            -- and the source-provider identity occupies N+1.
-            local index = #public_layout + 1 + slot
+            -- Public slots occupy 0..N-1, mutable/const Array metatables occupy
+            -- N/N+1, and the source-provider identity occupies N+2.
+            local index = #public_layout + 2 + slot
             if entry.kind == "variable" then
                 entry.value._upvalue = index
             else
@@ -344,17 +345,33 @@ function coderecorddec(ctx, code, initrecs, node)
                 SETWRAPPED = copyboxed(ctx, field.type,
                     "s2v(L->top.p - 1)", "_slot"),
             }))
-            table.insert(setswitch, render([[
-                case $INDEX: {
-                    $CHECKANDSET;
-                    break;
-                }
-            ]], {
-                INDEX = c_integer_literal(field.index),
-                CHECKANDSET = coder._dynamiccheckandset(
-                    ctx, field.dynamic_plan, field.type, "_dst", "_src",
-                    node.loc, "Lua record-field write")
-            }))
+            if field.isconst then
+                table.insert(setswitch, render([[
+                    case $INDEX: {
+                        return luaL_error(L,
+                            "%s:%d:%d: cannot assign const field '%s' in record '%s'",
+                            $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
+                    }
+                ]], {
+                    INDEX = c_integer_literal(field.index),
+                    FILE = c_string_literal(node.loc.filename),
+                    LINE = c_integer_literal(node.loc.line),
+                    COL = c_integer_literal(node.loc.col),
+                    FQTN = c_string_literal(node._type.name),
+                }))
+            else
+                table.insert(setswitch, render([[
+                    case $INDEX: {
+                        $CHECKANDSET;
+                        break;
+                    }
+                ]], {
+                    INDEX = c_integer_literal(field.index),
+                    CHECKANDSET = coder._dynamiccheckandset(
+                        ctx, field.dynamic_plan, field.type, "_dst", "_src",
+                        node.loc, "Lua record-field write")
+                }))
+            end
         end
     end
     for name, method in pairs(node._type.methods) do
@@ -759,6 +776,7 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
     assert(interface._tag == "Type.Interface"
            and types.validate_interface_descriptor(interface),
         "malformed Interface declaration reached code generation")
+    assert(#node.fields == #interface.fields)
     assert(#node.methods == #interface.methods)
 
     -- Allocate the owner's cached metatable slot even when no value of this
@@ -766,12 +784,34 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
     -- recover the same registry metatable through type2metatable.
     type2metatable(ctx, types.Nominal(interface.name))
 
-    local methodmap = {}
+    local membermap, fieldcases = {}, {}
+    for _, field in ipairs(interface.fields) do
+        table.insert(membermap, render([[
+            lua_pushliteral(L, $NAME);
+            lua_pushinteger(L, $INDEX);
+            lua_rawset(L, -3);
+        ]], {
+            NAME = c_string_literal(field.name),
+            INDEX = c_integer_literal(field.index),
+        }))
+        table.insert(fieldcases, render([[
+            case $INDEX: {
+                TValue *_slot = &_interface->uv[$UVINDEX].uv;
+                $SETWRAPPED
+                break;
+            }
+        ]], {
+            INDEX = c_integer_literal(field.index),
+            UVINDEX = c_integer_literal(2 + field.index),
+            SETWRAPPED = copyboxed(ctx, field.type,
+                "s2v(L->top.p - 1)", "_slot"),
+        }))
+    end
     for index, method_node in ipairs(node.methods) do
         local method = interface.methods[index]
         coder._code_interface_method_artifacts(
             ctx.tlcontext, sigs, code, interface, method_node, index - 1)
-        table.insert(methodmap, render([[
+        table.insert(membermap, render([[
             lua_pushliteral(L, $NAME);
             titan_pushmodule(L, _mod);
             lua_pushcclosure(L, $METHOD, 1);
@@ -782,9 +822,8 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
         }))
     end
 
-    local receiver_plan =
-        assert(node.methods[1]._lua_dynamic_plans[1],
-            "Interface receiver lacks its Lua boundary plan")
+    local receiver_plan = assert(node._dynamic_receiver_plan,
+        "Interface receiver lacks its Lua boundary plan")
     table.insert(code, render([[
         static int $INDEXNAME(lua_State *L) {
             TValue *_interfaceslot = s2v(L->ci->func.p + 1);
@@ -798,13 +837,26 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
             TValue _memberv;
             lu_byte _membertag =
                 luaH_get(_membermap, _memberslot, &_memberv);
-            if (TITAN_LIKELY(!tagisempty(_membertag)
-                             && ttisCclosure(&_memberv))) {
-                setobj2s(L, L->top.p - 1, &_memberv);
+            if (TITAN_LIKELY(!tagisempty(_membertag))) {
+                if (ttisCclosure(&_memberv)) {
+                    setobj2s(L, L->top.p - 1, &_memberv);
+                } else if (ttisinteger(&_memberv)) {
+                    switch (ivalue(&_memberv)) {
+                        $FIELDCASES
+                        default:
+                            return luaL_error(L,
+                                "malformed internal member map for interface '%s'",
+                                $FQTN);
+                    }
+                } else {
+                    return luaL_error(L,
+                        "malformed internal member map for interface '%s'",
+                        $FQTN);
+                }
                 return 1;
             }
             return luaL_error(L,
-                "%s:%d:%d: method '%s' not found in interface '%s'",
+                "%s:%d:%d: member '%s' not found in interface '%s'",
                 $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
         }
 
@@ -822,6 +874,7 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
             ctx, receiver_plan, types.Nominal(interface.name),
             "_interface", "_interfaceslot", node.loc,
             "Lua Interface receiver"),
+        FIELDCASES = table.concat(fieldcases, "\n"),
         FQTN = c_string_literal(interface.name),
         FILE = c_string_literal(node.loc.filename),
         LINE = c_integer_literal(node.loc.line),
@@ -836,7 +889,7 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
             lua_pushliteral(L, "Titan interface $TYPE");
             lua_rawset(L, -3);
             lua_newtable(L);
-            $METHODMAP
+            $MEMBERMAP
             lua_pushliteral(L, "__index");
             lua_pushvalue(L, -2);
             titan_pushmodule(L, _mod);
@@ -855,7 +908,7 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
             interface.name, "index"),
         NEWINDEXNAME = coder._nominal_metamethod_name(
             interface.name, "newindex"),
-        METHODMAP = table.concat(methodmap, "\n"),
+        MEMBERMAP = table.concat(membermap, "\n"),
     }))
 end
 
@@ -896,10 +949,11 @@ function allocate_upvalues(tlcontext, ast)
         end
     end
 
-    -- Every module has exactly one Array-metatable cache immediately after the
-    -- public prefix. This position remains unchanged and reconstructible by
-    -- every binary importer.
+    -- Every module has the mutable and const Array-metatable caches
+    -- immediately after the public prefix. Their consecutive order is the
+    -- ABI-0.26 private-state contract reconstructed by source importers.
     tlcontext.array_metatable_upvalue = nextupvalue(tlcontext)
+    tlcontext.const_array_metatable_upvalue = nextupvalue(tlcontext)
 
     -- A direct source importer must consume the exact co-generated producer,
     -- not a same-name module state left in the registry by another provider.
