@@ -88,3 +88,5 @@
 
 # Local trees for testing and experimentation
 /.local-builds/
+
+*.check.tmp.*

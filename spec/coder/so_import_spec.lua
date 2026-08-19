@@ -14,6 +14,7 @@
 -- one can itself be a `.so`-only dependency of a later one (transitive case).
 local h = require 'spec.support.helpers'
 local lfs = require 'lfs'
+local driver = require 'titan-compiler.driver'
 local call = h.call
 local generated_modules = {}
 
@@ -1243,4 +1244,76 @@ describe(".so-only cross-module imports", function()
         ]])
         assert.truthy(rok, out)
     end)
+
+    it("aborts when the loaded .so has an incompatible type manifest", function()
+        local ok, err = build_so_chain({
+            { name = "manifest_provider", src = [[
+                function get(): integer return 42 end
+            ]] },
+            { name = "manifest_consumer", src = [[
+                local p = import "manifest_provider"
+                function run(): integer return p.get() end
+            ]] },
+        })
+        assert.truthy(ok, err)
+        local rok, out = call("manifest_consumer", [[
+            assert(manifest_consumer.run() == 42)
+        ]])
+        assert.truthy(rok, out)
+
+        -- Recompile provider with an incompatible type interface
+        ok, err = build_so_chain({
+            { name = "manifest_provider", src = [[
+                function get(): string return "changed" end
+            ]] },
+        })
+        assert.truthy(ok, err)
+
+        -- Loading the consumer now must fail with manifest mismatch
+        rok, out = call("string", [[
+            local ok, err = pcall(require, "manifest_consumer")
+            assert(not ok, "expected require to fail")
+            assert(err:find("type manifest mismatch", 1, true), err)
+        ]])
+        assert.truthy(rok, out)
+    end)
+
+    it("aborts when the loaded .so is missing the types symbol", function()
+        local ok, err = build_so_chain({
+            { name = "notype_provider", src = [[
+                function answer(): integer return 1 end
+            ]] },
+            { name = "notype_consumer", src = [[
+                local p = import "notype_provider"
+                function run(): integer return p.answer() end
+            ]] },
+        })
+        assert.truthy(ok, err)
+
+        -- Replace notype_provider.so with a DSO providing ABI marker but no types symbol
+        local f = assert(io.open("notype_provider.c", "w"))
+        f:write([[
+            typedef struct lua_State lua_State;
+            extern const char *lua_pushstring(lua_State *L, const char *s);
+            int notype_provider_abi(lua_State *L) {
+                lua_pushstring(L, "0.26");
+                return 1;
+            }
+        ]])
+        f:close()
+        local shared = driver.IS_DARWIN and "-shared -undefined dynamic_lookup"
+            or "-shared"
+        local cok = os.execute(table.concat({
+            driver.CC, "-fPIC", shared, "-o", "notype_provider.so", "notype_provider.c"
+        }, " "))
+        assert.truthy(cok, "could not compile fake provider without types")
+
+        local rok, out = call("string", [[
+            local ok, err = pcall(require, "notype_consumer")
+            assert(not ok, "expected require to fail")
+            assert(err:find("missing types symbol", 1, true), err)
+        ]])
+        assert.truthy(rok, out)
+    end)
 end)
+

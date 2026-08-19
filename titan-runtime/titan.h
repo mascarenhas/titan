@@ -420,6 +420,8 @@ LUAI_FUNC void *loadsym(lua_State *L, void *lib, const char *sym);
 LUAI_FUNC void *loadglobalsym(lua_State *L, const char *sym);
 LUAI_FUNC void titan_check_abi(lua_State *L, void *lib, const char *sym,
                                const char *file);
+LUAI_FUNC void titan_check_types(lua_State *L, void *lib, const char *sym,
+                                 const char *file, const char *expected);
 LUAI_FUNC void titan_invalidate_backtrace_state(lua_State *L);
 LUAI_FUNC void titan_init_paths(lua_State *L);
 /* Publish/recover one type-specific canonical pointer. The candidate is an

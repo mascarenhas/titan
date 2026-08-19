@@ -126,6 +126,8 @@ exact sequence:
 ```c
 void *a_b_c_handle = loadlib(L, "a/b.so");
 titan_check_abi(L, a_b_c_handle, "a_b_c_abi", "a/b.so");
+titan_check_types(L, a_b_c_handle, "a_b_c_types", "a/b.so",
+    "Module(...)");
 ```
 
 It then resolves `a_b_c_init` and the used native entries from that handle.
