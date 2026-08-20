@@ -1,4 +1,4 @@
-local uv = import "uv"
+local uv = import "uv.titan"
 local str = import "string"
 
 -- Stream payloads are binary strings, so delimiter handling uses the string

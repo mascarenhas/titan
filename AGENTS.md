@@ -532,8 +532,10 @@ Native standard-library behavior lives in 22 module-owned roots under
 `spec/stdlib/titan/`. `TITAN_STDLIB_TEST_ROOTS` names every root explicitly;
 `make titan-stdlib-test-build` invokes the active
 `titanc --test --no-uv-bootstrap` once from `.titan-tests/`, with an absolute
-source tree, so every root remains source-authoritative. The generated runner
-is Task-independent; each async case explicitly owns `async.run`/`async.loop`
+source tree, so every root remains source-authoritative. Source-first lookup
+does not expose locals through ordinary imports; the generated runner uses
+`import "titan.test.titan"` for its private protocol. The runner is
+Task-independent; each async case explicitly owns `async.run`/`async.loop`
 through source-only `support.runtime`, and Runtime-bound cleanup runs in LIFO
 order inside that same supervisor Task before the loop returns. Ordinary later
 `Context:cleanup` is only for non-Runtime resources. The designated program
@@ -1062,14 +1064,24 @@ AST order, as does `makemoduletype`.
   `TValue`, or nullable C pointer sentinel; close callables accept zero or one
   state argument.
 
-`checkstat` handlers return a boolean "cannot fall through", stored in the historical `_always_returns` field and used to enforce that functions with fixed nonnil returns cannot fall off the end. Imports go through a `loader` callback (`driver.defaultloader` for real lookup, `driver.tableloader` for in-memory sources in tests); source deps are recursively typechecked, while compiled-provider deps probe the requested `<mangled>_abi`/`<mangled>_types` pair before recovering the interface.
+`checkstat` handlers return a boolean "cannot fall through", stored in the historical `_always_returns` field and used to enforce that functions with fixed nonnil returns cannot fall off the end. Imports go through a `loader` callback (`driver.defaultloader` for real lookup, `driver.tableloader` for in-memory sources in tests); source deps are recursively typechecked, while compiled-provider deps probe the requested `<mangled>_abi`/`<mangled>_types` pair before recovering the interface. A `TopLevelImport` whose spelling ended in `.titan` passes a source-required request under the stripped canonical module name.
 
-A direct trusted source import may select the producer's local declarations
-through its qualified alias. This capability is direct-only and comes from the
-loader result, never metadata, registry state, static co-residence, or another
-module's import. Binary module interfaces remain public-only. Source-private
-variables and closures use the canonical producer state; generated importers
-verify the exact physical producer identity before reading a private slot.
+An ordinary import exposes only the producer's public declarations even when
+the loader selected source. An explicit spelling such as
+`import "app.model.titan"` removes the terminal marker before shorthand and
+lookup, requires source with no binary fallback, and may select locals through
+that qualified alias only when the loader also returns trusted source
+provenance. The canonical module, dependency, native, artifact, and manifest
+identity remains `app.model`. Dotted logical names ending in the component
+`titan` are forbidden because that spelling is always the marker; bare `titan`
+and a nonterminal `titan` component remain valid. The capability is direct-only
+and comes from written opt-in plus loader provenance, never metadata, registry
+state, static co-residence, or another module's import. Source-private variables
+and closures use the canonical producer state; generated importers verify the
+exact physical producer identity before reading a private slot.
+The five source facades `titan.async`, `titan.timer`, `titan.fs`, `titan.net`,
+and `titan.os` therefore write `import "uv.titan"`; an ordinary `import "uv"`
+never exposes `titan.uv` locals.
 
 Titan aliases occupy a module-wide type-only namespace in `symtab`, resolve
 transparently to their RHS `Type.*` value, and never create a run-time member.
@@ -1325,7 +1337,7 @@ substitution, recursive; error on missing keys). Key facts:
   publishes the owner's method entry points. The importer then resolves those
   transitive symbols through `RTLD_DEFAULT`; it does not open the owner DSO a
   second time.
-- Module state is a `Udata` (`_mod`), allocated with `luaS_newudata(L, 0, NUPVALS)`. Its ABI-visible prefix is exported variables, exported top-level function closures, then exported static closures of public record/union owners in module-member and bytewise-static order. The unconditional per-state Array-metatable cache follows that prefix, then one lightuserdata source-provider identity token, then the deterministic source-private variable/callable region. A direct source importer compares that token with its exact linked producer's hidden immutable identity entry before reading any private slot; a same-name module state installed by another physical provider is an error. Remaining private user values hold imported modules, record/union metatables, per-nominal static-namespace tables, and module-local Array-writer closures allocated once per constructed structural element type; there is no distinguished `uv[0]` header. Publish function-type tags before any module-variable initializer can construct a lambda or bound-method closure, and initialize Array writers before module variable initializers. There is **no** Lua-facing module table — `require` returns the module `Udata` itself (so `type(require "m")` is `"userdata"`), and all member access (functions, variables, nominal namespaces such as `m.Rec`/`m.Union`) flows through a metatable `__index`/`__newindex` over a unified name→slot member map; functions and nominal namespaces are served read-only (assigning errors), variables use the same dynamic boundary coercions as Lua function arguments and Array writes, and the "not found" message is "member '%s' does not exist". A record instance is likewise a single `Udata` (fields in `uv[0..N-1]`, type identity is its metatable pointer, no raw payload); Lua field writes use that same dynamic policy. A union instance is a single zero-byte `Udata` with the union metatable identity, integer tag in `uv[0]`, and optional payload in `uv[1]`; empty variants allocate no payload slot and instance Lua access exposes methods only.
+- Module state is a `Udata` (`_mod`), allocated with `luaS_newudata(L, 0, NUPVALS)`. Its ABI-visible prefix is exported variables, exported top-level function closures, then exported static closures of public record/union owners in module-member and bytewise-static order. The unconditional per-state Array-metatable cache follows that prefix, then one lightuserdata source-provider identity token, then the deterministic source-private variable/callable region. An explicit source importer compares that token with its exact linked producer's hidden immutable identity entry before reading any private slot; a same-name module state installed by another physical provider is an error. Remaining private user values hold imported modules, record/union metatables, per-nominal static-namespace tables, and module-local Array-writer closures allocated once per constructed structural element type; there is no distinguished `uv[0]` header. Publish function-type tags before any module-variable initializer can construct a lambda or bound-method closure, and initialize Array writers before module variable initializers. There is **no** Lua-facing module table — `require` returns the module `Udata` itself (so `type(require "m")` is `"userdata"`), and all member access (functions, variables, nominal namespaces such as `m.Rec`/`m.Union`) flows through a metatable `__index`/`__newindex` over a unified name→slot member map; functions and nominal namespaces are served read-only (assigning errors), variables use the same dynamic boundary coercions as Lua function arguments and Array writes, and the "not found" message is "member '%s' does not exist". A record instance is likewise a single `Udata` (fields in `uv[0..N-1]`, type identity is its metatable pointer, no raw payload); Lua field writes use that same dynamic policy. A union instance is a single zero-byte `Udata` with the union metatable identity, integer tag in `uv[0]`, and optional payload in `uv[1]`; empty variants allocate no payload slot and instance Lua access exposes methods only.
 - Typedef-resolved pointers to Lua's internal `Udata` are GC-bearing FFI
   values, not ordinary C pointers: boxing a non-NULL `Udata *` emits a full
   userdata `TValue` for that same object, NULL boxes as nil, and unboxing
@@ -1421,7 +1433,7 @@ substitution, recursive; error on missing keys). Key facts:
   fixed point. Code generation and the final file boundary remove every blank
   physical line immediately after `#line`: the next generated statement retains
   the exact Titan source line named there in either mode.
-- Module resolution is compiled-first for dependencies: one complete
+- Ordinary module resolution is compiled-first for dependencies: one complete
   format-preference pass over `.so`/`.a`, then the other compiled format, then
   source. A dependency with no claiming prefix/exact provider but available
   flat/folder source is compiled in and linked directly; a DSO dependency is
@@ -1429,11 +1441,15 @@ substitution, recursive; error on missing keys). Key facts:
   selected archive once and generates direct calls. Explicit `titanc` roots
   are forced through source, so the same ordinary rule builds all eighteen
   standard roots from source in one process. There is no separate
-  standard-module origin or loader. Within one source root folder beats flat;
+  standard-module origin or loader. An import spelling ending in `.titan`
+  strips that marker, requires source for the canonical name, and neither
+  probes nor falls back to a compiled provider; source resolution without that
+  spelling remains public-only. Within one source root folder beats flat;
   source roots retain left-to-right precedence. Once an immediate constituent
   is recognized as private to its parent folder module, do not fall through to
-  a later root; all compiled candidates were already considered, and a genuine
-  requested deeper folder was already considered first. Every compiled module exports
+  a later root; for ordinary resolution all compiled candidates were already
+  considered, while an explicit source request deliberately considers none, and
+  a genuine requested deeper folder was already considered first. Every compiled module exports
   `luaopen_<mangled>`, `<mangled>_init`
   (idempotent), `<mangled>_abi` (returns `TITAN_VER`; checked before trusting a
   provider), and `<mangled>_types` (serialized interface type, evaluated with
@@ -1467,7 +1483,7 @@ substitution, recursive; error on missing keys). Key facts:
 
 ### C FFI (`c-parser/`, `foreigntypes.lua`)
 
-`foreign import "header.h"` invokes a pure-Lua C toolchain: `cpp.lua` (full hand-written preprocessor; asks the configured `CC -std=c99` plus parsed `TITAN_EXTRA_CPPFLAGS` for system include paths and predefined macros), `c99.lua` (relabel C99 grammar; module-global typedef table, not reentrant), `ctypes.lua`/`cdefines.lua` (build a TypeList), and `cdriver.lua` (include resolution plus C type extraction). The checker passes the importing Titan source directory and the shared toolchain configuration to `cdriver`, which emits quoted `#include "..."` syntax only when the header is found by the quoted-include rules relative to that source; otherwise generated C uses angle brackets. `cdriver` also exposes `titan-runtime/titan/ffi.h`, which defines selected `titan_ffi_*` aliases for portable C primitive types. Contextual conversions and C operators use one resolver-owned `cprobe.Service`: its compile-only probes share the generated objects' exact parsed `CC`, C99/CPP/target flags, include ordering, and target arithmetic profile. Rich answers remain session-scoped and never enter the pure gradual-consistency/coercion relations or serialized module types. Production services persist only successful probes as empty `<sha256(exact probe C)>.success` markers under the ABI-owned prefix cache; marker presence is the whole verdict and rejection is never persisted. This intentionally keys no compiler, flag, environment, or header state. Stable local rebuilds and CI reuse their selected trusted cache folder; change `TITAN_PROBE_CACHE_IDENTITY`, use another prefix, or clear the markers when build-policy isolation is required. A direct source import keeps its unique randomized physical checking header, but probes include a stable private-workspace wrapper keyed by logical module/absolute eventual public-header identity; that wrapper includes the physical file by absolute quoted spelling, preserving nested quoted origin. Keep every header-context descriptor field stable, perform marker lookup before creating the workspace/wrapper, reject conflicting bindings, and treat wrapper failures as infrastructure. Do not add dependency manifests, preprocessing, verdict payloads, or negative-result records.
+`foreign import "header.h"` invokes a pure-Lua C toolchain: `cpp.lua` (full hand-written preprocessor; asks the configured `CC -std=c99` plus parsed `TITAN_EXTRA_CPPFLAGS` for system include paths and predefined macros), `c99.lua` (relabel C99 grammar; module-global typedef table, not reentrant), `ctypes.lua`/`cdefines.lua` (build a TypeList), and `cdriver.lua` (include resolution plus C type extraction). The checker passes the importing Titan source directory and the shared toolchain configuration to `cdriver`, which emits quoted `#include "..."` syntax only when the header is found by the quoted-include rules relative to that source; otherwise generated C uses angle brackets. `cdriver` also exposes `titan-runtime/titan/ffi.h`, which defines selected `titan_ffi_*` aliases for portable C primitive types. Contextual conversions and C operators use one resolver-owned `cprobe.Service`: its compile-only probes share the generated objects' exact parsed `CC`, C99/CPP/target flags, include ordering, and target arithmetic profile. Rich answers remain session-scoped and never enter the pure gradual-consistency/coercion relations or serialized module types. Production services persist only successful probes as empty `<sha256(exact probe C)>.success` markers under the ABI-owned prefix cache; marker presence is the whole verdict and rejection is never persisted. This intentionally keys no compiler, flag, environment, or header state. Stable local rebuilds and CI reuse their selected trusted cache folder; change `TITAN_PROBE_CACHE_IDENTITY`, use another prefix, or clear the markers when build-policy isolation is required. An explicit source import keeps its unique randomized physical checking header, but probes include a stable private-workspace wrapper keyed by logical module/absolute eventual public-header identity; that wrapper includes the physical file by absolute quoted spelling, preserving nested quoted origin. Keep every header-context descriptor field stable, perform marker lookup before creating the workspace/wrapper, reject conflicting bindings, and treat wrapper failures as infrastructure. Do not add dependency manifests, preprocessing, verdict payloads, or negative-result records.
 
 Recognized existing object-like integer/accessor expressions and fully expanded
 outer casts to C integer, floating, object-pointer, or function-pointer types

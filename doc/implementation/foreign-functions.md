@@ -118,7 +118,7 @@ called with `{ foreign = true }` and increments
 * requires numeric-for controls, limits, and steps to share a C integer or
   floating type; and
 * permits only parameters/locals, current-module foreign declarations, C
-  namespaces, and foreign members reached through a direct source import.
+  namespaces, and foreign members reached through an explicit source import.
 
 `checkvar` rejects an ordinary top-level Titan declaration in this mode, and a
 qualified Titan-module lookup is accepted only when
@@ -153,7 +153,8 @@ compiler-private `source_members` overlay. The member is marked
 modifier. It is absent from `Type.Module.members`, `type_members`, serialized
 `*_types`, and `.titan.meta`.
 
-A loader result grants access only when it proves both `kind == "source"` and a
+A loader result grants access only when the import AST carries the written
+`source_required` marker and provenance proves both `kind == "source"` and a
 source module type. `TopLevelImport._source_import` then lets
 `types.module_member` select the overlay for that one written edge. A binary
 provider cannot forge the permission: the closed metadata validator rejects
@@ -161,7 +162,7 @@ provider cannot forge the permission: the closed metadata validator rejects
 context fields. Another source module cannot relay the declaration, and static
 co-residence or native symbol discovery does not create a Titan name for it.
 
-C declaration plumbing is kept separate from permission. A direct source import
+C declaration plumbing is kept separate from permission. An explicit source import
 of a producer that has foreign declarations records the producer's generated
 header path on the import node. That header makes the C prototype and any
 inline definition visible to the consumer translation unit, but only the
@@ -245,7 +246,7 @@ main rule as generated C and object files. Contributors never own headers.
 2. direct C imports in AST order;
 3. bytewise-sorted supplemental origin headers required to render C types used
    by the declarations and bodies;
-4. generated headers for direct source dependencies that define foreign
+4. generated headers for explicit source dependencies that define foreign
    functions;
 5. the portable definition of `TITAN_SOURCE_LOCAL`;
 6. all foreign prototypes in declaration order; and
@@ -301,7 +302,7 @@ CLI's close guard.
 After all source modules typecheck, `titanc` calls
 `driver.plan_foreign_headers` over the sorted invocation-wide source graph. It
 first derives every final absolute header identity without rendering content,
-rejects two logical modules claiming one path, then rewrites each direct source
+rejects two logical modules claiming one path, then rewrites each explicit source
 edge from its temporary checking path to the finalized producer path. It renders
 each required header exactly once from that finalized graph. The completed text
 is retained on the AST for the later module-code generation pass instead of

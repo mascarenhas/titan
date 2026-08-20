@@ -1,9 +1,9 @@
 local test = import "test"
-local runtime_test = import "support.runtime"
+local runtime_test = import "support.runtime.titan"
 local async = import "async"
 local stream = import "io"
 local timer = import "timer"
-local task_support = import "support.async"
+local task_support = import "support.async.titan"
 
 function test_timer_yield_and_sleep(_context: test.Context)
   runtime_test.run(function ()

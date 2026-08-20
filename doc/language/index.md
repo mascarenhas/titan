@@ -67,7 +67,7 @@ use the chapters below for the normative language reference.
 | [Unions](unions.md) | Nominal tagged unions, positional variant constructors, full-block `when` arms, optional case coverage with closed-union control-flow proof, payload binding, and Lua visibility. |
 | [Arrays and maps](arrays-maps.md) | Mutable and const-qualified positive-only, holed Arrays with deterministic highest-present length and distinct canonical Lua userdata tags; ordinary Maps, positional integer-Map construction, metamethod-aware integer-Map length, conversions, and performance. |
 | [Modules](modules.md) | Logical modules, `import`, visibility, module variables, initialization, and the compilation model (shared libraries, executables, search paths). |
-| [Visibility through source imports](source-import-visibility.md) | Direct source collaboration over local declarations, direct-only Titan permission, normalized use-driven C declaration origins, and the public-only binary/Lua boundary. |
+| [Visibility through explicit source imports](source-import-visibility.md) | Explicit `.titan` source imports over local declarations, direct-only Titan permission, canonical logical identity, required-source lookup, normalized use-driven C declaration origins, and the public-only ordinary-import/binary/Lua boundary. |
 | [Multi-module libraries](multi-module-libraries.md) | Separating logical modules from physical providers: common-prefix library output, prefix lookup, generated Lua loaders, and the combined standard library. |
 | [Static compiled modules](static-compiled-modules.md) | Self-describing `.a` providers, paired `.so`/`.a` outputs, default and `--static` resolution, native composition, and bundled/system final-link behavior. |
 | [Folder modules](folder-modules.md) | Splitting one logical module across a canonical main and immediate contributors: shared scope, deterministic order, lookup privacy, initialization, and artifacts. |
@@ -91,7 +91,7 @@ use the chapters below for the normative language reference.
 | [Garbage-collection standard library](standard-library-gc.md) | Weak Maps and ephemerons, collector actions and mode switches, byte counts, and Lua 5.5 tuning parameters. |
 | [Testing Titan code](standard-library-test.md) | The `titan.test` API, native `titanc --test` discovery, subtests and cleanup, filtering, failure output, and process statuses. |
 | [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, ownership, allocation, and limitations. |
-| [Foreign functions](foreign-functions.md) | Source-defined exact C-ABI entry points, the restricted raw-C body, pointer types, direct source collaboration, generated companions, sequencing, and callback use. |
+| [Foreign functions](foreign-functions.md) | Source-defined exact C-ABI entry points, the restricted raw-C body, pointer types, explicit source collaboration, generated companions, sequencing, and callback use. |
 | [C FFI declarations and expressions](c-ffi-expressions.md) | Named C tags, host-validated pointer conversions, target-directed automatic/owned allocation (including flexible tails), typed object-macro values, macro-projected fields, and target-correct C operators. |
 | [Grammar](grammar.md) | The complete lexical and syntactic grammar. |
 

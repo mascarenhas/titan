@@ -344,19 +344,38 @@ return {
 
         it("requires portable logical module components", function()
             for _, name in ipairs({
-                "pkg", "pkg.mod", "pkg-name._part2",
+                "pkg", "titan", "pkg.mod", "pkg.titan.child",
+                "pkg-name._part2",
             }) do
                 assert.truthy(staticmetadata.valid_module_name(name), name)
             end
             for _, name in ipairs({
                 "", ".pkg", "pkg.", "pkg..mod", "1pkg", "-pkg",
-                "pkg.$line", "pkg space", "pkg/mod",
+                "pkg.$line", "pkg space", "pkg/mod", "pkg.titan",
             }) do
                 assert.falsy(staticmetadata.valid_module_name(name), name)
                 local payload, err = staticmetadata.render(name, ABI, TYPES)
                 assert.falsy(payload)
                 assert.match("invalid logical Titan module name", err, 1, true)
             end
+        end)
+
+        it("allows a reserved terminal component only in provider prefixes",
+           function()
+            for _, prefix in ipairs({
+                "titan", "pkg.titan", "pkg.titan.child", "pkg-name._part2",
+            }) do
+                assert.truthy(
+                    staticmetadata.valid_provider_prefix(prefix), prefix)
+            end
+            for _, prefix in ipairs({
+                "", ".pkg", "pkg.", "pkg..titan", "1pkg",
+                "pkg.$line", "pkg space", "pkg/titan",
+            }) do
+                assert.falsy(
+                    staticmetadata.valid_provider_prefix(prefix), prefix)
+            end
+            assert.falsy(staticmetadata.valid_module_name("pkg.titan"))
         end)
 
         it("rejects canonical whitespace, ordering, and quoting variations", function()

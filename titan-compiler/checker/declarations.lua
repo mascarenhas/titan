@@ -589,13 +589,17 @@ end
 -- Typecheck the toplevel node
 toplevel_visitor = util.make_visitor({
     ["Ast.TopLevelImport"] = function(node, st, errors, loader)
+        local request = node.source_required and {
+            kind = "source-import",
+        } or nil
         local modtype, errs, import_info =
-            checker.checkimport(node.modname, loader)
+            checker.checkimport(node.modname, loader, request)
         if modtype then
             node._type = modtype
-            -- Source visibility is trusted loader provenance, never a field a
-            -- binary provider can place in evaluated metadata.
-            node._source_import = import_info
+            -- The syntax explicitly requests the collaboration view, while
+            -- trusted loader provenance proves that source was actually
+            -- selected. Neither half alone grants private visibility.
+            node._source_import = node.source_required and import_info
                 and import_info.kind == "source"
                 and modtype._source == true
             if node._source_import then

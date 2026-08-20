@@ -858,7 +858,7 @@ retained those 0.20 layouts while advancing the embedded Lua contract from
 schema and reconstructible module-userdata prefix while retaining Lua 5.5.1
 and the other value/native-call layouts from 0.21. Every generated module also
 added one fixed compiler-private, ABI-visible physical-provider identity slot so
-a direct source importer can reject canonical state installed by another
+an explicit source importer can reject canonical state installed by another
 provider. ABI 0.23 retains those layouts while source foreign callbacks and the
 injective module/nominal/member native-entry hierarchy change the native symbol
 contract. ABI 0.24 extends serialized interfaces for generic declarations while
@@ -1154,7 +1154,7 @@ slot containing the source producer's immutable physical-provider token
 follows them, before the
 fixed AST-order allocation for local variables/imports, referenced local
 ordinary-function closures, every static not already in the public prefix, and
-each nominal owner's private static-namespace table. A direct source importer
+each nominal owner's private static-namespace table. An explicit source importer
 compares that token with the hidden identity function of its exact linked
 producer before reading any source-private slot. Remaining private slots are
 allocated as

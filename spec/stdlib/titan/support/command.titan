@@ -1,5 +1,5 @@
 -- Native-test access to the host shell through Lua's standard os/io library.
-local common = import "support.common"
+local common = import "support.common.titan"
 local cstdlib = foreign import "stdlib.h"
 
 local type Renderer = ({string}) -> string

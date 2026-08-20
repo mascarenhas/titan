@@ -41,7 +41,7 @@ opener in a standalone. Use names such as `url_test`, `math_spec`, or
 
 ## Discovery and compilation
 
-`titanc --test M...` typechecks each requested source root and its source
+`titanc --test M...` typechecks each requested source root and its source-backed
 import closure. It discovers every declaration that is all of the following:
 
 * a public, non-`local` top-level function whose name starts with `test_`;
@@ -59,14 +59,18 @@ combined logical module.
 Test mode deliberately resolves dependencies **source first**, falling back to
 the normal compiled-provider order only when no source exists. This is one
 invocation-wide policy, so a coherent source closure is selected regardless of
-root order. It lets a test directly source-import and use local declarations of
-the module under test under the rules in
-[Visibility through source imports](source-import-visibility.md). Ordinary
+root order. Lookup order does not grant local visibility: an ordinary
+`import "app.calc"` remains public-only even when test mode selected its source.
+A test that intentionally needs local declarations writes
+`import "app.calc.titan"`; that explicit edge requires source and has no compiled
+fallback under the rules in
+[Visibility through explicit source imports](source-import-visibility.md). Ordinary
 compilation remains binary first, and `--static` still only swaps `.a` and
-`.so` preference during the compiled fallback.
+`.so` preference during the compiled fallback of ordinary imports.
 
 The compiler generates an ordinary source module with the reserved identity
-`titan.test.runner`. It imports every test owner directly and provides the sole
+`titan.test.runner`. It imports every test owner ordinarily, explicitly imports
+`titan.test.titan` for the private runner protocol, and provides the sole
 `main`; a `main` in an input module is ignored in test mode. The first requested
 root owns the executable path, including the usual folder-root `__main` rule,
 so unrelated roots can form one test executable. No provider pair or Lua shim

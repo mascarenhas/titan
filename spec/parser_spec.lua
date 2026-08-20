@@ -2366,7 +2366,28 @@ end
 
     it("can parse import", function ()
         assert_program_ast([[ local foo = import "module.foo" ]], {
-            { _tag = "Ast.TopLevelImport", localname = "foo", modname = "module.foo" },
+            { _tag = "Ast.TopLevelImport", localname = "foo",
+              modname = "module.foo", source_required = false },
+        })
+    end)
+
+    it("strips the .titan explicit-source marker from import names",
+       function()
+        assert_program_ast([[ local foo = import "module.foo.titan" ]], {
+            { _tag = "Ast.TopLevelImport", localname = "foo",
+              modname = "module.foo", source_required = true },
+        })
+        assert_program_ast([[ local uv = import "uv.titan" ]], {
+            { _tag = "Ast.TopLevelImport", localname = "uv",
+              modname = "titan.uv", source_required = true },
+        })
+        assert_program_ast([[ local uv = import "titan.uv.titan" ]], {
+            { _tag = "Ast.TopLevelImport", localname = "uv",
+              modname = "titan.uv", source_required = true },
+        })
+        assert_program_ast([[ local foo = import "foo.titan.titan" ]], {
+            { _tag = "Ast.TopLevelImport", localname = "foo",
+              modname = "foo.titan", source_required = true },
         })
     end)
 
@@ -2383,6 +2404,7 @@ end
                         _tag = "Ast.TopLevelImport",
                         localname = "library",
                         modname = "titan." .. name,
+                        source_required = false,
                     },
                 })
             assert_program_ast(
@@ -2391,6 +2413,7 @@ end
                         _tag = "Ast.TopLevelImport",
                         localname = "library",
                         modname = "titan." .. name,
+                        source_required = false,
                     },
                 })
         end

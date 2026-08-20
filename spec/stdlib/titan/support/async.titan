@@ -1,6 +1,6 @@
 -- Shared Task ownership protocol for native standard-library tests.
 local async = import "async"
-local runtime_test = import "support.runtime"
+local runtime_test = import "support.runtime.titan"
 
 local function active(task: async.Task): boolean
   return not task:status():has_finished()

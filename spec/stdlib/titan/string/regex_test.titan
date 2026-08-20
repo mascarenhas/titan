@@ -1,6 +1,6 @@
 local test = import "test"
 local strings = import "string"
-local support = import "string.test_support"
+local support = import "string.test_support.titan"
 
 local record RegexCase
   expression: string

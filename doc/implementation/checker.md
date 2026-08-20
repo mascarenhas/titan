@@ -927,11 +927,16 @@ declared without a return annotation default to **zero results** (`() -> ()`).
 
 ## Imports and the loader protocol
 
-`Ast.TopLevelImport` is checked by `checker.checkimport(modname, loader)`.
+`Ast.TopLevelImport` is checked by
+`checker.checkimport(modname, loader, request)`. The parser has already removed
+a terminal `.titan` marker from `modname`; `checker/declarations.lua` passes
+`{ kind = "source-import" }` only when the AST's separate `source_required` bit
+is true.
 The loader contract is:
 
 ```lua
-loader(modname)  -->  ok, moduletype_or_error, errors
+loader(modname, request)
+    --> ok, moduletype_or_error, errors, import_info
 ```
 
 The staged declaration pass invokes every import in AST order before resolving
@@ -943,8 +948,12 @@ while checking a module variable, `symtab.find_symbol` masks later
 
 On success, the import node's `_type` is the returned `Type.Module`, and
 errors found while checking the dependency propagate into this module's
-error list. `checkimport` first registers direct `Type.Interface` descriptors
-from `type_members`, then walks both namespaces and registers referenced
+error list. The checker sets `_source_import` only when the written request is
+explicit and `import_info` independently proves `kind == "source"` for a trusted
+source-complete descriptor. Ordinary imports remain public-only even when their
+loader result came from source. `checkimport` first registers direct
+`Type.Interface` descriptors from `type_members`, then walks both namespaces
+and registers referenced
 nominal owners in `types.registry`. Value members unwrap their
 `Type.ModuleMember` wrapper; records and unions are stored under their fqtn.
 For each complete recovered module interface it also derives the deterministic
@@ -974,8 +983,10 @@ Two real loaders exist in `driver.lua`:
   cycles by planting a `CIRCULAR_MARK` sentinel in the cache before recursing
   (a re-entry finds the mark and fails with `circular reference to module`).
   Dependencies with flat or folder source are recursively parsed and checked
-  once per logical module. Compiled dependencies run the invocation's complete
-  DSO/archive preference passes before source. A DSO recovers its interface
+  once per logical module. Ordinary dependencies run the invocation's complete
+  DSO/archive preference passes before source. A source-required request bypasses
+  those passes and a cached compiled selection, and fails on a clean source miss.
+  A DSO recovers its interface
   from the callable `<mangled>_types`; a static provider recovers the same
   serialized bytes from its validated per-object metadata section. Both are
   strings of nested constructor calls produced by `types.serialize` and are

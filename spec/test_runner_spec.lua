@@ -116,6 +116,8 @@ describe("Titan test-runner source generation", function()
         assert.truthy(ast, err and parser.error_to_string(err,
             "generated__test_runner.titan") or "generated runner did not parse")
         assert.equal(1, select(2, source:gsub(
+            'local test = import "titan.test.titan"', "")))
+        assert.equal(1, select(2, source:gsub(
             'local test_module_1 = import "example.alpha"', "")))
         assert.equal(1, select(2, source:gsub(
             'local test_module_2 = import "example.beta"', "")))

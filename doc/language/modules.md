@@ -180,7 +180,7 @@ every source file.
 The block is also the sole assignment region for an initializer-less const
 module variable owned by this logical module. Permission follows this root
 function frame through nested blocks, but does not flow into a function or
-lambda called or created from it. A direct source import does not grant an
+lambda called or created from it. An explicit source import does not grant an
 importer's initializer authority over the producer's const slots.
 
 ## Module variables
@@ -208,7 +208,7 @@ when initialization finishes. See
 [Const values](const-values.md#const-module-variables).
 
 A `local` variable is hidden from the public module interface; it is available
-inside its owner and through a qualified [direct source collaboration
+inside its owner and through a qualified [explicit source collaboration
 import](source-import-visibility.md). A variable without `local` is *exported*:
 modules that import this one can read it through their import alias, and can
 write it when it is mutable. Lua code that `require`s the module likewise sees
@@ -276,13 +276,31 @@ The alias is always `local` — imports are never re-exported, so there
 is no way to reach module `c` through `b` from `a` (`a.b.c`-style
 nesting does not exist).
 
+An ordinary import exposes only exported members even when lookup happens to
+select source. To intentionally require source and opt in to the imported
+module's local collaboration interface, append the marker `.titan` inside the
+string:
+
+```titan
+local internal = import "foo.bar.baz.titan"
+```
+
+This imports logical module `foo.bar.baz`; the suffix is not part of its name.
+It searches for folder source `foo/bar/baz/baz.titan` and then flat source
+`foo/bar/baz.titan` according to the ordinary source-root rules. If neither
+source form exists, compilation fails even when a compiled provider claims
+`foo.bar.baz`. See [Visibility through explicit source imports](source-import-visibility.md).
+
 A module name is a dot-separated name like `foo`, `foo.bar`, or
 `foo.bar.baz`, mapped to a path by turning dots into directory separators.
 Each component begins with an ASCII letter or underscore and continues with
 ASCII letters, digits, underscores, or hyphens. Hyphens are valid in the
 logical and filesystem name; the native protocol mangles them to underscores
 and rejects any resulting symbol-prefix collision. Characters such as `$`
-are not module-name characters.
+are not module-name characters. A dotted logical name ending in the component
+`titan`, such as `foo.titan`, is forbidden because that terminal spelling in an
+import is always the explicit-source marker for `foo`. The bare logical module
+`titan` and a nonterminal component such as `foo.titan.child` remain valid.
 Module `foo.bar` lives in flat source `foo/bar.titan`, folder source with main
 `foo/bar/bar.titan`, or a compiled provider whose metadata claims `foo.bar` — see
 [Where modules are found](#where-modules-are-found) below.
@@ -574,6 +592,11 @@ Titan's `titan.os` module without colliding with Lua's own `os` library, which
 is not importable as a Titan module. Likewise, `import "string"` selects
 Titan's module without replacing Lua's `string` table.
 
+The explicit-source marker is removed before this shorthand is expanded.
+Consequently `import "uv.titan"` and `import "titan.uv.titan"` both require the
+source for logical module `titan.uv`; neither spelling creates a module whose
+name or manifest key ends in `.titan`.
+
 The additional standard modules `titan.math`, `titan.lua`, `titan.iteration`, and
 `titan.gc` use their qualified names in Titan source as well as Lua. Short
 Titan imports never add unqualified Lua modules or replace Lua's bare
@@ -614,6 +637,11 @@ Module dependencies are resolved *compiled first*:
 * If there is no binary, but a flat or folder source representation is found,
   it is compiled and **statically linked** into the artifact being built.
   Cross-module calls are then direct C calls.
+* An import spelling ending in `.titan` is the explicit exception: it removes
+  the marker from the logical name and performs source lookup without probing or
+  falling back to a compiled provider. It also grants local visibility only to
+  that written alias. An ordinary import that eventually resolves to source
+  remains public-only.
 * A module named explicitly on the `titanc` command line is a build root, so
   its source is selected before any same-named binary. This is why
   `titanc titan.uv` rebuilds the `titan/uv/uv.titan` folder module while that

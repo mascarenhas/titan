@@ -2,7 +2,7 @@
 -- The executable bypasses the automatic standalone bootstrap, so a test that
 -- needs async operations starts one Task and pumps one Runtime explicitly.
 local async = import "async"
-local test = import "test"
+local test = import "test.titan"
 local lua = foreign import "lua.h"
 local ffi = foreign import "titan/ffi.h"
 

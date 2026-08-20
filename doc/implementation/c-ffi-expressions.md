@@ -228,7 +228,7 @@ providers to prove lifecycle and cleanup without depending on a real compiler.
 
 Angle headers keep their angle spelling. A source-relative quoted header is
 rendered as its resolved absolute quoted path before the probe source moves
-under `/tmp`. A direct source import is the exception to exposing that physical
+under `/tmp`. An explicit source import is the exception to exposing that physical
 spelling: its generated checking header deliberately has a unique randomized
 sibling name, so the checker replaces it in the probe context with a private
 hash-named wrapper derived from the logical module and eventual public-header

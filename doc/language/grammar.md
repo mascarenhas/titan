@@ -190,6 +190,7 @@ namedtype       ::= Name [typeargs] | Name '.' Name [typeargs]
 
 ```lua
 local m = import "ext.module"        -- both import forms are accepted
+local internals = import "ext.module.titan" -- explicit source marker
 local c = foreign import("stdlib.h")
 record Point
     x: float
@@ -212,6 +213,11 @@ do
     origin_x = Point.origin().x        -- optional final module initializer
 end
 ```
+
+The terminal `.titan` in a Titan import string is semantic rather than a
+filename grammar production. It is removed from the logical name and requests
+the module's source-only collaboration interface. See
+[Modules](modules.md#importing-other-modules).
 
 Notes on the top level:
 

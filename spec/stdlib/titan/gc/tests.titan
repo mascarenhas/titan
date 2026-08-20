@@ -1,6 +1,6 @@
 local test = import "test"
 local gclib = import "titan.gc"
-local support = import "support.common"
+local support = import "support.common.titan"
 local lua_api = foreign import "lua.h"
 
 local record FinalizableProbe

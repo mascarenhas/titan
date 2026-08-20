@@ -94,18 +94,19 @@ ABI. Write a foreign function that implements the required C boundary.
 ## Source visibility
 
 The defining module can call or take the address of its foreign functions by
-name. A module compiled from source can use a directly imported producer's
-foreign functions through the written alias:
+name. Another module can use them only through a written explicit source-import
+alias:
 
 ```titan
-local bridge = import "internal.bridge"
+local bridge = import "internal.bridge.titan"
 
 local function install()
   c.install_callback(bridge.callback)
 end
 ```
 
-This permission is direct and source-only. It does not propagate through an
+This permission is direct and source-only. Source resolution without the
+`.titan` marker does not grant it, and it does not propagate through an
 intermediate module. A consumer of a `.so` or `.a` sees only the producer's
 public Titan interface; compiled metadata contains no foreign function.
 Physical co-residence in one provider and static linking do not change that
@@ -113,8 +114,8 @@ rule, and Lua cannot see foreign functions through `require`.
 
 The imported module's C-import alias is not re-exported. The compiler carries
 only the generated C declarations and exact origin headers required to compile
-the direct source consumer. See
-[Visibility through source imports](source-import-visibility.md).
+the explicit-source consumer. See
+[Visibility through explicit source imports](source-import-visibility.md).
 
 ## Body subset
 
@@ -122,7 +123,7 @@ A foreign body can use:
 
 * its parameters and initialized C-typed locals;
 * foreign functions in the current module;
-* foreign functions reached through a direct source import;
+* foreign functions reached through an explicit source import;
 * imported C namespaces and their functions, values, fields, types,
   `sizeof`, and `alignof`;
 * C calls, field and pointer/array indexing, C casts and C-mode operators;
@@ -205,7 +206,7 @@ files.
 
 The compiler prepares all needed headers before compiling any source object, so
 a consumer may sort before its producer. A header contains the relevant C
-includes, generated headers for direct source dependencies, every foreign
+includes, generated headers for explicit source dependencies, every foreign
 prototype, and eligible inline bodies. Generated C includes its own companion
 header.
 

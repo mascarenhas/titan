@@ -1,5 +1,6 @@
 local lfs = require "lfs"
 local h = require "spec.support.helpers"
+local driver = require "titan-compiler.driver"
 
 local generated_modules = {}
 
@@ -74,7 +75,7 @@ describe("source-import local visibility (end-to-end)", function()
                 end
             ]],
             source_runtime_member_consumer = [[
-                local provider = import "source_runtime_members"
+                local provider = import "source_runtime_members.titan"
 
                 function direct(): integer
                     provider.total = 40
@@ -135,6 +136,32 @@ describe("source-import local visibility (end-to-end)", function()
         ]])
     end)
 
+    it("keeps the source marker out of logical and manifest identities",
+    function()
+        local provider = "source_marker_manifest_provider"
+        local consumer = "source_marker_manifest_consumer"
+        generate({
+            [provider] = [[
+                local function answer(): integer return 42 end
+            ]],
+            [consumer] = [[
+                local provider =
+                    import "source_marker_manifest_provider.titan"
+                function read(): integer return provider.answer() end
+            ]],
+        }, consumer)
+
+        local fingerprint, parsed = driver.derive_target_fingerprint(
+            provider .. ".o", provider)
+        assert.truthy(fingerprint, parsed)
+        assert.equal(provider, parsed.metadata.module)
+        assert.falsy(parsed.metadata.module:find(".titan", 1, true))
+
+        call(consumer, [[
+            assert(source_marker_manifest_consumer.read() == 42)
+        ]])
+    end)
+
     it("rejects canonical state from another physical provider", function()
         local owner = "source_runtime_identity_owner"
         local consumer = "source_runtime_identity_consumer"
@@ -159,7 +186,7 @@ describe("source-import local visibility (end-to-end)", function()
             [consumer] = string.format([[
                 local owner = import %q
                 function read(): integer return owner.secret end
-            ]], owner),
+            ]], owner .. ".titan"),
         }, consumer)
 
         local preloader = "source_runtime_identity_preloader"
@@ -198,7 +225,7 @@ describe("source-import local visibility (end-to-end)", function()
                 end
             ]],
             source_runtime_nominal_consumer = [[
-                local provider = import "source_runtime_nominals"
+                local provider = import "source_runtime_nominals.titan"
 
                 function run(): integer
                     local first = provider.Pair.new(10, 20)
@@ -248,7 +275,7 @@ struct SourceOwnedRuntime { int field; };
                 end
             ]], header),
             source_runtime_owned_forwarder = [[
-                local owner = import "source_runtime_owned_owner"
+                local owner = import "source_runtime_owned_owner.titan"
 
                 local function make(): owned *owner.Item
                     return owner.make()
@@ -261,8 +288,8 @@ struct SourceOwnedRuntime { int field; };
                 end
             ]],
             source_runtime_owned_consumer = [[
-                local forwarder = import "source_runtime_owned_forwarder"
-                local owner = import "source_runtime_owned_owner"
+                local forwarder = import "source_runtime_owned_forwarder.titan"
+                local owner = import "source_runtime_owned_owner.titan"
 
                 function run(): integer
                     local item: owned *owner.Item = forwarder.make()
@@ -312,7 +339,7 @@ static struct SourceRuntimeFileMacro *source_runtime_file_macro_make(void) {
                 end
             ]], header),
             source_runtime_file_macro_consumer = [[
-                local owner = import "source_runtime_file_macro_owner"
+                local owner = import "source_runtime_file_macro_owner.titan"
 
                 function run(): integer
                     local item = owner.get()
@@ -380,7 +407,7 @@ static struct SourceRuntimeFileMacro *source_runtime_file_macro_make(void) {
                 end
             ]], count_header, left_header, right_header),
             source_runtime_probe_consumer = [[
-                local owner = import "source_runtime_probe_owner"
+                local owner = import "source_runtime_probe_owner.titan"
 
                 function run(): integer
                     local count = owner.count()
@@ -438,7 +465,7 @@ static struct SourceRuntimeFileMacro *source_runtime_file_macro_make(void) {
                 end
             ]], base_header, alias_header),
             source_runtime_retained_consumer = [[
-                local owner = import "source_runtime_retained_owner"
+                local owner = import "source_runtime_retained_owner.titan"
                 function run(): integer
                     local pointer = owner.get()
                     if pointer == nil then return -1 end
@@ -479,7 +506,7 @@ static struct SourceRuntimeFileMacro *source_runtime_file_macro_make(void) {
                 end
             ]],
             source_runtime_ffi_bridge = [[
-                local leaf = import "source_runtime_ffi_leaf"
+                local leaf = import "source_runtime_ffi_leaf.titan"
 
                 local function open(): *leaf.File
                     return leaf.open()
@@ -494,7 +521,7 @@ static struct SourceRuntimeFileMacro *source_runtime_file_macro_make(void) {
                 end
             ]],
             source_runtime_ffi_consumer = [[
-                local bridge = import "source_runtime_ffi_bridge"
+                local bridge = import "source_runtime_ffi_bridge.titan"
 
                 function run(): integer
                     local open = bridge.open

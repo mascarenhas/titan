@@ -71,7 +71,7 @@ function test_runner.source_descriptor(program_output, source)
     }
 end
 
-local RUNNER_IMPORTS = [=[local test = import "titan.test"
+local RUNNER_IMPORTS = [=[local test = import "titan.test.titan"
 local stdio = foreign import "stdio.h"
 local ffi = foreign import "titan/ffi.h"
 local cstring = foreign import "string.h"

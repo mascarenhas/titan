@@ -1,6 +1,6 @@
 -- TLS fixture ownership for ssl.tests.
 local test = import "test"
-local runtime_test = import "support.runtime"
+local runtime_test = import "support.runtime.titan"
 local async = import "async"
 local fs = import "fs"
 local ssl = import "ssl"

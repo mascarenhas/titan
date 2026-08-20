@@ -379,10 +379,10 @@ function M.compile_bundle(workspace, roots, options)
     assert_layout(layout)
 end
 
--- Build uv and every direct source consumer needed by a fixture in one
--- canonical prefix provider. Source-private visibility belongs to those direct
--- import edges; compiling uv first and the facades later would intentionally
--- reduce the later imports to the public binary interface.
+-- Build uv and every explicit source consumer needed by a fixture in one
+-- canonical prefix provider. Each facade's `uv.titan` edge requires uv source
+-- even if a compiled provider already exists; passing all roots together also
+-- keeps the fixture in one canonical provider rather than separate outputs.
 function M.prepare_async_core(workspace, layout, facades)
     facades = facades or {}
     local allowed = { timer = true, fs = true, net = true, os = true }

@@ -14,9 +14,10 @@ function symtab.new(modname)
         foreign_field_macro_cache = {},
         c_file_tags = {},
         c_prototype_tags = {},
-        -- A local declaration in another module is visible only through a
-        -- direct source import of that owning module. This set deliberately
-        -- does not inherit the imported module's own source dependencies.
+        -- A local declaration in another module is visible only through an
+        -- explicit `.titan` import that the loader resolved from source. This
+        -- set deliberately does not inherit the imported module's own source
+        -- dependencies.
         source_imports = {},
         -- Generic type parameters form a separate lexical type namespace. Each
         -- declaration pushes one dense binder map while its signature or body

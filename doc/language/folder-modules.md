@@ -152,6 +152,13 @@ source, and the folder-before-flat rule applies. This is why
 `titan.so` provider contains it, while an ordinary `import "uv"` may use that
 compiled module.
 
+An explicit source import is a separate exception. For example,
+`import "pkg.service.titan"` removes the marker, requires logical module
+`pkg.service` to come from source, and applies the same folder-before-flat and
+source-root rules to `pkg/service/service.titan` and
+`pkg/service.titan`. It does not probe or fall back to a compiled provider, and
+the module's logical and manifest identity remains `pkg.service`.
+
 ### Contributors are not directly importable
 
 Once a parent folder module exists, its immediate `.titan` constituents stay
@@ -241,8 +248,9 @@ owns the other three public nominal types: `CancellationReason`, `TaskStatus`,
 and `Task`. The filesystem, OS, process, Runtime, timer, and TCP bridges and
 their native owner records are local declarations. The five high-level source
 modules `titan.async`, `titan.timer`, `titan.net`, `titan.os`, and `titan.fs`
-select those locals only through their direct source-import edges; they are not
-members of the compiled `titan.uv` interface.
+write `import "uv.titan"` to select those locals through explicit source edges;
+they are not members of the compiled `titan.uv` interface. An ordinary
+`import "uv"`, even when source-resolved, remains public-only.
 
 These files are one logical module and therefore produce one object and one
 `titan/uv.lua` loader, never one artifact per contributor. The production

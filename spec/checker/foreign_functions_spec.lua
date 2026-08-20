@@ -228,7 +228,7 @@ describe("foreign functions (checker)", function()
         end)
     end)
 
-    it("replays a direct source foreign header before consumer checking",
+    it("replays an explicit source foreign header before consumer checking",
     function()
         with_header([[
             #define FFI_REPLAY_VALUE 9
@@ -247,7 +247,7 @@ describe("foreign functions (checker)", function()
             provider.source_type_members = {}
 
             local code = [[
-                local provider = import "provider"
+                local provider = import "provider.titan"
                 local c = foreign import "]] .. header .. [["
                 function observed(): integer return c.FFI_REPLAY_VALUE end
             ]]
@@ -290,7 +290,7 @@ describe("foreign functions (checker)", function()
                     end
                 ]],
                 consumer = 'local c = foreign import ' .. quoted .. [[
-                    local provider = import "provider"
+                    local provider = import "provider.titan"
                     local type Callback =
                         foreign (c.ffi_int) -> c.ffi_int
 
@@ -310,13 +310,28 @@ describe("foreign functions (checker)", function()
                 modules, "consumer", { interface = "source" })
             assert.truthy(ok, err)
 
+            modules.consumer = 'local c = foreign import ' .. quoted .. [[
+                local provider = import "provider"
+                local type Callback =
+                    foreign (c.ffi_int) -> c.ffi_int
+
+                foreign function through(
+                    input: c.ffi_int
+                ): c.ffi_int
+                    return provider.increment(input)
+                end
+
+                local function address(): Callback
+                    return provider.increment
+                end
+            ]]
             ok, err = h.run_checker_modules(
                 modules, "consumer", { interface = "compiled" })
             assert.falsy(ok)
             assert.match("member 'increment' not found", err)
 
             modules.bridge = 'local c = foreign import ' .. quoted .. [[
-                local provider = import "provider"
+                local provider = import "provider.titan"
                 foreign function through(
                     input: c.ffi_int
                 ): c.ffi_int
@@ -324,7 +339,7 @@ describe("foreign functions (checker)", function()
                 end
             ]]
             modules.consumer = 'local c = foreign import ' .. quoted .. [[
-                local bridge = import "bridge"
+                local bridge = import "bridge.titan"
                 foreign function bad(
                     input: c.ffi_int
                 ): c.ffi_int
@@ -337,8 +352,8 @@ describe("foreign functions (checker)", function()
             assert.match("member 'increment' not found inside module 'bridge'", err)
 
             modules.consumer = 'local c = foreign import ' .. quoted .. [[
-                local bridge = import "bridge"
-                local provider = import "provider"
+                local bridge = import "bridge.titan"
+                local provider = import "provider.titan"
                 foreign function direct(
                     input: c.ffi_int
                 ): c.ffi_int
@@ -350,7 +365,7 @@ describe("foreign functions (checker)", function()
             assert.truthy(ok, err)
 
             modules.consumer = 'local c = foreign import ' .. quoted .. [[
-                local provider = import "provider"
+                local provider = import "provider.titan"
                 foreign function bad(
                     input: c.ffi_int
                 ): c.ffi_int
