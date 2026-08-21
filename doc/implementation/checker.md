@@ -492,8 +492,33 @@ an `ExpNil`, requires `nil_can_adjust_to`, applies `trycoerce`, and marks the
 result `_named_omitted`. It returns a dense formal-order list plus the lexical
 sequence of explicit formal indexes. The checker replaces the temporary named
 payload with `ArgsFunc`/`ArgsMethod` and writes `_named_arg_order` and
-`_named_call_kind` on the call for codegen. The full metadata and lowering
-contract is in [Named arguments](named-arguments.md).
+`_named_call_kind` on the call for codegen.
+
+The written `Ast.Field` list remains reachable only through the private
+`_surface_named_args` edge. Each valid Titan label has `_decl` bound to its
+formal declaration: raw source callables reuse one `Checker.Parameter`
+descriptor from the parameter node, while a separately compiled
+`Type.ModuleMember`, `Type.Method`, or `Type.StaticMethod` reconstructs the same
+identity from its owner, callable name, fixed index, and published parameter
+name. A synthesized record `new` label binds directly to the corresponding
+`Type.Field`, so field rename includes constructor call sites. These edges are
+for semantic tooling; coder consumes only the dense arguments and explicitly
+skips `_surface_named_args`. The full evaluation and lowering contract is in
+[Named arguments](named-arguments.md).
+
+### Source semantic bindings
+
+The checked AST retains a narrow set of private source-tooling edges alongside
+ordinary `_type` annotations. `_decl` binds variable uses, declarations,
+record/Interface fields, union variants and case arms, method/static names,
+alias namespaces, type spellings, and retained named labels to a canonical
+source or `Type.*`/`Checker.*` descriptor. Qualified type and alias spellings
+also carry `_module_decl`; method/static declarations carry `_owner_decl`.
+Generic lowering moves written binders and applications to
+`_surface_typeparams` and `_surface_typeargs` before clearing the public runtime
+lists. These descriptors and lists are neither serialized ABI nor codegen
+input; the language-server API version in the driver guards consumers that rely
+on their exact availability.
 
 ### Default `for` step
 

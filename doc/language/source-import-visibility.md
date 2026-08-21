@@ -161,7 +161,8 @@ collaboration and separating module, nominal owner, and member in native
 callable names. ABI 0.24 retains those visibility and native-layout rules while
 extending generic declaration metadata. ABI 0.25 retains the same rules while
 changing the public `titan.fs` and `titan.async` signatures. ABI 0.26 retains
-the visibility model while extending const and Interface metadata. The explicit
+the visibility model while extending the public `titan.fs.Stat` record plus
+const and Interface metadata. The explicit
 `.titan` marker changes lookup and checker permission only; because it is
 stripped before logical identity and serialization, it requires no further ABI
 change. A 0.25 binary remains public-only and is rejected by the 0.26 toolchain;

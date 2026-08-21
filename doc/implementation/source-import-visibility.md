@@ -183,8 +183,9 @@ before metadata decoding or native linking. ABI 0.24 retains the overlay and
 native layout while extending generic declaration metadata; 0.23 providers are
 rejected before decoding. ABI 0.25 retains the overlay and layout while
 changing the public `titan.fs` and `titan.async` signatures; 0.24 providers are
-rejected before decoding. ABI 0.26 retains the overlay while extending const
-and Interface metadata; 0.25 providers are rejected before decoding. Earlier
+rejected before decoding. ABI 0.26 retains the overlay while extending the
+public `titan.fs.Stat` record plus const and Interface metadata; 0.25 providers
+are rejected before decoding. Earlier
 trees are neither migrated nor deleted. The explicit `.titan` parser marker and
 source-required request add no serialized field or native identity and
 therefore require no additional ABI change.

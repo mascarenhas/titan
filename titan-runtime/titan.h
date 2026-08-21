@@ -164,11 +164,13 @@ typedef struct lua_longjmp {
    suspend gains an optional synchronous cancellation action. Their serialized
    public interfaces and exact native call signatures change, so 0.24 and 0.25
    standard providers must not be mixed.
-   0.25 -> 0.26: serialized Array, Field, ModuleVariable, and Interface
-   descriptors gain const/member-shape state; Interface wrappers gain field
-   uservalues; and generated module state/runtime support distinguish mutable
-   and const Array tags. The descriptor, wrapper, and runtime layouts are not
-   compatible, so 0.25 and 0.26 providers must not be mixed. */
+   0.25 -> 0.26: the serialized titan.fs.Stat record gains opaque device and
+   inode identity fields; serialized Array, Field, ModuleVariable, and
+   Interface descriptors gain const/member-shape state; Interface wrappers
+   gain field uservalues; and generated module state/runtime support
+   distinguish mutable and const Array tags. The public record, descriptor,
+   wrapper, and runtime layouts are not compatible, so 0.25 and 0.26 providers
+   must not be mixed. */
 #define TITAN_VER "0.26"
 #define TITAN_VER_SUFFIX "_0_26"
 #define TITAN_PATH_VAR "TITAN_PATH"

@@ -167,7 +167,14 @@ For every absent formal it synthesizes `Ast.ExpNil`, accepts it only when
 result `_named_omitted = true`. The checked call then receives
 `_named_arg_order = order` and `_named_call_kind = "titan"` or `"foreign"`,
 while its payload is replaced with `ArgsFunc` or `ArgsMethod`. Downstream call
-classification and native signatures therefore remain positional.
+classification and native signatures therefore remain positional. The original
+written fields remain only on `_surface_named_args`; each valid Titan label's
+`_decl` points to its canonical callable-parameter descriptor (or to the
+corresponding `Type.Field` for synthesized record `new`). Separately compiled
+callers reconstruct parameter identity from the callable owner/name, fixed
+index, and serialized `paramnames`. Semantic tools can therefore navigate and
+rename the label without exposing it to codegen, which explicitly skips this
+private source edge.
 
 ## Code generation and evaluation order
 

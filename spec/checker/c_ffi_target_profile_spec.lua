@@ -87,7 +87,11 @@ describe("direct-checker target profiles", function()
         local cprobe = require "titan-compiler.cprobe"
         local driver = require "titan-compiler.driver"
 
-        local base = assert(driver.toolchain_descriptor())
+        local context = driver.new_resolver_context()
+        local configured, configure_error =
+            driver.configure_foreign_c(context)
+        assert.truthy(configured, configure_error)
+        local base = assert(driver.toolchain_descriptor(context))
         local injected = {}
         for key, value in pairs(base) do injected[key] = value end
         injected.compile_flags = {}
@@ -152,8 +156,13 @@ describe("direct-checker target profiles", function()
 
         os.remove(header)
         local closed, close_error = service:close()
-        driver.configure_foreign_c()
+        local restored, restore_error =
+            driver.configure_foreign_c(context)
+        local context_closed, context_close_error =
+            driver.close_resolver_context(context)
         assert(closed, close_error)
+        assert(restored, restore_error)
+        assert(context_closed, context_close_error)
         assert.truthy(ok, failure)
     end)
 end)

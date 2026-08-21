@@ -2,6 +2,7 @@ local h = require "spec.support.helpers"
 local checker = require "titan-compiler.checker"
 local cprobe = require "titan-compiler.cprobe"
 local driver = require "titan-compiler.driver"
+local lfs = require "lfs"
 local types = require "titan-compiler.types"
 
 local function with_header(contents, fn)
@@ -29,6 +30,43 @@ local function with_headers(contents, fn)
         end)
     end
     return open_header(1)
+end
+
+local function with_hard_link(source, fn)
+    local alias = os.tmpname() .. ".h"
+    os.remove(alias)
+    assert(lfs.link(source, alias))
+
+    local results = { pcall(fn, alias) }
+    os.remove(alias)
+    if not results[1] then error(results[2], 0) end
+    table.remove(results, 1)
+    return table.unpack(results)
+end
+
+local function new_context_configured_probe_service(options)
+    local context = driver.new_resolver_context()
+    local configured, configure_error =
+        driver.configure_foreign_c(context)
+    assert.truthy(configured, configure_error)
+
+    local service_options = {}
+    for key, value in pairs(options or {}) do
+        service_options[key] = value
+    end
+    service_options.toolchain =
+        assert(driver.toolchain_descriptor(context))
+    local service, service_error = cprobe.new_service(service_options)
+    assert.truthy(service, service_error)
+    return context, service
+end
+
+local function close_context_configured_probe_service(context, service)
+    local service_closed, service_close_error = service:close()
+    local context_closed, context_close_error =
+        driver.close_resolver_context(context)
+    assert.truthy(service_closed, service_close_error)
+    assert.truthy(context_closed, context_close_error)
 end
 
 local function nested_array_bound(typ)
@@ -429,14 +467,14 @@ describe("compatible C declarations across foreign imports", function()
             ]],
         }, function(first_header, second_header, third_header)
             local calls = {}
-            local service = assert(cprobe.new_service({
-                toolchain = assert(driver.toolchain_descriptor()),
-                runner = function(argv, metadata)
-                    calls[#calls + 1] = metadata
-                    return require("c-parser.cdriver")
-                        .capture_command(argv)
-                end,
-            }))
+            local context, service =
+                new_context_configured_probe_service({
+                    runner = function(argv, metadata)
+                        calls[#calls + 1] = metadata
+                        return require("c-parser.cdriver")
+                            .capture_command(argv)
+                    end,
+                })
             local code =
                 'local first = foreign import "' .. first_header .. '"\n' ..
                 'local second = foreign import "' .. second_header .. '"\n' ..
@@ -463,7 +501,7 @@ describe("compatible C declarations across foreign imports", function()
             assert.matches("%[3%]", calls[3].source)
             assert.matches("%[4%]", calls[3].source)
             assert.not_matches("%[%]", calls[3].source)
-            assert.is_true(service:close())
+            close_context_configured_probe_service(context, service)
         end)
     end)
 
@@ -487,14 +525,14 @@ describe("compatible C declarations across foreign imports", function()
             ]],
         }, function(first_header, second_header, third_header)
             local calls = {}
-            local service = assert(cprobe.new_service({
-                toolchain = assert(driver.toolchain_descriptor()),
-                runner = function(argv, metadata)
-                    calls[#calls + 1] = metadata
-                    return require("c-parser.cdriver")
-                        .capture_command(argv)
-                end,
-            }))
+            local context, service =
+                new_context_configured_probe_service({
+                    runner = function(argv, metadata)
+                        calls[#calls + 1] = metadata
+                        return require("c-parser.cdriver")
+                            .capture_command(argv)
+                    end,
+                })
             local code =
                 'local first = foreign import "' .. first_header .. '"\n' ..
                 'local second = foreign import "' .. second_header .. '"\n' ..
@@ -517,7 +555,7 @@ describe("compatible C declarations across foreign imports", function()
             assert.not_matches(
                 "extern ffi_wave_array_alias titan_probe_d%d*_",
                 calls[3].source)
-            assert.is_true(service:close())
+            close_context_configured_probe_service(context, service)
         end)
     end)
 
@@ -533,14 +571,14 @@ describe("compatible C declarations across foreign imports", function()
         with_headers({ guarded, guarded },
         function(first_header, second_header)
             local calls = {}
-            local service = assert(cprobe.new_service({
-                toolchain = assert(driver.toolchain_descriptor()),
-                runner = function(argv, metadata)
-                    calls[#calls + 1] = metadata
-                    return require("c-parser.cdriver")
-                        .capture_command(argv)
-                end,
-            }))
+            local context, service =
+                new_context_configured_probe_service({
+                    runner = function(argv, metadata)
+                        calls[#calls + 1] = metadata
+                        return require("c-parser.cdriver")
+                            .capture_command(argv)
+                    end,
+                })
             local code =
                 'local first = foreign import "' .. first_header .. '"\n' ..
                 'local second = foreign import "' .. second_header .. '"\n'
@@ -569,7 +607,7 @@ describe("compatible C declarations across foreign imports", function()
             assert.equal(
                 ast[1]._type.members.ffi_shared_wave_object.type,
                 ast[2]._type.members.ffi_shared_wave_object.type)
-            assert.is_true(service:close())
+            close_context_configured_probe_service(context, service)
         end)
     end)
 
@@ -1286,6 +1324,32 @@ describe("compatible C declarations across foreign imports", function()
         end)
     end)
 
+    it("recognizes one pragma-once prototype tag through hard-link aliases",
+    function()
+        with_header([[
+            #pragma once
+            extern int ffi_hard_linked_prototype_tag(
+                struct ffi_hard_linked_local *value);
+        ]], function(common_header)
+            with_hard_link(common_header, function(alias_header)
+                local ok, err, ast = h.run_checker(
+                    'local first = foreign import "' ..
+                        common_header .. '"\n' ..
+                    'local second = foreign import "' ..
+                        alias_header .. '"\n')
+                assert.truthy(ok, err)
+
+                local first = ast[1]._type.members
+                    .ffi_hard_linked_prototype_tag.type
+                local second = ast[2]._type.members
+                    .ffi_hard_linked_prototype_tag.type
+                assert.equal(first, second)
+                assert.equal(first.params[1].pointee,
+                    second.params[1].pointee)
+            end)
+        end)
+    end)
+
     it("does not excuse same-source macro-dependent type changes", function()
         with_header([[
             #ifndef TITAN_FFI_SOURCE_REPEAT_MACRO
@@ -1559,18 +1623,18 @@ describe("compatible C declarations across foreign imports", function()
             ]],
         }, function(first_header, second_header)
             local calls = {}
-            local service = assert(cprobe.new_service({
-                toolchain = assert(driver.toolchain_descriptor()),
-                runner = function(_, metadata)
-                    calls[#calls + 1] = metadata
-                    return {
-                        started = true,
-                        ok = true,
-                        status = 0,
-                        diagnostic = "",
-                    }
-                end,
-            }))
+            local context, service =
+                new_context_configured_probe_service({
+                    runner = function(_, metadata)
+                        calls[#calls + 1] = metadata
+                        return {
+                            started = true,
+                            ok = true,
+                            status = 0,
+                            diagnostic = "",
+                        }
+                    end,
+                })
             local code =
                 'local first = foreign import "' .. first_header .. '"\n' ..
                 'local second = foreign import "' .. second_header .. '"\n'
@@ -1595,8 +1659,146 @@ describe("compatible C declarations across foreign imports", function()
                     "titan_probe_d" .. tostring(index) .. "_%x+",
                     calls[2].source)
             end
-            assert.is_true(service:close())
+            close_context_configured_probe_service(context, service)
         end)
+    end)
+
+    it("propagates production baseline exceptions through the checker",
+    function()
+        with_header(
+            "extern int ffi_production_baseline_exception(int value);",
+            function(header)
+                local context = driver.new_resolver_context()
+                local service, service_error =
+                    driver.get_probe_service(context)
+                assert.truthy(service, service_error)
+                local original_module_context = service.module_context
+                local cancellation = {}
+                service.module_context = function(self, options)
+                    local module_probe, err =
+                        original_module_context(self, options)
+                    assert.truthy(module_probe, err)
+                    assert.equal(cprobe.ModuleContext,
+                        getmetatable(module_probe))
+                    module_probe.validate_baseline = function()
+                        error(cancellation, 0)
+                    end
+                    return module_probe
+                end
+
+                local code =
+                    'local ffi = foreign import "' .. header .. '"\n'
+                h.reset(true)
+                local ast = assert(h.parse(code))
+                local result = table.pack(pcall(
+                    checker.check,
+                    "test", ast, code, "test.titan", nil, {
+                        probe_service_provider =
+                            function() return service end,
+                    }))
+                local closed, close_error =
+                    driver.close_resolver_context(context)
+
+                assert.is_false(result[1],
+                    result[3] and table.concat(result[3], "\n"))
+                assert.is_true(result[2] == cancellation)
+                assert.truthy(closed, close_error)
+            end)
+    end)
+
+    it("propagates production compatibility exceptions through the checker",
+    function()
+        with_headers({
+            "extern int ffi_production_batch_exception(int value);",
+            "extern int ffi_production_batch_exception(int value);",
+        }, function(first_header, second_header)
+            local context = driver.new_resolver_context()
+            local service, service_error =
+                driver.get_probe_service(context)
+            assert.truthy(service, service_error)
+            local original_module_context = service.module_context
+            local cancellation = {}
+            service.module_context = function(self, options)
+                local module_probe, err =
+                    original_module_context(self, options)
+                assert.truthy(module_probe, err)
+                assert.equal(cprobe.ModuleContext,
+                    getmetatable(module_probe))
+                module_probe.validate_baseline = function()
+                    return { status = "success" }
+                end
+                module_probe.validate_declaration_compatibilities =
+                    function()
+                        error(cancellation, 0)
+                    end
+                return module_probe
+            end
+
+            local code =
+                'local first = foreign import "' .. first_header .. '"\n' ..
+                'local second = foreign import "' .. second_header .. '"\n'
+            h.reset(true)
+            local ast = assert(h.parse(code))
+            local result = table.pack(pcall(
+                checker.check,
+                "test", ast, code, "test.titan", nil, {
+                    probe_service_provider =
+                        function() return service end,
+                }))
+            local closed, close_error =
+                driver.close_resolver_context(context)
+
+            assert.is_false(result[1],
+                result[3] and table.concat(result[3], "\n"))
+            assert.is_true(result[2] == cancellation)
+            assert.truthy(closed, close_error)
+        end)
+    end)
+
+    it("normalizes an injected baseline exception as infrastructure",
+    function()
+        with_header(
+            "extern int ffi_injected_baseline_exception(int value);",
+            function(header)
+                local context = driver.new_resolver_context()
+                local profile_service, service_error =
+                    driver.get_probe_service(context)
+                assert.truthy(profile_service, service_error)
+                local module_probe = {
+                    validate_baseline = function()
+                        error("injected baseline", 0)
+                    end,
+                }
+                local service = {
+                    profile = profile_service.profile,
+                    cdriver_process_options = function()
+                        return profile_service:cdriver_process_options()
+                    end,
+                    module_context = function()
+                        return module_probe
+                    end,
+                }
+
+                local code =
+                    'local ffi = foreign import "' .. header .. '"\n'
+                h.reset(true)
+                local ast = assert(h.parse(code))
+                local result = table.pack(pcall(
+                    checker.check,
+                    "test", ast, code, "test.titan", nil, {
+                        probe_service_provider =
+                            function() return service end,
+                    }))
+                local closed, close_error =
+                    driver.close_resolver_context(context)
+
+                assert.is_true(result[1])
+                assert.matches(
+                    "ordered header baseline validation failed: " ..
+                        "injected baseline",
+                    table.concat(result[3], "\n"), 1, true)
+                assert.truthy(closed, close_error)
+            end)
     end)
 
     it("normalizes plural and legacy injected probe failures", function()
@@ -1604,9 +1806,8 @@ describe("compatible C declarations across foreign imports", function()
             "extern int ffi_injected_probe(int value);",
             "extern int ffi_injected_probe(int value);",
         }, function(first_header, second_header)
-            local profile_service = assert(cprobe.new_service({
-                toolchain = assert(driver.toolchain_descriptor()),
-            }))
+            local context, profile_service =
+                new_context_configured_probe_service()
             local profile = profile_service.profile
 
             local scenarios = {
@@ -1678,7 +1879,8 @@ describe("compatible C declarations across foreign imports", function()
                     assert.equal("", err)
                 end
             end
-            assert.is_true(profile_service:close())
+            close_context_configured_probe_service(
+                context, profile_service)
         end)
     end)
 
@@ -1701,15 +1903,14 @@ describe("compatible C declarations across foreign imports", function()
                         '#include "' .. common_name .. '"\n',
                         function(second_header)
                             local calls = 0
-                            local service = assert(cprobe.new_service({
-                                toolchain =
-                                    assert(driver.toolchain_descriptor()),
-                                runner = function()
-                                    calls = calls + 1
-                                    return nil,
-                                        "test compiler could not be started"
-                                end,
-                            }))
+                            local context, service =
+                                new_context_configured_probe_service({
+                                    runner = function()
+                                        calls = calls + 1
+                                        return nil,
+                                            "test compiler could not be started"
+                                    end,
+                                })
                             local code =
                                 'local first = foreign import "' ..
                                     first_header .. '"\n' ..
@@ -1732,7 +1933,8 @@ describe("compatible C declarations across foreign imports", function()
                                 "conflicting C declaration for "
                                     .. "'ffi_infra_common'",
                                 err, 1, true)
-                            assert.is_true(service:close())
+                            close_context_configured_probe_service(
+                                context, service)
                         end)
                 end)
         end)

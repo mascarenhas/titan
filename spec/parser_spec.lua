@@ -285,6 +285,135 @@ end
         ]], "EndBlock")
     end)
 
+    it("retains exact semantic identifier locations", function()
+        local function assert_location(loc, line, col)
+            assert.same({
+                filename = "metadata.titan",
+                line = line,
+                col = col,
+            }, loc)
+        end
+
+        local program = assert(parser.parse("metadata.titan", [[
+local dep = import "pkg.dep"
+local type Alias = dep.Item
+record Box<T>
+    const item: dep.Item<T>
+end
+function Box:take<U>(input: dep.Item<U>): dep.Item<U>
+    local selected = input.item
+    local bound = input:convert
+    input:convert()
+    input:convert{item = input}
+    return input
+end
+]]))
+
+        assert_location(program[1]._name_loc, 1, 7)
+        assert_location(program[2]._name_loc, 2, 12)
+        assert_location(program[2].type._module_loc, 2, 20)
+        assert_location(program[2].type._name_loc, 2, 24)
+
+        local record = program[3]
+        assert_location(record._name_loc, 3, 8)
+        assert_location(record.typeparams[1]._name_loc, 3, 12)
+        assert_location(record.fields[1]._name_loc, 4, 11)
+        assert_location(record.fields[1].type._module_loc, 4, 17)
+        assert_location(record.fields[1].type._name_loc, 4, 21)
+        assert_location(record.fields[1].type.typeargs[1]._name_loc, 4, 26)
+
+        -- The parser inserts Box.new immediately after the record.
+        local method = program[5]
+        assert_location(method._owner_loc, 6, 10)
+        assert_location(method._name_loc, 6, 14)
+        assert_location(method.typeparams[1]._name_loc, 6, 19)
+        assert_location(method.params[1]._name_loc, 6, 22)
+        assert_location(method.params[1].type._module_loc, 6, 29)
+        assert_location(method.params[1].type._name_loc, 6, 33)
+        assert_location(method.rettypes[1]._module_loc, 6, 43)
+        assert_location(method.rettypes[1]._name_loc, 6, 47)
+        assert_location(method.block.stats[1].exps[1].var._name_loc, 7, 28)
+        assert_location(method.block.stats[2].exps[1]._name_loc, 8, 25)
+        assert_location(method.block.stats[3].callexp.args._name_loc, 9, 11)
+        local named = method.block.stats[4].callexp.args
+        assert_location(named._name_loc, 10, 11)
+        assert_location(named.fields[1]._name_loc, 10, 19)
+
+        local owners = assert(parser.parse("metadata.titan", [[
+interface View
+    item: integer
+    function show()
+end
+union Choice
+    local Some: integer
+    None
+end
+]]))
+        assert_location(owners[1]._name_loc, 1, 11)
+        assert_location(owners[1].fields[1]._name_loc, 2, 5)
+        assert_location(owners[1].methods[1]._name_loc, 3, 14)
+        assert_location(owners[2]._name_loc, 5, 7)
+        assert_location(owners[2].variants[1]._name_loc, 6, 11)
+        assert_location(owners[2].variants[2]._name_loc, 7, 5)
+    end)
+
+    it("retains structural closing-keyword locations", function()
+        local function assert_location(loc, line, col)
+            assert.same({
+                filename = "fold.titan",
+                line = line,
+                col = col,
+            }, loc)
+        end
+
+        local program = assert(parser.parse("fold.titan", [[
+function fold()
+    if true then
+    end
+    while true do
+    end
+    repeat
+    until true
+    for i = 1, 2 do
+    end
+    for item in items do
+    end
+    do
+    end
+    case item
+    when Some then
+    else
+    end
+    local callback = function()
+    end
+end
+do
+end
+]]))
+
+        local func = program[1]
+        local stats = func.block.stats
+        assert_location(func._end_loc, 20, 1)
+        assert_location(stats[1]._end_loc, 3, 5)
+        assert_location(stats[2]._end_loc, 5, 5)
+        assert_location(stats[3]._end_loc, 7, 5)
+        assert_location(stats[4]._end_loc, 9, 5)
+        assert_location(stats[5]._end_loc, 11, 5)
+        assert_location(stats[6]._structure_loc, 12, 5)
+        assert_location(stats[6]._end_loc, 13, 5)
+        assert_location(stats[7].arms[1]._name_loc, 15, 10)
+        assert_location(stats[7]._end_loc, 17, 5)
+        assert_location(stats[8].exps[1]._end_loc, 19, 5)
+        assert.is_nil(func.block._end_loc)
+        assert.is_nil(stats[1].thens[1].block._end_loc)
+
+        local initializer = program[2]
+        assert.is_true(initializer._module_initializer)
+        assert_location(initializer.loc, 21, 1)
+        assert_location(initializer._end_loc, 22, 1)
+        assert.is_nil(initializer._structure_loc)
+    end)
+
     it("can parse toplevel var declarations", function()
         assert_program_ast([[ local x=17 ]], {
             { _tag = "Ast.TopLevelVar",

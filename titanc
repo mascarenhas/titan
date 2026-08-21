@@ -57,8 +57,6 @@ local function exit(msg)
     os.exit(1)
 end
 
-if driver.TOOLCHAIN_ERROR then exit(driver.TOOLCHAIN_ERROR) end
-
 local jobs_text = args.jobs or os.getenv("TITAN_JOBS") or "1"
 if type(jobs_text) ~= "string" or
    not jobs_text:match("^[1-9][0-9]*$") then
@@ -74,15 +72,24 @@ local function link_failed(kind, modname, term, code)
         kind, modname, tostring(term), code and (", " .. tostring(code)) or "")
 end
 
+driver.TITAN_SOURCE_PATH = args.tree or driver.TITAN_SOURCE_PATH
+driver.LUA_SOURCE_PATH = args.lua or driver.LUA_SOURCE_PATH
+if args.no_line_directives then driver.EMIT_LINE_DIRECTIVES = false end
+
+resolver_context = driver.new_resolver_context({
+    prefer_static = args.static,
+    source_first = args.test,
+    verbose = args.verbose,
+    pretty_print = args.pretty_print,
+})
+if driver.TOOLCHAIN_ERROR then exit(driver.TOOLCHAIN_ERROR) end
 if args.lua and driver.INSTALLED then
     exit("--lua is only available in a source checkout; the installed " ..
         "compiler must use its matching Lua SDK")
 end
-
-driver.TITAN_SOURCE_PATH = args.tree or driver.TITAN_SOURCE_PATH
-driver.LUA_SOURCE_PATH = args.lua or driver.LUA_SOURCE_PATH
-if args.no_line_directives then driver.EMIT_LINE_DIRECTIVES = false end
-driver.configure_foreign_c()
+local configured, configure_error =
+    driver.configure_foreign_c(resolver_context)
+if not configured and configure_error then exit(configure_error) end
 
 local errors = {}
 local main_module = nil
@@ -92,16 +99,10 @@ local requested_modules = driver.deduplicate_module_names(args.module)
 local source_overrides = {}
 if args.test then
     local test_source, test_source_err =
-        driver.test_support_source_descriptor()
+        driver.test_support_source_descriptor(resolver_context)
     if not test_source then exit(test_source_err) end
     source_overrides["titan.test"] = test_source
 end
-resolver_context = driver.new_resolver_context({
-    prefer_static = args.static,
-    source_first = args.test,
-    verbose = args.verbose,
-    pretty_print = args.pretty_print,
-})
 for _, modname in ipairs(requested_modules) do
     if args.test and modname == test_runner.MODULE_NAME then
         exit("logical module '" .. test_runner.MODULE_NAME ..

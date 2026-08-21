@@ -3,8 +3,128 @@ local cpp = {}
 
 local typed = require("c-parser.typed")
 local c99 = require("c-parser.c99")
+local sha256 = require("titan-compiler.sha256")
+local compiler_io = require("titan-compiler.io")
+
+-- Standalone c-parser callers retain the ordinary synchronous behavior. The
+-- compiler driver passes its resolver-context strategy explicitly, so every
+-- language-server path uses the same Titan-backed object instead.
+local default_io = compiler_io.new_sync()
 
 local SEP = package.config:sub(1,1)
+
+local function path_join(directory, name)
+    if directory:sub(-1) == SEP then return directory .. name end
+    return directory .. SEP .. name
+end
+
+function cpp.absolute_lookup_path(path, cwd)
+    if path:sub(1, 1) ~= SEP then path = path_join(cwd, path) end
+    -- Remove only standalone '.' components. Preserve separator runs and,
+    -- critically, every '..' and symbolic-link component: in
+    -- link/../header.h the kernel follows link before applying '..', and a
+    -- later restat must traverse that same link again so retargeting it
+    -- invalidates the recorded header world.
+    local output = {}
+    local pending_separators = ""
+    local index = 1
+    while index <= #path do
+        if path:sub(index, index) == SEP then
+            local finish = index + 1
+            while finish <= #path and path:sub(finish, finish) == SEP do
+                finish = finish + 1
+            end
+            pending_separators = path:sub(index, finish - 1)
+            index = finish
+        else
+            local finish = index + 1
+            while finish <= #path and path:sub(finish, finish) ~= SEP do
+                finish = finish + 1
+            end
+            local component = path:sub(index, finish - 1)
+            if component == "." then
+                local separator_finish = finish
+                while separator_finish <= #path and
+                      path:sub(separator_finish, separator_finish) == SEP do
+                    separator_finish = separator_finish + 1
+                end
+                local following = path:sub(finish, separator_finish - 1)
+                -- Exactly two leading separators may name an
+                -- implementation-defined namespace on POSIX. A leading dot
+                -- must neither promote '/' to '//' nor demote '//' to a
+                -- longer run.
+                if #output > 0 and #following > #pending_separators then
+                    pending_separators = following
+                end
+                index = separator_finish
+            else
+                output[#output + 1] = pending_separators
+                output[#output + 1] = component
+                pending_separators = ""
+                index = finish
+            end
+        end
+    end
+    output[#output + 1] = pending_separators
+    return table.concat(output)
+end
+
+local function io_for(options)
+    return options and options.io or default_io
+end
+
+local function read_file_contents(filename, strategy)
+    return strategy:read_file(filename)
+end
+
+local function attribute_identity(attributes)
+    if not attributes then return "missing" end
+    local kind = attributes.kind == "symlink" and "link" or attributes.kind
+    return table.concat({
+        tostring(kind), tostring(attributes.mode),
+        tostring(attributes.device), tostring(attributes.inode),
+    }, ":")
+end
+
+local function search_candidate_openable(path, strategy)
+    return strategy:readable(path)
+end
+
+function cpp.header_search_identity(path, openable, strategy)
+    strategy = strategy or default_io
+    if openable == nil then
+        openable = search_candidate_openable(path, strategy)
+    end
+    local link = strategy:lstat(path)
+    local followed = strategy:stat(path)
+    return table.concat({
+        "c-header-search-v1", "lstat=" .. attribute_identity(link),
+        "stat=" .. attribute_identity(followed),
+        "open=" .. (openable and "readable" or "unreadable"),
+    }, ";")
+end
+
+function cpp.header_file_identity(contents, path, strategy)
+    strategy = strategy or default_io
+    local followed = strategy:stat(path)
+    return "c-header-file-v1:sha256:" .. sha256.hex(contents) ..
+        ";stat=" .. attribute_identity(followed)
+end
+
+function cpp.header_input_identity(kind, path, strategy)
+    strategy = strategy or default_io
+    if kind == "file" then
+        local contents, err = read_file_contents(path, strategy)
+        if not contents then
+            return "c-header-file-v1:unreadable:" ..
+                cpp.header_search_identity(path, nil, strategy), err
+        end
+        return cpp.header_file_identity(contents, path, strategy)
+    elseif kind == "search" then
+        return cpp.header_search_identity(path, nil, strategy)
+    end
+    return nil, "C header input kind must be 'file' or 'search'"
+end
 
 local function debug() end
 --[[
@@ -231,6 +351,7 @@ local function normalize_toolchain(options)
     end
 
     return {
+        io = io_for(options),
         compiler = compiler,
         language_mode = language_mode,
         language_flag = language_flag,
@@ -280,94 +401,15 @@ function cpp.capture_command(argv, options)
         }
     end
 
-    local command, err = shell_command(normalized)
-    if not command then
-        return {
-            started = false,
-            ok = false,
-            diagnostic = err,
-        }
-    end
-    command = "env LANG=C LC_ALL=C " .. command
-    if options.stderr_to_stdout ~= false then
-        command = command .. " 2>&1"
-    end
-
-    local opened, pipe, popen_err = pcall(io.popen, command, "r")
-    if not opened or not pipe then
-        return {
-            started = false,
-            ok = false,
-            command = command,
-            diagnostic = "could not start captured command: " ..
-                tostring(opened and popen_err or pipe),
-        }
-    end
-
-    local read_ok, output = pcall(pipe.read, pipe, "*a")
-    if not read_ok then
-        pcall(pipe.close, pipe)
-        return {
-            started = false,
-            ok = false,
-            command = command,
-            diagnostic = "could not capture command output: " ..
-                tostring(output),
-        }
-    end
-
-    local close_ok, succeeded, why, status =
-        pcall(pipe.close, pipe)
-    if not close_ok then
-        return {
-            started = false,
-            ok = false,
-            command = command,
-            diagnostic = output .. "\nfailed waiting for command: " ..
-                tostring(succeeded),
-        }
-    end
-
-    -- Lua receives a direct child's signal termination as
-    -- `(nil, "signal", signo)`, but io.popen necessarily inserts a POSIX
-    -- shell. That shell conventionally reports a signalled command as
-    -- `128 + signo` and exits normally itself. Normalize both shapes so a
-    -- killed compiler is never mistaken for an ordinary rejected C program.
-    -- POSIX signal numbers occupy the low 7 bits in this convention; bounding
-    -- the translation avoids treating arbitrary large application exit codes
-    -- as signals.
-    local shell_status = not succeeded and why == "exit"
-        and type(status) == "number"
-        and status >= 129 and status <= 192
-        and status or nil
-    local signal = not succeeded and (
-        why == "signal" and status
-        or shell_status and (shell_status - 128)
-    ) or nil
-    local interrupted = signal ~= nil
-    if interrupted then
-        why = "signal"
-        status = signal
-    end
-    local missing = not succeeded and why == "exit"
-        and (status == 126 or status == 127)
-    return {
-        started = not missing,
-        ok = succeeded == true,
-        status = succeeded and 0 or status,
-        shell_status = shell_status,
-        signal = signal,
-        why = why,
-        interrupted = interrupted,
-        command = command,
-        diagnostic = output,
-        output = output,
-    }
+    return io_for(options):run(normalized, {
+        stderr_to_stdout = options.stderr_to_stdout ~= false,
+    })
 end
 
-local function run_command(argv, stderr_to_stdout)
+local function run_command(argv, stderr_to_stdout, strategy)
     local result = cpp.capture_command(argv, {
         stderr_to_stdout = stderr_to_stdout,
+        io = strategy,
     })
     if not result.started or not result.ok then
         return nil, ("command failed (%s %s): %s"):format(
@@ -403,12 +445,131 @@ local function key_argv(argv)
     return table.concat(parts, "|")
 end
 
-local probe_cache = {}
+-- A process may host more than one compiler context (the language server does
+-- so across project reloads). Probe results are valid only for the strategy
+-- which observed the command and forced-header inputs.
+local probe_caches = setmetatable({}, { __mode = "k" })
+
+local function probe_cache_for(strategy)
+    local cache = probe_caches[strategy]
+    if not cache then
+        cache = {}
+        probe_caches[strategy] = cache
+    end
+    return cache
+end
+
+local function copy_config(config)
+    return {
+        io = config.io,
+        compiler = { table.unpack(config.compiler) },
+        language_mode = config.language_mode,
+        language_flag = config.language_flag,
+        compile_flags = { table.unpack(config.compile_flags) },
+        cppflags = { table.unpack(config.cppflags) },
+        fixed_include_dirs = { table.unpack(config.fixed_include_dirs) },
+    }
+end
+
+local function opaque_preprocessor_argument(argument)
+    if argument:sub(1, 1) == "@" then
+        return "response-file argument '" .. argument .. "'"
+    elseif argument:sub(1, 4) == "-Wp," then
+        return "preprocessor pass-through argument '" .. argument .. "'"
+    elseif argument == "-Xpreprocessor" then
+        return "preprocessor pass-through argument '-Xpreprocessor'"
+    elseif argument == "-include-pch" or argument == "-include-pth" then
+        return "opaque forced-header argument '" .. argument .. "'"
+    end
+end
+
+local function scan_forced_arguments(arguments, first, channel,
+                                     imacros, includes)
+    local stripped = {}
+    for index = 1, first - 1 do stripped[index] = arguments[index] end
+    local index = first
+    while index <= #arguments do
+        local argument = arguments[index]
+        local opaque = opaque_preprocessor_argument(argument)
+        if opaque then
+            return nil, "cannot track forced C headers hidden by " .. opaque ..
+                " in " .. channel
+        end
+
+        local kind
+        local operand
+        if argument == "-include" or argument == "-imacros" then
+            kind = argument == "-include" and "include" or "imacros"
+            index = index + 1
+            operand = arguments[index]
+            if operand == nil then
+                return nil, argument .. " in " .. channel ..
+                    " requires a header operand"
+            end
+        elseif argument:sub(1, 8) == "-include" and #argument > 8 then
+            kind = "include"
+            operand = argument:sub(9)
+        elseif argument:sub(1, 8) == "-imacros" and #argument > 8 then
+            kind = "imacros"
+            operand = argument:sub(9)
+        else
+            stripped[#stripped + 1] = argument
+        end
+
+        if kind then
+            if operand == "" then
+                return nil, "-" .. kind .. " in " .. channel ..
+                    " requires a nonempty header operand"
+            end
+            local item = {
+                kind = kind,
+                operand = operand,
+                channel = channel,
+            }
+            if kind == "imacros" then
+                imacros[#imacros + 1] = item
+            else
+                includes[#includes + 1] = item
+            end
+        end
+        index = index + 1
+    end
+    return stripped
+end
+
+local function forced_configuration(config)
+    local stripped = copy_config(config)
+    local imacros = {}
+    local includes = {}
+    local value, err = scan_forced_arguments(
+        config.compiler, 2, "compiler command", imacros, includes)
+    if not value then return nil, err end
+    stripped.compiler = value
+    value, err = scan_forced_arguments(
+        config.compile_flags, 1, "compile flags", imacros, includes)
+    if not value then return nil, err end
+    stripped.compile_flags = value
+    value, err = scan_forced_arguments(
+        config.cppflags, 1, "CPP flags", imacros, includes)
+    if not value then return nil, err end
+    stripped.cppflags = value
+
+    local forced = {}
+    -- GCC and Clang process every -imacros occurrence before every -include
+    -- occurrence, while preserving order within each class.
+    append_argv(forced, imacros)
+    append_argv(forced, includes)
+    return {
+        original = config,
+        stripped = stripped,
+        forced = forced,
+    }
+end
 
 local function probe_include_paths(config)
     local argv = config_argv(config)
     append_argv(argv, { "-E", "-v", "-x", "c", "/dev/null", "-o", "/dev/null" })
-    local output, err = run_command(argv, true)
+    local output, err = run_command(argv, true, config.io)
     if not output then
         return nil, "failed probing C include search: " .. err
     end
@@ -433,24 +594,9 @@ local function probe_include_paths(config)
     return paths
 end
 
-local function parse_macro_dump(output)
-    local fd, err = io.tmpfile()
-    if not fd then
-        return nil, "failed creating temporary macro probe file: " .. err
-    end
-    local wrote, write_err = fd:write(output)
-    if not wrote then
-        fd:close()
-        return nil, "failed writing temporary macro probe file: " ..
-            tostring(write_err)
-    end
-    local offset, seek_err = fd:seek("set", 0)
-    if not offset then
-        fd:close()
-        return nil, "failed rewinding temporary macro probe file: " ..
-            tostring(seek_err)
-    end
+local function parse_macro_dump(output, strategy)
     local blank_ctx = {
+        io = strategy,
         incdirs = {},
         defines = {},
         macro_changes = {},
@@ -460,9 +606,8 @@ local function parse_macro_dump(output)
         current_dir = {},
     }
     typed.set_type(blank_ctx, "Ctx")
-    local ctx
-    -- parse_file consumes and closes the supplied stream.
-    ctx, err = cpp.parse_file("-", fd, blank_ctx)
+    local ctx, err
+    ctx, err = cpp.parse_contents("-", output, blank_ctx)
     if not ctx then
         return nil, "failed parsing compiler macro output: " .. err
     end
@@ -480,15 +625,204 @@ end
 local function probe_macro_definitions(config, source)
     local argv = config_argv(config)
     append_argv(argv, { "-dM", "-E", "-x", "c", source })
-    local output, err = run_command(argv, false)
+    local output, err = run_command(argv, false, config.io)
     if not output then
         return nil, "failed probing C macros for '" .. source .. "': " .. err
     end
-    return parse_macro_dump(output)
+    return parse_macro_dump(output, config.io)
 end
 
 local function probe_default_defines(config)
     return probe_macro_definitions(config, "/dev/null")
+end
+
+local function base_probe(config)
+    local key = "base|" .. key_argv(config_argv(config))
+    local probe_cache = probe_cache_for(config.io)
+    local probed = probe_cache[key]
+    if probed then return probed end
+    local incdirs, err = probe_include_paths(config)
+    if not incdirs then return nil, err end
+    local defines
+    defines, err = probe_default_defines(config)
+    if not defines then return nil, err end
+    probed = { incdirs = incdirs, defines = defines }
+    probe_cache[key] = probed
+    return probed
+end
+
+local function append_manifest(parts, label, ...)
+    parts[#parts + 1] = label
+    for index = 1, select("#", ...) do
+        parts[#parts + 1] = tostring(select(index, ...))
+    end
+end
+
+local function truncate_array(values, length)
+    for index = #values, length + 1, -1 do values[index] = nil end
+end
+
+local function forced_header_candidates(operand, cwd, incdirs)
+    if operand:sub(1, 1) == SEP then
+        return { cpp.absolute_lookup_path(operand, cwd) }
+    end
+    local candidates = {
+        cpp.absolute_lookup_path(operand, cwd),
+    }
+    for _, directory in ipairs(incdirs.quote or {}) do
+        candidates[#candidates + 1] =
+            cpp.absolute_lookup_path(path_join(directory, operand), cwd)
+    end
+    for _, directory in ipairs(incdirs.system or {}) do
+        candidates[#candidates + 1] =
+            cpp.absolute_lookup_path(path_join(directory, operand), cwd)
+    end
+    return candidates
+end
+
+local function scan_forced_headers(forced, incdirs, base_defines, cwd,
+                                   strategy)
+    local dependencies = {}
+    local dependency_identities = {}
+    local search_inputs = {}
+    local search_identities = {}
+    local manifest = { "titan-forced-c-headers-v1" }
+    local ctx = {
+        io = strategy,
+        incdirs = copy_incdirs(incdirs),
+        defines = copy_map(base_defines),
+        macro_changes = {},
+        ifmode = { true },
+        output = {},
+        output_origins = {},
+        current_dir = {},
+    }
+    typed.set_type(ctx, "Ctx")
+
+    ctx.header_dependency_observer = function(path, contents)
+        path = cpp.absolute_lookup_path(path, cwd)
+        local identity = cpp.header_file_identity(contents, path, strategy)
+        append_manifest(manifest, "file", path, identity)
+        local previous = dependency_identities[path]
+        if previous and previous ~= identity then
+            return nil, "forced C header changed while it was parsed: " .. path
+        elseif not previous then
+            dependency_identities[path] = identity
+            dependencies[#dependencies + 1] = {
+                kind = "file", path = path, identity = identity,
+            }
+        end
+        return true
+    end
+    ctx.include_search_observer = function(path, openable)
+        path = cpp.absolute_lookup_path(path, cwd)
+        local identity = cpp.header_search_identity(path, openable, strategy)
+        append_manifest(manifest, "search", path, identity)
+        local previous = search_identities[path]
+        if previous and previous ~= identity then
+            return nil, "forced C include candidate changed while it " ..
+                "was searched: " .. path
+        elseif not previous then
+            search_identities[path] = identity
+            search_inputs[#search_inputs + 1] = {
+                kind = "search", path = path, identity = identity,
+            }
+        end
+        return true
+    end
+
+    for _, item in ipairs(forced) do
+        append_manifest(manifest, "option", item.kind, item.operand)
+        local selected
+        local selected_contents
+        local open_error
+        for _, candidate in ipairs(
+                forced_header_candidates(item.operand, cwd, incdirs)) do
+            local contents, err = strategy:read_file(candidate)
+            local observed, observe_err =
+                ctx.include_search_observer(candidate, contents ~= nil)
+            if not observed then
+                return nil, observe_err
+            end
+            if contents then
+                selected = candidate
+                selected_contents = contents
+                break
+            end
+            open_error = err
+        end
+        if not selected then
+            return nil, "forced C header '" .. item.operand ..
+                "' is missing or unreadable" ..
+                (open_error and ": " .. tostring(open_error) or "")
+        end
+
+        local output_length = #ctx.output
+        local origins_length = #ctx.output_origins
+        local parsed, parse_error =
+            cpp.parse_contents(selected, selected_contents, ctx)
+        if not parsed then
+            return nil, "failed preprocessing forced C header '" ..
+                item.operand .. "': " .. tostring(parse_error)
+        end
+        if item.kind == "imacros" then
+            truncate_array(ctx.output, output_length)
+            truncate_array(ctx.output_origins, origins_length)
+        end
+    end
+
+    ctx.header_dependency_observer = nil
+    ctx.include_search_observer = nil
+    return {
+        dependencies = dependencies,
+        search_inputs = search_inputs,
+        manifest = key_argv(manifest),
+        output = ctx.output,
+        output_origins = ctx.output_origins,
+        macro_changes = ctx.macro_changes,
+        scanned_defines = ctx.defines,
+    }
+end
+
+local function inspect_forced_configuration(configuration)
+    if #configuration.forced == 0 then
+        return {
+            dependencies = {},
+            search_inputs = {},
+            manifest = key_argv({ "titan-forced-c-headers-v1", "none" }),
+            output = {},
+            output_origins = {},
+            macro_changes = {},
+        }
+    end
+
+    local cwd, cwd_error = configuration.original.io:cwd()
+    if not cwd then
+        return nil, "failed determining cwd for forced C headers: " ..
+            tostring(cwd_error)
+    end
+    local base, err = base_probe(configuration.stripped)
+    if not base then return nil, err end
+    local scanned
+    scanned, err = scan_forced_headers(
+        configuration.forced, base.incdirs, base.defines, cwd,
+        configuration.original.io)
+    if not scanned then return nil, err end
+    scanned.incdirs = copy_incdirs(base.incdirs)
+    scanned.base_defines = copy_map(base.defines)
+    return scanned
+end
+
+function cpp.inspect_forced_headers(options)
+    local config, err = normalize_toolchain(options)
+    if not config then return nil, err end
+    local configuration
+    configuration, err = forced_configuration(config)
+    if not configuration then return nil, err end
+    local inspected
+    inspected, err = inspect_forced_configuration(configuration)
+    if not inspected then return nil, err end
+    return inspected
 end
 
 function cpp.new_context(options)
@@ -497,31 +831,55 @@ function cpp.new_context(options)
         return nil, err
     end
 
-    local key = key_argv(config_argv(config))
+    local configuration
+    configuration, err = forced_configuration(config)
+    if not configuration then return nil, err end
+    local forced
+    forced, err = inspect_forced_configuration(configuration)
+    if not forced then return nil, err end
+
+    local key = "final|" .. key_argv(config_argv(config)) ..
+        "|forced=" .. forced.manifest
+    local probe_cache = probe_cache_for(config.io)
     local probed = probe_cache[key]
     if not probed then
         local incdirs
-        incdirs, err = probe_include_paths(config)
-        if not incdirs then
-            return nil, err
+        if #configuration.forced == 0 then
+            incdirs, err = probe_include_paths(config)
+            if not incdirs then return nil, err end
+        else
+            incdirs = forced.incdirs
         end
         local defines
         defines, err = probe_default_defines(config)
-        if not defines then
-            return nil, err
+        if not defines then return nil, err end
+
+        if #configuration.forced > 0 then
+            local stable
+            stable, err = inspect_forced_configuration(configuration)
+            if not stable then return nil, err end
+            if stable.manifest ~= forced.manifest then
+                return nil, "forced C headers changed while probing the " ..
+                    "configured preprocessor"
+            end
+            forced = stable
         end
         probed = { incdirs = incdirs, defines = defines }
         probe_cache[key] = probed
     end
 
     local ctx = {
+        io = config.io,
         incdirs = copy_incdirs(probed.incdirs),
         defines = copy_map(probed.defines),
-        macro_changes = {},
+        macro_changes = copy_map(forced.macro_changes),
         ifmode = { true },
-        output = {},
-        output_origins = {},
+        output = { table.unpack(forced.output) },
+        output_origins = { table.unpack(forced.output_origins) },
         current_dir = {},
+        forced_header_dependencies = forced.dependencies,
+        forced_header_search_inputs = forced.search_inputs,
+        forced_header_manifest = forced.manifest,
     }
     typed.set_type(ctx, "Ctx")
     return ctx
@@ -529,7 +887,7 @@ end
 
 -- Test and embedding hook: cached probe results are otherwise process-lifetime.
 function cpp.clear_probe_cache()
-    probe_cache = {}
+    probe_caches = setmetatable({}, { __mode = "k" })
 end
 
 -- Not supported:
@@ -601,7 +959,7 @@ local function add(buf, txt)
     return buf
 end
 
-cpp.initial_processing = typed("FILE* -> LineList", function(fd)
+local function initial_processing_contents(contents)
     local backslash_buf
     local buf
     local state = "any"
@@ -697,7 +1055,17 @@ cpp.initial_processing = typed("FILE* -> LineList", function(fd)
         end
     end
 
-    for input_line in fd:lines() do
+    local input_offset = 1
+    while input_offset <= #contents do
+        local newline = contents:find("\n", input_offset, true)
+        local input_line
+        if newline then
+            input_line = contents:sub(input_offset, newline - 1)
+            input_offset = newline + 1
+        else
+            input_line = contents:sub(input_offset)
+            input_offset = #contents + 1
+        end
         -- for-loop control variables are read-only in Lua 5.5
         local line = input_line
         linenr = linenr + 1
@@ -734,9 +1102,15 @@ cpp.initial_processing = typed("FILE* -> LineList", function(fd)
         buf = nil
     end
 
-    fd:close()
     typed.set_type(output, "LineList")
     return output
+end
+
+cpp.initial_processing = typed("FILE* -> LineList", function(fd)
+    local contents, err = fd:read("a")
+    fd:close()
+    if not contents then error(err) end
+    return initial_processing_contents(contents)
 end)
 
 -- Stringification needs the spelling relationship between adjacent
@@ -908,8 +1282,8 @@ end)
 
 local function find_file(ctx, filename, mode, is_next)
     if filename:sub(1, 1) == SEP then
-        local fd = io.open(filename, "r")
-        if fd then return filename, fd end
+        local contents = ctx.io:read_file(filename)
+        if contents then return filename, contents end
         return nil, nil, "file not found"
     end
     local paths = {}
@@ -935,9 +1309,16 @@ local function find_file(ctx, filename, mode, is_next)
     end
     for _, path in ipairs(paths) do
         local pathname = path..SEP..filename
-        local fd = io.open(pathname, "r")
-        if fd then
-            return pathname, fd
+        local contents = ctx.io:read_file(pathname)
+        if ctx.include_search_observer then
+            local ok, observe_err =
+                ctx.include_search_observer(pathname, contents ~= nil)
+            if not ok then
+                return nil, nil, observe_err, true
+            end
+        end
+        if contents then
+            return pathname, contents
         end
     end
     return nil, nil, "file not found"
@@ -945,10 +1326,10 @@ end
 
 local parse_expression = typed("{string} -> Exp?", function(tokens)
     local text = table.concat(tokens, " ")
-    local exp, err, _, _, fragment = c99.match_preprocessing_expression_grammar(text)
-    if not exp then
-        print("Error parsing expression: " .. tostring(err) .. ": " .. text .. " AT " .. fragment)
-    end
+    local exp = c99.match_preprocessing_expression_grammar(text)
+    -- The caller reports a structured preprocessor syntax error. Never write
+    -- parser failures directly: embeddings such as an LSP server reserve
+    -- stdout for their transport framing.
     return exp
 end)
 
@@ -1417,25 +1798,14 @@ end)
 
 local run_expression = typed("Ctx, {string} -> boolean", function(ctx, tks)
     local exp = parse_expression(tks)
+    if not exp then
+        error("syntax error in preprocessor expression", 0)
+    end
     return eval_exp(ctx, exp) ~= 0
 end)
 
-cpp.parse_file = typed("string, FILE*?, Ctx? -> Ctx?, string?", function(filename, fd, ctx)
-    if not ctx then
-        local err
-        ctx, err = cpp.new_context()
-        if not ctx then
-            return nil, err
-        end
-        -- if not absolute path
-        if not filename:match("^/") then
-            local found_name, found_fd = find_file(ctx, filename, "system")
-            if found_fd then
-                filename, fd = found_name, found_fd
-            end
-        end
-    end
-
+local function parse_contents(filename, contents, ctx)
+    ctx.io = ctx.io or default_io
     ctx.output_origins = ctx.output_origins or {}
     -- Record the names whose active macro definition this header closure
     -- changes. Foreign imports are parsed independently, but generated C
@@ -1445,24 +1815,18 @@ cpp.parse_file = typed("string, FILE*?, Ctx? -> Ctx?, string?", function(filenam
     ctx.macro_changes = ctx.macro_changes or {}
 
     local current_dir = filename:gsub("/[^/]*$", "")
-    if current_dir == filename then
-        current_dir = "."
-        local found_name, found_fd = find_file(ctx, filename, "system")
-        if found_fd then
-            filename, fd = found_name, found_fd
-        end
-    end
+    if current_dir == filename then current_dir = "." end
     table.insert(ctx.current_dir, current_dir)
 
-    local err
-    if not fd then
-        fd, err = io.open(filename, "rb")
-        if not fd then
+    if ctx.header_dependency_observer then
+        local observed, observe_err =
+            ctx.header_dependency_observer(filename, contents)
+        if not observed then
             table.remove(ctx.current_dir)
-            return nil, err
+            return nil, observe_err
         end
     end
-    local linelist = cpp.initial_processing(fd)
+    local linelist = initial_processing_contents(contents)
 
     for _, lineitem in ipairs(linelist) do
         lineitem.tk = cpp.tokenize(lineitem.line)
@@ -1516,17 +1880,27 @@ cpp.parse_file = typed("string, FILE*?, Ctx? -> Ctx?, string?", function(filenam
                 local name = tk.exp[1]
                 local mode = tk.exp.mode
                 local is_next = (tk.directive == "include_next")
-                local inc_filename, inc_fd, err = find_file(ctx, name, mode, is_next)
-                if not inc_filename then
+                local inc_filename, inc_contents, err, observer_failed =
+                    find_file(ctx, name, mode, is_next)
+                if observer_failed then
+                    table.remove(ctx.current_dir)
+                    return nil, name .. ":" .. err
+                elseif not inc_filename then
                     -- fall back to trying to load an #include "..." as #include <...>;
                     -- this is necessary for Mac system headers
-                    inc_filename, inc_fd, err = find_file(ctx, name, "system", is_next)
+                    inc_filename, inc_contents, err, observer_failed =
+                        find_file(ctx, name, "system", is_next)
+                    if observer_failed then
+                        table.remove(ctx.current_dir)
+                        return nil, name .. ":" .. err
+                    end
                 end
                 if not inc_filename then
                     table.remove(ctx.current_dir)
                     return nil, name..":"..err
                 end
-                local ok, include_err = cpp.parse_file(inc_filename, inc_fd, ctx)
+                local ok, include_err =
+                    parse_contents(inc_filename, inc_contents, ctx)
                 if not ok then
                     table.remove(ctx.current_dir)
                     return nil, name .. ":" .. include_err
@@ -1568,7 +1942,47 @@ cpp.parse_file = typed("string, FILE*?, Ctx? -> Ctx?, string?", function(filenam
     table.remove(ctx.current_dir)
 
     return ctx, nil
-end)
+end
+
+cpp.parse_contents = typed(
+    "string, string, Ctx -> Ctx?, string?", parse_contents)
+
+-- Preserve the historical optional FILE* entry point for standalone parser
+-- callers, while compiler-owned paths pass only names and consume bytes via
+-- the context strategy. Include recursion uses parse_contents so a selected
+-- header is never opened a second time merely to test its existence.
+cpp.parse_file = typed(
+    "string, FILE*?, Ctx? -> Ctx?, string?",
+    function(filename, fd, ctx)
+        if not ctx then
+            local context_error
+            ctx, context_error = cpp.new_context()
+            if not ctx then return nil, context_error end
+        end
+        ctx.io = ctx.io or default_io
+
+        local contents
+        if not fd and not filename:match("^/") then
+            local found_name, found_contents, find_error, observer_failed =
+                find_file(ctx, filename, "system")
+            if observer_failed then return nil, find_error end
+            if found_contents then
+                filename, contents = found_name, found_contents
+            end
+        end
+
+        if fd then
+            local read_error
+            contents, read_error = fd:read("a")
+            fd:close()
+            if not contents then return nil, read_error end
+        elseif not contents then
+            local read_error
+            contents, read_error = ctx.io:read_file(filename)
+            if not contents then return nil, read_error end
+        end
+        return parse_contents(filename, contents, ctx)
+    end)
 
 cpp.expand_macro = typed("string, table -> string", function(macro, define_set)
     local ctx = typed.table("Ctx", setmetatable({

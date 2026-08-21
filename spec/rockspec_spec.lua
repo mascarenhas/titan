@@ -40,6 +40,14 @@ local function read_file(path)
     return contents
 end
 
+local function load_rock_manifest(path)
+    local environment = {}
+    local chunk = assert(loadfile(path, "t", environment))
+    local ok, err = pcall(chunk)
+    assert.truthy(ok, err)
+    return assert(environment.rock_manifest)
+end
+
 local function write_file(path, contents)
     local file = assert(io.open(path, "wb"))
     assert.truthy(file:write(contents))
@@ -274,7 +282,7 @@ describe("standalone-prefix source installation", function()
             "/share/lua/5.5/titan-compiler/pretty.lua")
         for _, module in ipairs({
             "cdeclarator.lua", "cpreamble.lua", "cprobe.lua",
-            "csemantics.lua", "sha256.lua", "test_runner.lua",
+            "csemantics.lua", "io.lua", "sha256.lua", "test_runner.lua",
         }) do
             assert_file(PREFIX ..
                 "/share/lua/5.5/titan-compiler/" .. module)
@@ -400,8 +408,10 @@ describe("standalone-prefix source installation", function()
             assert_file(PREFIX .. "/include/uv/version.h")
         end
 
-        local manifest = read_file(PREFIX ..
-            "/lib/luarocks/rocks-5.5/titan/dev-1/rock_manifest")
+        local manifest_path = PREFIX ..
+            "/lib/luarocks/rocks-5.5/titan/dev-1/rock_manifest"
+        local manifest = read_file(manifest_path)
+        local manifest_table = load_rock_manifest(manifest_path)
         assert.falsy(manifest:find("titan.so", 1, true), manifest)
         assert.falsy(manifest:find('["titan.a"]', 1, true), manifest)
         assert.falsy(manifest:find("stdlib_installer.lua", 1, true), manifest)
@@ -412,15 +422,16 @@ describe("standalone-prefix source installation", function()
             '["staticmetadata.lua"]', 1, true), manifest)
         for _, module in ipairs({
             "cdeclarator.lua", "cpreamble.lua", "cprobe.lua",
-            "csemantics.lua", "sha256.lua", "test_runner.lua",
+            "csemantics.lua", "io.lua", "sha256.lua", "test_runner.lua",
         }) do
             assert.truthy(manifest:find(
                 '["' .. module .. '"]', 1, true), manifest)
         end
+        local stdlib_lua_manifest = manifest_table.lua.titan
         for _, module in ipairs(STDLIB_MODULES) do
             assert.falsy(manifest:find(module .. ".so", 1, true), manifest)
-            assert.falsy(manifest:find(
-                '["' .. module .. '.lua"]', 1, true), manifest)
+            assert.falsy(stdlib_lua_manifest and
+                stdlib_lua_manifest[module .. ".lua"], manifest)
         end
     end)
 

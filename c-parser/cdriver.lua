@@ -4,12 +4,16 @@ local cpp = require("c-parser.cpp")
 local c99 = require("c-parser.c99")
 local ctypes = require("c-parser.ctypes")
 local cdefines = require("c-parser.cdefines")
-local lfs = require("lfs")
+local compiler_io = require("titan-compiler.io")
 
 local SEP = package.config:sub(1, 1)
-local LOAD_CWD = lfs.currentdir()
+local default_io = compiler_io.new_sync()
 
-local compiler_include_dirs
+local compiler_include_dirs = setmetatable({}, { __mode = "k" })
+
+local function io_for(options)
+    return options and options.io or default_io
+end
 
 local function is_absolute_path(filename)
     return filename:match("^/") ~= nil
@@ -22,13 +26,28 @@ local function join_path(dir, filename)
     return dir .. SEP .. filename
 end
 
-local function file_exists(filename)
-    local fd = io.open(filename, "rb")
-    if fd then
-        fd:close()
-        return true
-    end
-    return false
+local function absolute_lookup_path(path, cwd)
+    return cpp.absolute_lookup_path(path, cwd)
+end
+
+local function search_candidate_identity(path, openable, strategy)
+    return cpp.header_search_identity(path, openable, strategy)
+end
+
+local function file_contents_identity(path, contents, strategy)
+    return cpp.header_file_identity(contents, path, strategy)
+end
+
+-- Public, side-effect-free identity helper used by long-lived compiler
+-- clients to revalidate only the exact header paths and include candidates
+-- observed by cdriver. A search identity deliberately distinguishes a broken
+-- symlink from a symlink whose target is now a usable regular file.
+function cdriver.header_input_identity(kind, path, strategy)
+    return cpp.header_input_identity(kind, path, strategy or default_io)
+end
+
+local function file_exists(filename, strategy)
+    return strategy:readable(filename)
 end
 
 local function parent_dir(dir)
@@ -39,46 +58,46 @@ local function parent_dir(dir)
     return parent
 end
 
-local function find_runtime_dir(start_dir)
+local function find_runtime_dir(start_dir, strategy)
     local dir = start_dir
     while dir do
         local runtime = join_path(dir, "titan-runtime")
-        if file_exists(join_path(runtime, "titan/ffi.h")) then
+        if file_exists(join_path(runtime, "titan/ffi.h"), strategy) then
             return runtime
         end
         dir = parent_dir(dir)
     end
 end
 
-local function find_sdk_include_dir(start_dir)
+local function find_sdk_include_dir(start_dir, strategy)
     local dir = start_dir
     while dir do
         local include = join_path(dir, "include")
-        if file_exists(join_path(include, "titan/ffi.h")) then
+        if file_exists(join_path(include, "titan/ffi.h"), strategy) then
             return include
         end
         dir = parent_dir(dir)
     end
 end
 
-local function find_lua_source_dir(start_dir)
+local function find_lua_source_dir(start_dir, strategy)
     local dir = start_dir
     while dir do
         local lua_source = join_path(join_path(dir, "lua-5.5.1"), "src")
-        if file_exists(join_path(lua_source, "lua.h")) then
+        if file_exists(join_path(lua_source, "lua.h"), strategy) then
             return lua_source
         end
         lua_source = join_path(join_path(dir, "src"), "lua-5.5.1")
-        if file_exists(join_path(lua_source, "lua.h")) then
+        if file_exists(join_path(lua_source, "lua.h"), strategy) then
             return lua_source
         end
         dir = parent_dir(dir)
     end
 end
 
-local function default_compiler_include_dirs()
-    if compiler_include_dirs then
-        return compiler_include_dirs
+local function default_compiler_include_dirs(strategy)
+    if compiler_include_dirs[strategy] then
+        return compiler_include_dirs[strategy]
     end
 
     local source = debug.getinfo(1, "S").source
@@ -86,17 +105,24 @@ local function default_compiler_include_dirs()
         and source:sub(2):match("^(.*)[/\\][^/\\]+$")
         or "."
     if not is_absolute_path(this_dir) then
-        this_dir = join_path(LOAD_CWD, this_dir)
+        local cwd, cwd_error = strategy:cwd()
+        if not cwd then
+            return nil, "failed determining cwd for compiler headers: " ..
+                tostring(cwd_error)
+        end
+        this_dir = join_path(cwd, this_dir)
     end
-    compiler_include_dirs = {
-        find_runtime_dir(this_dir) or find_sdk_include_dir(this_dir)
+    local resolved = {
+        find_runtime_dir(this_dir, strategy) or
+            find_sdk_include_dir(this_dir, strategy)
             or "titan-runtime",
     }
-    local lua_source = find_lua_source_dir(this_dir)
+    local lua_source = find_lua_source_dir(this_dir, strategy)
     if lua_source then
-        table.insert(compiler_include_dirs, lua_source)
+        table.insert(resolved, lua_source)
     end
-    return compiler_include_dirs
+    compiler_include_dirs[strategy] = resolved
+    return resolved
 end
 
 -- Resolve the fixed Titan/Lua SDK roots once and return an owned ordered copy.
@@ -104,8 +130,13 @@ end
 -- array remains empty. This distinction lets direct checker embeddings share
 -- the exact roots later installed in their probe service instead of
 -- accidentally converting "discover" into "no fixed headers".
-function cdriver.resolve_compiler_include_dirs(value)
-    if value == nil then value = default_compiler_include_dirs() end
+function cdriver.resolve_compiler_include_dirs(value, strategy)
+    strategy = strategy or default_io
+    if value == nil then
+        local discovery_error
+        value, discovery_error = default_compiler_include_dirs(strategy)
+        if not value then return nil, discovery_error end
+    end
     if type(value) ~= "table" then
         return nil, "compiler include dirs must be an ordered array"
     end
@@ -130,10 +161,15 @@ function cdriver.resolve_compiler_include_dirs(value)
     return copy
 end
 
-local function find_header(filename, incdirs)
+local function find_header(filename, incdirs, observe, strategy)
     for _, incdir in ipairs(incdirs or {}) do
         local candidate = join_path(incdir, filename)
-        if file_exists(candidate) then
+        local exists = file_exists(candidate, strategy)
+        if observe then
+            local ok, err = observe(candidate, exists)
+            if not ok then return nil, err end
+        end
+        if exists then
             return candidate
         end
     end
@@ -149,8 +185,9 @@ local function normalize_options(options)
     return {}
 end
 
-local function resolve_include(filename, options, incdirs)
+local function resolve_include(filename, options, incdirs, observe)
     options = normalize_options(options)
+    local strategy = io_for(options)
 
     if is_absolute_path(filename) then
         return {
@@ -163,7 +200,12 @@ local function resolve_include(filename, options, incdirs)
 
     if options.source_dir then
         local source_relative = join_path(options.source_dir, filename)
-        if file_exists(source_relative) then
+        local exists = file_exists(source_relative, strategy)
+        if observe then
+            local ok, err = observe(source_relative, exists)
+            if not ok then return nil, err end
+        end
+        if exists then
             return {
                 original = filename,
                 resolved = source_relative,
@@ -173,7 +215,9 @@ local function resolve_include(filename, options, incdirs)
         end
     end
 
-    local quote_header = find_header(filename, incdirs.quote)
+    local quote_header, quote_err =
+        find_header(filename, incdirs.quote, observe, strategy)
+    if quote_err then return nil, quote_err end
     if quote_header then
         return {
             original = filename,
@@ -183,20 +227,25 @@ local function resolve_include(filename, options, incdirs)
         }
     end
 
+    local system_header, system_err =
+        find_header(filename, incdirs.system, observe, strategy)
+    if system_err then return nil, system_err end
     return {
         original = filename,
-        resolved = find_header(filename, incdirs.system) or filename,
+        resolved = system_header or filename,
         include_kind = "angle",
         include_name = filename,
     }
 end
 
 local function preprocessor_options(options)
+    local strategy = io_for(options)
     local own_dirs, dirs_error =
         cdriver.resolve_compiler_include_dirs(
-            options.compiler_include_dirs)
+            options.compiler_include_dirs, strategy)
     if not own_dirs then return nil, dirs_error end
     return {
+        io = strategy,
         compiler = options.compiler,
         language_mode = options.language_mode,
         language_flag = options.language_flag,
@@ -212,20 +261,137 @@ local function new_cpp_context(options)
     return cpp.new_context(config)
 end
 
+-- Inspect the forced preprocessing headers without parsing a module header.
+-- cprobe uses this exact context to key compiler probes and to expose the
+-- same restattable file/search inputs even before cdriver sees a foreign
+-- import.
+function cdriver.forced_header_inputs(options)
+    options = normalize_options(options)
+    local config, err = preprocessor_options(options)
+    if not config then return nil, err end
+    local inspected
+    inspected, err = cpp.inspect_forced_headers(config)
+    if not inspected then return nil, err end
+    return {
+        c_header_dependencies = inspected.dependencies,
+        c_header_search_inputs = inspected.search_inputs,
+        manifest = inspected.manifest,
+    }
+end
+
 function cdriver.process_file(filename, options)
     options = normalize_options(options)
+    local strategy = io_for(options)
     local ctx, err = new_cpp_context(options)
     if not ctx then
         return nil, "failed configuring C preprocessor: " .. err
     end
 
-    local include = resolve_include(filename, options, ctx.incdirs)
-    local parse_filename = file_exists(include.resolved) and include.resolved or filename
+    local cwd, cwd_err = strategy:cwd()
+    if not cwd then
+        return nil, "failed determining cwd for C header identity: " ..
+            tostring(cwd_err)
+    end
+    local dependencies = {}
+    local dependency_identities = {}
+    local search_inputs = {}
+    local search_identities = {}
+    local function record_dependency(path, identity)
+        path = absolute_lookup_path(path, cwd)
+        local previous = dependency_identities[path]
+        if previous and previous ~= identity then
+            return nil, "C header changed while it was being parsed: " .. path
+        elseif not previous then
+            dependency_identities[path] = identity
+            dependencies[#dependencies + 1] = {
+                kind = "file",
+                path = path,
+                identity = identity,
+            }
+        end
+        return true
+    end
+    local function record_search(path, identity)
+        path = absolute_lookup_path(path, cwd)
+        local previous = search_identities[path]
+        if previous and previous ~= identity then
+            return nil, "C include candidate changed while it was searched: " ..
+                path
+        elseif not previous then
+            search_identities[path] = identity
+            search_inputs[#search_inputs + 1] = {
+                kind = "search",
+                path = path,
+                identity = identity,
+            }
+        end
+        return true
+    end
+    ctx.header_dependency_observer = function(path, contents)
+        path = absolute_lookup_path(path, cwd)
+        return record_dependency(
+            path, file_contents_identity(path, contents, strategy))
+    end
+    ctx.include_search_observer = function(path, openable)
+        path = absolute_lookup_path(path, cwd)
+        return record_search(
+            path, search_candidate_identity(path, openable, strategy))
+    end
+
+    for _, dependency in ipairs(
+            ctx.forced_header_dependencies or {}) do
+        local recorded, record_error = record_dependency(
+            dependency.path, dependency.identity)
+        if not recorded then
+            return nil, "failed recording forced C header: " .. record_error
+        end
+    end
+    for _, search in ipairs(ctx.forced_header_search_inputs or {}) do
+        local recorded, record_error =
+            record_search(search.path, search.identity)
+        if not recorded then
+            return nil, "failed recording forced C header search: " ..
+                record_error
+        end
+    end
+
+    local include
+    include, err = resolve_include(
+        filename, options, ctx.incdirs, ctx.include_search_observer)
+    if not include then
+        return nil, "failed resolving C header '" .. filename .. "': " .. err
+    end
+    if is_absolute_path(include.resolved) or
+       file_exists(include.resolved, strategy) then
+        include.resolved = absolute_lookup_path(include.resolved, cwd)
+    end
+    local parse_filename = file_exists(include.resolved, strategy)
+        and include.resolved or filename
 
     ctx, err = cpp.parse_file(parse_filename, nil, ctx)
     if not ctx then
         return nil, "failed preprocessing '"..filename.."': " .. err
     end
+    for _, input in ipairs(dependencies) do
+        local current = assert(cdriver.header_input_identity(
+            input.kind, input.path, strategy))
+        if current ~= input.identity then
+            return nil, "C header changed while preprocessing '" ..
+                filename .. "': " .. input.path
+        end
+    end
+    for _, input in ipairs(search_inputs) do
+        local current = assert(cdriver.header_input_identity(
+            input.kind, input.path, strategy))
+        if current ~= input.identity then
+            return nil, "C include candidate changed while preprocessing '" ..
+                filename .. "': " .. input.path
+        end
+    end
+    include.c_header_dependencies = dependencies
+    include.c_header_search_inputs = search_inputs
+    ctx.c_header_dependencies = dependencies
+    ctx.c_header_search_inputs = search_inputs
 
     local srccode = table.concat(ctx.output, "\n").." $EOF$"
 
@@ -249,13 +415,16 @@ function cdriver.process_file(filename, options)
     local function source_identity(source_file)
         local cached = source_identities[source_file]
         if cached ~= nil then return cached end
-        local attributes = lfs.attributes(source_file)
-        cached = attributes
-            and attributes.dev ~= nil
-            and attributes.ino ~= nil
+        local metadata = strategy:stat(source_file)
+        cached = metadata
+            and metadata.device ~= nil
+            and metadata.inode ~= nil
             and {
-                device = attributes.dev,
-                inode = attributes.ino,
+                -- The checker compares this opaque pair only for equality.
+                -- Preserve physical identity across both symlink and hard-link
+                -- spellings without retaining the complete strategy record.
+                device = metadata.device,
+                inode = metadata.inode,
             } or false
         source_identities[source_file] = cached
         return cached
@@ -361,9 +530,10 @@ end
 -- csemantics owns interpretation; this layer only exposes parser facts.
 function cdriver.target_profile_inputs(options)
     options = normalize_options(options)
+    local strategy = io_for(options)
     local fixed_include_dirs, dirs_error =
         cdriver.resolve_compiler_include_dirs(
-            options.compiler_include_dirs)
+            options.compiler_include_dirs, strategy)
     if not fixed_include_dirs then return nil, dirs_error end
     local ffi_types, err, include, ctx =
         cdriver.process_file("lua.h", options)

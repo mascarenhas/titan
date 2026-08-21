@@ -10,6 +10,7 @@
 
 local cpp = require "c-parser.cpp"
 local c99 = require "c-parser.c99"
+local lfs = require "lfs"
 
 -- Run the preprocessor over `src` (a chunk of C) in isolation -- an empty
 -- define set and no system include paths, so nothing is pulled in from the
@@ -74,6 +75,70 @@ local function parse_decls(src)
 end
 
 describe("c preprocessor (cpp)", function()
+    it("removes only standalone dot components from absolute lookup paths",
+    function()
+        assert.equal("/work//root/header.h",
+            cpp.absolute_lookup_path("./header.h", "/work//root"))
+        assert.equal("/sdk/link/../include/api.h",
+            cpp.absolute_lookup_path(
+                "/sdk/link/../include/./api.h", "/ignored"))
+        assert.equal("//server/share//api.h",
+            cpp.absolute_lookup_path(
+                "//server/./share//api.h", "/ignored"))
+        assert.equal("/server/share.h",
+            cpp.absolute_lookup_path(
+                "/.//server/share.h", "/ignored"))
+        assert.equal("//server/share.h",
+            cpp.absolute_lookup_path(
+                "//.///server/share.h", "/ignored"))
+        assert.equal("/sdk///link/../include/api.h",
+            cpp.absolute_lookup_path(
+                "/sdk///link/../include/api.h", "/ignored"))
+    end)
+
+    it("treats include-search observer failure as terminal", function()
+        local root = os.tmpname()
+        os.remove(root)
+        assert(lfs.mkdir(root))
+        local fallback = root .. "/fallback"
+        assert(lfs.mkdir(fallback))
+        local main = root .. "/main.h"
+        local nested = root .. "/nested.h"
+        local fallback_nested = fallback .. "/nested.h"
+        local output = assert(io.open(main, "wb"))
+        assert(output:write('#include "nested.h"\n'))
+        assert(output:close())
+        output = assert(io.open(fallback_nested, "wb"))
+        assert(output:write("typedef int observer_was_swallowed;\n"))
+        assert(output:close())
+
+        local observed = {}
+        local ctx = {
+            incdirs = { quote = {}, system = { fallback } },
+            defines = {},
+            ifmode = { true },
+            output = {},
+            current_dir = {},
+            include_search_observer = function(path)
+                observed[#observed + 1] = path
+                if path == nested then
+                    return nil, "injected include observation failure"
+                end
+                return true
+            end,
+        }
+        local parsed, err = cpp.parse_file(
+            main, assert(io.open(main, "rb")), ctx)
+        assert.is_nil(parsed)
+        assert.matches("injected include observation failure", err, 1, true)
+        assert.same({ nested }, observed)
+
+        assert(os.remove(fallback_nested))
+        assert(os.remove(main))
+        assert(lfs.rmdir(fallback))
+        assert(lfs.rmdir(root))
+    end)
+
     describe("shell argument handling", function()
         it("splits quoted and escaped paths without losing argument boundaries", function()
             local words = assert(cpp.split_shell_words(
@@ -112,6 +177,36 @@ describe("c preprocessor (cpp)", function()
             words, err = cpp.split_shell_words("-I/tmp/path\\")
             assert.is_nil(words)
             assert.matches("trailing backslash", err)
+        end)
+
+        it("fails closed for opaque preprocessing argument encodings",
+        function()
+            local cases = {
+                { { "@compiler-options.rsp" }, "response%-file" },
+                { { "-Wp,-include,forced.h" }, "pass%-through" },
+                { { "-Xpreprocessor", "-include" }, "pass%-through" },
+                { { "-include-pch", "forced.pch" }, "opaque" },
+            }
+            for _, case in ipairs(cases) do
+                local ctx, err = cpp.new_context({
+                    compiler = { "cc" },
+                    compile_flags = case[1],
+                    fixed_include_dirs = {},
+                })
+                assert.is_nil(ctx)
+                assert.matches(case[2], err)
+            end
+        end)
+
+        it("treats equals as part of a joined forced-header operand",
+        function()
+            local ctx, err = cpp.new_context({
+                compiler = { "cc" },
+                compile_flags = { "-include=titan-not-present.h" },
+                fixed_include_dirs = {},
+            })
+            assert.is_nil(ctx)
+            assert.matches("'=titan%-not%-present%.h'", err)
         end)
 
         it("normalizes a shell-reported child signal as interruption",
@@ -405,6 +500,19 @@ VEC(acos,, (double __x))
         end)
         it("expands macros inside an #if condition", function()
             assert.equal("hit", expand("#define V 1\n#if V == 1\nhit\n#endif\n"))
+        end)
+        it("does not write malformed #if diagnostics to stdout", function()
+            local original_print = _G.print
+            local printed = {}
+            _G.print = function(...)
+                printed[#printed + 1] = table.concat({ ... }, " ")
+            end
+            local ok, failure = pcall(expand, "#if (\nhit\n#endif\n")
+            _G.print = original_print
+
+            assert.is_false(ok)
+            assert.matches("preprocessor expression", tostring(failure), 1, true)
+            assert.same({}, printed)
         end)
     end)
 

@@ -743,6 +743,17 @@ function foreign_redeclaration_batch.add_writes(declaration, writes)
     end
 end
 
+-- Production probe methods can cross the compiler I/O strategy and suspend a
+-- Titan Task. Invoke those methods directly so a cancellation raised while
+-- resuming through Lua is not mistaken for an ordinary probe failure. Keep
+-- the protected compatibility boundary only for injected legacy probes.
+local function invoke_module_probe(module_probe, method, ...)
+    if getmetatable(module_probe) == cprobe.ModuleContext then
+        return true, method(module_probe, ...)
+    end
+    return pcall(method, module_probe, ...)
+end
+
 function foreign_redeclaration_batch.validate_candidates(
         module_probe, candidates)
     local compatibilities = {}
@@ -750,9 +761,10 @@ function foreign_redeclaration_batch.validate_candidates(
 
     if type(module_probe.validate_declaration_compatibilities)
         == "function" then
-        local ok, validated = pcall(
+        local ok, validated = invoke_module_probe(
+            module_probe,
             module_probe.validate_declaration_compatibilities,
-            module_probe, candidates)
+            candidates)
         if ok and type(validated) == "table" then
             for index = 1, #candidates do
                 compatibilities[index] =
@@ -791,9 +803,9 @@ function foreign_redeclaration_batch.validate_candidates(
                     "the C probe service cannot validate a declaration pair",
             }
         else
-            local ok, validated = pcall(
-                module_probe.validate_declaration_compatibility,
+            local ok, validated = invoke_module_probe(
                 module_probe,
+                module_probe.validate_declaration_compatibility,
                 candidate.left_type, candidate.right_type,
                 candidate.left_declaration,
                 candidate.right_declaration)
@@ -840,8 +852,8 @@ function finalize_foreign_redeclarations(st, errors)
                 "the C probe service cannot validate an ordered header baseline",
         }
     else
-        local ok, validated = pcall(
-            module_probe.validate_baseline, module_probe)
+        local ok, validated = invoke_module_probe(
+            module_probe, module_probe.validate_baseline)
         if ok and type(validated) == "table" then
             result = validated
         else

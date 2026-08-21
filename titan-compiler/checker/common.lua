@@ -181,6 +181,7 @@ function generic_bare_forwarding_alias_target(node, st, errors)
     if node._tag == "Ast.TypeName" then
         local alias = st:find_type_alias(node.name)
         if alias then
+            node._decl = alias
             local target = resolve_type_alias(alias, st, errors)
             if target._tag == "Type.GenericAlias" then
                 local owner = types.registry[target.target_owner_fqtn]
@@ -192,10 +193,19 @@ function generic_bare_forwarding_alias_target(node, st, errors)
             end
             return nil, false, false
         end
+        local declaration = st:find_symbol(node.name)
+        if declaration and (declaration._tag == "Ast.TopLevelRecord"
+                or declaration._tag == "Ast.TopLevelUnion") then
+            node._decl = declaration
+        elseif st.interface_declarations
+           and st.interface_declarations[node.name] then
+            node._decl = st.interface_declarations[node.name]
+        end
         local owner = generic_resolve_local_owner(node.name, st)
         return owner, false, owner ~= nil
     elseif node._tag == "Ast.TypeQualName" then
         local declaration = st:find_symbol(node.module)
+        if declaration then node._module_decl = declaration end
         local module = declaration and declaration._type
         if not module or module._tag ~= "Type.Module" then
             return nil, false, false
@@ -204,6 +214,13 @@ function generic_bare_forwarding_alias_target(node, st, errors)
         local member = types.module_type_member(
             module, node.name, include_source)
         if member and member._tag == "Type.GenericAlias" then
+            node._decl = {
+                _tag = "Checker.TypeMember",
+                modname = module.name,
+                name = node.name,
+                type = member,
+                islocal = member.islocal and true or false,
+            }
             local owner = types.registry[member.target_owner_fqtn]
             local target_alias_fqtn = false
             if not member.locality then
@@ -211,6 +228,13 @@ function generic_bare_forwarding_alias_target(node, st, errors)
             end
             return owner, target_alias_fqtn, true
         elseif member and member._tag == "Type.Interface" then
+            node._decl = {
+                _tag = "Checker.TypeMember",
+                modname = module.name,
+                name = node.name,
+                type = member,
+                islocal = member.islocal and true or false,
+            }
             return member, false, true
         end
         local nominal = types.module_member(
@@ -218,6 +242,13 @@ function generic_bare_forwarding_alias_target(node, st, errors)
         local owner = nominal and nominal.type
         if owner and (owner._tag == "Type.Record"
                 or owner._tag == "Type.Union") then
+            node._decl = {
+                _tag = "Checker.TypeMember",
+                modname = module.name,
+                name = node.name,
+                type = nominal,
+                islocal = nominal.islocal and true or false,
+            }
             return owner, false, true
         end
     end
@@ -389,6 +420,86 @@ function param_types(params, st, errors)
         end
     end
     return ptypes, varargtype, paramnames
+end
+
+-- Named-call labels are references to declaration parameters, not record
+-- initializer fields. Keep a small source-only descriptor which can be
+-- reconstructed from a separately compiled callable's published parameter
+-- names. The descriptor deliberately lives outside `types.lua`: it is semantic
+-- tooling metadata, not part of a Titan callable's serialized type or ABI.
+local function callable_parameter_descriptor(
+        owner_kind, owner_name, callable_name, index, name, islocal)
+    return {
+        _tag = "Checker.Parameter",
+        owner_kind = owner_kind,
+        owner_name = owner_name,
+        callable_name = callable_name,
+        index = index,
+        name = name,
+        islocal = islocal and true or false,
+    }
+end
+
+-- Bind each written fixed parameter to the canonical descriptor used by named
+-- argument labels. Store the same private list on the source declaration and
+-- its callable descriptor so calls resolved without serialization can retain
+-- pointer identity as well as the reconstructible semantic identity.
+function bind_callable_parameter_declarations(
+        node, callable, owner_kind, owner_name, islocal, declarations)
+    local bound = {}
+    local fixed_index = 0
+    for _, parameter in ipairs(node.params or {}) do
+        if parameter.name ~= false then
+            fixed_index = fixed_index + 1
+            local declaration = declarations and declarations[fixed_index]
+                or callable_parameter_descriptor(
+                    owner_kind, owner_name, node.name, fixed_index,
+                    parameter.name, islocal)
+            parameter._decl = declaration
+            bound[fixed_index] = declaration
+        end
+    end
+    node._parameter_decls = bound
+    if callable then callable._parameter_decls = bound end
+    return bound
+end
+
+local function record_constructor_parameter(declaration, index, name)
+    if declaration._tag ~= "Type.StaticMethod" or declaration.name ~= "new"
+       then return nil end
+    local owner = types.registry[declaration.fqtn]
+    if not owner or owner._tag ~= "Type.Record" then return nil end
+    local field = owner.fields[index]
+    if field and field.name == name then return field end
+    for _, candidate in ipairs(owner.fields or {}) do
+        if candidate.name == name then return candidate end
+    end
+end
+
+-- Recover the parameter declaration represented by one named label. Raw
+-- source callables retain the exact descriptor table; compiled interfaces can
+-- reconstruct an equivalent Checker.Parameter from their ABI-stable owner,
+-- callable name, fixed position, and published parameter spelling.
+function named_parameter_declaration(declaration, index, name)
+    if type(declaration) ~= "table" then return nil end
+    local retained = declaration._parameter_decls
+    if retained and retained[index] then return retained[index] end
+
+    local tag = declaration._tag
+    if tag == "Ast.TopLevelFunc" then
+        local parameter = declaration.params and declaration.params[index]
+        return parameter and (parameter._decl or parameter) or nil
+    elseif tag == "Type.ModuleMember" then
+        return callable_parameter_descriptor(
+            "module", declaration.modname, declaration.name, index, name,
+            declaration.islocal)
+    elseif tag == "Type.Method" or tag == "Type.StaticMethod" then
+        local field = record_constructor_parameter(declaration, index, name)
+        if field then return field end
+        return callable_parameter_descriptor(
+            "member", declaration.fqtn, declaration.name, index, name,
+            declaration.islocal)
+    end
 end
 
 function flexible_return_type(

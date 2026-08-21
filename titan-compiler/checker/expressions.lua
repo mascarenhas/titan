@@ -774,9 +774,12 @@ checkexp = util.make_visitor({
                     end
                     local dense, order = check_named_args(
                         direct_cfunc, paramnames, node.args.fields, node.loc,
-                        "function '" .. fname .. "'", st, errors)
+                        "function '" .. fname .. "'", st, errors,
+                        named_call_declaration(node))
                     if dense then
-                        node.args = ast.ArgsFunc(node.args.loc, dense)
+                        local previous_args = node.args
+                        node._surface_named_args = previous_args.fields
+                        node.args = ast.ArgsFunc(previous_args.loc, dense)
                         node._named_arg_order = order
                         node._named_call_kind = "foreign"
                     end
@@ -915,10 +918,13 @@ checkexp = util.make_visitor({
                 elseif not node._generic_named_pending then
                     dense, order = check_named_args(ftype, paramnames,
                         node.args.fields, node.loc,
-                        "function '" .. fname .. "'", st, errors)
+                        "function '" .. fname .. "'", st, errors,
+                        named_call_declaration(node))
                 end
                 if dense then
-                    node.args = ast.ArgsFunc(node.args.loc, dense)
+                    local previous_args = node.args
+                    node._surface_named_args = previous_args.fields
+                    node.args = ast.ArgsFunc(previous_args.loc, dense)
                     node._named_arg_order = order
                     node._named_call_kind = lowering
                 end
@@ -989,6 +995,7 @@ checkexp = util.make_visitor({
                     return
                 end
                 local ftype = class.methods[method_name_text]
+                node.args._decl = ftype
                 if not is_nominal_member_visible_from(st, ftype) then
                     node._type = invalid(errors, node.loc,
                         "method '%s:%s' is local to module '%s'",
@@ -1033,10 +1040,16 @@ checkexp = util.make_visitor({
                     elseif not node._generic_named_pending then
                         dense, order = check_named_args(
                             ftype, ftype.paramnames, node.args.fields,
-                            node.loc, desc, st, errors)
+                            node.loc, desc, st, errors,
+                            named_call_declaration(node))
                     end
                     if dense then
-                        node.args = ast.ArgsMethod(node.args.loc, method_name_text, dense)
+                        local previous_args = node.args
+                        node._surface_named_args = previous_args.fields
+                        node.args = ast.ArgsMethod(
+                            previous_args.loc, method_name_text, dense)
+                        node.args._name_loc = previous_args._name_loc
+                        node.args._decl = ftype
                         node._named_arg_order = order
                         node._named_call_kind = "titan"
                     end
@@ -1317,48 +1330,51 @@ checkexp = util.make_visitor({
                 node._type = invalid(errors, node.loc,
                     "method '%s:%s' is local to module '%s'",
                     class.name, node.name, nominal_module(class.name))
-            elseif mtype.scope ~= false then
-                local expected = context
-                if expected and expected._tag == "Type.Option"
-                   and expected.base._tag == "Type.Function" then
-                    expected = expected.base
-                end
-                if expected and expected._tag ~= "Type.Function" then
-                    expected = nil
-                end
-                local subject = "generic bound method '" .. class.name
-                    .. ":" .. node.name .. "'"
-                node._generic_declaration = mtype
-                local closed = generic_infer_first_class_application(
-                    node, subject, { generic_inference_scope_entry(
-                        mtype.scope, mtype.typeparams) },
-                    types.method_function_type(mtype), expected,
-                    st, errors, node.loc,
-                    function(final_type, arguments, inference, use)
-                        local closed_method =
-                            generic_close_inference_declaration(
-                                inference, use, mtype, true)
-                        node._generic_type_arguments = arguments
-                        node._method = closed_method
-                        node._type = final_type
-                        if class._tag == "Type.Interface" then
-                            node._interface = class
-                            node._interface_method = closed_method
-                            node._interface_method_index =
-                                assert(interface_method_index(class, node.name))
-                            node._interface_bound = true
-                        end
-                    end)
-                node._type = closed
             else
-                node._method = mtype
-                node._type = types.method_function_type(mtype)
-                if class._tag == "Type.Interface" then
-                    node._interface = class
-                    node._interface_method = mtype
-                    node._interface_method_index =
-                        assert(interface_method_index(class, node.name))
-                    node._interface_bound = true
+                node._decl = mtype
+                if mtype.scope ~= false then
+                    local expected = context
+                    if expected and expected._tag == "Type.Option"
+                       and expected.base._tag == "Type.Function" then
+                        expected = expected.base
+                    end
+                    if expected and expected._tag ~= "Type.Function" then
+                        expected = nil
+                    end
+                    local subject = "generic bound method '" .. class.name
+                        .. ":" .. node.name .. "'"
+                    node._generic_declaration = mtype
+                    local closed = generic_infer_first_class_application(
+                        node, subject, { generic_inference_scope_entry(
+                            mtype.scope, mtype.typeparams) },
+                        types.method_function_type(mtype), expected,
+                        st, errors, node.loc,
+                        function(final_type, arguments, inference, use)
+                            local closed_method =
+                                generic_close_inference_declaration(
+                                    inference, use, mtype, true)
+                            node._generic_type_arguments = arguments
+                            node._method = closed_method
+                            node._type = final_type
+                            if class._tag == "Type.Interface" then
+                                node._interface = class
+                                node._interface_method = closed_method
+                                node._interface_method_index =
+                                    assert(interface_method_index(class, node.name))
+                                node._interface_bound = true
+                            end
+                        end)
+                    node._type = closed
+                else
+                    node._method = mtype
+                    node._type = types.method_function_type(mtype)
+                    if class._tag == "Type.Interface" then
+                        node._interface = class
+                        node._interface_method = mtype
+                        node._interface_method_index =
+                            assert(interface_method_index(class, node.name))
+                        node._interface_bound = true
+                    end
                 end
             end
         elseif otype._tag ~= "Type.Nominal" then

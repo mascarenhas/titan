@@ -85,6 +85,29 @@ local function constraints(context, owner)
     return found
 end
 
+local function contextual_resolutions(context)
+    local found = {}
+    for _, resolution in pairs(context.contextual_resolutions or {}) do
+        found[#found + 1] = {
+            owner = resolution.owner,
+            exposer = resolution.exposer,
+            kind = resolution.kind,
+            provider_file = resolution.provider_file,
+            ordinary_lookup = resolution.ordinary_lookup,
+        }
+    end
+    table.sort(found, function(left, right)
+        return table.concat({
+            left.owner or "", left.exposer or "", left.kind or "",
+            left.provider_file or "",
+        }, "\0") < table.concat({
+            right.owner or "", right.exposer or "", right.kind or "",
+            right.provider_file or "",
+        }, "\0")
+    end)
+    return found
+end
+
 describe("static compiled-module checker provenance", function()
     local root
     local source
@@ -184,6 +207,13 @@ describe("static compiled-module checker provenance", function()
                 exposer = "pkg.facade",
             },
         }, constraints(context, "pkg.owner"))
+        assert.same({{
+            owner = "pkg.owner",
+            exposer = "pkg.facade",
+            kind = "static",
+            provider_file = provider.archive,
+            ordinary_lookup = false,
+        }}, contextual_resolutions(context))
 
         -- Static provenance is carried separately from the canonical logical
         -- DSO path. It must not leak into Type.Module.file or serialization.
@@ -200,6 +230,42 @@ describe("static compiled-module checker provenance", function()
         assert.equal("direct", context.native_bindings["pkg.owner"])
         assert.equal("direct", context.native_bindings["pkg.unused"])
         assert.same({ provider }, context.selected_static_providers)
+        assert.same({{
+            owner = "pkg.owner",
+            exposer = "pkg.facade",
+            kind = "static",
+            provider_file = provider.archive,
+            ordinary_lookup = false,
+        }}, contextual_resolutions(context))
+    end)
+
+    it("propagates recursive referenced-module loader exceptions", function()
+        local facade = facade_interface(
+            "failure.facade", "Box", "failure.owner.Box")
+        local cancellation = {}
+        local calls = {}
+        local loader = function(modname, request)
+            calls[#calls + 1] = {
+                modname = modname,
+                kind = request and request.kind or false,
+            }
+            if modname == "failure.facade" then
+                return true, facade, {}
+            end
+            assert.equal("failure.owner", modname)
+            assert.equal("nominal-owner", request.kind)
+            error(cancellation, 0)
+        end
+
+        local result = table.pack(pcall(
+            checker.checkimport, "failure.facade", loader))
+
+        assert.is_false(result[1])
+        assert.is_true(result[2] == cancellation)
+        assert.same({
+            { modname = "failure.facade", kind = false },
+            { modname = "failure.owner", kind = "nominal-owner" },
+        }, calls)
     end)
 
     it("typechecks a rich exported surface from archive metadata",
@@ -534,6 +600,13 @@ end
                 exposer = "dyn.facade",
             },
         }, constraints(context, "dyn.owner"))
+        assert.same({{
+            owner = "dyn.owner",
+            exposer = "dyn.facade",
+            kind = "static",
+            provider_file = owner_provider.archive,
+            ordinary_lookup = true,
+        }}, contextual_resolutions(context))
 
         local finalized, final_errors =
             driver.finalize_resolver_context(context)
@@ -545,6 +618,13 @@ end
         assert.is_nil(context.native_static_names["dyn.owner"])
         assert.equal(owner_provider,
             context.provider_cache[owner_provider.archive])
+        assert.same({{
+            owner = "dyn.owner",
+            exposer = "dyn.facade",
+            kind = "static",
+            provider_file = owner_provider.archive,
+            ordinary_lookup = true,
+        }}, contextual_resolutions(context))
     end)
 
     it("rejects an independently resolved DSO owner required dynamically by an archive",

@@ -2,6 +2,7 @@ local lfs = require "lfs"
 local assert = require "luassert"
 
 local driver = require "titan-compiler.driver"
+local compiler_io = require "titan-compiler.io"
 local coder = require "titan-compiler.coder"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local types = require "titan-compiler.types"
@@ -15,7 +16,7 @@ local function write_file(path, contents)
 end
 
 local function remove_tree(path)
-    local mode = lfs.attributes(path, "mode")
+    local mode = lfs.symlinkattributes(path, "mode")
     if mode == "directory" then
         for name in lfs.dir(path) do
             if name ~= "." and name ~= ".." then
@@ -29,6 +30,343 @@ local function remove_tree(path)
 end
 
 describe("compiler installation discovery", function()
+    it("exports the language-server compiler API independently of the ABI",
+       function()
+        assert.equal("0.26", driver.TITAN_VER)
+        assert.equal(3, driver.LANGUAGE_SERVER_API_VERSION)
+        assert.is_function(driver.restat_c_header_dependencies)
+    end)
+
+    it("validates and stores one resolver-owned I/O strategy", function()
+        local strategy = compiler_io.new_sync()
+        local context = driver.new_resolver_context({ io = strategy })
+        assert.equal(strategy, context.io)
+        assert.same({}, context.checked_source_modules)
+
+        local ordinary = driver.new_resolver_context()
+        assert.is_table(ordinary.io)
+        assert.not_equal(strategy, ordinary.io)
+        assert.equal(ordinary.io, compiler_io.validate(ordinary.io))
+
+        assert.has_error(function()
+            driver.new_resolver_context({ io = {} })
+        end, "compiler I/O strategy method 'cwd' must be callable")
+    end)
+
+    it("releases sibling tmpname reservations with cancellation ownership",
+    function()
+        local calls = {}
+        local strategy = {
+            tmpname = function()
+                calls[#calls + 1] = { operation = "tmpname" }
+                return "/tmp/titan-owned-reservation"
+            end,
+            unlink = function(_, path, remove_if_cancelled)
+                calls[#calls + 1] = {
+                    operation = "unlink",
+                    path = path,
+                    remove_if_cancelled = remove_if_cancelled,
+                }
+                return true
+            end,
+        }
+
+        assert.equal("/project/module.c.tmp.titan-owned-reservation",
+            driver.sibling_temporary_path("/project/module.c", strategy))
+        assert.same({
+            { operation = "tmpname" },
+            {
+                operation = "unlink",
+                path = "/tmp/titan-owned-reservation",
+                remove_if_cancelled = true,
+            },
+        }, calls)
+    end)
+
+    it("propagates cancellation while releasing a sibling reservation",
+    function()
+        local cancellation = { kind = "simulated cancellation" }
+        local strategy = {
+            tmpname = function()
+                return "/tmp/titan-cancelled-reservation"
+            end,
+            unlink = function(_, path, remove_if_cancelled)
+                assert.equal("/tmp/titan-cancelled-reservation", path)
+                assert.is_true(remove_if_cancelled)
+                error(cancellation)
+            end,
+        }
+
+        local completed, reason = pcall(
+            driver.sibling_temporary_path, "/project/module.c", strategy)
+        assert.is_false(completed)
+        assert.equal(cancellation, reason)
+    end)
+
+    it("initializes uname lazily through the resolver strategy", function()
+        local strategy = compiler_io.new_sync()
+        local commands = {}
+        function strategy:run(argv, options)
+            commands[#commands + 1] = {
+                argv = argv,
+                options = options,
+            }
+            return {
+                started = true,
+                ok = true,
+                output = "TestOS\n",
+            }
+        end
+        local context = driver.new_resolver_context({ io = strategy })
+        assert.same({}, commands)
+
+        local previous_uname = driver.UNAME
+        local previous_is_darwin = driver.IS_DARWIN
+        local ran, failure = pcall(function()
+            local initialized, uname, is_darwin =
+                driver.initialize_platform(context)
+            assert.is_true(initialized)
+            assert.equal("TestOS", uname)
+            assert.is_false(is_darwin)
+            assert.equal("TestOS", driver.UNAME)
+            assert.is_false(driver.IS_DARWIN)
+            assert.same({ "uname" }, commands[1].argv)
+            assert.is_true(commands[1].options.stderr_to_stdout)
+
+            assert.is_true(driver.initialize_platform(context))
+            assert.equal(1, #commands)
+        end)
+        driver.UNAME = previous_uname
+        driver.IS_DARWIN = previous_is_darwin
+        assert.truthy(ran, failure)
+    end)
+
+    it("initializes native publication flags through a resolver strategy",
+    function()
+        local strategy = compiler_io.new_sync()
+        local commands = {}
+        function strategy:run(argv, options)
+            commands[#commands + 1] = {
+                argv = argv,
+                options = options,
+            }
+            return {
+                started = true,
+                ok = true,
+                output = "Darwin\n",
+            }
+        end
+        local context = driver.new_resolver_context({ io = strategy })
+        local previous_uname = driver.UNAME
+        local previous_is_darwin = driver.IS_DARWIN
+        driver.UNAME = nil
+        driver.IS_DARWIN = nil
+
+        local ran, failure = pcall(function()
+            assert.same({ "-shared", "-undefined", "dynamic_lookup" },
+                driver.shared_library_flags(context))
+            assert.same({ "uname" }, commands[1].argv)
+            assert.is_true(commands[1].options.stderr_to_stdout)
+            assert.equal("Darwin", driver.UNAME)
+            assert.is_true(driver.IS_DARWIN)
+        end)
+
+        driver.UNAME = previous_uname
+        driver.IS_DARWIN = previous_is_darwin
+        assert.truthy(ran, failure)
+    end)
+
+    it("surfaces resolver strategy failures at public driver boundaries",
+    function()
+        local failed, reason = driver.source_checkout_from_driver_source(
+            "@titan-compiler/driver.lua", nil, {
+                cwd = function() return nil, "injected cwd failure" end,
+            })
+        assert.is_false(failed)
+        assert.equal("injected cwd failure", reason)
+
+        assert.has_error(function() driver.initialize_layout({}) end,
+            "compiler layout initialization requires a resolver context")
+        assert.has_error(function() driver.initialize_platform({}) end,
+            "platform initialization requires a resolver context")
+        assert.has_error(function() driver.configure_foreign_c({}) end,
+            "foreign C configuration requires a resolver context")
+        assert.has_error(function() driver.new_resolver_context("invalid") end,
+            "resolver context options must be a table")
+        assert.has_error(function()
+            driver.new_resolver_context({
+                extra_ffi_include_dirs = "invalid",
+            })
+        end, "invalid extra_ffi_include_dirs: compiler include dirs must be " ..
+            "an ordered array")
+
+        local previous_support = driver.TEST_SUPPORT_SOURCE_PATH
+        driver.TEST_SUPPORT_SOURCE_PATH = "/virtual/titan/test.titan"
+        local descriptor
+        local completed, failure = pcall(function()
+            descriptor = assert(driver.test_support_source_descriptor({
+                io = {
+                    stat = function(_, filename)
+                        assert.equal("/virtual/titan/test.titan", filename)
+                        return { kind = "file" }
+                    end,
+                },
+            }))
+        end)
+        driver.TEST_SUPPORT_SOURCE_PATH = previous_support
+        assert.truthy(completed, failure)
+        assert.equal("/virtual/titan/test.titan", descriptor.main)
+
+        local failed_platform = driver.new_resolver_context()
+        function failed_platform.io:run(argv, options)
+            assert.same({ "uname" }, argv)
+            assert.is_true(options.stderr_to_stdout)
+            return {
+                started = false,
+                ok = false,
+                diagnostic = "injected uname failure",
+            }
+        end
+        local ok, err = driver.initialize_platform(failed_platform)
+        assert.is_nil(ok)
+        assert.equal("cannot determine the native platform with uname: " ..
+            "injected uname failure", err)
+
+        local empty_platform = driver.new_resolver_context()
+        function empty_platform.io:run()
+            return { started = true, ok = true, output = "  \n" }
+        end
+        ok, err = driver.initialize_platform(empty_platform)
+        assert.is_nil(ok)
+        assert.equal("cannot determine the native platform with uname: " ..
+            "command produced no output", err)
+
+        local original_configure = driver.configure_foreign_c
+        local probe_context = driver.new_resolver_context()
+        probe_context.foreign_c_configuration_id =
+            driver.FOREIGN_C_CONFIGURATION_ID - 1
+        driver.configure_foreign_c = function(context)
+            assert.equal(probe_context, context)
+            return nil, "injected configuration failure"
+        end
+        local called
+        called, ok, err = pcall(driver.get_probe_service, probe_context)
+        driver.configure_foreign_c = original_configure
+        assert.truthy(called, ok)
+        assert.is_nil(ok)
+        assert.equal("injected configuration failure", err)
+        assert.equal(err, probe_context.probe_service_error)
+
+        assert.is_true(driver.close_resolver_context(failed_platform))
+        assert.is_true(driver.close_resolver_context(empty_platform))
+        assert.is_true(driver.close_resolver_context(probe_context))
+    end)
+
+    it("distinguishes realpath, stat, and provider inspection failures",
+    function()
+        local context = driver.new_resolver_context()
+        local strategy = context.io
+        function strategy:realpath(path)
+            assert.equal("/virtual/link/../root", path)
+            return nil, "injected realpath failure"
+        end
+        function strategy:stat(path)
+            assert.equal("/virtual/link/../root", path)
+            return nil, "injected stat failure"
+        end
+
+        local found, err = driver.find_dynamic_interface(
+            "/virtual/link/../root", "probe", context)
+        assert.is_nil(found)
+        assert.equal("injected stat failure", err)
+
+        function strategy:stat()
+            return { kind = "directory" }
+        end
+        found, err = driver.find_dynamic_interface(
+            "/virtual/link/../root", "probe", context)
+        assert.is_nil(found)
+        assert.equal("injected realpath failure", err)
+
+        function strategy:stat() return nil end
+        function strategy:lstat(path)
+            assert.equal("/virtual/root/probe.so", path)
+            return nil
+        end
+        found, err = driver.find_dynamic_interface(
+            "/virtual/link/../root", "probe", context)
+        assert.is_nil(found)
+        assert.is_nil(err)
+
+        function strategy:lstat()
+            return nil, "injected lstat failure"
+        end
+        found, err = driver.find_dynamic_interface(
+            "/virtual/root", "probe", context)
+        assert.is_nil(found)
+        assert.matches("cannot inspect compiled provider candidate", err,
+            1, true)
+        assert.matches("injected lstat failure", err, 1, true)
+
+        found, err = driver.find_static_interface(
+            "/virtual/root", "probe", context)
+        assert.is_nil(found)
+        assert.matches("cannot inspect static provider candidate", err,
+            1, true)
+        assert.matches("injected lstat failure", err, 1, true)
+
+        function strategy:lstat() return { kind = "file" } end
+        function strategy:stat()
+            return nil, "injected followed-stat failure"
+        end
+        found, err = driver.find_static_interface(
+            "/virtual/root", "probe", context)
+        assert.is_nil(found)
+        assert.matches("injected followed-stat failure", err, 1, true)
+
+        assert.is_nil(driver.find_compiled_interface(
+            "/definitely/missing/titan-provider-root", "probe"))
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
+    it("loads the driver without touching the filesystem or spawning uname",
+       function()
+        local module_name = "titan-compiler.driver"
+        local loaded_driver = package.loaded[module_name]
+        local originals = {
+            currentdir = lfs.currentdir,
+            attributes = lfs.attributes,
+            symlinkattributes = lfs.symlinkattributes,
+            chdir = lfs.chdir,
+            popen = io.popen,
+        }
+        local function forbidden(name)
+            return function()
+                error("module-load " .. name .. " escape")
+            end
+        end
+        package.loaded[module_name] = nil
+        lfs.currentdir = forbidden("cwd")
+        lfs.attributes = forbidden("stat")
+        lfs.symlinkattributes = forbidden("lstat")
+        lfs.chdir = forbidden("realpath")
+        io.popen = forbidden("subprocess")
+
+        local loaded, value = pcall(require, module_name)
+
+        lfs.currentdir = originals.currentdir
+        lfs.attributes = originals.attributes
+        lfs.symlinkattributes = originals.symlinkattributes
+        lfs.chdir = originals.chdir
+        io.popen = originals.popen
+        package.loaded[module_name] = loaded_driver
+
+        assert.truthy(loaded, value)
+        assert.is_table(value)
+        assert.is_nil(value.UNAME)
+        assert.is_nil(value.IS_DARWIN)
+    end)
+
     it("uses the first literal Lua 5.5 C-module prefix", function()
         local cpath = table.concat({
             "/first prefix/lib/titan/0.26/?.so",
@@ -475,6 +813,7 @@ describe("loader resolver ownership", function()
         write_file(first, "first")
         write_file(second, "second")
         local context = {
+            io = compiler_io.new_sync(),
             source_foreign_header_temporaries = { first, second },
             probe_service = {
                 close = function()
@@ -493,9 +832,58 @@ describe("loader resolver ownership", function()
         local third = os.tmpname()
         write_file(third, "third")
         assert.is_true(driver.close_resolver_context({
+            io = compiler_io.new_sync(),
             source_foreign_header_temporaries = { third },
         }))
         assert.is_nil(lfs.symlinkattributes(third))
+    end)
+
+    it("retains source-header temporaries after unlink and lstat failures",
+    function()
+        assert.has_error(function()
+            driver.close_resolver_context({})
+        end, "closing a resolver requires its compiler I/O strategy")
+
+        local unlink_strategy = compiler_io.new_sync()
+        function unlink_strategy:lstat(path)
+            assert.equal("/virtual/remove-failure.h", path)
+            return { kind = "file" }
+        end
+        function unlink_strategy:unlink(path)
+            assert.equal("/virtual/remove-failure.h", path)
+            return nil, "injected unlink failure"
+        end
+        local unlink_context = {
+            io = unlink_strategy,
+            source_foreign_header_temporaries = {
+                "/virtual/remove-failure.h",
+            },
+        }
+
+        local ok, err = driver.close_resolver_context(unlink_context)
+        assert.is_nil(ok)
+        assert.equal("injected unlink failure", err)
+        assert.same({
+            "/virtual/remove-failure.h",
+        }, unlink_context.source_foreign_header_temporaries)
+
+        local lstat_strategy = compiler_io.new_sync()
+        function lstat_strategy:lstat(path)
+            assert.equal("/virtual/lstat-failure.h", path)
+            return nil, "injected lstat failure"
+        end
+        local lstat_context = {
+            io = lstat_strategy,
+            source_foreign_header_temporaries = {
+                "/virtual/lstat-failure.h",
+            },
+        }
+        ok, err = driver.close_resolver_context(lstat_context)
+        assert.is_nil(ok)
+        assert.equal("injected lstat failure", err)
+        assert.same({
+            "/virtual/lstat-failure.h",
+        }, lstat_context.source_foreign_header_temporaries)
     end)
 
     it("reports an owned resolver close failure after a successful body",
@@ -513,6 +901,33 @@ describe("loader resolver ownership", function()
         assert.matches("failed to close loader resolver context", err)
         assert.matches("injected resolver close failure", err)
         assert.is_true(driver.close_loader(loader))
+    end)
+
+    it("retries an owned resolver close after thrown cancellation", function()
+        local original_close = driver.close_resolver_context
+        local cancellation = { kind = "simulated cancellation" }
+        local close_calls = 0
+        driver.close_resolver_context = function(context)
+            assert.is_table(context)
+            close_calls = close_calls + 1
+            if close_calls == 1 then error(cancellation) end
+            return true
+        end
+
+        local ran, failure = pcall(function()
+            local loader = driver.defaultloader({})
+            local first_closed, reason = pcall(driver.close_loader, loader)
+            assert.is_false(first_closed)
+            assert.equal(cancellation, reason)
+            assert.equal(1, close_calls)
+
+            assert.is_true(driver.close_loader(loader))
+            assert.equal(2, close_calls)
+            assert.is_true(driver.close_loader(loader))
+            assert.equal(2, close_calls)
+        end)
+        driver.close_resolver_context = original_close
+        assert.truthy(ran, failure)
     end)
 end)
 
@@ -576,6 +991,45 @@ describe("generated C formatting", function()
         assert.matches(path, commands[1], 1, true)
         assert.matches("'%-%-Werror'", commands[1])
         assert(os.remove(path))
+    end)
+
+    it("formats and normalizes through the resolver strategy", function()
+        local calls = {}
+        local normalized
+        local strategy = compiler_io.new_sync()
+        function strategy:run(argv, options)
+            calls[#calls + 1] = { argv = argv, options = options }
+            return {
+                started = true,
+                ok = true,
+                why = "exit",
+                status = 0,
+            }
+        end
+        function strategy:read_file(path)
+            assert.equal("/virtual/generated.c", path)
+            return '#line 1 "module.titan"\n\nint value;\n'
+        end
+        function strategy:write_file(path, contents)
+            assert.equal("/virtual/generated.c", path)
+            normalized = contents
+            return true
+        end
+        driver.CLANG_FORMAT = "clang-format --Werror"
+
+        assert.is_true(driver.format_generated_file(
+            "/virtual/generated.c", false, true, strategy))
+        assert.equal(1, #calls)
+        assert.same({
+            "clang-format",
+            "--Werror",
+            "-i",
+            "--style={BasedOnStyle: LLVM, IndentWidth: 4, SortIncludes: false}",
+            "--",
+            "/virtual/generated.c",
+        }, calls[1].argv)
+        assert.is_true(calls[1].options.stderr_to_stdout)
+        assert.equal('#line 1 "module.titan"\nint value;\n', normalized)
     end)
 
     it("normalizes line directives without invoking the formatter", function()
@@ -1061,6 +1515,444 @@ describe("compiler module loader", function()
         remove_tree(root)
     end)
 
+    it("rejects malformed resolver caches at their public loader boundary",
+    function()
+        local context = driver.new_resolver_context()
+        local function construction_error(options, expected)
+            options.context = context
+            local called, err = pcall(driver.defaultloader, {}, options)
+            assert.is_false(called)
+            assert.matches(expected, tostring(err), 1, true)
+        end
+        construction_error({ known_source_modules = "invalid" },
+            "known_source_modules must be a module-keyed table")
+        construction_error({ cached_source_entries = "invalid" },
+            "cached_source_entries must be a module-keyed table")
+        construction_error({ cached_interfaces = "invalid" },
+            "cached_interfaces must be a module-keyed table")
+        construction_error({ after_source_check = function() end },
+            "after_source_check is no longer supported")
+        construction_error({
+            known_source_modules = { ["invalid module"] = true },
+        }, "known_source_modules must contain valid module names mapped to true")
+
+        local known_loader = driver.defaultloader({}, {
+            context = context,
+            known_source_modules = { cache_known_source = true },
+        })
+        assert.is_true(context.source_modules.cache_known_source)
+        assert.is_true(driver.close_loader(known_loader))
+
+        local function interface_error(index, candidate, source_required,
+                expected)
+            local name = "cache_interface_" .. index
+            local options = {
+                context = context,
+                cached_interfaces = { [name] = candidate },
+            }
+            if source_required then options.source_roots = { [name] = true } end
+            local loader = driver.defaultloader({}, options)
+            local ok, err = loader(name)
+            assert.is_false(ok)
+            assert.matches(expected, tostring(err), 1, true)
+            assert.is_true(driver.close_loader(loader))
+        end
+        local function manifest(name)
+            return types.serialize(types.Module(name, {}))
+        end
+
+        interface_error(1, "invalid", false, "must be a table")
+        interface_error(2, {
+            filename = root .. "/cache-interface-2.titan",
+        }, false, "has no serialized manifest")
+        interface_error(3, {
+            serialized = manifest("cache_interface_3"),
+            filename = "",
+        }, false, "has no source filename")
+        interface_error(4, {
+            serialized = manifest("cache_interface_4"),
+            filename = root .. "/cache-interface-4.titan",
+            source_files = "invalid",
+        }, false, "source_files must be a dense ordered string array")
+        interface_error(5, {
+            serialized = manifest("cache_interface_5"),
+            filename = root .. "/cache-interface-5.titan",
+            source_files = { "" },
+        }, false, "source_files entry 1 must be a nonempty string")
+        interface_error(6, {
+            serialized = manifest("cache_interface_6"),
+            filename = root .. "/cache-interface-6.titan",
+            source_files = {
+                root .. "/cache-interface-6.titan",
+                extra = true,
+            },
+        }, false, "source_files must be a dense ordered string array")
+        interface_error(7, {
+            serialized = manifest("cache_interface_7"),
+            filename = root .. "/cache-interface-7.titan",
+            dependencies = { "invalid dependency" },
+        }, false, "has invalid dependency name")
+        interface_error(8, {
+            serialized = "not valid Titan type metadata",
+            filename = root .. "/cache-interface-8.titan",
+        }, false, "invalid cached interface")
+
+        interface_error(9, "invalid", true, "must be a table")
+        interface_error(10, {
+            filename = root .. "/cache-interface-10.titan",
+        }, true, "has no serialized manifest")
+        interface_error(11, {
+            serialized = manifest("cache_interface_11"),
+            filename = "",
+        }, true, "has no source filename")
+        interface_error(12, {
+            serialized = manifest("cache_interface_12"),
+            filename = root .. "/cache-interface-12.titan",
+            source_files = {
+                root .. "/not-the-main-source.titan",
+                root .. "/cache-interface-12.titan",
+            },
+        }, true, "must list its main source filename first")
+
+        local function cached_source(name, ast, deps)
+            local filename = root .. "/" .. name .. ".titan"
+            return {
+                kind = "source",
+                ast = ast or {},
+                type = types.Module(name, {}),
+                filename = filename,
+                source_files = { filename },
+                deps = deps or {},
+            }
+        end
+        local function source_entry_error(name, candidate, expected)
+            local loader = driver.defaultloader({}, {
+                context = context,
+                cached_source_entries = { [name] = candidate },
+            })
+            local ok, err = loader(name)
+            assert.is_false(ok)
+            assert.matches(expected, tostring(err), 1, true)
+            assert.is_true(driver.close_loader(loader))
+        end
+        source_entry_error("cache_source_invalid", {},
+            "is not a complete checked source module")
+        local invalid_deps = cached_source("cache_source_bad_deps", {}, {
+            ["invalid dependency"] = true,
+        })
+        source_entry_error("cache_source_bad_deps", invalid_deps,
+            "has an invalid dependency map")
+
+        local child_name = "cache_nested_child"
+        local parent_name = "cache_nested_parent"
+        local import_child = {
+            _tag = "Ast.TopLevelImport",
+            _source_import = true,
+            modname = child_name,
+        }
+        local child = cached_source(child_name)
+        local parent = cached_source(parent_name, { import_child }, {
+            [child_name] = true,
+        })
+        local nested_loader = driver.defaultloader({}, {
+            context = context,
+            cached_source_entries = {
+                [parent_name] = parent,
+                [child_name] = child,
+            },
+        })
+        local nested_ok, nested_type, nested_errors = nested_loader(parent_name)
+        assert.truthy(nested_ok)
+        assert.equal(parent.type, nested_type)
+        assert.same({}, nested_errors)
+        assert.equal(child, driver.imported[child_name])
+        assert.equal(parent, driver.imported[parent_name])
+        assert.is_true(driver.close_loader(nested_loader))
+
+        local cycle_a_name = "cache_cycle_a"
+        local cycle_b_name = "cache_cycle_b"
+        local cycle_a = cached_source(cycle_a_name, {{
+            _tag = "Ast.TopLevelImport",
+            _source_import = true,
+            modname = cycle_b_name,
+        }}, { [cycle_b_name] = true })
+        local cycle_b = cached_source(cycle_b_name, {{
+            _tag = "Ast.TopLevelImport",
+            _source_import = true,
+            modname = cycle_a_name,
+        }}, { [cycle_a_name] = true })
+        local cycle_loader = driver.defaultloader({}, {
+            context = context,
+            cached_source_entries = {
+                [cycle_a_name] = cycle_a,
+                [cycle_b_name] = cycle_b,
+            },
+        })
+        local cycle_ok, cycle_error = cycle_loader(cycle_a_name)
+        assert.is_false(cycle_ok)
+        assert.matches("cached source entry cycle at module 'cache_cycle_a'",
+            cycle_error, 1, true)
+        assert.is_true(driver.close_loader(cycle_loader))
+
+        local missing_parent_name = "cache_missing_parent"
+        local missing_child_name = "cache_missing_child"
+        local missing_parent = cached_source(missing_parent_name, {{
+            _tag = "Ast.TopLevelImport",
+            _source_import = true,
+            modname = missing_child_name,
+        }}, { [missing_child_name] = true })
+        local missing_loader = driver.defaultloader({}, {
+            context = context,
+            cached_source_entries = {
+                [missing_parent_name] = missing_parent,
+            },
+        })
+        local missing_ok, missing_error = missing_loader(missing_parent_name)
+        assert.is_false(missing_ok)
+        assert.matches("requires clean source dependency 'cache_missing_child'",
+            missing_error, 1, true)
+        assert.is_true(driver.close_loader(missing_loader))
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
+    it("validates cached C-header inputs and resolver option ownership",
+    function()
+        local result, err = driver.restat_c_header_dependencies("invalid")
+        assert.is_nil(result)
+        assert.equal("C header dependencies must be an ordered array", err)
+
+        assert.has_error(function()
+            driver.restat_c_header_dependencies({}, "invalid")
+        end, "resolver options must be a table")
+        assert.has_error(function()
+            driver.restat_c_header_dependencies({}, { context = {} })
+        end, "options.context must be a resolver context")
+
+        local context = driver.new_resolver_context()
+        local valid = {
+            kind = "search",
+            path = "/virtual/header.h",
+            identity = "identity",
+        }
+        local cases = {
+            { value = { "invalid" }, expected = "entry 1 must be a table" },
+            {
+                value = {{
+                    kind = "invalid",
+                    path = valid.path,
+                    identity = valid.identity,
+                }},
+                expected = "kind must be 'file' or 'search'",
+            },
+            {
+                value = {{
+                    kind = valid.kind,
+                    path = "relative.h",
+                    identity = valid.identity,
+                }},
+                expected = "path must be an absolute NUL-free pathname",
+            },
+            {
+                value = {{
+                    kind = valid.kind,
+                    path = valid.path,
+                    identity = "",
+                }},
+                expected = "must have a nonempty identity",
+            },
+            {
+                value = { valid, valid },
+                expected = "repeats search input '/virtual/header.h'",
+            },
+            {
+                value = { valid, extra = true },
+                expected = "must be a dense ordered array",
+            },
+        }
+        for _, case in ipairs(cases) do
+            result, err = driver.restat_c_header_dependencies(
+                case.value, context)
+            assert.is_nil(result)
+            assert.matches(case.expected, err, 1, true)
+        end
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
+    it("reports every external topology outcome without retaining ASTs",
+    function()
+        assert.has_error(function()
+            driver.resolve_external_modules("invalid")
+        end, "external resolution requests must be a module-keyed table")
+        assert.has_error(function()
+            driver.resolve_external_modules({}, "invalid")
+        end, "known_source_modules must be a module-keyed table")
+        assert.has_error(function()
+            driver.resolve_external_modules({}, {
+                ["invalid module"] = true,
+            })
+        end, "known_source_modules must contain valid module names mapped to true")
+        assert.has_error(function()
+            driver.resolve_external_modules({ external_invalid = "yes" })
+        end, "external resolution requests must contain valid module names " ..
+            "mapped to booleans")
+
+        local missing = driver.resolve_external_modules({
+            external_missing = false,
+        })
+        assert.same({ kind = "missing" }, missing.external_missing)
+        local source_missing = driver.resolve_external_modules({
+            external_source_missing = true,
+        })
+        assert.equal("error", source_missing.external_source_missing.kind)
+        assert.matches("source module 'external_source_missing' not found",
+            source_missing.external_source_missing.message, 1, true)
+
+        assert(lfs.mkdir(source .. "/external_folder"))
+        write_file(source .. "/external_folder/external_folder.titan",
+            "local value: integer = 1\n")
+        write_file(source .. "/external_folder/child.titan",
+            "local child: integer = 2\n")
+        local blocked = driver.resolve_external_modules({
+            ["external_folder.child"] = true,
+        })
+        assert.equal("error", blocked["external_folder.child"].kind)
+        assert.matches("belongs to folder module 'external_folder'",
+            blocked["external_folder.child"].message, 1, true)
+
+        assert(lfs.mkdir(source .. "/external_bad_list"))
+        write_file(source .. "/external_bad_list/external_bad_list.titan",
+            "local value: integer = 1\n")
+        local list_context = driver.new_resolver_context()
+        function list_context.io:list(path)
+            assert.equal(source .. "/external_bad_list", path)
+            return "not an ordered list"
+        end
+        local listed = driver.resolve_external_modules({
+            external_bad_list = true,
+        }, {}, list_context)
+        assert.equal("error", listed.external_bad_list.kind)
+        assert.matches("invalid directory entries",
+            listed.external_bad_list.message, 1, true)
+        assert.is_true(driver.close_resolver_context(list_context))
+
+        local provider_context = driver.new_resolver_context()
+        function provider_context.io:lstat(path)
+            assert.equal(binary .. "/external_broken.so", path)
+            return nil, "injected provider inspection failure"
+        end
+        local broken = driver.resolve_external_modules({
+            external_broken = false,
+        }, {}, provider_context)
+        assert.equal("error", broken.external_broken.kind)
+        assert.matches("injected provider inspection failure",
+            broken.external_broken.message, 1, true)
+        assert.is_true(driver.close_resolver_context(provider_context))
+
+        local original_close = driver.close_resolver_context
+        driver.close_resolver_context = function()
+            return nil, "injected external close failure"
+        end
+        local called, close_failure = pcall(
+            driver.resolve_external_modules, {}, {}, {})
+        driver.close_resolver_context = original_close
+        assert.is_false(called)
+        assert.matches("failed to close external resolver context",
+            close_failure, 1, true)
+        assert.matches("injected external close failure",
+            close_failure, 1, true)
+        assert.same({}, driver.imported)
+    end)
+
+    it("retains only physical contextual-provider provenance at finalization",
+    function()
+        local facade_name = "contextual_facade"
+        local owner_name = "contextual_owner"
+        local facade_type = types.Module(facade_name, {})
+        local owner_type = types.Module(owner_name, {})
+        local archive = root .. "/contextual-provider.a"
+        local provider = {
+            archive = archive,
+            key_order = { facade_name, owner_name },
+            entries = {
+                [facade_name] = { type = facade_type },
+                [owner_name] = { type = owner_type },
+            },
+        }
+        driver.imported[facade_name] = {
+            kind = "static",
+            type = facade_type,
+            static_archive = archive,
+            static_provider = provider,
+        }
+        local context = driver.new_resolver_context()
+        local loader = driver.defaultloader({}, { context = context })
+        local ok, recovered, errors = loader(owner_name, {
+            kind = "nominal-owner",
+            exposer = facade_name,
+        })
+        assert.truthy(ok)
+        assert.equal(owner_type, recovered)
+        assert.same({}, errors)
+        assert.is_nil(driver.imported[owner_name])
+
+        local resolution_key, resolution = next(context.contextual_resolutions)
+        assert.is_string(resolution_key)
+        assert.equal(owner_name, resolution.owner)
+        assert.equal(facade_name, resolution.exposer)
+        assert.equal("static", resolution.kind)
+        assert.equal(archive, resolution.provider_file)
+        assert.equal(archive, resolution.exposer_file)
+        assert.is_false(resolution.ordinary_lookup)
+
+        assert.is_true(driver.close_loader(loader))
+        local finalized, finalize_errors =
+            driver.finalize_resolver_context(context)
+        assert.truthy(finalized,
+            finalize_errors and table.concat(finalize_errors, "\n"))
+        assert.equal(resolution,
+            context.contextual_resolutions[resolution_key])
+        assert.is_true(driver.close_resolver_context(context))
+
+        driver.imported = {}
+        types.registry = {}
+        local source_owner = types.Module("contextual_source_owner", {})
+        local source_facade = types.Module("contextual_source_facade", {})
+        local source_provider = {
+            archive = root .. "/contextual-source-provider.a",
+            key_order = { "contextual_source_facade" },
+            entries = {
+                contextual_source_facade = { type = source_facade },
+            },
+        }
+        driver.imported.contextual_source_facade = {
+            kind = "static",
+            type = source_facade,
+            static_archive = source_provider.archive,
+            static_provider = source_provider,
+        }
+        driver.imported.contextual_source_owner = {
+            kind = "source",
+            type = source_owner,
+            filename = root .. "/contextual-source-owner.titan",
+            source_files = { root .. "/contextual-source-owner.titan" },
+            deps = {},
+        }
+        local source_context = driver.new_resolver_context()
+        local source_loader = driver.defaultloader({}, {
+            context = source_context,
+        })
+        ok, recovered, errors = source_loader("contextual_source_owner", {
+            kind = "nominal-owner",
+            exposer = "contextual_source_facade",
+        })
+        assert.truthy(ok)
+        assert.equal(source_owner, recovered)
+        assert.same({}, errors)
+        assert.same({}, source_context.contextual_resolutions)
+        assert.is_true(driver.close_loader(source_loader))
+        assert.is_true(driver.close_resolver_context(source_context))
+    end)
+
     it("keeps unique source checking headers behind one public probe identity",
     function()
         write_file(source .. "/provider.h", "typedef int provider_int;\n")
@@ -1102,6 +1994,43 @@ describe("compiler module loader", function()
         types.registry = {}
         local second = load_once()
         assert.not_equal(first, second)
+    end)
+
+    it("cleans a source checking header when normalization is cancelled",
+    function()
+        write_file(source .. "/provider.h", "typedef int provider_int;\n")
+        write_file(source .. "/provider.titan", [[
+            local c = foreign import "provider.h"
+            foreign function identity(input: c.provider_int): c.provider_int
+                return input
+            end
+        ]])
+
+        local strategy = compiler_io.new_sync()
+        local ordinary_read_file = strategy.read_file
+        local checking_header
+        function strategy:read_file(path)
+            if path:find(".titan.h.check.tmp.", 1, true) then
+                checking_header = path
+                error("simulated checking-header cancellation")
+            end
+            return ordinary_read_file(self, path)
+        end
+        local context = driver.new_resolver_context({ io = strategy })
+        local loader = driver.defaultloader({}, {
+            context = context,
+            source_roots = { provider = true },
+        })
+
+        local loaded, failure = pcall(loader, "provider")
+        assert.is_false(loaded)
+        assert.matches("simulated checking%-header cancellation", failure)
+        assert.is_string(checking_header)
+        assert.equal("file", lfs.attributes(checking_header, "mode"))
+
+        assert.is_true(driver.close_loader(loader))
+        assert.is_true(driver.close_resolver_context(context))
+        assert.is_nil(lfs.symlinkattributes(checking_header))
     end)
 
     it("absolutizes source checking headers from a relative cross-directory root",
@@ -1255,6 +2184,61 @@ describe("compiler module loader", function()
         assert.equal("pkg.folder", imports[2].modname)
         assert.is_true(imports[2].source_required)
         assert.is_true(imports[2]._source_import)
+    end)
+
+    it("fingerprints external providers and complete folder topology without ASTs",
+    function()
+        assert(lfs.mkdir(source .. "/vendor"))
+        assert(lfs.mkdir(source .. "/vendor/pkg"))
+        local main = source .. "/vendor/pkg/pkg.titan"
+        local part = source .. "/vendor/pkg/part.titan"
+        write_file(main, "local main_value: integer = 1\n")
+        write_file(part, "local part_value: integer = 2\n")
+
+        local compiled = types.Module("vendor.pkg", {}, {})
+        local provider = binary .. "/vendor.so"
+        cache_dynamic_provider(provider, {
+            ["vendor.pkg"] = compiled,
+        })
+
+        local strategy = compiler_io.new_sync()
+        local observed = { stat = {}, lstat = {}, list = {} }
+        for _, method in ipairs({ "stat", "lstat", "list" }) do
+            local original = strategy[method]
+            strategy[method] = function(self, path, ...)
+                observed[method][path] =
+                    (observed[method][path] or 0) + 1
+                return original(self, path, ...)
+            end
+        end
+        local context = driver.new_resolver_context({ io = strategy })
+
+        local ordinary = driver.resolve_external_modules({
+            ["vendor.pkg"] = false,
+        }, {
+            app = true,
+        }, { context = context })
+        assert.same({
+            kind = "dynamic",
+            provider_file = provider,
+        }, ordinary["vendor.pkg"])
+
+        local explicit_source = driver.resolve_external_modules({
+            ["vendor.pkg"] = true,
+        }, {
+            app = true,
+        }, context)
+        assert.same({
+            kind = "source",
+            main_file = main,
+            source_files = { main, part },
+        }, explicit_source["vendor.pkg"])
+        assert.is_true((observed.lstat[provider] or 0) > 0)
+        assert.is_true((observed.stat[main] or 0) > 0)
+        assert.is_true((observed.stat[part] or 0) > 0)
+        assert.is_true((observed.list[source .. "/vendor/pkg"] or 0) > 0)
+        assert.same({}, driver.imported)
+        assert.is_true(driver.close_resolver_context(context))
     end)
 
     it("rejects source replacement after using a different compiled interface",
@@ -1548,6 +2532,631 @@ describe("compiler module loader", function()
             driver.imported.generated.program_output)
         assert.equal(true, deps.generated)
         assert.is_nil(lfs.attributes(filename, "mode"))
+    end)
+
+    it("checks a dirty root against a cached clean source interface",
+       function()
+        local provider_type = types.Module("provider", {
+            types.ModuleMember("provider", "answer",
+                types.Function({}, { types.Integer() },
+                    false, false, false), {}),
+        })
+        local filename = root .. "/dirty.titan"
+        local descriptor = {
+            kind = "generated",
+            main = filename,
+            files = { filename },
+            contents = {
+                [filename] = [[
+                    local provider = import "provider"
+                    function answer(): integer
+                        return provider.answer()
+                    end
+                ]],
+            },
+        }
+        local static_deps = {}
+        local loader = driver.defaultloader(static_deps, {
+            source_roots = { dirty = true },
+            source_overrides = { dirty = descriptor },
+            cached_interfaces = {
+                provider = {
+                    serialized = types.serialize(provider_type),
+                    filename = root .. "/provider.titan",
+                    source_files = {
+                        root .. "/provider.titan",
+                        root .. "/provider-part.titan",
+                    },
+                    dependencies = { "foundation" },
+                    c_header_dependencies = {{
+                        kind = "search",
+                        path = root .. "/provider.h",
+                        identity = "c-header-search-v1;lstat=missing;stat=missing",
+                    }},
+                },
+            },
+        })
+
+        local ok, modtype, errors = loader("dirty")
+        assert.truthy(ok)
+        assert.equal("Type.Module", modtype._tag)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.is_table(driver.imported.dirty.ast)
+        assert.is_true(driver.imported.provider._cached_interface)
+        assert.is_nil(driver.imported.provider.ast)
+        assert.equal(root .. "/provider.titan",
+            driver.imported.provider.filename)
+        assert.same({
+            root .. "/provider.titan",
+            root .. "/provider-part.titan",
+        }, driver.imported.provider.source_files)
+        assert.same({ foundation = true }, driver.imported.provider.deps)
+        assert.same({{
+            kind = "search",
+            path = root .. "/provider.h",
+            identity = "c-header-search-v1;lstat=missing;stat=missing",
+        }}, driver.imported.provider.c_header_dependencies)
+        assert.same({
+            dirty = true,
+            provider = true,
+            foundation = true,
+        }, static_deps)
+        assert.is_true(driver.close_loader(loader))
+    end)
+
+    it("prefers an available source override to a cached interface",
+       function()
+        local cached = types.Module("provider", {
+            types.ModuleMember("provider", "cached_answer",
+                types.Function({}, { types.Integer() },
+                    false, false, false), {}),
+        })
+        local filename = root .. "/provider-generated.titan"
+        local loader = driver.defaultloader({}, {
+            source_roots = { provider = true },
+            source_overrides = {
+                provider = {
+                    kind = "generated",
+                    main = filename,
+                    files = { filename },
+                    contents = {
+                        [filename] = [[
+                            function source_answer(): integer return 42 end
+                        ]],
+                    },
+                },
+            },
+            cached_interfaces = {
+                provider = {
+                    serialized = types.serialize(cached),
+                    filename = root .. "/cached-provider.titan",
+                },
+            },
+        })
+
+        local ok, modtype, errors = loader("provider")
+        assert.truthy(ok)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.is_table(driver.imported.provider.ast)
+        assert.is_nil(driver.imported.provider._cached_interface)
+        assert.is_nil(modtype.members.cached_answer)
+        assert.is_table(modtype.members.source_answer)
+        assert.is_true(driver.close_loader(loader))
+    end)
+
+    it("reuses a seeded clean project AST for a source import", function()
+        local provider_filename = root .. "/provider-generated.titan"
+        local provider_descriptor = {
+            kind = "generated",
+            main = provider_filename,
+            files = { provider_filename },
+            contents = {
+                [provider_filename] = [[
+                    local function secret(): integer return 42 end
+                ]],
+            },
+        }
+        local provider_loader = driver.defaultloader({}, {
+            source_roots = { provider = true },
+            source_overrides = { provider = provider_descriptor },
+        })
+        local provider_ok, _, provider_errors = provider_loader("provider")
+        assert.truthy(provider_ok)
+        assert.equal(0, #provider_errors,
+            table.concat(provider_errors, "\n"))
+        local retained = driver.imported.provider
+        local retained_ast = retained.ast
+        assert.is_true(driver.close_loader(provider_loader))
+
+        -- The language server starts each dirty-root analysis with a fresh
+        -- type registry, then supplies only unchanged project entries. A
+        -- source import must reuse that full entry rather than falling back to
+        -- the narrower serialized-interface seam or reparsing the file.
+        driver.imported = {}
+        types.registry = {}
+        local consumer_filename = root .. "/consumer-generated.titan"
+        local context = driver.new_resolver_context()
+        local consumer_loader = driver.defaultloader({}, {
+            context = context,
+            source_roots = { consumer = true },
+            source_overrides = {
+                consumer = {
+                    kind = "generated",
+                    main = consumer_filename,
+                    files = { consumer_filename },
+                    contents = {
+                        [consumer_filename] = [[
+                            local provider = import "provider.titan"
+                            function answer(): integer
+                                return provider.secret()
+                            end
+                        ]],
+                    },
+                },
+            },
+            cached_source_entries = { provider = retained },
+        })
+
+        local consumer_ok, _, consumer_errors = consumer_loader("consumer")
+        assert.truthy(consumer_ok)
+        assert.equal(0, #consumer_errors,
+            table.concat(consumer_errors, "\n"))
+        assert.equal(retained_ast, driver.imported.provider.ast)
+        assert.same({ "consumer" }, context.checked_source_modules)
+        assert.is_true(driver.imported.consumer.ast[1]._source_import)
+        assert.is_true(driver.close_loader(consumer_loader))
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
+    it("transiently rechecks a source-required external dependency of a " ..
+       "cached project AST", function()
+        local external_filename = source .. "/external.titan"
+        write_file(external_filename, [[
+            local function secret(): integer return 41 end
+            function public_answer(): integer return secret() end
+        ]])
+        local provider_filename = root .. "/provider-external.titan"
+        local provider_loader = driver.defaultloader({}, {
+            source_roots = { provider = true },
+            source_overrides = {
+                provider = {
+                    kind = "generated",
+                    main = provider_filename,
+                    files = { provider_filename },
+                    contents = {
+                        [provider_filename] = [[
+                            local external = import "external.titan"
+                            local function answer(): integer
+                                return external.secret()
+                            end
+                        ]],
+                    },
+                },
+            },
+        })
+        local provider_ok, _, provider_errors = provider_loader("provider")
+        assert.truthy(provider_ok)
+        assert.equal(0, #provider_errors,
+            table.concat(provider_errors, "\n"))
+        local retained = driver.imported.provider
+        local retained_ast = retained.ast
+        local external_type = driver.imported.external.type
+        local first_external_ast = driver.imported.external.ast
+        assert.is_true(driver.close_loader(provider_loader))
+
+        driver.imported = {}
+        types.registry = {}
+        local consumer_filename = root .. "/consumer-external.titan"
+        local context = driver.new_resolver_context()
+        local consumer_loader = driver.defaultloader({}, {
+            context = context,
+            source_roots = { consumer = true },
+            source_overrides = {
+                consumer = {
+                    kind = "generated",
+                    main = consumer_filename,
+                    files = { consumer_filename },
+                    contents = {
+                        [consumer_filename] = [[
+                            local external = import "external"
+                            local provider = import "provider.titan"
+                            function result(): integer
+                                return external.public_answer() +
+                                    provider.answer() - 40
+                            end
+                        ]],
+                    },
+                },
+            },
+            cached_source_entries = { provider = retained },
+            cached_interfaces = {
+                external = {
+                    serialized = types.serialize(external_type),
+                    filename = external_filename,
+                    source_files = { external_filename },
+                    dependencies = {},
+                },
+            },
+        })
+
+        local consumer_ok, _, consumer_errors = consumer_loader("consumer")
+        assert.truthy(consumer_ok)
+        assert.equal(0, #consumer_errors,
+            table.concat(consumer_errors, "\n"))
+        assert.equal(retained_ast, driver.imported.provider.ast)
+        assert.not_equal(first_external_ast, driver.imported.external.ast)
+        assert.same({ "external", "consumer" },
+            context.checked_source_modules)
+        assert.is_nil(driver.imported.external._cached_interface)
+        assert.is_true(driver.imported.external.ast[1].islocal)
+        assert.is_true(driver.close_loader(consumer_loader))
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
+    it("rehydrates cached project foreign headers per resolver", function()
+        local provider_filename = root .. "/ffi-provider-generated.titan"
+        local provider_loader = driver.defaultloader({}, {
+            source_roots = { ffi_provider = true },
+            source_overrides = {
+                ffi_provider = {
+                    kind = "generated",
+                    main = provider_filename,
+                    files = { provider_filename },
+                    contents = {
+                        [provider_filename] = [[
+                            local c = foreign import "stdint.h"
+                            foreign function identity(
+                                    input: c.int32_t): c.int32_t
+                                return input
+                            end
+                        ]],
+                    },
+                },
+            },
+        })
+        local provider_ok, _, provider_errors =
+            provider_loader("ffi_provider")
+        assert.truthy(provider_ok)
+        assert.equal(0, #provider_errors,
+            table.concat(provider_errors, "\n"))
+        local retained = driver.imported.ffi_provider
+        local retained_ast = retained.ast
+        local old_header = assert(retained.checking_foreign_header)
+        assert.equal("file", lfs.attributes(old_header, "mode"))
+        assert.is_true(driver.close_loader(provider_loader))
+        assert.is_nil(lfs.symlinkattributes(old_header))
+
+        driver.imported = {}
+        types.registry = {}
+        local consumer_filename = root .. "/ffi-consumer-generated.titan"
+        local context = driver.new_resolver_context()
+        local consumer_loader = driver.defaultloader({}, {
+            context = context,
+            source_roots = { ffi_consumer = true },
+            source_overrides = {
+                ffi_consumer = {
+                    kind = "generated",
+                    main = consumer_filename,
+                    files = { consumer_filename },
+                    contents = {
+                        [consumer_filename] = [[
+                            local provider =
+                                import "ffi_provider.titan"
+                            function answer(): integer return 42 end
+                        ]],
+                    },
+                },
+            },
+            cached_source_entries = { ffi_provider = retained },
+        })
+
+        local consumer_ok, _, consumer_errors =
+            consumer_loader("ffi_consumer")
+        assert.truthy(consumer_ok)
+        assert.equal(0, #consumer_errors,
+            table.concat(consumer_errors, "\n"))
+        local fresh_header =
+            driver.imported.ffi_provider.checking_foreign_header
+        assert.not_equal(old_header, fresh_header)
+        assert.equal("file", lfs.attributes(fresh_header, "mode"))
+        assert.equal(retained_ast, driver.imported.ffi_provider.ast)
+        assert.same({ "ffi_consumer" }, context.checked_source_modules)
+        assert.equal(fresh_header,
+            driver.imported.ffi_consumer.ast[1]._foreign_header)
+        assert.is_true(driver.close_loader(consumer_loader))
+        assert.is_true(driver.close_resolver_context(context))
+        assert.is_nil(lfs.symlinkattributes(fresh_header))
+    end)
+
+    it("publishes each source module before the cooperative I/O checkpoint",
+       function()
+        local dep_filename = root .. "/dep-generated.titan"
+        local main_filename = root .. "/main-generated.titan"
+        local strategy = compiler_io.new_sync()
+        function strategy:yield() coroutine.yield() end
+        local context = driver.new_resolver_context({ io = strategy })
+        local loader = driver.defaultloader({}, {
+            context = context,
+            source_roots = { main = true },
+            source_overrides = {
+                dep = {
+                    kind = "generated",
+                    main = dep_filename,
+                    files = { dep_filename },
+                    contents = {
+                        [dep_filename] = [[
+                            function answer(): integer return 42 end
+                        ]],
+                    },
+                },
+                main = {
+                    kind = "generated",
+                    main = main_filename,
+                    files = { main_filename },
+                    contents = {
+                        [main_filename] = [[
+                            local dep = import "dep"
+                            function answer(): integer return dep.answer() end
+                        ]],
+                    },
+                },
+            },
+        })
+        local thread = coroutine.create(function()
+            return loader("main")
+        end)
+
+        local resumed, yielded = coroutine.resume(thread)
+        assert.truthy(resumed, yielded)
+        assert.is_nil(yielded)
+        assert.equal("suspended", coroutine.status(thread))
+        assert.same({ "dep" }, context.checked_source_modules)
+        assert.is_table(driver.imported.dep.ast)
+        assert.equal("Ast.TopLevelFunc", driver.imported.dep.ast[1]._tag)
+        assert.equal(dep_filename,
+            driver.imported.dep.ast[1].loc.filename)
+        assert.same({ dep_filename }, driver.imported.dep.source_files)
+
+        resumed, yielded = coroutine.resume(thread)
+        assert.truthy(resumed, yielded)
+        assert.is_nil(yielded)
+        assert.same({ "dep", "main" }, context.checked_source_modules)
+        assert.is_table(driver.imported.main.ast)
+
+        local ok, modtype, errors
+        resumed, ok, modtype, errors = coroutine.resume(thread)
+        assert.truthy(resumed, ok)
+        assert.truthy(ok)
+        assert.equal("Type.Module", modtype._tag)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.equal("dead", coroutine.status(thread))
+        assert.is_true(driver.close_loader(loader))
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
+    it("uses project FFI include roots without changing global configuration",
+       function()
+        local include_root = root .. "/project-include"
+        assert(lfs.mkdir(include_root))
+        write_file(include_root .. "/vscode_titan_project_only.h", [[
+            typedef int vscode_titan_project_only_int;
+        ]])
+        local filename = root .. "/foreign-generated.titan"
+        local descriptor = {
+            kind = "generated",
+            main = filename,
+            files = { filename },
+            contents = {
+                [filename] = [[
+                    local c = foreign import "vscode_titan_project_only.h"
+                    function answer(): integer return 42 end
+                ]],
+            },
+        }
+        local global_includes = driver.foreign_include_dirs()
+
+        local missing_loader = driver.defaultloader({}, {
+            source_roots = { foreign_generated = true },
+            source_overrides = { foreign_generated = descriptor },
+        })
+        local missing_ok, _, missing_errors =
+            missing_loader("foreign_generated")
+        assert.truthy(missing_ok)
+        assert.equal(1, #missing_errors)
+        assert.match("failed preprocessing 'vscode_titan_project_only.h'",
+            missing_errors[1], 1, true)
+        assert.is_true(driver.close_loader(missing_loader))
+
+        driver.imported = {}
+        types.registry = {}
+        local configured_loader = driver.defaultloader({}, {
+            source_roots = { foreign_generated = true },
+            source_overrides = { foreign_generated = descriptor },
+            extra_ffi_include_dirs = { include_root },
+        })
+        local configured_ok, _, configured_errors =
+            configured_loader("foreign_generated")
+        assert.truthy(configured_ok)
+        assert.equal(0, #configured_errors,
+            table.concat(configured_errors, "\n"))
+        assert.same(global_includes, driver.foreign_include_dirs())
+        assert.is_true(driver.close_loader(configured_loader))
+    end)
+
+    it("publishes and restats resolved transitive C header inputs", function()
+        local early = root .. "/ffi-early"
+        local late = root .. "/ffi-late"
+        assert(lfs.mkdir(early))
+        assert(lfs.mkdir(late))
+        local outer = root .. "/ffi-outer.h"
+        local early_selected = early .. "/ffi-selected.h"
+        local late_selected = late .. "/ffi-selected.h"
+        local late_contents =
+            "typedef int titan_driver_selected_header;\n"
+        write_file(outer, "#include <ffi-selected.h>\n")
+        write_file(late_selected, late_contents)
+        local filename = root .. "/ffi-metadata.titan"
+        local loader = driver.defaultloader({}, {
+            source_roots = { ffi_metadata = true },
+            source_overrides = {
+                ffi_metadata = {
+                    kind = "generated",
+                    main = filename,
+                    files = { filename },
+                    contents = {
+                        [filename] = [[
+                            local c = foreign import "ffi-outer.h"
+                            function answer(): integer return 42 end
+                        ]],
+                    },
+                },
+            },
+            extra_ffi_include_dirs = { early, late },
+        })
+        local ok, _, errors = loader("ffi_metadata")
+        assert.truthy(ok)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        local observed = driver.imported.ffi_metadata.c_header_dependencies
+        local function identity(inputs, kind, path)
+            for _, input in ipairs(inputs) do
+                if input.kind == kind and input.path == path then
+                    return input.identity
+                end
+            end
+        end
+        assert.is_string(identity(observed, "file", outer))
+        assert.is_string(identity(observed, "file", late_selected))
+        assert.is_string(identity(observed, "search", outer))
+        assert.matches("stat=missing",
+            identity(observed, "search", early_selected), 1, true)
+        assert.matches("stat=file",
+            identity(observed, "search", late_selected), 1, true)
+        local restat_io = compiler_io.new_sync()
+        local read_paths = {}
+        local original_read = restat_io.read_file
+        function restat_io:read_file(path)
+            read_paths[path] = (read_paths[path] or 0) + 1
+            return original_read(self, path)
+        end
+        assert.same(observed,
+            assert(driver.restat_c_header_dependencies(
+                observed, { io = restat_io })))
+        assert.is_true((read_paths[outer] or 0) > 0)
+        assert.is_true((read_paths[late_selected] or 0) > 0)
+
+        write_file(late_selected,
+            "typedef long titan_driver_selected_header;\n")
+        local restat_context =
+            driver.new_resolver_context({ io = restat_io })
+        local nested_changed =
+            assert(driver.restat_c_header_dependencies(
+                observed, restat_context))
+        assert.not_equal(
+            identity(observed, "file", late_selected),
+            identity(nested_changed, "file", late_selected))
+
+        write_file(late_selected, late_contents)
+        write_file(early_selected,
+            "typedef short titan_driver_selected_header;\n")
+        local shadowed = assert(
+            driver.restat_c_header_dependencies(
+                observed, { context = restat_context }))
+        assert.not_equal(
+            identity(observed, "search", early_selected),
+            identity(shadowed, "search", early_selected))
+        assert.is_true(driver.close_resolver_context(restat_context))
+        assert.is_true(driver.close_loader(loader))
+    end)
+
+    it("restats exact symlinked include spellings after retargeting",
+    function()
+        local first = root .. "/ffi-link-first"
+        local second = root .. "/ffi-link-second"
+        local lexical = root .. "/include"
+        local link = root .. "/ffi-sdk-link"
+        local outer = root .. "/ffi-link-outer.h"
+        local selected_lookup = link .. "/../include/ffi-selected.h"
+        local selected_contents = [[
+#define TITAN_LINK_VALUE 42
+typedef int titan_driver_symlink_value;
+]]
+
+        local loader
+        local completed, failure = pcall(function()
+            assert(lfs.mkdir(first))
+            assert(lfs.mkdir(first .. "/nested"))
+            assert(lfs.mkdir(first .. "/include"))
+            assert(lfs.mkdir(second))
+            assert(lfs.mkdir(second .. "/nested"))
+            assert(lfs.mkdir(second .. "/include"))
+            assert(lfs.mkdir(lexical))
+            assert(lfs.link("ffi-link-first/nested", link, true))
+            write_file(outer, "#include <ffi-selected.h>\n")
+            write_file(first .. "/include/ffi-selected.h", selected_contents)
+            write_file(second .. "/include/ffi-selected.h", selected_contents)
+            write_file(lexical .. "/ffi-selected.h", [[
+#define TITAN_LINK_VALUE 17
+typedef double titan_driver_symlink_value;
+]])
+
+            local filename = root .. "/ffi-link-metadata.titan"
+            loader = driver.defaultloader({}, {
+                source_roots = { ffi_link_metadata = true },
+                source_overrides = {
+                    ffi_link_metadata = {
+                        kind = "generated",
+                        main = filename,
+                        files = { filename },
+                        contents = {
+                            [filename] = [[
+                                local c = foreign import "ffi-link-outer.h"
+                                function answer(): integer
+                                    return c.TITAN_LINK_VALUE
+                                end
+                            ]],
+                        },
+                    },
+                },
+                extra_ffi_include_dirs = {
+                    link .. "/../include",
+                },
+            })
+            local ok, _, errors = loader("ffi_link_metadata")
+            assert.truthy(ok)
+            assert.equal(0, #errors, table.concat(errors, "\n"))
+
+            local observed =
+                driver.imported.ffi_link_metadata.c_header_dependencies
+            local function identity(inputs, kind, path)
+                for _, input in ipairs(inputs) do
+                    if input.kind == kind and input.path == path then
+                        return input.identity
+                    end
+                end
+            end
+            local first_file =
+                identity(observed, "file", selected_lookup)
+            local first_search =
+                identity(observed, "search", selected_lookup)
+            assert.is_string(first_file)
+            assert.is_string(first_search)
+
+            assert(os.remove(link))
+            assert(lfs.link("ffi-link-second/nested", link, true))
+            local restatted = assert(
+                driver.restat_c_header_dependencies(observed))
+            assert.not_equal(first_file,
+                identity(restatted, "file", selected_lookup))
+            assert.not_equal(first_search,
+                identity(restatted, "search", selected_lookup))
+        end)
+        if loader then pcall(driver.close_loader, loader) end
+        local removed, remove_error = true
+        if lfs.symlinkattributes(link) then
+            removed, remove_error = os.remove(link)
+        end
+        assert.truthy(completed, failure)
+        assert.truthy(removed, remove_error)
     end)
 
     it("keeps root precedence ahead of candidate shallowness", function()
@@ -2536,17 +4145,19 @@ describe("compiler module loader", function()
             "local owner: integer = 1\n")
         write_file(part, "local contributor: integer = 2\n")
 
-        local real_get_file_contents = util.get_file_contents
-        util.get_file_contents = function(path)
+        local strategy = compiler_io.new_sync()
+        local real_read_file = strategy.read_file
+        function strategy:read_file(path)
             if path == part then
                 return false, part .. ": forced read failure"
             end
-            return real_get_file_contents(path)
+            return real_read_file(self, path)
         end
+        local context = driver.new_resolver_context({ io = strategy })
         local called, ok, message = pcall(driver.defaultloader({}, {
+            context = context,
             source_roots = { ["titan.sample"] = true },
         }), "titan.sample")
-        util.get_file_contents = real_get_file_contents
 
         assert.truthy(called)
         assert.falsy(ok)

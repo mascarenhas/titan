@@ -1364,6 +1364,38 @@ function staticmetadata.scan_bytes(bytes, origin, options)
 end
 
 local function read_file_bounded(filename, options)
+    if options.io then
+        local before, stat_error = options.io:stat(filename)
+        if not before then return nil, stat_error or "input does not exist" end
+        if before.kind ~= "file" then
+            return nil, "input is not a regular file"
+        end
+        if options.max_input_size ~= nil and
+           before.size > options.max_input_size then
+            return nil, "input size " .. tostring(before.size) ..
+                " exceeds limit " .. tostring(options.max_input_size)
+        end
+        local bytes, read_error = options.io:read_file(filename)
+        if not bytes then return nil, read_error end
+        if #bytes ~= before.size then
+            return nil, "short read (expected " .. tostring(before.size) ..
+                " bytes, found " .. tostring(#bytes) .. ")"
+        end
+        local after, restat_error = options.io:stat(filename)
+        if not after then
+            return nil, restat_error or "input disappeared while being read"
+        end
+        if after.kind ~= before.kind or after.size ~= before.size or
+           after.modified_seconds ~= before.modified_seconds or
+           after.modified_nanoseconds ~= before.modified_nanoseconds then
+            return nil, "input changed while it was being read"
+        end
+        return bytes
+    end
+
+    -- Publication/build callers which do not own a resolver context retain
+    -- the historical seekable synchronous path. Language-server analysis
+    -- always supplies options.io and therefore never reaches this branch.
     local file, open_error = io.open(filename, "rb")
     if not file then return nil, open_error end
     local size, seek_error = file:seek("end")

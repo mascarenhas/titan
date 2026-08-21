@@ -57,15 +57,15 @@ function checker._recover_referenced_module(
         interface_seen = interface_seen,
         reference_seen = seen,
     }
-    local called, module, err = pcall(
-        checker.checkimport, modname, loader, request)
+    -- Loader calls can suspend through the resolver's compiler I/O strategy.
+    -- Ordinary lookup failures are already returned as nil/error; exceptions
+    -- (in particular Titan Task cancellation) must continue unwinding.
+    local module, err = checker.checkimport(modname, loader, request)
     memo.pending = nil
-    if called and module then
+    if module then
         memo.module = module
-    elseif called then
-        memo.error = err
     else
-        memo.error = tostring(module)
+        memo.error = err
     end
     return memo
 end
@@ -703,6 +703,7 @@ function makemoduletype(modname, modast, st)
             elseif tag == "Ast.TopLevelFunc" then
                 local member = types.ModuleMember(modname, tlnode.name,
                     tlnode._type, tlnode._paramnames)
+                member._parameter_decls = tlnode._parameter_decls
                 if tlnode.islocal then
                     add_source_member(member)
                 else

@@ -5,7 +5,15 @@ local _ENV = core
 -- consumed by the existing native/direct-C lowering. The separate order map is
 -- retained so codegen can evaluate explicit expressions in source order before
 -- assembling operands in formal order.
-function check_named_args(callable, paramnames, fields, loc, fname, st, errors)
+function named_call_declaration(node)
+    if node.args and node.args._decl then return node.args._decl end
+    local variable = node.exp and node.exp._tag == "Ast.ExpVar"
+        and node.exp.var or nil
+    return variable and variable._decl or nil
+end
+
+function check_named_args(
+        callable, paramnames, fields, loc, fname, st, errors, declaration)
     local signature = assert(call_signature(callable),
         "named-call checking requires a callable signature")
     assert(type(paramnames) == "table")
@@ -47,6 +55,8 @@ function check_named_args(callable, paramnames, fields, loc, fname, st, errors)
             checkexp(field.exp, st, errors)
         else
             local ptype = signature.params[index]
+            field._decl = named_parameter_declaration(
+                declaration, index, field.name)
             checkexp(field.exp, st, errors, ptype)
             local term =
                 "named argument '" .. field.name .. "' of " .. fname
@@ -2236,7 +2246,7 @@ function generic_decl_paramnames(node)
 end
 
 function generic_infer_named_call(context, signature, fields,
-                                           paramnames, st, errors, term)
+                                  paramnames, st, errors, term, declaration)
     if type(paramnames) ~= "table" then
         for _, field in ipairs(fields) do checkexp(field.exp, st, errors) end
         return { unavailable = true, fields = fields }
@@ -2256,6 +2266,8 @@ function generic_infer_named_call(context, signature, fields,
             checkexp(field.exp, st, errors)
         else
             local pattern = signature.params[index]
+            field._decl = named_parameter_declaration(
+                declaration, index, field.name)
             local expected = generic_inference_expression_context(
                 context, pattern, field.exp)
             if field.exp._tag == "Ast.ExpFunction" then
@@ -2375,7 +2387,7 @@ function generic_infer_call_application(context, use, signature, node,
             named_plan = generic_infer_named_call(
                 context, signature, node.args.fields,
                 paramnames or generic_decl_paramnames(node),
-                st, errors, term)
+                st, errors, term, named_call_declaration(node))
         else
             adjusted, deferred = generic_infer_positional_call(
                 context, signature, node.args.args, st, errors, term)
@@ -2400,9 +2412,14 @@ function generic_infer_call_application(context, use, signature, node,
             if dense and not use.owns_context then
                 local args = node.args
                 local method = args._tag == "Ast.ArgsNamedMethod"
+                node._surface_named_args = args.fields
                 node.args = method
                     and ast.ArgsMethod(args.loc, args.method, dense)
                     or ast.ArgsFunc(args.loc, dense)
+                if method then
+                    node.args._name_loc = args._name_loc
+                    node.args._decl = args._decl or use.closed
+                end
                 node._named_arg_order = order
                 node._named_call_kind = "titan"
             end

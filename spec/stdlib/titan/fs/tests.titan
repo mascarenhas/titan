@@ -266,6 +266,11 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
                 "stat did not classify a directory")
     test.assert(fs.stat(link).kind == "file",
                 "stat did not follow a symbolic link")
+    local target_info = fs.stat(target)
+    local link_info = fs.stat(link)
+    test.assert(link_info.device == target_info.device and
+                link_info.inode == target_info.inode,
+                "stat did not preserve physical identity through a symlink")
     test.assert(fs.lstat(link).kind == "symlink",
                 "lstat did not classify the symbolic link")
 

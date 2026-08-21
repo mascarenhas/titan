@@ -17,7 +17,11 @@ in the [filesystem standard-library chapter](../language/standard-library-fs.md)
 operations. Their facade catches an `OperationError` only when its code is
 `UV_ENOENT`; that one result becomes `nil`. Every other error is re-raised with
 its original value and traceback. The two public result types are therefore
-`Stat?`, without changing the native request or `Stat` representation.
+`Stat?`. The private result copies libuv's `st_dev` and `st_ino` into the
+public `Stat.device` and `Stat.inode` fields as an opaque equality-only pair,
+alongside size, kind, mode, and modification time. Keeping the pair on the
+asynchronous result lets higher-level compiler I/O preserve physical identity
+without falling back to blocking Lua filesystem calls.
 
 `realpath` owns one `owned *uv_fs_t` in a local `RealpathRequest`. The request
 also stores its exact Titan callback, optional Task waiter, completion flag,
@@ -183,3 +187,10 @@ entry. Both the serialized public interfaces and native signatures therefore
 require the 0.25 marker; every other ABI-0.24 layout and contract is retained.
 A 0.24 provider is rejected before either boundary is used and remains
 preserved rather than migrated or cleaned up.
+
+The active, unreleased ABI-0.26 boundary also adds `device` and `inode` to the
+serialized public `Stat` record. Libuv exposes both as unsigned 64-bit values;
+the implementation carries their complete bit patterns through Lua's signed
+integer carrier. They may therefore appear negative and are meaningful only as
+an equality pair. This public-record shape change is covered by the existing
+0.26 marker; it does not introduce another ABI version.
