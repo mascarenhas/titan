@@ -1,24 +1,64 @@
-# Source-import collaboration interfaces
+# Explicit source-import collaboration interfaces
 
 This chapter implements the language rules in
-[Visibility through source imports](../language/source-import-visibility.md).
-The central invariant is that **loader provenance grants permission**. A rich
-in-memory descriptor, nominal registry entry, selected static dependency, or
-physical provider relationship never does.
+[Visibility through explicit source imports](../language/source-import-visibility.md).
+The central invariant is that **written opt-in and trusted source provenance
+jointly grant permission**. Neither half is sufficient: an ordinary import is
+public-only even when the loader selected source, while a `.titan` import cannot
+fall back to a binary. A rich in-memory descriptor, nominal registry entry,
+selected static dependency, or physical provider relationship never grants
+permission by itself.
+
+## Parsing and logical identity
+
+`parser.normalize_import` recognizes one terminal `.titan` marker, removes it,
+then applies standard-library shorthand. The resulting `Ast.TopLevelImport`
+stores the canonical `modname` plus a separate `source_required` bit. For
+example, both `uv.titan` and `titan.uv.titan` produce canonical module name
+`titan.uv` with `source_required == true`.
+
+Only the separate bit records the written request. The stripped name is used by
+the checker, resolver caches, dependency graph, source paths, native mangling,
+generated artifacts, `Type.Module`, DSO metadata, and archive manifests. The
+marker is therefore never observable as a second module identity.
+
+`staticmetadata.valid_module_name` rejects a dotted logical name whose final
+component is `titan`, because its import spelling would always be consumed as
+the marker. Bare `titan` remains the canonical standard-provider identity, and
+`titan` may remain a nonterminal component.
 
 ## Loader result and module views
 
-`driver.defaultloader` and `driver.tableloader` report whether an import was
-selected from source, a DSO, or an archive. `checker.checkimport` returns that
-trusted provenance with the module type. Only a direct `kind == "source"` edge
-to a descriptor produced by the current checker sets the import AST's
-`_source_import` capability.
+`checker.checkimport` forwards a source-required request only for an import AST
+whose marker bit is set. `driver.defaultloader` services that request by running
+canonical folder/flat source lookup before any compiled-provider pass. A clean
+miss is the compile-time error `source module '<name>' not found`; a blocked
+folder constituent or source error is likewise terminal. The loader never
+falls back to a DSO or archive for this request, and it replaces or bypasses an
+already cached compiled selection when source exists.
 
-Ordinary resolver contexts reach that result only after compiled-provider
+One resolver context records every serialized public projection of each
+compiled interface it has actually returned, including nominal-owner views
+recovered contextually through compiled facades. If a later source-required
+edge replaces that selection, the checked source module is serialized through
+the same public-only projection and must match every recorded view. A mismatch
+is added to the ordinary source-checker error list before foreign-header
+preparation, so compilation stops before finalization or code generation while
+retaining coherent source state for diagnostics. Process-global compiled
+entries that were not used by this resolver are intentionally replaceable; a
+later independent compilation must not be constrained by an old cache entry.
+
+`driver.defaultloader` and `driver.tableloader` still report whether the selected
+module actually came from source, a DSO, or an archive. `checker.checkimport`
+returns that trusted provenance with the module type. Only an import that both
+has `source_required == true` and receives `kind == "source"` for a descriptor
+produced by the current checker sets the AST's `_source_import` capability.
+
+Ordinary resolver contexts may also select source after compiled-provider
 passes. The test runner's invocation-local `source_first` policy changes lookup
-order, not the capability: its generated runner still receives private access
-only because the canonical modules were actually parsed and checked from
-source. See [Native test runner](test-runner.md).
+order, not visibility: ordinary imports in either context remain public-only.
+The generated runner writes an explicit `import "titan.test.titan"` edge for its
+private protocol. See [Native test runner](test-runner.md).
 
 A checked source module retains a compiler-only overlay on its `Type.Module`:
 
@@ -38,20 +78,20 @@ rejects every compiler-only source field, so evaluated DSO/archive metadata
 cannot spoof source provenance.
 
 `types.registry` may retain a source-complete nominal descriptor when a compiled
-facade for the same owner is loaded later. That descriptor is canonical type
-information, not authority: every local lookup also checks the current symbol
-table's direct-owner source capability. This keeps mixed source/binary loading
-order-independent.
+facade or ordinary source import for the same owner is loaded later. That
+descriptor is canonical type information, not authority: every local lookup
+also checks the current symbol table's explicit direct-owner capability. This
+keeps mixed public/explicit and source/binary loading order-independent.
 
 ## Checker staging
 
-The import pass records the earliest direct source edge per owner. Module-variable
-frontier checks consult that edge, so a local variable initializer sees only an
-owner import that was written earlier; body checking retains the ordinary
-placement-independent declaration rules.
+The import pass records the earliest explicit source edge per owner.
+Module-variable frontier checks consult that edge, so a local variable
+initializer sees only an owner import that was written earlier; body checking
+retains the ordinary placement-independent declaration rules.
 
 Module/type/member lookup first uses the public projection. It consults the
-source overlay only when the matching direct source capability is present.
+source overlay only when the matching explicit-source capability is present.
 Nominal lookup applies the same owner check to local fields, variants,
 constructors, methods, and nominal functions. Capabilities are not copied from
 an imported module, which enforces direct-only Titan visibility.
@@ -80,15 +120,15 @@ followed by non-direct used origins in stable byte order; normalized
 Selecting an unrelated Titan nominal member therefore cannot pull in another
 member's C header.
 
-Source imports do not merge Titan aliases, C type/tag registries, or declaration
-graphs. Each module remains an ordinary C translation unit. A direct producer
-with source foreign declarations does, however, supply one real generated C
-header: after all imports are visited, the consumer checker processes those
-headers in AST order and replays their macro effects into its cumulative probe
-context. This is declaration plumbing, not Titan permission—the direct source
-capability still gates `alias.foreign_member` independently. It makes the
-consumer's checked macro/declaration surface agree with the header that its
-final generated C will include.
+Explicit source imports do not merge Titan aliases, C type/tag registries, or
+declaration graphs. Each module remains an ordinary C translation unit. An
+explicitly imported producer with source foreign declarations does, however,
+supply one real generated C header: after all imports are visited, the consumer
+checker processes those headers in AST order and replays their macro effects
+into its cumulative probe context. This is declaration plumbing, not Titan
+permission—the explicit-source capability still gates `alias.foreign_member`
+independently. It makes the consumer's checked macro/declaration surface agree
+with the header that its final generated C will include.
 
 Other source-private C uses retain the narrow use-driven rule. A probe context
 starts from the consumer's direct imports and source-generated headers, then
@@ -145,4 +185,6 @@ rejected before decoding. ABI 0.25 retains the overlay and layout while
 changing the public `titan.fs` and `titan.async` signatures; 0.24 providers are
 rejected before decoding. ABI 0.26 retains the overlay while extending const
 and Interface metadata; 0.25 providers are rejected before decoding. Earlier
-trees are neither migrated nor deleted.
+trees are neither migrated nor deleted. The explicit `.titan` parser marker and
+source-required request add no serialized field or native identity and
+therefore require no additional ABI change.

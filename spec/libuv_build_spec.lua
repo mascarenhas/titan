@@ -1227,6 +1227,19 @@ describe("libuv Makefile configuration", function()
                 end
             end
 
+            for _, source in ipairs({
+                "titan/async.titan", "titan/timer.titan",
+                "titan/fs.titan", "titan/net.titan", "titan/os.titan",
+            }) do
+                local contents = read_file(source)
+                assert.truthy(contents:find(
+                    'import "uv.titan"', 1, true), source)
+                assert.falsy(contents:find(
+                    'import "uv"', 1, true), source)
+                assert.falsy(contents:find(
+                    'import "titan.uv.titan"', 1, true), source)
+            end
+
             local ssl = read_file("titan/ssl.titan")
             for _, dependency in ipairs({ "async", "fs", "net", "string" }) do
                 assert.truthy(ssl:find(

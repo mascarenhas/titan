@@ -1,10 +1,10 @@
 -- Native titan.uv Task routing and cancellation tests.
 local test = import "test"
-local runtime_test = import "support.runtime"
+local runtime_test = import "support.runtime.titan"
 local async = import "async"
 local coroutine = import "coroutine"
 local fs = import "fs"
 local net = import "net"
 local timer = import "timer"
-local support = import "uv.task_test_support"
-local task_support = import "support.async"
+local support = import "uv.task_test_support.titan"
+local task_support = import "support.async.titan"

@@ -30,7 +30,7 @@ return typedecl("Ast", {
         TopLevelRecord  = {"loc", "name", "fields", "typeparams"},
         TopLevelUnion   = {"loc", "name", "variants", "typeparams"},
         TopLevelInterface = {"loc", "name", "members", "fields", "methods", "typeparams"},
-        TopLevelImport  = {"loc", "localname", "modname"},
+        TopLevelImport  = {"loc", "localname", "modname", "source_required"},
         TopLevelForeignImport = {"loc", "localname", "headername"},
     },
 

@@ -1,4 +1,4 @@
-local uv = import "uv"
+local uv = import "uv.titan"
 
 record Ticker
   local handle: uv.uv_timer_t

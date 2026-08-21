@@ -162,7 +162,7 @@ omitted from the field lists for brevity.
 | `TopLevelInterface` | `name`, `members`, `fields`, `methods`, `typeparams` | top-level, non-local, nonempty Interface declaration; `members` preserves mixed source order and the other lists are ordered projections |
 | `TopLevelRecord` | `name`, `fields`, `typeparams` | `fields` is a list of `Decl`; parser decorates `islocal` |
 | `TopLevelUnion` | `name`, `variants`, `typeparams` | `variants` is a source-order list of `UnionVariant`; parser decorates `islocal` |
-| `TopLevelImport` | `localname`, `modname` | `local m = import "x.y"` |
+| `TopLevelImport` | `localname`, `modname`, `source_required` | `modname` is canonical; a terminal `.titan` marker is stripped and recorded separately in `source_required` |
 | `TopLevelForeignImport` | `localname`, `headername` | `local c = foreign import "x.h"` |
 
 `TopLevelStatic` covers record and union functions. The parser creates one directly for

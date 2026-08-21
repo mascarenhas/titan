@@ -107,8 +107,8 @@ observe nil when the initializer leaves it unset, so use an Option or another
 nil-bearing type honestly.
 
 Public const module variables are readable by importers and Lua but cannot be
-written by either. Local const module variables follow the normal source-only
-visibility rules.
+written by either. Local const module variables follow the normal explicit-
+source-import visibility rules.
 
 ## Const record fields
 

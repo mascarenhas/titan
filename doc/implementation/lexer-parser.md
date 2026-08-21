@@ -319,6 +319,13 @@ statement position get specific messages.
 
 The parser performs several rewrites that later passes rely on:
 
+* **Import markers are separated from identity.** `defs.importdecl` calls
+  `parser.normalize_import`, which removes one terminal `.titan` marker before
+  applying standard-library shorthand. It constructs
+  `Ast.TopLevelImport(localname, canonical_modname, source_required)`, so
+  `uv.titan` and `titan.uv.titan` both carry canonical name `titan.uv` plus a
+  true request bit. Later passes never need to parse the marker out of a name.
+
 * **Type alias declarations are direct.** `[local] type Name = T` is not a
   desugaring: it produces one `Ast.TopLevelTypeAlias` whose `type` field is the
   ordinary type-annotation AST. The checker keeps the declaration out of the

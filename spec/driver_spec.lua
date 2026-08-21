@@ -283,6 +283,20 @@ describe("compiled-container path contracts", function()
         assert.equal("foo", driver.common_module_provider({
             "foo", "foo.bar",
         }))
+
+        local reserved_provider, reserved_roots =
+            driver.common_module_provider({
+                "pkg.titan.left", "pkg.titan.right",
+            })
+        assert.equal("pkg.titan", reserved_provider)
+        local plans, provider_path = driver.plan_module_shims(
+            reserved_provider, reserved_roots)
+        assert.truthy(plans)
+        assert.equal("pkg/titan.so", provider_path)
+        assert.same({ "pkg/titan/left.lua", "pkg/titan/right.lua" }, {
+            plans[1].filename, plans[2].filename,
+        })
+
         local none, _, left, right = driver.common_module_provider({
             "foo.bar", "foobar.baz",
         })
@@ -1109,7 +1123,7 @@ describe("compiler module loader", function()
             end
         ]])
         write_file(relative_root .. "/b/consumer.titan", [[
-            local provider = import "a.provider"
+            local provider = import "a.provider.titan"
             function read(): integer return 1 end
         ]])
 
@@ -1185,6 +1199,126 @@ describe("compiler module loader", function()
             driver.imported["titan.timer"].filename)
         assert.equal("titan/timer__main",
             driver.imported["titan.timer"].program_output)
+    end)
+
+    it("canonically resolves explicit-source imports to flat and folder source",
+    function()
+        assert(lfs.mkdir(source .. "/pkg"))
+        assert(lfs.mkdir(source .. "/pkg/folder"))
+        assert(lfs.mkdir(binary .. "/pkg"))
+        write_file(source .. "/pkg/flat.titan", [[
+            local function answer(): integer return 20 end
+        ]])
+        write_file(source .. "/pkg/folder/folder.titan", [[
+            local function answer(): integer return 22 end
+        ]])
+        write_file(source .. "/consumer.titan", [[
+            local flat = import "pkg.flat.titan"
+            local folder = import "pkg.folder.titan"
+            function answer(): integer
+                return flat.answer() + folder.answer()
+            end
+        ]])
+
+        local compiled_flat = types.Module("pkg.flat", {}, {})
+        cache_dynamic_provider(binary .. "/pkg/flat.so", {
+            ["pkg.flat"] = compiled_flat,
+        })
+        write_file(binary .. "/pkg/folder.so",
+            "explicit source lookup must not inspect this provider\n")
+
+        local loader = driver.defaultloader({}, {
+            source_roots = { consumer = true },
+        })
+        local ok, modtype, errors, info = loader("pkg.flat")
+        assert.truthy(ok)
+        assert.equal("pkg.flat", modtype.name)
+        assert.equal(0, #errors)
+        assert.equal("dynamic", info.kind)
+
+        ok, _, errors = loader("consumer")
+        assert.truthy(ok)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.equal("source", driver.imported["pkg.flat"].kind)
+        assert.equal(source .. "/pkg/flat.titan",
+            driver.imported["pkg.flat"].filename)
+        assert.equal("source", driver.imported["pkg.folder"].kind)
+        assert.equal(source .. "/pkg/folder/folder.titan",
+            driver.imported["pkg.folder"].filename)
+        assert.is_nil(driver.imported["pkg.flat.titan"])
+        assert.is_nil(driver.imported["pkg.folder.titan"])
+
+        local imports = driver.imported.consumer.ast
+        assert.equal("pkg.flat", imports[1].modname)
+        assert.is_true(imports[1].source_required)
+        assert.is_true(imports[1]._source_import)
+        assert.equal("pkg.folder", imports[2].modname)
+        assert.is_true(imports[2].source_required)
+        assert.is_true(imports[2]._source_import)
+    end)
+
+    it("rejects source replacement after using a different compiled interface",
+    function()
+        local compiled_provider = types.Module("provider", {
+            types.ModuleMember("provider", "answer",
+                types.Function({}, { types.Integer() }, false, false, false),
+                {}),
+        })
+        cache_dynamic_provider(binary .. "/provider.so", {
+            provider = compiled_provider,
+        })
+        write_file(source .. "/provider.titan", [[
+            function answer(): string return "source" end
+        ]])
+        write_file(source .. "/ordinary_root.titan", [[
+            local provider = import "provider"
+            function answer(): integer return provider.answer() end
+        ]])
+        write_file(source .. "/source_root.titan", [[
+            local provider = import "provider.titan"
+            function answer(): string return provider.answer() end
+        ]])
+
+        local loader = driver.defaultloader({}, {
+            source_roots = {
+                ordinary_root = true,
+                source_root = true,
+            },
+        })
+        local ok, result, errors = loader("ordinary_root")
+        assert.truthy(ok, result)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.equal("dynamic", driver.imported.provider.kind)
+
+        ok, result, errors = loader("source_root")
+        assert.truthy(ok, result)
+        assert.equal(1, #errors)
+        assert.equal("source module 'provider' does not match a compiled " ..
+            "interface already used in this compilation", errors[1])
+        assert.equal("source", driver.imported.provider.kind)
+    end)
+
+    it("does not fall back to a cached compiled provider for an " ..
+       "explicit-source import", function()
+        local compiled = types.Module("compiled_only", {}, {})
+        cache_dynamic_provider(binary .. "/compiled_only.so", {
+            compiled_only = compiled,
+        })
+        write_file(source .. "/consumer.titan", [[
+            local ordinary = import "compiled_only"
+            local required = import "compiled_only.titan"
+            function answer(): integer return 42 end
+        ]])
+
+        local loader = driver.defaultloader({}, {
+            source_roots = { consumer = true },
+        })
+        local ok, _, errors = loader("consumer")
+        assert.truthy(ok)
+        assert.equal(1, #errors)
+        assert.match("source module 'compiled_only' not found",
+            errors[1], 1, true)
+        assert.equal("dynamic", driver.imported.compiled_only.kind)
     end)
 
     it("prefers source throughout a source-first invocation", function()
@@ -2669,7 +2803,7 @@ end
         local malformed = {
             "", ".", "titan.", ".titan", "titan..timer",
             "1titan", "-titan", "titan.$line", "titan timer",
-            "titan/timer",
+            "titan/timer", "pkg.titan",
         }
         local source_roots = {}
         for _, name in ipairs(malformed) do source_roots[name] = true end
@@ -2735,5 +2869,34 @@ end
         assert.equal(modtype, loaded)
         assert.equal(0, #errors)
         assert.equal(true, deps.cached)
+    end)
+
+    it("rejects a table source view after using a different cached interface",
+    function()
+        local compiled = types.Module("cached", {
+            types.ModuleMember("cached", "answer",
+                types.Function({}, { types.Integer() }, false, false, false),
+                {}),
+        })
+        local imported = {
+            cached = { kind = "dynamic", type = compiled },
+        }
+        local loader = driver.tableloader({
+            cached = [[
+                function answer(): string return "source" end
+            ]],
+        }, imported)
+
+        local ok, result, errors = loader("cached")
+        assert.truthy(ok, result)
+        assert.equal(0, #errors)
+
+        ok, result, errors = loader("cached", { kind = "source-import" })
+        assert.truthy(ok, result)
+        assert.equal(1, #errors)
+        assert.equal("source module 'cached' does not match a compiled " ..
+            "interface already used in this compilation", errors[1])
+        assert.equal("source", imported.cached.kind)
+        assert.is_true(driver.close_tableloader(loader))
     end)
 end)

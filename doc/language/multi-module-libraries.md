@@ -147,7 +147,7 @@ the same candidate at run time through the Titan binary path. Two imports from
 one provider reuse its native handle but resolve their own mangled initializer
 and function symbols.
 
-Dependency selection remains compiled-first. An ordinary `import` uses the
+Ordinary dependency selection remains compiled-first. An ordinary `import` uses the
 preferred valid compiled provider before visible flat or folder source. A
 module named explicitly on the `titanc` command line is source-first, which
 makes it a build root even when an installed provider also contains it. Source
@@ -228,7 +228,7 @@ retained those representations while advancing the embedded Lua contract from
 surface/private-provider boundary: its serialized public schema and
 reconstructible module-state prefix change while Lua 5.5.1 and the other
 value/native-call layouts remain unchanged. Every generated module also gains
-a fixed physical-provider identity slot so direct source collaborators reject
+a fixed physical-provider identity slot so explicit source collaborators reject
 canonical private state installed by another provider. ABI 0.23 retains those
 value/module layouts but moves standard callback definitions from retired
 runtime/adapter objects into generated Titan modules and gives callable entries
@@ -337,7 +337,8 @@ $ROCKS_TREE/share/lua/5.5/titan/test.lua
 
 The compiler also installs canonical test support source at
 `$ROCKS_TREE/share/titan/0.26/src/titan/test.titan`; it is compiler data for
-`--test` private-source collaboration, not another logical provider.
+the generated runner's explicit `import "titan.test.titan"` collaboration edge,
+not another logical provider.
 
 The DSO is also the installation's one complete dynamic libuv provider; in
 bundled mode the archive carries the same private libuv object payload. Both

@@ -1,5 +1,5 @@
 local test = import "test"
-local runtime_test = import "support.runtime"
+local runtime_test = import "support.runtime.titan"
 local async = import "async"
 local fs = import "fs"
 local stream = import "io"
@@ -7,9 +7,9 @@ local net = import "net"
 local ssl = import "ssl"
 local str = import "string"
 local timer = import "timer"
-local support = import "ssl.test_support"
-local net_support = import "net.test_support"
-local task_support = import "support.async"
+local support = import "ssl.test_support.titan"
+local net_support = import "net.test_support.titan"
+local task_support = import "support.async.titan"
 
 function test_ssl_combined_pem_and_binary_record_exchange(
     context: test.Context)

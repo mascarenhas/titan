@@ -755,11 +755,12 @@ static archive, or prefix-container provider therefore performs the same fresh
 local instantiation and eligibility checks. The native provider still contains
 one erased entry and one owner identity, not a specialization per application.
 
-Generic declarations obey ordinary [visibility](modules.md#declaration-order-and-visibility). A
-direct trusted source import may select a local generic declaration, just as it
-may select another local declaration. Binary metadata and transitive imports
-remain public-only. A type argument cannot smuggle a source-private owner across
-that boundary.
+Generic declarations obey ordinary [visibility](modules.md#declaration-order-and-visibility).
+An explicit import spelling such as `import "provider.titan"`, when the loader
+proves that source was selected, may select a local generic declaration just as
+it may select another local declaration. Ordinary imports, binary metadata, and
+transitive imports remain public-only. A type argument cannot smuggle a source-
+private owner across that boundary.
 
 Generics enter the compiled-module contract in ABI 0.24. ABI 0.25 retains that
 schema and erased implementation; its separate boundary changes public

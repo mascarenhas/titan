@@ -73,7 +73,7 @@ local function sorted_keys(map)
     return keys
 end
 
-local function valid_module_name(modname)
+local function portable_dotted_components(modname)
     if type(modname) ~= "string" or modname == "" then return false end
     local components = {}
     for component in modname:gmatch("[^.]+") do
@@ -90,10 +90,27 @@ local function valid_module_name(modname)
             return false
         end
     end
-    return true
+    return components
+end
+
+local function valid_module_name(modname)
+    local components = portable_dotted_components(modname)
+    if not components then return false end
+    -- The terminal `.titan` spelling is reserved by import declarations as
+    -- the explicit-source marker. The root logical module `titan` remains
+    -- valid; only a dotted name whose final component is `titan` is
+    -- ambiguous with that marker.
+    return #components == 1 or components[#components] ~= "titan"
 end
 
 staticmetadata.valid_module_name = valid_module_name
+
+-- A physical provider can be named from the common prefix of valid logical
+-- modules such as `pkg.titan.left` and `pkg.titan.right`. Validate that
+-- portable dotted prefix without treating it as an importable logical name.
+function staticmetadata.valid_provider_prefix(prefix)
+    return portable_dotted_components(prefix) ~= false
+end
 
 local function diagnostic_value(value)
     if type(value) == "string" then return format("%q", value) end

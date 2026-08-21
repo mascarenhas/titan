@@ -59,6 +59,9 @@ The source resolver runs only after ordinary compiled-module lookup for a
 dependency has missed. Exact binaries therefore retain their existing
 precedence. `titanc` marks command-line modules as explicit source roots, so
 they skip binary selection but otherwise use the same folder/flat resolver.
+An import AST marked `source_required` takes the same canonical resolver path
+under its stripped logical name, but a clean miss is terminal and no compiled
+lookup or fallback occurs.
 The old in-memory `driver.tableloader` remains a one-entry, one-source loader;
 filesystem folder semantics do not leak into checker fixtures or embeddings.
 
@@ -284,7 +287,7 @@ schema included the nominal `uv_stdio_t` process-stream wrapper used by
 ABI 0.22 still leaves folder composition unchanged, but deliberately changes
 the logical module boundary. `uv_stdio_t`, every high-level bridge function,
 and the filesystem, OS, process, Runtime, timer, and TCP owner records are now
-local declarations selected only by direct source consumers. The serialized
+local declarations selected only by explicit source consumers. The serialized
 public owner order is `Error`, `OperationError`, `CancellationReason`,
 `TaskStatus`, and `Task`: the first two come from the main and the last three
 from `task.titan`. That schema and its reconstructible module-userdata prefix,
@@ -313,7 +316,8 @@ setup, the sole initializer, and the public `Error` and `OperationError`
 records. `task.titan` owns the public `CancellationReason`, `TaskStatus`, and
 `Task` declarations alongside their implementations. Every other contributor
 declaration is source-private. Its related high-level module (`async`, `timer`,
-`net`, `os`, or `fs`) may select it only through a direct source import; no
+`net`, `os`, or `fs`) writes `import "uv.titan"` to select it through an
+explicit source import; no
 such owner or bridge is serialized into the compiled `titan.uv` interface.
 The Makefile declares this set explicitly as `UV_TITAN_SOURCES`; it does not use a
 wildcard, so adding a production source changes the reviewed build graph.

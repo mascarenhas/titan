@@ -504,8 +504,9 @@ iteration, and GC control live in `titan.math`, `titan.lua`, `titan.iteration`, 
 `titan.gc`; `titan.test` supplies native test contexts and assertions. GC-backed
 owners can attach table/full-userdata finalizers
 without discarding an existing metatable. Clean validation builds pass all
-eighteen roots to one `titanc` invocation, so their source imports are
-statically resolved
+eighteen roots to one `titanc` invocation, while the five high-level libuv
+facades explicitly import `uv.titan` for their private collaboration edges; the
+source graph is statically resolved
 inside the paired `titan.so` and `titan.a` providers. Bundled mode carries
 libuv's objects into both forms; system mode keeps the pkg-config-selected
 library as a repeated final-link input. The private LPegLabel objects enter
@@ -899,10 +900,13 @@ returns also with a`...: T` tail
 * first-class functions, including anonymous functions with proper lexical scoping
 * explicit invariant [parametric polymorphism](doc/language/generics.md) with
   Interface constraints, local call-site inference, and constraint-directed erasure
-* modules: early-bound, can be spread over multiple `.titan` files within a single folder,
-module metadata published in `.a`/`.so` files for binary import, direct source import
-allows visibility for module-local declarations ("friend" modules), visibility of module
-declarations not dependent on order
+* modules: early-bound, can be spread over multiple `.titan` files within a
+  single folder, and publish metadata in `.a`/`.so` files for binary import;
+  ordinary imports expose only public declarations even when source-resolved,
+  while `import "foo.bar.titan"` strips the marker to logical module `foo.bar`,
+  requires source with no binary fallback, and grants that one alias visibility
+  of module-local declarations ("friend" modules); dotted logical names ending
+  in `titan` are reserved by this syntax
 * module initializers (a `do ... end` block that executes on module startup)
 * FFI with C (C primitive types, pointers, arrays/structs/unions including
 stack allocation and FAMs, owned heap allocation, explicit C varargs, C function calls)

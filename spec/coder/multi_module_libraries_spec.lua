@@ -2000,7 +2000,7 @@ function get(): integer return dep.get() + 1 end
         assert.is_nil(lfs.attributes(workspace .. "/clash.a", "mode"))
     end)
 
-    it("prepares source foreign headers before compiling direct consumers",
+    it("prepares source foreign headers before explicit source consumers",
        function()
         write_file(source_root .. "/headers/types.h", [[
 typedef int ffi_int;
@@ -2014,7 +2014,7 @@ end
 ]])
         write_file(source_root .. "/headers/consumer.titan", [[
 local c = foreign import "types.h"
-local provider = import "headers.provider"
+local provider = import "headers.provider.titan"
 
 foreign function twice(input: c.ffi_int): c.ffi_int
     return provider.increment(provider.increment(input))
@@ -2065,7 +2065,7 @@ foreign function identity(input: c.ffi_int): c.ffi_int return input end
 ]])
         write_file(source_root .. "/macro/consumer.titan", [[
 local c = foreign import "consumer.h"
-local provider = import "macro.provider"
+local provider = import "macro.provider.titan"
 function collision(): integer return c.TITAN_SOURCE_COLLISION end
 ]])
 

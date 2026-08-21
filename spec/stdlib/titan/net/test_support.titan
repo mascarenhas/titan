@@ -1,6 +1,6 @@
 -- Network fixture ownership for net.tests.
 local test = import "test"
-local runtime_test = import "support.runtime"
+local runtime_test = import "support.runtime.titan"
 local async = import "async"
 local net = import "net"
 

@@ -60,11 +60,16 @@ local standard_imports = {
 }
 
 function parser.normalize_import(modname)
-    return standard_imports[modname] or modname
+    local source_required = modname:sub(-6) == ".titan"
+    if source_required then
+        modname = modname:sub(1, -7)
+    end
+    return standard_imports[modname] or modname, source_required
 end
 
 function defs.importdecl(loc, localname, modname)
-    return ast.TopLevelImport(loc, localname, parser.normalize_import(modname))
+    local normalized, source_required = parser.normalize_import(modname)
+    return ast.TopLevelImport(loc, localname, normalized, source_required)
 end
 
 function defs.get_loc(s, pos)

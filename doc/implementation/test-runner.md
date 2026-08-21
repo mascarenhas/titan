@@ -16,11 +16,14 @@ module.
 ## Resolution and the canonical support source
 
 A test invocation creates a resolver context with `source_first = true`.
-For every non-root dependency, `defaultloader` first asks the tagged folder/flat
+For every ordinary non-root dependency, `defaultloader` first asks the tagged folder/flat
 source resolver. A found source or blocked constituent is terminal; only a
 clean miss enters the existing complete `.so`/`.a` format passes, in the order
 selected by `prefer_static`. Explicit roots remain source-required. Ordinary
-resolver contexts retain their binary-first behavior byte-for-byte.
+resolver contexts retain their binary-first behavior byte-for-byte. This
+source-first policy changes selection only: it does not turn an ordinary import
+into permission to use locals. A written `.titan` import remains the only
+dependency edge that is both source-required and collaboration-capable.
 
 Checker-time static preference is provisional until resolver finalization. If a
 selected archive is later found to carry a source-selected identity, the loader
@@ -37,8 +40,10 @@ library checkout to the user's source path. Checkout mode locates
 `<checkout>/titan/test.titan` from `driver.lua`'s own provenance. Installed
 mode uses the transactionally published
 `<root>/share/titan/0.26/src/titan/test.titan`; a missing/nonregular file is an
-explicit test-mode diagnostic. This real direct source edge is what grants the
-runner access to private declarations. Binary metadata remains public-only.
+explicit test-mode diagnostic. The generated runner writes
+`import "titan.test.titan"`; that written opt-in plus this trusted source result
+grants access to private declarations. Binary metadata and ordinary source
+imports remain public-only.
 
 Generated descriptors carry `files`, an in-memory `contents` map, the usual
 `program_output`, and optionally a separate `native_output`. `parse_source`
@@ -68,7 +73,8 @@ provider physically carries other logical keys.
 
 `titan-compiler/test_runner.lua` hydrates fixed source text with:
 
-* one deterministic direct import alias per distinct owner;
+* one deterministic ordinary import alias per distinct owner;
+* one explicit `import "titan.test.titan"` alias for the private protocol;
 * one exact `(test.Context) -> ()` wrapper per case, which discards any result;
 * `TestCase` registration statements; and
 * the fixed runner implementation and `main`.
@@ -79,8 +85,9 @@ native-symbol naming. A bare owner rewritten by standard-library shorthand is
 rejected before runner checking because generated source has no exact import
 spelling for it; a bare name such as `math` would instead collide with Lua's
 `luaopen_math`. The documented `*_test`/`*_spec` convention avoids those
-pre-existing module constraints. The runner directly imports every accepted
-test owner and `titan.test`, preserving private-source identity. The source descriptor is
+pre-existing module constraints. The runner ordinarily imports every accepted
+test owner because discovered test functions are public, and explicitly imports
+`titan.test.titan` for its private protocol. The source descriptor is
 named `<first-program-output>__test_runner.titan`; the ordinary coder produces
 the adjacent `.c/.o`. `compile_program` receives an explicit
 `__test_entrypoint.c` path and links the same standalone objects, selected
@@ -109,7 +116,7 @@ policy.
 The public module serializes only `testing`, `verbose`, `location`, `skip`,
 `assert`, the nominal `Context`, and its four methods. Its fields,
 `RegisteredTest`, callback aliases, markers, state, and all `runner_*` helpers
-are local. The direct-source runner uses:
+are local. The explicit-source runner uses:
 
 * `runner_begin` / `runner_end` for module-local active and verbose state and
   the generated runner's logger callback;

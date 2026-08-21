@@ -1,4 +1,4 @@
-local uv = import "uv"
+local uv = import "uv.titan"
 local str = import "string"
 local libuv = foreign import "uv.h"
 local lua = foreign import "lua.h"

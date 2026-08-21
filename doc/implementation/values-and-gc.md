@@ -425,7 +425,7 @@ variables, ordinary-function canonical closures, then public nominal statics),
 then the consecutive mutable/const Array-metatable cache, one immutable lightuserdata
 physical-provider identity token, and fixed AST-order private slots for
 locals/imports, remaining canonical closures, and nominal namespace tables.
-A direct source importer verifies that token against its exact linked producer
+An explicit source importer verifies that token against its exact linked producer
 before reading any of those source-private slots. The remaining Array-writer,
 nominal/owned-C metatable, and transitive-owner
 module slots are allocated in inventory/first-use order and may interleave.

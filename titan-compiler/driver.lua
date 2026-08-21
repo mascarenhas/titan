@@ -351,9 +351,38 @@ function driver.new_resolver_context(options)
         native_interface_types = {},
         native_constraints = {},
         source_modules = {},
+        used_compiled_interfaces = {},
         probe_verbose = options.verbose == true,
         pretty_print = options.pretty_print == true,
     }
+end
+
+local function remember_used_compiled_interface(context, modname, modtype)
+    context.used_compiled_interfaces =
+        context.used_compiled_interfaces or {}
+    local used = context.used_compiled_interfaces[modname]
+    if not used then
+        used = {}
+        context.used_compiled_interfaces[modname] = used
+    end
+    used[types.serialize(modtype)] = true
+end
+
+local function check_used_compiled_interface(
+        context, modname, source_type, errors)
+    if #errors ~= 0 then return end
+    local used = context.used_compiled_interfaces and
+        context.used_compiled_interfaces[modname]
+    if not used then return end
+    local source_interface = types.serialize(source_type)
+    for compiled_interface in pairs(used) do
+        if compiled_interface ~= source_interface then
+            errors[#errors + 1] = "source module '" .. modname ..
+                "' does not match a compiled interface already used in " ..
+                "this compilation"
+            return
+        end
+    end
 end
 
 local function add_native_constraint(
@@ -2425,6 +2454,7 @@ function driver.defaultloader(static_deps, options)
                 end,
             })
         table.remove(dependency_stack)
+        check_used_compiled_interface(context, modname, modt, errors)
         local has_foreign = driver.ast_has_foreign_functions(ast)
         local foreign_header = has_foreign and driver.foreign_header_filename(
             source.native_output or source.main) or nil
@@ -2497,6 +2527,8 @@ function driver.defaultloader(static_deps, options)
             return nil
         end
         if modname == exposing_name then
+            remember_used_compiled_interface(
+                context, modname, exposing.type)
             return true, exposing.type, {}
         end
 
@@ -2508,12 +2540,15 @@ function driver.defaultloader(static_deps, options)
         if cached then
             if cached.error then return false, cached.error end
             context.native_interface_types[modname] = cached.type
+            remember_used_compiled_interface(
+                context, modname, cached.type)
             return true, cached.type, {}
         end
 
         local function remember_type(modtype)
             context.contextual_types[cache_key] = { type = modtype }
             context.native_interface_types[modname] = modtype
+            remember_used_compiled_interface(context, modname, modtype)
             return true, modtype, {}
         end
 
@@ -2583,7 +2618,12 @@ function driver.defaultloader(static_deps, options)
             return false, "circular reference to module"
         end
 
-        local source_required = source_roots[modname] == true
+        -- Command-line roots and `.titan` import spellings both require a
+        -- source implementation. The latter is an edge-local request: it may
+        -- replace an already cached binary selection, and a clean source miss
+        -- is terminal instead of falling back to a provider.
+        local source_required = source_roots[modname] == true or
+            (request and request.kind == "source-import")
         local source_preferred = source_required or context.source_first or
             source_overrides[modname] ~= nil
         local source, source_err
@@ -2629,6 +2669,11 @@ function driver.defaultloader(static_deps, options)
             local mod = driver.imported[modname]
             remember_dependency_closure(modname)
             remember_direct_dependency(modname)
+            if mod.kind == "dynamic" or mod.kind == "static" or
+               mod.compiled then
+                remember_used_compiled_interface(
+                    context, modname, mod.type)
+            end
             local info = { kind = mod.kind }
             if mod.kind == "source" and mod.filename then
                 local foreign_header = mod.checking_foreign_header
@@ -2669,6 +2714,8 @@ function driver.defaultloader(static_deps, options)
                 static_deps[modname] = true
             end
             remember_direct_dependency(modname)
+            remember_used_compiled_interface(
+                context, modname, resolved.type)
             return true, resolved.type, {}, { kind = resolved.kind }
         elseif compiled_err then
             return false, compiled_err
@@ -2950,8 +2997,13 @@ function driver.tableloader(modtable, imported, deps, options)
     local context = options.context or driver.new_resolver_context(options)
     local source_view = options.interface == "source"
 
-    local function selected_interface(mod)
-        if source_view and mod.kind == "source" and mod.source_type then
+    local function source_requested(request)
+        return request and request.kind == "source-import"
+    end
+
+    local function selected_interface(mod, request)
+        if (source_view or source_requested(request)) and
+           mod.kind == "source" and mod.source_type then
             local header = mod.filename and mod.ast
                 and driver.ast_has_foreign_functions(mod.ast)
                 and driver.foreign_header_filename(
@@ -2966,19 +3018,42 @@ function driver.tableloader(modtable, imported, deps, options)
             and "compiled" or mod.kind }
     end
 
-    local function loader(modname)
+    local function loader(modname, request)
+        if not staticmetadata.valid_module_name(modname) then
+            return false, "invalid logical Titan module name " ..
+                string.format("%q", modname)
+        end
         if imported[modname] == CIRCULAR_MARK then
             imported[modname] = nil
             return false, "circular reference to module"
         end
         if imported[modname] then
             local mod = imported[modname]
-            deps[modname] = true
-            local modtype, info = selected_interface(mod)
-            return true, modtype, {}, info
+            if source_requested(request) and
+               (mod.kind ~= "source" or not mod.source_type) then
+                if modtable[modname] == nil then
+                    return false,
+                        "source module '" .. modname .. "' not found"
+                end
+                imported[modname] = nil
+            else
+                deps[modname] = true
+                if mod.kind ~= "source" then
+                    remember_used_compiled_interface(
+                        context, modname, mod.type)
+                end
+                local modtype, info = selected_interface(mod, request)
+                return true, modtype, {}, info
+            end
         end
         local modf = "./" .. modname .. ".titan"
         local input = modtable[modname]
+        if input == nil then
+            local message = request and request.kind == "source-import"
+                and ("source module '" .. modname .. "' not found")
+                or ("module '" .. modname .. "' not found")
+            return false, message
+        end
         local ast, err = parser.parse(modf, input)
         if not ast then return false, parser.error_to_string(err, modf) end
         imported[modname] = CIRCULAR_MARK
@@ -2988,13 +3063,16 @@ function driver.tableloader(modtable, imported, deps, options)
                     return driver.get_probe_service(context)
                 end,
             })
+        check_used_compiled_interface(
+            context, modname, source_type, errors)
         if #errors ~= 0 then
             imported[modname] = {
                 kind = "source", ast = ast, type = source_type,
                 source_type = source_type, filename = modf,
             }
             deps[modname] = true
-            local modtype, info = selected_interface(imported[modname])
+            local modtype, info = selected_interface(
+                imported[modname], request)
             return true, modtype, errors, info
         end
 
@@ -3012,7 +3090,7 @@ function driver.tableloader(modtable, imported, deps, options)
             source_type = source_type, filename = modf,
         }
         deps[modname] = true
-        local modtype, info = selected_interface(imported[modname])
+        local modtype, info = selected_interface(imported[modname], request)
         return true, modtype, errors, info
     end
     loader_contexts[loader] = {
@@ -5305,6 +5383,15 @@ local function safe_module_output_path(modname, extension)
     return table.concat(components, "/") .. extension
 end
 
+local function safe_provider_output_path(provider, extension)
+    if not staticmetadata.valid_provider_prefix(provider) then return nil end
+    local components = {}
+    for component in provider:gmatch("[^.]+") do
+        table.insert(components, component)
+    end
+    return table.concat(components, "/") .. extension
+end
+
 local function validate_output_ancestors(filename)
     local normalized = normalized_absolute_filename(filename)
     local parent = normalized:match("^(.*)/[^/]+$")
@@ -5753,7 +5840,7 @@ end
 -- Validate the complete shim set before code generation. Only files carrying
 -- Titan's exact generated banner are owned and replaceable.
 function driver.plan_module_shims(provider, module_names)
-    local provider_path = safe_module_output_path(provider, ".so")
+    local provider_path = safe_provider_output_path(provider, ".so")
     if not provider_path then
         return nil, "invalid library provider name '" .. tostring(provider) .. "'"
     end

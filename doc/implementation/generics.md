@@ -259,9 +259,9 @@ Applying it substitutes into the canonical owner and returns the ordinary
 surface `Nominal(target,args)`. A bare scalar use substitutes `value` for every
 argument and then validates constraints. A concrete `TypeAlias` whose RHS is
 already `Pair<integer,integer>` has no arity. Public `GenericAlias` descriptors
-serialize in `Type.Module.type_members`; local ones do not. A direct source-
-private target is valid only through the existing direct-source capability and
-is never serialized.
+serialize in `Type.Module.type_members`; local ones do not. A source-private
+target is valid only through an explicit `.titan` edge and its direct-owner
+capability, and is never serialized.
 
 Every new type tag participates in `tostring`, equality and alpha-equivalence,
 graph traversal, substitution, normalization, serialization, and the closed
@@ -306,9 +306,11 @@ parameters. Missing, inaccessible, mutable, differently constrained, or
 incompatible members fail before erasure. The erased signature is never used
 to make two incompatible generic methods appear equal.
 
-Generic source visibility is ordinary source visibility. Direct source imports
-can select a local owner, scheme, or forwarding alias through their existing
-capability; binary recovery and transitive importers remain public-only.
+Generic source visibility follows the same explicit opt-in. An import whose
+terminal `.titan` marker was paired with trusted source provenance can select a
+local owner, scheme, or forwarding alias through its direct capability;
+ordinary source imports, binary recovery, and transitive importers remain
+public-only.
 
 ## Local instantiation and inference
 
@@ -920,7 +922,7 @@ Focused tests and reviews therefore establish:
 - scope/index alpha-equivalence, invariant applications, smart substitution,
   recursive eligibility, and deterministic serialization;
 - fresh use isolation, result/context/lambda inference, constraint validation,
-  rigid capability rejection, and direct-source visibility;
+  rigid capability rejection, and explicit-source visibility;
 - a frozen generic `ast._declared_type` beside a code-facing AST containing no
   parameter, scheme, application, alias descriptor, or inference cell;
 - no guard on a statically typed closed-to-carrier argument, constructor, or

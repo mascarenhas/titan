@@ -51,9 +51,9 @@ local function public_record(fqtn, fields)
         fqtn, fields, { new = constructor }, {}, #fields)
 end
 
-local function owner_interface(modname, record_name)
+local function owner_interface(modname, record_name, fields)
     local fqtn = modname .. "." .. record_name
-    local record = public_record(fqtn, {})
+    local record = public_record(fqtn, fields or {})
     local member = types.ModuleMember(
         modname, record_name, record, false)
     return types.Module(modname, { member }), record
@@ -699,10 +699,13 @@ end
             ["replace.owner"] = owner,
         })
         ensure_directory(source .. "/replace")
-        write_file(source .. "/replace/facade.titan", [[
-            function marker(): integer
-                return 1
+        write_file(source .. "/replace/owner.titan", [[
+            record Box
             end
+        ]])
+        write_file(source .. "/replace/facade.titan", [[
+            local owner = import "replace.owner.titan"
+            type Box = owner.Box
         ]])
         local source_roots = {}
         local loader = driver.defaultloader({}, {
@@ -727,7 +730,10 @@ end
         assert.truthy(ok)
         assert.equal(0, #source_errors)
         assert.equal("replace.facade", source_type.name)
+        assert.equal(types.serialize(facade),
+            types.serialize(source_type))
         assert.equal("source", driver.imported["replace.facade"].kind)
+        assert.equal("source", driver.imported["replace.owner"].kind)
 
         local finalized, final_errors =
             driver.finalize_resolver_context(context)
@@ -735,9 +741,130 @@ end
             final_errors and table.concat(final_errors, "\n"))
         assert.same({}, context.selected_static_providers)
         assert.same({}, constraints(context, "replace.owner"))
-        assert.is_nil(context.native_bindings["replace.owner"])
+        assert.is_nil(context.physical_owner["replace.owner"])
+        assert.equal("direct",
+            context.native_bindings["replace.owner"])
         assert.equal("direct",
             context.native_bindings["replace.facade"])
+    end)
+
+    it("rejects a changed source owner recovered through a compiled facade",
+       function()
+        local owner_name = "guard.owner"
+        local owner_fqtn = owner_name .. ".Box"
+        local owner = owner_interface(owner_name, "Box", {
+            types.Field(
+                owner_fqtn, "old", types.Integer(), 0, false),
+        })
+        local facade = facade_interface(
+            "guard.facade", "Box", owner_fqtn)
+        local context =
+            driver.new_resolver_context({ prefer_static = true })
+        cache_provider(context, "guard.a", {
+            ["guard.facade"] = facade,
+            [owner_name] = owner,
+        })
+        ensure_directory(source .. "/guard")
+        write_file(source .. "/guard/owner.titan", [[
+            record Box
+                replacement: string
+            end
+        ]])
+        write_file(source .. "/guard/facade.titan", [[
+            local owner = import "guard.owner.titan"
+            type Box = owner.Box
+        ]])
+        local source_roots = {}
+        local loader = driver.defaultloader({}, {
+            context = context,
+            source_roots = source_roots,
+        })
+
+        local compiled, compiled_errors =
+            checker.checkimport("guard.facade", loader)
+        assert.truthy(compiled)
+        assert.equal(0, #compiled_errors)
+        assert.truthy(types.registry[owner_fqtn])
+
+        source_roots["guard.facade"] = true
+        local ok, _, source_errors = loader("guard.facade")
+        assert.truthy(ok)
+        assert.equal(1, #source_errors)
+        assert.equal("source module 'guard.owner' does not match a compiled " ..
+            "interface already used in this compilation", source_errors[1])
+        assert.equal("source", driver.imported["guard.owner"].kind)
+        assert.equal("source", driver.imported["guard.facade"].kind)
+    end)
+
+    it("checks source owners against every compiled contextual view",
+       function()
+        local owner_name = "views.owner"
+        local owner_fqtn = owner_name .. ".Box"
+        local old_owner = owner_interface(owner_name, "Box", {
+            types.Field(
+                owner_fqtn, "old", types.Integer(), 0, false),
+        })
+        local current_owner = owner_interface(owner_name, "Box", {
+            types.Field(
+                owner_fqtn, "current", types.String(), 0, false),
+        })
+        local left_facade = facade_interface(
+            "left.facade", "Box", owner_fqtn)
+        local right_facade = facade_interface(
+            "right.facade", "Box", owner_fqtn)
+        local left_dso = binary .. "/left.so"
+        local right_dso = binary .. "/right.so"
+        write_file(left_dso, "mock left DSO\n")
+        write_file(right_dso, "mock right DSO\n")
+        local exports = {
+            [left_dso] = {
+                left_facade_types = types.serialize(left_facade),
+                views_owner_types = types.serialize(old_owner),
+            },
+            [right_dso] = {
+                right_facade_types = types.serialize(right_facade),
+                views_owner_types = types.serialize(current_owner),
+            },
+        }
+        titan._loadlib = function(filename, symbol)
+            local image = exports[filename]
+            if not image then
+                return nil, "unexpected DSO: " .. filename, "init"
+            end
+            local serialized = image[symbol]
+            if serialized then return function() return serialized end end
+            local prefix = symbol:match("^(.*)_abi$")
+            if prefix and image[prefix .. "_types"] then
+                return function() return driver.TITAN_VER end
+            end
+            return nil, "undefined symbol: " .. symbol, "init"
+        end
+        ensure_directory(source .. "/views")
+        write_file(source .. "/views/owner.titan", [[
+            record Box
+                current: string
+            end
+        ]])
+        local source_roots = {}
+        local loader = driver.defaultloader({}, {
+            context = driver.new_resolver_context(),
+            source_roots = source_roots,
+        })
+
+        local left, left_errors = checker.checkimport("left.facade", loader)
+        assert.truthy(left)
+        assert.equal(0, #left_errors)
+        local right, right_errors = checker.checkimport("right.facade", loader)
+        assert.truthy(right)
+        assert.equal(0, #right_errors)
+
+        source_roots[owner_name] = true
+        local ok, _, source_errors = loader(owner_name)
+        assert.truthy(ok)
+        assert.equal(1, #source_errors)
+        assert.equal("source module 'views.owner' does not match a compiled " ..
+            "interface already used in this compilation", source_errors[1])
+        assert.equal("source", driver.imported[owner_name].kind)
     end)
 
     it("rejects producer-dynamic owner constraints from different providers",

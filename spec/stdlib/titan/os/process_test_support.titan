@@ -3,7 +3,7 @@ local async = import "async"
 local stream = import "io"
 local system = import "os"
 local timer = import "timer"
-local task_support = import "support.async"
+local task_support = import "support.async.titan"
 
 local type CheckedAction = () -> ()
 

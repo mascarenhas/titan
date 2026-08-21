@@ -16,7 +16,13 @@ source/binary lookup, code generation, generated-shim planning, and static
 metadata acceptance. The alphabet is exactly what the native protocol can
 turn into a portable C identifier after its established dash-to-underscore
 mangling, and it keeps template metacharacters such as `$` out of generated
-symbol names.
+symbol names. The validator also rejects a dotted logical name whose final
+component is `titan`: import syntax reserves that terminal spelling as the
+explicit-source marker. Bare `titan` and a nonterminal `titan` component remain
+valid. The reservation applies only to logical module keys. A physical provider
+prefix derived from valid roots may end in that component, so
+`pkg.titan.left` and `pkg.titan.right` can share `pkg/titan.so` and
+`pkg/titan.a`.
 Binary lookup maps a logical name to every shallow-to-exact provider
 candidate. For `a.b.c`, those are `a.so`, `a/b.so`, and `a/b/c.so`, plus the
 corresponding `.a` names. It performs one complete format pass at a time
@@ -59,7 +65,7 @@ All modules, including the standard library, use the same two path strings:
   `TITAN_PATH_0_26` wins over `TITAN_PATH`; with neither set, installed mode
   uses `".;" .. root .. "/lib/titan/0.26"`.
 
-For `import foo.bar`, each compiled-format pass probes the shallow `foo`
+For ordinary import `foo.bar`, each compiled-format pass probes the shallow `foo`
 provider and then exact `foo/bar` provider with that pass's extension:
 `foo.so`, `foo/bar.so` in the DSO pass and `foo.a`, `foo/bar.a` in the
 archive pass. If source is needed, lookup checks `foo/bar/bar.titan` before
@@ -107,13 +113,14 @@ preferred compiled-format pass; Lua requires use a generated shim and the DSO
 form.
 
 `titan.uv` is the private Runtime and native-provider layer. `titan.async`
-imports it and exposes the public asynchronous facade, including transparent
-aliases of uv-owned record types. The timer/fs/net/os modules also import uv
-directly for their low-level plumbing, so all five consumers share one Runtime
-and one canonical libuv provider image.
+explicitly imports it as `uv.titan` and exposes the public asynchronous facade,
+including transparent aliases of uv-owned record types. The timer/fs/net/os
+modules use the same explicit spelling for their low-level plumbing, so all five
+consumers share one Runtime and one canonical libuv provider image.
 
-For source convenience, the parser desugars the fourteen short standard-library
-imports before module resolution: `import "async"`, for example, places
+For source convenience, the parser first removes one terminal explicit-source
+marker, `.titan`, and then desugars the fourteen short standard-library imports
+before module resolution: `import "async"`, for example, places
 `titan.async` in the import AST exactly as `import "titan.async"` would. The same
 mapping applies to `coroutine`, `uv`, `timer`, `io`, `fs`, `net`, `ssl`, `url`, `http`,
 `os`, `peg`, `string`, and `test`; every other name is left unchanged. The driver, checker, code
@@ -122,10 +129,14 @@ see only the qualified module name. Each qualified name naturally produces its
 matching native symbols and Lua entry point (`titan_async_*` and
 `luaopen_titan_async`, for example), so no separate Lua alias is required and
 Lua's bare `coroutine` and `os` libraries remain unrelated.
+The AST retains the marker only as `TopLevelImport.source_required`; its
+`modname` is canonical. Thus `uv.titan` and `titan.uv.titan` both carry
+`modname == "titan.uv"`, and no cache key, dependency, symbol, output, or
+metadata entry includes the marker.
 
 ### Source vs compiled providers: the selection logic
 
-Dependency resolution is unconditionally **binary first**: the driver probes
+Ordinary dependency resolution is **binary first**: the driver probes
 the logical module's shallow-to-exact candidates on `TITAN_BIN_PATH`, recovers
 the first validating interface, and does not inspect source timestamps. Only
 when every candidate is absent or every existing ancestor is a clean metadata
@@ -136,14 +147,27 @@ equally to standard-library and application dependencies. In particular, a
 stray `./titan/uv/uv.titan` folder does not capture `import "uv"` while an
 installed compiled standard provider claims `titan.uv` on the binary path.
 
-Source privacy is evaluated only after the complete binary-candidate miss. A requested
-nested flat file that is an immediate constituent of its parent folder module
-returns `blocked` and stops source-root traversal; it cannot be exposed by a
-later root. Any claiming child provider still wins before this check, and a genuine
-deeper child folder wins before the constituent flat candidate.
+An import request carrying `kind == "source-import"` is source-required. The
+loader resolves the stripped canonical name through the same tagged folder/flat
+source resolver, without entering a compiled-provider pass. A clean miss returns
+`source module '<name>' not found`; blocked source and all source errors are also
+terminal. The request bypasses a cached DSO/archive selection and replaces it
+with source when source exists. It never falls back to that cached provider.
+When the current resolver has already returned that compiled interface to an
+earlier importer, replacement additionally requires the source module's
+serialized public projection to match it. This per-resolver guard prevents
+stale typed ASTs while leaving an unused process-global cache entry replaceable
+by a later independent compilation.
 
-An explicitly requested `titanc` root is the one exception because naming a
-root is a request to build it. `titanc` passes the complete requested-root set
+For an ordinary import, source privacy is evaluated only after the complete
+binary-candidate miss. A requested nested flat file that is an immediate
+constituent of its parent folder module returns `blocked` and stops source-root
+traversal; it cannot be exposed by a later root. Any claiming child provider
+still wins before this check for an ordinary import, and a genuine deeper child
+folder wins before the constituent flat candidate in either mode.
+
+An explicitly requested `titanc` root is another source-required case because
+naming a root is a request to build it. `titanc` passes the complete requested-root set
 as `options.source_roots`; each such module tries source first, even if a
 binary for it was cached by an earlier import in the same compiler process.
 If its source is absent, compilation fails rather than treating an existing
@@ -153,11 +177,13 @@ through source even when a bootstrap or prior combined provider pair is
 visible. Their internal imports resolve to the already selected source cache
 entries and are linked statically into the replacement provider pair.
 
-A `--test` invocation is the second deliberate exception. Its resolver context
-sets `source_first`, making every dependency try the tagged source resolver
+A `--test` invocation is the invocation-wide source-preference case. Its
+resolver context sets `source_first`, making every dependency try the tagged source resolver
 before compiled formats and retaining binary fallback only on a clean miss. A
 narrow source override selects canonical `titan.test`, while generated
-`titan.test.runner` uses an in-memory ordinary source descriptor. See
+`titan.test.runner` uses an in-memory ordinary source descriptor. This lookup
+preference does not expose locals through ordinary imports; the generated runner
+writes `import "titan.test.titan"` for its private protocol. See
 [Native test runner](test-runner.md).
 
 The compiled branch runs complete format passes. A DSO candidate is probed
@@ -247,13 +273,18 @@ The checker does not know how to find modules. `checker.checkimport`
 with the protocol:
 
 ```
-loader(modname) -> ok, moduletype_or_error_message, errors
+loader(modname, request)
+    -> ok, moduletype_or_error_message, errors, import_info
 ```
 
 On success `ok` is true, the second value is the dependency's
 `Type.Module`, and the third is the (possibly empty) list of type errors
-found while checking it. On failure `ok` is false and the second value
-is a message. See [the type checker](checker.md) for the consumer side.
+found while checking it. `import_info.kind` reports trusted source, dynamic, or
+static provenance and may carry a source-generated foreign header. `request` is
+normally nil; explicit `.titan` imports pass `kind == "source-import"`, while
+compiled nominal-owner recovery uses its separate contextual request. On
+failure `ok` is false and the second value is a message. See
+[the type checker](checker.md) for the consumer side.
 
 ### `driver.defaultloader(static_deps, options)`
 
@@ -279,15 +310,17 @@ The closure proceeds in this order:
    same archive; a DSO-carried owner is probed from that same DSO; otherwise a
    compiled lookup may recover type information without committing ordinary
    resolver state or selecting an archive.
-2. An ordinary cache hit returns the cached type and remembers a direct
-   source/static edge for compatibility callers. If a name is now an explicit
-   `options.source_roots` build root, a prior compiled cache entry is discarded
-   so cache history cannot hide the requested source.
-3. An explicit root resolves folder/flat source or fails. Every other lookup
+2. The loader derives `source_required` for command-line roots and explicit
+   `.titan` requests, and `source_preferred` from that requirement, test mode's
+   invocation-wide `source_first`, or a source override. A preferred source may
+   replace a compiled cache entry; a required-source clean miss is terminal,
+   while `source_first` retains the compiled cache/fallback on a clean miss.
+3. A remaining cache hit returns its type and records the dependency. Otherwise
+   a preferred lookup tries folder/flat source first. An ordinary lookup then
    runs one complete compiled pass per format on `TITAN_BIN_PATH`—`.so` then
-   `.a` by default, reversed by `prefer_static`—before looking for source on
-   `TITAN_SOURCE_PATH`. Root-major, shallow-to-exact order and occupied
-   relative-path shadowing are independent within each format.
+   `.a` by default, reversed by `prefer_static`—before its final source fallback
+   on `TITAN_SOURCE_PATH`. Root-major, shallow-to-exact order and occupied
+   relative-path shadowing are independent within each compiled format.
 4. A source hit is a tagged flat/folder descriptor. Every listed file is read
    and parsed independently with its real filename. The main initializer is
    saved, contributor roots are appended in descriptor order, contributor
@@ -344,16 +377,22 @@ wiring](codegen-overview.md)). Folder layout does not add a loader protocol;
 the relevant filesystem options are `source_roots` and the shared resolver
 `context`.
 
-### `driver.tableloader(modtable, imported, deps)`
+### `driver.tableloader(modtable, imported, deps, options)`
 
 The in-memory variant used by the spec suite: module sources come from
 the `modtable` table instead of the filesystem (filename is faked as
 `"./" .. modname .. ".titan"`), and the caller supplies the `imported`
-cache (and optionally the `deps` set) explicitly. After checking, it round-trips the
-module type through `types.serialize` and `load`, exactly like the
-`.so` path, so the serializer is exercised even in pure-source tests.
-That round trip already exposes constructor-schema drift such as
-`flexrettype`; it does not by itself authorize loading that schema under the
+cache (and optionally the `deps` set) explicitly. After a successful check, it
+retains both the trusted raw `source_type` and a public `type` round-tripped
+through `types.serialize` and `load`, exactly like the `.so` path. Ordinary
+calls receive the public projection by default. `options.interface == "source"`
+or an explicit `source-import` request receives the raw source view plus trusted
+source provenance; only the request can grant an import AST local visibility.
+An explicit request may replace a cached compiled entry when `modtable` has the
+source and fails when it does not. If that compiled interface was already
+returned in the same resolver, its public serialization must match the new
+source projection. The round trip already exposes constructor-schema drift such
+as `flexrettype`; it does not by itself authorize loading that schema under the
 current compiled-module ABI marker.
 It deliberately remains a flat one-string-per-module loader. Source folders,
 privacy blocks, and contributor enumeration belong only to
@@ -842,10 +881,12 @@ Its flow:
 
 1. **Typecheck everything first.** One loader and resolver context shared by
    the complete `source_roots` set checks every requested module through
-   `checker.checkimport`; requested roots are source-first, imports are checked
-   recursively with compiled-format-first resolution, and each selected
+   `checker.checkimport`; requested roots are source-first, ordinary imports are
+   checked recursively with compiled-format-first resolution, explicit `.titan`
+   imports are source-required, and each selected
    folder is parsed into one dense AST and checked under its logical name.
-   Each source module records direct source/static edges. After all roots,
+   Each source module records direct source/static dependency edges under
+   canonical stripped logical names. After all roots,
    `driver.finalize_resolver_context` derives the invocation-wide source set,
    deduplicated selected archives, producer-binding constraints, and
    `native_static_names`, which every `compile_module`/`coder.generate` pass
@@ -1154,7 +1195,7 @@ the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 | `driver.TITAN_BIN_PATH` | `driver.lua` | `TITAN_PATH_0_26`, `TITAN_PATH`, or `.;<root>/lib/titan/0.26` in installed mode | Roots for root-major, shallow-to-exact compiled-provider search; checkout mode retains the legacy `/usr/local` fallback. |
 | `driver.TITAN_SOURCE_PATH` | `driver.lua` | `"."` (overridden by `titanc --tree`) | Semicolon-separated roots searched for folder `P/B.titan` before flat `P.titan`, including contributor privacy checks. |
 | `TITAN_NO_LINE_DIRECTIVES` / `driver.EMIT_LINE_DIRECTIVES` | environment / `driver.lua` | unset / true | Exact environment value `1`, or `titanc --no-line-directives`, disables generated Titan `#line` directives for physical generated-C diagnostics; this can omit ordinary native Titan frames from logical tracebacks. |
-| `options.source_roots` | `titanc` / `driver.defaultloader` | every CLI module name | Requires explicit build roots to come from flat/folder source while all dependencies remain binary-first; selected source descriptors also provide `program_output`. |
+| `options.source_roots` | `titanc` / `driver.defaultloader` | every CLI module name | Requires explicit build roots to come from flat/folder source; other ordinary edges retain the resolver context's binary-first or test-mode source-first policy, while `.titan` edges remain source-required. Selected source descriptors also provide `program_output`. |
 | `titan._loadlib` | `ltitanlib.c` / `driver.lua` | internal `RTLD_LAZY` + `RTLD_LOCAL` loader | Maps DSO candidates lazily for callable ABI/type interface recovery without initializing them or globalizing their symbols; archive candidates are parsed in-process instead. |
 | `titan._loadlibglobal` | `ltitanlib.c` / generated shims | internal canonical-path `RTLD_LAZY` + `RTLD_GLOBAL` loader | Maps or promotes a Lua-selected provider in a separate per-state cache and returns the requested logical `luaopen_*` entry. |
 | `Type.Module.file` | `types.lua`, `driver.lua`, `coder.lua` | exact logical `.so` path for a DSO claim, overwritten after dynamic lookup | Transient selected relative DSO used by generated handle imports; deliberately omitted from serialized interfaces and never populated with an archive path. |

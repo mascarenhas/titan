@@ -1,6 +1,6 @@
 -- Shared fixture ownership for uv Task tests.
 local test = import "test"
-local runtime_test = import "support.runtime"
+local runtime_test = import "support.runtime.titan"
 local async = import "async"
 local coroutine = import "coroutine"
 local fs = import "fs"

@@ -3057,7 +3057,7 @@ describe("generic declarations and explicit calls", function()
                     end
                 ]],
                 first = [[
-                    local provider = import "provider"
+                    local provider = import "provider.titan"
                     function use(): provider.Box<string>
                         return provider.boxed()
                     end

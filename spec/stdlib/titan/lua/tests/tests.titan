@@ -1,13 +1,13 @@
 -- Native titan.lua behavior tests.
 local test = import "test"
-local runtime_test = import "support.runtime"
+local runtime_test = import "support.runtime.titan"
 local async = import "async"
 local fs = import "fs"
 local timer = import "timer"
 local tlua = import "titan.lua"
-local common = import "support.common"
-local lua_support = import "lua.test_support"
-local task_support = import "support.async"
+local common = import "support.common.titan"
+local lua_support = import "lua.test_support.titan"
+local task_support = import "support.async.titan"
 
 -- Package-search tests inspect and temporarily replace existing Lua package
 -- fields through the narrow C API boundary.

@@ -1,4 +1,4 @@
-local uv = import "uv"
+local uv = import "uv.titan"
 local str = import "string"
 
 type Error = uv.Error

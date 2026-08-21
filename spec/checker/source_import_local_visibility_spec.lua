@@ -5,8 +5,7 @@ local types = require "titan-compiler.types"
 local h = require "spec.support.helpers"
 
 local function check_modules(modules, main)
-    local ok, err = h.run_checker_modules(
-        modules, main, { interface = "source" })
+    local ok, err = h.run_checker_modules(modules, main)
     assert.truthy(ok, err)
 end
 
@@ -35,7 +34,7 @@ describe("source-import local visibility (checker)", function()
                 end
             ]],
             source_local_consumer = [[
-                local provider = import "source_local_provider"
+                local provider = import "source_local_provider.titan"
 
                 function inspect(): integer
                     local token: provider.Token = provider.Token.new(40)
@@ -52,6 +51,87 @@ describe("source-import local visibility (checker)", function()
                 end
             ]],
         }, "source_local_consumer")
+    end)
+
+    it("keeps locals hidden on an ordinary import resolved from source",
+    function()
+        local ok, err = h.run_checker_modules({
+            source_ordinary_provider = [[
+                local function hidden(): integer return 40 end
+                function visible(): integer return 2 end
+            ]],
+            source_ordinary_consumer = [[
+                local provider = import "source_ordinary_provider"
+                function inspect(): integer
+                    return provider.hidden() + provider.visible()
+                end
+            ]],
+        }, "source_ordinary_consumer", { interface = "source" })
+        assert.falsy(ok)
+        assert.match("member 'hidden' not found inside module " ..
+            "'source_ordinary_provider'", err, 1, true)
+    end)
+
+    it("keeps source authority local to each alias in either cache order",
+    function()
+        for _, imports in ipairs({
+            [[
+                local public_view = import "source_alias_order_provider"
+                local source_view = import "source_alias_order_provider.titan"
+            ]],
+            [[
+                local source_view = import "source_alias_order_provider.titan"
+                local public_view = import "source_alias_order_provider"
+            ]],
+        }) do
+            local ok, err = h.run_checker_modules({
+                source_alias_order_provider = [[
+                    local function hidden(): integer return 40 end
+                    function visible(): integer return 2 end
+                ]],
+                source_alias_order_consumer = imports .. [[
+                    function inspect(): integer
+                        return source_view.hidden() + public_view.visible()
+                            + public_view.hidden()
+                    end
+                ]],
+            }, "source_alias_order_consumer")
+            assert.falsy(ok)
+            assert.match("member 'hidden' not found inside module " ..
+                "'source_alias_order_provider'", err, 1, true)
+            local _, count = err:gsub("member 'hidden' not found", "")
+            assert.equal(1, count, err)
+        end
+    end)
+
+    it("rejects a repeated marker instead of naming a .titan module",
+    function()
+        local ok, err = h.run_checker_modules({
+            ["source_repeated_marker.titan"] = [[
+                function visible(): integer return 42 end
+            ]],
+            source_repeated_marker_consumer = [[
+                local provider =
+                    import "source_repeated_marker.titan.titan"
+                function inspect(): integer return provider.visible() end
+            ]],
+        }, "source_repeated_marker_consumer")
+        assert.falsy(ok)
+        assert.match("invalid logical Titan module name " ..
+            '"source_repeated_marker.titan"', err, 1, true)
+    end)
+
+    it("requires a tableloader source entry for an explicit import",
+    function()
+        local ok, err = h.run_checker_modules({
+            source_missing_consumer = [[
+                local missing = import "source_missing_provider.titan"
+                function inspect(): integer return missing.visible() end
+            ]],
+        }, "source_missing_consumer")
+        assert.falsy(ok)
+        assert.match("source module 'source_missing_provider' not found",
+            err, 1, true)
     end)
 
     it("exposes local fields, constructors, statics, methods, and variants " ..
@@ -78,7 +158,7 @@ describe("source-import local visibility (checker)", function()
                 end
             ]],
             source_member_consumer = [[
-                local provider = import "source_member_provider"
+                local provider = import "source_member_provider.titan"
 
                 function inspect(): integer
                     local construct: (integer, integer) -> provider.Box =
@@ -110,7 +190,7 @@ describe("source-import local visibility (checker)", function()
                 end
             ]],
             source_variable_consumer = [[
-                local provider = import "source_variable_provider"
+                local provider = import "source_variable_provider.titan"
 
                 function inspect(): integer
                     provider.secret = provider.secret + 1
@@ -132,7 +212,7 @@ describe("source-import local visibility (checker)", function()
                 end
             ]],
             source_visibility_bridge = [[
-                local leaf = import "source_visibility_leaf"
+                local leaf = import "source_visibility_leaf.titan"
                 local type Borrowed = leaf.Secret
 
                 local function borrow(): Borrowed
@@ -144,7 +224,7 @@ describe("source-import local visibility (checker)", function()
                 end
             ]],
             source_visibility_field_consumer = [[
-                local bridge = import "source_visibility_bridge"
+                local bridge = import "source_visibility_bridge.titan"
 
                 function inspect(): integer
                     local secret: bridge.Borrowed = bridge.borrow()
@@ -164,7 +244,7 @@ describe("source-import local visibility (checker)", function()
 
         modules.source_visibility_field_consumer = nil
         modules.source_visibility_method_consumer = [[
-            local bridge = import "source_visibility_bridge"
+            local bridge = import "source_visibility_bridge.titan"
 
             function inspect(): integer
                 local secret: bridge.Borrowed = bridge.borrow()
@@ -183,8 +263,8 @@ describe("source-import local visibility (checker)", function()
 
         modules.source_visibility_method_consumer = nil
         modules.source_visibility_direct_consumer = [[
-            local bridge = import "source_visibility_bridge"
-            local leaf = import "source_visibility_leaf"
+            local bridge = import "source_visibility_bridge.titan"
+            local leaf = import "source_visibility_leaf.titan"
 
             function inspect(): integer
                 local secret: leaf.Secret = bridge.borrow()
@@ -208,7 +288,7 @@ describe("source-import local visibility (checker)", function()
                 end
             ]],
             source_local_facade = [[
-                local owner = import "source_local_owner"
+                local owner = import "source_local_owner.titan"
                 local type Secret = owner.Secret
 
                 local function make(): Secret
@@ -216,7 +296,7 @@ describe("source-import local visibility (checker)", function()
                 end
             ]],
             source_local_facade_consumer = [[
-                local facade = import "source_local_facade"
+                local facade = import "source_local_facade.titan"
 
                 function inspect(): integer
                     return facade.make().payload
@@ -232,8 +312,8 @@ describe("source-import local visibility (checker)", function()
                 "'source_local_owner'", err)
 
         modules.source_local_facade_consumer = [[
-            local facade = import "source_local_facade"
-            local owner = import "source_local_owner"
+            local facade = import "source_local_facade.titan"
+            local owner = import "source_local_owner.titan"
 
             function inspect(): integer
                 return facade.make().payload + owner.make().payload
@@ -265,7 +345,7 @@ describe("source-import local visibility (checker)", function()
                     return facade.Box.secret()
                 end
 
-                local owner = import "source_frontier_owner"
+                local owner = import "source_frontier_owner.titan"
                 local after: integer = facade.Box.secret()
             ]],
         }
@@ -330,11 +410,11 @@ describe("source-import local visibility (checker)", function()
                 types.registry = {}
                 driver.imported = {}
                 local imports = source_first and [[
-                    local owner = import "source_registry_owner"
+                    local owner = import "source_registry_owner.titan"
                     local facade = import "source_registry_facade"
                 ]] or [[
                     local facade = import "source_registry_facade"
-                    local owner = import "source_registry_owner"
+                    local owner = import "source_registry_owner.titan"
                 ]]
                 local subject = imports .. [[
                     function inspect(): integer
@@ -382,13 +462,13 @@ describe("source-import local visibility (checker)", function()
                 local type WideFunction = (WideMap) -> integer
             ]], header),
             source_alias_pointer_consumer = [[
-                local provider = import "source_alias_provider"
+                local provider = import "source_alias_provider.titan"
                 local type Pointer = *provider.Wide
                 local type Composite = provider.WideFunction?
                 function inspect(): integer return 1 end
             ]],
             source_alias_value_consumer = [[
-                local provider = import "source_alias_provider"
+                local provider = import "source_alias_provider.titan"
                 function inspect(): integer
                     local items: provider.WideArray = {}
                     return #items
