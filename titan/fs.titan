@@ -15,6 +15,8 @@ record Stat
   size: integer
   kind: string
   mode: integer
+  device: integer
+  inode: integer
   modified_seconds: integer
   modified_nanoseconds: integer
 end
@@ -216,9 +218,11 @@ end
 
 function stat(path: string): Stat?
   do
-    local size, kind, mode, modified_seconds, modified_nanoseconds =
+    local size, kind, mode, device, inode,
+      modified_seconds, modified_nanoseconds =
       uv.fs_stat(path)
-    return Stat.new(size, kind, mode, modified_seconds, modified_nanoseconds)
+    return Stat.new(size, kind, mode, device, inode,
+                    modified_seconds, modified_nanoseconds)
   catch
     if missing_path(error) then return nil end
     raise
@@ -227,9 +231,11 @@ end
 
 function lstat(path: string): Stat?
   do
-    local size, kind, mode, modified_seconds, modified_nanoseconds =
+    local size, kind, mode, device, inode,
+      modified_seconds, modified_nanoseconds =
       uv.fs_lstat(path)
-    return Stat.new(size, kind, mode, modified_seconds, modified_nanoseconds)
+    return Stat.new(size, kind, mode, device, inode,
+                    modified_seconds, modified_nanoseconds)
   catch
     if missing_path(error) then return nil end
     raise

@@ -4,6 +4,8 @@ local record FsStatResult
   local size: integer
   local kind: string
   local mode: integer
+  local device: integer
+  local inode: integer
   local modified_seconds: integer
   local modified_nanoseconds: integer
 end
@@ -177,6 +179,8 @@ local function stat_result(task: Task, owner: uv_fs_t, result: integer,
     kind = "symlink"
   end
   return FsStatResult.new(statbuf.st_size, kind, mode,
+                          statbuf.st_dev as lua.lua_Integer,
+                          statbuf.st_ino as lua.lua_Integer,
                           statbuf.st_mtim.tv_sec,
                           statbuf.st_mtim.tv_nsec)
 end
@@ -429,18 +433,18 @@ local function fs_close(operation: FsCloseCall)
 end
 
 local function fs_stat(path: string):
-    (integer, string, integer, integer, integer)
+    (integer, string, integer, integer, integer, integer, integer)
   local result = await(Call.fs_stat(FsStatCall.new(
       checked_text(path, "fs.stat")))) as FsStatResult
-  return result.size, result.kind, result.mode,
+  return result.size, result.kind, result.mode, result.device, result.inode,
          result.modified_seconds, result.modified_nanoseconds
 end
 
 local function fs_lstat(path: string):
-    (integer, string, integer, integer, integer)
+    (integer, string, integer, integer, integer, integer, integer)
   local result = await(Call.fs_lstat(FsLstatCall.new(
       checked_text(path, "fs.lstat")))) as FsStatResult
-  return result.size, result.kind, result.mode,
+  return result.size, result.kind, result.mode, result.device, result.inode,
          result.modified_seconds, result.modified_nanoseconds
 end
 

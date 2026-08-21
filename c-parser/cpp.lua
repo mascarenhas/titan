@@ -18,24 +18,56 @@ local function path_join(directory, name)
     return directory .. SEP .. name
 end
 
-local function normalize_absolute_path(path)
-    local components = {}
-    for component in path:gmatch("[^" .. SEP .. "]+") do
-        if component == ".." then
-            if #components > 0 then components[#components] = nil end
-        elseif component ~= "." then
-            components[#components + 1] = component
+function cpp.absolute_lookup_path(path, cwd)
+    if path:sub(1, 1) ~= SEP then path = path_join(cwd, path) end
+    -- Remove only standalone '.' components. Preserve separator runs and,
+    -- critically, every '..' and symbolic-link component: in
+    -- link/../header.h the kernel follows link before applying '..', and a
+    -- later restat must traverse that same link again so retargeting it
+    -- invalidates the recorded header world.
+    local output = {}
+    local pending_separators = ""
+    local index = 1
+    while index <= #path do
+        if path:sub(index, index) == SEP then
+            local finish = index + 1
+            while finish <= #path and path:sub(finish, finish) == SEP do
+                finish = finish + 1
+            end
+            pending_separators = path:sub(index, finish - 1)
+            index = finish
+        else
+            local finish = index + 1
+            while finish <= #path and path:sub(finish, finish) ~= SEP do
+                finish = finish + 1
+            end
+            local component = path:sub(index, finish - 1)
+            if component == "." then
+                local separator_finish = finish
+                while separator_finish <= #path and
+                      path:sub(separator_finish, separator_finish) == SEP do
+                    separator_finish = separator_finish + 1
+                end
+                local following = path:sub(finish, separator_finish - 1)
+                -- Exactly two leading separators may name an
+                -- implementation-defined namespace on POSIX. A leading dot
+                -- must neither promote '/' to '//' nor demote '//' to a
+                -- longer run.
+                if #output > 0 and #following > #pending_separators then
+                    pending_separators = following
+                end
+                index = separator_finish
+            else
+                output[#output + 1] = pending_separators
+                output[#output + 1] = component
+                pending_separators = ""
+                index = finish
+            end
         end
     end
-    return SEP .. table.concat(components, SEP)
+    output[#output + 1] = pending_separators
+    return table.concat(output)
 end
-
-function cpp.lexical_absolute_path(path, cwd)
-    if path:sub(1, 1) ~= SEP then path = path_join(cwd, path) end
-    return normalize_absolute_path(path)
-end
-
-local absolute_path = cpp.lexical_absolute_path
 
 local function io_for(options)
     return options and options.io or default_io
@@ -48,7 +80,10 @@ end
 local function attribute_identity(attributes)
     if not attributes then return "missing" end
     local kind = attributes.kind == "symlink" and "link" or attributes.kind
-    return tostring(kind) .. ":" .. tostring(attributes.mode)
+    return table.concat({
+        tostring(kind), tostring(attributes.mode),
+        tostring(attributes.device), tostring(attributes.inode),
+    }, ":")
 end
 
 local function search_candidate_openable(path, strategy)
@@ -69,8 +104,11 @@ function cpp.header_search_identity(path, openable, strategy)
     }, ";")
 end
 
-function cpp.header_file_identity(contents)
-    return "c-header-file-v1:sha256:" .. sha256.hex(contents)
+function cpp.header_file_identity(contents, path, strategy)
+    strategy = strategy or default_io
+    local followed = strategy:stat(path)
+    return "c-header-file-v1:sha256:" .. sha256.hex(contents) ..
+        ";stat=" .. attribute_identity(followed)
 end
 
 function cpp.header_input_identity(kind, path, strategy)
@@ -81,7 +119,7 @@ function cpp.header_input_identity(kind, path, strategy)
             return "c-header-file-v1:unreadable:" ..
                 cpp.header_search_identity(path, nil, strategy), err
         end
-        return cpp.header_file_identity(contents)
+        return cpp.header_file_identity(contents, path, strategy)
     elseif kind == "search" then
         return cpp.header_search_identity(path, nil, strategy)
     end
@@ -626,16 +664,18 @@ end
 
 local function forced_header_candidates(operand, cwd, incdirs)
     if operand:sub(1, 1) == SEP then
-        return { absolute_path(operand, cwd) }
+        return { cpp.absolute_lookup_path(operand, cwd) }
     end
-    local candidates = { absolute_path(operand, cwd) }
+    local candidates = {
+        cpp.absolute_lookup_path(operand, cwd),
+    }
     for _, directory in ipairs(incdirs.quote or {}) do
         candidates[#candidates + 1] =
-            absolute_path(path_join(directory, operand), cwd)
+            cpp.absolute_lookup_path(path_join(directory, operand), cwd)
     end
     for _, directory in ipairs(incdirs.system or {}) do
         candidates[#candidates + 1] =
-            absolute_path(path_join(directory, operand), cwd)
+            cpp.absolute_lookup_path(path_join(directory, operand), cwd)
     end
     return candidates
 end
@@ -660,8 +700,8 @@ local function scan_forced_headers(forced, incdirs, base_defines, cwd,
     typed.set_type(ctx, "Ctx")
 
     ctx.header_dependency_observer = function(path, contents)
-        path = absolute_path(path, cwd)
-        local identity = cpp.header_file_identity(contents)
+        path = cpp.absolute_lookup_path(path, cwd)
+        local identity = cpp.header_file_identity(contents, path, strategy)
         append_manifest(manifest, "file", path, identity)
         local previous = dependency_identities[path]
         if previous and previous ~= identity then
@@ -675,7 +715,7 @@ local function scan_forced_headers(forced, incdirs, base_defines, cwd,
         return true
     end
     ctx.include_search_observer = function(path, openable)
-        path = absolute_path(path, cwd)
+        path = cpp.absolute_lookup_path(path, cwd)
         local identity = cpp.header_search_identity(path, openable, strategy)
         append_manifest(manifest, "search", path, identity)
         local previous = search_identities[path]

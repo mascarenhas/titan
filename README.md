@@ -562,7 +562,8 @@ scopes, parameter references, applied nominal arguments, declaration schemes,
 generic owners and methods, and constructor-preserving aliases to serialized
 interfaces while retaining Lua 5.5.1 and erased native layouts. ABI 0.25
 changed the public `titan.fs`/`titan.async` interfaces and exact native
-signatures. The active compiled-module ABI is 0.26: serialized const
+signatures. The active compiled-module ABI is 0.26: the public `titan.fs.Stat`
+record gains opaque physical-identity fields, while serialized const
 qualifiers, Interface fields/wrappers, and distinct mutable/const Array runtime
 tags change the metadata and generated/runtime layouts.
 Current lookup and publication use `TITAN_PATH_0_26` and `lib/titan/0.26`;

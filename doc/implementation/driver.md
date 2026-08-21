@@ -340,7 +340,10 @@ backend-specific records, arrays, error objects, or task handles.
 | `yield()` | No arguments or results. This is the cooperative post-module checkpoint; the synchronous implementation is a no-op. |
 
 `stat` and `lstat` metadata has exactly the Lua-facing fields `kind`, `size`,
-`mode`, `modified_seconds`, and `modified_nanoseconds`. `kind` is `file`,
+`mode`, `device`, `inode`, `modified_seconds`, and `modified_nanoseconds`.
+`device` and `inode` are integers that form an opaque physical-file identity
+pair: clients compare the pair only for equality and must not interpret either
+component. `kind` is `file`,
 `directory`, `symlink`, or `other`; `size` and the timestamps are integers,
 nanoseconds are in `[0, 1000000000)`, and `mode` carries the POSIX file-type
 and permission bits used by compiler identity code.
@@ -485,16 +488,20 @@ headers from any file resolve under that same directory.
 
 Every successfully checked source entry also owns an ordered
 `c_header_dependencies` array. A `file` item names a header whose exact parsed
-bytes supplied the recorded SHA-256 identity. A `search` item names one exact
-candidate consulted during ordered lookup, up to and including the winner, and
-records its `lstat` state, followed state, and the exact read-open predicate
-used for selection, including missing files, broken symlinks, and effective
-access failures. The checker unions the complete written/imported
+bytes and followed physical-file identity supply the recorded fingerprint. A
+`search` item names one exact candidate consulted during ordered lookup, up to
+and including the winner, and records its final-component `lstat` state,
+followed state, physical identities, and the exact read-open predicate used for
+selection, including missing files, broken symlinks, and effective access
+failures. The checker unions the complete written/imported
 foreign-include set for that module, deduplicates identical kind/path
 observations in first-seen order, and rejects conflicting identities from one
-check. Paths are lexically normalized absolute names (`.` and `..` are
-collapsed without resolving symlinks), so restat and cache consumers compare
-one stable spelling while preserving the configured search topology.
+check. Paths are absolute lookup spellings: a relative candidate is prefixed
+with the captured process cwd and harmless standalone `.` components are
+removed, but `..`, repeated separators, and symbolic-link components remain
+untouched. Restat and generated C therefore traverse the same lookup route;
+retargeting an intermediate symbolic link changes the physical fingerprint
+instead of leaving a cache entry pinned to its former target.
 Configured `-imacros` and `-include` inputs are part of this same per-module
 closure, including their transitive includes and every candidate consulted to
 resolve a relative operand. Resolver-owned
@@ -566,8 +573,8 @@ Ordinary filesystem churn is data rather than a driver failure. If a former
 became unreadable, the result carries a stable
 `c-header-file-v1:unreadable:...` identity describing its current `lstat` and
 followed/read-open state. Recreating a readable file replaces that state with
-its exact byte identity. Only malformed input metadata or an unknown dependency
-kind returns `nil, message`.
+its exact byte and followed physical-file identity. Only malformed input
+metadata or an unknown dependency kind returns `nil, message`.
 
 The optional second argument may be a resolver context, an options table with
 `context`, or an options table with `io`. The first two forms borrow the

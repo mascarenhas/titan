@@ -335,6 +335,17 @@ local function source_foreign_include_alias(
     local name = "titan-source-foreign-" .. sha256.hex(identity) .. ".h"
     local rendered, rendered_error = quote_header_name(name)
     if not rendered then return nil, rendered_error end
+    local function stable_generated_identity(value)
+        local digest, kind, mode, device, inode = value:match(
+            "^c%-header%-file%-v1:sha256:([0-9a-f]+);" ..
+            "stat=([^:;]+):([^:;]+):([^:;]+):([^:;]+)$")
+        if digest and #digest == 64 and kind == "file" and
+           mode:match("^%d+$") and device:match("^%-?%d+$") and
+           inode:match("^%-?%d+$") then
+            return "c-header-file-v1:sha256:" .. digest
+        end
+        return value
+    end
     local header_dependencies = {}
     for index, dependency in ipairs(
             descriptor.c_header_dependencies or {}) do
@@ -347,6 +358,7 @@ local function source_foreign_include_alias(
             -- not publish. Titan source stamps cover regeneration; physical
             -- nested C headers remain independently restattable.
             copy.path = public_header
+            copy.identity = stable_generated_identity(copy.identity)
             copy.restat = false
         end
         header_dependencies[index] = copy

@@ -151,6 +151,96 @@ describe("session-scoped C probe service", function()
             err, 1, true)
     end)
 
+    it("rejects malformed header manifests and I/O strategies", function()
+        local valid_input = {
+            kind = "file",
+            path = "/headers/api.h",
+            identity = "identity",
+        }
+        local sparse = { valid_input }
+        sparse.extra = valid_input
+        local cases = {
+            {
+                value = false,
+                expected = "C header dependencies must be an ordered array",
+            },
+            {
+                value = { false },
+                expected = "C header dependencies entry 1 must be a table",
+            },
+            {
+                value = {{
+                    kind = "search",
+                    path = "/headers/api.h",
+                    identity = "identity",
+                }},
+                expected = "C header dependencies entry 1 must have kind 'file'",
+            },
+            {
+                value = {{
+                    kind = "file",
+                    path = "",
+                    identity = "identity",
+                }},
+                expected = "must have a nonempty NUL-free path",
+            },
+            {
+                value = {{
+                    kind = "file",
+                    path = "/headers/api.h",
+                    identity = "",
+                }},
+                expected = "must have a nonempty identity",
+            },
+            {
+                value = {{
+                    kind = "file",
+                    path = "/headers/api.h",
+                    identity = "identity",
+                    restat = "yes",
+                }},
+                expected = "restat flag must be boolean",
+            },
+            {
+                value = sparse,
+                expected = "must be a dense ordered array",
+            },
+        }
+        for _, case in ipairs(cases) do
+            local normalized, err = cprobe.normalize_include_descriptor({
+                include_kind = "quote",
+                include_name = "api.h",
+                c_header_dependencies = case.value,
+            }, {
+                cwd = "/project",
+                source_dir = "/project",
+            })
+            assert.is_nil(normalized)
+            assert.matches(case.expected, err, 1, true)
+        end
+
+        local collected, conflict = cprobe.collect_header_inputs({}, {
+            {
+                kind = "file",
+                path = "/headers/api.h",
+                identity = "first",
+            },
+            {
+                kind = "file",
+                path = "/headers/api.h",
+                identity = "second",
+            },
+        })
+        assert.is_nil(collected)
+        assert.matches("conflicting C header input identity", conflict,
+            1, true)
+
+        local service, strategy_error = cprobe.new_service({ io = {} })
+        assert.is_nil(service)
+        assert.matches("invalid compiler I/O strategy", strategy_error,
+            1, true)
+    end)
+
     it("transfers tmpname and mkdir cancellation ownership to the strategy",
     function()
         local reservation = assert(os.tmpname())
@@ -1361,6 +1451,90 @@ exit 0
         assert.equal(1, cleanup_called)
     end)
 
+    it("normalizes default strategy workspace failures and cleanup",
+    function()
+        local function service_with(strategy)
+            return assert(cprobe.new_service({
+                io = strategy,
+                include_dirs = {},
+                profile = target_profile(),
+            }))
+        end
+
+        local reservation = compiler_io.new_sync()
+        local reservation_service = service_with(reservation)
+        reservation.tmpname = function()
+            return nil, "injected reservation failure"
+        end
+        local workspace, workspace_error =
+            reservation_service:_ensure_workspace()
+        assert.is_nil(workspace)
+        assert.matches("could not reserve private probe directory",
+            workspace_error, 1, true)
+        assert.matches("injected reservation failure", workspace_error,
+            1, true)
+        assert.is_true(reservation_service:close())
+
+        local release = compiler_io.new_sync()
+        local release_service = service_with(release)
+        release.tmpname = function() return "/fake/reservation" end
+        release.unlink = function()
+            return nil, "injected release failure"
+        end
+        workspace, workspace_error = release_service:_ensure_workspace()
+        assert.is_nil(workspace)
+        assert.matches("could not release probe directory reservation",
+            workspace_error, 1, true)
+        assert.matches("injected release failure", workspace_error,
+            1, true)
+        assert.is_true(release_service:close())
+
+        local creation = compiler_io.new_sync()
+        local creation_service = service_with(creation)
+        creation.tmpname = function() return "/fake/reservation" end
+        creation.unlink = function() return true end
+        creation.mkdir = function()
+            return nil, "injected creation failure"
+        end
+        workspace, workspace_error = creation_service:_ensure_workspace()
+        assert.is_nil(workspace)
+        assert.matches("could not create private probe directory",
+            workspace_error, 1, true)
+        assert.matches("injected creation failure", workspace_error,
+            1, true)
+        assert.is_true(creation_service:close())
+
+        local cleanup = compiler_io.new_sync()
+        local cleanup_service = service_with(cleanup)
+        cleanup.tmpname = function() return "/fake/workspace-one" end
+        cleanup.unlink = function() return true end
+        cleanup.mkdir = function() return true end
+        assert(cleanup_service:_ensure_workspace())
+        cleanup.list = function() return { "stray.o" } end
+        cleanup.unlink = function()
+            return nil, "injected unlink failure"
+        end
+        cleanup.rmdir = function() return true end
+        local closed, close_error = cleanup_service:close()
+        assert.is_nil(closed)
+        assert.matches("stray.o: injected unlink failure", close_error,
+            1, true)
+
+        local listing = compiler_io.new_sync()
+        local listing_service = service_with(listing)
+        listing.tmpname = function() return "/fake/workspace-two" end
+        listing.unlink = function() return true end
+        listing.mkdir = function() return true end
+        assert(listing_service:_ensure_workspace())
+        listing.list = function()
+            return nil, "injected list failure"
+        end
+        listing.rmdir = function() return true end
+        closed, close_error = listing_service:close()
+        assert.is_nil(closed)
+        assert.matches("injected list failure", close_error, 1, true)
+    end)
+
     it("keys every ordered toolchain, header-context, and type direction input",
     function()
         local function probe_key(options, context_options, source, target)
@@ -1988,6 +2162,67 @@ describe("persistent successful C probe markers", function()
         assert(lfs.rmdir(root))
     end)
 
+    it("reports invalidated forced-header metadata before every probe path",
+    function()
+        local root = temporary_directory()
+        local forced = root .. "/forced.h"
+        local service
+        local completed, failure = pcall(function()
+            write_file(forced, "#define TITAN_FORCED_DISAPPEARANCE 1\n")
+            local compiler = lfs.attributes("/usr/bin/cc", "mode")
+                and { "/usr/bin/cc" } or { os.getenv("CC") or "cc" }
+            local state
+            service, state = new_fake_service({
+                compiler_argv = compiler,
+                cppflags = { "-include", forced },
+                include_dirs = {},
+                profile = target_profile(),
+            })
+            local module = assert(service:module_context())
+            assert.equal("file", service.forced_header_inputs[1].kind)
+            service.forced_header_inputs[1].kind = "invalid"
+
+            local run = service:_run_source(
+                "candidate", "int titan_forced_disappearance;\n", "same-key")
+            assert.is_false(run.started)
+            assert.is_false(run.ok)
+            assert.equal("header_inputs", run.reason)
+            assert.matches("could not restat forced C header input",
+                run.diagnostic, 1, true)
+
+            local baseline = module:validate_baseline()
+            assert.equal("infrastructure_failure", baseline.status)
+            assert.equal("header_inputs", baseline.reason)
+            assert.matches("could not restat forced C header input",
+                baseline.diagnostic, 1, true)
+
+            local compatibilities =
+                module:validate_declaration_compatibilities({ { } })
+            assert.equal(1, #compatibilities)
+            assert.equal("infrastructure_failure", compatibilities[1].status)
+            assert.equal("header_inputs", compatibilities[1].reason)
+            assert.matches("could not restat forced C header input",
+                compatibilities[1].diagnostic, 1, true)
+
+            local operator = module:probe_operator({})
+            assert.equal("infrastructure_failure", operator.status)
+            assert.equal("header_inputs", operator.reason)
+            assert.matches("could not restat forced C header input",
+                operator.diagnostic, 1, true)
+
+            assert.equal(0, #state.calls)
+            assert.is_true(service:close())
+            service = nil
+        end)
+        if service then pcall(service.close, service) end
+        local cleaned, cleanup_failure = pcall(function()
+            if lfs.symlinkattributes(forced) then assert(os.remove(forced)) end
+            if lfs.attributes(root) then assert(lfs.rmdir(root)) end
+        end)
+        assert.truthy(completed, failure)
+        assert.truthy(cleaned, cleanup_failure)
+    end)
+
     it("rejects missing forced headers without a success marker", function()
         local root = temporary_directory()
         local cache = root .. "/cache"
@@ -2042,6 +2277,42 @@ describe("persistent successful C probe markers", function()
             module.header_key)
         assert.not_matches("generated bytes", module.header_key, 1, true)
         assert.is_true(service:close())
+    end)
+
+    it("strips only complete generated-file stat identity suffixes", function()
+        local digest = string.rep("b", 64)
+        local prefix = "c-header-file-v1:sha256:" .. digest
+        local function remapped_identity(identity)
+            local path = "/tmp/provider.check.h"
+            local descriptor = assert(cprobe.normalize_include_descriptor({
+                resolved = path,
+                include_kind = "quote",
+                include_name = path,
+                c_header_dependencies = {{
+                    kind = "file",
+                    path = path,
+                    identity = identity,
+                }},
+            }, { source_dir = "/tmp" }))
+            local alias = assert(cprobe.source_foreign_include_alias(
+                descriptor, "provider.module", "/project/provider.titan.h"))
+            return alias.c_header_dependencies[1].identity
+        end
+
+        assert.equal(prefix,
+            remapped_identity(prefix .. ";stat=file:33188:1:2"))
+        assert.equal(prefix,
+            remapped_identity(prefix .. ";stat=file:33188:-1:-2"))
+        for _, malformed in ipairs({
+            prefix .. ";stat=",
+            prefix .. ";stat=file:33188:1",
+            prefix .. ";stat=file:33188:1:2;semantic=A",
+            prefix .. ";stat=other:33188:1:2",
+            prefix .. ";stat=file:not-a-mode:1:2",
+            prefix .. ";stat=file:33188:-:-2",
+        }) do
+            assert.equal(malformed, remapped_identity(malformed))
+        end
     end)
 
     it("rejects invalid persistent cache configuration", function()
@@ -2119,6 +2390,38 @@ describe("persistent successful C probe markers", function()
         assert.is_true(service:close())
         assert(os.remove(path))
         assert(lfs.rmdir(cache))
+    end)
+
+    it("accepts a cache-directory creation race", function()
+        local strategy = compiler_io.new_sync()
+        local service = assert(cprobe.new_service({
+            io = strategy,
+            include_dirs = {},
+            profile = target_profile(),
+            cache_directory = "/cache",
+        }))
+        local cache_stats = 0
+        strategy.stat = function(_, path)
+            if path == "/" then return { kind = "directory" } end
+            assert.equal("/cache", path)
+            cache_stats = cache_stats + 1
+            if cache_stats == 1 then return nil, "not found" end
+            return { kind = "directory" }
+        end
+        strategy.mkdir = function(_, path)
+            assert.equal("/cache", path)
+            return nil, "already created concurrently"
+        end
+        strategy.write_file = function(_, path, contents)
+            assert.equal("/cache/key.success", path)
+            assert.equal("", contents)
+            return true
+        end
+
+        assert.is_true(service:_publish_persistent_success(
+            "/cache/key.success"))
+        assert.equal(2, cache_stats)
+        assert.is_true(service:close())
     end)
 
     it("retains only the committed marker when publication is cancelled",
@@ -2334,10 +2637,17 @@ describe("persistent successful C probe markers", function()
     it("stabilizes randomized source-foreign headers before cache lookup",
     function()
         local cache = temporary_directory()
-        local function alias_for(physical)
+        local generated_digest = string.rep("a", 64)
+        local function alias_for(physical, stat_identity)
             local include = assert(cprobe.normalize_include_descriptor({
                 include_kind = "quote",
                 include_name = physical,
+                c_header_dependencies = {{
+                    kind = "file",
+                    path = physical,
+                    identity = "c-header-file-v1:sha256:" ..
+                        generated_digest .. ";stat=" .. stat_identity,
+                }},
             }, { source_dir = "." }))
             return assert(cprobe.source_foreign_include_alias(
                 include, "provider.module", "/project/provider.titan.h"))
@@ -2347,7 +2657,9 @@ describe("persistent successful C probe markers", function()
             cache_directory = cache,
         })
         local first_module = assert(first:module_context({
-            includes = { alias_for("/tmp/provider-check-one.h") },
+            includes = {
+                alias_for("/tmp/provider-check-one.h", "file:33188:1:2"),
+            },
         }))
         local first_source = cprobe.render_baseline_source(first_module)
         local first_header_key = first_module.header_key
@@ -2371,7 +2683,9 @@ describe("persistent successful C probe markers", function()
             cache_directory = cache,
         })
         local second_module = assert(second:module_context({
-            includes = { alias_for("/tmp/provider-check-two.h") },
+            includes = {
+                alias_for("/tmp/provider-check-two.h", "file:33188:3:4"),
+            },
         }))
         assert.equal(first_source,
             cprobe.render_baseline_source(second_module))

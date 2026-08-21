@@ -23,6 +23,20 @@ local function workspace()
     return path
 end
 
+local function with_overrides(target, replacements, body)
+    local originals = {}
+    for name, replacement in pairs(replacements) do
+        originals[name] = target[name]
+        target[name] = replacement
+    end
+    local results = table.pack(pcall(body))
+    for name, original in pairs(originals) do
+        target[name] = original
+    end
+    assert.is_true(results[1], results[2])
+    return table.unpack(results, 2, results.n)
+end
+
 describe("compiler I/O strategy", function()
     local root
 
@@ -95,8 +109,8 @@ describe("compiler I/O strategy", function()
 
         local metadata = assert(strategy:stat(source))
         assert.same({
-            "kind", "mode", "modified_nanoseconds", "modified_seconds",
-            "size",
+            "device", "inode", "kind", "mode", "modified_nanoseconds",
+            "modified_seconds", "size",
         }, (function()
             local keys = {}
             for key in pairs(metadata) do keys[#keys + 1] = key end
@@ -106,10 +120,19 @@ describe("compiler I/O strategy", function()
         assert.equal("file", metadata.kind)
         assert.equal(#bytes, metadata.size)
         assert.equal(0x8000, metadata.mode & 0xF000)
+        assert.is_number(metadata.device)
+        assert.is_number(metadata.inode)
         assert.is_number(metadata.modified_seconds)
         assert.is_number(metadata.modified_nanoseconds)
         assert.is_true(metadata.modified_nanoseconds >= 0)
         assert.is_true(metadata.modified_nanoseconds < 1000000000)
+
+        local hard_link = directory .. "/source-hard-link.bin"
+        assert(lfs.link(source, hard_link))
+        local hard_link_metadata = assert(strategy:stat(hard_link))
+        assert.equal(metadata.device, hard_link_metadata.device)
+        assert.equal(metadata.inode, hard_link_metadata.inode)
+        assert.is_true(strategy:unlink(hard_link))
 
         local entries = assert(strategy:list(directory))
         table.sort(entries)
@@ -231,5 +254,238 @@ describe("compiler I/O strategy", function()
         assert.is_false(invalid.started)
         assert.is_false(invalid.ok)
         assert.matches("dense argument array", invalid.diagnostic, 1, true)
+    end)
+
+    it("rejects malformed paths, writes, commands, and strategy methods",
+    function()
+        root = workspace()
+        local strategy = compiler_io.new_sync()
+
+        local value, err = strategy:stat(false)
+        assert.is_nil(value)
+        assert.equal("path must be a string", err)
+        value, err = strategy:lstat("bad\0path")
+        assert.is_nil(value)
+        assert.equal("path contains a NUL byte", err)
+        value, err = strategy:write_file(root .. "/bad", {})
+        assert.is_nil(value)
+        assert.equal("file contents must be a string", err)
+
+        local directory = root .. "/directory"
+        assert.is_true(strategy:mkdir(directory))
+        value, err = strategy:unlink(directory)
+        assert.is_nil(value)
+        assert.matches("cannot unlink directory", err, 1, true)
+
+        local cases = {
+            {
+                argv = false,
+                diagnostic = "command must be an argument array",
+            },
+            {
+                argv = { "sh", false },
+                diagnostic = "command argument 2 must be a string",
+            },
+            {
+                argv = { "sh", "bad\0argument" },
+                diagnostic = "command argument 2 contains a NUL byte",
+            },
+            {
+                argv = {},
+                diagnostic = "command is empty",
+            },
+            {
+                argv = { "sh" },
+                options = "invalid options",
+                diagnostic = "command options must be a table",
+            },
+        }
+        for _, case in ipairs(cases) do
+            local result = strategy:run(case.argv, case.options)
+            assert.is_false(result.started)
+            assert.is_false(result.ok)
+            assert.equal(case.diagnostic, result.diagnostic)
+        end
+
+        local unreadable = setmetatable({}, {
+            __index = function(_, name)
+                error("injected denial for " .. tostring(name))
+            end,
+        })
+        local readable, validation_error = pcall(
+            compiler_io.validate, unreadable)
+        assert.is_false(readable)
+        assert.matches("cannot read compiler I/O strategy method 'cwd'",
+            validation_error, 1, true)
+        assert.matches("injected denial for cwd", validation_error, 1, true)
+    end)
+
+    it("normalizes uncommon metadata and realpath failures", function()
+        local strategy = compiler_io.new_sync()
+        with_overrides(lfs, {
+            attributes = function()
+                return {
+                    mode = "file",
+                    permissions = "rwsr-Sr-T",
+                    modification = 1.9999999996,
+                    size = 0,
+                    dev = 7,
+                    ino = 11,
+                }
+            end,
+        }, function()
+            local metadata = assert(strategy:stat("virtual"))
+            assert.equal(0x8E00, metadata.mode & 0xFE00)
+            assert.equal(2, metadata.modified_seconds)
+            assert.equal(0, metadata.modified_nanoseconds)
+        end)
+
+        with_overrides(lfs, {
+            attributes = function() return { mode = "file" } end,
+            symlinkattributes = function() return { mode = "file" } end,
+            currentdir = (function()
+                local calls = 0
+                return function()
+                    calls = calls + 1
+                    return calls == 1 and "/" or "/virtual"
+                end
+            end)(),
+            chdir = function() return true end,
+        }, function()
+            assert.equal("/virtual", assert(strategy:realpath("virtual")))
+        end)
+
+        with_overrides(lfs, {
+            attributes = function() return { mode = "file" } end,
+            symlinkattributes = function()
+                return { mode = "link", target = "loop" }
+            end,
+            currentdir = function() return "/base" end,
+        }, function()
+            local resolved, err = strategy:realpath("loop")
+            assert.is_nil(resolved)
+            assert.matches("too many levels of symbolic links", err, 1, true)
+        end)
+
+        with_overrides(lfs, {
+            attributes = function() return { mode = "file" } end,
+            symlinkattributes = (function()
+                local hop = 0
+                return function()
+                    hop = hop + 1
+                    return { mode = "link", target = "/hop" .. hop }
+                end
+            end)(),
+            currentdir = function() return "/base" end,
+        }, function()
+            local resolved, err = strategy:realpath("many-links")
+            assert.is_nil(resolved)
+            assert.matches("too many levels of symbolic links", err, 1, true)
+        end)
+
+        with_overrides(lfs, {
+            attributes = function() return { mode = "file" } end,
+            symlinkattributes = function() return { mode = "file" } end,
+            currentdir = (function()
+                local calls = 0
+                return function()
+                    calls = calls + 1
+                    return calls == 1 and "/base" or "/resolved"
+                end
+            end)(),
+            chdir = (function()
+                local calls = 0
+                return function()
+                    calls = calls + 1
+                    if calls == 1 then return true end
+                    return nil, "injected restore failure"
+                end
+            end)(),
+        }, function()
+            local resolved, err = strategy:realpath("entry")
+            assert.is_nil(resolved)
+            assert.equal("injected restore failure", err)
+        end)
+
+        with_overrides(lfs, {
+            attributes = function() return { mode = "file" } end,
+            symlinkattributes = function() return { mode = "file" } end,
+            currentdir = (function()
+                local calls = 0
+                return function()
+                    calls = calls + 1
+                    if calls == 1 then return "/base" end
+                    return nil, "injected resolve failure"
+                end
+            end)(),
+            chdir = function() return true end,
+        }, function()
+            local resolved, err = strategy:realpath("entry")
+            assert.is_nil(resolved)
+            assert.equal("injected resolve failure", err)
+        end)
+
+        with_overrides(lfs, {
+            attributes = function() return { mode = "file" } end,
+            symlinkattributes = function()
+                return nil, "injected lookup failure"
+            end,
+            currentdir = function() return "/base" end,
+            chdir = function() return nil, "injected chdir failure" end,
+        }, function()
+            local resolved, err = strategy:realpath("missing")
+            assert.is_nil(resolved)
+            assert.equal("injected lookup failure", err)
+        end)
+    end)
+
+    it("normalizes command transport failures", function()
+        local strategy = compiler_io.new_sync()
+
+        with_overrides(io, {
+            popen = function() return nil, "injected spawn failure" end,
+        }, function()
+            local result = strategy:run({ "tool" })
+            assert.is_false(result.started)
+            assert.is_false(result.ok)
+            assert.matches("injected spawn failure", result.diagnostic,
+                1, true)
+        end)
+
+        local read_close_calls = 0
+        with_overrides(io, {
+            popen = function()
+                return {
+                    read = function() error("injected read failure") end,
+                    close = function()
+                        read_close_calls = read_close_calls + 1
+                        return true
+                    end,
+                }
+            end,
+        }, function()
+            local result = strategy:run({ "tool" })
+            assert.is_false(result.started)
+            assert.is_false(result.ok)
+            assert.matches("injected read failure", result.diagnostic,
+                1, true)
+        end)
+        assert.equal(1, read_close_calls)
+
+        with_overrides(io, {
+            popen = function()
+                return {
+                    read = function() return "partial output" end,
+                    close = function() error("injected wait failure") end,
+                }
+            end,
+        }, function()
+            local result = strategy:run({ "tool" })
+            assert.is_false(result.started)
+            assert.is_false(result.ok)
+            assert.matches("partial output", result.diagnostic, 1, true)
+            assert.matches("injected wait failure", result.diagnostic,
+                1, true)
+        end)
     end)
 end)

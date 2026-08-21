@@ -2,6 +2,7 @@ local h = require "spec.support.helpers"
 local checker = require "titan-compiler.checker"
 local cprobe = require "titan-compiler.cprobe"
 local driver = require "titan-compiler.driver"
+local lfs = require "lfs"
 local types = require "titan-compiler.types"
 
 local function with_header(contents, fn)
@@ -29,6 +30,18 @@ local function with_headers(contents, fn)
         end)
     end
     return open_header(1)
+end
+
+local function with_hard_link(source, fn)
+    local alias = os.tmpname() .. ".h"
+    os.remove(alias)
+    assert(lfs.link(source, alias))
+
+    local results = { pcall(fn, alias) }
+    os.remove(alias)
+    if not results[1] then error(results[2], 0) end
+    table.remove(results, 1)
+    return table.unpack(results)
 end
 
 local function new_context_configured_probe_service(options)
@@ -1308,6 +1321,32 @@ describe("compatible C declarations across foreign imports", function()
                                 .ffi_guarded_local)
                         end)
                 end)
+        end)
+    end)
+
+    it("recognizes one pragma-once prototype tag through hard-link aliases",
+    function()
+        with_header([[
+            #pragma once
+            extern int ffi_hard_linked_prototype_tag(
+                struct ffi_hard_linked_local *value);
+        ]], function(common_header)
+            with_hard_link(common_header, function(alias_header)
+                local ok, err, ast = h.run_checker(
+                    'local first = foreign import "' ..
+                        common_header .. '"\n' ..
+                    'local second = foreign import "' ..
+                        alias_header .. '"\n')
+                assert.truthy(ok, err)
+
+                local first = ast[1]._type.members
+                    .ffi_hard_linked_prototype_tag.type
+                local second = ast[2]._type.members
+                    .ffi_hard_linked_prototype_tag.type
+                assert.equal(first, second)
+                assert.equal(first.params[1].pointee,
+                    second.params[1].pointee)
+            end)
         end)
     end)
 

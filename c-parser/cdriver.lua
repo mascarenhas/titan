@@ -26,16 +26,16 @@ local function join_path(dir, filename)
     return dir .. SEP .. filename
 end
 
-local function absolute_path(path, cwd)
-    return cpp.lexical_absolute_path(path, cwd)
+local function absolute_lookup_path(path, cwd)
+    return cpp.absolute_lookup_path(path, cwd)
 end
 
 local function search_candidate_identity(path, openable, strategy)
     return cpp.header_search_identity(path, openable, strategy)
 end
 
-local function file_contents_identity(contents)
-    return cpp.header_file_identity(contents)
+local function file_contents_identity(path, contents, strategy)
+    return cpp.header_file_identity(contents, path, strategy)
 end
 
 -- Public, side-effect-free identity helper used by long-lived compiler
@@ -297,7 +297,7 @@ function cdriver.process_file(filename, options)
     local search_inputs = {}
     local search_identities = {}
     local function record_dependency(path, identity)
-        path = absolute_path(path, cwd)
+        path = absolute_lookup_path(path, cwd)
         local previous = dependency_identities[path]
         if previous and previous ~= identity then
             return nil, "C header changed while it was being parsed: " .. path
@@ -312,7 +312,7 @@ function cdriver.process_file(filename, options)
         return true
     end
     local function record_search(path, identity)
-        path = absolute_path(path, cwd)
+        path = absolute_lookup_path(path, cwd)
         local previous = search_identities[path]
         if previous and previous ~= identity then
             return nil, "C include candidate changed while it was searched: " ..
@@ -328,9 +328,12 @@ function cdriver.process_file(filename, options)
         return true
     end
     ctx.header_dependency_observer = function(path, contents)
-        return record_dependency(path, file_contents_identity(contents))
+        path = absolute_lookup_path(path, cwd)
+        return record_dependency(
+            path, file_contents_identity(path, contents, strategy))
     end
     ctx.include_search_observer = function(path, openable)
+        path = absolute_lookup_path(path, cwd)
         return record_search(
             path, search_candidate_identity(path, openable, strategy))
     end
@@ -360,7 +363,7 @@ function cdriver.process_file(filename, options)
     end
     if is_absolute_path(include.resolved) or
        file_exists(include.resolved, strategy) then
-        include.resolved = absolute_path(include.resolved, cwd)
+        include.resolved = absolute_lookup_path(include.resolved, cwd)
     end
     local parse_filename = file_exists(include.resolved, strategy)
         and include.resolved or filename
@@ -412,14 +415,17 @@ function cdriver.process_file(filename, options)
     local function source_identity(source_file)
         local cached = source_identities[source_file]
         if cached ~= nil then return cached end
-        local canonical = strategy:realpath(source_file)
-        cached = canonical and {
-            -- The checker compares this pair only for equality. A canonical
-            -- path preserves physical identity across symlink spellings
-            -- without leaking backend-specific stat records into the AST.
-            device = "canonical-path",
-            inode = canonical,
-        } or false
+        local metadata = strategy:stat(source_file)
+        cached = metadata
+            and metadata.device ~= nil
+            and metadata.inode ~= nil
+            and {
+                -- The checker compares this opaque pair only for equality.
+                -- Preserve physical identity across both symlink and hard-link
+                -- spellings without retaining the complete strategy record.
+                device = metadata.device,
+                inode = metadata.inode,
+            } or false
         source_identities[source_file] = cached
         return cached
     end

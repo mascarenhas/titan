@@ -1,7 +1,6 @@
 local lfs = require "lfs"
 
 local cdriver = require "c-parser.cdriver"
-local sha256 = require "titan-compiler.sha256"
 
 local function write_file(filename, contents)
     local fd = assert(io.open(filename, "wb"))
@@ -124,11 +123,11 @@ describe("C FFI cdriver", function()
                 "outer.h", { source_dir = root })
             assert.same({
                 { kind = "file", path = outer,
-                  identity = "c-header-file-v1:sha256:" ..
-                    sha256.hex(outer_contents) },
+                  identity = assert(cdriver.header_input_identity(
+                      "file", outer)) },
                 { kind = "file", path = nested,
-                  identity = "c-header-file-v1:sha256:" ..
-                    sha256.hex(first_nested) },
+                  identity = assert(cdriver.header_input_identity(
+                      "file", nested)) },
             }, include.c_header_dependencies)
             assert.equal(
                 include.c_header_dependencies,
@@ -150,7 +149,7 @@ describe("C FFI cdriver", function()
                 include.c_header_dependencies[1].identity,
                 changed.c_header_dependencies[1].identity)
             assert.equal(
-                "c-header-file-v1:sha256:" .. sha256.hex(second_nested),
+                assert(cdriver.header_input_identity("file", nested)),
                 changed.c_header_dependencies[2].identity)
             assert.not_equal(
                 include.c_header_dependencies[2].identity,
@@ -205,6 +204,135 @@ describe("C FFI cdriver", function()
             remove_tree(
                 { outer, early_header, late_header },
                 { source, early, late, root })
+        end)
+
+        it("preserves symlink traversal when absolutizing include paths",
+        function()
+            local root = tmp_dir()
+            local source = mkdir(root, "source")
+            local first = mkdir(root, "first")
+            local first_nested = mkdir(first, "nested")
+            local first_include = mkdir(first, "include")
+            local second = mkdir(root, "second")
+            local second_nested = mkdir(second, "nested")
+            local second_include = mkdir(second, "include")
+            local lexical_dir = mkdir(root, "include")
+            local link = root .. "/sdk-link"
+            assert(lfs.link("first/nested", link, true))
+
+            local outer = source .. "/outer.h"
+            local first_selected = first_include .. "/selected.h"
+            local second_selected = second_include .. "/selected.h"
+            local lexical = lexical_dir .. "/selected.h"
+            local lookup = link .. "/../include/selected.h"
+            local selected_contents =
+                "typedef int titan_symlink_parent_value;\n"
+            write_file(outer, "#include <selected.h>\n")
+            write_file(first_selected, selected_contents)
+            write_file(second_selected, selected_contents)
+            write_file(lexical,
+                "typedef double titan_symlink_parent_value;\n")
+
+            local types, include = assert_process_file("outer.h", {
+                source_dir = source,
+                compiler_include_dirs = {},
+                cppflags = { "-I", link .. "/../include" },
+            })
+            assert.same({ "int" },
+                types.titan_symlink_parent_value.def)
+            assert.equal(lookup,
+                include.c_header_dependencies[2].path)
+            assert.equal(lookup,
+                include.c_header_search_inputs[2].path)
+            local first_file_identity =
+                include.c_header_dependencies[2].identity
+            local first_search_identity =
+                include.c_header_search_inputs[2].identity
+            assert.equal(assert(cdriver.header_input_identity("file", lookup)),
+                first_file_identity)
+            assert.equal(assert(cdriver.header_input_identity(
+                "search", lookup)), first_search_identity)
+
+            local direct_types, direct_include = assert_process_file(lookup, {
+                compiler_include_dirs = {},
+            })
+            assert.same({ "int" },
+                direct_types.titan_symlink_parent_value.def)
+            assert.equal(lookup, direct_include.resolved)
+            assert.equal(lookup,
+                direct_include.c_header_dependencies[1].path)
+
+            assert(os.remove(link))
+            assert(lfs.link("second/nested", link, true))
+            assert.not_equal(first_file_identity,
+                assert(cdriver.header_input_identity("file", lookup)))
+            assert.not_equal(first_search_identity,
+                assert(cdriver.header_input_identity("search", lookup)))
+
+            remove_tree(
+                { outer, first_selected, second_selected, lexical, link },
+                { root, first, first_nested, first_include,
+                  second, second_nested, second_include,
+                  lexical_dir, source })
+        end)
+
+        it("preserves a symlinked header's quoted-include origin", function()
+            local root = tmp_dir()
+            local alias = mkdir(root, "alias")
+            local vendor = mkdir(root, "vendor")
+            local alias_header = alias .. "/api.h"
+            local alias_nested = alias .. "/nested.h"
+            local vendor_header = vendor .. "/api.h"
+            local vendor_nested = vendor .. "/nested.h"
+            write_file(vendor_header, '#include "nested.h"\n')
+            write_file(alias_nested,
+                "typedef int titan_symlink_origin_value;\n")
+            write_file(vendor_nested,
+                "typedef double titan_symlink_origin_value;\n")
+            assert(lfs.link("../vendor/api.h", alias_header, true))
+
+            local types, include = assert_process_file(alias_header, {
+                compiler_include_dirs = {},
+            })
+            assert.same({ "int" }, types.titan_symlink_origin_value.def)
+            assert.equal(alias_header, include.resolved)
+            assert.same({ alias_header, alias_nested }, {
+                include.c_header_dependencies[1].path,
+                include.c_header_dependencies[2].path,
+            })
+
+            remove_tree(
+                { alias_header, alias_nested, vendor_header, vendor_nested },
+                { alias, vendor, root })
+        end)
+
+        it("distinguishes a same-byte replacement from a hard link",
+        function()
+            local root = tmp_dir()
+            local original = root .. "/original.h"
+            local linked = root .. "/linked.h"
+            local replacement = root .. "/replacement.h"
+            local contents = "typedef int titan_physical_header_value;\n"
+            write_file(original, contents)
+            assert(lfs.link(original, linked))
+
+            local original_file = assert(cdriver.header_input_identity(
+                "file", original))
+            local original_search = assert(cdriver.header_input_identity(
+                "search", original))
+            assert.equal(original_file,
+                assert(cdriver.header_input_identity("file", linked)))
+            assert.equal(original_search,
+                assert(cdriver.header_input_identity("search", linked)))
+
+            write_file(replacement, contents)
+            assert(os.rename(replacement, linked))
+            assert.not_equal(original_file,
+                assert(cdriver.header_input_identity("file", linked)))
+            assert.not_equal(original_search,
+                assert(cdriver.header_input_identity("search", linked)))
+
+            remove_tree({ original, linked, replacement }, { root })
         end)
 
         it("records the exact include lookup access result", function()
@@ -653,14 +781,14 @@ typedef float cached_selection;
                 {
                     kind = "file",
                     path = forced,
-                    identity = "c-header-file-v1:sha256:" ..
-                        sha256.hex("#define TITAN_FORCED_TYPE int\n"),
+                    identity = assert(cdriver.header_input_identity(
+                        "file", forced)),
                 },
                 {
                     kind = "file",
                     path = imported,
-                    identity = "c-header-file-v1:sha256:" .. sha256.hex(
-                        "typedef TITAN_FORCED_TYPE titan_forced_value;\n"),
+                    identity = assert(cdriver.header_input_identity(
+                        "file", imported)),
                 },
             }, first_include.c_header_dependencies)
 
@@ -787,7 +915,7 @@ typedef double titan_forced_order_value;
             }, { early, late, root })
         end)
 
-        it("normalizes forced and ordinary lexical dependency paths",
+        it("retains exact forced and ordinary lookup paths",
         function()
             local root = tmp_dir()
             local child = mkdir(root, "child")
@@ -796,26 +924,28 @@ typedef double titan_forced_order_value;
             write_file(forced, "#define TITAN_NORMALIZED_TYPE int\n")
             write_file(imported,
                 "typedef TITAN_NORMALIZED_TYPE titan_normalized_value;\n")
+            local forced_lookup = child .. "/../forced.h"
+            local imported_lookup = child .. "/../imported.h"
             local types, include = assert_process_file("imported.h", {
                 compiler = { "cc" },
                 language_mode = "c99",
                 source_dir = child .. "/..",
                 compile_flags = {
                     "-I", child .. "/..",
-                    "-include" .. child .. "/../forced.h",
+                    "-include" .. forced_lookup,
                 },
                 compiler_include_dirs = {},
             })
             assert.same({ "int" }, types.titan_normalized_value.def)
-            assert.equal(imported, include.resolved)
-            assert.same({ forced, imported }, {
+            assert.equal(imported_lookup, include.resolved)
+            assert.same({ forced_lookup, imported_lookup }, {
                 include.c_header_dependencies[1].path,
                 include.c_header_dependencies[2].path,
             })
-            for _, input in ipairs(include.c_header_search_inputs) do
-                assert.is_nil(input.path:find("/../", 1, true))
-                assert.is_nil(input.path:find("/./", 1, true))
-            end
+            assert.equal(forced_lookup,
+                include.c_header_search_inputs[1].path)
+            assert.equal(imported_lookup,
+                include.c_header_search_inputs[2].path)
 
             remove_tree({ forced, imported }, { child, root })
         end)

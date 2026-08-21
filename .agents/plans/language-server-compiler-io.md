@@ -53,6 +53,13 @@ within that version. API 3 guarantees that every I/O operation reachable from
 language-server analysis, external resolution, or C-header restatting is routed
 through the supplied strategy.
 
+An adversarial hard-link regression later proved that the existing async
+`fs.Stat` record discarded physical identity which LuaFileSystem had supplied
+to synchronous compiler callers. The approved minimal standard-library change
+adds equality-only `device` and `inode` fields to `fs.Stat`; it adds no new I/O
+operation and lets both strategy implementations preserve the same stat
+contract without blocking or spawning helper processes.
+
 ## Implementation phases
 
 ### 1. Prove and establish the boundary

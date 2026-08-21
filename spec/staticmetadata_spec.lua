@@ -323,6 +323,81 @@ local function scan(bytes, options)
 end
 
 describe("static compiled-module metadata", function()
+    describe("strategy-backed archive reads", function()
+        local function file_stat(size, modified_seconds)
+            return {
+                kind = "file",
+                size = size,
+                modified_seconds = modified_seconds or 1,
+                modified_nanoseconds = 2,
+            }
+        end
+
+        it("rejects non-files, oversized or short reads, and restat races",
+        function()
+            local cases = {
+                {
+                    name = "non-file",
+                    stats = {{
+                        kind = "directory",
+                        size = 0,
+                        modified_seconds = 1,
+                        modified_nanoseconds = 2,
+                    }},
+                    contents = "",
+                    expected = "input is not a regular file",
+                },
+                {
+                    name = "oversized",
+                    stats = { file_stat(2) },
+                    contents = "ab",
+                    max_input_size = 1,
+                    expected = "input size 2 exceeds limit 1",
+                },
+                {
+                    name = "short read",
+                    stats = { file_stat(2) },
+                    contents = "a",
+                    expected = "short read (expected 2 bytes, found 1)",
+                },
+                {
+                    name = "disappeared",
+                    stats = { file_stat(2), false },
+                    contents = "ab",
+                    expected = "input disappeared while being read",
+                },
+                {
+                    name = "changed",
+                    stats = { file_stat(2), file_stat(2, 3) },
+                    contents = "ab",
+                    expected = "input changed while it was being read",
+                },
+            }
+
+            for _, case in ipairs(cases) do
+                local stat_calls = 0
+                local strategy = {}
+                function strategy:stat()
+                    stat_calls = stat_calls + 1
+                    local result = case.stats[stat_calls]
+                    if result == false then return nil end
+                    return result
+                end
+                function strategy:read_file()
+                    return case.contents
+                end
+
+                local result, err = staticmetadata.scan_archive(
+                    "virtual.a", {
+                        io = strategy,
+                        max_input_size = case.max_input_size,
+                    })
+                assert.is_nil(result, case.name)
+                assert.matches(case.expected, err, 1, true, case.name)
+            end
+        end)
+    end)
+
     describe("canonical Lua payload", function()
         it("renders exact stable bytes and a numeric C initializer", function()
             assert.equal([[

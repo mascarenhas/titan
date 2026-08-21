@@ -75,6 +75,27 @@ local function parse_decls(src)
 end
 
 describe("c preprocessor (cpp)", function()
+    it("removes only standalone dot components from absolute lookup paths",
+    function()
+        assert.equal("/work//root/header.h",
+            cpp.absolute_lookup_path("./header.h", "/work//root"))
+        assert.equal("/sdk/link/../include/api.h",
+            cpp.absolute_lookup_path(
+                "/sdk/link/../include/./api.h", "/ignored"))
+        assert.equal("//server/share//api.h",
+            cpp.absolute_lookup_path(
+                "//server/./share//api.h", "/ignored"))
+        assert.equal("/server/share.h",
+            cpp.absolute_lookup_path(
+                "/.//server/share.h", "/ignored"))
+        assert.equal("//server/share.h",
+            cpp.absolute_lookup_path(
+                "//.///server/share.h", "/ignored"))
+        assert.equal("/sdk///link/../include/api.h",
+            cpp.absolute_lookup_path(
+                "/sdk///link/../include/api.h", "/ignored"))
+    end)
+
     it("treats include-search observer failure as terminal", function()
         local root = os.tmpname()
         os.remove(root)

@@ -2028,6 +2028,62 @@ describe("Titan code generator", function()
         if not ok then error(err, 0) end
     end)
 
+    it("keeps a symlinked foreign header's quoted-include origin", function()
+        local lfs = require "lfs"
+        local root = os.tmpname()
+        os.remove(root)
+        assert(lfs.mkdir(root))
+        local vendor = root .. "/vendor"
+        assert(lfs.mkdir(vendor))
+        local header = root .. "/api.h"
+        local root_nested = root .. "/nested.h"
+        local vendor_header = vendor .. "/api.h"
+        local vendor_nested = vendor .. "/nested.h"
+        local function write_file(path, contents)
+            local file = assert(io.open(path, "wb"))
+            assert(file:write(contents))
+            assert(file:close())
+        end
+        write_file(root_nested,
+            "struct titan_symlink_origin { int selected; };\n")
+        write_file(vendor_nested,
+            "struct titan_symlink_origin { int wrong; };\n")
+        write_file(vendor_header, [[
+#include "nested.h"
+static struct titan_symlink_origin titan_symlink_origin_value = { 42 };
+static struct titan_symlink_origin *titan_symlink_origin_get(void) {
+    return &titan_symlink_origin_value;
+}
+]])
+        assert(lfs.link("vendor/api.h", header, true))
+        local suffix = root:match("[^/]+$"):gsub("%W", "_")
+        local modname = "ffi_symlink_origin_" .. suffix
+        local modules = {
+            [modname] = [[
+                local c = foreign import "]] .. header .. [["
+                function selected(): integer
+                    return c.titan_symlink_origin_get().selected as integer
+                end
+            ]],
+        }
+
+        local ok, err = pcall(function()
+            local generated, generate_error =
+                generate_modules(modules, modname)
+            assert.truthy(generated, generate_error)
+            local called, call_error = call(modname,
+                "assert(" .. modname .. ".selected() == 42)")
+            assert.truthy(called, call_error)
+        end)
+        os.remove(header)
+        os.remove(root_nested)
+        os.remove(vendor_header)
+        os.remove(vendor_nested)
+        lfs.rmdir(vendor)
+        lfs.rmdir(root)
+        if not ok then error(err, 0) end
+    end)
+
     local function assert_dollar_foreign_header(
             header_token, modname, macro, value)
         local header = os.tmpname() .. "-" .. header_token

@@ -131,6 +131,11 @@ local function normalized_stat(attributes)
         kind = KIND[attributes.mode] or "other",
         mode = (FILE_TYPE_BITS[attributes.mode] or 0) |
             permission_bits(attributes.permissions),
+        -- These are opaque physical-file identity components. Consumers
+        -- compare the pair only for equality; they must not interpret their
+        -- numeric values.
+        device = attributes.dev,
+        inode = attributes.ino,
         modified_seconds = modified_seconds,
         modified_nanoseconds = modified_nanoseconds,
     }

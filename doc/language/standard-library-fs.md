@@ -198,6 +198,8 @@ record Stat
   size: integer
   kind: string
   mode: integer
+  device: integer
+  inode: integer
   modified_seconds: integer
   modified_nanoseconds: integer
 end
@@ -210,7 +212,11 @@ symlink reports the target's metadata and kind. `lstat` returns the same
 the link itself with `kind == "symlink"`. `mode` is the platform mode bitset
 supplied by libuv; its numeric permission/type bits are host-specific. The two
 modification fields form one timestamp, with nanoseconds in the range 0
-through 999,999,999.
+through 999,999,999. `device` and `inode` form an opaque physical-file
+identity pair. Compare both fields for equality when identifying the same
+physical file through aliases; do not interpret their numeric values. Either
+field may be negative because Titan preserves the complete unsigned host value
+through its signed integer carrier.
 
 If the requested path does not exist, `stat` and `lstat` return `nil`.
 Only libuv's `UV_ENOENT` result has that meaning; permission failures,
@@ -223,6 +229,10 @@ both functions with an exact `Stat` result; changing them to `Stat?` changes the
 serialized public `titan.fs` interface and each exact native result signature.
 An ABI-0.24 provider remains preserved prior-version state and is rejected
 rather than migrated or adapted.
+
+The active, unreleased ABI-0.26 boundary adds `device` and `inode` to the
+serialized public `Stat` record. Existing 0.26 provider metadata is rebuilt in
+place during development; no additional ABI marker is introduced.
 
 `realpath(path)` resolves symbolic links plus `.` and `..` components and
 returns the canonical absolute path. The complete path must exist. It rejects

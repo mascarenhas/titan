@@ -237,8 +237,9 @@ interfaces for generic declarations while retaining the erased native layouts.
 ABI 0.25 changes the public `titan.fs.stat`/`lstat` results and
 `titan.async.suspend` parameter in both serialized interfaces and exact native
 signatures while retaining the other 0.24 layouts. ABI 0.26 advances the
-serialized/generated boundary for const descriptors, Interface fields, and
-qualified Array runtime tags. The current marker, `TITAN_PATH_0_26`, and
+serialized/generated boundary for the public `titan.fs.Stat` identity fields,
+const descriptors, Interface fields, and qualified Array runtime tags. The
+current marker, `TITAN_PATH_0_26`, and
 `lib/titan/0.26` namespace advance together.
 Conditional [closure adjustment wrappers](closure-adjustment-wrappers.md) reuse the fixed closure header and native signature retained through 0.26:
 target adapters and strict relays are private to the consuming translation unit,
