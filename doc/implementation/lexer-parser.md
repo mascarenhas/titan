@@ -511,6 +511,18 @@ locations survive plain-node concatenation. Cross-file checker diagnostics
 can use `location.format` to name the earlier declaration's complete
 `filename:line:col` as well as the primary node.
 
+The ordinary `loc` remains the diagnostic start of a complete construct. The
+parser additionally records private exact-source locations for semantic tools:
+`_name_loc` points at the selected identifier (including declarations, member
+selectors, named labels, and method names), `_module_loc` points at a qualified
+type's module spelling, and `_owner_loc` points at a method/static declaration's
+nominal owner. `_end_loc` points at the first byte of the closing `end` or
+`until`; an explicit statement `do ... end` also uses `_structure_loc` for its
+opening `do`, because its block's diagnostic location otherwise belongs to its
+first child. These fields do not change AST constructor arity or error
+locations. They are 1-based compiler locations; clients convert them to their
+own coordinate system at the protocol boundary.
+
 ## Non-reentrancy
 
 The grammar cannot thread extra arguments to its actions (the source comment

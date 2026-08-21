@@ -2,7 +2,7 @@ local core = require "titan-compiler.coder.core"
 local _ENV = core
 
 -- Code generation consumes only the ordinary erased checker product. Detached
--- generic surface graphs live exclusively in `_declared_type` metadata on the
+-- generic surface graphs live exclusively in private source metadata on the
 -- module and its declarations; following the checked AST recursively is not
 -- safe because declaration and type annotations contain cycles. Keep this walk
 -- iterative, identity-aware, and bounded so the entry assertion itself cannot
@@ -75,10 +75,19 @@ function coder._assert_erased_boundary(ast)
             if reason then
                 error(reason .. " reached coder through " .. label, 3)
             end
+            local tag = rawget(value, "_tag")
             for key, child in next, value do
+                local semantic_type_binding = key == "_decl" and
+                    (tag == "Ast.TypeName" or
+                     tag == "Ast.TypeQualName" or
+                     tag == "Ast.TypeParam")
                 if not (skip_declared_type and
                         (key == "_declared_type" or
-                         key == "_erased_registry")) then
+                         key == "_erased_registry" or
+                         key == "_surface_typeparams" or
+                         key == "_surface_typeargs" or
+                         key == "_surface_named_args" or
+                         semantic_type_binding)) then
                     enqueue(key)
                     enqueue(child)
                 end

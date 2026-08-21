@@ -1,6 +1,31 @@
 local core = require "titan-compiler.checker.core"
 local _ENV = core
 
+-- A qualified type member's serialized type can be the transparent target
+-- itself, which deliberately loses the alias spelling. Preserve the selected
+-- module/name identity in a private checker descriptor for semantic tools;
+-- ordinary type checking and serialization continue to use `target`.
+local function bind_qualified_type(node, module_decl, module_type, target)
+    node._module_decl = module_decl
+    node._decl = {
+        _tag = "Checker.TypeMember",
+        modname = module_type.name,
+        name = node.name,
+        type = target,
+        islocal = target and target.islocal and true or false,
+    }
+end
+
+local function local_owner_declaration(st, name)
+    local declaration = st:find_symbol(name)
+    if declaration and (declaration._tag == "Ast.TopLevelRecord"
+            or declaration._tag == "Ast.TopLevelUnion") then
+        return declaration
+    end
+    return st.interface_declarations
+        and st.interface_declarations[name] or nil
+end
+
 -- Converts an AST type declaration into a typechecker type
 --   node: AST node
 --   errors: list of compile-time errors
@@ -34,6 +59,7 @@ typefromnode = util.make_visitor({
                                     defer_c_enum_carrier)
         local parameter = st:find_type_parameter(node.name)
         if parameter then
+            node._decl = parameter._decl or parameter
             if #(node.typeargs or {}) > 0 then
                 return invalid(errors, node.loc,
                     "type parameter '%s' cannot be applied to type arguments",
@@ -44,6 +70,7 @@ typefromnode = util.make_visitor({
 
         local alias = st:find_type_alias(node.name)
         if alias then
+            node._decl = alias
             local typ = resolve_type_alias(alias, st, errors)
             if typ._tag == "Type.GenericAlias" then
                 return generic_apply_generic_alias(
@@ -66,6 +93,7 @@ typefromnode = util.make_visitor({
         if owner and (owner._tag == "Type.Record"
                 or owner._tag == "Type.Union"
                 or owner._tag == "Type.Interface") then
+            node._decl = local_owner_declaration(st, node.name) or owner
             return generic_apply_named_owner(owner, node.typeargs, st, errors,
                 node.loc, "type '" .. node.name .. "'")
         end
@@ -79,6 +107,7 @@ typefromnode = util.make_visitor({
     ["Ast.TypeQualName"] = function(node, st, errors,
                                         defer_c_enum_carrier)
         local mod = st:find_symbol(node.module)
+        if mod then node._module_decl = mod end
         if node._contextual_c_name and mod and mod._type
            and mod._type._tag ~= "Type.CModule" then
             return invalid(errors, node.loc,
@@ -97,6 +126,7 @@ typefromnode = util.make_visitor({
                         "nominal type '%s' is local to module '%s'",
                         owner.name, mod._type.name)
                 end
+                bind_qualified_type(node, mod, mod._type, type_member)
                 return generic_apply_generic_alias(
                     type_member, node.typeargs, st, errors,
                     node.loc, subject)
@@ -106,6 +136,7 @@ typefromnode = util.make_visitor({
                         "interface type '%s' is local to module '%s'",
                         node.name, mod._type.name)
                 end
+                bind_qualified_type(node, mod, mod._type, type_member)
                 return generic_apply_named_owner(
                     type_member, node.typeargs, st, errors,
                     node.loc, subject)
@@ -127,6 +158,7 @@ typefromnode = util.make_visitor({
                 if checker._ensure_c_enum_supported(
                         st, type_member, node.loc, errors, nil,
                         defer_c_enum_carrier and true or false) then
+                    bind_qualified_type(node, mod, mod._type, type_member)
                     return type_member
                 end
                 return types.Invalid()
@@ -150,6 +182,7 @@ typefromnode = util.make_visitor({
                     member.type._tag == "Type.Record" and "record" or "union",
                     node.name, mod._type.name)
             end
+            bind_qualified_type(node, mod, mod._type, member)
             return generic_apply_named_owner(member.type, node.typeargs,
                 st, errors, node.loc, "type '" .. fqtn .. "'")
         elseif mod and mod._type and mod._type._tag == "Type.CModule" then
@@ -338,6 +371,7 @@ function generic_reserve_generic_binders(node, scope, st, errors)
 
     local active_names = {}
     for index, typeparam in ipairs(node.typeparams or {}) do
+        typeparam._decl = typeparam
         local name = typeparam.name
         local active = st:find_type_parameter(name)
         if active then
@@ -352,6 +386,7 @@ function generic_reserve_generic_binders(node, scope, st, errors)
             active_names[name] = true
         end
         local parameter = types.Parameter(scope, index, name, false)
+        parameter._decl = typeparam
         node._generic_parameters[index] = parameter
         if not node._generic_bindings[name] then
             node._generic_bindings[name] = parameter

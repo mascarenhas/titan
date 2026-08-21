@@ -11,7 +11,9 @@ local cpreamble = require "titan-compiler.cpreamble"
 local types = require "titan-compiler.types"
 local sha256 = require "titan-compiler.sha256"
 local cdriver = require "c-parser.cdriver"
-local lfs = require "lfs"
+local compiler_io = require "titan-compiler.io"
+
+local default_io = compiler_io.new_sync()
 
 local Service = {}
 Service.__index = Service
@@ -130,17 +132,18 @@ local function absolute_path(path, base)
     return path_join(base, path)
 end
 
-local function ensure_directory(path)
-    local mode = lfs.attributes(path, "mode")
-    if mode == "directory" then return true end
-    if mode ~= nil then return nil end
+local function ensure_directory(path, strategy)
+    local attributes = strategy:stat(path)
+    if attributes and attributes.kind == "directory" then return true end
+    if attributes ~= nil then return nil end
     local parent = path:match("^(.*)/[^/]+$")
     if parent and parent ~= "" and parent ~= path then
-        if not ensure_directory(parent) then return nil end
+        if not ensure_directory(parent, strategy) then return nil end
     end
-    local made = lfs.mkdir(path)
+    local made = strategy:mkdir(path)
     if made then return true end
-    return lfs.attributes(path, "mode") == "directory" or nil
+    attributes = strategy:stat(path)
+    return attributes and attributes.kind == "directory" or nil
 end
 
 local function first_diagnostic_line(diagnostic)
@@ -166,6 +169,52 @@ local function angle_header_name(name)
     return "<" .. name .. ">"
 end
 
+local function normalize_header_inputs(value, expected_kind, source_dir, cwd,
+                                       subject)
+    if value == nil then return {} end
+    if type(value) ~= "table" then
+        return nil, subject .. " must be an ordered array"
+    end
+    local result = {}
+    for index = 1, #value do
+        local input = value[index]
+        if type(input) ~= "table" then
+            return nil, subject .. " entry " .. index .. " must be a table"
+        end
+        local kind = input.kind
+        local path = input.path
+        local identity = input.identity
+        local restat = input.restat
+        if kind ~= expected_kind then
+            return nil, subject .. " entry " .. index .. " must have kind '" ..
+                expected_kind .. "'"
+        elseif type(path) ~= "string" or path == "" or
+               path:find("\0", 1, true) then
+            return nil, subject .. " entry " .. index ..
+                " must have a nonempty NUL-free path"
+        elseif type(identity) ~= "string" or identity == "" then
+            return nil, subject .. " entry " .. index ..
+                " must have a nonempty identity"
+        elseif restat ~= nil and type(restat) ~= "boolean" then
+            return nil, subject .. " entry " .. index ..
+                " restat flag must be boolean"
+        end
+        result[index] = {
+            kind = kind,
+            path = absolute_path(path, cwd or source_dir),
+            identity = identity,
+            restat = restat ~= false,
+        }
+    end
+    for key in pairs(value) do
+        if type(key) ~= "number" or key < 1 or key > #value
+        or key % 1 ~= 0 then
+            return nil, subject .. " must be a dense ordered array"
+        end
+    end
+    return result
+end
+
 local function normalize_include_descriptor(descriptor, source_dir, cwd)
     if type(descriptor) == "string" then
         descriptor = {
@@ -184,6 +233,14 @@ local function normalize_include_descriptor(descriptor, source_dir, cwd)
     local original = descriptor.original or name
     local resolved = descriptor.resolved
     local probe_wrapper = descriptor.probe_wrapper
+    local header_dependencies, dependency_error = normalize_header_inputs(
+        descriptor.c_header_dependencies, "file", source_dir, cwd,
+        "C header dependencies")
+    if not header_dependencies then return nil, dependency_error end
+    local header_search_inputs, search_error = normalize_header_inputs(
+        descriptor.c_header_search_inputs, "search", source_dir, cwd,
+        "C header search inputs")
+    if not header_search_inputs then return nil, search_error end
     if kind ~= "angle" and kind ~= "quote" then
         return nil, "C include descriptor kind must be 'angle' or 'quote'"
     elseif type(name) ~= "string" or name == "" then
@@ -220,6 +277,8 @@ local function normalize_include_descriptor(descriptor, source_dir, cwd)
                 name = probe_wrapper.name,
                 contents = probe_wrapper.contents,
             },
+            c_header_dependencies = header_dependencies,
+            c_header_search_inputs = header_search_inputs,
         }
     elseif kind == "quote" then
         -- cdriver descriptors are resolved relative to the importing process,
@@ -246,6 +305,8 @@ local function normalize_include_descriptor(descriptor, source_dir, cwd)
         include_kind = kind,
         include_name = name,
         rendered = rendered,
+        c_header_dependencies = header_dependencies,
+        c_header_search_inputs = header_search_inputs,
     }
 end
 
@@ -274,6 +335,22 @@ local function source_foreign_include_alias(
     local name = "titan-source-foreign-" .. sha256.hex(identity) .. ".h"
     local rendered, rendered_error = quote_header_name(name)
     if not rendered then return nil, rendered_error end
+    local header_dependencies = {}
+    for index, dependency in ipairs(
+            descriptor.c_header_dependencies or {}) do
+        local copy = deep_copy(dependency)
+        if copy.kind == "file" and copy.path == descriptor.resolved then
+            -- The resolver-owned sibling contains the exact generated bytes
+            -- parsed by cdriver. Give those bytes the stable public-header
+            -- logical path for probe-cache identity, but do not ask a
+            -- language-server client to stat a file which this analysis did
+            -- not publish. Titan source stamps cover regeneration; physical
+            -- nested C headers remain independently restattable.
+            copy.path = public_header
+            copy.restat = false
+        end
+        header_dependencies[index] = copy
+    end
     return {
         original = modname,
         resolved = public_header,
@@ -284,6 +361,9 @@ local function source_foreign_include_alias(
             name = name,
             contents = "#include " .. descriptor.rendered .. "\n",
         },
+        c_header_dependencies = header_dependencies,
+        c_header_search_inputs =
+            deep_copy(descriptor.c_header_search_inputs or {}),
     }
 end
 
@@ -348,9 +428,12 @@ local function include_dirs_key(include_dirs)
     return keyed_fields(fields)
 end
 
-local function header_context_key(source_dir, includes)
+local function header_context_key(
+        source_dir, includes, forced_header_manifest)
     local fields = {
+        { "header_context_version", "2" },
         { "source_dir", source_dir },
+        { "forced_headers", forced_header_manifest or "" },
     }
     for index, include in ipairs(includes) do
         local prefix = "header_" .. index .. "_"
@@ -359,8 +442,81 @@ local function header_context_key(source_dir, includes)
         fields[#fields + 1] = { prefix .. "kind", include.include_kind }
         fields[#fields + 1] = { prefix .. "name", include.include_name }
         fields[#fields + 1] = { prefix .. "rendered", include.rendered }
+        for dependency_index, dependency in ipairs(
+                include.c_header_dependencies or {}) do
+            local dependency_prefix = prefix .. "dependency_" ..
+                dependency_index .. "_"
+            fields[#fields + 1] = {
+                dependency_prefix .. "kind", dependency.kind }
+            fields[#fields + 1] = {
+                dependency_prefix .. "path", dependency.path }
+            fields[#fields + 1] = {
+                dependency_prefix .. "identity", dependency.identity }
+            fields[#fields + 1] = {
+                dependency_prefix .. "restat",
+                dependency.restat and "true" or "false" }
+        end
+        for search_index, search in ipairs(
+                include.c_header_search_inputs or {}) do
+            local search_prefix = prefix .. "search_" .. search_index .. "_"
+            fields[#fields + 1] = {
+                search_prefix .. "kind", search.kind }
+            fields[#fields + 1] = {
+                search_prefix .. "path", search.path }
+            fields[#fields + 1] = {
+                search_prefix .. "identity", search.identity }
+            fields[#fields + 1] = {
+                search_prefix .. "restat",
+                search.restat and "true" or "false" }
+        end
     end
-    return keyed_fields(fields)
+    -- Header closures can contain thousands of files and failed include-search
+    -- candidates. Keep the exact ordered manifest as the hash input, but never
+    -- embed that unbounded string in every baseline/candidate cache key. Those
+    -- keys are retained for the lifetime of a compiler service, so carrying
+    -- the manifest directly makes memory and hashing work multiplicative in
+    -- (header inputs x semantic probes).
+    return "titan-cprobe-header-context-v2:sha256:" ..
+        sha256.hex(keyed_fields(fields))
+end
+
+local function collect_header_inputs(includes, additional_inputs)
+    local result = {}
+    local seen = {}
+    local function append(input)
+        if input.restat == false then return true end
+        local key = input.kind .. "\0" .. input.path
+        local previous = seen[key]
+        if previous and previous ~= input.identity then
+            return nil, "conflicting C header input identity for '" ..
+                input.path .. "'"
+        elseif not previous then
+            seen[key] = input.identity
+            result[#result + 1] = {
+                kind = input.kind,
+                path = input.path,
+                identity = input.identity,
+            }
+        end
+        return true
+    end
+    for _, input in ipairs(additional_inputs or {}) do
+        local ok, err = append(input)
+        if not ok then return nil, err end
+    end
+    for _, include in ipairs(includes or {}) do
+        for _, dependency in ipairs(
+                include.c_header_dependencies or {}) do
+            local ok, err = append(dependency)
+            if not ok then return nil, err end
+        end
+        for _, search in ipairs(
+                include.c_header_search_inputs or {}) do
+            local ok, err = append(search)
+            if not ok then return nil, err end
+        end
+    end
+    return result
 end
 
 local function render_header_preamble(includes)
@@ -691,52 +847,57 @@ local function command_string(argv)
     return "env LANG=C LC_ALL=C " .. table.concat(quoted, " ")
 end
 
-local function default_runner(argv)
-    return cdriver.capture_command(argv, {
+local function default_runner(strategy, argv)
+    return strategy:run(argv, {
         stderr_to_stdout = true,
     })
 end
 
-local function default_temp_provider()
-    local temporary_root = os.getenv("TMPDIR") or "/tmp"
-    local template = path_join(
-        temporary_root, "titan-cprobe.XXXXXX")
-    local result = cdriver.capture_command(
-        { "mktemp", "-d", template },
-        { stderr_to_stdout = true })
-    if not result.started or not result.ok then
-        return nil, "could not create private probe directory: " ..
-            tostring(result.diagnostic or "mktemp failed")
+local function default_temp_provider(strategy)
+    local root, temp_error = strategy:tmpname()
+    if not root then
+        return nil, "could not reserve private probe directory: " ..
+            tostring(temp_error)
     end
-    local output = tostring(result.output or result.diagnostic or "")
-    local root = output:match("^([^\r\n]+)\r?\n?$")
-    if not root or lfs.attributes(root, "mode") ~= "directory" then
-        return nil, "mktemp returned an invalid private probe directory"
+    -- The optional ownership flag lets the async Titan strategy finish
+    -- releasing this caller-owned tmpname reservation even when Task
+    -- cancellation is delivered with the unlink completion.
+    local removed, remove_error = strategy:unlink(root, true)
+    if not removed then
+        return nil, "could not release probe directory reservation: " ..
+            tostring(remove_error)
+    end
+    -- The optional ownership flag lets the async Titan strategy roll back this
+    -- unique, previously absent directory if its mkdir completes concurrently
+    -- with Task cancellation. Ordinary Lua strategies ignore the extra value.
+    local made, mkdir_error = strategy:mkdir(root, true)
+    if not made then
+        return nil, "could not create private probe directory: " ..
+            tostring(mkdir_error)
     end
 
     local tracked = {}
-    local workspace = { root = root }
+    local workspace = {
+        root = root,
+        _compiler_io_strategy_owned = true,
+    }
 
     function workspace:write(name, contents)
         local path = path_join(self.root, name)
-        local file, err = io.open(path, "wb")
-        if not file then return nil, err end
-        local ok, write_error = file:write(contents)
-        local close_ok, close_error = file:close()
+        local ok, write_error = strategy:write_file(path, contents)
         if not ok then return nil, write_error end
-        if not close_ok then return nil, close_error end
         tracked[name] = true
         return true
     end
 
     function workspace:remove(name)
         local path = path_join(self.root, name)
-        local mode = lfs.attributes(path, "mode")
-        if not mode then
+        local current = strategy:lstat(path)
+        if not current then
             tracked[name] = nil
             return true
         end
-        local removed, err = os.remove(path)
+        local removed, err = strategy:unlink(path)
         if not removed then return nil, err end
         tracked[name] = nil
         return true
@@ -750,18 +911,19 @@ local function default_temp_provider()
         end
         -- Account for an object emitted by the compiler between a failed
         -- runner return and normal per-probe cleanup.
-        local iter, directory_or_error = lfs.dir(self.root)
-        if iter then
-            for entry in iter, directory_or_error do
-                if entry ~= "." and entry ~= ".." then
-                    local removed, err = os.remove(path_join(self.root, entry))
-                    if not removed then
-                        errors[#errors + 1] = entry .. ": " .. tostring(err)
-                    end
+        local entries, list_error = strategy:list(self.root)
+        if entries then
+            for _, entry in ipairs(entries) do
+                local removed, err =
+                    strategy:unlink(path_join(self.root, entry))
+                if not removed then
+                    errors[#errors + 1] = entry .. ": " .. tostring(err)
                 end
             end
+        elseif list_error then
+            errors[#errors + 1] = tostring(list_error)
         end
-        local removed, err = lfs.rmdir(self.root)
+        local removed, err = strategy:rmdir(self.root)
         if not removed then errors[#errors + 1] = tostring(err) end
         if #errors > 0 then return nil, table.concat(errors, "; ") end
         return true
@@ -871,41 +1033,57 @@ function Service:_emit(event)
     end
 end
 
-function Service:_persistent_success_location(source)
+function Service:_persistent_success_location(source, key)
     if not self.cache_directory then return nil end
-    local digest = sha256.hex(source)
+    -- v1 named markers by source alone. v2 accepted a caller-supplied semantic
+    -- key, but did not independently bind the service's forced-header state.
+    -- v3 includes the authoritative toolchain and forced-header manifest, so
+    -- old markers are guaranteed misses even for internal callers that reuse
+    -- an otherwise identical semantic key.
+    local digest = sha256.hex(keyed_fields({
+        { "persistent_success_version", "3" },
+        { "toolchain", self.toolchain_key },
+        { "forced_headers", self.forced_header_manifest },
+        { "semantic_key", key or "" },
+        { "source", source },
+    }))
     return path_join(self.cache_directory, digest .. ".success"), digest
 end
 
-function Service:_persistent_success(source)
-    local path, digest = self:_persistent_success_location(source)
+function Service:_forced_header_inputs_stable()
+    for _, input in ipairs(self.forced_header_inputs or {}) do
+        local identity, err =
+            cdriver.header_input_identity(input.kind, input.path, self.io)
+        if not identity then
+            return nil, "could not restat forced C header input '" ..
+                input.path .. "': " .. tostring(err)
+        elseif identity ~= input.identity then
+            return nil, "forced C header input changed: " .. input.path
+        end
+    end
+    return true
+end
+
+function Service:_persistent_success(source, key)
+    local path, digest = self:_persistent_success_location(source, key)
     if not path then return nil end
-    local ok, mode = pcall(lfs.attributes, path, "mode")
-    if ok and mode == "file" then return true, path, digest end
+    local attributes = self.io:stat(path)
+    if attributes and attributes.kind == "file" then
+        return true, path, digest
+    end
     return false, path, digest
 end
 
-function Service:_publish_persistent_success(path, digest, workspace)
+function Service:_publish_persistent_success(path)
     if not path or not self.cache_directory then return nil end
-    if not ensure_directory(self.cache_directory) then return nil end
-    self.cache_publish_sequence = self.cache_publish_sequence + 1
-    local nonce = sha256.hex(table.concat({
-        tostring(self), tostring(workspace and workspace.root or ""),
-        tostring(self.cache_publish_sequence), digest,
-    }, "\0"))
-    local temporary = path .. ".tmp." .. nonce
-    local file = io.open(temporary, "wb")
-    if not file then return nil end
-    local closed = file:close()
-    if not closed then
-        os.remove(temporary)
-        return nil
-    end
-    local renamed = os.rename(temporary, path)
-    if not renamed then
-        os.remove(temporary)
-        local ok, mode = pcall(lfs.attributes, path, "mode")
-        return ok and mode == "file" or nil
+    if not ensure_directory(self.cache_directory, self.io) then return nil end
+    -- write_file is the strategy's atomic publication primitive. Writing the
+    -- final marker directly leaves no second, unowned temporary file if an
+    -- async strategy commits the rename and then delivers Task cancellation.
+    local written = self.io:write_file(path, "")
+    if not written then
+        local attributes = self.io:stat(path)
+        return attributes and attributes.kind == "file" or nil
     end
     return true
 end
@@ -916,7 +1094,10 @@ function Service:_ensure_workspace()
 
     local provider = self.temp_provider
     local ok, workspace, err
-    if type(provider) == "function" then
+    if self.temp_provider_is_strategy then
+        workspace, err = provider(self)
+        ok = true
+    elseif type(provider) == "function" then
         ok, workspace, err = pcall(provider, self)
     elseif type(provider) == "table" and type(provider.create) == "function" then
         ok, workspace, err = pcall(provider.create, provider, self)
@@ -942,7 +1123,16 @@ local function call_workspace(workspace, method, ...)
     if type(fn) ~= "function" then
         return nil, "temporary workspace has no " .. method .. " method"
     end
-    local ok, first, second = pcall(fn, workspace, ...)
+    local ok, first, second
+    if workspace._compiler_io_strategy_owned then
+        -- Strategy methods normalize ordinary backend failures themselves.
+        -- Call them directly so a Titan Task cancellation is not converted
+        -- into an ordinary probe infrastructure diagnostic by Lua pcall.
+        first, second = fn(workspace, ...)
+        ok = true
+    else
+        ok, first, second = pcall(fn, workspace, ...)
+    end
     if not ok then
         return nil, method .. " raised an error: " .. tostring(first)
     elseif first == false or (first == nil and second ~= nil) then
@@ -1021,8 +1211,19 @@ function Service:_run_source(stage, source, key, probe_label, wrappers)
             source = source,
         })
     end
+    local stable, stability_error = self:_forced_header_inputs_stable()
+    if not stable then
+        return {
+            started = false,
+            ok = false,
+            interrupted = false,
+            reason = "header_inputs",
+            diagnostic = stability_error,
+            source = source,
+        }
+    end
     local persistent_hit, persistent_path, persistent_digest =
-        self:_persistent_success(source)
+        self:_persistent_success(source, key)
     if persistent_path then
         self:_emit({
             kind = "cache",
@@ -1033,6 +1234,17 @@ function Service:_run_source(stage, source, key, probe_label, wrappers)
         })
     end
     if persistent_hit then
+        stable, stability_error = self:_forced_header_inputs_stable()
+        if not stable then
+            return {
+                started = false,
+                ok = false,
+                interrupted = false,
+                reason = "header_inputs",
+                diagnostic = stability_error,
+                source = source,
+            }
+        end
         return {
             started = true,
             ok = true,
@@ -1121,8 +1333,14 @@ function Service:_run_source(stage, source, key, probe_label, wrappers)
         source_path = source_path,
         object_path = self.syntax_only and nil or object_path,
     }
-    local call_ok, raw_result, secondary =
-        pcall(self.runner, copy_array(argv), metadata)
+    local call_ok, raw_result, secondary
+    if self.runner_is_strategy then
+        raw_result, secondary = self.runner(copy_array(argv), metadata)
+        call_ok = true
+    else
+        call_ok, raw_result, secondary =
+            pcall(self.runner, copy_array(argv), metadata)
+    end
     local run
     if not call_ok then
         run = {
@@ -1133,6 +1351,14 @@ function Service:_run_source(stage, source, key, probe_label, wrappers)
         }
     else
         run = normalize_runner_result(raw_result, secondary)
+    end
+    stable, stability_error = self:_forced_header_inputs_stable()
+    if not stable then
+        run.started = false
+        run.ok = false
+        run.interrupted = false
+        run.reason = "header_inputs"
+        run.diagnostic = stability_error
     end
     run.argv = copy_array(argv)
     run.command = command
@@ -1180,8 +1406,7 @@ function Service:_run_source(stage, source, key, probe_label, wrappers)
             table.concat(cleanup_errors, "; ")
         run.cleanup_error = true
     elseif run.started and run.ok and not run.interrupted and persistent_path then
-        self:_publish_persistent_success(
-            persistent_path, persistent_digest, workspace)
+        self:_publish_persistent_success(persistent_path)
         run.cache_path = persistent_path
     end
     return run
@@ -1213,6 +1438,16 @@ local function infrastructure_message(stage, run)
 end
 
 function Service:_ensure_baseline(module_context)
+    local stable, stability_error = self:_forced_header_inputs_stable()
+    if not stable then
+        return infrastructure_run("baseline", "header_inputs", {
+            started = false,
+            ok = false,
+            interrupted = false,
+            reason = "header_inputs",
+            diagnostic = stability_error,
+        })
+    end
     local key = module_context.baseline_key
     local cached = self.baseline_cache[key]
     self:_emit({
@@ -1338,6 +1573,22 @@ local function closed_declaration_compatibility_result()
         message =
             "cannot validate C declaration compatibility because "
             .. "the probe service is closed",
+    }
+end
+
+local function changed_forced_header_result(diagnostic)
+    diagnostic = tostring(diagnostic)
+    return {
+        status = "infrastructure_failure",
+        ok = false,
+        accepted = nil,
+        stage = "service",
+        reason = "header_inputs",
+        diagnostic = diagnostic,
+        summary = first_diagnostic_line(diagnostic),
+        message = "cannot validate C semantics because the configured " ..
+            "forced header inputs changed: " ..
+            first_diagnostic_line(diagnostic),
     }
 end
 
@@ -1524,6 +1775,13 @@ function ModuleContext:validate_declaration_compatibilities(candidates)
         end
         return results
     end
+    local stable, stability_error = service:_forced_header_inputs_stable()
+    if not stable then
+        for index = 1, #candidates do
+            results[index] = changed_forced_header_result(stability_error)
+        end
+        return results
+    end
 
     local entries = {}
     local pending_by_key = {}
@@ -1636,6 +1894,10 @@ function ModuleContext:probe_unsafe_object_pointer(source_type, target_type)
             message =
                 "cannot validate C conversion because the probe service is closed",
         }
+    end
+    local stable, stability_error = service:_forced_header_inputs_stable()
+    if not stable then
+        return changed_forced_header_result(stability_error)
     end
 
     local rendered_ok, source, rendered = pcall(
@@ -1802,6 +2064,10 @@ function ModuleContext:probe_operator(trait)
                 "cannot validate C operator because the probe service is closed",
         }
     end
+    local stable, stability_error = service:_forced_header_inputs_stable()
+    if not stable then
+        return changed_forced_header_result(stability_error)
+    end
 
     local rendered_ok, source, rendered = pcall(
         render_operator_source, self, trait)
@@ -1933,12 +2199,14 @@ ModuleContext.c_operator = ModuleContext.probe_operator
 
 function Service:module_context(options)
     if self.closed then return nil, "probe service is closed" end
+    local stable, stability_error = self:_forced_header_inputs_stable()
+    if not stable then return nil, stability_error end
     options = options or {}
     if type(options) ~= "table" then
         return nil, "module probe context options must be a table"
     end
 
-    local process_cwd, cwd_error = lfs.currentdir()
+    local process_cwd, cwd_error = self.io:cwd()
     if not process_cwd then
         return nil, "cannot determine module probe cwd: " ..
             tostring(cwd_error)
@@ -1992,13 +2260,18 @@ function Service:module_context(options)
         self.probe_wrapper_bindings[name] = contents
     end
 
-    local header_key = header_context_key(source_dir, includes)
+    local header_key = header_context_key(
+        source_dir, includes, self.forced_header_manifest)
+    local header_inputs, inputs_error = collect_header_inputs(
+        includes, self.forced_header_inputs)
+    if not header_inputs then return nil, inputs_error end
     local context = setmetatable({
         service = self,
         source_dir = source_dir,
         includes = includes,
         header_preamble = render_header_preamble(includes),
         probe_wrappers = probe_wrappers,
+        header_inputs = header_inputs,
         header_key = header_key,
         baseline_key = keyed_fields({
             { "toolchain", self.toolchain_key },
@@ -2049,7 +2322,7 @@ function Service:probe_operator(module_context, trait)
 end
 
 function Service:close()
-    if self.closed then
+    if self.closed and not self.workspace then
         if self.close_error then return nil, self.close_error end
         return true
     end
@@ -2057,7 +2330,6 @@ function Service:close()
     if not self.workspace then return true end
 
     local workspace = self.workspace
-    self.workspace = nil
     local wrapper_names = {}
     for name in pairs(self.materialized_probe_wrappers) do
         wrapper_names[#wrapper_names + 1] = name
@@ -2071,9 +2343,14 @@ function Service:close()
             wrapper_error = remove_error
         end
     end
-    self.materialized_probe_wrappers = {}
     local cleaned, cleanup_error =
         call_workspace(workspace, "cleanup")
+    -- A strategy-owned cancellation raises out of call_workspace before these
+    -- ownership fields are cleared. An uncancelled resolver cleanup can then
+    -- retry the exact workspace. Ordinary custom-provider failures retain the
+    -- historical terminal close_error behavior.
+    self.workspace = nil
+    self.materialized_probe_wrappers = {}
     local close_error = wrapper_error
     if not cleaned and not close_error then close_error = cleanup_error end
     self:_emit({
@@ -2129,6 +2406,7 @@ function Service:cdriver_process_options()
     end
 
     return {
+        io = self.io,
         compiler = copy_array(self.compiler_argv),
         language_mode = self.language_mode,
         language_flag = false,
@@ -2157,6 +2435,13 @@ function cprobe.new_service(options)
     local toolchain = options.toolchain or {}
     if type(toolchain) ~= "table" then
         return nil, "C probe toolchain must be a table"
+    end
+
+    local strategy = options.io or toolchain.io or default_io
+    local valid, validation_error = pcall(compiler_io.validate, strategy, 3)
+    if not valid then
+        return nil, "invalid compiler I/O strategy: " ..
+            tostring(validation_error)
     end
 
     local compiler_argv, err = dense_string_array(
@@ -2201,7 +2486,7 @@ function cprobe.new_service(options)
         option(options, toolchain, "include_dirs", nil)
     if raw_include_dirs == nil then
         raw_include_dirs, err =
-            cdriver.resolve_compiler_include_dirs(nil)
+            cdriver.resolve_compiler_include_dirs(nil, strategy)
         if not raw_include_dirs then return nil, err end
     end
     local include_dirs
@@ -2254,6 +2539,52 @@ function cprobe.new_service(options)
         { "compile_mode", syntax_only and "syntax-only" or "object" },
     }
 
+    local effective_preprocessor_flags = copy_array(compile_flags)
+    append_all(effective_preprocessor_flags, cppflags)
+    if language_flag then
+        effective_preprocessor_flags[#effective_preprocessor_flags + 1] =
+            language_flag
+    end
+    append_all(effective_preprocessor_flags, cflags)
+    for _, include in ipairs(include_dirs) do
+        effective_preprocessor_flags[#effective_preprocessor_flags + 1] =
+            include.flag
+        effective_preprocessor_flags[#effective_preprocessor_flags + 1] =
+            include.path
+    end
+    local forced_headers
+    forced_headers, err = cdriver.forced_header_inputs({
+        io = strategy,
+        compiler = compiler_argv,
+        language_mode = language_mode,
+        language_flag = false,
+        compile_flags = effective_preprocessor_flags,
+        cppflags = {},
+        compiler_include_dirs = {},
+    })
+    if not forced_headers then
+        return nil, "invalid forced C header configuration: " .. tostring(err)
+    end
+    local forced_header_inputs = {}
+    append_all(forced_header_inputs,
+        forced_headers.c_header_dependencies)
+    append_all(forced_header_inputs,
+        forced_headers.c_header_search_inputs)
+    -- cpp's manifest is intentionally exact and ordered, but it can grow with
+    -- every forced header and include-search candidate. Toolchain and probe
+    -- keys are retained and nested repeatedly, so publish only one
+    -- domain-separated digest here; the exact restattable inputs remain in the
+    -- separate arrays above.
+    local forced_header_manifest =
+        "titan-cprobe-forced-header-context-v2:sha256:" .. sha256.hex(
+            keyed_fields({
+                { "forced_header_context_version", "2" },
+                { "manifest", forced_headers.manifest },
+            }))
+    fields[#fields + 1] = {
+        "forced_header_manifest", forced_header_manifest,
+    }
+
     local verbose = options.verbose
     local verbose_sink = options.verbose_sink
     if type(verbose) == "function" and verbose_sink == nil then
@@ -2267,11 +2598,23 @@ function cprobe.new_service(options)
         return nil, "verbose_sink must be a function"
     end
 
-    local runner = options.runner or default_runner
+    local runner = options.runner
+    local runner_is_strategy = runner == nil
+    if runner == nil then
+        runner = function(argv)
+            return default_runner(strategy, argv)
+        end
+    end
     if type(runner) ~= "function" then
         return nil, "runner must be a function"
     end
-    local temp_provider = options.temp_provider or default_temp_provider
+    local temp_provider = options.temp_provider
+    local temp_provider_is_strategy = temp_provider == nil
+    if temp_provider == nil then
+        temp_provider = function()
+            return default_temp_provider(strategy)
+        end
+    end
     if type(temp_provider) ~= "function"
     and not (type(temp_provider) == "table"
         and type(temp_provider.create) == "function") then
@@ -2286,7 +2629,7 @@ function cprobe.new_service(options)
            or cache_directory:find("%z") then
             return nil, "cache_directory must be a pathname string"
         end
-        local cwd, cwd_error = lfs.currentdir()
+        local cwd, cwd_error = strategy:cwd()
         if not cwd then
             return nil, "cannot determine cache cwd: " .. tostring(cwd_error)
         end
@@ -2307,6 +2650,7 @@ function cprobe.new_service(options)
     end
 
     return setmetatable({
+        io = strategy,
         compiler_argv = compiler_argv,
         compile_flags = compile_flags,
         language_mode = language_mode,
@@ -2314,14 +2658,21 @@ function cprobe.new_service(options)
         cppflags = cppflags,
         cflags = cflags,
         include_dirs = include_dirs,
+        forced_header_dependencies =
+            forced_headers.c_header_dependencies,
+        forced_header_search_inputs =
+            forced_headers.c_header_search_inputs,
+        forced_header_inputs = forced_header_inputs,
+        forced_header_manifest = forced_header_manifest,
         profile = profile,
         profile_identity = profile_identity,
         syntax_only = syntax_only,
         toolchain_key = keyed_fields(fields),
         runner = runner,
+        runner_is_strategy = runner_is_strategy,
         temp_provider = temp_provider,
+        temp_provider_is_strategy = temp_provider_is_strategy,
         cache_directory = cache_directory,
-        cache_publish_sequence = 0,
         verbose = verbose,
         verbose_sink = verbose_sink,
         evidence = {},
@@ -2336,10 +2687,12 @@ function cprobe.new_service(options)
 end
 
 cprobe.source_foreign_include_alias = source_foreign_include_alias
+cprobe.collect_header_inputs = collect_header_inputs
 
 function cprobe.normalize_include_descriptor(descriptor, options)
     options = options or {}
-    local process_cwd, cwd_error = lfs.currentdir()
+    local strategy = options.io or default_io
+    local process_cwd, cwd_error = strategy:cwd()
     if not process_cwd then
         return nil, "cannot determine include cwd: " .. tostring(cwd_error)
     end

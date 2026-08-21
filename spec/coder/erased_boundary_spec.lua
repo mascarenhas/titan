@@ -74,6 +74,31 @@ describe("erased coder boundary", function()
         assert.equal(expected, serialized)
     end)
 
+    it("ignores private generic and named-argument source metadata", function()
+        h.reset(true)
+        local source = [[
+            record Box<T>
+                item: T
+            end
+            function choose<T>(first: T, second: T): T
+                return first
+            end
+            function run(): integer
+                local box: Box<integer> = { item = 1 }
+                return choose { second = box.item, first = 2 }
+            end
+        ]]
+        local tree, parse_error = h.parse(source, MODULE .. ".titan")
+        assert.truthy(tree, parse_error)
+        local _, errors = checker.check(
+            MODULE, tree, source, MODULE .. ".titan")
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.truthy(tree[1]._surface_typeparams)
+        assert.truthy(
+            tree[#tree].block.stats[2].exps[1].exp._surface_named_args)
+        assert.is_string(generate(tree))
+    end)
+
     it("serializes the detached declared graph while coding the erased one",
     function()
         local tree = checked()

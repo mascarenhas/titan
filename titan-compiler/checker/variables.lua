@@ -27,6 +27,7 @@ checkvar = util.make_visitor({
                 generic_annotate_alias_namespace(
                     node, resolved_alias, namespace)
                 node._alias_decl = alias
+                node._decl = alias
                 node._type = namespace
             elseif resolved_alias and types.is_direct_c(resolved_alias) then
                 node._ctype_namespace = true
@@ -177,6 +178,13 @@ checkvar = util.make_visitor({
                     generic_annotate_alias_namespace(
                         node, member, namespace)
                     node._alias_type = member
+                    node._decl = {
+                        _tag = "Checker.TypeMember",
+                        modname = mod.name,
+                        name = node.name,
+                        type = member,
+                        islocal = member.islocal and true or false,
+                    }
                     node._type = namespace
                 elseif member._tag == "Type.Interface" then
                     node._type = invalid(errors, node.loc,

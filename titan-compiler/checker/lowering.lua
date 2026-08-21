@@ -1136,8 +1136,26 @@ function generic_lower_erased_annotations(root, state)
         local result = (is_ast or not is_list) and value or {}
         memo[value] = result
         if is_ast then
-            if value.typeparams ~= nil then value.typeparams = {} end
-            if value.typeargs ~= nil then value.typeargs = {} end
+            -- Runtime lowering still consumes the erased public lists. Keep
+            -- the written generic syntax on private edges so source tooling
+            -- can visit type-parameter declarations and type-argument
+            -- references after checking has resolved their bindings.
+            if value.typeparams ~= nil then
+                if value._surface_typeparams == nil
+                   and type(value.typeparams) == "table"
+                   and #value.typeparams > 0 then
+                    value._surface_typeparams = value.typeparams
+                end
+                value.typeparams = {}
+            end
+            if value.typeargs ~= nil then
+                if value._surface_typeargs == nil
+                   and type(value.typeargs) == "table"
+                   and #value.typeargs > 0 then
+                    value._surface_typeargs = value.typeargs
+                end
+                value.typeargs = {}
+            end
         end
 
         for key, child in pairs(value) do
@@ -1150,6 +1168,14 @@ function generic_lower_erased_annotations(root, state)
                         or key == "_closed_generic_declaration"
                         or key == "_rigid_receiver_type") then
                     result[key] = nil
+                elseif key == "_decl" and is_ast
+                   and (value._tag == "Ast.TypeName"
+                        or value._tag == "Ast.TypeQualName"
+                        or value._tag == "Ast.TypeParam") then
+                    -- These nodes have no code-facing role after checking.
+                    -- Retain their canonical semantic binding while the
+                    -- ordinary runtime type annotations are erased below.
+                    result[key] = child
                 else
                     result[key] = visit(child)
                 end
@@ -1201,6 +1227,33 @@ function generic_refresh_erased_annotations(node)
     visit(node)
 end
 
+-- The declared module/type snapshots are the public semantic interface handed
+-- to resolvers and retained independently of the source AST. Source navigation
+-- metadata points in the opposite direction: Type.Parameter._decl reaches its
+-- Ast.TypeParam (and potentially the whole declaration tree), while callable
+-- _parameter_decls contain Checker.Parameter descriptors shared with the AST.
+-- Clone the type graph across that ownership boundary without those two
+-- source-only edges. The original type graph and annotated AST keep them.
+local declared_interface_source_edge = {
+    _decl = true,
+    _parameter_decls = true,
+}
+
+local function clone_declared_interface_graph(value, memo)
+    if type(value) ~= "table" then return value end
+    memo = memo or {}
+    if memo[value] then return memo[value] end
+    local copy = {}
+    memo[value] = copy
+    for key, child in pairs(value) do
+        if not declared_interface_source_edge[key] then
+            copy[clone_declared_interface_graph(key, memo)] =
+                clone_declared_interface_graph(child, memo)
+        end
+    end
+    return copy
+end
+
 function generic_freeze_declared_annotations(root, clone_memo)
     local seen = {}
     local function visit(node)
@@ -1213,7 +1266,8 @@ function generic_freeze_declared_annotations(root, clone_memo)
                     or tag == "Ast.InterfaceMethod"
                     or tag == "Ast.UnionVariant") then
                 node._declared_type = clone_memo[node._type]
-                    or types.clone_graph(node._type, clone_memo)
+                    or clone_declared_interface_graph(
+                        node._type, clone_memo)
             end
             for key, child in pairs(node) do
                 if type(key) == "number" or (type(key) == "string"
@@ -1238,7 +1292,7 @@ end
 
 function generic_lower_erased_core(modname, tree, st, errors)
     local clone_memo = {}
-    local declared = types.clone_graph(assert(tree._type,
+    local declared = clone_declared_interface_graph(assert(tree._type,
         "generic erasure requires the declared module graph"), clone_memo)
     tree._declared_type = declared
     generic_freeze_declared_annotations(tree, clone_memo)

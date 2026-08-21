@@ -992,7 +992,13 @@ For a folder source the driver calls the checker exactly once with the
 combined AST, logical module name, and canonical main filename/source
 directory. Duplicate declarations, aliases, and alias/record conflicts use
 the later node's normal error prefix and print the earlier declaration's full
-`filename:line:col`; do not regress those to line-only messages.
+`filename:line:col`; do not regress those to line-only messages. Source tooling
+also relies on exact parser `_name_loc`/`_module_loc`/`_owner_loc` and structural
+`_end_loc`/`_structure_loc`, checker `_decl` bindings (including
+`Checker.TypeMember` and `Checker.Parameter`), and the private
+`_surface_typeparams`/`_surface_typeargs`/`_surface_named_args` lists. Those
+private edges are not serialized ABI or runtime input and must stay outside the
+coder's erased-boundary traversal.
 
 During each `TopLevelVar`, `symtab.initializer_order` hides the current/later
 module variables and later Titan/foreign imports; foreign type/name histories

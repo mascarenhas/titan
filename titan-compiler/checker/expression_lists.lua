@@ -1166,6 +1166,7 @@ function generic_finish_named_record_constructor(
                     cfield.exp, found.type, "field " .. cfield.name,
                     errors, cfield.loc)
                 cfield._field = found
+                cfield._decl = found
                 supplied[found.name] = true
                 table.insert(finalized_fields, cfield)
             end
@@ -1185,6 +1186,7 @@ function generic_finish_named_record_constructor(
                 exp._named_omitted = true
                 local cfield = ast.Field(node.loc, rfield.name, exp)
                 cfield._field = rfield
+                cfield._decl = rfield
                 table.insert(finalized_fields, cfield)
             else
                 checker.typeerror(errors, node.loc,
@@ -1255,6 +1257,7 @@ function generic_check_named_record_constructor(
                 else
                     finish_field(cfield, found.type)
                     cfield._field = found
+                    cfield._decl = found
                     if contribute then
                         generic_constructor_unify(operation,
                             found.type, cfield.exp._type,
@@ -1390,6 +1393,7 @@ function generic_check_named_record_constructor(
                         "field " .. cfield.name, cfield.loc))
             end
             cfield._field = found
+            cfield._decl = found
             supplied[found.name] = true
             if operation and not deferred then
                 generic_constructor_unify(operation,
@@ -1438,6 +1442,7 @@ function generic_check_named_record_constructor(
                     exp._named_omitted = true
                     local cfield = ast.Field(node.loc, rfield.name, exp)
                     cfield._field = rfield
+                    cfield._decl = rfield
                     table.insert(node.fields, cfield)
                 else
                     checker.typeerror(errors, node.loc,

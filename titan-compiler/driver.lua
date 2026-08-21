@@ -8,6 +8,7 @@ local staticmetadata = require "titan-compiler.staticmetadata"
 local cdriver = require "c-parser.cdriver"
 local cprobe = require "titan-compiler.cprobe"
 local csemantics = require "titan-compiler.csemantics"
+local compiler_io = require "titan-compiler.io"
 
 local lfs = require "lfs"
 
@@ -18,6 +19,15 @@ driver.imported = {}
 driver.TITAN_VER = "0.26"
 driver.TITAN_VER_SUFFIX = "_0_26"
 driver.LUA_VERSION = "5.5"
+
+-- Version of the additive compiler contract consumed by the Titan language
+-- server. This is intentionally independent from TITAN_VER: matching the
+-- generated-code ABI does not imply support for semantic AST metadata,
+-- incremental source/interface caches, analysis-local FFI include paths, or
+-- cooperative scheduling. API 2 additionally guarantees exact C-header
+-- dependency metadata and driver.restat_c_header_dependencies. API 3 owns all
+-- analysis I/O and cooperative checkpoints through one resolver strategy.
+driver.LANGUAGE_SERVER_API_VERSION = 3
 
 local LUA_CPATH_SUFFIX = "/lib/lua/" .. driver.LUA_VERSION .. "/?.so"
 
@@ -33,8 +43,13 @@ local function normalize_absolute_path(path)
     return "/" .. table.concat(components, "/")
 end
 
-local function absolute_filename(filename)
+local function absolute_filename(filename, strategy)
     if filename:sub(1, 1) == "/" then return filename end
+    if strategy then
+        local current_dir, current_err = strategy:cwd()
+        if not current_dir then return nil, current_err end
+        return current_dir .. "/" .. filename
+    end
     return lfs.currentdir() .. "/" .. filename
 end
 
@@ -112,16 +127,32 @@ function driver.root_from_package_cpath(cpath)
     return nil
 end
 
-local function normalize_root(root)
+local function normalize_root(root, strategy)
     if type(root) ~= "string" or root == "" then return nil end
+    local current_dir
     if root:sub(1, 1) ~= "/" then
-        root = lfs.currentdir() .. "/" .. root
+        if strategy then
+            local current_err
+            current_dir, current_err = strategy:cwd()
+            if not current_dir then return nil, current_err end
+        else
+            current_dir = lfs.currentdir()
+        end
+        root = current_dir .. "/" .. root
     end
     -- A literal `..` after a symlink must be resolved by the filesystem:
     -- lexical normalization would name a different directory. Ordinary roots
     -- keep their normalized pathname spelling (notably macOS /tmp rather than
     -- /private/tmp), preserving the existing loader-path contract.
     if ("/" .. root .. "/"):find("/../", 1, true) then
+        if strategy then
+            local resolved, resolve_error = strategy:realpath(root)
+            if resolved then return resolved end
+            local attributes, attribute_error = strategy:stat(root)
+            if attribute_error then return nil, attribute_error end
+            if attributes then return nil, resolve_error end
+            return normalize_absolute_path(root)
+        end
         local previous = lfs.currentdir()
         if lfs.chdir(root) then
             local resolved = lfs.currentdir()
@@ -168,84 +199,186 @@ function driver.installed_paths(root)
     }
 end
 
-function driver.source_checkout_from_driver_source(source, current_dir)
+function driver.source_checkout_from_driver_source(
+        source, current_dir, strategy)
     if type(source) ~= "string" then return false end
     if source:sub(1, 1) ~= "@" then return false end
     source = source:sub(2)
     if source:sub(1, 1) ~= "/" then
+        if not current_dir and strategy then
+            local current_error
+            current_dir, current_error = strategy:cwd()
+            if not current_dir then return false, current_error end
+        end
         source = (current_dir or lfs.currentdir()) .. "/" .. source
     end
     local root = source:match("^(.*)/titan%-compiler/driver[.]lua$")
-    return root ~= nil and
-        lfs.attributes(root .. "/titan-runtime/titan.c", "mode") == "file" and
-        lfs.attributes(root .. "/Makefile", "mode") == "file"
+    if not root then return false end
+    if strategy then
+        local runtime, runtime_error =
+            strategy:stat(root .. "/titan-runtime/titan.c")
+        if runtime_error then return false, runtime_error end
+        local makefile, makefile_error = strategy:stat(root .. "/Makefile")
+        if makefile_error then return false, makefile_error end
+        return runtime and runtime.kind == "file" and
+            makefile and makefile.kind == "file" or false
+    end
+    return lfs.attributes(root .. "/titan-runtime/titan.c", "mode") ==
+        "file" and lfs.attributes(root .. "/Makefile", "mode") == "file"
 end
 
-local function source_checkout_root()
+local function driver_source()
     if type(debug) ~= "table" or type(debug.getinfo) ~= "function" then
         return nil
     end
     local source = debug.getinfo(1, "S").source
     if type(source) ~= "string" or source:sub(1, 1) ~= "@" then return nil end
+    return source
+end
+
+local DRIVER_SOURCE = driver_source()
+
+local function source_checkout_root(strategy)
+    local source = DRIVER_SOURCE
+    if not source then return nil end
     source = source:sub(2)
     if source:sub(1, 1) ~= "/" then
-        source = lfs.currentdir() .. "/" .. source
+        local current_dir, current_error = strategy:cwd()
+        if not current_dir then return nil, current_error end
+        source = current_dir .. "/" .. source
     end
     local root = source:match("^(.*)/titan%-compiler/driver[.]lua$")
-    if root and driver.source_checkout_from_driver_source("@" .. source) then
-        return normalize_root(root)
+    if root then
+        local checkout, checkout_error =
+            driver.source_checkout_from_driver_source(
+                "@" .. source, nil, strategy)
+        if checkout_error then return nil, checkout_error end
+        if checkout then return normalize_root(root, strategy) end
     end
     return nil
 end
 
 local internal_root = os.getenv("TITAN_ROCKS_ROOT")
 if internal_root == "" then internal_root = nil end
-driver.TITAN_ROOT = driver.resolve_installation_root(
-    package.cpath, internal_root)
 local probe_prefix = os.getenv("TITAN_PREFIX")
 if probe_prefix == "" then probe_prefix = nil end
 local probe_cache_disabled = os.getenv("TITAN_PROBE_CACHE_DISABLE") == "1"
-driver.PROBE_CACHE_DIRECTORY = not probe_cache_disabled
-    and driver.probe_cache_directory(
-        package.cpath, probe_prefix, driver.TITAN_VER) or nil
+local configured_installation_root =
+    internal_root or driver.root_from_package_cpath(package.cpath)
+driver.TITAN_ROOT = configured_installation_root and
+    configured_installation_root:sub(1, 1) == "/" and
+    normalize_absolute_path(configured_installation_root) or nil
+local preliminary_probe_root = probe_prefix and
+    probe_prefix:sub(1, 1) == "/" and
+    normalize_absolute_path(probe_prefix) or driver.TITAN_ROOT
+driver.PROBE_CACHE_DIRECTORY = not probe_cache_disabled and
+    preliminary_probe_root and root_join(preliminary_probe_root,
+        "var/cache/titan-probes/" .. driver.TITAN_VER) or nil
 local probe_cache_identity = os.getenv("TITAN_PROBE_CACHE_IDENTITY")
 if probe_cache_identity == "" then probe_cache_identity = nil end
 driver.PROBE_CACHE_IDENTITY = probe_cache_identity
-driver.SOURCE_CHECKOUT_ROOT = not internal_root and source_checkout_root() or nil
-driver.SOURCE_CHECKOUT = driver.SOURCE_CHECKOUT_ROOT ~= nil
-driver.INSTALLED = not driver.SOURCE_CHECKOUT
-driver.INSTALL_PATHS = driver.installed_paths(driver.TITAN_ROOT)
-driver.TEST_SUPPORT_SOURCE_PATH = driver.SOURCE_CHECKOUT and
-    (driver.SOURCE_CHECKOUT_ROOT .. "/titan/test.titan") or
-    (driver.INSTALL_PATHS and driver.INSTALL_PATHS.test_source or nil)
-driver.INSTALLATION_ERROR = driver.INSTALLED and not driver.INSTALL_PATHS and
-    ("cannot locate the Titan installation: package.cpath has no entry ending "
-        .. "in '" .. LUA_CPATH_SUFFIX .. "'") or nil
-
-local default_titan_bin_path
-if driver.INSTALL_PATHS then
-    default_titan_bin_path = ".;" .. driver.INSTALL_PATHS.titan_bin
-else
-    default_titan_bin_path = ".;/usr/local/lib/titan/" .. driver.TITAN_VER
-end
-driver.DEFAULT_TITAN_BIN_PATH = default_titan_bin_path
-
-driver.TITAN_BIN_PATH = os.getenv("TITAN_PATH" .. driver.TITAN_VER_SUFFIX)
+local configured_titan_bin_path =
+    os.getenv("TITAN_PATH" .. driver.TITAN_VER_SUFFIX)
     or os.getenv("TITAN_PATH")
-    or default_titan_bin_path
+
+local function apply_layout(source_root)
+    local previous_bin_default = driver.DEFAULT_TITAN_BIN_PATH
+    local previous_lua_default = driver._DEFAULT_LUA_SOURCE_PATH
+    driver.SOURCE_CHECKOUT_ROOT = source_root
+    driver.SOURCE_CHECKOUT = source_root ~= nil
+    driver.INSTALLED = not driver.SOURCE_CHECKOUT
+    driver.INSTALL_PATHS = driver.installed_paths(driver.TITAN_ROOT)
+    driver.TEST_SUPPORT_SOURCE_PATH = driver.SOURCE_CHECKOUT and
+        (source_root .. "/titan/test.titan") or
+        (driver.INSTALL_PATHS and driver.INSTALL_PATHS.test_source or nil)
+    driver.INSTALLATION_ERROR = driver.INSTALLED and
+        not driver.INSTALL_PATHS and
+        ("cannot locate the Titan installation: package.cpath has no entry " ..
+            "ending in '" .. LUA_CPATH_SUFFIX .. "'") or nil
+
+    local bin_default = driver.INSTALL_PATHS and
+        (".;" .. driver.INSTALL_PATHS.titan_bin) or
+        (".;/usr/local/lib/titan/" .. driver.TITAN_VER)
+    driver.DEFAULT_TITAN_BIN_PATH = bin_default
+    if driver.TITAN_BIN_PATH == nil or
+       driver.TITAN_BIN_PATH == previous_bin_default then
+        driver.TITAN_BIN_PATH = configured_titan_bin_path or bin_default
+    end
+
+    local lua_default = driver.INSTALLED and driver.INSTALL_PATHS and
+        driver.INSTALL_PATHS.lua_source or "lua-5.5.1/src"
+    driver._DEFAULT_LUA_SOURCE_PATH = lua_default
+    if driver.LUA_SOURCE_PATH == nil or
+       driver.LUA_SOURCE_PATH == previous_lua_default then
+        driver.LUA_SOURCE_PATH = lua_default
+    end
+    driver.INCLUDE_PATH = driver.INSTALLED and driver.INSTALL_PATHS and
+        driver.INSTALL_PATHS.include or nil
+end
+
+-- Keep module loading purely lexical. A relative driver source is the ordinary
+-- checkout shape; every real filesystem check and canonicalization is repeated
+-- through the first resolver context below before compiler work begins.
+local lexical_source_root = not internal_root and DRIVER_SOURCE and
+    DRIVER_SOURCE:sub(2, 2) ~= "/" and
+    DRIVER_SOURCE:sub(2):match("^(.*)/titan%-compiler/driver[.]lua$") or nil
+apply_layout(lexical_source_root)
+
+function driver.initialize_layout(context)
+    if type(context) ~= "table" or context.io == nil then
+        error("compiler layout initialization requires a resolver context", 2)
+    end
+    compiler_io.validate(context.io, 2)
+    if context._layout_initialized then return true end
+
+    local installation_root
+    if configured_installation_root then
+        local installation_error
+        installation_root, installation_error = normalize_root(
+            configured_installation_root, context.io)
+        if not installation_root then return nil, installation_error end
+    end
+    driver.TITAN_ROOT = installation_root
+
+    local checkout_root, checkout_error
+    if not internal_root then
+        checkout_root, checkout_error = source_checkout_root(context.io)
+        if checkout_error then return nil, checkout_error end
+    end
+    apply_layout(checkout_root)
+
+    local cache_root = probe_prefix or installation_root
+    if not probe_cache_disabled and cache_root then
+        local cache_error
+        cache_root, cache_error = normalize_root(cache_root, context.io)
+        if not cache_root then return nil, cache_error end
+        driver.PROBE_CACHE_DIRECTORY = root_join(cache_root,
+            "var/cache/titan-probes/" .. driver.TITAN_VER)
+    else
+        driver.PROBE_CACHE_DIRECTORY = nil
+    end
+    driver.TOOLCHAIN_ERROR = driver.INSTALLATION_ERROR or
+        driver._TOOLCHAIN_FLAGS_ERROR
+    context._layout_initialized = true
+    return true
+end
+
 driver.TITAN_SOURCE_PATH = "."
-driver.LUA_SOURCE_PATH = driver.INSTALLED and driver.INSTALL_PATHS and
-    driver.INSTALL_PATHS.lua_source or "lua-5.5.1/src"
 driver.EMIT_LINE_DIRECTIVES = os.getenv("TITAN_NO_LINE_DIRECTIVES") ~= "1"
 driver.TITAN_RUNTIME_PATH = "titan-runtime/"
 driver.LIBBACKTRACE_PATH = "libbacktrace"
-driver.INCLUDE_PATH = driver.INSTALLED and driver.INSTALL_PATHS and
-    driver.INSTALL_PATHS.include or nil
 driver.CFLAGS = "--std=c99 -O2 -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g"
 
-function driver.test_support_source_descriptor()
+function driver.test_support_source_descriptor(context)
     local filename = driver.TEST_SUPPORT_SOURCE_PATH
-    if not filename or lfs.attributes(filename, "mode") ~= "file" then
+    local is_file
+    if filename and context and context.io then
+        local attributes = context.io:stat(filename)
+        is_file = attributes and attributes.kind == "file"
+    else
+        is_file = filename and lfs.attributes(filename, "mode") == "file"
+    end
+    if not is_file then
         return nil, "Titan test support source is missing" ..
             (filename and (" at '" .. filename .. "'") or "")
     end
@@ -279,8 +412,9 @@ driver.EXTRA_CFLAGS, cflags_error =
     parse_extra_flags("TITAN_EXTRA_CFLAGS")
 driver.EXTRA_LDFLAGS, ldflags_error =
     parse_extra_flags("TITAN_EXTRA_LDFLAGS")
-driver.TOOLCHAIN_ERROR = driver.INSTALLATION_ERROR or cppflags_error or
-    cflags_error or ldflags_error
+driver._TOOLCHAIN_FLAGS_ERROR = cppflags_error or cflags_error or ldflags_error
+driver.TOOLCHAIN_ERROR = driver.INSTALLATION_ERROR or
+    driver._TOOLCHAIN_FLAGS_ERROR
 driver.FOREIGN_C_CONFIGURATION_ID = 0
 
 function driver.foreign_include_dirs()
@@ -297,22 +431,69 @@ function driver.foreign_include_dirs()
     return include_dirs
 end
 
-function driver.configure_foreign_c()
+function driver.initialize_platform(context)
+    context = context or driver.new_resolver_context()
+    if type(context) ~= "table" or context.io == nil then
+        error("platform initialization requires a resolver context", 2)
+    end
+    compiler_io.validate(context.io, 2)
+    if context._platform_initialized then
+        return true, context.uname, context.is_darwin
+    end
+
+    local result = context.io:run({ "uname" }, {
+        stderr_to_stdout = true,
+    })
+    if type(result) ~= "table" or not result.started or not result.ok then
+        local detail = type(result) == "table" and
+            (result.diagnostic or result.output) or result
+        return nil, "cannot determine the native platform with uname: " ..
+            tostring(detail or "command failed")
+    end
+    local uname = tostring(result.output or ""):match("^%s*(.-)%s*$")
+    if uname == "" then
+        return nil, "cannot determine the native platform with uname: " ..
+            "command produced no output"
+    end
+    context.uname = uname
+    context.is_darwin = uname:match("Darwin") ~= nil
+    context._platform_initialized = true
+
+    -- Retain the historical process-visible fields for build/publication APIs.
+    -- The subprocess which populates them now belongs to an explicit resolver
+    -- context instead of running while this module is loaded.
+    driver.UNAME = uname
+    driver.IS_DARWIN = context.is_darwin
+    return true, uname, context.is_darwin
+end
+
+function driver.configure_foreign_c(context)
+    context = context or driver.new_resolver_context()
+    if type(context) ~= "table" or context.io == nil then
+        error("foreign C configuration requires a resolver context", 2)
+    end
+    compiler_io.validate(context.io, 2)
+    local platform_ok, platform_result = driver.initialize_platform(context)
+    local platform_err = not platform_ok and platform_result or nil
+
     -- Configuration is replaceable in embeddings and tests. A profile belongs
     -- to one exact compiler identity and must never survive a reconfiguration.
     driver.TARGET_PROFILE = nil
     local toolchain, toolchain_err
     if driver.toolchain_descriptor then
-        toolchain, toolchain_err = driver.toolchain_descriptor()
+        toolchain, toolchain_err = driver.toolchain_descriptor(context)
     end
     local options = {
+        io = context.io,
         compiler = driver.CC,
         language_mode = "c99",
         cppflags = toolchain and {} or (driver.EXTRA_CPPFLAGS or {}),
         compile_flags = toolchain and toolchain.compile_flags or {},
         compiler_include_dirs = driver.foreign_include_dirs(),
         toolchain = toolchain,
-        probe_runner = cdriver.capture_command,
+        probe_runner = function(argv, run_options)
+            return context.io:run(argv, run_options)
+        end,
         probe_cache_directory = driver.PROBE_CACHE_DIRECTORY,
         probe_cache_identity = driver.PROBE_CACHE_IDENTITY,
     }
@@ -334,8 +515,13 @@ function driver.configure_foreign_c()
     end
     driver.FOREIGN_C_CONFIGURATION_ID =
         driver.FOREIGN_C_CONFIGURATION_ID + 1
+    context.foreign_c_configuration_id =
+        driver.FOREIGN_C_CONFIGURATION_ID
     checker.configure_foreign_c(
-        options, driver.TOOLCHAIN_ERROR or toolchain_err or profile_error)
+        options, driver.TOOLCHAIN_ERROR or platform_err or toolchain_err or
+            profile_error)
+    if not platform_ok then return nil, platform_err end
+    return true
 end
 
 local CIRCULAR_MARK = {}
@@ -343,18 +529,41 @@ local loader_contexts = setmetatable({}, { __mode = "k" })
 
 function driver.new_resolver_context(options)
     options = options or {}
-    return {
+    if type(options) ~= "table" then
+        error("resolver context options must be a table", 2)
+    end
+    local io_strategy = options.io
+    if io_strategy == nil then io_strategy = compiler_io.new_sync() end
+    compiler_io.validate(io_strategy, 2)
+    local extra_ffi_include_dirs, include_error =
+        cdriver.resolve_compiler_include_dirs(
+            options.extra_ffi_include_dirs or {}, io_strategy)
+    if not extra_ffi_include_dirs then
+        error("invalid extra_ffi_include_dirs: " .. tostring(include_error), 2)
+    end
+    local context = {
+        _resolver_context = true,
+        io = io_strategy,
         prefer_static = options.prefer_static == true,
         source_first = options.source_first == true,
         provider_cache = {},
         contextual_types = {},
+        contextual_resolutions = {},
         native_interface_types = {},
         native_constraints = {},
         source_modules = {},
+        checked_source_modules = {},
         used_compiled_interfaces = {},
         probe_verbose = options.verbose == true,
         pretty_print = options.pretty_print == true,
+        extra_ffi_include_dirs = extra_ffi_include_dirs,
     }
+    local initialized, layout_error = driver.initialize_layout(context)
+    if not initialized then
+        error("cannot initialize compiler layout: " ..
+            tostring(layout_error), 2)
+    end
+    return context
 end
 
 local function remember_used_compiled_interface(context, modname, modtype)
@@ -403,11 +612,33 @@ local function add_native_constraint(
     }
 end
 
-local function shell(cmd)
-    local p = assert(io.popen(cmd))
-    local out = p:read("*a")
-    p:close()
-    return out
+-- Contextual nominal-owner recovery is intentionally not an ordinary import:
+-- it must not populate driver.imported or select another archive for linking.
+-- Long-lived semantic clients still need the narrow physical provenance that
+-- supplied the recovered interface so they can invalidate cached consumers.
+local function remember_contextual_resolution(
+        context, owner, exposer, resolved, ordinary_lookup, exposer_file)
+    local kind = resolved and resolved.kind
+    local provider_file = resolved and
+        (resolved.static_archive or resolved.filename)
+    if (kind ~= "dynamic" and kind ~= "static") or
+       type(provider_file) ~= "string" then
+        return
+    end
+    context.contextual_resolutions =
+        context.contextual_resolutions or {}
+    local key = table.concat({
+        owner or "", exposer or "", kind, provider_file,
+        ordinary_lookup and "ordinary" or "carried",
+    }, "\0")
+    context.contextual_resolutions[key] = {
+        owner = owner,
+        exposer = exposer,
+        kind = kind,
+        provider_file = provider_file,
+        exposer_file = exposer_file,
+        ordinary_lookup = ordinary_lookup == true,
+    }
 end
 
 local function append_argv(dst, src)
@@ -441,7 +672,8 @@ local function run_argv(argv, verbose)
     return os.execute(cmd)
 end
 
-function driver.format_generated_file(filename, verbose, pretty_print)
+function driver.format_generated_file(
+        filename, verbose, pretty_print, strategy)
     local label = "generated file '" .. tostring(filename) .. "'"
     if pretty_print then
         local args, err = parsed_words(driver.CLANG_FORMAT, "CLANG_FORMAT")
@@ -458,7 +690,17 @@ function driver.format_generated_file(filename, verbose, pretty_print)
             "--",
             filename,
         })
-        local ok, term, code = run_argv(args, verbose)
+        local ok, term, code
+        if strategy then
+            if verbose then print(assert(command_argv(args))) end
+            local result = strategy:run(args, { stderr_to_stdout = true })
+            ok = type(result) == "table" and result.started and result.ok
+            term = type(result) == "table" and
+                (result.why or result.diagnostic) or result
+            code = type(result) == "table" and result.status or nil
+        else
+            ok, term, code = run_argv(args, verbose)
+        end
         if not ok then
             local detail
             if code ~= nil then
@@ -472,7 +714,12 @@ function driver.format_generated_file(filename, verbose, pretty_print)
         end
     end
 
-    local contents, read_err = util.get_file_contents(filename)
+    local contents, read_err
+    if strategy then
+        contents, read_err = strategy:read_file(filename)
+    else
+        contents, read_err = util.get_file_contents(filename)
+    end
     if not contents then
         return nil, "failed to normalize " .. label ..
             (pretty_print and " after clang-format" or "") ..
@@ -488,8 +735,12 @@ function driver.format_generated_file(filename, verbose, pretty_print)
             "([ \t]*#line[^\n]*\n)[ \t]*\n", "%1")
     until removed == 0
     if normalized ~= contents then
-        local write_ok, write_err =
-            util.set_file_contents(filename, normalized)
+        local write_ok, write_err
+        if strategy then
+            write_ok, write_err = strategy:write_file(filename, normalized)
+        else
+            write_ok, write_err = util.set_file_contents(filename, normalized)
+        end
         if not write_ok then
             return nil, "failed to normalize " .. label ..
                 (pretty_print and " after clang-format" or "") ..
@@ -540,7 +791,7 @@ end
 -- objects, predefined-macro/header discovery, and compile-only checker probes.
 -- `compile_flags` deliberately includes Titan's fixed language selection, so
 -- cprobe is told not to synthesize a second `-std` spelling.
-function driver.toolchain_descriptor()
+function driver.toolchain_descriptor(context)
     if driver.TOOLCHAIN_ERROR then return nil, driver.TOOLCHAIN_ERROR end
     local cc, err = parsed_words(driver.CC, "CC")
     if not cc then return nil, err end
@@ -553,6 +804,7 @@ function driver.toolchain_descriptor()
         flags[#flags + 1] = effective[index]
     end
     return {
+        io = context and context.io or nil,
         compiler_argv = cc,
         compile_flags = flags,
         language_mode = "c99",
@@ -567,6 +819,14 @@ function driver.toolchain_descriptor()
 end
 
 function driver.get_probe_service(context)
+    if context.foreign_c_configuration_id ~=
+       driver.FOREIGN_C_CONFIGURATION_ID then
+        local configured, configure_err = driver.configure_foreign_c(context)
+        if not configured then
+            context.probe_service_error = configure_err
+            return nil, configure_err
+        end
+    end
     local configuration_id = driver.FOREIGN_C_CONFIGURATION_ID
     if context.probe_configuration_id ~= configuration_id then
         if context.probe_service then
@@ -584,15 +844,26 @@ function driver.get_probe_service(context)
     if context.probe_service_error then
         return nil, context.probe_service_error
     end
-    local toolchain, err = driver.toolchain_descriptor()
+    local toolchain, err = driver.toolchain_descriptor(context)
     if not toolchain then
         context.probe_service_error = err
         return nil, err
     end
+    -- Project include roots belong to one resolver/analysis. Extend the fresh
+    -- descriptor rather than reconfiguring the process-global checker and
+    -- target profile shared by other compiler clients in this Lua state.
+    local include_dirs = {}
+    for _, directory in ipairs(toolchain.include_dirs or {}) do
+        include_dirs[#include_dirs + 1] = directory
+    end
+    for _, directory in ipairs(context.extra_ffi_include_dirs or {}) do
+        include_dirs[#include_dirs + 1] = directory
+    end
+    toolchain.include_dirs = include_dirs
     local service
     service, err = cprobe.new_service({
+        io = context.io,
         toolchain = toolchain,
-        runner = cdriver.capture_command,
         verbose = context.probe_verbose,
         cache_directory = driver.PROBE_CACHE_DIRECTORY,
         cache_identity = driver.PROBE_CACHE_IDENTITY,
@@ -607,22 +878,40 @@ end
 
 function driver.close_resolver_context(context)
     if not context then return true end
+    if type(context) ~= "table" or context.io == nil then
+        error("closing a resolver requires its compiler I/O strategy", 2)
+    end
+    compiler_io.validate(context.io, 2)
     local first_error
+    local remaining_headers = {}
     for _, filename in ipairs(
             context.source_foreign_header_temporaries or {}) do
-        local removed, remove_err = os.remove(filename)
-        if not removed and lfs.symlinkattributes(filename) and not first_error then
-            first_error = remove_err or
-                ("could not remove temporary source foreign header '" ..
-                    filename .. "'")
+        local attributes, attribute_err = context.io:lstat(filename)
+        if attributes then
+            local removed, remove_err = context.io:unlink(filename)
+            if not removed and not first_error then
+                first_error = remove_err or
+                    ("could not remove temporary source foreign header '" ..
+                        filename .. "'")
+            end
+            if not removed then remaining_headers[#remaining_headers + 1] = filename end
+        elseif attribute_err and not first_error then
+            first_error = attribute_err
+            remaining_headers[#remaining_headers + 1] = filename
         end
     end
-    context.source_foreign_header_temporaries = nil
+    context.source_foreign_header_temporaries =
+        #remaining_headers > 0 and remaining_headers or nil
     if context.probe_service then
         local service = context.probe_service
-        context.probe_service = nil
         local ok, err = service:close()
-        if not ok then
+        -- A thrown cancellation leaves this assignment unreached so an
+        -- uncancelled owner can retry. Ordinary returned close failures keep
+        -- their historical terminal behavior.
+        context.probe_service = nil
+        if ok then
+            context.probe_service_error = nil
+        else
             context.probe_service_error = err
             first_error = first_error or err
         end
@@ -631,12 +920,122 @@ function driver.close_resolver_context(context)
     return true
 end
 
+local function resolver_context_from_options(options, level)
+    level = level or 3
+    if options == nil then
+        return driver.new_resolver_context(), true
+    elseif type(options) ~= "table" then
+        error("resolver options must be a table", level)
+    elseif options._resolver_context == true then
+        compiler_io.validate(options.io, level)
+        return options, false
+    elseif options.context ~= nil then
+        local context = options.context
+        if type(context) ~= "table" or context.io == nil then
+            error("options.context must be a resolver context", level)
+        end
+        compiler_io.validate(context.io, level)
+        return context, false
+    end
+    return driver.new_resolver_context(options), true
+end
+
+local function copy_c_header_dependencies(value, label)
+    label = label or "C header dependencies"
+    if value == nil then return {} end
+    if type(value) ~= "table" then
+        return nil, label .. " must be an ordered array"
+    end
+    local result = {}
+    local seen = {}
+    for index = 1, #value do
+        local input = value[index]
+        if type(input) ~= "table" then
+            return nil, label .. " entry " .. index .. " must be a table"
+        end
+        local kind = input.kind
+        local path = input.path
+        local identity = input.identity
+        if kind ~= "file" and kind ~= "search" then
+            return nil, label .. " entry " .. index ..
+                " kind must be 'file' or 'search'"
+        elseif type(path) ~= "string" or path:sub(1, 1) ~= "/" or
+               path:find("\0", 1, true) then
+            return nil, label .. " entry " .. index ..
+                " path must be an absolute NUL-free pathname"
+        elseif type(identity) ~= "string" or identity == "" then
+            return nil, label .. " entry " .. index ..
+                " must have a nonempty identity"
+        end
+        local key = kind .. "\0" .. path
+        if seen[key] then
+            return nil, label .. " repeats " .. kind .. " input '" ..
+                path .. "'"
+        end
+        seen[key] = true
+        result[index] = {
+            kind = kind,
+            path = path,
+            identity = identity,
+        }
+    end
+    for key in pairs(value) do
+        if type(key) ~= "number" or key < 1 or key > #value
+        or key % 1 ~= 0 then
+            return nil, label .. " must be a dense ordered array"
+        end
+    end
+    return result
+end
+
+-- Recompute the identities of an already-resolved module header closure. This
+-- never searches for a different header wholesale: `search` entries are the
+-- exact ordered candidates cdriver consulted, including misses, so a new
+-- earlier shadow changes identity without walking an include tree.
+function driver.restat_c_header_dependencies(value, options)
+    local context, owns_context =
+        resolver_context_from_options(options, 2)
+    local dependencies, err = copy_c_header_dependencies(value)
+    if not dependencies then
+        if owns_context then driver.close_resolver_context(context) end
+        return nil, err
+    end
+    local result = {}
+    for index, dependency in ipairs(dependencies) do
+        local identity, identity_error = cdriver.header_input_identity(
+            dependency.kind, dependency.path, context.io)
+        if not identity then
+            if owns_context then driver.close_resolver_context(context) end
+            return nil, "cannot fingerprint C header input '" ..
+                dependency.path .. "': " .. tostring(identity_error)
+        end
+        result[index] = {
+            kind = dependency.kind,
+            path = dependency.path,
+            identity = identity,
+        }
+    end
+    if owns_context then
+        local closed, close_error = driver.close_resolver_context(context)
+        if not closed then return nil, close_error end
+    end
+    return result
+end
+
 function driver.close_loader(loader)
     local binding = loader_contexts[loader]
     if not binding then return true end
+    if not binding.owned then
+        loader_contexts[loader] = nil
+        return true
+    end
+    local closed, close_error =
+        driver.close_resolver_context(binding.context)
+    -- A thrown cancellation leaves this assignment unreached so an
+    -- uncancelled owner can retry. Ordinary returned success or failure keeps
+    -- close_loader's historical terminal behavior.
     loader_contexts[loader] = nil
-    if not binding.owned then return true end
-    return driver.close_resolver_context(binding.context)
+    return closed, close_error
 end
 
 -- Execute a loader-scoped operation and close an internally owned resolver on
@@ -664,16 +1063,11 @@ function driver.with_loader(loader, body, ...)
     return table.unpack(results, 2, results.n)
 end
 
-driver.configure_foreign_c()
-
-driver.UNAME = shell("uname")
 -- On Mach-O (macOS), libbacktrace needs a companion `.dSYM` bundle to symbolize
 -- PCs to #line-attributed .titan file/line — the linker does NOT produce one, so
 -- without `dsymutil` the native Titan frames are unsymbolized and dropped. Run
 -- `dsymutil` after every final link on Darwin only; on Linux DWARF is embedded in
 -- the binary and dsymutil may be absent, so it must be a no-op there.
-driver.IS_DARWIN = string.match(driver.UNAME, "Darwin") ~= nil
-
 local function run_dsymutil(output, verbose, stable_input_basename)
     if not driver.IS_DARWIN then return true end
     if not stable_input_basename then
@@ -798,39 +1192,61 @@ function driver.module_binary_candidates(modname)
     return driver.module_compiled_candidates(modname, ".so")
 end
 
-local function regular_file(filename)
+local function regular_file(filename, context)
+    if context and context.io then
+        local attributes = context.io:stat(filename)
+        return attributes and attributes.kind == "file" or false
+    end
     return lfs.attributes(filename, "mode") == "file"
 end
 
-local function source_resolution_in_root(root, modname)
+local function source_resolution_in_root(root, modname, context)
     local module_path = modname:gsub("[.]", "/")
     local basename = modname:match("([^.]+)$")
     if not basename then return nil end
     local folder = root .. "/" .. module_path
     local folder_main = folder .. "/" .. basename .. ".titan"
 
-    if regular_file(folder_main) then
-        local opened, iterator, state = pcall(lfs.dir, folder)
-        if not opened or type(iterator) ~= "function" then
-            local detail = opened and state or iterator
+    if regular_file(folder_main, context) then
+        local entries
+        if context and context.io then
+            local list_err
+            entries, list_err = context.io:list(folder)
+            if not entries then
+                return nil, "cannot enumerate folder module '" .. modname ..
+                    "' at '" .. folder_main .. "': " .. tostring(list_err)
+            end
+        else
+            local opened, iterator, state = pcall(lfs.dir, folder)
+            if not opened or type(iterator) ~= "function" then
+                local detail = opened and state or iterator
+                return nil, "cannot enumerate folder module '" .. modname ..
+                    "' at '" .. folder_main .. "': " .. tostring(detail)
+            end
+            entries = {}
+            local enumerated, enumeration_error = pcall(function()
+                for name in iterator, state do entries[#entries + 1] = name end
+            end)
+            if not enumerated then
+                return nil, "cannot enumerate folder module '" .. modname ..
+                    "' at '" .. folder_main .. "': " ..
+                    tostring(enumeration_error)
+            end
+        end
+
+        if type(entries) ~= "table" then
             return nil, "cannot enumerate folder module '" .. modname ..
-                "' at '" .. folder_main .. "': " .. tostring(detail)
+                "' at '" .. folder_main .. "': invalid directory entries"
         end
 
         local contributors = {}
-        local enumerated, enumeration_error = pcall(function()
-            for name in iterator, state do
-                if name ~= basename .. ".titan" and
-                   name:sub(-6) == ".titan" and
-                   regular_file(folder .. "/" .. name) then
-                    table.insert(contributors, name)
-                end
+        for _, name in ipairs(entries) do
+            if name ~= "." and name ~= ".." and
+               name ~= basename .. ".titan" and
+               name:sub(-6) == ".titan" and
+               regular_file(folder .. "/" .. name, context) then
+                table.insert(contributors, name)
             end
-        end)
-        if not enumerated then
-            return nil, "cannot enumerate folder module '" .. modname ..
-                "' at '" .. folder_main .. "': " ..
-                tostring(enumeration_error)
         end
         table.sort(contributors, util.bytewise_less)
 
@@ -847,7 +1263,7 @@ local function source_resolution_in_root(root, modname)
     end
 
     local flat = root .. "/" .. module_path .. ".titan"
-    if not regular_file(flat) then return nil end
+    if not regular_file(flat, context) then return nil end
 
     local owner = modname:match("^(.*)[.][^.]+$")
     if owner then
@@ -856,7 +1272,7 @@ local function source_resolution_in_root(root, modname)
         if not owner_basename then return nil end
         local owner_main = root .. "/" .. owner_path .. "/" ..
             owner_basename .. ".titan"
-        if regular_file(owner_main) then
+        if regular_file(owner_main, context) then
             return {
                 kind = "blocked",
                 owner = owner,
@@ -874,9 +1290,9 @@ local function source_resolution_in_root(root, modname)
     }
 end
 
-local function resolve_source(paths, modname)
+local function resolve_source(paths, modname, context)
     for root in paths:gmatch("[^;]+") do
-        local source, err = source_resolution_in_root(root, modname)
+        local source, err = source_resolution_in_root(root, modname, context)
         if source or err then return source, err end
     end
     return nil
@@ -2117,20 +2533,32 @@ end
 -- is root-major so an earlier local exact module wins over a later installed
 -- shallow bundle. Once a relative candidate exists in one root it shadows the
 -- same relative pathname in all later roots, even when it is a clean nonclaim.
-function driver.find_dynamic_interface(paths, modname)
+function driver.find_dynamic_interface(paths, modname, context)
     local candidates = driver.module_binary_candidates(modname)
     if #candidates == 0 then return nil end
     local occupied = {}
 
     for _, root in ipairs(driver.titan_bin_path_entries(paths)) do
-        local absolute_root = assert(normalize_root(root))
+        local absolute_root, root_error = normalize_root(
+            root, context and context.io or nil)
+        if not absolute_root then return nil, root_error end
         for index, relative in ipairs(candidates) do
             if not occupied[relative] then
                 local filename = join_path(absolute_root, relative)
                 -- lstat semantics are intentional: a broken symlink or other
                 -- occupied pathname is a broken selected candidate, not an
                 -- invitation to fall through to a later Titan path root.
-                if lfs.symlinkattributes(filename, "mode") then
+                local attributes, attribute_error
+                if context and context.io then
+                    attributes, attribute_error = context.io:lstat(filename)
+                else
+                    local mode = lfs.symlinkattributes(filename, "mode")
+                    attributes = mode and { kind = mode } or nil
+                end
+                if attribute_error then
+                    return nil, "cannot inspect compiled provider candidate '" ..
+                        filename .. "': " .. tostring(attribute_error)
+                elseif attributes then
                     occupied[relative] = true
                     local status, value =
                         probe_compiled_interface(modname, filename)
@@ -2153,8 +2581,8 @@ function driver.find_dynamic_interface(paths, modname)
 end
 
 -- Compatibility wrapper for callers which predate static providers.
-function driver.find_compiled_interface(paths, modname)
-    return driver.find_dynamic_interface(paths, modname)
+function driver.find_compiled_interface(paths, modname, context)
+    return driver.find_dynamic_interface(paths, modname, context)
 end
 
 local function inspect_static_provider(context, filename, relative)
@@ -2165,6 +2593,7 @@ local function inspect_static_provider(context, filename, relative)
     end
 
     local provider, scan_err = staticmetadata.scan_archive(filename, {
+        io = context.io,
         expected_abi = driver.TITAN_VER,
         validate_types = function(name, serialized, origin)
             return driver.decode_module_interface(
@@ -2208,16 +2637,24 @@ function driver.find_static_interface(paths, modname, context)
     local occupied = {}
 
     for _, root in ipairs(driver.titan_bin_path_entries(paths)) do
-        local absolute_root = assert(normalize_root(root))
+        local absolute_root, root_error = normalize_root(root, context.io)
+        if not absolute_root then return nil, root_error end
         for index, relative in ipairs(candidates) do
             if not occupied[relative] then
                 local filename = join_path(absolute_root, relative)
-                if lfs.symlinkattributes(filename, "mode") then
+                local attributes, attribute_error = context.io:lstat(filename)
+                if attribute_error then
+                    return nil, "cannot inspect static provider candidate '" ..
+                        filename .. "': " .. tostring(attribute_error)
+                elseif attributes then
                     occupied[relative] = true
                     -- Preserve lstat occupancy (including usable symlinks),
                     -- but never open a FIFO/device/directory as an archive.
-                    local followed_mode = lfs.attributes(filename, "mode")
-                    if followed_mode ~= "file" then
+                    local followed, followed_error = context.io:stat(filename)
+                    if followed_error then
+                        return nil, "cannot inspect static provider candidate '" ..
+                            filename .. "': " .. tostring(followed_error)
+                    elseif not followed or followed.kind ~= "file" then
                         return nil, "static provider candidate '" ..
                             filename .. "' for module '" .. modname ..
                             "' is not a readable regular file"
@@ -2257,7 +2694,7 @@ function driver.find_dependency_interface(paths, modname, context)
     for _, format in ipairs(formats) do
         if format == "dynamic" then
             local modtype, filename, relative =
-                driver.find_dynamic_interface(paths, modname)
+                driver.find_dynamic_interface(paths, modname, context)
             if modtype then
                 return {
                     kind = "dynamic",
@@ -2295,12 +2732,321 @@ function driver.defaultloader(static_deps, options)
     local context = options.context or driver.new_resolver_context(options)
     local source_roots = options.source_roots or {}
     local source_overrides = options.source_overrides or {}
+    local known_source_modules = options.known_source_modules or {}
+    local cached_source_entries = options.cached_source_entries or {}
+    local cached_interfaces = options.cached_interfaces or {}
+    if type(known_source_modules) ~= "table" then
+        error("known_source_modules must be a module-keyed table", 2)
+    elseif type(cached_source_entries) ~= "table" then
+        error("cached_source_entries must be a module-keyed table", 2)
+    elseif type(cached_interfaces) ~= "table" then
+        error("cached_interfaces must be a module-keyed table", 2)
+    elseif options.after_source_check ~= nil then
+        error("after_source_check is no longer supported; provide " ..
+            "options.io with a yield method", 2)
+    end
     local dependency_stack = {}
     for name in pairs(source_roots) do
         context.source_modules[name] = true
     end
     for name in pairs(source_overrides) do
         context.source_modules[name] = true
+    end
+    for name, present in pairs(known_source_modules) do
+        if not staticmetadata.valid_module_name(name) or present ~= true then
+            error("known_source_modules must contain valid module names " ..
+                "mapped to true", 2)
+        end
+        context.source_modules[name] = true
+    end
+
+    local function cached_string_list(value, label)
+        if value == nil then return {} end
+        if type(value) ~= "table" then
+            return nil, label .. " must be a dense ordered string array"
+        end
+        local copy = {}
+        for index = 1, #value do
+            if type(value[index]) ~= "string" or value[index] == "" then
+                return nil, label .. " entry " .. index ..
+                    " must be a nonempty string"
+            end
+            copy[index] = value[index]
+        end
+        for key in pairs(value) do
+            if type(key) ~= "number" or key % 1 ~= 0
+               or key < 1 or key > #value then
+                return nil, label .. " must be a dense ordered string array"
+            end
+        end
+        return copy
+    end
+
+    local function prepare_source_checking_header(
+            modname, ast, foreign_header)
+        if not foreign_header then return nil end
+        local checking_foreign_header, temporary_error =
+            driver.sibling_temporary_path(
+                foreign_header .. ".check", context.io)
+        if not checking_foreign_header then
+            return nil, "could not prepare source foreign header: " ..
+                tostring(temporary_error)
+        end
+        if checking_foreign_header:sub(1, 1) ~= "/" then
+            local absolute, absolute_error = absolute_filename(
+                checking_foreign_header, context.io)
+            if not absolute then return nil, absolute_error end
+            checking_foreign_header = normalize_absolute_path(absolute)
+        end
+        -- Register ownership before publishing any bytes. A strategy method may
+        -- suspend or raise for cancellation after the destination exists; the
+        -- resolver close path must already know the exact physical pathname.
+        context.source_foreign_header_temporaries =
+            context.source_foreign_header_temporaries or {}
+        context.source_foreign_header_temporaries[
+            #context.source_foreign_header_temporaries + 1] =
+                checking_foreign_header
+        local contents = coder.generate_foreign_header(
+            modname, ast, { module = modname })
+        local wrote, write_err = contents and context.io:write_file(
+            checking_foreign_header, contents)
+        local formatted, format_err
+        if wrote then
+            formatted, format_err = driver.format_generated_file(
+                checking_foreign_header, context.probe_verbose,
+                context.pretty_print, context.io)
+        end
+        if not wrote or not formatted then
+            local existing = context.io:lstat(checking_foreign_header)
+            if existing then context.io:unlink(checking_foreign_header) end
+            return nil, "could not prepare source foreign header '" ..
+                checking_foreign_header .. "': " ..
+                tostring(write_err or format_err or
+                    "no generated contents")
+        end
+        return checking_foreign_header
+    end
+
+    local function validate_cached_source_entry(modname, candidate)
+        if type(candidate) ~= "table" or candidate.kind ~= "source"
+           or type(candidate.ast) ~= "table"
+           or type(candidate.type) ~= "table"
+           or candidate.type._tag ~= "Type.Module"
+           or candidate.type.name ~= modname
+           or type(candidate.filename) ~= "string"
+           or candidate.filename == ""
+           or type(candidate.source_files) ~= "table"
+           or type(candidate.deps) ~= "table" then
+            return nil, "cached source entry for module '" .. modname ..
+                "' is not a complete checked source module"
+        end
+        for dependency, present in pairs(candidate.deps) do
+            if not staticmetadata.valid_module_name(dependency)
+               or present ~= true then
+                return nil, "cached source entry for module '" .. modname ..
+                    "' has an invalid dependency map"
+            end
+        end
+        local header_dependencies, header_error =
+            copy_c_header_dependencies(candidate.c_header_dependencies,
+                "cached source entry for module '" .. modname ..
+                "' C header dependencies")
+        if not header_dependencies then return nil, header_error end
+        candidate.c_header_dependencies = header_dependencies
+        return true
+    end
+
+    local function cached_interface_source_descriptor(modname)
+        local candidate = cached_interfaces[modname]
+        if candidate == nil then return nil end
+        if type(candidate) ~= "table" then
+            return false, "cached interface for module '" .. modname ..
+                "' must be a table"
+        end
+        if type(candidate.serialized) ~= "string" then
+            return false, "cached interface for module '" .. modname ..
+                "' has no serialized manifest"
+        end
+        local filename = candidate.filename
+        if type(filename) ~= "string" or filename == "" then
+            return false, "cached interface for module '" .. modname ..
+                "' has no source filename"
+        end
+        local source_files, files_error = cached_string_list(
+            candidate.source_files, "cached interface for module '" ..
+                modname .. "' source_files")
+        if not source_files then return false, files_error end
+        if #source_files == 0 then source_files[1] = filename end
+        if source_files[1] ~= filename then
+            return false, "cached interface for module '" .. modname ..
+                "' must list its main source filename first"
+        end
+        return {
+            kind = #source_files == 1 and "flat" or "folder",
+            main = filename,
+            files = source_files,
+            native_output = filename,
+        }
+    end
+
+    local cached_source_loading = {}
+    local load_cached_source_entry
+    load_cached_source_entry = function(modname, active_loader)
+        local candidate = cached_source_entries[modname]
+        if candidate == nil then return nil end
+        local valid, validation_error =
+            validate_cached_source_entry(modname, candidate)
+        if not valid then return false, validation_error end
+        if cached_source_loading[modname] then
+            return false, "cached source entry cycle at module '" ..
+                modname .. "'"
+        end
+        cached_source_loading[modname] = true
+
+        -- Rehydrate source-required dependency headers first. Their paths are
+        -- context-owned temporaries too, and the retained import annotations
+        -- necessarily point at files removed with the previous resolver.
+        for _, node in ipairs(candidate.ast) do
+            if node._tag == "Ast.TopLevelImport" and node._source_import then
+                local dependency = driver.imported[node.modname]
+                if not dependency then
+                    local loaded, load_error =
+                        load_cached_source_entry(node.modname, active_loader)
+                    if loaded == false then
+                        cached_source_loading[modname] = nil
+                        return false, load_error
+                    end
+                    dependency = loaded
+                end
+                if not dependency or not dependency.ast then
+                    -- External source ASTs are intentionally not retained by
+                    -- language-server clients. A caller-certified cached
+                    -- interface may already have been selected by an ordinary
+                    -- import in this analysis. It still carries the exact
+                    -- selected source constituent list, so recheck that source
+                    -- transiently to recover source-private declarations and a
+                    -- fresh resolver-owned foreign header.
+                    if cached_interfaces[node.modname] ~= nil then
+                        local ok, type_or_error, errors = active_loader(
+                            node.modname, { kind = "source-import" })
+                        if not ok then
+                            cached_source_loading[modname] = nil
+                            return false, type_or_error
+                        elseif #errors ~= 0 then
+                            cached_source_loading[modname] = nil
+                            return false, table.concat(errors, "\n")
+                        end
+                        dependency = driver.imported[node.modname]
+                    end
+                end
+                if not dependency or dependency.kind ~= "source"
+                   or not dependency.ast then
+                    cached_source_loading[modname] = nil
+                    return false, "cached source entry for module '" ..
+                        modname .. "' requires clean source dependency '" ..
+                        node.modname .. "'"
+                end
+                node._foreign_header =
+                    dependency.checking_foreign_header or
+                    dependency.foreign_header
+                node._foreign_header_for_check =
+                    dependency.checking_foreign_header ~= nil
+                local probe_identity = dependency.foreign_header
+                if probe_identity and probe_identity:sub(1, 1) ~= "/" then
+                    local absolute, absolute_error = absolute_filename(
+                        probe_identity, context.io)
+                    if not absolute then
+                        cached_source_loading[modname] = nil
+                        return false, absolute_error
+                    end
+                    probe_identity = normalize_absolute_path(absolute)
+                end
+                node._foreign_header_probe_identity = probe_identity
+            end
+        end
+
+        local has_foreign = driver.ast_has_foreign_functions(candidate.ast)
+        local foreign_header = has_foreign and
+            (candidate.foreign_header or driver.foreign_header_filename(
+                candidate.native_output or candidate.filename)) or nil
+        local checking_foreign_header, header_error =
+            prepare_source_checking_header(
+                modname, candidate.ast, foreign_header)
+        if header_error then
+            cached_source_loading[modname] = nil
+            return false, header_error
+        end
+        candidate.foreign_header = foreign_header
+        candidate.checking_foreign_header = checking_foreign_header
+        candidate._cached_source_entry = true
+        driver.imported[modname] = candidate
+        context.source_modules[modname] = true
+        cached_source_loading[modname] = nil
+        return candidate
+    end
+
+    -- Decode clean project interfaces lazily, only when a dirty module imports
+    -- one. These entries deliberately have source provenance but no AST: this
+    -- is an analysis-only seam, and a source-required edge still reparses the
+    -- real module below so private declarations remain available.
+    local function load_cached_interface(modname)
+        local candidate = cached_interfaces[modname]
+        if candidate == nil then return nil end
+        if type(candidate) ~= "table" then
+            return false, "cached interface for module '" .. modname ..
+                "' must be a table"
+        end
+        local serialized = candidate.serialized
+        if type(serialized) ~= "string" then
+            return false, "cached interface for module '" .. modname ..
+                "' has no serialized manifest"
+        end
+        local filename = candidate.filename
+        if type(filename) ~= "string" or filename == "" then
+            return false, "cached interface for module '" .. modname ..
+                "' has no source filename"
+        end
+        local source_files, files_error = cached_string_list(
+            candidate.source_files, "cached interface for module '" ..
+                modname .. "' source_files")
+        if not source_files then return false, files_error end
+        if #source_files == 0 then source_files[1] = filename end
+        local dependencies, dependencies_error = cached_string_list(
+            candidate.dependencies, "cached interface for module '" ..
+                modname .. "' dependencies")
+        if not dependencies then return false, dependencies_error end
+        local header_dependencies, header_error =
+            copy_c_header_dependencies(candidate.c_header_dependencies,
+                "cached interface for module '" .. modname ..
+                "' C header dependencies")
+        if not header_dependencies then return false, header_error end
+        local deps = {}
+        for _, dependency in ipairs(dependencies) do
+            if not staticmetadata.valid_module_name(dependency) then
+                return false, "cached interface for module '" .. modname ..
+                    "' has invalid dependency name " ..
+                    string.format("%q", dependency)
+            end
+            deps[dependency] = true
+        end
+        local modtype, decode_error = driver.decode_module_interface(
+            serialized, modname, "cached interface for " .. modname)
+        if not modtype then
+            return false, "invalid cached interface for module '" ..
+                modname .. "': " .. tostring(decode_error)
+        end
+        local entry = {
+            kind = "source",
+            type = modtype,
+            filename = filename,
+            source_files = source_files,
+            deps = deps,
+            c_header_dependencies = header_dependencies,
+            _cached_interface = true,
+        }
+        driver.imported[modname] = entry
+        context.source_modules[modname] = true
+        return entry
     end
 
     -- A source-first traversal may select one key from a static container
@@ -2339,7 +3085,8 @@ function driver.defaultloader(static_deps, options)
             local replacements = {}
             for _, name in ipairs(selected_names) do
                 local dynamic_type, filename, relative =
-                    driver.find_dynamic_interface(driver.TITAN_BIN_PATH, name)
+                    driver.find_dynamic_interface(
+                        driver.TITAN_BIN_PATH, name, context)
                 if not dynamic_type then
                     return nil, "static provider '" .. path ..
                         "' carries source-selected module '" .. source_name ..
@@ -2383,7 +3130,7 @@ function driver.defaultloader(static_deps, options)
         seen[modname] = true
         local mod = driver.imported[modname]
         if not mod or mod == CIRCULAR_MARK then return end
-        if mod.ast or mod.kind == "static" then
+        if mod.ast or mod.kind == "source" or mod.kind == "static" then
             static_deps[modname] = true
             for depname in pairs(mod.deps or {}) do
                 static_deps[depname] = true
@@ -2397,7 +3144,7 @@ function driver.defaultloader(static_deps, options)
         if not direct then return end
         local mod = driver.imported[modname]
         if mod and mod ~= CIRCULAR_MARK and
-           (mod.ast or mod.kind == "static") then
+           (mod.ast or mod.kind == "source" or mod.kind == "static") then
             direct[modname] = true
         end
     end
@@ -2416,7 +3163,7 @@ function driver.defaultloader(static_deps, options)
                         filename .. "'"
                 end
             else
-                input, err = util.get_file_contents(filename)
+                input, err = context.io:read_file(filename)
                 if not input then return false, err end
             end
             local nodes, perr = parser.parse(filename, input)
@@ -2460,35 +3207,11 @@ function driver.defaultloader(static_deps, options)
             source.native_output or source.main) or nil
         local checking_foreign_header
         if has_foreign and #errors == 0 then
-            checking_foreign_header = driver.sibling_temporary_path(
-                foreign_header .. ".check")
-            local contents = coder.generate_foreign_header(
-                modname, ast, { module = modname })
-            local wrote, write_err = contents and util.set_file_contents(
-                checking_foreign_header, contents)
-            local formatted, format_err
-            if wrote then
-                formatted, format_err = driver.format_generated_file(
-                    checking_foreign_header, context.probe_verbose,
-                    context.pretty_print)
-            end
-            if not wrote or not formatted then
-                os.remove(checking_foreign_header)
-                table.insert(errors, "could not prepare source foreign header '"
-                    .. checking_foreign_header .. "': " ..
-                    tostring(write_err or format_err or
-                        "no generated contents"))
-                checking_foreign_header = nil
-            else
-                if checking_foreign_header:sub(1, 1) ~= "/" then
-                    checking_foreign_header = normalize_absolute_path(
-                        lfs.currentdir() .. "/" .. checking_foreign_header)
-                end
-                context.source_foreign_header_temporaries =
-                    context.source_foreign_header_temporaries or {}
-                context.source_foreign_header_temporaries[#context.source_foreign_header_temporaries + 1] =
-                    checking_foreign_header
-            end
+            local header_error
+            checking_foreign_header, header_error =
+                prepare_source_checking_header(
+                    modname, ast, foreign_header)
+            if header_error then errors[#errors + 1] = header_error end
         end
         driver.imported[modname] = {
             kind = "source",
@@ -2499,14 +3222,26 @@ function driver.defaultloader(static_deps, options)
             source_files = source.files,
             program_output = source.program_output,
             deps = direct_deps,
+            c_header_dependencies = ast._c_header_dependencies or {},
             foreign_header = foreign_header,
             checking_foreign_header = checking_foreign_header,
         }
         static_deps[modname] = true
         if foreign_header and foreign_header:sub(1, 1) ~= "/" then
-            foreign_header = normalize_absolute_path(
-                lfs.currentdir() .. "/" .. foreign_header)
+            local absolute, absolute_error = absolute_filename(
+                foreign_header, context.io)
+            if not absolute then
+                return false, absolute_error
+            end
+            foreign_header = normalize_absolute_path(absolute)
         end
+        -- The context strategy owns cooperative suspension. This module is
+        -- fully published and its dependency frame has been popped. Recursive
+        -- callers can still be mid-check, so a client which abandons the Task
+        -- must close the resolver and discard the whole analysis state.
+        context.checked_source_modules[
+            #context.checked_source_modules + 1] = modname
+        context.io:yield()
         return true, modt, errors, {
             kind = "source",
             filename = source.main,
@@ -2545,10 +3280,13 @@ function driver.defaultloader(static_deps, options)
             return true, cached.type, {}
         end
 
-        local function remember_type(modtype)
+        local function remember_type(modtype, resolved, ordinary_lookup)
             context.contextual_types[cache_key] = { type = modtype }
             context.native_interface_types[modname] = modtype
             remember_used_compiled_interface(context, modname, modtype)
+            remember_contextual_resolution(
+                context, modname, exposing_name, resolved, ordinary_lookup,
+                physical_identity)
             return true, modtype, {}
         end
 
@@ -2558,7 +3296,7 @@ function driver.defaultloader(static_deps, options)
             if entry then
                 add_native_constraint(context, modname, "direct-carried",
                     exposing.static_archive, exposing_name)
-                return remember_type(entry.type)
+                return remember_type(entry.type, exposing, false)
             end
         elseif exposing.kind == "dynamic" then
             local status, value =
@@ -2566,7 +3304,7 @@ function driver.defaultloader(static_deps, options)
             if status == "valid" then
                 add_native_constraint(context, modname, "dynamic-global",
                     exposing.filename, exposing_name)
-                return remember_type(value)
+                return remember_type(value, exposing, false)
             elseif status == "error" then
                 context.contextual_types[cache_key] = { error = value }
                 return false, value
@@ -2582,7 +3320,7 @@ function driver.defaultloader(static_deps, options)
             -- selected source/archive/other-DSO implementation.
             add_native_constraint(context, modname, "dynamic-global",
                 exposing.static_archive or exposing.filename, exposing_name)
-            return remember_type(ordinary.type)
+            return remember_type(ordinary.type, ordinary, true)
         end
 
         -- The exposing compiled object already chose how to bind this owner.
@@ -2599,7 +3337,7 @@ function driver.defaultloader(static_deps, options)
         end
         add_native_constraint(context, modname, "dynamic-global",
             exposing.static_archive or exposing.filename, exposing_name)
-        return remember_type(resolved.type)
+        return remember_type(resolved.type, resolved, true)
     end
 
     local function loader(modname, request)
@@ -2633,8 +3371,18 @@ function driver.defaultloader(static_deps, options)
             source_checked = true
             source = source_overrides[modname]
             if source then return source end
+            if source_required then
+                source, source_err =
+                    cached_interface_source_descriptor(modname)
+                if source == false then
+                    source = nil
+                    return nil, source_err
+                elseif source then
+                    return source
+                end
+            end
             source, source_err = resolve_source(
-                driver.TITAN_SOURCE_PATH, modname)
+                driver.TITAN_SOURCE_PATH, modname, context)
             return source, source_err
         end
         local function load_source(candidate)
@@ -2651,12 +3399,29 @@ function driver.defaultloader(static_deps, options)
             return ok, modt, errors, info
         end
 
+        -- Raw entries retain the complete annotated AST and source-private
+        -- interface required by `.titan` imports. Only caller-certified clean
+        -- modules are eligible; explicit dirty roots, source overrides, and
+        -- source-first compiler builds always check source again.
+        if not driver.imported[modname]
+           and not context.source_first
+           and source_roots[modname] ~= true
+           and source_overrides[modname] == nil then
+            local cached, cached_error =
+                load_cached_source_entry(modname, loader)
+            if cached == false then return false, cached_error end
+        end
+
         -- Source-required roots and invocation-wide source-first builds may
         -- replace a binary left in this process-global cache by an earlier
         -- compilation. A source error is terminal; a clean source miss lets a
         -- source-first dependency retain/fall back to its compiled identity.
+        local dirty_source_requested = source_roots[modname] == true or
+            source_overrides[modname] ~= nil
         if source_preferred and driver.imported[modname] and
-           not driver.imported[modname].ast then
+           (not driver.imported[modname].ast or
+            (dirty_source_requested and
+             driver.imported[modname]._cached_source_entry)) then
             local candidate, candidate_err = find_source()
             if candidate_err then return false, candidate_err end
             if candidate then
@@ -2664,6 +3429,10 @@ function driver.defaultloader(static_deps, options)
             elseif source_required then
                 return false, "source module '" .. modname .. "' not found"
             end
+        end
+        if not source_preferred and not driver.imported[modname] then
+            local cached, cached_error = load_cached_interface(modname)
+            if cached == false then return false, cached_error end
         end
         if driver.imported[modname] then
             local mod = driver.imported[modname]
@@ -2679,13 +3448,17 @@ function driver.defaultloader(static_deps, options)
                 local foreign_header = mod.checking_foreign_header
                     or mod.foreign_header
                 if foreign_header and foreign_header:sub(1, 1) ~= "/" then
-                    foreign_header = normalize_absolute_path(
-                        lfs.currentdir() .. "/" .. foreign_header)
+                    local absolute, absolute_error = absolute_filename(
+                        foreign_header, context.io)
+                    if not absolute then return false, absolute_error end
+                    foreign_header = normalize_absolute_path(absolute)
                 end
                 local probe_identity = mod.foreign_header
                 if probe_identity and probe_identity:sub(1, 1) ~= "/" then
-                    probe_identity = normalize_absolute_path(
-                        lfs.currentdir() .. "/" .. probe_identity)
+                    local absolute, absolute_error = absolute_filename(
+                        probe_identity, context.io)
+                    if not absolute then return false, absolute_error end
+                    probe_identity = normalize_absolute_path(absolute)
                 end
                 info.filename = mod.filename
                 info.foreign_header = foreign_header
@@ -2734,6 +3507,113 @@ function driver.defaultloader(static_deps, options)
         owned = owns_context,
     }
     return loader
+end
+
+-- Resolve the physical identity of already-known external dependencies without
+-- parsing source or retaining compiler state. Language-server clients use this
+-- as a cheap topology probe before deciding whether a cached project AST is
+-- still valid. `requests` maps logical module names to the edge requirement:
+-- true means an explicit `.titan` import and therefore source-only lookup;
+-- false uses the ordinary compiled-first policy. `known_source_modules` is the
+-- complete project catalog, not just the dirty work set, so static providers
+-- which overlap project source are rejected exactly as they are by the loader.
+function driver.resolve_external_modules(
+        requests, known_source_modules, options)
+    requests = requests or {}
+    known_source_modules = known_source_modules or {}
+    if type(requests) ~= "table" then
+        error("external resolution requests must be a module-keyed table", 2)
+    elseif type(known_source_modules) ~= "table" then
+        error("known_source_modules must be a module-keyed table", 2)
+    end
+
+    local context, owns_context =
+        resolver_context_from_options(options, 2)
+    local results = {}
+    local names = {}
+    local ok, failure = xpcall(function()
+        for name, present in pairs(known_source_modules) do
+            if not staticmetadata.valid_module_name(name) or present ~= true then
+                error("known_source_modules must contain valid module names " ..
+                    "mapped to true", 2)
+            end
+            context.source_modules[name] = true
+        end
+        for name, source_required in pairs(requests) do
+            if not staticmetadata.valid_module_name(name) or
+               type(source_required) ~= "boolean" then
+                error("external resolution requests must contain valid " ..
+                    "module names mapped to booleans", 2)
+            end
+            names[#names + 1] = name
+            if source_required then context.source_modules[name] = true end
+        end
+        table.sort(names, util.bytewise_less)
+
+        for _, name in ipairs(names) do
+            local source_required = requests[name]
+            if not source_required then
+                local resolved, compiled_error =
+                    driver.find_dependency_interface(
+                        driver.TITAN_BIN_PATH, name, context)
+                if resolved then
+                    results[name] = {
+                        kind = resolved.kind,
+                        provider_file = resolved.static_archive or
+                            resolved.filename,
+                    }
+                elseif compiled_error then
+                    results[name] = {
+                        kind = "error",
+                        message = compiled_error,
+                    }
+                end
+            end
+
+            if not results[name] then
+                local source, source_error = resolve_source(
+                    driver.TITAN_SOURCE_PATH, name, context)
+                if source_error then
+                    results[name] = {
+                        kind = "error",
+                        message = source_error,
+                    }
+                elseif source and source.kind == "blocked" then
+                    results[name] = {
+                        kind = "error",
+                        message = blocked_source_error(name, source),
+                    }
+                elseif source then
+                    local files = {}
+                    for index, filename in ipairs(source.files) do
+                        files[index] = filename
+                    end
+                    results[name] = {
+                        kind = "source",
+                        main_file = source.main,
+                        source_files = files,
+                    }
+                elseif source_required then
+                    results[name] = {
+                        kind = "error",
+                        message = "source module '" .. name .. "' not found",
+                    }
+                else
+                    results[name] = { kind = "missing" }
+                end
+            end
+        end
+    end, function(err) return err end)
+    local closed, close_error = true
+    if owns_context then
+        closed, close_error = driver.close_resolver_context(context)
+    end
+    if not ok then error(failure, 0) end
+    if not closed then
+        error("failed to close external resolver context: " ..
+            tostring(close_error), 0)
+    end
+    return results
 end
 
 function driver.dependency_closure(modname)
@@ -2963,6 +3843,29 @@ function driver.finalize_resolver_context(context)
     context.native_bindings = native_bindings
     context.physical_owner = physical_owner
 
+    -- Simple recovered aliases may reuse a canonical registry owner while
+    -- final interfaces are replayed, so contextual resolution callbacks are
+    -- not guaranteed to fire again. Retain provisional metadata only when its
+    -- exposing compiled module survived final resolver selection with the
+    -- same physical identity; this rejects entries made obsolete by a later
+    -- source-root or provider replacement without relying on registry replay.
+    local contextual_resolutions = {}
+    for key, resolution in pairs(
+            context.contextual_resolutions or {}) do
+        local exposer = driver.imported[resolution.exposer]
+        local exposer_file = exposer and
+            (exposer.static_archive or exposer.filename)
+        local compiled = exposer and exposer ~= CIRCULAR_MARK and
+            (exposer.kind == "static" or exposer.kind == "dynamic")
+        local carried_matches = resolution.ordinary_lookup or
+            resolution.provider_file == exposer_file
+        if compiled and exposer_file == resolution.exposer_file and
+           carried_matches then
+            contextual_resolutions[key] = resolution
+        end
+    end
+    context.contextual_resolutions = contextual_resolutions
+
     if #errors ~= 0 then return nil, errors end
     return context
 end
@@ -3104,9 +4007,27 @@ function driver.close_tableloader(loader)
     return driver.close_loader(loader)
 end
 
-local function shared_flag()
+-- Native publication can run in a fresh Lua process after the compiler has
+-- already produced its objects (for example stdlib_installer.lua validating a
+-- staged archive). Module loading deliberately performs no subprocess I/O, so
+-- recover the platform through an explicit resolver strategy when no earlier
+-- compiler operation initialized it.
+function driver.shared_library_flags(context)
+    local owns_context = context == nil
+    if context ~= nil or type(driver.UNAME) ~= "string"
+       or type(driver.IS_DARWIN) ~= "boolean" then
+        context = context or driver.new_resolver_context()
+        local initialized, platform_error = driver.initialize_platform(context)
+        local closed, close_error = true
+        if owns_context then
+            closed, close_error = driver.close_resolver_context(context)
+        end
+        if not initialized then return nil, platform_error end
+        if not closed then return nil, close_error end
+    end
+
     local shared = { "-shared" }
-    if string.match(driver.UNAME, "Darwin") then
+    if driver.IS_DARWIN then
         table.insert(shared, "-undefined")
         table.insert(shared, "dynamic_lookup")
     end
@@ -4339,9 +5260,21 @@ ensure_output_parent = function(filename)
     return ensure_directory(parent)
 end
 
-function driver.sibling_temporary_path(filename)
-    local unique = os.tmpname()
-    os.remove(unique)
+function driver.sibling_temporary_path(filename, strategy)
+    local unique
+    if strategy then
+        local temporary_error
+        unique, temporary_error = strategy:tmpname()
+        if not unique then return nil, temporary_error end
+        -- tmpname's contract leaves one caller-owned regular file. Release it
+        -- immediately, with no intervening cancellation point at which the
+        -- unique path could be lost before ownership reaches the sibling.
+        local removed, remove_error = strategy:unlink(unique, true)
+        if not removed then return nil, remove_error end
+    else
+        unique = os.tmpname()
+        os.remove(unique)
+    end
     unique = unique:match("([^/]+)$") or unique:gsub("[^%w]", "_")
     return filename .. ".tmp." .. unique
 end
@@ -5058,7 +5991,9 @@ function driver.compile_library_output(soname, libnames, link, verbose,
 
     local args, err = compiler_argv(false)
     if not args then return nil, err end
-    append_argv(args, shared_flag())
+    local shared, shared_error = driver.shared_library_flags()
+    if not shared then return nil, shared_error end
+    append_argv(args, shared)
     -- Darwin otherwise derives LC_ID_DYLIB from the unique staged `-o` path,
     -- while its debug map records volatile input-object modification times.
     -- Use the eventual public identity and reproducible-link mode so unchanged

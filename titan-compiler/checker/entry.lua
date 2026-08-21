@@ -43,6 +43,20 @@ function checker.check(modname, ast, subject, filename, loader, options)
         collect_type_aliases(ast, st, errors)
         checktoplevel(ast, st, errors, loader)
         checkbodies(ast, st, errors)
+        local header_inputs, header_error =
+            cprobe.collect_header_inputs(st.foreign_includes)
+        if header_inputs then
+            -- Language-server clients retain this small immutable closure on
+            -- both project and metadata-only external source entries. It has
+            -- no compiler types or AST nodes: each item is an exact physical
+            -- header byte identity or an include-search candidate state.
+            ast._c_header_dependencies = header_inputs
+        else
+            checker.typeerror(errors,
+                (ast[1] and ast[1].loc) or { line = 1, column = 1 },
+                "cannot establish stable C header dependencies: %s",
+                tostring(header_error))
+        end
         if #errors == 0 then
             select_linear_array_freezes(ast)
         end

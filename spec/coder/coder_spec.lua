@@ -2021,7 +2021,7 @@ describe("Titan code generator", function()
             local csrc = c:read("*a")
             c:close()
             local rendered = '#include "' .. require("lfs").currentdir()
-                .. "/./" .. header .. '"'
+                .. "/" .. header .. '"'
             assert.match(rendered, csrc, 1, true)
         end)
         os.remove(header)

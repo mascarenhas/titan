@@ -4,6 +4,7 @@ local csemantics = require "titan-compiler.csemantics"
 local sha256 = require "titan-compiler.sha256"
 local types = require "titan-compiler.types"
 local cdriver = require "c-parser.cdriver"
+local compiler_io = require "titan-compiler.io"
 local lfs = require "lfs"
 
 local function cstruct(name)
@@ -148,6 +149,71 @@ describe("session-scoped C probe service", function()
         assert.matches(
             "profile_identity disagrees with the target profile",
             err, 1, true)
+    end)
+
+    it("transfers tmpname and mkdir cancellation ownership to the strategy",
+    function()
+        local reservation = assert(os.tmpname())
+        local strategy = compiler_io.new_sync()
+        local ordinary_unlink = strategy.unlink
+        local ordinary_mkdir = strategy.mkdir
+        local unlink_owned
+        local mkdir_owned
+
+        function strategy:tmpname()
+            return reservation
+        end
+        function strategy:unlink(path, remove_if_cancelled)
+            if path == reservation then unlink_owned = remove_if_cancelled end
+            return ordinary_unlink(self, path, remove_if_cancelled)
+        end
+        function strategy:mkdir(path, remove_if_cancelled)
+            if path == reservation then mkdir_owned = remove_if_cancelled end
+            return ordinary_mkdir(self, path, remove_if_cancelled)
+        end
+
+        local service, err = cprobe.new_service({
+            io = strategy,
+            profile = target_profile(),
+        })
+        assert(service, err)
+        local workspace, workspace_error = service:_ensure_workspace()
+        assert(workspace, workspace_error)
+        assert.equal(reservation, workspace.root)
+        assert.is_true(unlink_owned)
+        assert.is_true(mkdir_owned)
+        assert.equal("directory", lfs.attributes(reservation, "mode"))
+        assert.is_true(service:close())
+        assert.is_nil(lfs.symlinkattributes(reservation))
+    end)
+
+    it("propagates cancellation while releasing a probe reservation",
+    function()
+        local reservation = assert(os.tmpname())
+        local cancellation = { kind = "simulated cancellation" }
+        local strategy = compiler_io.new_sync()
+        local ordinary_unlink = strategy.unlink
+
+        function strategy:tmpname()
+            return reservation
+        end
+        function strategy:unlink(path, remove_if_cancelled)
+            assert.equal(reservation, path)
+            assert.is_true(remove_if_cancelled)
+            assert.is_true(ordinary_unlink(self, path, remove_if_cancelled))
+            error(cancellation)
+        end
+
+        local service, err = cprobe.new_service({
+            io = strategy,
+            profile = target_profile(),
+        })
+        assert(service, err)
+        local completed, reason = pcall(service._ensure_workspace, service)
+        assert.is_false(completed)
+        assert.equal(cancellation, reason)
+        assert.is_nil(lfs.symlinkattributes(reservation))
+        assert.is_true(service:close())
     end)
 
     it("exposes one authoritative cdriver process context", function()
@@ -1548,6 +1614,436 @@ describe("persistent successful C probe markers", function()
         return out
     end
 
+    it("partitions contexts by restattable header and search identities",
+    function()
+        local service = new_fake_service()
+        local function context(identity)
+            return assert(service:module_context({ includes = {{
+                original = "public.h",
+                resolved = "/headers/public.h",
+                include_kind = "quote",
+                include_name = "public.h",
+                c_header_dependencies = {{
+                    kind = "file",
+                    path = "/headers/public.h",
+                    identity = identity,
+                }},
+                c_header_search_inputs = {{
+                    kind = "search",
+                    path = "/earlier/public.h",
+                    identity = "c-header-search-v1:lstat=missing;stat=missing",
+                }},
+            }}}))
+        end
+        local first = context("first contents")
+        local second = context("second contents")
+        assert.not_equal(first.header_key, second.header_key)
+        assert.same({
+            { kind = "file", path = "/headers/public.h",
+              identity = "first contents" },
+            { kind = "search", path = "/earlier/public.h",
+              identity =
+                "c-header-search-v1:lstat=missing;stat=missing" },
+        }, first.header_inputs)
+        assert.is_true(service:close())
+    end)
+
+    it("bounds retained probe keys independently of header closure size",
+    function()
+        local function dependencies(count, changed_last)
+            local result = {}
+            for index = 1, count do
+                result[index] = {
+                    kind = "file",
+                    path = ("/headers/dependency-%04d.h"):format(index),
+                    identity = ("c-header-file-v1:sha256:%064d"):format(
+                        changed_last and index == count and 1 or 0),
+                }
+            end
+            return result
+        end
+        local function context(service, inputs)
+            return assert(service:module_context({ includes = {{
+                original = "public.h",
+                resolved = "/headers/public.h",
+                include_kind = "quote",
+                include_name = "public.h",
+                c_header_dependencies = inputs,
+            }}}))
+        end
+
+        local service = new_fake_service()
+        local small = context(service, dependencies(1))
+        local large = context(service, dependencies(2000))
+        local changed = context(service, dependencies(2000, true))
+
+        assert.matches(
+            "^titan%-cprobe%-header%-context%-v2:sha256:[0-9a-f]+$",
+            large.header_key)
+        assert.equal(#small.header_key, #large.header_key)
+        assert.equal(#small.baseline_key, #large.baseline_key)
+        assert.not_equal(large.header_key, changed.header_key)
+        assert.not_equal(large.baseline_key, changed.baseline_key)
+
+        local result = large:probe_unsafe_object_pointer(
+            cpointer("large_header_source"),
+            cpointer("large_header_target"))
+        assert.equal("success", result.status, result.message)
+        local changed_result = changed:probe_unsafe_object_pointer(
+            cpointer("large_header_source"),
+            cpointer("large_header_target"))
+        assert.equal("success", changed_result.status,
+            changed_result.message)
+        assert.not_equal(result.key, changed_result.key)
+        assert.equal(#result.key, #changed_result.key)
+        assert.is_true(#result.key < 1024)
+        assert.is_true(service:close())
+    end)
+
+    it("bounds retained keys independently of forced-header manifest size",
+    function()
+        local small = new_fake_service()
+        local small_module = assert(small:module_context())
+        local small_result = small_module:probe_unsafe_object_pointer(
+            cpointer("forced_source"), cpointer("forced_target"))
+        assert.equal("success", small_result.status, small_result.message)
+
+        local previous_forced_header_inputs =
+            cdriver.forced_header_inputs
+        cdriver.forced_header_inputs = function()
+            return {
+                c_header_dependencies = {},
+                c_header_search_inputs = {},
+                manifest = string.rep("forced-header-input;", 20000),
+            }
+        end
+        local created, large_or_error = pcall(new_fake_service)
+        cdriver.forced_header_inputs = previous_forced_header_inputs
+        assert.is_true(created, large_or_error)
+        local large = large_or_error
+        local large_module = assert(large:module_context())
+        local large_result = large_module:probe_unsafe_object_pointer(
+            cpointer("forced_source"), cpointer("forced_target"))
+        assert.equal("success", large_result.status, large_result.message)
+
+        assert.matches(
+            "^titan%-cprobe%-forced%-header%-context%-v2:sha256:[0-9a-f]+$",
+            large.forced_header_manifest)
+        assert.equal(#small.forced_header_manifest,
+            #large.forced_header_manifest)
+        assert.equal(#small.toolchain_key, #large.toolchain_key)
+        assert.equal(#small_module.header_key, #large_module.header_key)
+        assert.equal(#small_module.baseline_key, #large_module.baseline_key)
+        assert.equal(#small_result.key, #large_result.key)
+        assert.not_equal(small.toolchain_key, large.toolchain_key)
+        assert.not_equal(small_module.header_key, large_module.header_key)
+        assert.not_equal(small_module.baseline_key, large_module.baseline_key)
+        assert.not_equal(small_result.key, large_result.key)
+        assert.is_true(#large_result.key < 1024)
+
+        assert.is_true(small:close())
+        assert.is_true(large:close())
+    end)
+
+    it("does not reuse persistent probes after header bytes change", function()
+        local cache = temporary_directory()
+        local function options(identity)
+            return { includes = {{
+                original = "public.h",
+                resolved = "/headers/public.h",
+                include_kind = "quote",
+                include_name = "public.h",
+                c_header_dependencies = {{
+                    kind = "file",
+                    path = "/headers/public.h",
+                    identity = identity,
+                }},
+            }} }
+        end
+        local first, first_state = new_fake_service({
+            cache_directory = cache,
+        })
+        local first_result = assert(first:module_context(
+            options("before"))):validate_baseline()
+        assert.equal("success", first_result.status, first_result.message)
+        assert.equal(1, #first_state.calls)
+        assert.is_true(first:close())
+
+        local changed, changed_state = new_fake_service({
+            cache_directory = cache,
+        })
+        local changed_result = assert(changed:module_context(
+            options("after"))):validate_baseline()
+        assert.equal("success", changed_result.status, changed_result.message)
+        assert.is_false(changed_result.persistent_cached == true)
+        assert.equal(1, #changed_state.calls)
+        assert.is_true(changed:close())
+
+        for _, name in ipairs(entries(cache)) do
+            assert(os.remove(cache .. "/" .. name))
+        end
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("does not reuse persistent probes after a forced header changes",
+    function()
+        local root = temporary_directory()
+        local cache = root .. "/cache"
+        assert(lfs.mkdir(cache))
+        local forced = root .. "/forced.h"
+        write_file(forced, "#define TITAN_FORCED_PROBE 1\n")
+        local compiler = lfs.attributes("/usr/bin/cc", "mode")
+            and { "/usr/bin/cc" } or { os.getenv("CC") or "cc" }
+        local function service()
+            return assert(cprobe.new_service({
+                compiler_argv = compiler,
+                cppflags = { "-include", forced },
+                profile = target_profile(),
+                cache_directory = cache,
+            }))
+        end
+
+        local source = "int titan_forced_probe;\n"
+        local first = service()
+        local first_result = first:_run_source(
+            "candidate", source, "same-semantic-key")
+        assert.is_true(first_result.ok, first_result.diagnostic)
+        assert.is_false(first_result.persistent_cached == true)
+        assert.is_true(first:close())
+
+        write_file(forced, "#error forced header changed\n")
+        local changed = service()
+        local changed_result = changed:_run_source(
+            "candidate", source, "same-semantic-key")
+        assert.is_false(changed_result.ok)
+        assert.is_false(changed_result.persistent_cached == true)
+        assert.matches("forced header changed", changed_result.diagnostic,
+            1, true)
+        assert.is_true(changed:close())
+
+        for _, name in ipairs(entries(cache)) do
+            assert(os.remove(cache .. "/" .. name))
+        end
+        assert(os.remove(forced))
+        assert(lfs.rmdir(cache))
+        assert(lfs.rmdir(root))
+    end)
+
+    it("publishes forced C-flag header closure into module inputs", function()
+        local root = temporary_directory()
+        local forced = root .. "/forced.h"
+        local nested = root .. "/nested.h"
+        write_file(forced, '#include "nested.h"\n')
+        write_file(nested, "#define TITAN_FORCED_CFLAG 1\n")
+        local compiler = lfs.attributes("/usr/bin/cc", "mode")
+            and { "/usr/bin/cc" } or { os.getenv("CC") or "cc" }
+        local function service()
+            return assert(cprobe.new_service({
+                compiler_argv = compiler,
+                cflags = { "-include", "forced.h" },
+                include_dirs = { root },
+                profile = target_profile(),
+            }))
+        end
+
+        local first = service()
+        local module = assert(first:module_context())
+        assert.same({ forced, nested }, {
+            first.forced_header_dependencies[1].path,
+            first.forced_header_dependencies[2].path,
+        })
+        assert.same(first.forced_header_inputs, module.header_inputs)
+        local cwd = assert(lfs.currentdir())
+        assert.equal(cwd .. "/forced.h",
+            first.forced_header_search_inputs[1].path)
+        assert.equal(forced,
+            first.forced_header_search_inputs[2].path)
+        local first_toolchain_key = first.toolchain_key
+        assert.is_true(first:close())
+
+        local duplicated = assert(cprobe.new_service({
+            compiler_argv = compiler,
+            cflags = {
+                "-include", "forced.h", "-include", "forced.h",
+            },
+            include_dirs = { root },
+            profile = target_profile(),
+        }))
+        assert.not_equal(first_toolchain_key, duplicated.toolchain_key)
+        assert.is_true(duplicated:close())
+
+        write_file(nested, "#define TITAN_FORCED_CFLAG 2\n")
+        local changed = service()
+        assert.not_equal(first_toolchain_key, changed.toolchain_key)
+        assert.is_true(changed:close())
+
+        assert(os.remove(nested))
+        assert(os.remove(forced))
+        assert(lfs.rmdir(root))
+    end)
+
+    it("does not publish success when a forced header changes during a probe",
+    function()
+        local root = temporary_directory()
+        local cache = root .. "/cache"
+        assert(lfs.mkdir(cache))
+        local forced = root .. "/forced.h"
+        write_file(forced, "#define TITAN_FORCED_RACE 1\n")
+        local state, runner, temp_provider = fake_environment(function()
+            write_file(forced, "#define TITAN_FORCED_RACE 2\n")
+            return { started = true, ok = true, status = 0, diagnostic = "" }
+        end)
+        local service = assert(cprobe.new_service({
+            compiler_argv = { "/usr/bin/cc" },
+            cppflags = { "-include", forced },
+            profile = target_profile(),
+            cache_directory = cache,
+            runner = runner,
+            temp_provider = temp_provider,
+        }))
+        local result = service:module_context():validate_baseline()
+        assert.equal("infrastructure_failure", result.status)
+        assert.matches("forced C header input changed", result.diagnostic,
+            1, true)
+        assert.equal(1, #state.calls)
+        assert.same({}, entries(cache))
+        assert.is_true(service:close())
+
+        assert(os.remove(forced))
+        assert(lfs.rmdir(cache))
+        assert(lfs.rmdir(root))
+    end)
+
+    it("restats again after locating a persistent forced-header hit",
+    function()
+        local root = temporary_directory()
+        local cache = root .. "/cache"
+        assert(lfs.mkdir(cache))
+        local forced = root .. "/forced.h"
+        local source = "int titan_forced_lookup_race;\n"
+        write_file(forced, "#define TITAN_FORCED_LOOKUP_RACE 1\n")
+        local function options()
+            return {
+                compiler_argv = { "/usr/bin/cc" },
+                cppflags = { "-include", forced },
+                profile = target_profile(),
+                cache_directory = cache,
+            }
+        end
+        local first = assert(cprobe.new_service(options()))
+        assert.is_true(first:_run_source(
+            "candidate", source, "same-key").ok)
+        assert.is_true(first:close())
+
+        local second = assert(cprobe.new_service(options()))
+        local ordinary_lookup = second._persistent_success
+        second._persistent_success = function(self, probe_source, key)
+            local hit, path, digest =
+                ordinary_lookup(self, probe_source, key)
+            write_file(forced,
+                "#define TITAN_FORCED_LOOKUP_RACE 2\n")
+            return hit, path, digest
+        end
+        local raced = second:_run_source(
+            "candidate", source, "same-key")
+        assert.is_false(raced.ok)
+        assert.equal("header_inputs", raced.reason)
+        assert.is_false(raced.persistent_cached == true)
+        assert.is_true(second:close())
+
+        for _, name in ipairs(entries(cache)) do
+            assert(os.remove(cache .. "/" .. name))
+        end
+        assert(os.remove(forced))
+        assert(lfs.rmdir(cache))
+        assert(lfs.rmdir(root))
+    end)
+
+    it("does not reuse an in-memory candidate after a forced header changes",
+    function()
+        local root = temporary_directory()
+        local forced = root .. "/forced.h"
+        write_file(forced, "#define TITAN_FORCED_MEMORY 1\n")
+        local service, state = new_fake_service({
+            compiler_argv = { "/usr/bin/cc" },
+            cppflags = { "-include", forced },
+            profile = target_profile(),
+        })
+        local module = assert(service:module_context())
+        local first = module:probe_unsafe_object_pointer(
+            cpointer("forced_source"), cpointer("forced_target"))
+        assert.equal("success", first.status, first.message)
+        assert.equal(2, #state.calls)
+
+        write_file(forced, "#define TITAN_FORCED_MEMORY 2\n")
+        local changed = module:probe_unsafe_object_pointer(
+            cpointer("forced_source"), cpointer("forced_target"))
+        assert.equal("infrastructure_failure", changed.status)
+        assert.equal("header_inputs", changed.reason)
+        assert.is_false(changed.cached == true)
+        assert.equal(2, #state.calls)
+        assert.is_true(service:close())
+
+        assert(os.remove(forced))
+        assert(lfs.rmdir(root))
+    end)
+
+    it("rejects missing forced headers without a success marker", function()
+        local root = temporary_directory()
+        local cache = root .. "/cache"
+        assert(lfs.mkdir(cache))
+        local service, err = cprobe.new_service({
+            compiler_argv = { "/usr/bin/cc" },
+            compile_flags = { "-include", root .. "/missing.h" },
+            profile = target_profile(),
+            cache_directory = cache,
+            runner = function()
+                error("runner must not be reached")
+            end,
+        })
+        assert.is_nil(service)
+        assert.matches("missing or unreadable", err, 1, true)
+        assert.same({}, entries(cache))
+
+        assert(lfs.rmdir(cache))
+        assert(lfs.rmdir(root))
+    end)
+
+    it("keeps source-foreign generated bytes in key identity but not restat inputs",
+    function()
+        local physical = assert(cprobe.normalize_include_descriptor({
+            original = "/tmp/provider.check.h",
+            resolved = "/tmp/provider.check.h",
+            include_kind = "quote",
+            include_name = "/tmp/provider.check.h",
+            c_header_dependencies = {
+                { kind = "file", path = "/tmp/provider.check.h",
+                  identity = "generated bytes" },
+                { kind = "file", path = "/headers/nested.h",
+                  identity = "nested bytes" },
+            },
+            c_header_search_inputs = {
+                { kind = "search", path = "/headers/earlier.h",
+                  identity = "missing candidate" },
+            },
+        }, { source_dir = "/tmp" }))
+        local alias = assert(cprobe.source_foreign_include_alias(
+            physical, "provider.module", "/project/provider.titan.h"))
+        local service = new_fake_service()
+        local module = assert(service:module_context({ includes = { alias } }))
+        assert.same({
+            { kind = "file", path = "/headers/nested.h",
+              identity = "nested bytes" },
+            { kind = "search", path = "/headers/earlier.h",
+              identity = "missing candidate" },
+        }, module.header_inputs)
+        assert.matches(
+            "^titan%-cprobe%-header%-context%-v2:sha256:[0-9a-f]+$",
+            module.header_key)
+        assert.not_matches("generated bytes", module.header_key, 1, true)
+        assert.is_true(service:close())
+    end)
+
     it("rejects invalid persistent cache configuration", function()
         local rejected, err = cprobe.new_service({
             cache_directory = false,
@@ -1580,18 +2076,21 @@ describe("persistent successful C probe markers", function()
         local cache = temporary_directory()
         local service = new_fake_service({ cache_directory = cache })
         local source = "int titan_marker_publication_failure;\n"
-        local path, digest = service:_persistent_success_location(source)
+        local path = service:_persistent_success_location(source)
 
         local previous_open = io.open
         io.open = function(name, mode)
-            if name:find(".tmp.", 1, true) then
-                return { close = function() return nil end }
+            if name:match("%.tmp$") then
+                return {
+                    write = function() return true end,
+                    close = function() return nil end,
+                }
             end
             return previous_open(name, mode)
         end
         local close_ok, close_result = pcall(
             service._publish_persistent_success,
-            service, path, digest, { root = "/fake/workspace" })
+            service, path)
         io.open = previous_open
         assert.is_true(close_ok)
         assert.is_nil(close_result)
@@ -1603,7 +2102,7 @@ describe("persistent successful C probe markers", function()
         end
         local rename_ok, rename_result = pcall(
             service._publish_persistent_success,
-            service, path, digest, { root = "/fake/workspace" })
+            service, path)
         assert.is_true(rename_ok)
         assert.is_nil(rename_result)
         assert.same({}, entries(cache))
@@ -1611,7 +2110,7 @@ describe("persistent successful C probe markers", function()
         write_file(path, "")
         local race_ok, race_result = pcall(
             service._publish_persistent_success,
-            service, path, digest, { root = "/fake/workspace" })
+            service, path)
         os.rename = previous_rename
         assert.is_true(race_ok)
         assert.is_true(race_result)
@@ -1622,26 +2121,80 @@ describe("persistent successful C probe markers", function()
         assert(lfs.rmdir(cache))
     end)
 
-    it("uses exact probe text hashes and an empty marker as success evidence",
+    it("retains only the committed marker when publication is cancelled",
     function()
         local cache = temporary_directory()
+        local strategy = compiler_io.new_sync()
+        local ordinary_write = strategy.write_file
+        local cancellation = { kind = "simulated cancellation" }
+        local publication_path
+        strategy.write_file = function(self, path, contents)
+            local written, err = ordinary_write(self, path, contents)
+            if written and path:match("%.success$") then
+                publication_path = path
+                error(cancellation)
+            end
+            return written, err
+        end
+
+        local source = "int titan_cancelled_marker_publication;\n"
+        local first, first_state = new_fake_service({
+            cache_directory = cache,
+            io = strategy,
+        })
+        local completed, reason = pcall(
+            first._run_source, first, "candidate", source, "same-key")
+        assert.is_false(completed)
+        assert.equal(cancellation, reason)
+        assert.equal(1, #first_state.calls)
+
+        local expected_path = first:_persistent_success_location(
+            source, "same-key")
+        assert.equal(expected_path, publication_path)
+        assert.same({ expected_path:match("([^/]+)$") }, entries(cache))
+        assert.is_true(first:close())
+
+        local second, second_state = new_fake_service({
+            cache_directory = cache,
+        }, function()
+            error("a committed marker must not invoke the compiler")
+        end)
+        local hit = second:_run_source("candidate", source, "same-key")
+        assert.is_true(hit.ok)
+        assert.is_true(hit.persistent_cached)
+        assert.equal(expected_path, hit.cache_path)
+        assert.equal(0, #second_state.calls)
+        assert.is_true(second:close())
+
+        assert(os.remove(expected_path))
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("keys empty success markers by probe text and semantic context",
+    function()
+        local cache = temporary_directory()
+        local source = "int titan_persistent_success;\n"
+        local legacy = cache .. "/" .. sha256.hex(source) .. ".success"
+        write_file(legacy, "legacy source-only marker")
         local first, first_state = new_fake_service({
             cache_directory = cache,
         })
-        local source = "int titan_persistent_success;\n"
         local run = first:_run_source("candidate", source, "first-key")
         assert.is_true(run.ok)
         assert.equal(1, #first_state.calls)
         assert.is_true(first:close())
 
         local names = entries(cache)
-        assert.equal(1, #names)
-        assert.equal(sha256.hex(source) .. ".success", names[1])
-        local marker = assert(io.open(cache .. "/" .. names[1], "rb"))
+        assert.equal(2, #names)
+        assert.is_true(entries(cache)[1] == legacy:match("([^/]+)$") or
+            entries(cache)[2] == legacy:match("([^/]+)$"))
+        local marker_name = run.cache_path:match("([^/]+)$")
+        assert.not_equal(sha256.hex(source) .. ".success", marker_name)
+        local marker = assert(io.open(cache .. "/" .. marker_name, "rb"))
         assert.equal("", assert(marker:read("a")))
         assert.is_true(marker:close())
         -- Presence is the complete contract; readers never decode payload.
-        write_file(cache .. "/" .. names[1], "ignored marker payload")
+        write_file(cache .. "/" .. marker_name, "ignored marker payload")
 
         local second, second_state = new_fake_service({
             cache_directory = cache,
@@ -1649,13 +2202,27 @@ describe("persistent successful C probe markers", function()
             error("a persistent success must not invoke the compiler")
         end)
         local hit = second:_run_source(
-            "baseline", source, "a-different-semantic-key")
+            "baseline", source, "first-key")
         assert.is_true(hit.ok)
         assert.is_true(hit.persistent_cached)
         assert.equal(0, #second_state.calls)
         assert.equal(0, second_state.created)
         assert.is_true(second:close())
-        assert(os.remove(cache .. "/" .. names[1]))
+
+        local changed, changed_state = new_fake_service({
+            cache_directory = cache,
+        })
+        local changed_run = changed:_run_source(
+            "baseline", source, "a-different-semantic-key")
+        assert.is_true(changed_run.ok)
+        assert.is_nil(changed_run.persistent_cached)
+        assert.equal(1, #changed_state.calls)
+        assert.not_equal(run.cache_path, changed_run.cache_path)
+        assert.is_true(changed:close())
+
+        for _, name in ipairs(entries(cache)) do
+            assert(os.remove(cache .. "/" .. name))
+        end
         assert(lfs.rmdir(cache))
     end)
 

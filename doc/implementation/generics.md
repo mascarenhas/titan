@@ -479,9 +479,12 @@ The code-facing graph is separate:
   lowering;
 - declaration and expression `_type` annotations become ordinary erased types;
 - `types.registry` is replaced with or points at a detached erased owner
-  registry; and
-- temporary surface-boundary links survive only until focused cast insertion
-  has materialized ordinary annotations.
+  registry;
+- temporary inference and surface-boundary links survive only until focused
+  cast insertion has materialized ordinary annotations; and
+- written generic binders and applications remain on the private
+  `_surface_typeparams` and `_surface_typeargs` AST edges, with canonical
+  semantic `_decl` bindings, after their public runtime lists are cleared.
 
 No descriptor reachable from `ast._declared_type` is mutated during erasure. In
 particular, the declared graph cannot share an owner table whose fields are
@@ -924,7 +927,9 @@ Focused tests and reviews therefore establish:
 - fresh use isolation, result/context/lambda inference, constraint validation,
   rigid capability rejection, and explicit-source visibility;
 - a frozen generic `ast._declared_type` beside a code-facing AST containing no
-  parameter, scheme, application, alias descriptor, or inference cell;
+  runtime-facing parameter, scheme, application, alias descriptor, or inference
+  cell; private `_surface_typeparams`/`_surface_typeargs` source syntax and their
+  semantic bindings are explicitly outside the coder traversal;
 - no guard on a statically typed closed-to-carrier argument, constructor, or
   write, but every carrier-to-closed edge uses the constraint-appropriate strict
   elimination—`gradual_guard` for unconstrained carriers (including

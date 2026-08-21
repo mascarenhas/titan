@@ -633,6 +633,7 @@ toplevel_visitor = util.make_visitor({
     ["Ast.TopLevelForeignImport"] = function(node, st, errors)
         local name = node.headername
         local ftypes, err, include
+        local strategy
         if foreign_c_config_error then
             err = foreign_c_config_error
         else
@@ -642,6 +643,7 @@ toplevel_visitor = util.make_visitor({
                 local options
                 options, err = service:cdriver_process_options()
                 if options then
+                    strategy = options.io
                     options.source_dir = st.source_dir
                     ftypes, err, include =
                         cdriver.process_file(name, options)
@@ -652,6 +654,7 @@ toplevel_visitor = util.make_visitor({
             local normalized
             normalized, err = cprobe.normalize_include_descriptor(include, {
                 source_dir = st.source_dir,
+                io = strategy,
             })
             if normalized then
                 include = normalized
@@ -922,6 +925,7 @@ toplevel_visitor = util.make_visitor({
                     tfield.dynamic_plan =
                         types.dynamic_coercion(ftype) or false
                     member._field = tfield
+                    member._decl = tfield
                     member._dynamic_plan = tfield.dynamic_plan
                     fields[#fields + 1] = tfield
                 else
@@ -962,6 +966,10 @@ toplevel_visitor = util.make_visitor({
                                 varargtype, flexrettype, paramnames,
                                 member._generic_scope,
                                 member._generic_typeparams)
+                            member._decl = member._type
+                            bind_callable_parameter_declarations(
+                                member, member._type, "member", fqtn,
+                                member.islocal)
                         end)
                     annotate_lua_function_boundary(member)
                     methods[#methods + 1] = member._type
@@ -1000,6 +1008,8 @@ toplevel_visitor = util.make_visitor({
                 node._type = signature
             end
             node._paramnames = paramnames
+            bind_callable_parameter_declarations(
+                node, node._type, "module", st.modname, node.islocal)
         end)
     end,
 
@@ -1057,6 +1067,8 @@ toplevel_visitor = util.make_visitor({
                     tfield.dynamic_plan =
                         types.dynamic_coercion(ftype) or false
                     field._dynamic_plan = tfield.dynamic_plan
+                    field._field = tfield
+                    field._decl = tfield
                     fields[#fields + 1] = tfield
                 end
             end
@@ -1097,6 +1109,7 @@ toplevel_visitor = util.make_visitor({
                     tvariant.islocal =
                         (node.islocal or variant.islocal) and true or false
                     variant._type = tvariant
+                    variant._decl = tvariant
                     variants[#variants + 1] = tvariant
                 end
             end
@@ -1169,6 +1182,7 @@ toplevel_visitor = util.make_visitor({
         end
         if owner.islocal then node.islocal = true end
         node._nominal_owner = owner
+        node._owner_decl = owner
         generic_with_owner_bindings(owner, st, function()
             generic_prepare_generic_binders(node, st, errors, owner)
             generic_with_generic_binding_map(st, node._generic_bindings, function()
@@ -1194,6 +1208,15 @@ toplevel_visitor = util.make_visitor({
         node._type._owner_scope = ownertype.scope
         node._type._owner_typeparams = ownertype.typeparams
         node._type._owner_parameters = ownertype._generic_parameters
+        node._decl = node._type
+        if node._record_constructor then
+            bind_callable_parameter_declarations(
+                node, node._type, "member", ownertype.name, node.islocal,
+                ownertype.fields)
+        else
+            bind_callable_parameter_declarations(
+                node, node._type, "member", ownertype.name, node.islocal)
+        end
         ownertype.functions[node.name] = node._type
     end,
 
@@ -1244,6 +1267,7 @@ toplevel_visitor = util.make_visitor({
         end
         if owner.islocal then node.islocal = true end
         node._nominal_owner = owner
+        node._owner_decl = owner
         generic_with_owner_bindings(owner, st, function()
             generic_prepare_generic_binders(node, st, errors, owner)
             generic_with_generic_binding_map(st, node._generic_bindings, function()
@@ -1264,6 +1288,9 @@ toplevel_visitor = util.make_visitor({
         node._type.islocal = node.islocal and true or false
         node._type._owner_scope = ownertype.scope
         node._type._owner_typeparams = ownertype.typeparams
+        node._decl = node._type
+        bind_callable_parameter_declarations(
+            node, node._type, "member", ownertype.name, node.islocal)
         ownertype.methods[node.name] = node._type
     end,
 })
@@ -1344,6 +1371,12 @@ function mark_toplevel_duplicates(ast, errors)
     local first = {}
     for index, node in ipairs(ast) do
         node._toplevel_order = index
+        if node._tag:sub(1, 12) == "Ast.TopLevel" then
+            node._decl = node
+            if node._tag == "Ast.TopLevelVar" then
+                node.decl._decl = node
+            end
+        end
         local name = toplevel_name(node)
         if name then
             local previous = first[name]
@@ -1493,10 +1526,12 @@ function apply_source_foreign_headers(ast, st, errors)
             seen[filename] = true
             local service, err = ensure_probe_service(st)
             local ftypes, include
+            local strategy
             if service then
                 local options
                 options, err = service:cdriver_process_options()
                 if options then
+                    strategy = options.io
                     options.source_dir = st.source_dir
                     ftypes, err, include =
                         cdriver.process_file(filename, options)
@@ -1506,6 +1541,7 @@ function apply_source_foreign_headers(ast, st, errors)
                 local normalized
                 normalized, err = cprobe.normalize_include_descriptor(include, {
                     source_dir = st.source_dir,
+                    io = strategy,
                 })
                 if normalized and node._foreign_header_probe_identity then
                     normalized, err = cprobe.source_foreign_include_alias(

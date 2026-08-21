@@ -1313,6 +1313,7 @@ checkstat_visitor = util.make_visitor({
                     covered_variants = covered_variants + 1
                 end
                 arm._variant = variant
+                arm._decl = variant
                 arm._variant_index = variant.index
             end
 

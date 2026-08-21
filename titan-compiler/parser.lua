@@ -29,6 +29,8 @@ local LIST_LIMIT = 100
 --
 
 local defs = {}
+local with_name_loc
+local with_end_loc
 
 for tokname, tokpat in pairs(lexer) do
     defs[tokname] = tokpat
@@ -67,13 +69,32 @@ function parser.normalize_import(modname)
     return standard_imports[modname] or modname, source_required
 end
 
-function defs.importdecl(loc, localname, modname)
+function defs.importdecl(loc, name_loc, localname, modname)
     local normalized, source_required = parser.normalize_import(modname)
-    return ast.TopLevelImport(loc, localname, normalized, source_required)
+    return with_name_loc(
+        ast.TopLevelImport(loc, localname, normalized, source_required),
+        name_loc)
 end
 
 function defs.get_loc(s, pos)
     return true, location.from_pos(THIS_FILENAME, s, pos)
+end
+
+-- Semantic tooling needs the exact selected identifier rather than the
+-- declaration/expression diagnostic location, which often points at a leading
+-- keyword, modifier, dot, or colon. Keep this source metadata private so the
+-- ordinary AST constructor shapes and every existing compiler consumer remain
+-- unchanged.
+with_name_loc = function(node, name_loc)
+    node._name_loc = name_loc
+    return node
+end
+
+-- Likewise, structural folding needs the location of the closing keyword.
+-- Record its start independently of the node's ordinary diagnostic location.
+with_end_loc = function(node, end_loc)
+    node._end_loc = end_loc
+    return node
 end
 
 function defs.totrue()
@@ -151,7 +172,7 @@ function defs.number_exp(pos, n)
 end
 
 function defs.name_exp(pos, name)
-    return ast.ExpVar(pos, ast.VarName(pos, name))
+    return ast.ExpVar(pos, with_name_loc(ast.VarName(pos, name), pos))
 end
 
 function defs.adjust_exp(pos, exp)
@@ -213,10 +234,10 @@ end
 -- Its diagnostic location is the `do` keyword rather than the first
 -- token in the block, so filesystem assembly can reject the construct in a
 -- contributor without guessing from the statement tag.
-function defs.moduleinit(pos, block)
+function defs.moduleinit(pos, block, end_loc)
     block.loc = pos
     block._module_initializer = true
-    return block
+    return with_end_loc(block, end_loc)
 end
 
 function defs.cptrtype(pos, subtype)
@@ -271,28 +292,48 @@ function defs.negativecarraylength(_, _, loc, n)
     return true, length
 end
 
-function defs.ifstat(pos, exp, block, thens, elseopt)
+function defs.ifstat(pos, exp, block, thens, elseopt, end_loc)
     table.insert(thens, 1, ast.Then(pos, exp, block))
-    return ast.StatIf(pos, thens, elseopt)
+    return with_end_loc(ast.StatIf(pos, thens, elseopt), end_loc)
 end
 
-function defs.fornum_rest(_, start, finish, inc, block)
+function defs.fornum_rest(_, start, finish, inc, block, end_loc)
     return function(pos, decl)
-        return ast.StatFor(pos, decl, start, finish, inc, block)
+        return with_end_loc(
+            ast.StatFor(pos, decl, start, finish, inc, block), end_loc)
     end
 end
 
-function defs.forin_rest(_, decls, exps, block)
+function defs.forin_rest(_, decls, exps, block, end_loc)
     return function(pos, decl)
         table.insert(decls, 1, decl)
-        return ast.StatForIn(pos, decls, exps, block)
+        return with_end_loc(
+            ast.StatForIn(pos, decls, exps, block), end_loc)
     end
 end
 
-function defs.forin_rest0(_, exps, block)
+function defs.forin_rest0(_, exps, block, end_loc)
     return function(pos, decl)
-        return ast.StatForIn(pos, { decl }, exps, block)
+        return with_end_loc(
+            ast.StatForIn(pos, { decl }, exps, block), end_loc)
     end
+end
+
+function defs.whilestat(pos, exp, block, end_loc)
+    return with_end_loc(ast.StatWhile(pos, exp, block), end_loc)
+end
+
+function defs.repeatstat(pos, block, end_loc, exp)
+    return with_end_loc(ast.StatRepeat(pos, block, exp), end_loc)
+end
+
+function defs.casestat(pos, exp, arms, elseopt, end_loc)
+    return with_end_loc(ast.StatCase(pos, exp, arms, elseopt), end_loc)
+end
+
+function defs.doblock(pos, block, end_loc)
+    block._structure_loc = pos
+    return with_end_loc(block, end_loc)
 end
 
 function defs.forstat(pos, decl, rest)
@@ -367,10 +408,11 @@ end
 -- type arguments so the complete generic list is probed only once. This
 -- parser-only carrier preserves both the dot location and contextual C-name
 -- status until `suffix_anyfunccall` builds the existing AST shape.
-function defs.nominal_member_selector(pos, member)
+function defs.nominal_member_selector(pos, name_loc, member)
     local name, contextual = unpack_membername(member)
     return {
         loc = pos,
+        name_loc = name_loc,
         name = name,
         contextual = contextual,
     }
@@ -402,7 +444,8 @@ function defs.suffix_anyfunccall(pos, typeargs, args, named)
         exp._nominal_typeargs = typeargs
         exp._nominal_typeargs_loc = pos
 
-        local var = ast.VarDot(selector.loc, exp, selector.name)
+        local var = with_name_loc(
+            ast.VarDot(selector.loc, exp, selector.name), selector.name_loc)
         if selector.contextual then
             var._contextual_c_name = true
         end
@@ -417,10 +460,10 @@ end
 -- Parse `: NAME` once, then distinguish a call tail from the empty tail of a
 -- bound-method reference. Calls retain the existing positional/named argument
 -- nodes and explicit (possibly empty) type-argument list.
-function defs.suffix_anymethod(pos, name, typeargs, args, named)
+function defs.suffix_anymethod(pos, name_loc, name, typeargs, args, named)
     if typeargs == false then
         return function(exp)
-            return ast.ExpMethodRef(pos, exp, name)
+            return with_name_loc(ast.ExpMethodRef(pos, exp, name), name_loc)
         end
     end
 
@@ -431,6 +474,7 @@ function defs.suffix_anymethod(pos, name, typeargs, args, named)
         else
             callargs = ast.ArgsMethod(pos, name, args)
         end
+        callargs._name_loc = name_loc
         return ast.ExpCall(pos, exp, callargs, typeargs)
     end
 end
@@ -445,10 +489,10 @@ function defs.contextual_c_name(name)
     return { name = name }
 end
 
-function defs.suffix_dot(pos, member)
+function defs.suffix_dot(pos, name_loc, member)
     return function(exp)
         local name, contextual = unpack_membername(member)
-        local var = ast.VarDot(pos, exp, name)
+        local var = with_name_loc(ast.VarDot(pos, exp, name), name_loc)
         if contextual then
             var._contextual_c_name = true
         end
@@ -456,9 +500,11 @@ function defs.suffix_dot(pos, member)
     end
 end
 
-function defs.qualifiedtype(pos, module, member, typeargs)
+function defs.qualifiedtype(pos, module, name_loc, member, typeargs)
     local name, contextual = unpack_membername(member)
-    local node = ast.TypeQualName(pos, module, name, typeargs)
+    local node = with_name_loc(
+        ast.TypeQualName(pos, module, name, typeargs), name_loc)
+    node._module_loc = pos
     if contextual then
         node._contextual_c_name = true
     end
@@ -493,26 +539,75 @@ function defs.exp_is_call(_, pos, exp)
     end
 end
 
-function defs.methoddecl(pos, islocal, class, name, typeparams, params,
-                         rettypes, flexrettype, block)
-    local node = ast.TopLevelMethod(pos, class, name, params, rettypes,
-        flexrettype, block, typeparams)
+function defs.methoddecl(pos, islocal, owner_loc, class, name_loc, name,
+                         typeparams, params, rettypes, flexrettype, block,
+                         end_loc)
+    local node = with_name_loc(ast.TopLevelMethod(
+        pos, class, name, params, rettypes,
+        flexrettype, block, typeparams), name_loc)
     node.islocal = islocal
-    return node
+    node._owner_loc = owner_loc
+    return with_end_loc(node, end_loc)
 end
 
-function defs.staticdecl(pos, islocal, class, name, typeparams, params,
-                         rettypes, flexrettype, block)
-    local node = ast.TopLevelStatic(pos, class, name, params, rettypes,
-        flexrettype, block, typeparams)
+function defs.staticdecl(pos, islocal, owner_loc, class, name_loc, name,
+                         typeparams, params, rettypes, flexrettype, block,
+                         end_loc)
+    local node = with_name_loc(ast.TopLevelStatic(
+        pos, class, name, params, rettypes,
+        flexrettype, block, typeparams), name_loc)
     node.islocal = islocal
-    return node
+    node._owner_loc = owner_loc
+    return with_end_loc(node, end_loc)
 end
 
-function defs.toplevelfuncdecl(pos, islocal, name, typeparams, params,
-                               rettypes, flexrettype, block)
-    return ast.TopLevelFunc(pos, islocal, name, params, rettypes,
-        flexrettype, block, typeparams)
+function defs.toplevelfuncdecl(pos, islocal, name_loc, name, typeparams,
+                               params, rettypes, flexrettype, block, end_loc)
+    return with_end_loc(with_name_loc(
+        ast.TopLevelFunc(pos, islocal, name, params, rettypes,
+            flexrettype, block, typeparams), name_loc), end_loc)
+end
+
+function defs.foreignfuncdecl(pos, name_loc, name, params, rettypes,
+                              flexrettype, block, end_loc)
+    return with_end_loc(with_name_loc(
+        ast.TopLevelForeignFunc(
+            pos, name, params, rettypes, flexrettype, block), name_loc),
+        end_loc)
+end
+
+function defs.typealiasdecl(pos, islocal, name_loc, name, type)
+    return with_name_loc(
+        ast.TopLevelTypeAlias(pos, islocal, name, type), name_loc)
+end
+
+function defs.foreignimportdecl(pos, name_loc, localname, headername)
+    return with_name_loc(
+        ast.TopLevelForeignImport(pos, localname, headername), name_loc)
+end
+
+function defs.typename(pos, name, typeargs)
+    return with_name_loc(ast.TypeName(pos, name, typeargs), pos)
+end
+
+function defs.typeparamdecl(pos, name, constraint)
+    return with_name_loc(ast.TypeParam(pos, name, constraint), pos)
+end
+
+function defs.funcexp(pos, params, rettypes, flexrettype, block, end_loc)
+    return with_end_loc(
+        ast.ExpFunction(pos, params, rettypes, flexrettype, block), end_loc)
+end
+
+function defs.casearm(pos, name_loc, name, binding, block)
+    return with_name_loc(
+        ast.CaseArm(pos, name, binding, block), name_loc)
+end
+
+function defs.makefield(pos, name, exp)
+    local node = ast.Field(pos, name, exp)
+    if type(name) == "string" then node._name_loc = pos end
+    return node
 end
 
 function defs.toplevelvardecl(pos, islocal, decl, value)
@@ -524,7 +619,7 @@ function defs.toplevelconstvardecl(pos, islocal, decl, value)
     return ast.TopLevelVar(pos, islocal, true, decl, value)
 end
 
-function defs.interfacedecl(pos, name, typeparams, members)
+function defs.interfacedecl(pos, name_loc, name, typeparams, members, end_loc)
     local fields, methods = {}, {}
     for _, member in ipairs(members) do
         if member._tag == "Ast.InterfaceMethod" then
@@ -534,18 +629,20 @@ function defs.interfacedecl(pos, name, typeparams, members)
             fields[#fields + 1] = member
         end
     end
-    return ast.TopLevelInterface(pos, name, members, fields, methods,
-        typeparams)
+    return with_end_loc(with_name_loc(
+        ast.TopLevelInterface(pos, name, members, fields, methods,
+            typeparams), name_loc), end_loc)
 end
 
-function defs.interfacemethoddecl(pos, name, typeparams, params, rettypes,
-                                  flexrettype)
-    return ast.InterfaceMethod(pos, name, params, rettypes, flexrettype,
-        typeparams)
+function defs.interfacemethoddecl(pos, name_loc, name, typeparams, params,
+                                  rettypes, flexrettype)
+    return with_name_loc(
+        ast.InterfaceMethod(pos, name, params, rettypes, flexrettype,
+            typeparams), name_loc)
 end
 
 function defs.interfacefielddecl(pos, name, type)
-    return ast.Decl(pos, name, type, false, true)
+    return with_name_loc(ast.Decl(pos, name, type, false, true), pos)
 end
 
 local function has_local_field(fields)
@@ -563,7 +660,8 @@ local function applied_owner_type(pos, name, typeparams)
     return ast.TypeName(pos, name, typeargs)
 end
 
-function defs.recorddecl(pos, islocal, name, typeparams, fields)
+function defs.recorddecl(pos, islocal, name_loc, name, typeparams, fields,
+                         end_loc)
     local params, initlist = {}, {}
     for _, field in ipairs(fields) do
         table.insert(params,
@@ -576,7 +674,8 @@ function defs.recorddecl(pos, islocal, name, typeparams, fields)
             ast.ExpInitList(pos, initlist)
         })
     })
-    local record = ast.TopLevelRecord(pos, name, fields, typeparams)
+    local record = with_end_loc(with_name_loc(
+        ast.TopLevelRecord(pos, name, fields, typeparams), name_loc), end_loc)
     record.islocal = islocal
     local new = ast.TopLevelStatic(pos, name, "new", params,
         { applied_owner_type(pos, name, typeparams) }, false, body, {})
@@ -586,17 +685,20 @@ function defs.recorddecl(pos, islocal, name, typeparams, fields)
 end
 
 function defs.unionvariantdecl(pos, name, payload)
-    return ast.UnionVariant(pos, name, payload)
+    return with_name_loc(ast.UnionVariant(pos, name, payload), pos)
 end
 
-function defs.localunionvariantdecl(pos, name, payload)
-    local variant = ast.UnionVariant(pos, name, payload)
+function defs.localunionvariantdecl(pos, name_loc, name, payload)
+    local variant = with_name_loc(
+        ast.UnionVariant(pos, name, payload), name_loc)
     variant.islocal = true
     return variant
 end
 
-function defs.uniondecl(pos, islocal, name, typeparams, variants)
-    local union = ast.TopLevelUnion(pos, name, variants, typeparams)
+function defs.uniondecl(pos, islocal, name_loc, name, typeparams, variants,
+                        end_loc)
+    local union = with_end_loc(with_name_loc(
+        ast.TopLevelUnion(pos, name, variants, typeparams), name_loc), end_loc)
     union.islocal = islocal
 
     local nodes = { union }
@@ -635,65 +737,70 @@ function defs.uniondecl(pos, islocal, name, typeparams, variants)
     return table.unpack(nodes)
 end
 
-function defs.recordfielddecl(pos, name, type)
-    local decl = ast.Decl(pos, name, type, false, false)
-    return decl
+function defs.recordfielddecl(pos, name_loc, name, type)
+    return with_name_loc(
+        ast.Decl(pos, name, type, false, false), name_loc)
 end
 
-function defs.localrecordfielddecl(pos, name, type)
-    local decl = ast.Decl(pos, name, type, false, false)
+function defs.localrecordfielddecl(pos, name_loc, name, type)
+    local decl = with_name_loc(
+        ast.Decl(pos, name, type, false, false), name_loc)
     decl.islocal = true
     return decl
 end
 
-function defs.optionrecordfielddecl(pos, name, type)
-    return ast.Decl(pos, name, ast.TypeOption(type.loc, type), false, false)
+function defs.optionrecordfielddecl(pos, name_loc, name, type)
+    return with_name_loc(ast.Decl(
+        pos, name, ast.TypeOption(type.loc, type), false, false), name_loc)
 end
 
-function defs.localoptionrecordfielddecl(pos, name, type)
-    local decl = defs.optionrecordfielddecl(pos, name, type)
+function defs.localoptionrecordfielddecl(pos, name_loc, name, type)
+    local decl = defs.optionrecordfielddecl(pos, name_loc, name, type)
     decl.islocal = true
     return decl
 end
 
-function defs.constrecordfielddecl(pos, name, type)
-    return ast.Decl(pos, name, type, false, true)
+function defs.constrecordfielddecl(pos, name_loc, name, type)
+    return with_name_loc(
+        ast.Decl(pos, name, type, false, true), name_loc)
 end
 
-function defs.localconstrecordfielddecl(pos, name, type)
-    local decl = defs.constrecordfielddecl(pos, name, type)
+function defs.localconstrecordfielddecl(pos, name_loc, name, type)
+    local decl = defs.constrecordfielddecl(pos, name_loc, name, type)
     decl.islocal = true
     return decl
 end
 
-function defs.constoptionrecordfielddecl(pos, name, type)
-    return ast.Decl(pos, name, ast.TypeOption(type.loc, type), false, true)
+function defs.constoptionrecordfielddecl(pos, name_loc, name, type)
+    return with_name_loc(ast.Decl(
+        pos, name, ast.TypeOption(type.loc, type), false, true), name_loc)
 end
 
-function defs.localconstoptionrecordfielddecl(pos, name, type)
-    local decl = defs.constoptionrecordfielddecl(pos, name, type)
+function defs.localconstoptionrecordfielddecl(pos, name_loc, name, type)
+    local decl = defs.constoptionrecordfielddecl(pos, name_loc, name, type)
     decl.islocal = true
     return decl
 end
 
 function defs.typeddecl(pos, name, type)
-    return ast.Decl(pos, name, type, false, false)
+    return with_name_loc(ast.Decl(pos, name, type, false, false), pos)
 end
 
 function defs.optiondecl(pos, name, type)
     if type then
-        return ast.Decl(pos, name, ast.TypeOption(type.loc, type), false, false)
+        return with_name_loc(ast.Decl(
+            pos, name, ast.TypeOption(type.loc, type), false, false), pos)
     else
-        return ast.Decl(pos, name, false, true, false)
+        return with_name_loc(ast.Decl(pos, name, false, true, false), pos)
     end
 end
 
 function defs.inferreddecl(pos, name)
-    return ast.Decl(pos, name, false, false, false)
+    return with_name_loc(ast.Decl(pos, name, false, false, false), pos)
 end
 
 function defs.casebinding(pos, name)
-    return ast.Decl(pos, name, false, false, false)
+    return with_name_loc(ast.Decl(pos, name, false, false, false), pos)
 end
 
 function defs.constlocalvardecl(pos, decls, exps)
@@ -822,30 +929,30 @@ local grammar = re.compile([[
                               / foreign ) => appendprogram)*
                            ((moduleinit)? -> opt) !.) -> makeprogram
 
-    method          <- (P  localopt FUNCTION NAME COLON NAME^NameMethod
+    method          <- (P  localopt FUNCTION P NAME COLON P NAME^NameMethod
                            typeparamsopt
                            LPAREN^LParPList paramlist RPAREN^RParPList
-                           rettypeopt block END^EndFunc)         -> methoddecl
+                           rettypeopt block P END^EndFunc)       -> methoddecl
 
-    static          <- (P  localopt FUNCTION NAME DOT NAME^NameStatic
+    static          <- (P  localopt FUNCTION P NAME DOT P NAME^NameStatic
                            typeparamsopt
                            LPAREN^LParPList paramlist RPAREN^RParPList
-                           rettypeopt block END^EndFunc)         -> staticdecl
+                           rettypeopt block P END^EndFunc)       -> staticdecl
 
-    toplevelfunc    <- (P  localopt FUNCTION NAME^NameFunc
+    toplevelfunc    <- (P  localopt FUNCTION P NAME^NameFunc
                            typeparamsopt
                            LPAREN^LParPList paramlist RPAREN^RParPList
-                           rettypeopt block END^EndFunc)         -> toplevelfuncdecl
+                           rettypeopt block P END^EndFunc)       -> toplevelfuncdecl
 
-    foreignfunc     <- (P  FOREIGN FUNCTION NAME^NameFunc
+    foreignfunc     <- (P  FOREIGN FUNCTION P NAME^NameFunc
                            (LT %{GenericForeignFunc})?
                            LPAREN^LParPList paramlist RPAREN^RParPList
-                           rettypeopt block END^EndFunc)         -> TopLevelForeignFunc
+                           rettypeopt block P END^EndFunc)       -> foreignfuncdecl
 
-    topleveltype    <- (P  localopt TYPE NAME^NameTypeAlias
+    topleveltype    <- (P  localopt TYPE P NAME^NameTypeAlias
                            (LT %{GenericTypeAlias})?
                            ASSIGN^AssignTypeAlias
-                           type^TypeTypeAlias)                   -> TopLevelTypeAlias
+                           type^TypeTypeAlias)                   -> typealiasdecl
 
     toplevelconstvar
                     <- (P localopt CONST decl
@@ -855,25 +962,25 @@ local grammar = re.compile([[
                            !(IMPORT / FOREIGN)
                            exp^ExpVarDec)                        -> toplevelvardecl
 
-    toplevelrecord  <- (P  localopt RECORD NAME^NameRecord
+    toplevelrecord  <- (P  localopt RECORD P NAME^NameRecord
                            typeparamsopt
                            recordfields^FieldRecord
-                           END^EndRecord)                        -> recorddecl
+                           P END^EndRecord)                      -> recorddecl
 
-    toplevelunion   <- (P  localopt UNION NAME^NameUnion
+    toplevelunion   <- (P  localopt UNION P NAME^NameUnion
                            typeparamsopt
                            unionvariants^VariantUnion
-                           END^EndUnion)                         -> uniondecl
+                           P END^EndUnion)                       -> uniondecl
 
     -- Interfaces are deliberately top-level and non-local. The local branch
     -- exists only to commit to the interface-specific diagnostic before the
     -- ordinary `local NAME = ...` alternatives get a chance to claim it.
     toplevelinterface
                     <- (P  (LOCAL INTERFACE %{LocalInterface} / INTERFACE)
-                           NAME^NameInterface
+                           P NAME^NameInterface
                            typeparamsopt
                            interfacemembers
-                           (END
+                           (P END
                             / (!. %{EndInterface})
                             / %{MemberInterface}))               -> interfacedecl
 
@@ -888,7 +995,7 @@ local grammar = re.compile([[
                      / (P  LOCAL %{LocalInterfaceField})
 
     interfacemethod <- (P  LOCAL FUNCTION %{LocalInterfaceMethod})
-                     / (P  FUNCTION NAME^NameInterfaceMethod
+                     / (P  FUNCTION P NAME^NameInterfaceMethod
                            typeparamsopt
                            LPAREN^LParInterfaceMethod paramlist
                            RPAREN^RParInterfaceMethod
@@ -913,19 +1020,19 @@ local grammar = re.compile([[
 
     typeparam       <- (P  NAME
                            ((COLON namedtype^TypeParamConstraint)? -> opt))
-                                                                  -> TypeParam
+                                                                  -> typeparamdecl
 
-    import          <- (P  LOCAL NAME^NameImport ASSIGN^AssignImport
+    import          <- (P  LOCAL P NAME^NameImport ASSIGN^AssignImport
                           !FOREIGN IMPORT^ImportImport
                           (LPAREN STRINGLIT^StringLParImport RPAREN^RParImport /
                           STRINGLIT^StringImport))               -> importdecl
 
-    foreign         <- (P  LOCAL NAME^NameImport ASSIGN^AssignImport
+    foreign         <- (P  LOCAL P NAME^NameImport ASSIGN^AssignImport
                            FOREIGN IMPORT^ImportImport
                           (LPAREN STRINGLIT^StringLParImport RPAREN^RParImport /
-                           STRINGLIT^StringImport))              -> TopLevelForeignImport
+                           STRINGLIT^StringImport))              -> foreignimportdecl
 
-    moduleinit      <- (P DO block END^EndBlock) -> moduleinit   -- marks StatBlock/StatTry
+    moduleinit      <- (P DO block P END^EndBlock) -> moduleinit -- marks StatBlock/StatTry
 
     rettypeopt      <- (P  (COLON rettype^TypeFunc)?)            -> rettypeopt
 
@@ -968,7 +1075,7 @@ local grammar = re.compile([[
     funcexp         <- (P  FUNCTION (LT %{GenericLambda})?
                            LPAREN^LParPList lambdaparamlist
                            RPAREN^RParPList lambdarettypeopt
-                           block END^EndFunc)                    -> ExpFunction
+                           block P END^EndFunc)                  -> funcexp
 
     decl            <- (P  NAME COLON type^TypeDecl)             -> typeddecl
                      / (P  NAME OPT COLON type^TypeDecl)         -> optiondecl
@@ -1012,9 +1119,9 @@ local grammar = re.compile([[
                        GENERICGT^RAngleTypeArgs
 
     namedtype       <- qualifiedtype
-                     / (P  NAME typeargsopt)                     -> TypeName
+                     / (P  NAME typeargsopt)                     -> typename
 
-    qualifiedtype   <- (P  NAME DOT membername^QualName
+    qualifiedtype   <- (P  NAME DOT P membername^QualName
                            typeargsopt)                           -> qualifiedtype
 
     -- An owned payload is deliberately optionless: the sole trailing `?` in
@@ -1131,26 +1238,26 @@ local grammar = re.compile([[
 
     recordfields    <- {| recordfield* |}                        -- produces {Decl}
 
-    recordfield     <- (P  LOCAL CONST NAME OPT COLON^ColonRecordField
+    recordfield     <- (P  LOCAL CONST P NAME OPT COLON^ColonRecordField
                            type^TypeRecordField SEMICOLON?)      -> localconstoptionrecordfielddecl
-                     / (P  LOCAL CONST NAME COLON^ColonRecordField
+                     / (P  LOCAL CONST P NAME COLON^ColonRecordField
                            type^TypeRecordField SEMICOLON?)      -> localconstrecordfielddecl
-                     / (P  CONST NAME OPT COLON^ColonRecordField
+                     / (P  CONST P NAME OPT COLON^ColonRecordField
                            type^TypeRecordField SEMICOLON?)      -> constoptionrecordfielddecl
-                     / (P  CONST NAME COLON^ColonRecordField
+                     / (P  CONST P NAME COLON^ColonRecordField
                            type^TypeRecordField SEMICOLON?)      -> constrecordfielddecl
-                     / (P  LOCAL NAME OPT COLON^ColonRecordField
+                     / (P  LOCAL P NAME OPT COLON^ColonRecordField
                            type^TypeRecordField SEMICOLON?)      -> localoptionrecordfielddecl
-                     / (P  LOCAL NAME COLON^ColonRecordField
+                     / (P  LOCAL P NAME COLON^ColonRecordField
                            type^TypeRecordField SEMICOLON?)      -> localrecordfielddecl
-                     / (P  NAME OPT COLON^ColonRecordField
+                     / (P  P NAME OPT COLON^ColonRecordField
                            type^TypeRecordField SEMICOLON?)      -> optionrecordfielddecl
-                     / (P  NAME COLON^ColonRecordField
+                     / (P  P NAME COLON^ColonRecordField
                            type^TypeRecordField SEMICOLON?)      -> recordfielddecl
 
     unionvariants   <- {| unionvariant^VariantUnion unionvariant* |}
 
-    unionvariant    <- (P  LOCAL NAME^NameUnionVariant
+    unionvariant    <- (P  LOCAL P NAME^NameUnionVariant
                            unionpayloadopt SEMICOLON?)           -> localunionvariantdecl
                      / (P  NAME unionpayloadopt SEMICOLON?)      -> unionvariantdecl
 
@@ -1171,11 +1278,11 @@ local grammar = re.compile([[
                      / deferstat
                      / doblock                                   -- produces StatBlock/StatTry
                      / (P  WHILE exp^ExpWhile DO^DoWhile
-                                 block END^EndWhile)             -> StatWhile
-                     / (P  REPEAT block UNTIL^UntilRepeat
-                                      exp^ExpRepeat)             -> StatRepeat
+                                 block P END^EndWhile)           -> whilestat
+                     / (P  REPEAT block P UNTIL^UntilRepeat
+                                      exp^ExpRepeat)             -> repeatstat
                      / (P  IF exp^ExpIf THEN^ThenIf block
-                           elseifstats elseopt END^EndIf)        -> ifstat
+                           elseifstats elseopt P END^EndIf)      -> ifstat
                      / casestat
                      / forstat
                      / (P  (LOCAL? CONST) localdecllist^DeclLocal
@@ -1197,14 +1304,14 @@ local grammar = re.compile([[
 	    forstat         <- (P  FOR decl^DeclFor forrest)          -> forstat
 
 	    forrest         <- (P  IN explist^ExpForIn
-	                            DO^DoForIn block END^EndForIn)   -> forin_rest0
+	                            DO^DoForIn block P END^EndForIn) -> forin_rest0
 	                     / (P  forindecls IN^InFor
 	                             explist^ExpForIn
-	                             DO^DoForIn block END^EndForIn)   -> forin_rest
+	                             DO^DoForIn block P END^EndForIn) -> forin_rest
 	                     / (P  ASSIGN^AssignFor exp^Exp1For
 	                             COMMA^CommaFor exp^Exp2For
 	                             (COMMA exp^Exp3For)?             -> opt
-	                             DO^DoFor block END^EndFor)       -> fornum_rest
+	                             DO^DoFor block P END^EndFor)     -> fornum_rest
 	                     / %{AssignFor}
 
 	    forindecls      <- {| COMMA decl^DeclParList
@@ -1219,20 +1326,20 @@ local grammar = re.compile([[
 
     casestat        <- (P  CASE exp^ExpCase
                            casearms^WhenCase
-                           elseopt END^EndCase)                  -> StatCase
+                           elseopt P END^EndCase)                -> casestat
 
     casearms        <- {| casearm^WhenCase casearm* |}
 
-    casearm         <- (P  WHEN NAME^NameCaseVariant
+    casearm         <- (P  WHEN P NAME^NameCaseVariant
                            casebindingopt
-                           THEN^ThenCase block)                  -> CaseArm
+                           THEN^ThenCase block)                  -> casearm
 
     casebindingopt  <- (((COLON P NAME^NameCaseBinding)
                                                         -> casebinding)?) -> opt
 
     returnstat      <- (P  RETURN (explist? -> listopt) SEMICOLON?)      -> StatReturn
 
-    doblock         <- (DO block END^EndBlock)                   -- produces StatBlock/StatTry
+    doblock         <- (P DO block P END^EndBlock) -> doblock    -- produces StatBlock/StatTry
 
     op1             <- ( OR -> 'or' )
     op2             <- ( AND -> 'and' )
@@ -1295,7 +1402,7 @@ local grammar = re.compile([[
     -- generic call, so `Owner<T>.member` does not add a second full type-list
     -- probe ahead of every ordinary expression suffix.
     nominalmemberselector
-                    <- (&DOT P DOT membername^NameDotExpSuf)
+                    <- (&DOT P DOT P membername^NameDotExpSuf)
                                                                -> nominal_member_selector
 
     callexpsuffix   <- genericsuffixtypeargs
@@ -1308,11 +1415,11 @@ local grammar = re.compile([[
                      / ('' -> method_reference_tail)
 
     expsuffix       <- (P  callexpsuffix)                        -> suffix_anyfunccall
-                     / (P  COLON NAME^NameColonExpSuf
+                     / (P  COLON P NAME^NameColonExpSuf
                                  methodtail)                     -> suffix_anymethod
                      / (P  LBRACKET exp^ExpExpSuf
                                 RBRACKET^RBracketExpSuf)         -> suffix_bracket
-                     / (P  DOT membername^NameDotExpSuf)         -> suffix_dot
+                     / (P  DOT P membername^NameDotExpSuf)       -> suffix_dot
 
     prefixexp       <- (P  NAME)                                 -> name_exp
                      / (P  LPAREN exp^ExpSimpleExp
@@ -1359,7 +1466,7 @@ local grammar = re.compile([[
 
     namedarg        <- (P  NAMEDLABEL
                            ASSIGN^AssignNamedArg
-                           exp^ExpNamedArg)                     -> Field
+                           exp^ExpNamedArg)                     -> makefield
 
     -- A trailing `...` spread is allowed as the last item of an explist (call
     -- args, return, assignment/decl RHS). A bare `...` is a one-element list;
@@ -1388,7 +1495,7 @@ local grammar = re.compile([[
                         fieldsep?)                          -- produces Field...
 
     field           <- (P  DOTS !LBRACKET)                 -> dots_field
-                     / (P  (key ASSIGN)? -> opt exp)       -> Field
+                     / (P  (key ASSIGN)? -> opt exp)       -> makefield
 
     key             <- NAME
                      / LBRACKET exp^ExpExpSuf

@@ -34,9 +34,13 @@ describe("generic for loops (typechecker)", function()
         assert.truthy(ok, err)
         local loop = ast[2].block.stats[1]
         assert.same("Ast.StatForIn", loop._tag)
-        assert.same(types.Function({ types.Nil() },
-            { types.Option(types.String()) }, false, false, false),
-            loop._tuple_decls[1]._type)
+        local iterator = loop._tuple_decls[1]._type
+        assert.same("Type.Function", iterator._tag)
+        assert.same({ types.Nil() }, iterator.params)
+        assert.same({ types.Option(types.String()) }, iterator.rettypes)
+        assert.is_false(iterator.vararg)
+        assert.is_false(iterator.varargtype)
+        assert.is_false(iterator.flexrettype)
         assert.same(types.Nil(), loop._tuple_decls[2]._type)
         assert.same(types.Nil(), loop._tuple_decls[3]._type)
         assert.same(types.Nil(), loop._tuple_decls[4]._type)
