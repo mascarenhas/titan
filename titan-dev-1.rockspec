@@ -119,6 +119,7 @@ build = {
       ["titan-compiler.location"] = "titan-compiler/location.lua",
       ["titan-compiler.typedecl"] = "titan-compiler/typedecl.lua",
       ["titan-compiler.parser"] = "titan-compiler/parser.lua",
+      ["titan-compiler.sourceinterface"] = "titan-compiler/sourceinterface.lua",
       ["titan-compiler.staticmetadata"] = "titan-compiler/staticmetadata.lua",
       ["titan-compiler.symtab"] = "titan-compiler/symtab.lua",
       ["titan-compiler.syntax_errors"] = "titan-compiler/syntax_errors.lua",
