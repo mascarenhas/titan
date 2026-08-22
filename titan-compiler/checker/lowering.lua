@@ -493,6 +493,12 @@ function generic_lower_call_in_place(node, state)
         node, signature, surface_signature, state)
 
     if node.args._tag == "Ast.ArgsMethod" then
+        -- Runtime lowering must rebind the call to the erased method, but
+        -- source tooling still needs the applied surface declaration that was
+        -- selected for the written method name (including owner/type-argument
+        -- substitutions). Keep that descriptor on a private semantic edge.
+        node.args._declared_method = node.args._decl
+            or node._method or node._interface_method or declaration
         node._method = erased_declaration
         if node._interface_method then
             node._interface_method = erased_declaration
@@ -1159,7 +1165,8 @@ function generic_lower_erased_annotations(root, state)
         end
 
         for key, child in pairs(value) do
-            if key ~= "_declared_type" then
+            if key ~= "_declared_type" and key ~= "_declared_method"
+               and key ~= "_resolved_typearg" then
                 if type(key) == "string"
                    and (key:match("^_generic")
                         or key == "_nominal_typeargs"

@@ -83,8 +83,10 @@ describe("erased coder boundary", function()
             function choose<T>(first: T, second: T): T
                 return first
             end
+            function Box:get(): T return self.item end
             function run(): integer
                 local box: Box<integer> = { item = 1 }
+                local item = box:get()
                 return choose { second = box.item, first = 2 }
             end
         ]]
@@ -94,8 +96,14 @@ describe("erased coder boundary", function()
             MODULE, tree, source, MODULE .. ".titan")
         assert.equal(0, #errors, table.concat(errors, "\n"))
         assert.truthy(tree[1]._surface_typeparams)
+        assert.equal("Type.Integer",
+            tree[#tree].block.stats[1].decls[1].type
+                ._surface_typeargs[1]._resolved_typearg._tag)
+        assert.equal("Type.Integer",
+            tree[#tree].block.stats[2].exps[1].exp.args
+                ._declared_method.rettypes[1]._tag)
         assert.truthy(
-            tree[#tree].block.stats[2].exps[1].exp._surface_named_args)
+            tree[#tree].block.stats[3].exps[1].exp._surface_named_args)
         assert.is_string(generate(tree))
     end)
 

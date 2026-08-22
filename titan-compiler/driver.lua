@@ -3241,7 +3241,7 @@ function driver.defaultloader(static_deps, options)
         -- must close the resolver and discard the whole analysis state.
         context.checked_source_modules[
             #context.checked_source_modules + 1] = modname
-        context.io:yield()
+        context.io:yield(modname)
         return true, modt, errors, {
             kind = "source",
             filename = source.main,

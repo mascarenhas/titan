@@ -86,6 +86,8 @@ function coder._assert_erased_boundary(ast)
                          key == "_erased_registry" or
                          key == "_surface_typeparams" or
                          key == "_surface_typeargs" or
+                         key == "_declared_method" or
+                         key == "_resolved_typearg" or
                          key == "_surface_named_args" or
                          semantic_type_binding)) then
                     enqueue(key)

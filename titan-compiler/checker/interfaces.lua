@@ -1783,7 +1783,14 @@ end
 function generic_resolve_type_argument_nodes(nodes, st, errors)
     local arguments = {}
     for index, typenode in ipairs(nodes or {}) do
-        arguments[index] = typefromnode(typenode, st, errors)
+        local argument = typefromnode(typenode, st, errors)
+        -- Runtime lowering clears the public generic syntax lists, but source
+        -- tooling still needs the exact checked application (including
+        -- aliases and parameters from another generic scope). Keep that
+        -- resolved surface type beside the retained syntax node instead of
+        -- asking clients to reconstruct checker semantics from the AST.
+        typenode._resolved_typearg = argument
+        arguments[index] = argument
     end
     return arguments
 end

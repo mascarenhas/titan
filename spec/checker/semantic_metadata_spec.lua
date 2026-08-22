@@ -142,6 +142,15 @@ describe("checker semantic metadata", function()
         assert.is_true(inspect.params[1].type._decl == box)
         assert.is_true(inspect.params[1].type._surface_typeargs[1]._decl ==
             inspect._surface_typeparams[1])
+        assert.equal("Type.Parameter",
+            inspect.params[1].type._surface_typeargs[1]
+                ._resolved_typearg._tag)
+        assert.is_true(
+            inspect.params[1].type._surface_typeargs[1]
+                ._resolved_typearg._decl == inspect._surface_typeparams[1])
+        assert.equal("Type.Integer",
+            maybe.variants[1].payload._surface_typeargs[1]
+                ._resolved_typearg._tag)
         assert.is_true(inspect.params[2].type._decl == alias)
         assert.is_true(inspect.params[3].type._decl == maybe)
         assert.is_true(inspect.rettypes[1]._decl ==
@@ -162,11 +171,16 @@ describe("checker semantic metadata", function()
         assert.equal("Ast.ArgsMethod", called.args._tag)
         assert.equal("Type.Method", called.args._decl._tag)
         assert.equal("get", called.args._decl.name)
+        assert.equal("Type.Method", called.args._declared_method._tag)
+        assert.equal("Type.Parameter",
+            called.args._declared_method.rettypes[1]._tag)
+        assert.equal("Type.Value", called.args._decl.rettypes[1]._tag)
 
         local named = unwrap_cast(stats[4].exps[1])
         assert.equal("Ast.ArgsMethod", named.args._tag)
         assert.equal("Type.Method", named.args._decl._tag)
         assert.equal("replace", named.args._decl.name)
+        assert.equal("Type.Method", named.args._declared_method._tag)
         assert.truthy(named.args._name_loc)
 
         local initializer = unwrap_cast(stats[5].exps[1])

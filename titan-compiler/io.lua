@@ -525,7 +525,7 @@ function Sync:run(argv, options)
     }
 end
 
-function Sync:yield()
+function Sync:yield(_module_name)
     -- Ordinary titanc and the compiler's Lua tests execute synchronously.
 end
 
