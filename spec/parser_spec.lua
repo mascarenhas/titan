@@ -1,4 +1,5 @@
 local parser = require 'titan-compiler.parser'
+local location = require 'titan-compiler.location'
 local syntax_errors = require 'titan-compiler.syntax_errors'
 local util = require 'titan-compiler.util'
 
@@ -126,6 +127,34 @@ end
 local function assert_statements_syntax_error(code, expected_error_label)
     local program_str = statements_test_program(code)
     assert_program_syntax_error(program_str, expected_error_label)
+end
+
+-- Keep this independent of wall-clock timing. The hook counts Lua VM
+-- instructions only while parser.parse is running and always restores any
+-- hook installed by the test runner, including when the parser raises.
+local function parse_under_instruction_budget(program_str, budget)
+    local previous_hook, previous_mask, previous_count = debug.gethook()
+    local quantum = 100
+    local instructions = 0
+
+    debug.sethook(function()
+        instructions = instructions + quantum
+        if instructions > budget then
+            -- Disable this hook before raising so the handful of Lua
+            -- instructions between pcall returning and restoration cannot
+            -- trigger a second, uncaught budget error.
+            debug.sethook()
+            error("parser instruction budget exceeded", 0)
+        end
+    end, "", quantum)
+
+    local ok, ast, err = pcall(
+        parser.parse, "(parser_instruction_budget)", program_str)
+    debug.sethook(previous_hook, previous_mask, previous_count)
+
+    assert.is_true(ok, tostring(ast))
+    assert.truthy(ast, err and err.label or "parser returned no AST")
+    return ast, instructions
 end
 
 --
@@ -1557,6 +1586,10 @@ end
             assert_type_ast("a -> b -> c",   ast1)
             assert_type_ast("a -> (b -> c)", ast1)
             assert_type_ast("(a -> b) -> c", ast2)
+
+            local function_result = assert_parses_successfuly(
+                "local function f(): a -> b -> c end")
+            assert_is_subset(ast1, function_result[1].rettypes[1])
         end)
 
         it("and '->' has higher precedence than ','", function()
@@ -2381,6 +2414,51 @@ end
                 typeargs = {},
                 args = { _tag = "Ast.ArgsFunc" },
             })
+        end)
+
+        it("prescans dense angles without changing generic suffixes", function()
+            local angles = string.rep("<", 40)
+            local source = util.render([==[
+                local comment_padding = 1 -- $ANGLES
+                local short_padding = "$ANGLES"
+                local long_padding = [=[$ANGLES]=]
+
+                local function probe()
+                    local call = f<(integer) -> Outer<Inner<T>>>(x)
+                    local member = Box<Outer<Inner<T>>>.make()
+                    local method = object:map<Outer<Inner<T>>>(x)
+                    local comparison = a < b > c
+                    local commented_call = f<T> -- call after comment
+                        (x)
+                end
+            ]==], { ANGLES = angles })
+            local program = assert_parses_successfuly(source)
+            local stats = program[#program].block.stats
+
+            assert.are.equal("Ast.TypeFunction",
+                stats[1].exps[1].typeargs[1]._tag)
+            assert.are.equal("Outer",
+                stats[2].exps[1].exp.var.exp._nominal_typeargs[1].name)
+            assert.are.equal("Outer", stats[3].exps[1].typeargs[1].name)
+            assert.are.equal("map", stats[3].exps[1].args.method)
+            assert.are.equal(">", stats[4].exps[1].op)
+            assert.are.equal("<", stats[4].exps[1].lhs.op)
+            assert.are.equal("Ast.ExpCall", stats[5].exps[1]._tag)
+            assert.are.equal("T", stats[5].exps[1].typeargs[1].name)
+        end)
+
+        it("keeps unclosed long strings authoritative during the prescan",
+        function()
+            local source = "local function probe()\n" ..
+                " local text = [=[" .. string.rep("<", 40) .. "\nend\n"
+            local program, err = parser.parse("dense-angles.titan", source)
+            assert.falsy(program)
+            assert.are.equal("UnclosedLongString", err.label)
+            assert.are.same({
+                filename = "dense-angles.titan",
+                line = 2,
+                col = 18,
+            }, err.loc)
         end)
 
         it("does not treat callable arguments as a bound-method specialization",
@@ -4590,6 +4668,527 @@ end]])
             assert_type_syntax_error(rejected, "ListTooLong")
             assert_expression_syntax_error(
                 "make<" .. rejected_args .. ">()", "ListTooLong")
+        end)
+    end)
+
+    describe("preserves factored grammar ASTs and diagnostics", function()
+        it("keeps casts and type tests at their original precedence", function()
+            assert_expression_ast("f(g(x as value)) is Result", {
+                _tag = "Ast.ExpIs",
+                exp = {
+                    _tag = "Ast.ExpCall",
+                    args = { args = {
+                        {
+                            _tag = "Ast.ExpCall",
+                            args = { args = {
+                                {
+                                    _tag = "Ast.ExpCast",
+                                    exp = { _tag = "Ast.ExpVar" },
+                                    target = { _tag = "Ast.TypeValue" },
+                                },
+                            } },
+                        },
+                    } },
+                },
+                target = {
+                    _tag = "Ast.TypeName",
+                    name = "Result",
+                },
+            })
+
+            assert_expression_ast("x as First as Second", {
+                _tag = "Ast.ExpCast",
+                target = { _tag = "Ast.TypeName", name = "First" },
+                exp = {
+                    _tag = "Ast.ExpCast",
+                    target = { _tag = "Ast.TypeName", name = "Second" },
+                    exp = { _tag = "Ast.ExpVar" },
+                },
+            })
+
+            assert_expression_ast(
+                "x as First as Second is Third is Fourth", {
+                    _tag = "Ast.ExpIs",
+                    target = { _tag = "Ast.TypeName", name = "Fourth" },
+                    exp = {
+                        _tag = "Ast.ExpIs",
+                        target = { _tag = "Ast.TypeName", name = "Third" },
+                        exp = {
+                            _tag = "Ast.ExpCast",
+                            target = {
+                                _tag = "Ast.TypeName",
+                                name = "First",
+                            },
+                            exp = {
+                                _tag = "Ast.ExpCast",
+                                target = {
+                                    _tag = "Ast.TypeName",
+                                    name = "Second",
+                                },
+                            },
+                        },
+                    },
+                })
+
+            assert_expression_ast("x is First as Second is Third", {
+                _tag = "Ast.ExpIs",
+                target = { _tag = "Ast.TypeName", name = "Third" },
+                exp = {
+                    _tag = "Ast.ExpCast",
+                    target = { _tag = "Ast.TypeName", name = "Second" },
+                    exp = {
+                        _tag = "Ast.ExpIs",
+                        target = {
+                            _tag = "Ast.TypeName",
+                            name = "First",
+                        },
+                        exp = { _tag = "Ast.ExpVar" },
+                    },
+                },
+            })
+        end)
+
+        it("keeps parenthesized call adjustment and suffix ASTs", function()
+            local adjusted = assert_expression_ast("(((f())))", {
+                _tag = "Ast.ExpAdjust",
+                exp = { _tag = "Ast.ExpCall" },
+            })
+            -- The historical grammar collapses these redundant parentheses
+            -- to one adjustment around the call.
+            assert.are.equal("Ast.ExpCall", adjusted.exp._tag)
+
+            assert_expression_ast("(object).field", {
+                _tag = "Ast.ExpVar",
+                var = {
+                    _tag = "Ast.VarDot",
+                    name = "field",
+                    exp = {
+                        _tag = "Ast.ExpVar",
+                        var = { _tag = "Ast.VarName", name = "object" },
+                    },
+                },
+            })
+        end)
+
+        it("right-folds power with right-hand prefixes and suffixes", function()
+            local power = assert_expression_ast(
+                "a ^ -b ^ -c as integer as value is value", {
+                    _tag = "Ast.ExpBinop",
+                    op = "^",
+                    lhs = { var = { name = "a" } },
+                    rhs = { _tag = "Ast.ExpUnop", op = "-" },
+                })
+            local nested = power.rhs.exp
+            assert.are.equal("Ast.ExpBinop", nested._tag)
+            assert.are.equal("^", nested.op)
+            assert.are.equal("b", nested.lhs.var.name)
+
+            local test = nested.rhs
+            assert.are.equal("Ast.ExpIs", test._tag)
+            assert.are.equal("Ast.TypeValue", test.target._tag)
+            assert.are.equal("Ast.ExpCast", test.exp._tag)
+            assert.are.equal("Ast.TypeInteger", test.exp.target._tag)
+            assert.are.equal("Ast.ExpCast", test.exp.exp._tag)
+            assert.are.equal("Ast.TypeValue", test.exp.exp.target._tag)
+            assert.are.equal("Ast.ExpUnop", test.exp.exp.exp._tag)
+            assert.are.equal("-", test.exp.exp.exp.op)
+            assert.are.equal("c", test.exp.exp.exp.exp.var.name)
+
+            local mixed = assert_expression_ast(
+                "a ^ b ^ c ^ d is T as U is V as W", {
+                    _tag = "Ast.ExpBinop",
+                    op = "^",
+                    rhs = { _tag = "Ast.ExpBinop", op = "^" },
+                })
+            local terminal = mixed.rhs.rhs.rhs
+            assert.are.equal("Ast.ExpCast", terminal._tag)
+            assert.are.equal("W", terminal.target.name)
+            assert.are.equal("Ast.ExpIs", terminal.exp._tag)
+            assert.are.equal("V", terminal.exp.target.name)
+            assert.are.equal("Ast.ExpCast", terminal.exp.exp._tag)
+            assert.are.equal("U", terminal.exp.exp.target.name)
+            assert.are.equal("Ast.ExpIs", terminal.exp.exp.exp._tag)
+            assert.are.equal("T", terminal.exp.exp.exp.target.name)
+            assert.are.equal("d", terminal.exp.exp.exp.exp.var.name)
+        end)
+
+        it("right-folds and flattens parenthesized concatenation", function()
+            local concat = assert_expression_ast("a .. (b .. c)", {
+                _tag = "Ast.ExpConcat",
+                exps = {
+                    { var = { name = "a" } },
+                    { var = { name = "b" } },
+                    { var = { name = "c" } },
+                },
+            })
+            -- The historical right fold retains the location of the first
+            -- concat node constructed in the right-hand suffix.
+            assert.is_true(rawequal(concat.loc, concat.exps[2].loc))
+        end)
+
+        it("keeps nested nominal types and right-associative arrows", function()
+            assert_type_ast("a -> b -> c", {
+                _tag = "Ast.TypeFunction",
+                argtypes = { { _tag = "Ast.TypeName", name = "a" } },
+                rettypes = { {
+                    _tag = "Ast.TypeFunction",
+                    argtypes = { { _tag = "Ast.TypeName", name = "b" } },
+                    rettypes = {
+                        { _tag = "Ast.TypeName", name = "c" },
+                    },
+                } },
+            })
+
+            local arrow = assert_parses_successfuly(type_test_program(
+                "Node<Node<Node<T>>> -> Result -> Final"))[1].decl.type
+            assert.are.equal("Ast.TypeFunction", arrow._tag)
+            assert.are.equal("Ast.TypeFunction", arrow.rettypes[1]._tag)
+            assert.are.equal("Result", arrow.rettypes[1].argtypes[1].name)
+            assert.are.equal("Final", arrow.rettypes[1].rettypes[1].name)
+
+            local nominal = arrow.argtypes[1]
+            for _ = 1, 3 do
+                assert.are.equal("Ast.TypeName", nominal._tag)
+                assert.are.equal("Node", nominal.name)
+                assert.are.equal(1, #nominal.typeargs)
+                nominal = nominal.typeargs[1]
+            end
+            assert.are.equal("Ast.TypeName", nominal._tag)
+            assert.are.equal("T", nominal.name)
+        end)
+
+        it("distinguishes nested Array and Map tails after one key type", function()
+            assert_type_ast("{{T}: {U: {V}}}", {
+                _tag = "Ast.TypeMap",
+                keystype = {
+                    _tag = "Ast.TypeArray",
+                    subtype = { _tag = "Ast.TypeName", name = "T" },
+                },
+                valuestype = {
+                    _tag = "Ast.TypeMap",
+                    keystype = { _tag = "Ast.TypeName", name = "U" },
+                    valuestype = {
+                        _tag = "Ast.TypeArray",
+                        subtype = { _tag = "Ast.TypeName", name = "V" },
+                    },
+                },
+            })
+        end)
+
+        it("reconstructs the owned Array pointer at the star location", function()
+            local source = "local x: owned **ffi.Item[] = nil"
+            local owner = assert(parser.parse(
+                "owned-factoring.titan", source))[1].decl.type
+            assert.are.equal("Ast.TypeCOwned", owner._tag)
+            assert.is_true(owner.count)
+            assert.are.equal("Ast.TypeCPointer", owner.subtype._tag)
+            assert.are.equal("Ast.TypeCPointer", owner.subtype.subtype._tag)
+            assert.are.equal("ffi", owner.subtype.subtype.subtype.module)
+            assert.are.equal("Item", owner.subtype.subtype.subtype.name)
+            assert.are.same({
+                filename = "owned-factoring.titan",
+                line = 1,
+                col = 16,
+            }, owner.subtype.loc)
+            assert.are.same({
+                filename = "owned-factoring.titan",
+                line = 1,
+                col = 17,
+            }, owner.subtype.subtype.loc)
+        end)
+
+        it("reports malformed nested owners at the local failure", function()
+            local cases = {
+                { "local x: owned owned = nil", "COwnedShape", 22 },
+                { "local x: owned owned * = nil", "OwnedPayload", 24 },
+            }
+            for _, case in ipairs(cases) do
+                local program, err = parser.parse(
+                    "nested-owned-error.titan", case[1])
+                assert.falsy(program)
+                assert.are.equal(case[2], err.label)
+                assert.are.same({
+                    filename = "nested-owned-error.titan",
+                    line = 1,
+                    col = case[3],
+                }, err.loc)
+            end
+        end)
+
+        it("classifies assignment and call statements from one prefix", function()
+            assert_statements_ast([[
+                target.items[index], other = make(), rhs
+                target:run(callback(arg))
+            ]], {
+                {
+                    _tag = "Ast.StatAssign",
+                    vars = {
+                        { _tag = "Ast.VarBracket" },
+                        { _tag = "Ast.VarName", name = "other" },
+                    },
+                    exps = {
+                        { _tag = "Ast.ExpCall" },
+                        { _tag = "Ast.ExpVar" },
+                    },
+                },
+                {
+                    _tag = "Ast.StatCall",
+                    callexp = {
+                        _tag = "Ast.ExpCall",
+                        args = {
+                            _tag = "Ast.ArgsMethod",
+                            method = "run",
+                            args = { { _tag = "Ast.ExpCall" } },
+                        },
+                    },
+                },
+            })
+        end)
+
+        it("retains labels at each factored decision point", function()
+            assert_expression_syntax_error(
+                "f(g(x)) as", "CastMissingType")
+            assert_expression_syntax_error(
+                "f(g(x)) as First as", "CastMissingType")
+            assert_expression_syntax_error(
+                "f(g(x)) is", "IsMissingType")
+            assert_expression_syntax_error(
+                "f(g(x)) is First is", "IsMissingType")
+            assert_expression_syntax_error("(((x))", "RParSimpleExp")
+            assert_type_syntax_error("Node<T> ->", "TypeReturnTypes")
+            assert_type_syntax_error("{T:}", "TypeType")
+            assert_type_syntax_error("{T", "RCurlyType")
+            assert_type_syntax_error("owned **", "OwnedPayload")
+            assert_type_syntax_error("owned const *", "COwnedShape")
+            assert_expression_syntax_error("x ..", "OpExp")
+            assert_statements_syntax_error("x", "AssignAssign")
+            assert_statements_syntax_error("(x) = y", "AssignNotLValue")
+            assert_statements_syntax_error(
+                "f() + y = z", "AssignNotLValue")
+            assert_statements_syntax_error(
+                "f() .. y = z", "AssignNotLValue")
+            assert_statements_syntax_error("1 + 2", "ExpStat")
+        end)
+
+        it("keeps the malformed call-tail statement boundary", function()
+            local program, err = parser.parse(
+                "call-tail-error.titan", "function p() f() + y end")
+            assert.falsy(program)
+            assert.are.equal("EndFunc", err.label)
+            assert.are.same({
+                filename = "call-tail-error.titan",
+                line = 1,
+                col = 18,
+            }, err.loc)
+        end)
+
+        it("keeps the malformed non-call suffix failure position", function()
+            local program, err = parser.parse(
+                "suffix-tail-error.titan", "function p() 1 .. y . ^ end")
+            assert.falsy(program)
+            -- The factored simple-expression path does not retry the parsed
+            -- prefix solely to relabel this malformed statement as ExpStat.
+            assert.are.equal("EndFunc", err.label)
+            assert.are.same({
+                filename = "suffix-tail-error.titan",
+                line = 1,
+                col = 14,
+            }, err.loc)
+        end)
+    end)
+
+    describe("keeps recursive grammar traversal within a linear budget", function()
+        local budget = 100000
+
+        it("parses nested ordinary calls without tripling each operand", function()
+            local expression = "x"
+            for _ = 1, 5 do
+                expression = "f(" .. expression .. ")"
+            end
+            parse_under_instruction_budget(
+                expression_test_program(expression), budget)
+        end)
+
+        it("parses nested parentheses without duplicating each prefix", function()
+            local expression = "x"
+            for _ = 1, 3 do
+                expression = "(" .. expression .. ")"
+            end
+            parse_under_instruction_budget(
+                expression_test_program(expression), budget)
+        end)
+
+        it("parses nested generic types without retrying each simple type",
+        function()
+            local type_string = "T"
+            for _ = 1, 8 do
+                type_string = "Node<" .. type_string .. ">"
+            end
+            parse_under_instruction_budget(
+                type_test_program(type_string), budget)
+        end)
+
+        it("bounds failed generic-call probes with missing closes", function()
+            local parts = { "f" }
+            for _ = 1, 100 do
+                parts[#parts + 1] = " < Box"
+            end
+            parse_under_instruction_budget(
+                expression_test_program(table.concat(parts)), budget)
+        end)
+
+        it("disambiguates nested parenthesized return types once", function()
+            local type_string = "integer"
+            for _ = 1, 8 do
+                type_string = "integer -> (" .. type_string .. ") -> integer"
+            end
+            parse_under_instruction_budget(
+                type_test_program(type_string), budget)
+        end)
+
+        it("parses nested Arrays without retrying them as Maps", function()
+            local type_string = "T"
+            for _ = 1, 4 do
+                type_string = "{" .. type_string .. "}"
+            end
+            parse_under_instruction_budget(
+                type_test_program(type_string), budget)
+        end)
+
+        it("parses nested owned payloads without lookahead reparsing",
+        function()
+            local type_string = "ffi.Item"
+            for _ = 1, 8 do
+                type_string = "owned *" .. type_string
+            end
+            parse_under_instruction_budget(
+                type_test_program(type_string), budget)
+        end)
+
+        it("parses long power chains without recursive stack growth", function()
+            local parts = { "x" }
+            for i = 1, 200 do
+                parts[#parts + 1] = " ^ "
+                if i % 2 == 0 then
+                    parts[#parts + 1] = "-"
+                end
+                parts[#parts + 1] = "x"
+            end
+            parse_under_instruction_budget(
+                expression_test_program(table.concat(parts)), budget)
+        end)
+
+        it("parses long concat chains without recursive stack growth", function()
+            local parts = { "x" }
+            for _ = 1, 200 do
+                parts[#parts + 1] = " .. x"
+            end
+            parse_under_instruction_budget(
+                expression_test_program(table.concat(parts)), budget)
+        end)
+
+        it("classifies nested callback call statements once", function()
+            local lines = { "local function probe()" }
+            local depth = 4
+            for i = 1, depth do
+                lines[#lines + 1] = string.rep("    ", i) ..
+                    string.format("context:run(\"case%d\", function()", i)
+            end
+            lines[#lines + 1] = string.rep("    ", depth + 1) ..
+                "sink(x)"
+            for i = depth, 1, -1 do
+                lines[#lines + 1] = string.rep("    ", i) .. "end)"
+            end
+            lines[#lines + 1] = "end"
+            parse_under_instruction_budget(table.concat(lines, "\n"), budget)
+        end)
+    end)
+
+    describe("interns source locations for one parse", function()
+        local source = "function foo(): nil\n    x = y\nend"
+
+        it("converts each byte position once and shares the location", function()
+            local original_from_pos = location.from_pos
+            local calls = {}
+            location.from_pos = function(filename, input, pos)
+                calls[pos] = (calls[pos] or 0) + 1
+                return original_from_pos(filename, input, pos)
+            end
+            local ok, program, err = pcall(
+                parser.parse, "interned-locations.titan", source)
+            location.from_pos = original_from_pos
+
+            assert.is_true(ok, tostring(program))
+            assert.truthy(program, err and err.label or "parser returned no AST")
+            assert.truthy(next(calls))
+            for _, count in pairs(calls) do
+                assert.are.equal(1, count)
+            end
+
+            local exp = program[1].block.stats[1].exps[1]
+            assert.is_true(rawequal(exp.loc, exp.var.loc))
+            assert.is_true(rawequal(exp.loc, exp.var._name_loc))
+        end)
+
+        it("starts with a fresh location table for every parse", function()
+            local first = assert(parser.parse("first.titan", source))
+            local second = assert(parser.parse("second.titan", source))
+            local first_loc = first[1].block.stats[1].exps[1].loc
+            local second_loc = second[1].block.stats[1].exps[1].loc
+
+            assert.is_false(rawequal(first_loc, second_loc))
+            assert.are.equal("first.titan", first_loc.filename)
+            assert.are.equal("second.titan", second_loc.filename)
+        end)
+
+        it("clears parser state after an unexpected location error", function()
+            local original_from_pos = location.from_pos
+            location.from_pos = function()
+                error("forced location conversion failure", 0)
+            end
+            local ok, err = pcall(parser.parse, "broken.titan", source)
+            location.from_pos = original_from_pos
+
+            assert.is_false(ok)
+            assert.truthy(tostring(err):find(
+                "forced location conversion failure", 1, true))
+
+            local recovered = assert(parser.parse("recovered.titan", source))
+            assert.are.equal("recovered.titan",
+                recovered[1].block.stats[1].exps[1].loc.filename)
+        end)
+
+        it("installs parser state after generic candidate collection",
+        function()
+            local original_find = string.find
+            string.find = function()
+                error("forced generic candidate failure", 0)
+            end
+            local ok, err = pcall(parser.parse, "broken-scan.titan", source)
+            string.find = original_find
+
+            assert.is_false(ok)
+            assert.truthy(tostring(err):find(
+                "forced generic candidate failure", 1, true))
+
+            local recovered = assert(parser.parse("recovered-scan.titan", source))
+            assert.are.equal("recovered-scan.titan",
+                recovered[1].block.stats[1].exps[1].loc.filename)
+        end)
+
+        it("keeps non-ASCII source columns byte based", function()
+            local utf8_source =
+                "function foo(): nil\n    x = \"é\" .. y\nend"
+            local program = assert(parser.parse("utf8.titan", utf8_source))
+            local concat = program[1].block.stats[1].exps[1]
+            local y = concat.exps[2]
+
+            assert.are.equal("Ast.ExpConcat", concat._tag)
+            assert.are.same({
+                filename = "utf8.titan",
+                line = 2,
+                col = 17,
+            }, y.loc)
         end)
     end)
 

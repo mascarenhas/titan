@@ -4,6 +4,7 @@ local assert = require "luassert"
 local driver = require "titan-compiler.driver"
 local compiler_io = require "titan-compiler.io"
 local coder = require "titan-compiler.coder"
+local sourceinterface = require "titan-compiler.sourceinterface"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local types = require "titan-compiler.types"
 local util = require "titan-compiler.util"
@@ -34,6 +35,7 @@ describe("compiler installation discovery", function()
        function()
         assert.equal("0.26", driver.TITAN_VER)
         assert.equal(3, driver.LANGUAGE_SERVER_API_VERSION)
+        assert.is_function(driver.serialize_source_interface)
         assert.is_function(driver.restat_c_header_dependencies)
     end)
 
@@ -1482,6 +1484,107 @@ describe("compiler module loader", function()
         end
     end
 
+    local function source_module(name, members, type_members,
+            source_members, source_type_members)
+        source_members = source_members or {}
+        for _, member in ipairs(source_members) do
+            member.islocal = true
+            source_members[member.name] = member
+        end
+        local modtype = types.Module(name, members or {}, type_members or {})
+        modtype._source = true
+        modtype.source_members = source_members
+        modtype.source_type_members = source_type_members or {}
+        return modtype
+    end
+
+    local function source_entry(name, modtype, headers)
+        local filename = root .. "/" .. name .. ".titan"
+        return {
+            kind = "source",
+            ast = {},
+            type = modtype or source_module(name),
+            filename = filename,
+            source_files = { filename },
+            deps = {},
+            c_header_dependencies = headers or {},
+        }
+    end
+
+    local function source_manifest(entry)
+        local manifest, err = driver.serialize_source_interface(entry)
+        assert.is_nil(err)
+        assert.is_string(manifest)
+        assert.not_equal("", manifest)
+        return manifest
+    end
+
+    local function generated_source_manifest(contents)
+        driver.imported = {}
+        types.registry = {}
+        local name = "source_manifest_generated"
+        local filename = root .. "/" .. name .. ".titan"
+        local loader = driver.defaultloader({}, {
+            source_roots = { [name] = true },
+            source_overrides = {
+                [name] = {
+                    kind = "generated",
+                    main = filename,
+                    files = { filename },
+                    contents = { [filename] = contents },
+                },
+            },
+        })
+        local ok, result, errors = loader(name)
+        assert.truthy(ok, tostring(result))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        local entry = assert(driver.imported[name])
+        local manifest = entry.source_manifest
+        assert.is_string(manifest)
+        assert.not_equal("", manifest)
+        assert.is_true(driver.close_loader(loader))
+        return manifest
+    end
+
+    it("reports source-interface publication failures as analysis errors",
+    function()
+        local name = "source_manifest_publication_failure"
+        local filename = root .. "/" .. name .. ".titan"
+        local loader = driver.defaultloader({}, {
+            source_roots = { [name] = true },
+            source_overrides = {
+                [name] = {
+                    kind = "generated",
+                    main = filename,
+                    files = { filename },
+                    contents = {
+                        [filename] = [[
+                            function answer(): integer
+                                return 42
+                            end
+                        ]],
+                    },
+                },
+            },
+        })
+        local serialize = driver.serialize_source_interface
+        driver.serialize_source_interface = function()
+            return nil, "forced source-interface failure"
+        end
+        local called, ok, _, errors = pcall(loader, name)
+        driver.serialize_source_interface = serialize
+
+        assert.truthy(called, tostring(ok))
+        assert.truthy(ok)
+        assert.equal(1, #errors)
+        assert.equal(
+            "could not serialize source interface for module '" .. name ..
+                "': forced source-interface failure",
+            errors[1])
+        assert.is_nil(driver.imported[name].source_manifest)
+        assert.is_true(driver.close_loader(loader))
+    end)
+
     before_each(function()
         root = os.tmpname()
         assert(os.remove(root))
@@ -1513,6 +1616,633 @@ describe("compiler module loader", function()
         types.registry = previous.registry
         titan._loadlib = previous.loadlib
         remove_tree(root)
+    end)
+
+    it("validates source-interface entries and their exact header inputs",
+    function()
+        local function reject(entry, expected)
+            local manifest, err = driver.serialize_source_interface(entry)
+            assert.is_nil(manifest)
+            assert.matches(expected, tostring(err), 1, true)
+        end
+        local function malformed(mutator)
+            local entry = source_entry("source_manifest_invalid")
+            mutator(entry)
+            return entry
+        end
+
+        reject(nil, "is not a complete checked source module")
+        reject(malformed(function(entry) entry.kind = "dynamic" end),
+            "is not a complete checked source module")
+        reject(malformed(function(entry) entry.ast = false end),
+            "is not a complete checked source module")
+        reject(malformed(function(entry)
+            entry.type = types.Module("source_manifest_invalid", {})
+        end), "is not a complete checked source module")
+        reject(malformed(function(entry) entry.filename = "" end),
+            "is not a complete checked source module")
+        reject(malformed(function(entry)
+            entry.source_files.extra = true
+        end), "has invalid source_files")
+        reject(malformed(function(entry)
+            entry.source_files = {
+                [1] = entry.filename,
+                [3] = root .. "/source-manifest-part.titan",
+            }
+        end), "has invalid source_files")
+        reject(malformed(function(entry)
+            entry.source_files = { root .. "/not-main.titan" }
+        end), "has invalid source_files")
+        reject(malformed(function(entry) entry.deps = nil end),
+            "has no dependency map")
+        reject(malformed(function(entry)
+            entry.deps = { ["invalid dependency"] = true }
+        end), "has an invalid dependency map")
+
+        local valid = {
+            kind = "search",
+            path = "/virtual/source-interface.h",
+            identity = "missing",
+        }
+        local header_cases = {
+            {
+                headers = "invalid",
+                expected = "must be an ordered array",
+            },
+            {
+                headers = { "invalid" },
+                expected = "entry 1 must be a table",
+            },
+            {
+                headers = {{
+                    kind = "invalid",
+                    path = valid.path,
+                    identity = valid.identity,
+                }},
+                expected = "kind must be 'file' or 'search'",
+            },
+            {
+                headers = {{
+                    kind = valid.kind,
+                    path = "relative.h",
+                    identity = valid.identity,
+                }},
+                expected = "path must be an absolute NUL-free pathname",
+            },
+            {
+                headers = {{
+                    kind = valid.kind,
+                    path = valid.path,
+                    identity = "",
+                }},
+                expected = "must have a nonempty identity",
+            },
+            {
+                headers = { valid, valid },
+                expected = "repeats search input '/virtual/source-interface.h'",
+            },
+            {
+                headers = { valid, extra = true },
+                expected = "must be a dense ordered array",
+            },
+        }
+        for _, case in ipairs(header_cases) do
+            reject(malformed(function(entry)
+                entry.c_header_dependencies = case.headers
+            end), case.expected)
+        end
+    end)
+
+    it("rejects malformed internal source-interface graphs deterministically",
+    function()
+        local function direct(modtype, headers)
+            return {
+                kind = "source",
+                type = modtype,
+                c_header_dependencies = headers or {},
+            }
+        end
+        local function reject(entry, expected)
+            local manifest, err = sourceinterface.serialize(entry)
+            assert.is_nil(manifest)
+            assert.matches(expected, tostring(err), 1, true)
+        end
+        local function with_type(name, typ)
+            return source_module(name, {}, {}, {}, { Bad = typ })
+        end
+        local function module_variable(name)
+            return {
+                _tag = "Type.ModuleVariable",
+                modname = name,
+                name = "bad",
+                type = types.Integer(),
+                isconst = false,
+                islocal = true,
+            }
+        end
+
+        reject(nil, "source interface entry must be a source module")
+        reject({ kind = "source", type = types.Module("public_only", {}) },
+            "source interface entry has no source Type.Module")
+
+        local scalar_name = "source_manifest_bad_scalar"
+        local bad_scalar = module_variable(scalar_name)
+        bad_scalar.isconst = 0.5
+        reject(direct(source_module(
+            scalar_name, {}, {}, { bad_scalar })),
+            "is not a scalar source-interface value")
+
+        local index_name = "source_manifest_bad_index"
+        local bad_index = source_module(index_name)
+        bad_index.source_members = {
+            [1.5] = module_variable(index_name),
+        }
+        reject(direct(bad_index), "has an invalid array index")
+
+        local key_name = "source_manifest_bad_key"
+        local bad_key = source_module(key_name)
+        bad_key.source_members = {
+            [false] = module_variable(key_name),
+        }
+        reject(direct(bad_key), "has a non-array key")
+
+        local function aggregate(origin)
+            return {
+                _tag = "Type.CStruct",
+                cname = { "outer", "inner" },
+                tagname = false,
+                typedef = false,
+                _c_tag_scope = "source_manifest_internal",
+                _ffi_scope = "source_manifest_internal",
+                _c_origin_header = origin,
+            }
+        end
+        reject(direct(with_type("source_manifest_bad_origin_input",
+            aggregate({
+                rendered = "<bad-origin-input.h>",
+                c_header_dependencies = { "invalid" },
+                c_header_search_inputs = {},
+            }))), "C header dependencies entry 1 must be a table")
+        reject(direct(with_type("source_manifest_uncovered_origin",
+            aggregate({
+                rendered = "<uncovered.h>",
+                c_header_dependencies = {},
+                c_header_search_inputs = {},
+            }))), "C header origin is not covered by the source interface")
+        reject(direct(with_type("source_manifest_bad_wrapper",
+            aggregate({
+                rendered = "\"bad-wrapper.h\"",
+                probe_wrapper = { name = "", contents = "" },
+            }))), "has an invalid source-foreign header wrapper")
+
+        local wrapped = direct(with_type("source_manifest_wrapped_origin",
+            aggregate({
+                rendered = "\"titan-source-foreign-test.h\"",
+                probe_wrapper = {
+                    name = "titan-source-foreign-test.h",
+                    contents = "generated interface",
+                },
+            })))
+        assert.is_string(sourceinterface.serialize(wrapped))
+
+        reject(direct(with_type("source_manifest_bad_header", {
+            _tag = "Type.Pointer",
+            type = types.Integer(),
+            _ffi_scope = "source_manifest_bad_header",
+            _c_origin_header = { rendered = "" },
+        })), "has no stable rendered spelling")
+        reject(direct(with_type("source_manifest_bad_descriptor", {})),
+            "is not a type descriptor")
+        reject(direct(with_type("source_manifest_unspellable_enum", {
+            _tag = "Type.CInteger",
+            spelling = "int",
+            signed = true,
+            rank = 3,
+            bits = 32,
+            _c_enum_unspellable = true,
+            _c_declaration_spelling = false,
+            _c_enum_enumerator = false,
+            _ffi_scope = "source_manifest_unspellable_enum",
+        })), "unspellable anonymous C enum reached a source interface")
+
+        local header_module = source_module("source_manifest_bad_headers")
+        local valid_header = {
+            kind = "file",
+            path = "/virtual/direct-source-interface.h",
+            identity = "bytes:direct",
+        }
+        reject(direct(header_module, "invalid"),
+            "C header dependencies must be an ordered array")
+        reject(direct(header_module, { "invalid" }),
+            "C header dependency 1 must be a table")
+        reject(direct(header_module, {{
+            kind = "invalid",
+            path = valid_header.path,
+            identity = valid_header.identity,
+        }}), "C header dependency 1 has invalid kind")
+        reject(direct(header_module, {{
+            kind = valid_header.kind,
+            path = "relative.h",
+            identity = valid_header.identity,
+        }}), "C header dependency 1 has invalid path")
+        reject(direct(header_module, {{
+            kind = valid_header.kind,
+            path = valid_header.path,
+            identity = "",
+        }}), "C header dependency 1 has no identity")
+        reject(direct(header_module, { valid_header, valid_header }),
+            "C header dependencies repeat file input " .. valid_header.path)
+    end)
+
+    it("keeps generated source manifests stable across non-interface edits",
+    function()
+        local baseline = [[
+local seed: integer = 1
+local function hidden(input: integer): integer
+    return input + seed
+end
+function visible(input: integer): integer
+    return hidden(input)
+end
+]]
+        local expected = generated_source_manifest(baseline)
+        assert.equal(expected, generated_source_manifest([[
+-- Leading comments and blank lines must not become semantic metadata.
+
+
+local seed: integer = 1
+local function hidden(input: integer): integer
+    return input + seed
+end
+function visible(input: integer): integer
+    return hidden(input)
+end
+]]))
+        assert.equal(expected, generated_source_manifest([[
+local seed: integer = 1
+local function hidden(input: integer): integer
+    if input > seed then return input * 2 end
+    return seed
+end
+function visible(input: integer): integer
+    return hidden(input) + hidden(seed)
+end
+]]))
+        assert.equal(expected, generated_source_manifest([[
+local seed: integer = 99
+local function hidden(input: integer): integer
+    return input + seed
+end
+function visible(input: integer): integer
+    return hidden(input)
+end
+]]))
+    end)
+
+    it("changes generated source manifests for private interface edits",
+    function()
+        local cases = {
+            {
+                name = "private parameter name",
+                before = [[
+local function hidden(input: integer): integer return input end
+]],
+                after = [[
+local function hidden(item: integer): integer return item end
+]],
+            },
+            {
+                name = "private signature",
+                before = [[
+local function hidden(input: integer): integer return input end
+]],
+                after = [[
+local function hidden(input: string): string return input end
+]],
+            },
+            {
+                name = "private constness",
+                before = [[local seed: integer = 1]],
+                after = [[local const seed: integer = 1]],
+            },
+            {
+                name = "private value type",
+                before = [[local seed: integer = 1]],
+                after = [[local seed: string = "one"]],
+            },
+            {
+                name = "local nominal field",
+                before = [[
+local record Hidden
+    payload: integer
+end
+]],
+                after = [[
+local record Hidden
+    payload: string
+end
+]],
+            },
+        }
+        for _, case in ipairs(cases) do
+            assert.not_equal(
+                generated_source_manifest(case.before),
+                generated_source_manifest(case.after), case.name)
+        end
+    end)
+
+    it("includes header kind, path, identity, and order in source manifests",
+    function()
+        local function manifest(headers)
+            return source_manifest(source_entry(
+                "source_manifest_headers", nil, headers))
+        end
+        local first = {
+            kind = "search",
+            path = "/virtual/first.h",
+            identity = "missing",
+        }
+        local second = {
+            kind = "file",
+            path = "/virtual/second.h",
+            identity = "bytes:one",
+        }
+        local baseline = manifest({ first, second })
+        assert.equal(baseline, manifest({
+            {
+                kind = first.kind,
+                path = first.path,
+                identity = first.identity,
+            },
+            {
+                kind = second.kind,
+                path = second.path,
+                identity = second.identity,
+            },
+        }))
+        assert.not_equal(baseline, manifest({
+            {
+                kind = "file",
+                path = first.path,
+                identity = first.identity,
+            }, second,
+        }))
+        assert.not_equal(baseline, manifest({
+            {
+                kind = first.kind,
+                path = "/virtual/renamed.h",
+                identity = first.identity,
+            }, second,
+        }))
+        assert.not_equal(baseline, manifest({
+            {
+                kind = first.kind,
+                path = first.path,
+                identity = "now-present",
+            }, second,
+        }))
+        assert.not_equal(baseline, manifest({ second, first }))
+    end)
+
+    it("ignores benign descriptor sharing topology", function()
+        local function manifest(shared)
+            local name = "source_manifest_sharing"
+            local first = { _tag = "Type.Integer" }
+            local second = shared and first or { _tag = "Type.Integer" }
+            local member = types.ModuleMember(name, "hidden",
+                types.Function({ first, second }, { first },
+                    false, false, false), { "left", "right" })
+            member.islocal = true
+            return source_manifest(source_entry(name,
+                source_module(name, {}, {}, { member })))
+        end
+        assert.equal(manifest(true), manifest(false))
+    end)
+
+    it("requires omitted C aggregate layouts to have covered origins",
+    function()
+        local name = "source_manifest_aggregate_origin"
+        local aggregate = types.CStruct(
+            "struct hidden", "hidden", false, {}, true, false)
+        local entry = source_entry(name,
+            source_module(name, {}, {}, {}, { Hidden = aggregate }))
+        local manifest, err = driver.serialize_source_interface(entry)
+        assert.is_nil(manifest)
+        assert.matches("has no stable C header origin", err, 1, true)
+
+        local dependency = {
+            kind = "file",
+            path = "/virtual/aggregate-origin.h",
+            identity = "bytes:aggregate",
+        }
+        aggregate._c_origin_header = {
+            rendered = "<aggregate-origin.h>",
+            c_header_dependencies = { dependency },
+            c_header_search_inputs = {},
+        }
+        manifest, err = driver.serialize_source_interface(entry)
+        assert.is_nil(manifest)
+        assert.matches("is not covered by the source interface", err, 1, true)
+
+        entry.c_header_dependencies = { dependency }
+        assert.is_string(source_manifest(entry))
+    end)
+
+    it("serializes generic, nominal, alias, and recursive C source graphs " ..
+       "without table-address or map-order instability", function()
+        local function complex_entry(reverse, integer_bits)
+            local name = "source_manifest_complex"
+            local dependency = {
+                kind = "file",
+                path = "/virtual/source-manifest-complex.h",
+                identity = "bytes:complex",
+            }
+            local header = {
+                rendered = "source_manifest_complex.h",
+                c_header_dependencies = { dependency },
+                c_header_search_inputs = {},
+            }
+            local function cmetadata(typ)
+                typ._ffi_scope = name
+                typ._c_origin_header = header
+                return typ
+            end
+
+            local cint = cmetadata(types.CInteger(
+                "int", true, 3, integer_bits))
+            cint._c_declaration_spelling = "signed int"
+            cint._c_enum_enumerator = false
+            local cfloat = cmetadata(types.CFloat("double"))
+            local cvoid = cmetadata(types.CVoid())
+            local aggregate_fields = {}
+            local aggregate = cmetadata(types.CStruct(
+                "struct source_node", "source_node", false,
+                aggregate_fields, true, false))
+            aggregate._c_tag_scope = name
+            local aggregate_pointer = cmetadata(types.CPointer(
+                aggregate, { "const" }))
+            local recursive_field = cmetadata(types.CField(
+                aggregate, "next", aggregate_pointer, false, false))
+            aggregate_fields[1] = recursive_field
+            aggregate_fields.next = recursive_field
+
+            local aggregate_union = cmetadata(types.CUnion(
+                "union source_choice", "source_choice", false,
+                {}, true))
+            aggregate_union._c_tag_scope = name
+            local carray = cmetadata(types.CArray(cint, {
+                "SOURCE_MANIFEST_BOUND",
+                1,
+                op = "+",
+            }, { "volatile" }))
+            local ctypedef = cmetadata(types.CTypedef(
+                "source_count", cint, { "const" }))
+            local cowned = cmetadata(types.COwned(aggregate, false))
+            local cfunction = cmetadata(types.CFunction(
+                { aggregate_pointer, carray, ctypedef }, cint, false, false))
+            cfunction._paramstyle = "prototype"
+            cfunction._return_declaration_qualifiers = { "const" }
+            local legacy_pointer = cmetadata({
+                _tag = "Type.Pointer",
+                type = cint,
+            })
+            local legacy_typedef = cmetadata({
+                _tag = "Type.Typedef",
+                name = "legacy_count",
+                _type = legacy_pointer,
+            })
+
+            local callable_scope = types.GenericScope(
+                name, false, "identity", "callable", "function")
+            local callable_parameter = types.Parameter(
+                callable_scope, 1, "T", false)
+            local callable_type_parameter = types.TypeParameter("T", false)
+            local generic_callable = types.ModuleMember(
+                name, "identity",
+                types.FunctionScheme(callable_scope,
+                    { callable_type_parameter },
+                    types.Function(
+                        { callable_parameter }, { callable_parameter },
+                        false, false, false)),
+                { "item" })
+
+            local nominal_name = name .. ".Hidden"
+            local nominal_scope = types.GenericScope(
+                name, nominal_name, false, "owner", "record")
+            local nominal_parameter = types.Parameter(
+                nominal_scope, 1, "T", false)
+            local nominal_type_parameter = types.TypeParameter("T", false)
+            local field = types.Field(
+                nominal_name, "payload", nominal_parameter, 0, false)
+            field.islocal = true
+            local fields = { field }
+            fields.payload = field
+            local build = types.StaticMethod(
+                nominal_name, "build", { nominal_parameter },
+                { types.Nominal(nominal_name, { nominal_parameter }) },
+                false, false, { "payload" })
+            build.islocal = true
+            local create = types.StaticMethod(
+                nominal_name, "create", {},
+                { types.Nominal(nominal_name, { nominal_parameter }) },
+                false, false, {})
+            create.islocal = true
+            local read = types.Method(
+                nominal_name, "read", {}, { nominal_parameter },
+                false, false, {})
+            read.islocal = true
+            local replace = types.Method(
+                nominal_name, "replace", { nominal_parameter },
+                { nominal_parameter }, false, false, { "payload" })
+            replace.islocal = true
+            local functions, methods = {}, {}
+            if reverse then
+                functions.create = create
+                functions.build = build
+                methods.replace = replace
+                methods.read = read
+            else
+                functions.build = build
+                functions.create = create
+                methods.read = read
+                methods.replace = replace
+            end
+            local nominal = types.Record(
+                nominal_name, fields, functions, methods, 1,
+                nominal_scope, { nominal_type_parameter })
+            nominal.islocal = true
+            local nominal_member = types.ModuleMember(
+                name, "Hidden", nominal, false)
+
+            local visible_name = name .. ".Visible"
+            local visible_field = types.Field(
+                visible_name, "shown", types.Integer(), 0, false)
+            local hidden_field = types.Field(
+                visible_name, "hidden", types.String(), 1, true)
+            hidden_field.islocal = true
+            local visible_fields = { visible_field, hidden_field }
+            visible_fields.shown = visible_field
+            visible_fields.hidden = hidden_field
+            local visible = types.Record(
+                visible_name, visible_fields, {}, {}, 2)
+            local public_members = {
+                types.ModuleMember(name, "Visible", visible, false),
+            }
+
+            local foreign = types.ModuleMember(
+                name, "native", cfunction,
+                { "node", "values", "count" })
+            foreign._foreign_source = true
+
+            local alias = types.GenericAlias(
+                name, "Alias", true, nominal_name, false,
+                nominal_scope, { nominal_type_parameter })
+            local aliases = {}
+            local alias_entries = {
+                { "Alias", alias },
+                { "CArray", carray },
+                { "CField", recursive_field },
+                { "CFloat", cfloat },
+                { "CFunction", cfunction },
+                { "CInteger", cint },
+                { "COwned", cowned },
+                { "CPointer", aggregate_pointer },
+                { "CStruct", aggregate },
+                { "CTypedef", ctypedef },
+                { "CUnion", aggregate_union },
+                { "CVoid", cvoid },
+                { "LegacyPointer", legacy_pointer },
+                { "LegacyTypedef", legacy_typedef },
+            }
+            if reverse then
+                for index = #alias_entries, 1, -1 do
+                    aliases[alias_entries[index][1]] =
+                        alias_entries[index][2]
+                end
+            else
+                for index = 1, #alias_entries do
+                    aliases[alias_entries[index][1]] =
+                        alias_entries[index][2]
+                end
+            end
+            local modtype = source_module(
+                name, public_members, {},
+                { generic_callable, nominal_member, foreign }, aliases)
+            return source_entry(name, modtype, { dependency }), aggregate
+        end
+
+        local first, first_aggregate = complex_entry(false, 32)
+        local second, second_aggregate = complex_entry(true, 32)
+        assert.not_equal(first_aggregate, second_aggregate)
+        assert.equal(first_aggregate, first_aggregate.fields[1].owner)
+        assert.equal(first_aggregate,
+            first_aggregate.fields[1].type.pointee)
+        local expected = source_manifest(first)
+        collectgarbage("collect")
+        assert.equal(expected, source_manifest(second))
+
+        local changed = complex_entry(false, 64)
+        assert.not_equal(expected, source_manifest(changed))
     end)
 
     it("rejects malformed resolver caches at their public loader boundary",
@@ -1616,14 +2346,17 @@ describe("compiler module loader", function()
 
         local function cached_source(name, ast, deps)
             local filename = root .. "/" .. name .. ".titan"
-            return {
+            local entry = {
                 kind = "source",
                 ast = ast or {},
-                type = types.Module(name, {}),
+                type = source_module(name),
                 filename = filename,
                 source_files = { filename },
                 deps = deps or {},
+                c_header_dependencies = {},
             }
+            entry.source_manifest = source_manifest(entry)
+            return entry
         end
         local function source_entry_error(name, candidate, expected)
             local loader = driver.defaultloader({}, {
@@ -1637,9 +2370,26 @@ describe("compiler module loader", function()
         end
         source_entry_error("cache_source_invalid", {},
             "is not a complete checked source module")
-        local invalid_deps = cached_source("cache_source_bad_deps", {}, {
-            ["invalid dependency"] = true,
-        })
+        local missing_manifest = cached_source("cache_source_no_manifest")
+        missing_manifest.source_manifest = nil
+        source_entry_error("cache_source_no_manifest", missing_manifest,
+            "is not a complete checked source module")
+
+        local public_only = cached_source("cache_source_public_only")
+        public_only.type = types.Module("cache_source_public_only", {})
+        source_entry_error("cache_source_public_only", public_only,
+            "is not a complete checked source module")
+
+        local holey_sources = cached_source("cache_source_holey_files")
+        holey_sources.source_files = {
+            [1] = holey_sources.filename,
+            [3] = root .. "/cache-source-part.titan",
+        }
+        source_entry_error("cache_source_holey_files", holey_sources,
+            "is not a complete checked source module")
+
+        local invalid_deps = cached_source("cache_source_bad_deps")
+        invalid_deps.deps = { ["invalid dependency"] = true }
         source_entry_error("cache_source_bad_deps", invalid_deps,
             "has an invalid dependency map")
 

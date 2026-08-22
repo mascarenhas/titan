@@ -9,6 +9,7 @@ local cdriver = require "c-parser.cdriver"
 local cprobe = require "titan-compiler.cprobe"
 local csemantics = require "titan-compiler.csemantics"
 local compiler_io = require "titan-compiler.io"
+local sourceinterface = require "titan-compiler.sourceinterface"
 
 local lfs = require "lfs"
 
@@ -26,7 +27,8 @@ driver.LUA_VERSION = "5.5"
 -- incremental source/interface caches, analysis-local FFI include paths, or
 -- cooperative scheduling. API 2 additionally guarantees exact C-header
 -- dependency metadata and driver.restat_c_header_dependencies. API 3 owns all
--- analysis I/O and cooperative checkpoints through one resolver strategy.
+-- analysis I/O and cooperative checkpoints through one resolver strategy and
+-- publishes an opaque source-visible manifest for every clean source entry.
 driver.LANGUAGE_SERVER_API_VERSION = 3
 
 local LUA_CPATH_SUFFIX = "/lib/lua/" .. driver.LUA_VERSION .. "/?.so"
@@ -986,6 +988,59 @@ local function copy_c_header_dependencies(value, label)
         end
     end
     return result
+end
+
+local function valid_source_files(value, main_filename)
+    if type(value) ~= "table" then return false end
+    local count, maximum = 0, 0
+    for key, filename in pairs(value) do
+        if type(key) ~= "number" or key < 1 or key % 1 ~= 0
+           or type(filename) ~= "string" or filename == "" then
+            return false
+        end
+        count = count + 1
+        maximum = math.max(maximum, key)
+    end
+    return count > 0 and count == maximum and value[1] == main_filename
+end
+
+-- Produce the equality-only source interface consumed by incremental semantic
+-- clients. Unlike `types.serialize`, this is not executable metadata: it also
+-- covers declarations visible only through an explicit `.titan` import and
+-- their exact C-header inputs.
+function driver.serialize_source_interface(entry)
+    if type(entry) ~= "table" or entry.kind ~= "source"
+       or type(entry.ast) ~= "table"
+       or type(entry.type) ~= "table"
+       or entry.type._tag ~= "Type.Module"
+       or entry.type._source ~= true
+       or type(entry.type.name) ~= "string"
+       or type(entry.filename) ~= "string" or entry.filename == ""
+       or type(entry.source_files) ~= "table" then
+        return nil, "source interface entry is not a complete checked source module"
+    end
+    if not valid_source_files(entry.source_files, entry.filename) then
+        return nil, "source interface entry has invalid source_files"
+    end
+    if type(entry.deps) ~= "table" then
+        return nil, "source interface entry has no dependency map"
+    end
+    for dependency, present in pairs(entry.deps) do
+        if not staticmetadata.valid_module_name(dependency)
+           or present ~= true then
+            return nil, "source interface entry has an invalid dependency map"
+        end
+    end
+    local headers, header_error = copy_c_header_dependencies(
+        entry.c_header_dependencies,
+        "source interface entry C header dependencies")
+    if not headers then return nil, header_error end
+    local normalized = {
+        kind = "source",
+        type = entry.type,
+        c_header_dependencies = headers,
+    }
+    return sourceinterface.serialize(normalized)
 end
 
 -- Recompute the identities of an already-resolved module header closure. This
@@ -2832,11 +2887,17 @@ function driver.defaultloader(static_deps, options)
            or type(candidate.ast) ~= "table"
            or type(candidate.type) ~= "table"
            or candidate.type._tag ~= "Type.Module"
+           or candidate.type._source ~= true
            or candidate.type.name ~= modname
+           or type(candidate.type.source_members) ~= "table"
+           or type(candidate.type.source_type_members) ~= "table"
            or type(candidate.filename) ~= "string"
            or candidate.filename == ""
-           or type(candidate.source_files) ~= "table"
-           or type(candidate.deps) ~= "table" then
+           or not valid_source_files(
+                candidate.source_files, candidate.filename)
+           or type(candidate.deps) ~= "table"
+           or type(candidate.source_manifest) ~= "string"
+           or candidate.source_manifest == "" then
             return nil, "cached source entry for module '" .. modname ..
                 "' is not a complete checked source module"
         end
@@ -3213,7 +3274,7 @@ function driver.defaultloader(static_deps, options)
                     modname, ast, foreign_header)
             if header_error then errors[#errors + 1] = header_error end
         end
-        driver.imported[modname] = {
+        local entry = {
             kind = "source",
             ast = ast,
             type = modt,
@@ -3226,6 +3287,18 @@ function driver.defaultloader(static_deps, options)
             foreign_header = foreign_header,
             checking_foreign_header = checking_foreign_header,
         }
+        if #errors == 0 then
+            local source_manifest, manifest_error =
+                driver.serialize_source_interface(entry)
+            if not source_manifest then
+                errors[#errors + 1] = "could not serialize source interface " ..
+                    "for module '" .. modname .. "': " ..
+                    tostring(manifest_error)
+            else
+                entry.source_manifest = source_manifest
+            end
+        end
+        driver.imported[modname] = entry
         static_deps[modname] = true
         if foreign_header and foreign_header:sub(1, 1) ~= "/" then
             local absolute, absolute_error = absolute_filename(
