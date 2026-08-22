@@ -1,5 +1,6 @@
 local parser = {}
 
+local lpeg = require "lpeglabel"
 local re = require "relabel"
 local inspect = require "inspect"
 
@@ -19,10 +20,27 @@ local THIS_FILENAME = nil
 -- (see THIS_FILENAME), so the per-parse accumulator follows the same contract.
 local PROGRAM_NODES = nil
 
+-- Source positions recur throughout the grammar, both on successful paths and
+-- in bounded lookaheads. Locations are immutable compiler metadata, so intern
+-- them for one parse instead of repeating the newline search and allocation.
+-- The cache follows the parser's existing non-reentrant lifetime.
+local SOURCE_LOCATIONS = nil
+
+-- Byte positions where a raw, balanced angle sequence has a call/member
+-- delimiter after its matching close. This is only a conservative guard for
+-- the authoritative PEG type probe: false positives are harmless, while the
+-- guard prevents a failed nested generic-looking comparison from recursively
+-- probing every remaining suffix.
+local GENERIC_CALL_CANDIDATES = nil
+
 -- Parse-time guardrail on the length of parameter, expression, and generic
 -- lists (not a runtime bound; runtime vararg counts have their own cap,
 -- TITAN_VARARG_MAX).
 local LIST_LIMIT = 100
+
+-- Stay below LPegLabel's default backtrack-stack failure point for a nested
+-- sequence of failed generic-call probes.
+local GENERIC_PROBE_SCAN_LIMIT = 32
 
 --
 -- Functions used by the PEG grammar
@@ -38,6 +56,113 @@ end
 
 for tag, cons in pairs(ast) do
     defs[tag] = cons
+end
+
+-- Relabel definitions may include ordinary LPegLabel patterns. Keep one parsed
+-- statement candidate in a named capture, then classify it through a back
+-- capture without traversing the expression again.
+defs.STATEMENT_CANDIDATE = lpeg.Cb("statement_candidate")
+
+defs.GENERIC_CALL_START = #lexer.LT * lpeg.Cmt(lpeg.Cp(),
+    function(_, position, start)
+        assert(GENERIC_CALL_CANDIDATES ~= nil)
+        if GENERIC_CALL_CANDIDATES == false or
+           GENERIC_CALL_CANDIDATES[start]
+        then
+            return position
+        end
+        return false
+    end)
+
+local function long_bracket_end(source, position)
+    if source:sub(position, position) ~= "[" then return nil end
+    local cursor = position + 1
+    while source:sub(cursor, cursor) == "=" do cursor = cursor + 1 end
+    if source:sub(cursor, cursor) ~= "[" then return nil end
+    local level = cursor - position - 1
+    local closing = "]" .. string.rep("=", level) .. "]"
+    local _, last = source:find(closing, cursor + 1, true)
+    if last then return last + 1 end
+    return #source + 1
+end
+
+local long_bracket_open = lpeg.P("[") * lpeg.P("=")^0 * lpeg.P("[")
+local safe_long_bracket = lpeg.Cmt(
+    #long_bracket_open * lpeg.P("[") * lpeg.Cp(),
+    function(source, _, start)
+        local finish = long_bracket_end(source, start - 1)
+        if finish then return finish end
+        return false
+    end)
+local escaped_string_byte = lpeg.P("\\") *
+    (lpeg.P("z") * lpeg.S(" \t\n\v\f\r")^0 +
+     lpeg.P("\r\n") + lpeg.P("\n\r") + lpeg.P(1))
+local safe_single_string = lpeg.P("'") *
+    (escaped_string_byte + (lpeg.P(1) - lpeg.S("'\r\n")))^0 * lpeg.P("'")^-1
+local safe_double_string = lpeg.P("\"") *
+    (escaped_string_byte + (lpeg.P(1) - lpeg.S("\"\r\n")))^0 * lpeg.P("\"")^-1
+local safe_short_string = safe_single_string + safe_double_string
+local safe_comment = lpeg.P("--") *
+    (safe_long_bracket + (lpeg.P(1) - lpeg.P("\n"))^0 * lpeg.P("\n")^-1)
+local angle_capture = lpeg.Cp() * lpeg.C(lpeg.S("<>"))
+local ordinary_scan_bytes = (lpeg.P(1) - lpeg.S("-'\"[<>"))^1
+local generic_angle_scan = lpeg.Ct((
+    safe_comment + safe_short_string + safe_long_bracket +
+    lpeg.P("->") + lpeg.P("<=") + lpeg.P("<<") + lpeg.P(">=") +
+    angle_capture + ordinary_scan_bytes + lpeg.P(1)
+)^0)
+
+local function collect_generic_call_candidates(source)
+    -- Below this constant number of ambiguous starts, repeated probes are
+    -- bounded work and the ordinary grammar avoids a whole-source prescan.
+    -- Once the threshold is crossed, one linear scan makes every probe O(1).
+    local next_angle = 1
+    for _ = 1, GENERIC_PROBE_SCAN_LIMIT + 1 do
+        next_angle = source:find("<", next_angle, true)
+        if not next_angle then return false end
+        next_angle = next_angle + 1
+    end
+
+    local candidates = {}
+    local angles = {}
+
+    local function has_call_delimiter(position)
+        while true do
+            position = source:find("%S", position)
+            if not position then return false end
+            if source:sub(position, position + 1) == "--" then
+                local after = position + 2
+                position = long_bracket_end(source, after) or
+                    source:find("\n", after, true) or (#source + 1)
+            else
+                local byte = source:sub(position, position)
+                if byte == "(" or byte == "{" or byte == "." or
+                   byte == "\"" or byte == "'"
+                then
+                    return true
+                end
+                return byte == "[" and
+                    long_bracket_end(source, position) ~= nil
+            end
+        end
+    end
+
+    local angles_found = assert(generic_angle_scan:match(source))
+    for index = 1, #angles_found, 2 do
+        local position = angles_found[index]
+        local byte = angles_found[index + 1]
+        if byte == "<" then
+            angles[#angles + 1] = position
+        elseif #angles > 0 then
+            local start = angles[#angles]
+            angles[#angles] = nil
+            if has_call_delimiter(position + 1) then
+                candidates[start] = true
+            end
+        end
+    end
+
+    return candidates
 end
 
 -- Titan's standard library has qualified module names so its Lua-facing names
@@ -77,7 +202,13 @@ function defs.importdecl(loc, name_loc, localname, modname)
 end
 
 function defs.get_loc(s, pos)
-    return true, location.from_pos(THIS_FILENAME, s, pos)
+    local locations = assert(SOURCE_LOCATIONS)
+    local loc = locations[pos]
+    if not loc then
+        loc = location.from_pos(THIS_FILENAME, s, pos)
+        locations[pos] = loc
+    end
+    return true, loc
 end
 
 -- Semantic tooling needs the exact selected identifier rather than the
@@ -248,10 +379,6 @@ function defs.constcptrtype(pos, subtype)
     return ast.TypeCPointer(pos, subtype, true)
 end
 
-function defs.arraytype(pos, subtype)
-    return ast.TypeArray(pos, subtype, false)
-end
-
 function defs.constarraytype(pos, subtype)
     return ast.TypeArray(pos, subtype, true)
 end
@@ -260,12 +387,81 @@ function defs.maybeconstarraytype(pos, subtype)
     return ast.TypeArray(pos, subtype, "maybe")
 end
 
-function defs.cownedscalartype(pos, subtype)
-    return ast.TypeCOwned(pos, subtype, false)
+-- The first `*` in `owned *T` is the scalar ownership marker, but in
+-- `owned *T[]` it is part of the Array element type. Parse the payload once;
+-- when an Array suffix follows, reconstruct that pointer layer at its original
+-- source location.
+function defs.owned_pointer_tail(star_loc, subtype, counted)
+    if counted then
+        subtype = ast.TypeCPointer(star_loc, subtype, false)
+    end
+    return { subtype = subtype, count = counted }
 end
 
-function defs.cownedarraytype(pos, subtype)
-    return ast.TypeCOwned(pos, subtype, true)
+function defs.owned_array_tail(subtype)
+    return { subtype = subtype, count = true }
+end
+
+function defs.finish_owned_type(pos, tail)
+    return ast.TypeCOwned(pos, tail.subtype, tail.count)
+end
+
+function defs.cast_type_tail(target)
+    return { kind = "as", target = target }
+end
+
+function defs.test_type_tail(target)
+    return { kind = "is", target = target }
+end
+
+local function finish_casts_and_tests(loc, exp, tails)
+    local i = 1
+    while i <= #tails do
+        local kind = tails[i].kind
+        local last = i
+        while last < #tails and tails[last + 1].kind == kind do
+            last = last + 1
+        end
+
+        if kind == "as" then
+            -- Each contiguous `as` chain associates to the right. Apply its
+            -- last target closest to the operand, then wrap outward toward the
+            -- first written target.
+            for j = last, i, -1 do
+                exp = ast.ExpCast(loc, exp, tails[j].target)
+            end
+        else
+            -- Each contiguous `is` chain associates to the left. Later tests
+            -- observe the boolean result of earlier tests; usefulness is a
+            -- checker decision rather than a parser restriction.
+            for j = i, last do
+                exp = ast.ExpIs(loc, exp, tails[j].target)
+            end
+        end
+        i = last + 1
+    end
+    return exp
+end
+
+function defs.finish_casts_and_tests(_, next_pos, loc, exp, tails)
+    exp = finish_casts_and_tests(loc, exp, tails)
+    return next_pos, exp
+end
+
+function defs.map_type_tail(valuestype)
+    return { kind = "map", valuestype = valuestype }
+end
+
+function defs.array_type_tail()
+    return { kind = "array" }
+end
+
+function defs.finish_curly_type(pos, firsttype, tail)
+    if tail.kind == "map" then
+        return ast.TypeMap(pos, firsttype, tail.valuestype)
+    else
+        return ast.TypeArray(pos, firsttype, false)
+    end
 end
 
 local function carraylength(loc, n)
@@ -350,33 +546,109 @@ function defs.fold_binop_left(pos, matches)
     return lhs
 end
 
--- Should this go on a separate constant propagation pass?
-function defs.binop_concat(pos, lhs, op, rhs)
-    if op then
-        if rhs._tag == "Ast.ExpConcat" then
-            table.insert(rhs.exps, 1, lhs)
-            return rhs
-        elseif (lhs._tag == "Ast.ExpString" or
-            lhs._tag == "Ast.ExpInteger" or
-            lhs._tag == "Ast.ExpFloat") and
-            (rhs._tag == "Ast.ExpString" or
-            rhs._tag == "Ast.ExpInteger" or
-            rhs._tag == "Ast.ExpFloat") then
-            return ast.ExpString(pos, lhs.value .. rhs.value)
-        else
-            return ast.ExpConcat(pos, { lhs, rhs })
-        end
-    else
-        return lhs
-    end
+local function is_concat_constant(exp)
+    return exp._tag == "Ast.ExpString" or
+           exp._tag == "Ast.ExpInteger" or
+           exp._tag == "Ast.ExpFloat"
 end
 
-function defs.binop_right(pos, lhs, op, rhs)
-    if op then
-        return ast.ExpBinop(pos, lhs, op, rhs)
-    else
-        return lhs
+function defs.fold_binop_concat_right(_, next_pos, matches)
+    local operand_count = #matches // 2
+    if operand_count == 1 then
+        return next_pos, matches[2]
     end
+
+    -- The historical right fold gives a pre-existing RHS ExpConcat priority,
+    -- including one returned transparently through parentheses. Otherwise it
+    -- folds only the maximal constant suffix, then creates the first concat
+    -- node. Every earlier operand is prepended without further folding.
+    local rhs = matches[2 * operand_count]
+    local concat
+    local prefix_end
+    if rhs._tag == "Ast.ExpConcat" then
+        concat = rhs
+        prefix_end = operand_count - 1
+    else
+        local constant_start = operand_count + 1
+        for operand = operand_count, 1, -1 do
+            local exp = matches[2 * operand]
+            if not is_concat_constant(exp) then break end
+            constant_start = operand
+        end
+
+        local first_unfolded
+        if constant_start < operand_count then
+            local values = {}
+            for operand = constant_start, operand_count do
+                values[#values + 1] = matches[2 * operand].value
+            end
+            rhs = ast.ExpString(matches[2 * constant_start - 1],
+                table.concat(values))
+            first_unfolded = constant_start - 1
+        else
+            first_unfolded = operand_count - 1
+        end
+
+        if first_unfolded == 0 then
+            return next_pos, rhs
+        end
+
+        local lhs = matches[2 * first_unfolded]
+        concat = ast.ExpConcat(
+            matches[2 * first_unfolded - 1], { lhs, rhs })
+        prefix_end = first_unfolded - 1
+    end
+
+    -- Build the flattened children once. Keep this match-time callback pure:
+    -- it may run on a parse path that is later abandoned, so do not mutate a
+    -- captured RHS node merely to reuse its table.
+    local exps = {}
+    for operand = 1, prefix_end do
+        exps[operand] = matches[2 * operand]
+    end
+    for index = 1, #concat.exps do
+        exps[prefix_end + index] = concat.exps[index]
+    end
+    return next_pos, ast.ExpConcat(concat.loc, exps)
+end
+
+-- A power operand needs two locations. Its unary operators use the position
+-- before the first prefix, while a nested power node begins at the simple
+-- expression after those prefixes. Keeping this parser-only carrier lets the
+-- flat grammar reproduce the locations of the former recursive `e12` rule.
+function defs.power_operand(unary_loc, unops, simple_loc, exp)
+    return {
+        unary_loc = unary_loc,
+        unops = unops,
+        simple_loc = simple_loc,
+        exp = exp,
+    }
+end
+
+function defs.power_tail(op, operand)
+    operand.op = op
+    return operand
+end
+
+function defs.fold_power(_, next_pos, pos, lhs, tails, casttesttails)
+    if not tails then
+        return next_pos, lhs
+    end
+
+    local last = tails[#tails]
+    local rhs = defs.fold_unops(last.unary_loc, last.unops, last.exp)
+    rhs = finish_casts_and_tests(last.unary_loc, rhs, casttesttails)
+
+    -- `a ^ -b ^ -c` is `a ^ (-(b ^ (-c)))`: each unary prefix on a
+    -- right-hand operand wraps the complete power suffix beginning there.
+    for i = #tails - 1, 1, -1 do
+        local operand = tails[i]
+        rhs = ast.ExpBinop(
+            operand.simple_loc, operand.exp, operand.op, rhs)
+        rhs = defs.fold_unops(operand.unary_loc, operand.unops, rhs)
+    end
+
+    return next_pos, ast.ExpBinop(pos, lhs, tails[1].op, rhs)
 end
 
 function defs.fold_unops(pos, unops, exp)
@@ -519,20 +791,74 @@ function defs.fold_suffixes(exp, suffixes)
     return exp
 end
 
+function defs.statement_name_prefix(pos, name)
+    return {
+        exp = defs.name_exp(pos, name),
+        bare_parenthesized = false,
+    }
+end
+
+function defs.statement_parenthesized_prefix(pos, exp)
+    return {
+        exp = defs.adjust_exp(pos, exp),
+        bare_parenthesized = true,
+    }
+end
+
+
+function defs.fold_statement_candidate(prefix, suffixes)
+    prefix.exp = defs.fold_suffixes(prefix.exp, suffixes)
+    if #suffixes > 0 then
+        prefix.bare_parenthesized = false
+    end
+    return prefix
+end
+
+function defs.statement_candidate_var(_, position, candidate)
+    if candidate.bare_parenthesized or
+        candidate.exp._tag ~= "Ast.ExpVar"
+    then
+        return false
+    end
+    return position, candidate.exp.var
+end
+
+function defs.statement_candidate_call(_, position, candidate)
+    if candidate.exp._tag ~= "Ast.ExpCall" then
+        return false
+    end
+    return position, candidate.exp
+end
+
+function defs.statement_assignment_tail(vars, exps)
+    return { vars = vars, exps = exps }
+end
+
+function defs.statement_assignment_candidate(first, tail)
+    local vars = { first }
+    for i = 1, #tail.vars do
+        vars[#vars + 1] = tail.vars[i]
+    end
+    return { assignment = true, vars = vars, exps = tail.exps }
+end
+
+function defs.statement_call_candidate(exp)
+    return { assignment = false, exp = exp }
+end
+
+function defs.finish_assignment_or_call(pos, candidate)
+    if candidate.assignment then
+        return ast.StatAssign(pos, candidate.vars, candidate.exps)
+    end
+    return ast.StatCall(pos, candidate.exp)
+end
+
 function defs.exp2var(exp)
     return exp.var
 end
 
 function defs.exp_is_var(_, pos, exp)
     if exp._tag == "Ast.ExpVar" then
-        return pos, exp
-    else
-        return false
-    end
-end
-
-function defs.exp_is_call(_, pos, exp)
-    if exp._tag == "Ast.ExpCall" then
         return pos, exp
     else
         return false
@@ -852,32 +1178,94 @@ function defs.singlereturn(type)
     return { rettypes = { type }, flexrettype = false }
 end
 
--- A function type appearing as the sole return value of another function is a
--- fixed one-value result shape; the nested function's own flexible return tail
--- remains on its TypeFunction node.
-function defs.functionreturnshape(pos, argtypes, varargtype, result)
+function defs.simple_type_operand(type)
     return {
-        rettypes = {
-            ast.TypeFunction(pos, argtypes, result.rettypes, varargtype,
-                result.flexrettype),
-        },
-        flexrettype = false,
+        kind = "simple",
+        loc = type.loc,
+        type = type,
     }
 end
 
--- Build a TypeFunction node, reordering the captures so both optional tails
--- land after their corresponding fixed lists.
-function defs.typefunc(pos, argtypes, varargtype, result)
-    return ast.TypeFunction(pos, argtypes, result.rettypes, varargtype,
-        result.flexrettype)
+function defs.argument_type_operand(pos, types, varargtype)
+    return {
+        kind = "arguments",
+        loc = pos,
+        types = types,
+        tailtype = varargtype,
+    }
 end
 
--- `foreign (P...) -> R` is a C function-pointer type written without a C
--- typedef. Keep its source shape distinct until the checker validates the C
--- parameter/result restrictions and lowers it to Type.CPointer(Type.CFunction).
-function defs.typeforeignfunc(pos, argtypes, varargtype, result)
-    return ast.TypeForeignFunction(pos, argtypes, result.rettypes, varargtype,
-        result.flexrettype)
+function defs.result_type_operand(pos, shape)
+    return {
+        kind = "results",
+        loc = pos,
+        types = shape.rettypes,
+        tailtype = shape.flexrettype,
+    }
+end
+
+function defs.foreign_type_operand(pos, types, varargtype)
+    return {
+        kind = "foreign",
+        loc = pos,
+        types = types,
+        tailtype = varargtype,
+    }
+end
+
+local function operand_return_shape(operand)
+    if operand.kind == "simple" then
+        return defs.singlereturn(operand.type)
+    end
+    assert(operand.kind == "results")
+    return {
+        rettypes = operand.types,
+        flexrettype = operand.tailtype,
+    }
+end
+
+local function function_from_operand(operand, result)
+    local argtypes
+    local varargtype
+    if operand.kind == "simple" then
+        argtypes = { operand.type }
+        varargtype = false
+    else
+        argtypes = operand.types
+        varargtype = operand.tailtype
+    end
+
+    if operand.kind == "foreign" then
+        return ast.TypeForeignFunction(operand.loc, argtypes,
+            result.rettypes, varargtype, result.flexrettype)
+    end
+    return ast.TypeFunction(operand.loc, argtypes,
+        result.rettypes, varargtype, result.flexrettype)
+end
+
+local function fold_type_operands(operands)
+    if #operands == 1 then
+        assert(operands[1].kind == "simple")
+        return operands[1].type
+    end
+
+    local result = operand_return_shape(operands[#operands])
+    for i = #operands - 1, 1, -1 do
+        result = defs.singlereturn(
+            function_from_operand(operands[i], result))
+    end
+    return result.rettypes[1]
+end
+
+function defs.fold_type_operands(_, next_pos, operands)
+    return next_pos, fold_type_operands(operands)
+end
+
+function defs.fold_rettype_operands(_, next_pos, operands)
+    if #operands == 1 then
+        return next_pos, operand_return_shape(operands[1])
+    end
+    return next_pos, defs.singlereturn(fold_type_operands(operands))
 end
 
 function defs.makeprogram(_, init)
@@ -1125,10 +1513,10 @@ local grammar = re.compile([[
                            typeargsopt)                           -> qualifiedtype
 
     -- An owned payload is deliberately optionless: the sole trailing `?` in
-    -- `simpletype` wraps the complete owner. The array alternative is selected
-    -- with lookahead before the scalar ownership marker is considered, so
-    -- `owned *c.Item[]` is an array of C pointers while `owned *c.Item` owns
-    -- one C Item object.
+    -- `simpletype` wraps the complete owner. `ownedtail` parses its recursive
+    -- payload once. Its first `*` is the scalar ownership marker unless an
+    -- Array suffix follows, in which case `owned_pointer_tail` restores it as
+    -- part of the counted element type.
     cownedpayload   <- (P  NIL)                                  -> TypeNil
                      / (P  BOOLEAN)                              -> TypeBoolean
                      / (P  INTEGER)                              -> TypeInteger
@@ -1142,12 +1530,28 @@ local grammar = re.compile([[
                      / namedtype
                      / ownedtype
 
-    ownedtype       <- (P  OWNED &(cownedpayload LBRACKET)
-                           cownedpayload LBRACKET
-                           RBRACKET^RBracketCOwned)              -> cownedarraytype
-                     / (P  OWNED MUL
-                           cownedpayload^OwnedPayload)           -> cownedscalartype
-                     / (P  OWNED %{COwnedShape})
+    ownedtype       <- (P  OWNED ownedtail)                      -> finish_owned_type
+
+    -- A non-star owner can begin with `const` only when that starts one or
+    -- more pointer layers and eventually reaches a payload base. Reject a
+    -- malformed regular pointer prefix at the outer owner before the labeled
+    -- recursive payload rule turns the historical shape error into an
+    -- OwnedPayload error. This bounded probe never traverses the payload.
+    cownedbasehead  <- NIL / BOOLEAN / INTEGER / FLOAT / STRING / VALUE
+                     / NAME / OWNED
+
+    badconstownedpayload
+                    <- &(CONST MUL (CONST MUL / MUL)* !cownedbasehead)
+                       %{COwnedShape}
+
+    ownedtail       <- (P  MUL cownedpayload^OwnedPayload
+                           ((LBRACKET RBRACKET^RBracketCOwned    -> totrue)
+                            / (''                               -> tofalse)))
+                                                               -> owned_pointer_tail
+                     / badconstownedpayload
+                     / (cownedpayload LBRACKET
+                           RBRACKET^RBracketCOwned)              -> owned_array_tail
+                     / %{COwnedShape}
 
     constarray      <- (P  CONST OPT LCURLY
                            type^TypeConstArray
@@ -1170,11 +1574,10 @@ local grammar = re.compile([[
                      / (P  MUL simpletype^TypeType)              -> cptrtype
                      / namedtype
                      / (P  LCURLY type^TypeType
-                           COLON
-                           type^TypeType
-                           RCURLY^RCurlyType)                    -> TypeMap
-                     / (P  LCURLY type^TypeType
-                           RCURLY^RCurlyType)                    -> arraytype)
+                           ((COLON type^TypeType
+                                   RCURLY^RCurlyType)            -> map_type_tail
+                            / RCURLY^RCurlyType                  -> array_type_tail))
+                                                               -> finish_curly_type)
                                                   (OPT -> '?')?) -> typeopt)
                         (!LBRACKET / %{CArrayOnlyAutomatic})
 
@@ -1213,28 +1616,28 @@ local grammar = re.compile([[
                          / {| '' |} flexrettypeonlyopt )
                          RPAREN^RParenTypelist )                 -> returnshape
 
-    -- Try a parenthesized result list first, but commit to it only when no
-    -- arrow follows. This disambiguates `(...: T)` as a flexible result list
-    -- from `(...: T) -> R` as a function type without running the input-vararg
-    -- capture path and then backtracking through it.
-    foreignfunctype <- (P  FOREIGN arglist RARROW
-                            rettype^TypeReturnTypes)             -> typeforeignfunc
+    -- Function arrows form a flat operand chain which is folded from the
+    -- right: `a -> b -> c` is `a -> (b -> c)`. In particular, matching an
+    -- arrow commits to matching its following return operand instead of
+    -- recursively retrying every prefix as a complete type.
+    typefirstoperand
+                    <- (P  FOREIGN arglist &RARROW)              -> foreign_type_operand
+                     / (P  arglist &RARROW)                      -> argument_type_operand
+                     / (simpletype                               -> simple_type_operand)
 
-    rettype         <- (resulttypelist !RARROW)
-                     / (P  arglist RARROW
-                            rettype^TypeReturnTypes)             -> functionreturnshape
-                     / (P  {| simpletype |} (''->tofalse) RARROW
-                             rettype^TypeReturnTypes)            -> functionreturnshape
-                     / (foreignfunctype                         -> singlereturn)
-                     / (simpletype                              -> singlereturn)
+    rettypeoperand  <- (P  resulttypelist)                       -> result_type_operand
+                     / (P  FOREIGN arglist &RARROW)              -> foreign_type_operand
+                     / (simpletype                               -> simple_type_operand)
                      / (DOTS %{FlexRetParens})
 
-    type            <- foreignfunctype
-                     / (P  arglist RARROW
-                           rettype^TypeReturnTypes)              -> typefunc
-                     / (P  {| simpletype |} (''->tofalse) RARROW
-                           rettype^TypeReturnTypes)              -> typefunc
-                     / simpletype
+    arrowrettypeoperand
+                    <- RARROW rettypeoperand^TypeReturnTypes
+
+    rettype         <- {| rettypeoperand arrowrettypeoperand* |}
+                                                               => fold_rettype_operands
+
+    type            <- {| typefirstoperand arrowrettypeoperand* |}
+                                                               => fold_type_operands
 
     recordfields    <- {| recordfield* |}                        -- produces {Decl}
 
@@ -1291,11 +1694,30 @@ local grammar = re.compile([[
                      / (P  LOCAL localdecllist^DeclLocal
                                  ((ASSIGN explist^ExpLocal)? -> listopt))
                                                                   -> StatDecl
-                     / (P  varlist ASSIGN^AssignAssign
-                               explist^ExpAssign)                    -> StatAssign
+                     / (P  assignmentorcall)                    -> finish_assignment_or_call
                      / &(exp ASSIGN) %{AssignNotLValue}
-	                     / (P  (suffixedexp => exp_is_call))         -> StatCall
 	                     / &exp %{ExpStat}
+
+    assignmentorcall
+                    <- {:statement_candidate: statementcandidate :}
+                       ((((%STATEMENT_CANDIDATE => statement_candidate_var)
+                           (statementassignmenttail / %{AssignAssign}))
+                                            -> statement_assignment_candidate)
+                        / (((%STATEMENT_CANDIDATE => statement_candidate_call)
+                             !(ASSIGN / expressioncontinuation))
+                                            -> statement_call_candidate))
+
+    statementcandidate
+                    <- (((P NAME) -> statement_name_prefix
+                         / (P LPAREN exp^ExpSimpleExp
+                               RPAREN^RParSimpleExp)
+                                             -> statement_parenthesized_prefix)
+                        {| expsuffix* |}) -> fold_statement_candidate
+
+    statementassignmenttail
+                    <- ({| (COMMA var^ExpVarList)* |}
+                         ASSIGN^AssignAssign explist^ExpAssign)
+                                            -> statement_assignment_tail
 
     deferstat       <- (P  DEFER (!DEFER / %{DeferDefer})
                               (!SEMICOLON / %{DeferStatement})
@@ -1349,11 +1771,30 @@ local grammar = re.compile([[
     op5             <- ( BXOR -> '~' )
     op6             <- ( BAND -> '&' )
     op7             <- ( SHL -> '<<' / SHR -> '>>' )
-    op8             <- ( CONCAT -> '..' )
+    op8             <- CONCAT
     op9             <- ( ADD -> '+' / SUB -> '-' )
     op10            <- ( MUL -> '*' / MOD -> '%%' / DIV -> '/' / IDIV -> '//' )
     unop            <- ( NOT -> 'not' / LEN -> '#' / NEG -> '-' / BNEG -> '~' )
     op12            <- ( POW -> '^' )
+
+    -- A captured call is not yet a complete statement when a syntactically
+    -- viable binary, cast, or type-test tail leads to an assignment. Let the
+    -- diagnostic fallback parse that full expression so `f() + x = y`
+    -- remains AssignNotLValue. The first lookahead is a bounded token check on
+    -- valid calls; only this invalid-assignment path runs the quiet tail probe.
+    expressionoperator
+                    <- op1 / op2 / op3 / op4 / op5 / op6 / op7
+                     / op8 / op9 / op10 / op12
+
+    expressioncontinuation
+                    <- &(expressionoperator / AS / IS)
+                       &((op12 e11)?
+                         (AS type / IS type)*
+                         (op10 e11)* (op9 e10)* (op8 e9)*
+                         (op7 e8)* (op6 e7)* (op5 e6)* (op4 e5)*
+                         (op3 e4)* (op2 e3)* (op1 e2)*
+                         !(expressionoperator / AS / IS)
+                         ASSIGN)
 
     exp             <- e1
     e1              <- (P  {| e2  (op1  e2^OpExp)* |})           -> fold_binop_left
@@ -1363,14 +1804,28 @@ local grammar = re.compile([[
     e5              <- (P  {| e6  (op5  e6^OpExp)* |})           -> fold_binop_left
     e6              <- (P  {| e7  (op6  e7^OpExp)* |})           -> fold_binop_left
     e7              <- (P  {| e8  (op7  e8^OpExp)* |})           -> fold_binop_left
-    e8              <- (P     e9  (op8  e8^OpExp)?)              -> binop_concat
+    e8              <- ({| P e9 (op8 P e9^OpExp)* |})
+                                               => fold_binop_concat_right
     e9              <- (P  {| e10 (op9  e10^OpExp)* |})          -> fold_binop_left
     e10             <- (P  {| e11 (op10 e11^OpExp)* |})          -> fold_binop_left
     e11             <- castexp
     unopexp         <- (P  {| unop* |}  e12)                     -> fold_unops
-    e12             <- (P  simpleexp (op12 e11^OpExp)?)          -> binop_right
+    -- Power is right-associative, but its right operand admits unary prefixes
+    -- and cast/type-test suffixes. Parse the whole operator chain once, then
+    -- fold from the right. Once `^` is consumed the labeled operand commits,
+    -- so a missing operand remains an `OpExp` error at the same boundary.
+    poweroperand    <- (P {| unop* |} P simpleexp)               -> power_operand
+    powertail       <- (op12 poweroperand^OpExp)                 -> power_tail
+    casttesttail    <- (AS type^CastMissingType)                 -> cast_type_tail
+                     / (IS type^IsMissingType)                   -> test_type_tail
+    e12             <- (P simpleexp
+                           ({| powertail+ |}
+                            {| casttesttail* |})?)               => fold_power
 
     suffixedexp     <- (prefixexp {| expsuffix+ |})              -> fold_suffixes
+
+    prefixorsuffixedexp
+                    <- (prefixexp {| expsuffix* |})              -> fold_suffixes
 
     -- Parentheses and bare strings are positional call suffixes. Bare braces
     -- are always named calls; passing one constructor positionally therefore
@@ -1380,7 +1835,8 @@ local grammar = re.compile([[
     -- ordinary comparison operator. Successful lists are deliberately parsed
     -- once in this noncommitting lookahead and once for their AST captures.
     genericcalltypeargprobe
-                    <- LT type (COMMA type)* GENERICGT
+                    <- %GENERIC_CALL_START
+                       LT type (COMMA type)* GENERICGT
 
     genericcalltypeargs
                     <- &(genericcalltypeargprobe
@@ -1426,9 +1882,9 @@ local grammar = re.compile([[
                                RPAREN^RParSimpleExp)             -> adjust_exp
 
 
-    castexp         <- (P  unopexp AS type^CastMissingType)      -> ExpCast
-                     / (P  unopexp IS type^IsMissingType)        -> ExpIs
-                     / unopexp                                   -- produces Exp
+    castexp         <- (P  unopexp
+                           {| casttesttail* |})
+                                               => finish_casts_and_tests
 
     simpleexp       <- (P  NIL)                                  -> nil_exp
                      / (P  FALSE -> tofalse)                     -> ExpBool
@@ -1440,13 +1896,10 @@ local grammar = re.compile([[
                      / (P  DOTS)                                 -> ExpDots
                      / initlist                                  -- produces Exp
                      / funcexp                                   -- produces Exp
-                     / suffixedexp                               -- produces Exp
-                     / prefixexp                                 -- produces Exp
+                     / prefixorsuffixedexp                       -- produces Exp
 
     var             <- (suffixedexp => exp_is_var)               -> exp2var
                      / (P  NAME !expsuffix)                      -> name_exp -> exp2var
-
-    varlist         <- {| var (COMMA var^ExpVarList)* |}            -- produces {Var}
 
     funcargs        <- (LPAREN (explist? -> listopt) RPAREN^RParFuncArgs)      -- produces {Exp}
                      / {| (P  STRINGLIT) -> ExpString |}         -- produces {Exp}
@@ -1618,11 +2071,22 @@ function parser.parse(filename, input)
     assert(type(filename) == "string")
     assert(THIS_FILENAME == nil)
 
+    local generic_call_candidates = collect_generic_call_candidates(input)
     THIS_FILENAME = filename
     PROGRAM_NODES = {}
-    local ast, err, errpos = grammar:match(input)
+    SOURCE_LOCATIONS = {}
+    GENERIC_CALL_CANDIDATES = generic_call_candidates
+    local ok, ast, err, errpos = pcall(function()
+        return grammar:match(input)
+    end)
+    GENERIC_CALL_CANDIDATES = nil
+    SOURCE_LOCATIONS = nil
     PROGRAM_NODES = nil
     THIS_FILENAME = nil
+
+    if not ok then
+        error(ast, 0)
+    end
 
     if ast then
         return ast
