@@ -2873,7 +2873,11 @@ describe("compiler module loader", function()
         local dep_filename = root .. "/dep-generated.titan"
         local main_filename = root .. "/main-generated.titan"
         local strategy = compiler_io.new_sync()
-        function strategy:yield() coroutine.yield() end
+        local yielded_modules = {}
+        function strategy:yield(module_name)
+            yielded_modules[#yielded_modules + 1] = module_name
+            coroutine.yield()
+        end
         local context = driver.new_resolver_context({ io = strategy })
         local loader = driver.defaultloader({}, {
             context = context,
@@ -2911,6 +2915,7 @@ describe("compiler module loader", function()
         assert.is_nil(yielded)
         assert.equal("suspended", coroutine.status(thread))
         assert.same({ "dep" }, context.checked_source_modules)
+        assert.same({ "dep" }, yielded_modules)
         assert.is_table(driver.imported.dep.ast)
         assert.equal("Ast.TopLevelFunc", driver.imported.dep.ast[1]._tag)
         assert.equal(dep_filename,
@@ -2921,6 +2926,7 @@ describe("compiler module loader", function()
         assert.truthy(resumed, yielded)
         assert.is_nil(yielded)
         assert.same({ "dep", "main" }, context.checked_source_modules)
+        assert.same({ "dep", "main" }, yielded_modules)
         assert.is_table(driver.imported.main.ast)
 
         local ok, modtype, errors

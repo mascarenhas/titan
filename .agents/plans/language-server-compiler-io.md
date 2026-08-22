@@ -53,6 +53,12 @@ within that version. API 3 guarantees that every I/O operation reachable from
 language-server analysis, external resolution, or C-header restatting is routed
 through the supplied strategy.
 
+The same unreleased API also retains each checked generic syntax argument on
+its private `_resolved_typearg` edge. Generic lowering preserves that exact
+descriptor for source tooling while coder boundary validation skips it, so the
+language server can render specialized hover summaries without reconstructing
+checker semantics from erased surface syntax.
+
 An adversarial hard-link regression later proved that the existing async
 `fs.Stat` record discarded physical identity which LuaFileSystem had supplied
 to synchronous compiler callers. The approved minimal standard-library change
@@ -73,8 +79,9 @@ contract without blocking or spawning helper processes.
   public analysis helpers. Preserve omitted-option behavior for existing
   callers.
 - Replace the special `after_source_check` callback with
-  `context.io:yield()` after a source module is fully published and its
-  dependency frame is popped.
+  `context.io:yield(module_name)` after a source module is fully published and
+  its dependency frame is popped. The synchronous strategy ignores the module
+  name; async clients can use it for bounded progress reporting.
 
 ### 2. Route compiler analysis I/O
 

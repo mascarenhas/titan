@@ -46,10 +46,12 @@ local function assert_runtime_ast_erased(root)
     local seen = {}
     local source_backreference = {
         _decl = true,
+        _declared_method = true,
         _declared_type = true,
         _generic_scheme = true,
         _generic_declaration = true,
         _generic_owner = true,
+        _resolved_typearg = true,
     }
     local function visit(value, path)
         if type(value) ~= "table" or seen[value] then return nil end
