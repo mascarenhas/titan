@@ -236,9 +236,12 @@ Verification completed:
 - focused parser suite: 206/206;
 - full isolated `make test`: Busted 124/124, all four compiler shards, and
   native aggregate 197/197;
-- CI-equivalent LuaCov shards: all four passed; parser file 99.06%, executable
-  patch additions 99.64% (276/277), with the sole missed addition an
+- CI-equivalent LuaCov shards: all four passed; parser file 99.06%, expected
+  Codecov executable patch 99.64% (275/276), with the sole missed addition an
   unreachable defensive return behind a positive long-bracket guard;
+- `parser_spec.lua` runs as an isolated coverage process: LuaCov retains only
+  the last loaded prototype's line table inside a shared Busted process, which
+  otherwise discards its direct parser hits when later specs reload the module;
 - vscode-titan native server suite with the combined compiler: 156/156;
 - standalone LSP transcript and Codex native adapter smoke tests: passed;
 - exact differential checks: 38,461 concat/power cases, 7,605 cast/test/power

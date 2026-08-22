@@ -84,6 +84,7 @@ while IFS= read -r test_file; do
             category=unit
             ;;
         spec/cprobe_spec.lua | \
+        spec/parser_spec.lua | \
         spec/sha256_spec.lua | \
         spec/union_interface_spec.lua | \
         spec/checker/static_compiled_modules_spec.lua | \
