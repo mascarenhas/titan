@@ -90,9 +90,7 @@ local long_bracket_open = lpeg.P("[") * lpeg.P("=")^0 * lpeg.P("[")
 local safe_long_bracket = lpeg.Cmt(
     #long_bracket_open * lpeg.P("[") * lpeg.Cp(),
     function(source, _, start)
-        local finish = long_bracket_end(source, start - 1)
-        if finish then return finish end
-        return false
+        return long_bracket_end(source, start - 1)
     end)
 local escaped_string_byte = lpeg.P("\\") *
     (lpeg.P("z") * lpeg.S(" \t\n\v\f\r")^0 +

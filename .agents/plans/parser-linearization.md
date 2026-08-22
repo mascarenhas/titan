@@ -236,9 +236,10 @@ Verification completed:
 - focused parser suite: 206/206;
 - full isolated `make test`: Busted 124/124, all four compiler shards, and
   native aggregate 197/197;
-- CI-equivalent LuaCov shards: all four passed; parser file 99.06%, expected
-  Codecov executable patch 99.64% (275/276), with the sole missed addition an
-  unreachable defensive return behind a positive long-bracket guard;
+- CI-equivalent LuaCov shards: all four passed and parser file coverage exceeds
+  99%; the long-bracket match-time capture directly returns its total scanner
+  result, removing the sole unreachable changed branch so every executable
+  patch line is covered;
 - `parser_spec.lua` runs as an isolated coverage process: LuaCov retains only
   the last loaded prototype's line table inside a shared Busted process, which
   otherwise discards its direct parser hits when later specs reload the module;
