@@ -268,7 +268,7 @@ describe("Titan types", function()
         assert.falsy(types.equals(base, fn({i}, {i}, false, i)))
     end)
 
-    it("keeps the ABI-0.26 Function vararg slot reserved false", function()
+    it("keeps the compiled Function vararg slot reserved false", function()
         local valid = types.Function(
             { types.Integer() }, { types.Integer() }, false, false, false)
         local malformed = types.Function(

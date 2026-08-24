@@ -1,6 +1,6 @@
 # FFI wrapup
 
-Status: complete design for the ABI-0.23 implementation on
+Status: complete design for the FFI ABI-boundary implementation on
 `feature/ffi-wrapup`. This closes the roadmap item formerly called “FFI with C,
 continued”. Adopted pointers are not part of the design or the roadmap.
 
@@ -114,7 +114,7 @@ C API contract. Titan installs no `setjmp`, roots, cleanup, or recovery frame.
 
 ### C names and entry families
 
-ABI 0.23 gives every callable family explicit structural boundaries. The
+This ABI boundary gives every callable family explicit structural boundaries. The
 C99 UCN `_\u2133_` (SCRIPT CAPITAL M) separates a flattened module from the
 remaining signature, and `_\u2131_` (SCRIPT CAPITAL F) separates a record,
 union, or Interface owner from its member or synthetic metamethod role. Neither
@@ -337,9 +337,9 @@ mode separately installs libuv headers). The standard provider's native payload
 is `ltitanlib.o`, private LPegLabel, the selected libuv payload, private llhttp,
 and the selected OpenSSL payload; there is no HTTP adapter object.
 
-## ABI 0.23 boundary
+## ABI boundary
 
-The complete change advances the compiled-module ABI from 0.22 to 0.23. The
+The complete change advances the compiled-module ABI. The
 source syntax and local C types are not serialized, but two native contracts do
 change:
 
@@ -349,11 +349,10 @@ change:
    signature and `_\u2131_` between a nominal owner and its static,
    constructor, variant, method, bound, or metamethod role.
 
-An ABI-0.22 object or provider must therefore not be paired with the ABI-0.23
-runtime or generated objects. `TITAN_VER`, `_0_23`, `TITAN_PATH_0_23`,
-`lib/titan/0.23`, `share/titan/0.23`, and `stdlib_0_23` advance together.
-Versioned 0.22 state is preserved, never migrated, cleaned, or treated as an
-active-layout predecessor.
+Objects and providers built on opposite sides of the boundary must not be
+paired. Advance the ABI marker, generated metadata, and ABI-sensitive cache
+namespace coherently while keeping the semantic release and library layout
+independently versioned, without compatibility aliases or migration.
 
 The generated foreign header and source collaboration view do not add metadata
 keys or module-state slots. The standard provider still has eighteen logical

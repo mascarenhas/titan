@@ -30,7 +30,7 @@
 > follow-on feature added anonymous function expressions that capture
 > enclosing locals, plus bound instance-method references `obj:method`. The
 > extra native-ABI `_fn` parameter that closures need is a hard `.so` ABI
-> break, so `TITAN_VER` was bumped 0.5 → 0.6. See
+> break, so the compiled-module ABI was bumped. See
 > [anonymous functions and closures](language/closures.md) for the language
 > feature and [the code generator overview](implementation/codegen-overview.md#closures-and-captured-variables)
 > for the implementation.

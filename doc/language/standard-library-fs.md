@@ -224,15 +224,10 @@ invalid path components, and every other error still raise
 `async.OperationError`. A dangling symbolic link therefore returns `nil` from
 `stat`, while `lstat` returns the link's own `Stat` value.
 
-These optional results are part of the ABI-0.25 boundary. ABI 0.24 declared
-both functions with an exact `Stat` result; changing them to `Stat?` changes the
-serialized public `titan.fs` interface and each exact native result signature.
-An ABI-0.24 provider remains preserved prior-version state and is rejected
-rather than migrated or adapted.
-
-The active, unreleased ABI-0.26 boundary adds `device` and `inode` to the
-serialized public `Stat` record. Existing 0.26 provider metadata is rebuilt in
-place during development; no additional ABI marker is introduced.
+The optional results, including their serialized public `titan.fs` interface
+and exact native result signatures, are part of ABI 2. The same ABI includes
+`device` and `inode` in the serialized public `Stat` record. A mismatched
+provider is rejected rather than migrated or adapted.
 
 `realpath(path)` resolves symbolic links plus `.` and `..` components and
 returns the canonical absolute path. The complete path must exist. It rejects

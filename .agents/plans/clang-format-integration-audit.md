@@ -278,7 +278,7 @@ Remove/update live references in:
 
 - `titan-compiler/driver.lua` (`require` and all four calls);
 - `titan-compiler/coder.lua`'s comments about `reindent_c`;
-- `titan-dev-1.rockspec`'s explicit compiler-module list;
+- the active rockspec's explicit compiler-module list;
 - `AGENTS.md` pipeline, coder/driver heading, style contract, prerequisites,
   and stdlib configuration-stamp description;
 - `doc/implementation/codegen-overview.md`;

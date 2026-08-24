@@ -2,7 +2,7 @@
 -- the imports shared by its topical contributors.
 local test = import "test"
 local pattern = import "peg"
-local gc = import "titan.gc"
+local gc = import "gc"
 local support = import "peg.test_support.titan"
 local ffi = foreign import "titan/ffi.h"
 local clocale = foreign import "locale.h"

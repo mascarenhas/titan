@@ -1,11 +1,10 @@
 # Mathematical standard library
 
 The `math` standard module provides typed numeric functions, Lua 5.5's
-xoshiro256** pseudo-random generator, and numeric-string conversion. It is one
-of the qualified-only standard modules:
+xoshiro256** pseudo-random generator, and numeric-string conversion:
 
 ```titan
-local math = import "titan.math"
+local math = import "math"
 ```
 
 Lua loads the same module with `require "titan.math"`. Loading it does not
@@ -126,7 +125,7 @@ the C wall and process-CPU clocks plus the preceding generator state. This is
 not a cryptographic random-number generator. Supplying a second component
 without a first raises.
 
-Each loaded `titan.math` module has independent state. As with every Titan
+Each loaded `math` module has independent state. As with every Titan
 module variable, separate Lua states do not share it.
 
 ## Numeric conversion

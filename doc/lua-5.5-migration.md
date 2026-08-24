@@ -1,7 +1,7 @@
 # Titan's migration from Lua 5.3 to Lua 5.5
 
 > This is the historical Lua 5.3.5-to-5.5.0 migration report. For the current
-> Lua 5.5.1 and Titan ABI 0.21 follow-up, see the
+> Lua 5.5.1 and Titan ABI follow-up, see the
 > [Lua 5.5.1 Update Audit](implementation/lua-5.5.1-update.md).
 
 This document explains every change made to migrate Titan from targeting
@@ -97,7 +97,7 @@ All templates that touch the Lua stack were rewritten for
 ### Table access
 
 The Array bullets in this subsection record the original 5.5 port and are
-historical. ABI 0.17 later replaced the plain-table Array policy described
+historical. The current Array contract replaced the plain-table policy described
 here; Map details remain current.
 
 * **Array reads** (`codeindexarray`) use 5.5's `luaH_fastgeti` macro into
@@ -125,9 +125,9 @@ here; Map details remain current.
   `lua_State*` parameter).
 * `luaV_tointeger(..., 0)` became `luaV_tointeger(..., F2Ieq)`.
 
-### ABI 0.17 dense Arrays use stock `lenhint`
+### Dense Arrays use stock `lenhint`
 
-ABI 0.17 does **not** patch Lua. Titan still builds pinned, otherwise stock
+The dense-Array contract does **not** patch Lua. Titan still builds pinned, otherwise stock
 Lua 5.5.0 and uses its installed internal headers and archive. A Titan Array's
 private ordinary `Table` uses the stock `lenhint(t)` word beside the array
 allocation as authoritative highest-present-positive length. Generated
@@ -161,13 +161,13 @@ in [Dense Arrays](implementation/dense-arrays.md#authoritative-lenhint-and-resiz
 
 ### Records
 
-> **Superseded (0.7 ABI).** The CClosure+Udata dual object described below
+> **Superseded.** The CClosure+Udata dual object described below
 > was the 5.5-migration-era representation. Records (and module state
 > `_mod`) have since been collapsed to a **single Lua 5.5 `Udata`**: a
 > record value *is* its userdata (fields in `uv[0..N-1]`, type identity in
 > the udata's metatable, metatable on the udata), there is no backing
 > closure, and field stores use the **back** barrier (`luaC_barrierback`)
-> instead of the forward barrier. (As of the 0.8 ABI the record type
+> instead of the forward barrier. (The current record type
 > identity is the metatable pointer — there is no raw tag payload in
 > `getudatamem` at all.) See the
 > [records/modules single-Udata plan](../.agents/plans/records-modules-udata-simplification.md)
@@ -204,7 +204,7 @@ barriers the old code skipped:
   all existing table barriers also gained the `obj2gco` wrapper required
   by 5.5's `GCObject*`-typed `luaC_barrierback_`.
 
-(Superseded in part by the 0.7 ABI: once records and `_mod` became
+(Superseded in part when records and `_mod` became
 `Udata`, all of those record-field and module-slot stores flipped from
 the forward barrier to the **back** barrier — a userdata's traversal
 calls `genlink`, so the back barrier is the correct one. Only
@@ -224,7 +224,7 @@ function-value/closure upvalue stores still take the forward barrier.)
 * `spec/coder_spec.lua`: the `call()` helper runs the in-tree
   `./lua`; two regression specs were added (large array
   indices, float-to-string format — see below).
-* `titan-dev-1.rockspec`: `lua ~> 5.3` → `lua ~> 5.5`.
+* The then-active rockspec: `lua ~> 5.3` → `lua ~> 5.5`.
 * CI (`.github/workflows/ci.yml`): provisions Lua 5.5 via hererocks
   installed **from git master** — the PyPI hererocks release (0.25.1)
   does not know Lua 5.5 and would fail before running any test.
@@ -242,7 +242,7 @@ codegen, host code/packaging), with every claim adversarially verified
 against the real Lua sources — several with live reproductions — before
 being accepted. Confirmed findings, all fixed in that migration baseline.
 The old large-index hash fallback and plain-table constructor behavior
-described below were intentionally superseded by ABI 0.17's positive-only,
+described below were intentionally superseded by the positive-only,
 array-part-only protocol:
 
 1. **`errorhandler` crash** (critical, found while running the suite).

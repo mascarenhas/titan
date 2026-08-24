@@ -1,6 +1,6 @@
 # Const-value implementation
 
-ABI 0.26 adds const bindings, const record and Interface fields, and
+ABI 2 adds const bindings, const record and Interface fields, and
 const-qualified Arrays across the parser, semantic descriptors, checker,
 generated C, Lua boundary, and compiled-module metadata. The language contract
 is [Const values](../language/const-values.md). This chapter records the
@@ -49,7 +49,7 @@ checks.
 
 ## Semantic descriptors and serialization
 
-The ABI-0.26 constructors require their new axes rather than defaulting absent
+The ABI-2 constructors require their new axes rather than defaulting absent
 metadata to mutable:
 
 ```lua
@@ -73,10 +73,9 @@ qualifier, sparse or keyed input, duplicate or cross-kind member names,
 incorrect owners or indices, and descriptors placed outside their allowed
 owner graph.
 
-The driver checks the provider ABI before evaluating serialized types. ABI
-0.25 metadata is therefore rejected before a constructor with the old arity
-can be interpreted as ABI 0.26 state. DSO and embedded archive metadata use the
-same validation path.
+The driver checks the provider ABI before evaluating serialized types, so
+mismatched metadata is rejected before a descriptor can be interpreted as ABI
+2 state. DSO and embedded archive metadata use the same validation path.
 
 ## Checker rules for declarations
 
@@ -269,11 +268,11 @@ The new edges use stock Lua reachability:
   allocation or Lua call.
 
 Forced full and generational collections are required around shallow Array
-copy/freeze and adjusted Interface snapshot construction. The ABI-0.26 gate
+copy/freeze and adjusted Interface snapshot construction. The ABI-2 gate
 covers required descriptor booleans, Interface member/schema changes, wrapper
 user-value counts, the two-slot Array-metatable cache, and the second runtime
-tag. Providers from ABI 0.25 are rejected before metadata decoding or native
-value exchange; separately versioned installations are preserved.
+tag. Mismatched providers are rejected before metadata decoding or native
+value exchange; earlier installations are not migration sources.
 
 ## Focused evidence
 

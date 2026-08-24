@@ -11,7 +11,7 @@ local _ENV = core
 -- old generation until the next major GC. A box never crosses a module boundary
 -- (it backs a captured local inside one module's closures, and only that module
 -- generates the code that touches it), so this representation is module-internal
--- and does not affect the cross-module ABI (no TITAN_VER bump).
+-- and does not affect the cross-module ABI (no TITAN_ABI_VERSION bump).
 --
 -- Two representations, chosen by `is_rawbox` (= `not types.is_gc(typ)`):
 --   (N) any non-gc type (integer/float/boolean/Nil/ordinary foreign

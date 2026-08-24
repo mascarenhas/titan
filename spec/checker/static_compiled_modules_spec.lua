@@ -129,10 +129,10 @@ describe("static compiled-module checker provenance", function()
         for name, modtype in pairs(module_types) do
             local serialized = types.serialize(modtype)
             local payload = assert(staticmetadata.render(
-                name, driver.TITAN_VER, serialized))
+                name, driver.TITAN_ABI_VERSION, serialized))
             local entry = assert(staticmetadata.validate(
                 payload, filename .. ":" .. name, {
-                    expected_abi = driver.TITAN_VER,
+                    expected_abi = driver.TITAN_ABI_VERSION,
                     validate_types = function(entry_name, entry_types, origin)
                         return driver.decode_module_interface(
                             entry_types, entry_name, origin)
@@ -528,7 +528,7 @@ end
             assert.equal(dynamic, filename)
             local prefix = symbol:match("^(.*)_abi$")
             if prefix and protocols[prefix] then
-                return function() return driver.TITAN_VER end
+                return function() return driver.TITAN_ABI_VERSION end
             end
             prefix = symbol:match("^(.*)_types$")
             if prefix and protocols[prefix] then
@@ -579,7 +579,7 @@ end
         titan._loadlib = function(filename, symbol)
             assert.equal(dynamic, filename)
             if symbol == "dyn_facade_abi" then
-                return function() return driver.TITAN_VER end
+                return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "dyn_facade_types" then
                 return function() return facade_types end
             end
@@ -645,7 +645,7 @@ end
         titan._loadlib = function(filename, symbol)
             assert.equal(owner_dso, filename)
             if symbol == "identity_owner_abi" then
-                return function() return driver.TITAN_VER end
+                return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "identity_owner_types" then
                 return function() return serialized_owner end
             end
@@ -915,7 +915,7 @@ end
             if serialized then return function() return serialized end end
             local prefix = symbol:match("^(.*)_abi$")
             if prefix and image[prefix .. "_types"] then
-                return function() return driver.TITAN_VER end
+                return function() return driver.TITAN_ABI_VERSION end
             end
             return nil, "undefined symbol: " .. symbol, "init"
         end

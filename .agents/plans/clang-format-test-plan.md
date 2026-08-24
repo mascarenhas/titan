@@ -157,7 +157,7 @@ export PREFIX=/tmp/titan-$USER-clang-format
 export PATH="$PREFIX/bin:$PATH"
 make lua
 make luarocks
-"$PREFIX/bin/luarocks" make titan-dev-1.rockspec
+"$PREFIX/bin/luarocks" make
 
 "$PREFIX/bin/busted" spec/driver_spec.lua --filter='generated C formatting'
 "$PREFIX/bin/busted" spec/coder/driver_flags_spec.lua

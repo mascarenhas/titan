@@ -2,8 +2,7 @@
 
 Static compiled modules extend the compiled-module loader and native-output
 pipeline without giving archives a different logical interface or native
-calling convention from DSOs. The static-provider feature shipped within ABI
-0.16; current artifacts carry ABI 0.26. One checked interface can now come
+calling convention from DSOs. Current artifacts carry ABI 2. One checked interface can come
 from a DSO's callable metadata or from a canonical section embedded in an
 archive member.
 
@@ -68,7 +67,7 @@ feed the callable `_types` entry and:
 -- Titan archive module metadata v1
 return {
     ["pkg.left"] = {
-        abi = "0.26",
+        abi = "2",
         types = "Module('pkg.left', ...)",
     },
 }
@@ -350,50 +349,17 @@ removal. Titan never scans a directory and never removes an unrecognized Lua
 file.
 
 The canonical standard installation places `titan.so` and `titan.a` together
-under `lib/titan/0.26`. Post-install recognizes bootstrap-only and complete-pair
-predecessor states within that active namespace. Separately versioned 0.17
-through 0.25 installations are preserved, not migrated, cleaned up, or treated
-as active-layout predecessors.
+under `lib/titan/0.6`. Post-install recognizes bootstrap-only and complete-pair
+states within that active library namespace. Earlier Titan installations are
+not migrated, cleaned up, or treated as active-layout predecessors.
 
-ABI 0.17 keeps the serialized `Array(...)` text and exact `Table *` /
-`Table **` native shapes but changes the represented Array protocol, so
-embedded and callable metadata must reject 0.16 providers before linking them.
-See [Dense Arrays](dense-arrays.md#abi-017-020-021-022-023-024-and-025-boundaries).
-
-ABI 0.18 preserved that Array protocol but changed the standard-library static
-runtime contract. Its logical archive objects directly reference promoted
-libuv callback trampolines and no longer reference the replaced
-libuv/coroutine helpers. Static validation must therefore reject a 0.17
-provider before native linking; a 0.18 provider and runtime had to be
-distributed together.
-
-ABI 0.19 kept the metadata section/container format, but its serialized
-payload language gained `Union` and `Variant`, and its module-state contract
-gained the public nominal-static slot prefix. Its marker was checked before
-either schema decoding or native linking.
-
-ABI 0.20 left the static metadata section/container format unchanged but
-changed the native runtime representation of Arrays and first-class Titan
-functions. ABI 0.21 again retained the container while advancing the embedded
-Lua contract to 5.5.1. ABI 0.22 retains that container and Lua contract while
-changing `titan.uv`'s serialized public schema and reconstructible module-state
-prefix and adding the fixed physical-provider identity slot to every generated
-module. The marker is checked before schema decoding or native linking, so
-neither a 0.19 archive can be misinterpreted as a two-user-value Array or a
-strict-entry-bearing function closure, a 0.20 archive linked against the Lua
-5.5.1 runtime, nor a 0.21 archive with the old `titan.uv` schema can cross the
-boundary. ABI 0.23 still uses the same metadata container and retains the 0.22
-public schema/layout, but separates module, nominal owner, and member in generated
-callable names and moves the standard callback definitions out of retired
-runtime/adapter objects. A 0.22
-archive is rejected before those incompatible symbols can reach the link. ABI
-0.24 extends the serialized interface payload for generic declarations without
-changing the metadata container. ABI 0.25 changes the serialized public
-standard-module signatures for `titan.fs.stat`/`lstat` and
-`titan.async.suspend`, again without changing the container; a 0.24 archive is
-rejected before decoding. ABI 0.26 retains the container while changing
-serialized const/member state, Interface wrapper slots, and qualified Array
-runtime state; a 0.25 archive is rejected before decoding or linking.
+The embedded metadata container is independent of the compiled-module ABI,
+but every entry carries ABI `2`. Static validation checks it before schema
+decoding or native linking. This protects the current Array and function
+representations, union and Interface schemas, generic declarations,
+source-private provider identity, callable symbol hierarchy, callback
+ownership, const/member state, wrapper slots, and qualified Array runtime
+state. See [Dense Arrays](dense-arrays.md#abi-boundary).
 
 Bundled libuv enters as shared `-X` provider payload and is present in both
 native forms. System libuv remains a repeated final-link setting and never

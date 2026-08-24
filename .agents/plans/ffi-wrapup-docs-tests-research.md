@@ -16,12 +16,12 @@ Status: research only. This does not change the draft plan or implementation.
    be retired.
 3. The new syntax and local C types do **not**, by themselves, change serialized
    Titan module interfaces or the Titan native calling convention. The full
-   draft nevertheless **does require an ABI bump (0.22 -> 0.23) if the current
-   runtime callbacks are removed as specified**. ABI 0.18 established the exact
+   draft nevertheless **does require an ABI bump if the current runtime
+   callbacks are removed as specified**. The prior callback ABI established the exact
    precedent: old `titan.a` logical objects have undefined references to
    `titan_coro_entry`/`titan_uvshim_*` supplied by the unversioned runtime SDK
-   archive. Removing those definitions makes an old-0.22-provider/new-runtime
-   static pairing fail even though its public type metadata still says 0.22.
+   archive. Removing those definitions makes a pre-boundary provider/runtime
+   static pairing fail even though its public type metadata is unchanged.
    Keeping compatibility objects would contradict the draft and Titan's
    clean-break prototype policy.
 4. A generated module header is a source-build artifact, not another provider
@@ -82,9 +82,11 @@ than coexist with:
   Darwin dSYM. Standard installation additionally owns the canonical
   `titan/test.titan` compiler source. It does not publish source-adjacent C/O
   intermediates.
-* Installed `libtitan.a` currently has exactly `titan.o`, `titan_coro.o`, and
-  `titan_uv.o`; the SDK currently installs `titan/{ffi,coro,uv}.h`; and the
-  standard `-X` payload currently includes `titan_httpshim.o` before llhttp.
+* At this research baseline, installed
+  `lib/titan/<library-version>/libtitan.a` has exactly `titan.o`,
+  `titan_coro.o`, and `titan_uv.o`; the SDK installs
+  `titan/{ffi,coro,uv}.h`; and the standard `-X` payload includes
+  `titan_httpshim.o` before llhttp.
 * Standard-library behavior is native Titan under `spec/stdlib/titan/` and is
   intentionally outside LuaCov. Compiler/checker/coder behavior belongs in
   root, `spec/checker/`, and `spec/coder/` respectively.
@@ -167,11 +169,11 @@ than coexist with:
   folder main owns it; contributors own none.
 * [ ] `doc/language/multi-module-libraries.md` and
   `doc/language/static-compiled-modules.md` state that generated source headers
-  are not provider-bundle members or metadata. Add the 0.23 compatibility
-  rationale while retaining 0.18 as history.
+  are not provider-bundle members or metadata. Add the feature-based
+  compatibility rationale.
 * [ ] Sweep current-version prose in the quick tour, Lua interop, philosophy,
-  Arrays, Interfaces, functions, and other active manuals from 0.22 to 0.23;
-  preserve historical statements as history rather than rewriting their facts.
+  Arrays, Interfaces, functions, and other active manuals for stale ABI and
+  library-path claims.
 
 ### Implementation manual edits
 
@@ -216,7 +218,7 @@ than coexist with:
   `static-compiled-modules.md` keep publication validation limited to logical
   protocols/provider forms and explain that private foreign symbols may be
   physical object members without metadata keys. Update standard payload order
-  and ABI 0.23.
+  and the ABI boundary.
 * [ ] Rewrite current shim descriptions in
   `doc/implementation/{coroutines,libuv-runtime,libuv-extension-guide,
   libuv-networking,http-library}.md` and `doc/async-with-coroutines.md` to point
@@ -228,7 +230,7 @@ than coexist with:
   support, automatic storage, and the chosen macro boundary.
 * [ ] Update `AGENTS.md` after implementation: prerequisites/SDK inventory,
   runtime archive members, standard `-X` payload, source callback ownership,
-  generated header/cleanup rules, ABI 0.23 paths, sanitizer snapshot inputs, and
+  generated header/cleanup rules, active library paths, sanitizer snapshot inputs, and
   spec placement. Do not edit historical draft plans or the worklog merely to
   make old prose look current.
 
@@ -293,20 +295,21 @@ machinery:
 
 ### Decision
 
-**Bump to ABI 0.23 for the full plan as written.** The reason is the native
+**Advance the ABI for the full plan as written.** The reason is the native
 runtime/static-provider contract, not the presence of a new keyword or header:
 
 * foreign functions, C function-pointer aliases, FAM owners, and automatic C
   storage are local C types and remain rejected from serialized interfaces;
 * generated headers are compiler-only source collaboration artifacts;
-* but current 0.22 standard archive objects directly reference callbacks from
+* pre-boundary standard archive objects directly reference callbacks from
   `titan_coro.o`/`titan_uv.o`, while `libtitan.a` is deliberately not flattened
   into a generated provider archive;
 * replacing those callbacks with functions defined in new generated logical
   objects and removing the runtime objects leaves an old `titan.a` unable to
-  link against the new unversioned `libtitan.a`;
+  link against the runtime SDK archive at
+  `lib/titan/<library-version>/libtitan.a`;
 * the language and implementation manuals explicitly record this exact class of
-  static provider/runtime mismatch as the reason ABI 0.18 existed.
+  static provider/runtime mismatch as the reason the earlier boundary existed.
 
 If the callback symbols and compatible runtime objects were retained, the
 language pieces alone would not justify a bump. That is not the full draft, and
@@ -314,24 +317,20 @@ retaining them only as compatibility shims would be an unnecessary epicycle.
 The HTTP adapter removal alone is internal to the standard provider payload and
 would not force the bump; the runtime archive boundary does.
 
-### Coordinated 0.23 work
+### Coordinated ABI work
 
-* [ ] Advance `driver.TITAN_VER`, `TITAN_VER_SUFFIX`, `titan.h`, Make's active
-  ABI, `TITAN_PATH_0_23`, `lib/titan/0.23`, `share/titan/0.23`,
-  `stdlib_0_23`, CI cache/env/path checks, smoke/snapshot helpers, and all active
-  standard-install paths together.
-* [ ] Add the 0.22 -> 0.23 rationale to `titan.h` and compatibility manuals:
+* [ ] Advance `driver.TITAN_ABI_VERSION`, the matching `titan.h` macro, Make's
+  active ABI, generated metadata, ABI-keyed caches, CI checks, and smoke helpers
+  together. Keep release and library-search paths governed by their own
+  version constants.
+* [ ] Add the ABI rationale to `titan.h` and compatibility manuals:
   generated standard objects now own foreign callback definitions and the
   former runtime callback symbols/members are absent.
-* [ ] Change `spec/abi_spec.lua` to reject a 0.22 DSO/archive before metadata
-  decoding or native linking, and to ignore `TITAN_PATH_0_22` when 0.23 is
-  active.
-* [ ] Preserve a separately installed 0.22 tree. Do not migrate it, remove it,
-  synthesize child copies, or teach the 0.23 publisher to treat a 0.22 pair as
-  an active-layout predecessor.
-* [ ] Update active standard-installer predecessor rules for a clean 0.23
-  namespace. Do not carry historical same-namespace predecessor machinery
-  unless a real 0.23 predecessor exists.
+* [ ] Change `spec/abi_spec.lua` to reject a pre-boundary DSO/archive before
+  metadata decoding or native linking.
+* [ ] Do not migrate, remove, or synthesize compatibility child copies.
+* [ ] Keep active standard-installer predecessor rules limited to bootstrap and
+  valid active-layout states.
 * [ ] Update type-schema fixtures only for actual public standard-interface
   changes. Foreign locals themselves must not appear in the eighteen logical
   public schemas.
@@ -501,7 +500,7 @@ claim the feature from one Lua-internal example.
 
 ### Layer 5: ABI, build, packaging, and installed SDK
 
-* `spec/abi_spec.lua`: coordinated 0.23 constants and early 0.22 rejection.
+* `spec/abi_spec.lua`: coordinated ABI constants and early mismatch rejection.
 * `spec/driver_spec.lua`: exact final runtime archive members and normal links
   through the whole archive.
 * `spec/libuv_build_spec.lua`: no C callback/HTTP adapter sources or objects;
@@ -511,7 +510,7 @@ claim the feature from one Lua-internal example.
   longer contains `titan_httpshim.{c,h}`, no generated local headers installed,
   and both bundled/system installs work outside the checkout.
 * `spec/stdlib_installer_spec.lua`, static/multi-module specs, and support scripts:
-  active 0.23 paths, preserved 0.22 tree, unchanged eighteen-key logical
+  active library paths, unchanged eighteen-key logical
   provider, paired rollback/equivalence, and archive-backed validation.
 
 Because Busted loads the installed compiler snapshot, reinstall the edited

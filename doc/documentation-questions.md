@@ -87,7 +87,7 @@ language (normative, implementation-independent) or as documentation of
 this prototype?
 
 **Assumption:** Reference-style prose with examples, normative where the
-design is settled, but explicitly tied to the 0.5 prototype — it
+design is settled, but explicitly tied to the current prototype — it
 documents what this compiler does, flagging places where the prototype
 diverges from evident design intent.
 

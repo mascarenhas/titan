@@ -685,8 +685,8 @@ entry itself roots the closure and its emitting-module upvalue.
 
 ## Four shared-library loading paths
 
-The current 0.26 layout retains the four deliberately separate paths
-established by 0.20. They share the ordinary
+The current provider layout has four deliberately separate loading paths. They
+share the ordinary
 per-logical-module symbols but differ in selection, flags, cache, and whether
 module initialization runs.
 
@@ -724,8 +724,8 @@ Udata* (*some_dep_init)(lua_State *L) =
         loadsym(L, some_dep_handle, "some_dep_init"));
 ```
 
-`loadlib` consults `TITAN_LIBS_KEY`, then walks `TITAN_PATH_0_26`,
-`TITAN_PATH`, or `".;<root>/lib/titan/0.26"`, with `;;` splicing the
+`loadlib` consults `TITAN_LIBS_KEY`, then walks `TITAN_PATH_0_6`,
+`TITAN_PATH`, or `".;<root>/lib/titan/0.6"`, with `;;` splicing the
 ordinary default. It maps `dir/file` with `RTLD_LAZY | RTLD_GLOBAL`, caches
 the handle by relative provider for the state, invalidates native backtrace
 state, and never calls `dlclose`. Two logical modules in one image reuse the
@@ -763,7 +763,7 @@ eager load. A second Lua state repeats its own cache insertion and promotion
 request while the operating-system loader may reuse the mapped image.
 
 The installed standard layout has paired providers at
-`<root>/lib/titan/0.26/{titan.so,titan.a}` and eighteen generated shims below
+`<root>/lib/titan/0.6/{titan.so,titan.a}` and eighteen generated shims below
 `<root>/share/lua/5.5/titan/`; the shims use the DSO form. A direct-libuv
 extension explicitly imports
 `uv` and foreign-imports `uv.h`; Titan runtime initialization loads the
@@ -856,9 +856,10 @@ When exactly one requested module defines `main(args: {string}):
 integer`, `driver.compile_program` emits a srlua-derived C entrypoint
 (`entrypoint_template` in `driver.lua`) and links it with all source module
 objects, selected static providers, caller `-X` inputs, and the active runtime
-SDK. Installed mode uses `libtitan.a`, the separate `libbacktrace.a`, and the
-matching `liblua.a` from the Titan SDK/rocks-tree root; checkout mode uses the
-same archive contract with local `libtitan.a`, separate local
+SDK. Installed mode uses `lib/titan/0.6/libtitan.a`, the separate
+`lib/libbacktrace.a`, and the matching `lib/liblua.a` from the Titan
+SDK/rocks-tree root; checkout mode uses the same archive contract with local
+`libtitan.a`, separate local
 `libbacktrace.a`, and local `liblua.a`. Generic links do not receive libuv
 merely from the SDK, but selecting bundled standard `titan.a` carries its
 private libuv payload into an executable. The combined standard build receives
@@ -871,7 +872,7 @@ bundled-mode extension DSOs leave their `uv_*` calls unresolved:
   state and runs `luaL_openlibs`. `titan_init_paths` then parses the inherited
   `package.cpath` for the first `/lib/lua/5.5/?.so` entry, initializes the
   Titan module-path default from that root, and ensures
-  `<root>/lib/titan/0.26/?.so` is present in `package.cpath`. The
+  `<root>/lib/titan/0.6/?.so` is present in `package.cpath`. The
   prefix-configured Titan-owned Lua already places that template before its
   `lib/lua` entries. It then
   registers the module's `luaopen_` function in

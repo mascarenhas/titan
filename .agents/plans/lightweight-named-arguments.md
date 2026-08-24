@@ -302,14 +302,14 @@ one-`value` Titan function must continue to arrive as that one ordinary value.
   large record static calls; `titan/{async,timer,fs,net,os}.titan` consume its
   exported surface through the compiled `titan/uv.so`, making them a production
   integration proof for both metadata paths.
-- The compiled module ABI and installation namespace are currently 0.12 in
-  `driver.lua:15-16`, `titan-runtime/titan.h:59-65`, and `Makefile:207-210`.
+- The compiled module ABI and release/library installation namespaces are
+  defined independently in the driver, runtime header, and Makefile.
 
 ## 4. Implementation plan
 
 Execution prerequisite: use a dedicated absolute prefix throughout the
-implementation so the 0.13 compiler, Lua default C path, SDK, and standard
-library cannot be confused with an existing 0.12 installation. The ABI version
+implementation so the compiler, Lua default C path, SDK, and standard library
+cannot be confused with ambient installed state. The library version
 participates in Lua's build configuration stamp (`Makefile:282-330`), so rerun
 `make lua`; installing only the new rock would leave a warm Lua binary searching
 the old versioned path. Reinstall the rock after each compiler edit batch because
@@ -458,7 +458,7 @@ CCACHE_DISABLE=1 "$PREFIX/bin/luarocks" make
    deterministic array order. Local declarations/members remain omitted by the
    existing public-interface filter. `Type.CModule`/`Type.CFunction` remain
    non-serializable and are rebuilt from headers; the FFI work does not add a
-   second `.so` metadata format or require another ABI bump beyond 0.13.
+   second `.so` metadata format or require another ABI bump.
 
 9. Add metadata-layer coverage proving:
 
@@ -714,24 +714,24 @@ CCACHE_DISABLE=1 "$PREFIX/bin/luarocks" make
    - imported records with no local fields continuing to use the ordinary
      omission rule.
 
-### Phase F: `.so` metadata, ABI 0.13, and installation paths
+### Phase F: `.so` metadata and ABI boundary
 
 The serialized interface constructor shapes change, so advance the compiled
-module ABI from 0.12 to 0.13. A separate optional metadata symbol would avoid a
+module ABI. A separate optional metadata symbol would avoid a
 version bump but would create a second interface channel and provenance rules;
 that is needless indirection when `<mangled>_types` is already the canonical
 declaration interface.
 
-1. Set `driver.TITAN_VER = "0.13"` and suffix `_0_13`.
+1. Advance `driver.TITAN_ABI_VERSION` and the matching generated ABI claim.
 
-2. Set `TITAN_VER`/`TITAN_VER_SUFFIX` in `titan-runtime/titan.h` and add a
-   `0.12 -> 0.13` history note: native call frames are unchanged, but compiled
+2. Set `TITAN_ABI_VERSION` in `titan-runtime/titan.h` and document that native
+   call frames are unchanged, but compiled
    interface metadata now publishes formal names and older type-constructor
    environments cannot interpret the new descriptor shape safely.
 
-3. Set `TITAN_ABI_VERSION := 0.13` in the Makefile so canonical standard-library
-   DSOs move to `lib/titan/0.13` and `TITAN_PATH_0_13` becomes the versioned
-   override.
+3. Set the matching Makefile ABI value and rebuild the canonical
+   standard-library providers without coupling the ABI marker to the release or
+   library-search version.
 
 4. Update current-version/path references and exact expectations in:
 
@@ -740,11 +740,10 @@ declaration interface.
      `spec/stdlib/coroutine_spec.lua`, `spec/stdlib/uv_states_spec.lua`, and
      `spec/support/{async_stdlib.lua,ci_libuv_mode_smoke.sh}`;
    - the current-path/current-version portions of the language and implementation
-     manuals found by `rg '0\.12|0_12|TITAN_PATH_0_12'`.
+     manuals found by an audit for stale ABI and path names.
 
-   Preserve historical prose explaining the older 0.11 -> 0.12 type-alias bump;
-   add the new transition rather than blindly replacing every historical
-   occurrence.
+   Preserve the feature rationale without retaining a historical version
+   timeline.
 
 5. Extend `spec/checker/so_rehydration_spec.lua` with a dependency available only
    as a `.so`. Prove named calls to an exported function, record static, and
@@ -757,11 +756,11 @@ declaration interface.
    recovery and unchanged positional native linkage.
 
 7. Keep the existing ABI-marker-before-types ordering in
-   `driver.load_compiled_interface` (`driver.lua:250-274`). A 0.12 DSO must fail
+   `driver.load_compiled_interface` (`driver.lua:250-274`). A mismatched DSO must fail
    with the normal ABI mismatch before its old metadata is evaluated.
 
 8. Extend `spec/abi_spec.lua` with a fake module whose ABI entry explicitly
-   returns `0.12`, and assert the clean `expected 0.13 but found 0.12` diagnostic.
+   returns a synthetic mismatched marker, and assert the clean mismatch diagnostic.
    Keep the existing markerless-module case too; the two failures prove distinct
    loader contracts.
 
@@ -791,7 +790,7 @@ change.
    - `ArgsNamed*` parse nodes and checker normalization;
    - declaration-only `paramnames` metadata, C parser/type preservation, and why
      `Type.Function` remains unchanged;
-   - serialization/rehydration and the 0.13 ABI bump;
+   - serialization/rehydration and the ABI bump;
    - `_named_arg_order`, source-order materialization, GC anchoring, and the
      parallel native/foreign direct-call paths;
    - record missing-field synthesis;
@@ -817,7 +816,7 @@ change.
    - `doc/implementation/ffi-internals.md` for the
      `c99 -> ctypes -> foreigntypes -> ModuleMember` name pipeline and
      `codeforeigncall` lowering;
-   - `doc/implementation/driver.md` and current ABI/path documentation for 0.13.
+   - `doc/implementation/driver.md` and current ABI/path documentation.
 
 5. Update roadmap/status wording if named arguments are listed as unsupported.
    Search first; do not invent a roadmap entry if none exists.
@@ -1027,7 +1026,7 @@ The feature is complete when all of the following are true:
   interface round trips but do not affect structural function types or native
   signatures;
 - Lua calls remain positional and one-table calls are never inferred as named;
-- the compiled interface/install ABI is consistently 0.13;
+- the compiled interface ABI is consistent across all producers and consumers;
 - both new manuals and all affected existing chapters describe the shipped
   behavior;
 - the delegated `uv.titan`/facade migration builds and passes the complete
@@ -1052,7 +1051,7 @@ The feature is complete when all of the following are true:
 - **C names collide with Titan keywords.** Use a raw identifier primitive only
   for the named-label-before-`=` position; do not weaken ordinary identifier
   rules or rename foreign parameters.
-- **Old DSOs fail while evaluating metadata.** Bump to 0.13 and retain the ABI
+- **Old DSOs fail while evaluating metadata.** Advance the ABI and retain the ABI
   marker check before `_types` loading.
 - **Named calls enter the wrong generic/foreign/vararg path.** Classify direct
   Titan versus direct C provenance in the checker, reject value/pointer/vararg

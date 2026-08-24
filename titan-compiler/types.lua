@@ -72,12 +72,11 @@ function types.ModuleVariable(modname, name, typ, isconst)
     return raw_ModuleVariable(modname, name, typ, isconst)
 end
 
--- ABI 0.22 serialized Function constructors retain their third positional
--- field. It is a reserved false sentinel, not a callable-shape property: C
+-- Serialized Function constructors retain their third positional field. It is
+-- a reserved false sentinel, not a callable-shape property: C
 -- variadicity belongs exclusively to Type.CFunction.vararg, while Titan input
 -- tails use Type.Function.varargtype. Removing the reserved slot waits for a
--- future ABI boundary so current provider metadata keeps the same constructor
--- arity.
+-- future ABI boundary so provider metadata keeps the same constructor arity.
 
 -- Array qualification belongs to the element type in C declarator syntax, but
 -- it must remain attached to the array shape until decay. Keep the constructor
@@ -1920,7 +1919,7 @@ type_equals = function(t1, t2, seen)
            and same_value(t1.members, t2.members, seen)
            and same_value(t1.type_members, t2.type_members, seen)
     elseif tag1 == "Type.Function" then
-        -- The third ABI-0.22 constructor slot is reserved, not an identity
+        -- The third constructor slot is reserved, not an identity
         -- dimension. Malformed non-false shapes are never callable values.
         if t1.vararg ~= false or t2.vararg ~= false then return false end
         -- Typed input/output tails are part of the exact runtime function tag;

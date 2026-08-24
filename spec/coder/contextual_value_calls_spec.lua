@@ -11,7 +11,7 @@ local function generate(source)
     assert.truthy(ast, perr)
     local _, errors = checker.check("test", ast, source, "test.titan")
     assert.equal(0, #errors, table.concat(errors, "\n"))
-    return coder.generate("test", ast, {}, driver.TITAN_VER)
+    return coder.generate("test", ast, {}, driver.TITAN_ABI_VERSION)
 end
 
 describe("contextual calls through value (code generation)", function()

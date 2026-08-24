@@ -467,7 +467,7 @@ that imports a compiled Titan `.so` and rehydrates its interface would also need
 its generated C source to include the same C header(s) before it could name or
 pass those C types in generated C. That include/provenance problem is not solved
 by serializing the C type graph. So v1 has no cross-module C type ABI and should
-not bump `TITAN_VER` for C type export.
+not advance the compiled-module ABI for C type export.
 
 Future support would need both pieces: type serialization/identity and generated
 C include propagation or explicit re-import requirements in every consuming

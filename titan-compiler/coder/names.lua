@@ -529,7 +529,7 @@ function type2metatable(ctx, typ --[[:table]])
     return entry.slot
 end
 
--- Every ABI-0.26-or-newer module reserves consecutive private uservalue slots
+-- Every module reserves consecutive private uservalue slots
 -- for the canonical mutable and const Array proxy metatables. Importers
 -- reconstruct only the public variable/function prefix and never need these
 -- private slots. Array's native representation remains Table*: only boxed/

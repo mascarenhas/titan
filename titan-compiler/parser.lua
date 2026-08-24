@@ -67,7 +67,7 @@ defs.GENERIC_CALL_START = #lexer.LT * lpeg.Cmt(lpeg.Cp(),
     function(_, position, start)
         assert(GENERIC_CALL_CANDIDATES ~= nil)
         if GENERIC_CALL_CANDIDATES == false or
-           GENERIC_CALL_CANDIDATES[start]
+            GENERIC_CALL_CANDIDATES[start]
         then
             return position
         end
@@ -86,29 +86,29 @@ local function long_bracket_end(source, position)
     return #source + 1
 end
 
-local long_bracket_open = lpeg.P("[") * lpeg.P("=")^0 * lpeg.P("[")
+local long_bracket_open = lpeg.P("[") * lpeg.P("=") ^ 0 * lpeg.P("[")
 local safe_long_bracket = lpeg.Cmt(
     #long_bracket_open * lpeg.P("[") * lpeg.Cp(),
     function(source, _, start)
         return long_bracket_end(source, start - 1)
     end)
 local escaped_string_byte = lpeg.P("\\") *
-    (lpeg.P("z") * lpeg.S(" \t\n\v\f\r")^0 +
-     lpeg.P("\r\n") + lpeg.P("\n\r") + lpeg.P(1))
+    (lpeg.P("z") * lpeg.S(" \t\n\v\f\r") ^ 0 +
+        lpeg.P("\r\n") + lpeg.P("\n\r") + lpeg.P(1))
 local safe_single_string = lpeg.P("'") *
-    (escaped_string_byte + (lpeg.P(1) - lpeg.S("'\r\n")))^0 * lpeg.P("'")^-1
+    (escaped_string_byte + (lpeg.P(1) - lpeg.S("'\r\n"))) ^ 0 * lpeg.P("'") ^ -1
 local safe_double_string = lpeg.P("\"") *
-    (escaped_string_byte + (lpeg.P(1) - lpeg.S("\"\r\n")))^0 * lpeg.P("\"")^-1
+    (escaped_string_byte + (lpeg.P(1) - lpeg.S("\"\r\n"))) ^ 0 * lpeg.P("\"") ^ -1
 local safe_short_string = safe_single_string + safe_double_string
 local safe_comment = lpeg.P("--") *
-    (safe_long_bracket + (lpeg.P(1) - lpeg.P("\n"))^0 * lpeg.P("\n")^-1)
+    (safe_long_bracket + (lpeg.P(1) - lpeg.P("\n")) ^ 0 * lpeg.P("\n") ^ -1)
 local angle_capture = lpeg.Cp() * lpeg.C(lpeg.S("<>"))
-local ordinary_scan_bytes = (lpeg.P(1) - lpeg.S("-'\"[<>"))^1
+local ordinary_scan_bytes = (lpeg.P(1) - lpeg.S("-'\"[<>")) ^ 1
 local generic_angle_scan = lpeg.Ct((
     safe_comment + safe_short_string + safe_long_bracket +
     lpeg.P("->") + lpeg.P("<=") + lpeg.P("<<") + lpeg.P(">=") +
     angle_capture + ordinary_scan_bytes + lpeg.P(1)
-)^0)
+) ^ 0)
 
 local function collect_generic_call_candidates(source)
     -- Below this constant number of ambiguous starts, repeated probes are
@@ -135,7 +135,7 @@ local function collect_generic_call_candidates(source)
             else
                 local byte = source:sub(position, position)
                 if byte == "(" or byte == "{" or byte == "." or
-                   byte == "\"" or byte == "'"
+                    byte == "\"" or byte == "'"
                 then
                     return true
                 end
@@ -182,6 +182,10 @@ local standard_imports = {
     peg = "titan.peg",
     string = "titan.string",
     test = "titan.test",
+    lua = "titan.lua",
+    math = "titan.math",
+    gc = "titan.gc",
+    iteration = "titan.iteration",
 }
 
 function parser.normalize_import(modname)
@@ -284,7 +288,7 @@ function defs.boolopt(x)
     return x ~= ""
 end
 
-function defs.nil_exp(pos--[[, s ]])
+function defs.nil_exp(pos --[[, s ]])
     -- We can't call ast.ExpNil directly in the parser because we
     -- need to drop the string capture that comes in the second argument.
     return ast.ExpNil(pos)
@@ -538,16 +542,16 @@ function defs.fold_binop_left(pos, matches)
     local lhs = matches[1]
     for i = 2, #matches, 2 do
         local op  = matches[i]
-        local rhs = matches[i+1]
-        lhs = ast.ExpBinop(pos, lhs, op, rhs)
+        local rhs = matches[i + 1]
+        lhs       = ast.ExpBinop(pos, lhs, op, rhs)
     end
     return lhs
 end
 
 local function is_concat_constant(exp)
     return exp._tag == "Ast.ExpString" or
-           exp._tag == "Ast.ExpInteger" or
-           exp._tag == "Ast.ExpFloat"
+        exp._tag == "Ast.ExpInteger" or
+        exp._tag == "Ast.ExpFloat"
 end
 
 function defs.fold_binop_concat_right(_, next_pos, matches)
@@ -803,7 +807,6 @@ function defs.statement_parenthesized_prefix(pos, exp)
     }
 end
 
-
 function defs.fold_statement_candidate(prefix, suffixes)
     prefix.exp = defs.fold_suffixes(prefix.exp, suffixes)
     if #suffixes > 0 then
@@ -895,8 +898,8 @@ end
 function defs.foreignfuncdecl(pos, name_loc, name, params, rettypes,
                               flexrettype, block, end_loc)
     return with_end_loc(with_name_loc(
-        ast.TopLevelForeignFunc(
-            pos, name, params, rettypes, flexrettype, block), name_loc),
+            ast.TopLevelForeignFunc(
+                pos, name, params, rettypes, flexrettype, block), name_loc),
         end_loc)
 end
 

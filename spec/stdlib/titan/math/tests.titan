@@ -1,6 +1,6 @@
 -- Native behavior tests for titan.math.
 local test = import "test"
-local mathlib = import "titan.math"
+local mathlib = import "math"
 
 local lua_api = foreign import "lua.h"
 local lua_aux = foreign import "lauxlib.h"

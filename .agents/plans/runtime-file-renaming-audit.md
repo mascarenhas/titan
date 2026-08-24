@@ -12,7 +12,8 @@ Audited at `f274b9d` on `feature/ffi-wrapup`. This is an implementation checklis
 
 The intended resulting contracts are:
 
-* runtime SDK `libtitan.a` has exactly, in order, `titan.o`, `minicoro.o`;
+* installed runtime SDK archive `lib/titan/<library-version>/libtitan.a` has exactly, in
+  order, `titan.o`, `minicoro.o`;
 * the private bootstrap is linked only from `ltitanlib.o`;
 * the standard provider `-X` payload begins with `ltitanlib.o`, then private LPegLabel, selected libuv, private llhttp, and selected OpenSSL payload;
 * the Titan-owned non-Lua installed headers are top-level `minicoro.h`, top-level `titan.h`, and namespaced `titan/ffi.h` (plus separately governed bundled-libuv headers); there is no installed `titan_longjmp.h`.
@@ -50,14 +51,17 @@ The intended resulting contracts are:
 
 ### Installed header removal
 
-- [ ] Merely deleting the header from `TITAN_SDK_ROOT_HEADERS` is insufficient: `install-titan-sdk` copies into an existing prefix and never prunes it. Add an exact `rm -f "$rocks_tree/include/titan_longjmp.h"` in that target so cached/warm prefixes satisfy the approved installed inventory. Do not purge other ABI directories or broad header globs.
+- [ ] Merely deleting the header from `TITAN_SDK_ROOT_HEADERS` is insufficient: `install-titan-sdk` copies into an existing prefix and never prunes it. Add an exact `rm -f "$rocks_tree/include/titan_longjmp.h"` in that target so cached/warm prefixes satisfy the approved installed inventory. Do not purge other versioned library directories or broad header globs.
 - [ ] Keep `titan.h` and `minicoro.h` installation modes/paths unchanged. The old header is direct SDK state outside the rock manifest, so LuaRocks removal/manifest logic will not remove it for us.
 
 ## 3. Compiler driver
 
 - [ ] In `titan-compiler/driver.lua:RUNTIME_ARCHIVE_INPUTS` (current lines 2272-2279), replace `titan_coro.c` with `minicoro.c` and remove `titan_longjmp.h`; `titan.h` now covers its mtime. Retain `minicoro.h` and `titan/ffi.h` for the same runtime/warm-build freshness contract.
 - [ ] Change `RUNTIME_ARCHIVE_MEMBERS` to exact ordered `{ "titan.o", "minicoro.o" }`.
-- [ ] Do not change runtime link ordering, `libtitan.a` paths, archive-index filtering, or installed-mode behavior. The rename changes archive member spelling, not native symbols.
+- [ ] Do not change runtime link ordering or archive-index filtering. The
+  checkout archive remains `titan-runtime/libtitan.a`; installed mode resolves
+  `lib/titan/<library-version>/libtitan.a`. The rename changes archive member spelling, not
+  native symbols.
 
 ## 4. Tests and fixtures requiring literal updates
 
@@ -114,17 +118,20 @@ Those files contain old-state claims, proposed names, or retired symbol names; a
 
 ## 6. Semantic/non-changes to protect
 
-- [ ] No ABI bump: source filenames, object member names, and an equivalent header fold do not change serialized types, generated native signatures, Lua 5.5.1 layout, or exported symbols. ABI remains 0.23.
+- [ ] No ABI bump: source filenames, object member names, and an equivalent header fold do not change serialized types, generated native signatures, Lua 5.5.1 layout, or exported symbols. The current ABI marker remains unchanged.
 - [ ] No installer predecessor/migration expansion: the ordinary current-ABI stdlib stamp/publisher rebuild is enough. The only exact installed-state deletion approved here is the unversioned retired `include/titan_longjmp.h`.
-- [ ] `minicoro.o` remains in `libtitan.a`; it is **not** added as an `-X` member of `titan.a`. Static consumers extract it from the separately linked runtime archive when `titan.coroutine` references `mco_*`.
-- [ ] `ltitanlib.o` remains outside `libtitan.a`, metadata-free, first in the standard `-X` payload, and the sole private-bootstrap input. Do not confuse `ltitanlib` with the `libtitan.a` runtime archive.
+- [ ] `minicoro.o` remains in `lib/titan/<library-version>/libtitan.a`; it is **not** added as
+  an `-X` member of `titan.a`. Static consumers extract it from the separately
+  linked runtime archive when `titan.coroutine` references `mco_*`.
+- [ ] `ltitanlib.o` remains outside `lib/titan/<library-version>/libtitan.a`, metadata-free,
+  first in the standard `-X` payload, and the sole private-bootstrap input.
 - [ ] Renaming source files changes DWARF/source-path text and archive leaf names only. Runtime frames under `titan-runtime/` remain filtered by the existing path rule; native APIs remain the same.
 - [ ] Do not rename logical module `titan`, `require "titan"`, `luaopen_titan`, Titan coroutine mangling, registry keys, or public/minicoro `mco_*` symbols.
 
 ## 7. Negative findings (no edit expected)
 
 - [ ] `.gitignore` already covers `*.o`, `/titan-runtime/.titan-*-build-config`, and the bootstrap directory; the new object/stamp spellings need no new ignore rule.
-- [ ] `titan-dev-1.rockspec` delegates the build to Make and packages the Git source tree; it has no literal runtime C/object/header list to rename.
+- [ ] The active rockspec delegates the build to Make and packages the Git source tree; it has no literal runtime C/object/header list to rename.
 - [ ] `scripts/stdlib_installer.lua`, `spec/support/ci_stdlib_snapshot.sh`, sanitizer mapping scripts, and production smoke scripts refer to the runtime archive/provider as wholes, not these member names; no mechanical update is needed.
 - [ ] `titan-compiler/cpreamble.lua` already includes `titan.h` only, so folding the block requires no generated-preamble change.
 

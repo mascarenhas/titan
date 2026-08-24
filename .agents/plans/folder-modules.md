@@ -312,7 +312,7 @@ The `titan.uv` dogfood deliberately moves exported declarations into their
 semantic contributors. Ordered module members participate in module user-value
 slot reconstruction by compiled importers, so the resulting contributor order
 changes the old monolithic slot sequence. Advance the repository-wide
-compiled-module ABI to `0.15` so 0.14 importers cannot load the reordered DSO.
+compiled-module ABI so pre-boundary importers cannot load the reordered DSO.
 
 An exact `titan_uv_types` string is useful only after making keyed interface
 serialization reproducible: `types.serialize(Type.Record)` currently walks the
@@ -321,7 +321,7 @@ locale-aware default sorting. Collect and sort all three sets of names with the
 same numeric-byte comparator first, add insertion-order and locale-independence
 regressions, rebuild the still-monolithic uv with that compiler, and capture
 the deterministic string for comparison. After the split, capture and pin the
-new exact 0.15 interface. Sorting keyed map output changes no descriptor schema
+new exact interface. Sorting keyed map output changes no descriptor schema
 or meaning; the ABI bump is for the intentional ordered-member relocation, not
 for keyed serialization.
 
@@ -603,7 +603,7 @@ The split must be a source refactoring, not a runtime redesign. Preserve:
 - every exported name, type, visibility, and record layout;
 - the sole initializer's current behavior, including program-argument setup;
 - all production and late-FS test-variant behavior;
-- one installed `$ROCKS_TREE/lib/titan/0.15/titan/uv.so` and one Lua provider
+- one installed versioned `titan/uv.so` and one Lua provider
   loader at `share/lua/5.5/titan/uv.lua`.
 
 After the keyed-interface serialization sort is installed, rebuild the
@@ -611,7 +611,7 @@ unchanged monolithic `titan.uv` and capture its deterministic `titan_uv_types`
 string in `/tmp` as the compatibility reference. Move each exported record,
 the `Task` methods, and all exported
 `_run`/`_fs_*`/`_net_*`/`_os_*`/ticker/loop/version declarations into the
-related contributor. Capture the new deterministic sequence as the exact 0.15
+related contributor. Capture the new deterministic sequence as the exact
 fixture and verify that only declaration order changed.
 
 Keep shared imports/foreign imports, constants, top-level module state, the
@@ -621,8 +621,8 @@ remaining private record to the semantic contributor that owns its operations;
 move the private `FS` constants instance with `FsConstants` into `file.titan`,
 and leave no record in the main. Preserve all other import, variable, and
 initializer behavior in their original relative order. The earlier
-public-member move is the 0.15 compatibility boundary; this private relocation
-changes internal slot/initialization order but neither the exact 0.15
+public-member move is the compatibility boundary; this private relocation
+changes internal slot/initialization order but neither the exact
 `titan_uv_types` fixture nor importer-visible variable and canonical
 exported-function closure slots, so do not bump the ABI again.
 Validate initializer behavior with the complete uv suites in addition to
@@ -805,10 +805,10 @@ Files: `titan/uv/uv.titan` and contributors, `Makefile`, `.gitignore`,
   split above.
 - Before the first move, rebuild the monolith with the deterministic serializer
   and capture its exact interface string. After moving public declarations into
-  semantic contributors, capture and pin the deliberately reordered 0.15
+  semantic contributors, capture and pin the deliberately reordered
   interface exactly.
-- Advance compiler/runtime constants, install/search paths, tests, CI, and
-  current documentation from ABI 0.14 to 0.15.
+- Advance the ABI marker, generated metadata, tests, CI, and current
+  documentation for the folder-layout boundary.
 - Update Make prerequisites/cleanup/ignore rules.
 - Make the libuv build spec compare `UV_TITAN_SOURCES` with the discovered
   folder set and force every member, preventing dependency-list drift.
@@ -845,12 +845,12 @@ sources.
   shared imports/constants/module state/bootstrap and the sole initializer in
   the main.
 - Compare the exact `titan_uv_types` fixture byte-for-byte before and after the
-  private ownership move. Keep ABI 0.15 because neither its public interface
+  private ownership move. Keep the ABI marker unchanged because neither its public interface
   nor native signatures change despite the private slot/initialization reorder.
 
 Exit: imports and module variables are the only mutually source-ordered
 declaration families; semantic uv contributors own every record without
-changing the pinned public ABI 0.15 interface.
+changing the pinned public ABI interface.
 
 ### Phase F — Complete both manuals and repository guidance
 
@@ -862,7 +862,7 @@ cross-references listed in section 8.
   artifacts, binary precedence, declaration staging/frontiers, and examples.
 - Document resolver/assembly/cache/codegen internals, why folder assembly adds
   no AST/native/schema change, and why the uv member relocation still advances
-  the compatibility marker to ABI 0.15 while the later private ownership move
+  the compatibility marker while the later private ownership move
   does not advance it again.
 - Update all one-file module claims and `titan.uv` paths.
 - Update `README.md` and `AGENTS.md` so future compiler/stdlib work uses the new
@@ -971,9 +971,9 @@ not only helper-level candidate selection.
 - no fragment DSO or legacy copy is installed/manifested;
 - after keyed-interface sorting, before/after `titan_uv_types` descriptors
   match by name and type and differ only in the intended member order; the
-  exact new deterministic serialization matches the ABI 0.15 fixture;
+  exact new deterministic serialization matches the ABI fixture;
 - moving all remaining private records and the private `FS` constants instance
-  to contributors leaves that exact ABI 0.15 fixture byte-for-byte unchanged,
+  to contributors leaves that exact ABI fixture byte-for-byte unchanged,
   leaves no record in `uv.titan`, and keeps `FS` adjacent to `FsConstants.new`;
 - `make clean` removes `titan/uv/uv.c` and `titan/uv/uv.o`.
 
@@ -1026,7 +1026,7 @@ Create `doc/implementation/folder-modules.md` and link it from
 - deterministic `ipairs` codegen walks;
 - per-node `#line` behavior;
 - program-output handling and the folder `main` collision;
-- lack of AST/type/native/runtime-loader shape changes and the deliberate 0.15
+- lack of AST/type/native/runtime-loader shape changes and the deliberate
   compatibility-marker transition for reordered uv members;
 - the uv build/test-harness migration.
 
@@ -1043,7 +1043,7 @@ Update:
   unit, unchanged source order after checker staging, and mixed-file `#line`
   attribution;
 - `doc/implementation/libuv-runtime.md` for contributor-owned public/private
-  records while retaining one provider image and the exact ABI 0.15 interface;
+  records while retaining one provider image and the exact ABI interface;
 - `README.md` for lookup/build examples;
 - `AGENTS.md` for standard-source layout, Make dependencies, generated nested
   artifacts, and `titan.uv` explicit-root examples.
@@ -1134,13 +1134,14 @@ and wait for the manual macOS suite before merge.
     emits and runs the collision-free `P__main` executable even with an
     external `--tree`, and leaves flat artifact paths unchanged.
 13. No AST/Type schema, native call convention, or runtime DSO lookup rule
-    changes. The compiled-module ABI advances to 0.15 solely to segregate the
-    deliberately reordered `titan.uv` public member slots from 0.14 artifacts;
-    later checker staging and private record/`FS` relocation keep ABI 0.15.
+    changes. The compiled-module ABI advances solely to segregate the
+    deliberately reordered `titan.uv` public member slots from pre-boundary
+    artifacts; later checker staging and private record/`FS` relocation keep
+    the marker unchanged.
 14. `titan.uv` is split into the documented folder, contributor files own their
     related exports and every public/private record, `uv.titan` retains only
     shared imports/constants/state/bootstrap/initializer concerns,
-    `titanc titan.uv` pins the exact deterministic 0.15 interface, and
+    `titanc titan.uv` pins the exact deterministic interface, and
     bundled/system modes each produce exactly one canonical `titan/uv.so`.
 15. `UV_TITAN_SOURCES` exactly matches the discovered uv ensemble, touching
     any member rebuilds that one DSO, and cleanup, source install, packaging,

@@ -34,9 +34,9 @@ The existing [checker plan architecture](type-relations-and-boundaries.md) is a
 prerequisite: generics reuse those concrete plans rather than teaching the
 coder a new relation.
 
-Generics introduce the declared type schema in compiled-module ABI 0.24. The ABI
-change carries schemes and applications in metadata; it does **not** add a
-run-time generic calling convention.
+Generics include their declared type schema in compiled-module ABI metadata.
+The schema carries schemes and applications; it does **not** add a run-time
+generic calling convention.
 
 ## Design and safety invariants
 
@@ -764,9 +764,9 @@ generic dispatch switch, type argument, per-application witness, or
 instantiation table. Two closed applications of one declaration have the same symbols and native entry;
 only their caller-side ordinary adjustments differ.
 
-## Compiled metadata and ABI 0.24
+## Compiled metadata and ABI boundary
 
-ABI 0.24 serializes the frozen declared module graph. The schema adds structural
+The current ABI serializes the frozen declared module graph. The schema adds structural
 scopes, dense binder descriptors, rigid parameter references, applied nominal
 arguments, function/method/constructor schemes, generic owner descriptors, and
 public forwarding aliases. It does not serialize expression inference cells,
@@ -788,14 +788,9 @@ The closed validator proves:
 During recovery, referenced external generic owners and alias targets are loaded
 before their arity and constraints are reconciled. DSO callable metadata,
 embedded archive metadata, and prefix-container recovery validate the same
-schema. An ABI-0.23 provider is rejected by its ABI entry before 0.24 types are
-decoded. ABI 0.25 retains this generic schema and erased implementation; its
-boundary instead changes the public `titan.fs` and `titan.async` interfaces and
-exact signatures, so an ABI-0.24 provider is rejected before current metadata
-is decoded. ABI 0.26 extends generic Interface metadata with fields while
-retaining erased implementation; 0.25 providers are rejected before decoding.
-Prior-version state is preserved; generics add no cross-ABI
-migration, cleanup, or compatibility provider.
+schema. ABI 2 includes generic Interface field metadata while retaining erased
+implementation. A mismatched provider is rejected before decoding; generics add
+no cross-ABI migration or compatibility provider.
 
 Metadata retains precise declared applications while native provenance remains
 owner-level. Selecting a static provider still records its physical archive as

@@ -119,11 +119,11 @@ shallow-immutable container type described below.
 
 ## 2. Compatibility boundary and non-goals
 
-This is an ABI-0.26 change. Serialized Array, Field, ModuleVariable, and
+This change advances the ABI boundary. Serialized Array, Field, ModuleVariable, and
 Interface descriptors change; Interface wrapper uservalue counts change; the
 module-private Array metatable cache grows; and the runtime exports a second
-Array tag plus freeze/copy operations. Old 0.25 providers remain versioned and
-untouched, but a 0.26 compiler will reject them at the existing ABI boundary.
+Array tag plus freeze/copy operations. Providers from before the boundary are
+not migrated, and the compiler rejects them before decoding metadata.
 
 The feature does not add deep immutability, const functions/methods/parameters,
 flow-sensitive definite assignment, consuming types, union named fields,
@@ -168,7 +168,7 @@ productions without disturbing `const *T` parsing.
 In `titan-compiler/types.lua`:
 
 - change `Type.Array(elem)` to `Type.Array(elem, isconst)` and require an exact
-  boolean qualifier at ABI 0.26; migrate every internal constructor explicitly
+  boolean qualifier at the new ABI boundary; migrate every internal constructor explicitly
   so missing hostile metadata cannot be normalized to mutable before closed
   validation;
 - add required exact-boolean `isconst` axes to `Type.Field` and
@@ -367,22 +367,20 @@ worklist to a fixpoint over all nested field/callable conversions. Emission
 must never append a late pair to an already sorted or partially emitted
 inventory.
 
-## 7. ABI 0.26 cutover
+## 7. ABI cutover
 
-Update the authoritative version in `titan-runtime/titan.h`,
-`titan-compiler/driver.lua`, the Make/install/rockspec scripts, CI paths,
-canonical provider/shim locations, production smokes, and active documentation
-from 0.25 to 0.26. Add the 0.25-to-0.26 history entry. Preserve historical
-0.25 fixtures/references where they describe the old ABI; do not purge, migrate,
-or clean separately versioned installations.
+Update the authoritative ABI marker in `titan-runtime/titan.h`,
+`titan-compiler/driver.lua`, the Make/install/rockspec scripts, CI caches,
+generated metadata, production smokes, and active documentation. Treat this as
+a clean rebuild boundary; do not add migration or cross-boundary cleanup.
 
 The cutover tests must prove:
 
-- old compiled metadata is rejected by the 0.26 compiler/loader;
+- pre-boundary compiled metadata is rejected by the compiler/loader;
 - source, DSO, and archive providers round-trip const module variables, record
   fields, Interface fields, and qualified Arrays;
 - module public-prefix and private-slot reconstruction agree on the new layout;
-- installer rollback/publication and generated shim paths target only 0.26;
+- installer rollback/publication and generated shim paths target only the active layout;
   and
 - the standard-library image remains otherwise behaviorally unchanged.
 
@@ -433,7 +431,7 @@ tests for this feature.
   and archive metadata/behavior. Extend source/folder visibility cases for local
   const members and the final module initializer.
 - Extend `spec/staticmetadata_spec.lua`, `spec/abi_spec.lua`, installer,
-  rockspec, and smoke expectations for ABI 0.26.
+  rockspec, and smoke expectations for the current ABI.
 
 Use exact diagnostics for each const storage category and initializer failure.
 Run the manifest completeness check so no new compiler spec can silently miss
@@ -449,7 +447,7 @@ Add and link both required feature chapters:
   permitting unobservable semantics-preserving copy elision;
 - `doc/implementation/const-values.md`: AST/type schema, checker flags and
   analysis, wrapper layout/GC, Array runtime tags/copy/freeze, serialization,
-  diagnostics, and ABI 0.26.
+  diagnostics, and the ABI boundary.
 
 Audit and cross-update the existing language chapters for modules, statements,
 grammar, types, records, Interfaces, Arrays/Maps, generics, expressions, and Lua
@@ -479,7 +477,7 @@ modified skill directory with the repository/system skill validator.
 ## 10. Implementation phases
 
 1. Freeze the parser/AST/type descriptor contract, add focused syntax/type
-   tests, and perform the ABI-0.26 metadata cutover.
+   tests, and perform the metadata ABI cutover.
 2. Implement binding/field constness and omitted nil initialization in the
    checker, including root-initializer authority and mutable-C-address denial.
 3. Implement the qualified Array runtime, coder tag selection, shallow copy,

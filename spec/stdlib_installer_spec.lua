@@ -6,15 +6,9 @@ local INSTALLER_SCRIPT =
 local installer = assert(loadfile(INSTALLER_SCRIPT))()
 local NEW_TEST_SOURCE = "new titan.test support source\n"
 local PRIOR_TEST_SOURCE = "prior titan.test support source\n"
-local PREVIOUS_TEST_SOURCE = "previous ABI titan.test support source\n"
-local TEST_SOURCE_RELATIVE = "share/titan/0.26/src/titan/test.titan"
-local PREVIOUS_TEST_SOURCE_RELATIVE =
-    "share/titan/0.25/src/titan/test.titan"
-local PREVIOUS_ABI_MODULES = {
-    "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
-    "url", "http", "os", "peg", "string", "math", "lua", "iteration", "gc",
-    "test",
-}
+local TEST_SOURCE_RELATIVE = "share/titan/0.6/src/titan/test.titan"
+local RUNTIME_ARCHIVE_RELATIVE = "lib/titan/0.6/libtitan.a"
+local RUNTIME_ARCHIVE_CONTENTS = "installed runtime SDK archive\n"
 
 local function make_directory(path)
     if lfs.symlinkattributes(path, "mode") == "directory" then return end
@@ -84,15 +78,13 @@ local predecessor_states = {}
 
 local function predecessor_paths(root)
     local paths = {
-        root .. "/lib/titan/0.26/titan.so",
-        root .. "/lib/titan/0.26/titan.a",
-        root .. "/lib/titan/0.26/titan.so.dSYM",
+        root .. "/" .. RUNTIME_ARCHIVE_RELATIVE,
+        root .. "/lib/titan/0.6/titan.so",
+        root .. "/lib/titan/0.6/titan.a",
+        root .. "/lib/titan/0.6/titan.so.dSYM",
         root .. "/" .. TEST_SOURCE_RELATIVE,
-        root .. "/lib/titan/0.26/titan/uv.so",
+        root .. "/lib/titan/0.6/titan/uv.so",
         root .. "/lib/lua/5.5/titan.so",
-        root .. "/lib/titan/0.25",
-        root .. "/lib/lua/5.5/titan/stdlib_0_25",
-        root .. "/" .. PREVIOUS_TEST_SOURCE_RELATIVE,
     }
     for _, module in ipairs(installer.MODULES) do
         paths[#paths + 1] =
@@ -147,7 +139,7 @@ local function fake_entries(extra)
     local entries = {}
     for _, name in ipairs(installer.MODULE_NAMES) do
         entries[name] = {
-            abi = "0.26",
+            abi = "2",
             types = "types:" .. name,
         }
     end
@@ -175,7 +167,7 @@ local function fake_prior_archive_scanner(path)
         entries["titan.test"] = nil
     elseif contents == "prior archive with retired key\n" then
         entries["titan.retired"] = {
-            abi = "0.26",
+            abi = "2",
             types = "types:titan.retired",
         }
     end
@@ -196,14 +188,14 @@ local function assert_unique_regular_file(path)
 end
 
 local function assert_no_active_compatibility_copies(root)
-    local abi_dir = root .. "/lib/titan/0.26"
+    local library_dir = root .. "/lib/titan/0.6"
     local lua_cdir = root .. "/lib/lua/5.5"
     for _, module in ipairs(installer.MODULES) do
         for _, path in ipairs({
-            abi_dir .. "/titan/" .. module .. ".so",
-            abi_dir .. "/" .. module .. ".so",
+            library_dir .. "/titan/" .. module .. ".so",
+            library_dir .. "/" .. module .. ".so",
             lua_cdir .. "/titan/" .. module .. ".so",
-            lua_cdir .. "/titan/stdlib_0_26/" .. module .. ".so",
+            lua_cdir .. "/titan/stdlib_0_6/" .. module .. ".so",
         }) do
             assert.is_nil(lfs.symlinkattributes(path), path)
             assert.is_nil(lfs.symlinkattributes(path .. ".dSYM"),
@@ -214,51 +206,37 @@ local function assert_no_active_compatibility_copies(root)
     assert.is_nil(lfs.symlinkattributes(lua_cdir .. "/titan.so.dSYM"))
 end
 
-local function seed_previous_abi(root)
-    write_file(root .. "/lib/titan/0.25/titan.so", "previous ABI image\n")
-    write_file(root .. "/lib/titan/0.25/titan.a", "previous ABI archive\n")
-    write_file(root ..
-        "/lib/titan/0.25/titan.so.dSYM/Contents/Resources/DWARF/titan.so",
-        "previous ABI symbols\n")
-    write_file(root .. "/lib/titan/0.25/titan/uv.so", "previous ABI\n")
-    write_file(root .. "/" .. PREVIOUS_TEST_SOURCE_RELATIVE,
-        PREVIOUS_TEST_SOURCE)
-    for index, module in ipairs(PREVIOUS_ABI_MODULES) do
-        local legacy = root .. "/lib/lua/5.5/titan/stdlib_0_25/" ..
-            module .. ".so"
-        write_file(legacy, "previous ABI legacy " .. module .. "\n")
-        set_file_metadata(legacy, "0640", 978307300 + index)
-    end
-    set_file_metadata(
-        root .. "/lib/titan/0.25/titan.so", "0751", 978307201)
-    set_file_metadata(
-        root .. "/lib/titan/0.25/titan.a", "0640", 978307202)
-    set_file_metadata(root ..
-        "/lib/titan/0.25/titan.so.dSYM/Contents/Resources/DWARF/titan.so",
-        "0600", 978307203)
-    set_file_metadata(
-        root .. "/lib/titan/0.25/titan/uv.so", "0644", 978307204)
-    set_file_metadata(root .. "/" .. PREVIOUS_TEST_SOURCE_RELATIVE,
-        "0640", 978307205)
-end
-
 local function seed_active_debris(root)
-    write_file(root .. "/lib/titan/0.26/titan/uv.so", "stale child\n")
+    write_file(root .. "/lib/titan/0.6/titan/uv.so", "stale child\n")
     write_file(root .. "/lib/lua/5.5/titan.so", "old manifest support\n")
 end
 
+local function seed_runtime_archive(root)
+    local path = root .. "/" .. RUNTIME_ARCHIVE_RELATIVE
+    write_file(path, RUNTIME_ARCHIVE_CONTENTS)
+    set_file_metadata(path, "0640", 1009843200)
+end
+
+local function assert_runtime_archive_untouched(root)
+    local path = root .. "/" .. RUNTIME_ARCHIVE_RELATIVE
+    local states = assert(predecessor_states[root], root)
+    assert.same(states[path], snapshot_path(path), path)
+    assert_unique_regular_file(path)
+end
+
 local function seed_bootstrap(root)
-    write_file(root .. "/lib/titan/0.26/titan.so", "bootstrap image\n")
-    seed_previous_abi(root)
+    seed_runtime_archive(root)
+    write_file(root .. "/lib/titan/0.6/titan.so", "bootstrap image\n")
     set_file_metadata(
-        root .. "/lib/titan/0.26/titan.so", "0750", 1009843201)
+        root .. "/lib/titan/0.6/titan.so", "0750", 1009843201)
     capture_predecessor(root)
 end
 
 local function seed_complete_pair(root)
-    write_file(root .. "/lib/titan/0.26/titan.so", "prior image\n")
+    seed_runtime_archive(root)
+    write_file(root .. "/lib/titan/0.6/titan.so", "prior image\n")
     write_file(root ..
-        "/lib/titan/0.26/titan.so.dSYM/Contents/Resources/DWARF/titan.so",
+        "/lib/titan/0.6/titan.so.dSYM/Contents/Resources/DWARF/titan.so",
         "prior symbols\n")
     for _, module in ipairs(installer.MODULES) do
         write_file(root .. "/share/lua/5.5/titan/" .. module .. ".lua",
@@ -266,12 +244,11 @@ local function seed_complete_pair(root)
     end
     write_file(root .. "/" .. TEST_SOURCE_RELATIVE, PRIOR_TEST_SOURCE)
     seed_active_debris(root)
-    seed_previous_abi(root)
-    write_file(root .. "/lib/titan/0.26/titan.a", "prior archive\n")
+    write_file(root .. "/lib/titan/0.6/titan.a", "prior archive\n")
     set_file_metadata(
-        root .. "/lib/titan/0.26/titan.so", "0750", 1009843210)
+        root .. "/lib/titan/0.6/titan.so", "0750", 1009843210)
     set_file_metadata(root ..
-        "/lib/titan/0.26/titan.so.dSYM/Contents/Resources/DWARF/titan.so",
+        "/lib/titan/0.6/titan.so.dSYM/Contents/Resources/DWARF/titan.so",
         "0600", 1009843211)
     for index, module in ipairs(installer.MODULES) do
         set_file_metadata(root .. "/share/lua/5.5/titan/" ..
@@ -280,11 +257,11 @@ local function seed_complete_pair(root)
     set_file_metadata(root .. "/" .. TEST_SOURCE_RELATIVE,
         "0640", 1009843239)
     set_file_metadata(
-        root .. "/lib/titan/0.26/titan/uv.so", "0644", 1009843230)
+        root .. "/lib/titan/0.6/titan/uv.so", "0644", 1009843230)
     set_file_metadata(
         root .. "/lib/lua/5.5/titan.so", "0644", 1009843231)
     set_file_metadata(
-        root .. "/lib/titan/0.26/titan.a", "0640", 1009843240)
+        root .. "/lib/titan/0.6/titan.a", "0640", 1009843240)
     capture_predecessor(root)
 end
 
@@ -292,60 +269,30 @@ local function seed_seventeen_key_pair(root)
     seed_complete_pair(root)
     os.remove(root .. "/share/lua/5.5/titan/test.lua")
     os.remove(root .. "/" .. TEST_SOURCE_RELATIVE)
-    write_file(root .. "/lib/titan/0.26/titan.a",
+    write_file(root .. "/lib/titan/0.6/titan.a",
         "seventeen-key prior archive\n")
     capture_predecessor(root)
 end
 
 local function assert_seventeen_key_pair(root)
     assert.equal("prior image\n",
-        read_file(root .. "/lib/titan/0.26/titan.so"))
+        read_file(root .. "/lib/titan/0.6/titan.so"))
     assert.equal("seventeen-key prior archive\n",
-        read_file(root .. "/lib/titan/0.26/titan.a"))
+        read_file(root .. "/lib/titan/0.6/titan.a"))
     assert.is_nil(lfs.symlinkattributes(
         root .. "/share/lua/5.5/titan/test.lua"))
     assert.is_nil(lfs.symlinkattributes(
         root .. "/" .. TEST_SOURCE_RELATIVE))
 end
 
-local function assert_previous_abi_untouched(root)
-    assert.equal("previous ABI image\n",
-        read_file(root .. "/lib/titan/0.25/titan.so"))
-    assert.equal("previous ABI archive\n",
-        read_file(root .. "/lib/titan/0.25/titan.a"))
-    assert.equal("previous ABI symbols\n", read_file(root ..
-        "/lib/titan/0.25/titan.so.dSYM/Contents/Resources/DWARF/titan.so"))
-    assert.equal("previous ABI\n",
-        read_file(root .. "/lib/titan/0.25/titan/uv.so"))
-    local previous_test_source =
-        root .. "/" .. PREVIOUS_TEST_SOURCE_RELATIVE
-    assert.equal(PREVIOUS_TEST_SOURCE, read_file(previous_test_source))
-    assert.same(
-        assert(predecessor_states[root], root)[previous_test_source],
-        snapshot_path(previous_test_source),
-        previous_test_source .. " content, mode, or mtime changed")
-    local previous_path = root .. "/lib/titan/0.25"
-    assert.same(
-        assert(predecessor_states[root], root)[previous_path],
-        snapshot_path(previous_path),
-        previous_path .. " content, mode, or mtime changed")
-    local previous_legacy_path =
-        root .. "/lib/lua/5.5/titan/stdlib_0_25"
-    assert.equal("previous ABI legacy uv\n",
-        read_file(previous_legacy_path .. "/uv.so"))
-    assert.same(
-        assert(predecessor_states[root], root)[previous_legacy_path],
-        snapshot_path(previous_legacy_path),
-        previous_legacy_path .. " content, mode, or mtime changed")
-end
-
 local function assert_bootstrap(root)
+    assert_runtime_archive_untouched(root)
     assert.equal("bootstrap image\n",
-        read_file(root .. "/lib/titan/0.26/titan.so"))
-    assert_unique_regular_file(root .. "/lib/titan/0.26/titan.so")
-    assert.is_nil(lfs.symlinkattributes(root .. "/lib/titan/0.26/titan.a"))
+        read_file(root .. "/lib/titan/0.6/titan.so"))
+    assert_unique_regular_file(root .. "/lib/titan/0.6/titan.so")
+    assert.is_nil(lfs.symlinkattributes(root .. "/lib/titan/0.6/titan.a"))
     assert.is_nil(lfs.symlinkattributes(
-        root .. "/lib/titan/0.26/titan.so.dSYM"))
+        root .. "/lib/titan/0.6/titan.so.dSYM"))
     for _, module in ipairs(installer.MODULES) do
         assert.is_nil(lfs.symlinkattributes(
             root .. "/share/lua/5.5/titan/" .. module .. ".lua"))
@@ -353,28 +300,27 @@ local function assert_bootstrap(root)
     assert.is_nil(lfs.symlinkattributes(
         root .. "/" .. TEST_SOURCE_RELATIVE))
     assert_no_active_compatibility_copies(root)
-    assert_previous_abi_untouched(root)
 end
 
 local function assert_complete_pair(root)
+    assert_runtime_archive_untouched(root)
     assert.equal("prior image\n",
-        read_file(root .. "/lib/titan/0.26/titan.so"))
+        read_file(root .. "/lib/titan/0.6/titan.so"))
     assert.equal("prior symbols\n", read_file(root ..
-        "/lib/titan/0.26/titan.so.dSYM/Contents/Resources/DWARF/titan.so"))
+        "/lib/titan/0.6/titan.so.dSYM/Contents/Resources/DWARF/titan.so"))
     for _, module in ipairs(installer.MODULES) do
         assert.equal(installer.shim_contents("titan." .. module),
             read_file(root ..
                 "/share/lua/5.5/titan/" .. module .. ".lua"))
     end
     assert.equal("stale child\n",
-        read_file(root .. "/lib/titan/0.26/titan/uv.so"))
+        read_file(root .. "/lib/titan/0.6/titan/uv.so"))
     assert.equal("old manifest support\n",
         read_file(root .. "/lib/lua/5.5/titan.so"))
     assert.equal("prior archive\n",
-        read_file(root .. "/lib/titan/0.26/titan.a"))
+        read_file(root .. "/lib/titan/0.6/titan.a"))
     assert.equal(PRIOR_TEST_SOURCE,
         read_file(root .. "/" .. TEST_SOURCE_RELATIVE))
-    assert_previous_abi_untouched(root)
 end
 
 local function assert_no_transaction_residue(path)
@@ -390,12 +336,13 @@ local function assert_no_transaction_residue(path)
 end
 
 local function assert_new_install(root, darwin)
+    assert_runtime_archive_untouched(root)
     assert.equal("new combined image\n",
-        read_file(root .. "/lib/titan/0.26/titan.so"))
+        read_file(root .. "/lib/titan/0.6/titan.so"))
     assert.equal("new combined archive\n",
-        read_file(root .. "/lib/titan/0.26/titan.a"))
-    assert_unique_regular_file(root .. "/lib/titan/0.26/titan.so")
-    assert_unique_regular_file(root .. "/lib/titan/0.26/titan.a")
+        read_file(root .. "/lib/titan/0.6/titan.a"))
+    assert_unique_regular_file(root .. "/lib/titan/0.6/titan.so")
+    assert_unique_regular_file(root .. "/lib/titan/0.6/titan.a")
     for _, module in ipairs(installer.MODULES) do
         local path = root .. "/share/lua/5.5/titan/" .. module .. ".lua"
         assert.equal(installer.shim_contents("titan." .. module),
@@ -405,7 +352,7 @@ local function assert_new_install(root, darwin)
     local test_source = root .. "/" .. TEST_SOURCE_RELATIVE
     assert.equal(NEW_TEST_SOURCE, read_file(test_source))
     assert_unique_regular_file(test_source)
-    local dsym = root .. "/lib/titan/0.26/titan.so.dSYM"
+    local dsym = root .. "/lib/titan/0.6/titan.so.dSYM"
     if darwin then
         assert.equal("new symbols\n",
             read_file(dsym .. "/Contents/Resources/DWARF/titan.so"))
@@ -413,7 +360,6 @@ local function assert_new_install(root, darwin)
         assert.is_nil(lfs.symlinkattributes(dsym))
     end
     assert_no_active_compatibility_copies(root)
-    assert_previous_abi_untouched(root)
     assert_no_transaction_residue(root)
 end
 
@@ -455,7 +401,7 @@ describe("recoverable paired standard-library publication", function()
 
     for _, predecessor in ipairs({
         { "bootstrap-only first install", seed_bootstrap },
-        { "seventeen-key active-ABI upgrade", seed_seventeen_key_pair },
+        { "seventeen-key current-library upgrade", seed_seventeen_key_pair },
         { "complete-pair upgrade", seed_complete_pair },
     }) do
         it("publishes the pair over a " .. predecessor[1], function()
@@ -468,7 +414,7 @@ describe("recoverable paired standard-library publication", function()
         end)
     end
 
-    it("repeats a complete publication and retires active-ABI debris",
+    it("repeats a complete publication and retires current-layout debris",
        function()
         seed_complete_pair(root)
         local ok, err = publish({
@@ -478,8 +424,7 @@ describe("recoverable paired standard-library publication", function()
         assert_new_install(root, true)
 
         -- A repeated source installation publishes the same complete set over
-        -- its own predecessor. Reintroduced active-layout debris is still
-        -- retired, while the captured previous-ABI tree remains exact.
+        -- its own predecessor. Reintroduced active-layout debris is retired.
         seed_active_debris(root)
         ok, err = publish({
             stage = stage, root = root, platform = "Darwin",
@@ -497,9 +442,9 @@ describe("recoverable paired standard-library publication", function()
         assert.truthy(ok, err)
         assert_new_install(root, true)
         assert.equal("rwxr-xr-x",
-            lfs.attributes(root .. "/lib/titan/0.26/titan.so").permissions)
+            lfs.attributes(root .. "/lib/titan/0.6/titan.so").permissions)
         assert.equal("rw-r--r--",
-            lfs.attributes(root .. "/lib/titan/0.26/titan.a").permissions)
+            lfs.attributes(root .. "/lib/titan/0.6/titan.a").permissions)
         for _, module in ipairs(installer.MODULES) do
             assert.equal("rw-r--r--", lfs.attributes(root ..
                 "/share/lua/5.5/titan/" .. module .. ".lua").permissions)
@@ -511,7 +456,7 @@ describe("recoverable paired standard-library publication", function()
     it("retires only exact generated shims named by the old archive",
        function()
         seed_complete_pair(root)
-        write_file(root .. "/lib/titan/0.26/titan.a",
+        write_file(root .. "/lib/titan/0.6/titan.a",
             "prior archive with retired key\n")
         write_file(root .. "/share/lua/5.5/titan/retired.lua",
             installer.shim_contents("titan.retired"))
@@ -543,7 +488,7 @@ describe("recoverable paired standard-library publication", function()
     it("refuses to retire an old-key shim with a different exact template",
        function()
         seed_complete_pair(root)
-        write_file(root .. "/lib/titan/0.26/titan.a",
+        write_file(root .. "/lib/titan/0.6/titan.a",
             "prior archive with retired key\n")
         write_file(root .. "/share/lua/5.5/titan/retired.lua",
             installer.BANNER .. "return 'not the old generated shim'\n")
@@ -554,19 +499,23 @@ describe("recoverable paired standard-library publication", function()
         assert.truthy(tostring(err):find(
             "refusing to overwrite unrecognized Lua file", 1, true), err)
         assert.equal("prior image\n",
-            read_file(root .. "/lib/titan/0.26/titan.so"))
+            read_file(root .. "/lib/titan/0.6/titan.so"))
         assert.equal("prior archive with retired key\n",
-            read_file(root .. "/lib/titan/0.26/titan.a"))
+            read_file(root .. "/lib/titan/0.6/titan.a"))
     end)
 
     local function inject_script()
         local script = workspace .. "/inject.lua"
         write_file(script, [[
 local installer_script, stage, root = ...
+local source_root = assert(installer_script:match(
+    "^(.*)/scripts/stdlib_installer[.]lua$"))
+package.path = source_root .. "/?.lua;" .. source_root .. "/?/init.lua;" ..
+    package.path
 local installer = assert(loadfile(installer_script))()
 local entries = {}
 for _, name in ipairs(installer.MODULE_NAMES) do
-    entries[name] = { abi = "0.26", types = "types:" .. name }
+    entries[name] = { abi = "2", types = "types:" .. name }
 end
 local function prior_archive_scanner()
     local prior = {}
@@ -689,7 +638,7 @@ os.exit(1)
 
     it("rejects a nonregular public archive destination", function()
         seed_bootstrap(root)
-        make_directory(root .. "/lib/titan/0.26/titan.a")
+        make_directory(root .. "/lib/titan/0.6/titan.a")
         local ok, err = publish({
             stage = stage, root = root, platform = "Linux",
         })
@@ -697,11 +646,10 @@ os.exit(1)
         assert.truthy(tostring(err):find(
             "is not a regular nonlink file", 1, true), err)
         assert.equal("bootstrap image\n",
-            read_file(root .. "/lib/titan/0.26/titan.so"))
-        assert_previous_abi_untouched(root)
+            read_file(root .. "/lib/titan/0.6/titan.so"))
         assert.equal("directory",
             lfs.symlinkattributes(root ..
-                "/lib/titan/0.26/titan.a", "mode"))
+                "/lib/titan/0.6/titan.a", "mode"))
     end)
 
     it("rejects a nonregular public test support source destination",
@@ -716,8 +664,7 @@ os.exit(1)
         assert.truthy(tostring(err):find(
             "is not a regular nonlink file", 1, true), err)
         assert.equal("bootstrap image\n",
-            read_file(root .. "/lib/titan/0.26/titan.so"))
-        assert_previous_abi_untouched(root)
+            read_file(root .. "/lib/titan/0.6/titan.so"))
         assert.equal("directory",
             lfs.symlinkattributes(destination, "mode"))
     end)
@@ -818,7 +765,7 @@ os.exit(1)
             {
                 embedded = fake_entries({
                     ["titan.extra"] = {
-                        abi = "0.26", types = "types:titan.extra",
+                        abi = "2", types = "types:titan.extra",
                     },
                 }),
             },
@@ -828,7 +775,7 @@ os.exit(1)
             "wrong embedded ABI",
             (function()
                 local entries = fake_entries()
-                entries["titan.uv"].abi = "0.25"
+                entries["titan.uv"].abi = "1"
                 return { embedded = entries, dso = fake_entries() }
             end)(),
             "ABI for module 'titan.uv' differs",
@@ -906,10 +853,14 @@ os.exit(1)
         local script = workspace .. "/environment.lua"
         write_file(script, [[
 local installer_script, stage, root = ...
+local source_root = assert(installer_script:match(
+    "^(.*)/scripts/stdlib_installer[.]lua$"))
+package.path = source_root .. "/?.lua;" .. source_root .. "/?/init.lua;" ..
+    package.path
 local installer = assert(loadfile(installer_script))()
 local entries = {}
 for _, name in ipairs(installer.MODULE_NAMES) do
-    entries[name] = { abi = "0.26", types = "types:" .. name }
+    entries[name] = { abi = "2", types = "types:" .. name }
 end
 local validation_image
 local ok, err = installer.publish({

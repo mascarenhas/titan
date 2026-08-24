@@ -591,7 +591,7 @@ its exact serialized interface and compare it with
 `spec/fixtures/libuv/titan_uv_types.lua`:
 
 ```sh
-TITAN_UV_PROVIDER="$PREFIX/lib/titan/0.26/titan.so" \
+TITAN_UV_PROVIDER="$PREFIX/lib/titan/0.6/titan.so" \
 "$PREFIX/bin/lua" -e '
 local support = require "titan"
 local types = assert(support._loadlib(
@@ -636,7 +636,7 @@ narrow the 22-root executable.
 The real installation path and both link policies remain release boundaries:
 
 ```sh
-"$PREFIX/bin/luarocks" make titan-dev-1.rockspec
+"$PREFIX/bin/luarocks" make titan-0.6.0-1.rockspec
 PREFIX="$PREFIX" bash spec/support/ci_libuv_mode_smoke.sh both
 ```
 

@@ -3,18 +3,7 @@
 Titan compiles generated C against Lua's private headers and links the matching
 `liblua.a`. A Lua point release therefore needs a source-level audit rather
 than only a public-API compatibility check. This chapter records the complete
-5.5.0 to 5.5.1 audit that established Titan ABI 0.21.
-
-> ABI 0.22 retained this Lua 5.5.1 contract and the other ABI-0.21
-> value/native-call layouts while changing the source-local `titan.uv` schema,
-> reconstructible module prefix, and physical-provider identity slot. ABI 0.23
-> retains the same Lua 5.5.1 contract again; its boundary moves native callbacks
-> into source and separates module, nominal owner, and member in callable
-> symbols. ABI 0.24 retains Lua 5.5.1 and those native layouts while extending
-> serialized interfaces for generic declarations. ABI 0.26 retains the Lua
-> contract and every other ABI-0.24 layout while changing the serialized and
-> exact native signatures of `titan.fs.stat`/`lstat` and
-> `titan.async.suspend`.
+5.5.0 to 5.5.1 audit underlying a Titan ABI cutover.
 
 ## Scope and evidence
 
@@ -43,7 +32,7 @@ The conclusions use three categories:
 * **no dependency** means Titan neither calls nor reproduces the changed
   private mechanism.
 
-## Why this is Titan ABI 0.21
+## Why this changes the Titan ABI
 
 Lua 5.5.1 changes `LUAI_MAXALIGN` on the C99 configuration used by Titan from
 fields based on `lua_Number`, `double`, `void *`, `lua_Integer`, and `long` to
@@ -58,13 +47,15 @@ Consequently, a provider compiled with the 5.5.0 internal-header set must not
 be combined with the 5.5.1 runtime or generated code, even on a target where a
 particular layout happens to have the same numeric size. Titan therefore:
 
-* sets `TITAN_VER` to `0.21` and `TITAN_VER_SUFFIX` to `_0_21`;
-* publishes the standard pair under `lib/titan/0.21/` and uses
-  `TITAN_PATH_0_21` for the versioned search override;
+* identifies the generated-code contract with the active
+  `TITAN_ABI_VERSION` marker;
+* publishes the standard pair under the independently derived
+  `TITAN_VERSION` major/minor directory `lib/titan/<library-version>/` and uses
+  `TITAN_PATH_<major>_<minor>` for the versioned search override;
 * stages and discovers `src/lua-5.5.1` together with its matching
   `liblua.a`; and
-* treats 0.20 and 0.21 providers, archives, generated interfaces, and compiler
-  SDK objects as incompatible rather than attempting an in-place migration.
+* rejects providers, archives, generated interfaces, and compiler SDK objects
+  whose embedded ABI does not match the active marker.
 
 This is an exact-header compatibility boundary, not a claim that Lua changed
 one of Titan's language-level value representations.
@@ -123,7 +114,7 @@ new required call shape.
 
 `titan.string` implements Lua's `string.pack` format, including the omitted
 argument to `!`, which means the target's native `LUAI_MAXALIGN`. The old
-mirror computed the maximum alignment of the old macro's fields. ABI 0.21
+mirror computed the maximum alignment of the old macro's fields. Titan
 exports an FFI spelling for `long double` and now computes the maximum of
 `long double`, `void *`, and `long long`, matching Lua 5.5.1. The string suite
 compares a format whose result distinguishes an 8-byte cap from a 16-byte cap
@@ -272,7 +263,7 @@ special case was added.
 | `src/ltm.h` | Removes an obsolete table-flag comment. **No dependency.** |
 | `src/lua.c` | Explicit load modes, `-E` environment indirection, configurable readline loading, and optional debug-library startup. Interpreter-CLI behavior is **inherited**; no generated-code dependency. |
 | `src/lua.h` | Advances release number and copyright. **Inherited** through the pinned public headers. |
-| `src/luaconf.h` | Readline policy, path-token spacing, numeric compatibility macro, compiler guard, and `LUAI_MAXALIGN`. Path rewriting and native alignment were **adapted**; this file is central to ABI 0.21. |
+| `src/luaconf.h` | Readline policy, path-token spacing, numeric compatibility macro, compiler guard, and `LUAI_MAXALIGN`. Path rewriting and native alignment were **adapted**; this file is central to the Titan ABI. |
 | `src/lundump.c` | Uses the shared parser anchor table. **No direct Titan dependency.** |
 | `src/lundump.h` | Adds the anchor argument to `luaU_undump`. **No Titan references.** |
 | `src/lutf8lib.c` | Rejects impossible high lead bytes before excess reads/shifts and corrects an unsigned formatting cast. Lua behavior is **inherited**; the analogous private LPegLabel decoder was adapted. |
@@ -282,7 +273,8 @@ special case was added.
 
 The audit is complete only together with the ordinary repository gates: pure
 compiler/C-parser tests against the new headers, generated-C and standard
-library behavior tests, packaging/layout tests for ABI 0.21, the full local
+library behavior tests, packaging/layout tests for the active ABI and library
+version, the full local
 suite, Linux CI, and the manually dispatched complete macOS suite. Those tests
 verify the implementation identified by this audit; they do not replace the
 source comparison itself.

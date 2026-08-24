@@ -313,7 +313,7 @@ describe("static compiled-module native containers", function()
                 target_object, "fixture.target"))
         assert.same(target, fingerprint)
         assert.equal("fixture.target", parsed.metadata.module)
-        assert.equal(driver.TITAN_VER, parsed.metadata.abi)
+        assert.equal(driver.TITAN_ABI_VERSION, parsed.metadata.abi)
 
         local generated = read_file(workspace .. "/fixture_target.c")
         assert.match(
@@ -463,7 +463,7 @@ describe("static compiled-module native containers", function()
         assert.truthy(fingerprint, parsed)
         assert.same(target, fingerprint)
         assert.equal("fixture.target", parsed.metadata.module)
-        assert.equal(driver.TITAN_VER, parsed.metadata.abi)
+        assert.equal(driver.TITAN_ABI_VERSION, parsed.metadata.abi)
     end)
 
     it("renders platform force-load arguments without losing awkward paths",
@@ -761,7 +761,7 @@ end
 
     it("compares exact archive logical protocols", function()
         local entry = {
-            abi = driver.TITAN_VER,
+            abi = driver.TITAN_ABI_VERSION,
             types = "Module('fixture.target',{}, {})",
             payload = "canonical",
         }
@@ -771,7 +771,7 @@ end
         local ok, err = driver.compare_archive_entries(
             { ["fixture.target"] = entry },
             { ["fixture.target"] = {
-                abi = driver.TITAN_VER,
+                abi = driver.TITAN_ABI_VERSION,
                 types = "different",
                 payload = "canonical",
             } })

@@ -1,6 +1,6 @@
 local async = import "async"
 local io = import "io"
-local math = import "titan.math"
+local math = import "math"
 local net = import "net"
 local ssl = import "ssl"
 local str = import "string"

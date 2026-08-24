@@ -5,12 +5,8 @@ executes Lua files asynchronously, and loads Lua, C, or Titan modules into the
 current Lua state. Import it by its qualified name:
 
 ```titan
-local lua = import "titan.lua"
+local lua = import "lua"
 ```
-
-There is deliberately no compiler-level `lua` import alias, and this module
-does not replace Lua's global `load`, `dofile`, or `require`. Lua code
-loads the standard-provider module with `require "titan.lua"`.
 
 ## Loading a string
 
@@ -31,7 +27,7 @@ forwards a run-time-sized sequence of `value` arguments and results, including
 nil elements:
 
 ```titan
-local lua = import "titan.lua"
+local lua = import "lua"
 
 local chunk = lua.load("return ...", "=passthrough", nil)
 return chunk("first", nil, "third")

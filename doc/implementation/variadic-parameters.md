@@ -25,9 +25,8 @@ backing storage must respect. Background on the calling convention is in the
 [code generator overview](codegen-overview.md); value representation and the
 collector invariants in [values and the GC](values-and-gc.md).
 
-Variadic support originally bumped the compiled-module **ABI to 0.9**; the
-descriptor layout described here then bumped it to **0.10** (see
-[the ABI bumps](#the-abi-bumps-09-and-010)).
+Variadic signatures and descriptor layout are part of the compiled-module ABI;
+see [the ABI boundary](#the-abi-boundary).
 
 ## Parser: the `...: t` grammar
 
@@ -141,7 +140,7 @@ symbol, and — its central job — turns every spread into either synthesized
 `types.lua` adds `varargtype` to `Type.Function`
 (`{"params","rettypes","vararg","varargtype","flexrettype"}`) and to
 `Type.Method` / `Type.StaticMethod` (whose declaration descriptors also carry
-`paramnames`). In the current ABI-0.26 `Type.Function`, the third positional
+`paramnames`). In the current ABI-2 `Type.Function`, the third positional
 `vararg` field is a required **reserved `false` sentinel** retained only to keep
 serialized constructor arity stable; it has no C or Titan variadic meaning. A
 Titan variadic sets `varargtype = T`. A direct foreign declaration instead has
@@ -167,8 +166,8 @@ view exposes the C bit as `c_vararg`. Four type operations change:
   presence/type, and output-tail presence/type must all match. Thus
   `...: integer` and `...: value` are not equal, which gives them different
 runtime tags even if a directional callable adjustment is legal.
-* **`serialize`** emits `varargtype` for Function, Method, and StaticMethod (the
-  historical 0.9 ABI change), alongside the independent `flexrettype` schema.
+* **`serialize`** emits `varargtype` for Function, Method, and StaticMethod
+  alongside the independent `flexrettype` schema.
   It emits and validates `false` in the reserved Function position; a hostile
   non-false value is rejected. The latter tail is not accepted from compiled
   interfaces until the coordinated flexible-return ABI transition.
@@ -583,37 +582,21 @@ values and dynamic conversion otherwise before resetting the Lua stack.
 Thus input and output tails share descriptor representations without changing
 which branch owns the boundary policy.
 
-## The ABI bumps (0.9 and 0.10)
+## The ABI boundary
 
-Variadic support bumped `titan-runtime/titan.h` from `TITAN_VER "0.8"` to
-`"0.9"` and `TITAN_VER_SUFFIX "_0_8"` to `"_0_9"` (which also moved the
-compiled-module search-path suffix and the `TITAN_PATH_0_9` env var). Two
-cross-`.so` ABI surfaces changed: a variadic function's native signature gained
-the trailing `TitanVargX *` + `int _start` pair, and `<mangled>_types` began
-encoding the `varargtype` element type for variadic functions and methods. A
-0.8 module has neither, so 0.8 and 0.9 `.so`s are ABI-incompatible.
+Two cross-provider surfaces are ABI-visible: a variadic function's native
+signature has the trailing `TitanVargX *` plus `int _start` pair, and
+`<mangled>_types` encodes the `varargtype` element type. Each `TitanVargX` is a
+descriptor (`lu_byte n_args; T *args`), not an inline flexible-array object;
+mixing layouts would misread argument storage.
 
-The `0.10` ABI (`TITAN_VER_SUFFIX "_0_10"`,
-`TITAN_PATH_0_10`) changed the `TitanVargX` family from an inline
-flexible-array object (`lu_byte n_args; T args[]`) to a descriptor
-(`lu_byte n_args; T *args`). The native parameter type name stayed the same, but
-the struct layout did not; mixing 0.9 and 0.10 modules would misread the bytes
-after `n_args`, so they must live under different `TITAN_PATH` directories.
-
-The current ABI is **0.26**, newer than this variadic change. Flexible outputs
-reuse these descriptors but add `flexrettype` to serialized callable shapes and
-`_flexout`/`_flexwant` to native signatures. They shipped as ABI 0.14 rather
-than accepting both layouts under one marker. ABI 0.17 introduced the current
-Array boundary while leaving `TitanVargArrayOrMap` as `Table **`: exact Array
-elements remain internal backing Tables, while generic/Lua-visible runs box
-them as proxies. ABI 0.18 and 0.19 preserved that descriptor contract; ABI
-0.20 kept it while adding the Array writer user value and callable
-strict-entry trailer; 0.21 retained those descriptors while advancing the
-embedded Lua contract to 5.5.1, and ABIs 0.22 through 0.26 retain them. ABIs
-0.24 through 0.26 also retain the historical third `Function` constructor position
-as `false`; separating
-direct `CFunction` declarations is checker-internal and does not alter that
-schema or native convention. Closure adjustment wrappers reuse the same
+Flexible outputs reuse these descriptors and add `flexrettype` to serialized
+callable shapes plus `_flexout`/`_flexwant` to native signatures.
+`TitanVargArrayOrMap` remains `Table **`: exact Array elements are internal
+backing Tables, while generic or Lua-visible runs box them as proxies. The
+third `Function` constructor position remains the reserved `false` sentinel;
+separating direct `CFunction` declarations is checker-internal and does not
+alter that schema or native convention. Closure adjustment wrappers reuse the same
 descriptor/native signature and add only private
 consumer adapter/relay artifacts, so this optimization does not advance the
 ABI. See [Dense Arrays](dense-arrays.md#internal-and-boxed-representations) and

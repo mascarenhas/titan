@@ -116,17 +116,17 @@ Only `UV_ENOENT` returns `nil`. All other failures remain
 returns `nil` from both. Watcher classification uses `lstat`, so a newly
 created dangling symlink still counts as an existing entry.
 
-## ABI 0.25 boundary
+## ABI boundary
 
-This feature advances the compiled-module ABI from 0.24 to 0.25. The optional
+This feature advances the compiled-module ABI. The optional
 `stat`/`lstat` result changes each raw native return carrier from `Udata *` to
 `TValue`, and the optional cancellation action adds a `TValue` parameter to
 `titan.async.suspend` and its source-private `titan.uv` entry. The new watcher
 and cancellation declarations also extend serialized standard-module
-interfaces. `TITAN_VER "0.25"`, suffix `_0_25`, `TITAN_PATH_0_25`,
-`lib/titan/0.25`, `share/titan/0.25`, and `stdlib_0_25` advance together. This
-is a clean-start prototype boundary: 0.24 providers and installation trees are
-rejected and preserved, not migrated, reconciled, or cleaned up.
+interfaces. Advance the ABI marker, generated metadata, and ABI-sensitive cache
+namespace coherently while keeping the semantic release and library layout
+independently versioned. This is a clean-start prototype boundary:
+incompatible providers are rejected, not migrated or reconciled.
 
 ## High-level implementation boundary
 

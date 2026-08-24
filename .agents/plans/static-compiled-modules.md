@@ -1,7 +1,7 @@
 # Static compiled modules — specification and implementation plan
 
 This plan expands the attached `Static compiled modules` brief into a
-source-grounded design for Titan's ABI 0.16 compiler, multi-module providers,
+source-grounded design for Titan's current-ABI compiler, multi-module providers,
 installed toolchain, and standard library.
 
 The feasibility investigation in item 0 changes the draft's artifact shape:
@@ -56,11 +56,11 @@ remain source build roots.
 | Resolver versus native provenance | Selecting key `M` decides how `M` is found and which archive is linked. Separately, code generation records which logical definitions are physically direct in the final image and which transitive owner symbols must still come from a producer-chosen DSO. Physical membership can make a referenced owner direct without making it independently discoverable. |
 | Library outputs | Every successful no-`main` invocation publishes a same-base `.so` and `.a`; generated shims and the Darwin dSYM remain as today. No `.tmm` is emitted or installed. |
 | Native input policy | The same source objects, selected static-provider archives, and `-X` provider payload feed both outputs. Selected/input archives are force-loaded into the DSO and flattened into the archive. There is no companion-only input list. |
-| Common runtime inputs | `libtitan.a`, `libbacktrace.a`, `liblua.a`, `-l` libraries, and final-only flags are supplied once at a final link and are not copied into every produced `.a`. |
+| Common runtime inputs | Installed `lib/titan/<library-version>/libtitan.a`, `lib/libbacktrace.a`, `liblua.a`, `-l` libraries, and final-only flags are supplied once at a final link and are not copied into every produced `.a`. |
 | libuv | Bundled `libuv.a` is the same `-X` payload for both outputs, so its objects are in `titan.so` and `titan.a`. System libuv remains a final-link setting and is never copied into `titan.a`; whether that setting selects a shared or static system library is the user's linker/toolchain decision. |
 | Repackaging | A no-`main` build force-carries the complete physical membership of each selected static provider into both new native forms. That physical membership is not a promise that an unrelated logical prefix can discover the new provider pathname. |
 | Standalone outputs | When exactly one explicitly requested root defines the exact Titan `main(args: {string}): integer`, retain executable-only behavior. Other requested roots may be present. No provider pair is invented beside the executable. |
-| ABI | Keep compiled-module ABI 0.16. The native protocol and serialized types do not change. Give the embedded container format its own format banner/version. |
+| ABI | Keep the compiled-module ABI unchanged. The native protocol and serialized types do not change. Give the embedded container format its own format banner/version. |
 | Platforms | Implement and test ELF/Linux and Mach-O/macOS, including consumption of universal Darwin archives. Windows `.lib`/COFF remains future work. |
 
 The feature does not add Titan syntax, a dependency manifest, a package
@@ -168,14 +168,14 @@ actually compiled.
 
 ```lua
 local interface = {
-    abi = driver.TITAN_VER,
+    abi = driver.TITAN_ABI_VERSION,
     types = types.serialize(ast._type),
 }
 ```
 
 The same `interface.types` feeds `<mangled>_types`; the runtime header's
-`TITAN_VER` feeds `<mangled>_abi`, with `spec/abi_spec.lua` continuing to prove
-that it equals `driver.TITAN_VER`.
+`TITAN_ABI_VERSION` feeds `<mangled>_abi`, with `spec/abi_spec.lua` continuing
+to prove that it equals `driver.TITAN_ABI_VERSION`.
 
 Render one canonical Lua chunk:
 
@@ -183,7 +183,7 @@ Render one canonical Lua chunk:
 -- Titan archive module metadata v1
 return {
     ["pkg.left"] = {
-        abi = "0.16",
+        abi = "2",
         types = "Module('pkg.left',{...},{...})",
     },
 }
@@ -259,7 +259,7 @@ types string
 ```
 
 Reject numeric keys, unknown fields, metatables, functions, and all other
-shapes. Require `abi == driver.TITAN_VER`. Decode `types` with the existing
+shapes. Require `abi == driver.TITAN_ABI_VERSION`. Decode `types` with the existing
 constructor environment:
 
 ```lua
@@ -406,7 +406,7 @@ Scanning `/root/a/b.a` produces:
     relative_archive = "a/b.a",
     entries = {
         ["a.b.left"] = {
-            abi = "0.16",
+            abi = "2",
             types = "Module(...)",
             type = decoded_module_type,
             origin = "a/b.a[x86_64 slice, member 7 @ 0x1234, " ..
@@ -467,20 +467,23 @@ final provenance rather than monotone probe side effects.
 
 ### 3.6 ABI and embedded-format compatibility
 
-Keep:
+Keep the ABI marker independent from the semantic release and its derived
+library namespace:
 
 ```lua
-driver.TITAN_VER = "0.16"
-driver.TITAN_VER_SUFFIX = "_0_16"
+driver.TITAN_ABI_VERSION = "<active-ABI>"
+driver.TITAN_VERSION = "<semantic-version>"
+driver.TITAN_LIBRARY_VERSION = "<major>.<minor>"
+driver.TITAN_LIBRARY_VERSION_SUFFIX = "_<major>_<minor>"
 ```
 
-and `TITAN_PATH_0_16`. The native symbols, callable signatures,
+and `TITAN_PATH_<major>_<minor>`. The native symbols, callable signatures,
 `Type.Module` serialization, module layout, and DSO protocol do not change.
 An old compiler ignores `.a`; a new compiler can use `.so` or `.a`.
 
 The section banner has its own `v1`. An unknown banner is an archive metadata
-format error, not a Titan ABI mismatch. A decoded entry with ABI other than
-0.16 is a compile-time ABI error before its type string is executed.
+format error, not a Titan ABI mismatch. A decoded entry with ABI other than the
+active marker is a compile-time ABI error before its type string is executed.
 
 ## 4. Module resolution
 
@@ -498,11 +501,12 @@ Generalize `driver.module_binary_candidates` into a suffix-aware compiled
 provider helper while retaining a compatibility wrapper if tests/external
 callers use the old name. Validate dotted components once.
 
-Both compiled passes use the expanded `TITAN_PATH_0_16`/`TITAN_PATH`. There is
+Both compiled passes use the expanded
+`TITAN_PATH_<major>_<minor>`/`TITAN_PATH`. There is
 no metadata side path. `;;` continues to insert:
 
 ```text
-.;<rocks-root>/lib/titan/0.16
+.;<rocks-root>/lib/titan/<library-version>
 ```
 
 ### 4.2 Global format preference and path precedence
@@ -573,7 +577,7 @@ and section where applicable:
 ```text
 cannot inspect static provider '/root/a.a' for module 'a.b': invalid archive member header at offset ...
 static provider '/root/a.a' contains duplicate metadata for module 'a.b' in ... and ...
-static provider '/root/a.a' has ABI mismatch for module 'a.b': expected 0.16 but found 0.15
+static provider '/root/a.a' has ABI mismatch for module 'a.b': expected <active ABI> but found <mismatched ABI>
 static provider '/root/a.a' has invalid types for module 'a.b': ...
 universal static provider '/root/a.a' disagrees for module 'a.b' between x86_64 and arm64
 exact static provider '/root/a/b.a' contains no metadata for module 'a.b'
@@ -817,7 +821,7 @@ entrypoint object (program only)
 generated Titan module objects
 selected static-provider archives
 ordinary -X objects/archives
-libtitan.a
+lib/titan/<library-version>/libtitan.a
 libbacktrace.a
 liblua.a
 -l inputs
@@ -835,12 +839,12 @@ Titan runtime with the selected providers:
 -Wl,--end-group
 <ordinary -X objects/archives>
 -Wl,--start-group
-    libtitan.a
+    lib/titan/<library-version>/libtitan.a
     <selected provider archives>
 -Wl,--end-group
 ```
 
-The runtime archive's supported three-member contract has no reverse
+At this plan's baseline, the runtime archive's three-member contract has no reverse
 references into generated Titan module protocols, but it may reference
 metadata-free provider payload: `titan_uv.o` depends on the bundled libuv
 objects flattened into `titan.a`. The second ordinary archive group closes
@@ -886,7 +890,7 @@ omitting a payload would make `.so` and `.a` differ. Preserve broader existing
 Do not copy these common/final inputs into package archives:
 
 ```text
-libtitan.a
+lib/titan/<library-version>/libtitan.a
 libbacktrace.a
 liblua.a
 -l libraries
@@ -1185,7 +1189,8 @@ STDLIB_PROVIDER_OUTPUTS := \
     $(STDLIB_STATIC_ARCHIVE)
 ```
 
-The one existing compiler invocation still names all seven roots and passes
+At this plan's implementation baseline, the compiler invocation names all
+seven roots and passes
 `titanlib.o` through `-X`. It now creates:
 
 ```text
@@ -1208,9 +1213,9 @@ metadata in both native forms. `titan.a` also defines `luaopen_titan` through
 The installer publishes:
 
 ```text
-$ROCKS_TREE/lib/titan/0.16/titan.so
-$ROCKS_TREE/lib/titan/0.16/titan.a
-$ROCKS_TREE/lib/titan/0.16/titan.so.dSYM/     Darwin only
+$ROCKS_TREE/lib/titan/<library-version>/titan.so
+$ROCKS_TREE/lib/titan/<library-version>/titan.a
+$ROCKS_TREE/lib/titan/<library-version>/titan.so.dSYM/     Darwin only
 $ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,fs,net,os}.lua
 ```
 
@@ -1274,24 +1279,17 @@ is never flattened or copied into the published `titan.a`.
 Keep the private bootstrap DSO-only. SDK staging may seed/preserve:
 
 ```text
-$ROCKS_TREE/lib/titan/0.16/titan.so
+$ROCKS_TREE/lib/titan/<library-version>/titan.so
 ```
 
 but must not synthesize `titan.a`. The post-install hook explicitly compiles
 all standard roots and therefore needs no static provider to create the full
 pair.
 
-The unchanged ABI means installation must recognize three predecessor states:
-
-1. bootstrap-only `titan.so`, no standard shims/archive;
-2. the normal pre-feature ABI-0.16 installation: a complete seven-module
-   `titan.so` and generated shims but no `titan.a`; and
-3. a complete post-feature `.so`/`.a`/shim pair.
-
-Validate and transactionally replace state 2 rather than treating the absent
-archive as corruption. At every injected failpoint, restore its exact old DSO,
-dSYM, and shims and leave `titan.a` absent. This is a same-ABI artifact
-migration, not a bootstrap case and not a reason to bump 0.16.
+The unchanged ABI means installation may encounter a bootstrap-only `titan.so`
+or a complete `.so`/`.a`/shim pair. Validate and publish transactionally. At
+every injected failpoint, restore the exact predecessor DSO, dSYM, archive, and
+shims. Do not introduce same-ABI migration machinery solely for this feature.
 
 Extend the private destination-filesystem stage and
 `scripts/stdlib_installer.lua` to:
@@ -1311,7 +1309,7 @@ preceding compiler call: configured `CC`, `AR`, `RANLIB`,
 `TITAN_EXTRA_CPPFLAGS`, `TITAN_EXTRA_CFLAGS`,
 `TITAN_EXTRA_LDFLAGS` (including the selected system-libuv setting),
 `TITAN_ROCKS_ROOT`, and runtime-prebuilt mode. The helper derives
-`libtitan.a`, libbacktrace, and the matching Lua archive from the supplied
+`lib/titan/<library-version>/libtitan.a`, `lib/libbacktrace.a`, and the matching Lua archive from the supplied
 installation root, force-loads staged `titan.a` into a private validation DSO,
 and validates it in a fresh child process. Keep the compiler and installer
 inside the same environment scope in `rock-post-install`; do not rely on the
@@ -1335,8 +1333,7 @@ before:titan.so
 after:titan.so
 ```
 
-Test each over bootstrap first install, legacy full-0.16-without-archive
-migration, and complete-pair upgrade.
+Test each over bootstrap first install and complete-pair replacement.
 
 ### 8.4 Make ownership, warm builds, and CI snapshots
 
@@ -1378,7 +1375,7 @@ mtimes. Missing/corrupt archive invalidates completion and rebuilds the pair.
 `spec/support/ci_stdlib_snapshot.sh` snapshots installed artifacts. Beside:
 
 ```text
-provider=$prefix_rel/lib/titan/0.16/titan.so
+provider=$prefix_rel/lib/titan/<library-version>/titan.so
 ```
 
 add:
@@ -1517,7 +1514,7 @@ Resolver:
 
 Compilation/link:
 
-- pass `driver.TITAN_VER` explicitly to `coder.generate`;
+- pass `driver.TITAN_ABI_VERSION` explicitly to `coder.generate`;
 - factor canonical module-interface validation for DSO/archive reuse;
 - classify/scan `-X` payload;
 - add selected archives and ELF grouping to programs;
@@ -1538,7 +1535,7 @@ Compute `types.serialize(ast._type)` once. Feed the same string to:
 - `staticmetadata.render` for the embedded section.
 
 Use the explicit ABI passed by driver for the section; retain the generated C
-`TITAN_VER` function and ABI sync spec. Emit stable numeric bytes and section
+`TITAN_ABI_VERSION` function and ABI sync spec. Emit stable numeric bytes and section
 attributes in every logical module translation unit.
 
 Generalize the current dynamic/static import branches to accept finalized
@@ -1578,7 +1575,7 @@ Update:
 
 - `Makefile` for `titan.a`, one libuv payload, completion/install/clean;
 - `examples/Makefile` for exact paired-output comments/clean ownership;
-- `titan-dev-1.rockspec` for the new compiler module and output expectations;
+- the active rockspec for the new compiler module and output expectations;
 - `scripts/stdlib_installer.lua`;
 - `spec/support/ci_stdlib_snapshot.sh`;
 - `spec/support/ci_libuv_mode_smoke.sh`;
@@ -1651,7 +1648,7 @@ through an ordinary discoverable key.
 6. Extend exact clean/completion/snapshot ownership.
 7. Add installed bundled/system executable smokes.
 
-Checkpoint: the ABI directory has `titan.so`/`titan.a`; bundled async/libuv
+Checkpoint: the library-version directory has `titan.so`/`titan.a`; bundled async/libuv
 works without either DSO, while system behavior follows the final-link setting.
 
 ### Phase 5 — manuals, full gates, and CI
@@ -1828,8 +1825,7 @@ case.
 
 Extend `spec/stdlib_installer_spec.lua`:
 
-- first install over bootstrap, migration from a complete ABI-0.16
-  DSO/dSYM/seven-shim install with no archive, and upgrade over a full pair;
+- first install over bootstrap and replacement of a full current-ABI pair;
 - missing/corrupt/nonregular archive;
 - wrong key set, ABI, serialized types;
 - embedded/DSO mismatch;
@@ -1927,9 +1923,9 @@ Create `doc/implementation/static-compiled-modules.md`:
   validation, and active-slice handling;
 - exact three-way metadata validation;
 - publication/installed ownership;
-- same-ABI migration from the existing full DSO/shim install with no archive;
+- same-ABI publication over supported active-layout states;
 - stdlib/libuv policy; and
-- why ABI stays 0.16.
+- why the ABI stays unchanged.
 
 Link both indexes and relevant module/import, multi-module, driver, and libuv
 chapters. Update README, `titanc --help`, artifact-layout/install docs, and
@@ -2072,7 +2068,7 @@ Do not put standard-library behavior under LuaCov.
 
 ### Standard library/install
 
-- ABI directory has canonical `titan.so`/`titan.a` plus dSYM/shims.
+- Library-version directory has canonical `titan.so`/`titan.a` plus dSYM/shims.
 - Archive has exactly seven standard module entries, all matching both forms.
 - Bundled libuv is in both native providers and permits no Titan/libuv DSO.
 - System libuv is never copied into `titan.a`. The repeated final-link setting
@@ -2080,8 +2076,8 @@ Do not put standard-library behavior under LuaCov.
   reachable objects into `titan.so`/the executable when it selects a static
   system library.
 - No separate libuv archive, sidecar metadata, links, or compatibility copies.
-- Bootstrap first install, legacy full-0.16-without-archive migration,
-  complete-pair upgrade, injected failure, warm build, snapshot/restore, and
+- Bootstrap first install, complete-pair replacement, injected failure, warm
+  build, snapshot/restore, and
   exact clean behavior preserve ownership.
 
 ### Docs/verification
@@ -2170,7 +2166,7 @@ Do not:
 - publish before three-way metadata/protocol validation;
 - glob arbitrary `.a` files in clean;
 - run library behavior under LuaCov; or
-- bump ABI 0.16 without a native/serialized protocol change.
+- bump the ABI without a native/serialized protocol change.
 
 ## 16. Traceability to the attached brief and maintainer corrections
 
@@ -2180,7 +2176,7 @@ Do not:
 | 1. Static search between DSO and source, shallow-to-exact | §4 searches `.a` itself because it now contains metadata. | Resolver matrix §11.2. |
 | 2. Empty-`_ENV` keyed Lua metadata and compile-time errors | §3.2–§3.4 embeds/evaluates the canonical keyed Lua chunk. | Schema/container failures §11.1. |
 | 3. Type/code metadata and same-path static symbols | One `.a` now contains both; there can be no missing sidecar/archive pair. | Direct codegen, scanner, archive-backed link/validation tests §11.3–§11.5. |
-| 4. Paired outputs and standard installation | No-`main` builds emit `.so`/self-describing `.a`; stdlib installs both in ABI dir. | Producer/installer tests §11.5–§11.7. |
+| 4. Paired outputs and standard installation | No-`main` builds emit `.so`/self-describing `.a`; stdlib installs both in the library-version directory. | Producer/installer tests §11.5–§11.7. |
 | 5. `--static` order and single executable | §4.2/§7.4 implement preference and bundled proof. | Priority/runtime/dependency inspection. |
 | Metadata has exactly the DSO information | Entries contain only `abi`/`types`; exact three-way equality is normative. | DSO/archive-backed callable checks and extra-field rejection. |
 | `.so` and `.a` contents should match | Same module objects and provider payload feed both; physical logical key sets/protocols match. | Staged key/protocol equality. |

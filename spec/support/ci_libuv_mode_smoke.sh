@@ -24,11 +24,12 @@ if [[ $PREFIX != /* ]]; then PREFIX=$PWD/$PREFIX; fi
 PREFIX=$(CDPATH= cd "$PREFIX" && pwd -P)
 LUA="$PREFIX/bin/lua"
 TITANC="$PREFIX/bin/titanc"
-ABI_ROOT="$PREFIX/lib/titan/0.26"
+LIBRARY_ROOT="$PREFIX/lib/titan/0.6"
 SHIM_ROOT="$PREFIX/share/lua/5.5"
-PROVIDER="$ABI_ROOT/titan.so"
-STATIC_ARCHIVE="$ABI_ROOT/titan.a"
-TEST_SUPPORT_SOURCE="$PREFIX/share/titan/0.26/src/titan/test.titan"
+PROVIDER="$LIBRARY_ROOT/titan.so"
+STATIC_ARCHIVE="$LIBRARY_ROOT/titan.a"
+RUNTIME_ARCHIVE="$LIBRARY_ROOT/libtitan.a"
+TEST_SUPPORT_SOURCE="$PREFIX/share/titan/0.6/src/titan/test.titan"
 PROCESS_CHILD_SUPPLIED=${TITAN_PROCESS_SMOKE_CHILD:+1}
 LIBUV_PKG_CONFIG=${LIBUV_PKG_CONFIG:-pkg-config}
 OPENSSL_PKG_CONFIG=${OPENSSL_PKG_CONFIG:-pkg-config}
@@ -76,7 +77,7 @@ case "$(uname -s)" in
 esac
 
 SMOKE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/titan-libuv-mode-smoke.XXXXXX")
-PROVIDER_HIDDEN="$ABI_ROOT/.titan.so.libuv-smoke-hidden.$$"
+PROVIDER_HIDDEN="$LIBRARY_ROOT/.titan.so.libuv-smoke-hidden.$$"
 SHIMS_HIDDEN="$SHIM_ROOT/.titan.libuv-smoke-hidden.$$"
 
 restore_hidden_provider() {
@@ -101,6 +102,9 @@ check_canonical_container() {
     test ! -L "$PROVIDER"
     test -f "$STATIC_ARCHIVE"
     test ! -L "$STATIC_ARCHIVE"
+    test -f "$RUNTIME_ARCHIVE"
+    test ! -L "$RUNTIME_ARCHIVE"
+    test ! -e "$PREFIX/lib/libtitan.a"
     test ! -e "$PREFIX/lib/libuv.a"
     test -s "$TEST_SUPPORT_SOURCE"
     test ! -L "$TEST_SUPPORT_SOURCE"
@@ -119,10 +123,10 @@ check_canonical_container() {
             < <(head -n 1 "$shim")
         grep -Fq 'package.searchpath("titan", package.cpath)' "$shim"
         grep -Fq "luaopen_titan_$module" "$shim"
-        test ! -e "$ABI_ROOT/titan/$module.so"
-        test ! -e "$ABI_ROOT/titan/$module.so.dSYM"
-        test ! -e "$ABI_ROOT/$module.so"
-        test ! -e "$ABI_ROOT/$module.so.dSYM"
+        test ! -e "$LIBRARY_ROOT/titan/$module.so"
+        test ! -e "$LIBRARY_ROOT/titan/$module.so.dSYM"
+        test ! -e "$LIBRARY_ROOT/$module.so"
+        test ! -e "$LIBRARY_ROOT/$module.so.dSYM"
         test ! -e "$PREFIX/lib/lua/5.5/titan/$module.so"
         test ! -e "$PREFIX/lib/lua/5.5/titan/$module.so.dSYM"
     done
@@ -159,7 +163,7 @@ local expected = {
     ["titan.test"] = true,
 }
 local scanned, scan_error = metadata.scan_archive(archive, {
-    expected_abi = driver.TITAN_VER,
+    expected_abi = driver.TITAN_ABI_VERSION,
     validate_types = function(name, serialized, origin)
         return driver.decode_module_interface(serialized, name, origin)
     end,
@@ -464,23 +468,23 @@ LUA
 
 run_mode_smoke() {
     local mode=$1
-    local titan_path="$ABI_ROOT"
+    local titan_path="$LIBRARY_ROOT"
     local lua_path="$SHIM_ROOT/?.lua;$SHIM_ROOT/?/init.lua"
-    local lua_cpath="$ABI_ROOT/?.so"
+    local lua_cpath="$LIBRARY_ROOT/?.so"
 
     env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-        TITAN_PATH_0_26="$titan_path" LUA_PATH="$lua_path" \
+        TITAN_PATH_0_6="$titan_path" LUA_PATH="$lua_path" \
         LUA_CPATH="$lua_cpath" \
         "$LUA" spec/fixtures/libuv/stdlib_provider_smoke.lua "$mode"
 
     env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-        TITAN_PATH_0_26="$titan_path" LUA_PATH="$lua_path" \
+        TITAN_PATH_0_6="$titan_path" LUA_PATH="$lua_path" \
         LUA_CPATH="$lua_cpath" \
         "$LUA" spec/fixtures/libuv/net_production_smoke.lua "$mode"
     # The os facade intentionally supports only pipe and TTY parent streams;
     # CI and noninteractive shells may otherwise supply a regular-file stdin.
     printf '' | env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-        TITAN_PATH_0_26="$titan_path" LUA_PATH="$lua_path" \
+        TITAN_PATH_0_6="$titan_path" LUA_PATH="$lua_path" \
         LUA_CPATH="$lua_cpath" \
         "$LUA" spec/fixtures/libuv/os_production_smoke.lua "$mode" \
         "$TITAN_PROCESS_SMOKE_CHILD"
@@ -505,10 +509,10 @@ local http = import "http"
 local system = import "os"
 local peg = import "peg"
 local strings = import "string"
-local math = import "titan.math"
-local lua = import "titan.lua"
-local iteration = import "titan.iteration"
-local gc = import "titan.gc"
+local math = import "math"
+local lua = import "lua"
+local iteration = import "iteration"
+local gc = import "gc"
 local testing = import "test"
 
 local function check(condition: boolean, message: string)
@@ -723,7 +727,7 @@ TITAN
         cd "$mode_dir"
         env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
             TITAN_ROCKS_ROOT="$PREFIX" \
-            TITAN_PATH_0_26="$ABI_ROOT" TITAN_PATH= \
+            TITAN_PATH_0_6="$LIBRARY_ROOT" TITAN_PATH= \
             TITAN_RUNTIME_PREBUILT=1 \
             TITAN_EXTRA_CPPFLAGS="$cppflags" \
             TITAN_EXTRA_CFLAGS="-fno-strict-aliasing" \

@@ -404,7 +404,7 @@ No driver-level standard-module origin, reserved-name lookup, or separate
 loader is needed. Generic dependency resolution is binary-first. An explicitly
 requested `titanc` root is forced through source, while its dependencies use
 already-built binaries when available. The checkout build therefore uses the
-directory containing `titan/` as `TITAN_PATH_0_11` and builds in dependency
+directory containing `titan/` through the active versioned `TITAN_PATH` override and builds in dependency
 order:
 
 ```text
@@ -428,8 +428,9 @@ Likewise `titan.coroutine` exports the `titan_coroutine_*` ABI plus
 separate Lua alias option or special build mode is involved.
 
 Install exactly one regular DSO for each module at
-`<root>/lib/titan/<Titan ABI>/titan/<module>.so`. Both Titan and Lua use the
-parent ABI directory as their search root and open that exact pathname. Do not
+`<root>/lib/titan/<Titan library version>/titan/<module>.so`. Both Titan and Lua
+use the parent library-version directory as their search root and open that
+exact pathname. Do not
 install byte-for-byte copies, symbolic links, hard links, or forwarding DSOs.
 This matters especially for `titan/uv.so`: two independently loaded images
 would contain two statically linked libuv instances. Installed-layout,
@@ -1782,7 +1783,7 @@ Extend the build graph:
 
 ```text
 lua + libbacktrace + libuv
-  -> libtitan.a (exactly titan.o + titan_coro.o + titan_uv.o)
+  -> titan-runtime/libtitan.a (exactly titan.o + titan_coro.o + titan_uv.o)
   -> titan/coroutine.so
   -> titan/uv.so
   -> titan/{timer,fs,net,os}.so
@@ -1797,12 +1798,15 @@ The checkout root is the Titan path, allowing each later build to find the
 already-built qualified binary dependency.
 
 Add an `install-stdlib` target. Before LuaRocks installs the compiler, build
-and install the Lua runtime/SDK, `libtitan.a`, and separate `libbacktrace.a`;
+and install the Lua runtime/SDK archive at
+`lib/titan/<library-version>/libtitan.a` and the
+separate `lib/libbacktrace.a`;
 build bundled libuv as a private prerequisite and install its headers, but do
 not export `libuv.a`.
 After the compiler is deployed, build the standard modules and install only
-`<root>/lib/titan/<Titan ABI>/titan/{coroutine,uv,timer,fs,net,os}.so`.
-Do not install parent-ABI or `lib/lua` copies, links, or forwarding modules.
+`<root>/lib/titan/<library-version>/titan/{coroutine,uv,timer,fs,net,os}.so`.
+Do not install parent-library-directory or `lib/lua` copies, links, or
+forwarding modules.
 The coroutine module exports `luaopen_titan_coroutine`, not
 the old `luaopen_coro` or Lua's reserved `luaopen_coroutine`. Installed `uv`
 imports the qualified `titan.coroutine` binary through ordinary module loading,
@@ -1828,7 +1832,7 @@ Files:
 
 - `Makefile`
 - `titan/coroutine.titan` (moved and renamed from the old root prototype)
-- `titan-dev-1.rockspec`
+- the active rockspec
 - `.gitignore`
 - `.github/workflows/ci.yml`
 - `c-parser/cpp.lua`
@@ -2184,7 +2188,7 @@ and the manual macOS workflow verify each branch head.
 
 Files:
 
-- `titan-dev-1.rockspec`
+- the active rockspec
 - `Makefile`
 - `README.md`
 - `CLAUDE.md`

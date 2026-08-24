@@ -105,7 +105,7 @@ This refactoring restored the proper compiler invariant: **`_mod` for any genera
 ## Verification & Walkthrough Results
 
 1. **Compilation & Installation**:
-   - `luarocks make titan-dev-1.rockspec` built and installed cleanly to `/tmp/titan-mascarenhas-const93` and `.local-builds/titan-mascarenhas-const93`.
+   - `luarocks make` with the then-active rockspec built and installed cleanly to `/tmp/titan-mascarenhas-const93` and `.local-builds/titan-mascarenhas-const93`.
 2. **Targeted Spec Execution**:
    - `spec/coder/adapter_registry_elimination_spec.lua`: 4 successes / 0 failures / 0 errors.
    - `spec/checker/interfaces_spec.lua`: 55 successes / 0 failures.

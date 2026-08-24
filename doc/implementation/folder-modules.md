@@ -237,74 +237,20 @@ order is its written declaration order inside that source file; contributor
 byte order decides only where the whole declaration appears in the combined
 AST. No contributor name enters the Interface identity or wrapper ABI.
 
-The original `titan.uv` dogfood used that rule rather than hiding public
-declarations in the main source. In ABI 0.15 its exported records and functions
-lived in their semantic contributors, so member order followed the contributor
-sequence `file`, `os`, `process`, `runtime`, `task`, `tcp`. That initial public
-move differed from the old monolithic member order, so the release advanced
-the compiled-module ABI to **0.15** and the exact `titan_uv_types` fixture
-pinned the resulting deterministic interface. The subsequent declaration-order
-pass moved the remaining private records to their semantic contributors and
-the private `FS` constants instance beside `FsConstants` in `file.titan`.
-Private slot and initialization order changed, but no serialized public member,
-importer-visible variable slot, canonical exported-function closure slot, or
-fixture did. It therefore remained ABI 0.15 until the later provider-layout
-transition. ABI 0.22 changes the public/private boundary as described below;
-it does not change folder assembly.
+The `titan.uv` dogfood uses that rule rather than hiding public declarations
+in the main source. Exported records and functions live in their semantic
+contributors, so member order follows contributor order; the exact
+`titan_uv_types` fixture pins the deterministic public interface. Moving
+private records or constants among contributors changes private initialization
+order without changing the public schema.
 
-ABI 0.16 leaves this logical interface unchanged but permits `M`'s symbols to
-reside in a shared prefix container. Runtime imports load the selected
-`Type.Module.file`, publish one `_mod` `Udata` for `M` in the registry, and
-invoke only `M`'s initializer once per Lua state. No runtime component knows
-whether its object came from a flat or folder source representation, and the
-container does not gain a contributor protocol.
-
-ABI 0.17 likewise leaves folder composition and the serialized logical
-interface unchanged. Every generated module—flat or folder—reserves the same
-unconditional private Array-metatable cache after its importer-reconstructed
-public prefix. That private slot and the new Array boxing protocol require the
-ABI transition, but contributor boundaries still have no runtime identity.
-See [Dense Arrays](dense-arrays.md#canonical-proxy-and-module-cache).
-
-ABI 0.18 preserved folder composition, contributor ordering, and the logical
-interface again. Its compatibility boundary is instead the external callback
-symbol contract between standard-library archive objects and the runtime.
-
-ABI 0.19 still gave contributors no runtime identity. It added union schemas
-and absolute variant tags, plus the reconstructible public nominal-static slot
-prefix. Folder order therefore remains authoritative for public owner/member
-order and for variant tags, while keyed static maps use bytewise ordering.
-
-ABI 0.20 and ABI 0.21 left folder composition unchanged. Array writer
-inventories, callable strict entries, Interface descriptors, and
-concrete/Interface pair obligations are collected only after the contributors
-have become one checked AST, then emitted once per logical module. Their
-module-private slots follow the same importer-reconstructible public prefix and
-never give a contributor a runtime identity. ABI 0.20's logical `titan.uv`
-schema included the nominal `uv_stdio_t` process-stream wrapper used by
-`titan.os`; its private native representation selected a pipe or TTY owner.
-
-ABI 0.22 still leaves folder composition unchanged, but deliberately changes
-the logical module boundary. `uv_stdio_t`, every high-level bridge function,
-and the filesystem, OS, process, Runtime, timer, and TCP owner records are now
-local declarations selected only by explicit source consumers. The serialized
-public owner order is `Error`, `OperationError`, `CancellationReason`,
-`TaskStatus`, and `Task`: the first two come from the main and the last three
-from `task.titan`. That schema and its reconstructible module-userdata prefix,
-together with the fixed physical-provider identity slot now carried by every
-module, are why this source-private transition advances the ABI; contributor
-filenames still have no runtime identity of their own.
-
-ABI 0.23 again leaves folder composition unchanged. `Ast.TopLevelForeignFunc`
-declarations in any contributor are checked and lowered as declarations of the
-one logical module. Their prototypes and eligible inline bodies enter the
-canonical main's single generated `*.titan.h`; out-of-line bodies enter its
-single C/object pair. The callback-symbol and UCN top-level-entry changes are
-native ABI reasons for 0.23, not contributor identities or new folder metadata.
-ABI 0.24 likewise leaves folder composition unchanged; its boundary is the
-extended generic declaration metadata, not contributor identity. ABI 0.26
-again leaves folder composition unchanged; its boundary is the changed public
-`titan.fs` and `titan.async` signatures.
+Folder composition has no independent ABI identity. ABI 2 covers the selected
+physical prefix container, module-private Array cache, union and Interface
+schemas, source-private provider identity, source foreign callbacks, generic
+metadata, and current public standard-library signatures. Contributors first
+become one checked AST and then emit one logical module, one `_mod` Udata, and
+one initializer per Lua state. Contributor filenames never enter runtime
+identity.
 
 ## `titan.uv` dogfooding
 

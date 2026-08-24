@@ -7,8 +7,8 @@ at a statically known use site, and the coder lowers that coercion to a fresh
 wrapper containing the concrete receiver, its owning module, an ordered method
 table, and declaration-order field snapshots. Code generation also advertises every emitted pair on the
 concrete metatable so later strict/dynamic Interface observations can construct
-that same wrapper after type erasure. ABI 0.26 extends the serialized Interface
-schema and wrapper user-value count for fields; dynamic discovery still adds no
+that same wrapper after type erasure. ABI 2 includes the serialized Interface
+schema and wrapper user-value count for fields; dynamic discovery adds no
 new relation.
 
 The language-visible contract is in
@@ -532,7 +532,7 @@ The driver's closed validator requires:
 value-facing positions in recovered metadata. The value graph is closed:
 error-recovery/no-value markers, nested modules, C FFI descriptors, legacy
 wrappers, and unknown tags are rejected as well. A recovered Titan function
-type must carry ABI 0.25's reserved `vararg=false` sentinel; typed variadics
+type must carry the reserved `vararg=false` sentinel; typed variadics
 use `varargtype`, while C variadicity exists only on unexportable
 `Type.CFunction`. An Option cannot contain another Option or `value`, matching
 source canonicalization.
@@ -554,8 +554,7 @@ concrete method symbols.
 
 Static-provider and library preflight inventories the three exported bound
 method symbols from recovered Interface type members, in addition to ordinary
-module and nominal symbols. Interface artifacts follow the native hierarchy
-introduced in ABI 0.23 and retained through ABI 0.26:
+module and nominal symbols. Interface artifacts follow the current native hierarchy:
 `<module>_\u2133_<owner>_\u2131_<member><role>`, matching record and
 union callables. Pair arrays and adjustment entries are private to
 the translation unit that needs a concrete/Interface conversion; its witness
@@ -568,8 +567,7 @@ compiled to witness.
 
 ## ABI, GC, and failure boundaries
 
-Interfaces entered the compiled-module contract in ABI 0.20. That boundary
-covers:
+The compiled-module ABI covers:
 
 - `Type.Interface` and ordered `Type.Method` metadata in
   `Module.type_members`;
@@ -578,20 +576,14 @@ covers:
 - the concrete-owner module retention rule; and
 - the exported bound native/Lua/strict trampoline set.
 
-ABI 0.20 also introduced the two-user-value Array proxy and strict generic
-function entry. ABI 0.21 retained those layouts while advancing the matched
-Lua runtime to 5.5.1. ABI 0.22 retains those layouts; ABI 0.23 also retains
-them while renaming the native bound and metatable entry families. ABI 0.24
-retains their erased representation while extending generic metadata, and ABI
-0.25 retained that Interface representation while changing only the affected
-public `titan.fs` and `titan.async` signatures. ABI 0.26 adds ordered field
-descriptors and const booleans, field adjustment mappings, and one wrapper user
-value per field. The generalized callable action graph, `nil_fill_result`, and
+ABI 2 includes the two-user-value Array proxy, strict generic function entry,
+ordered Interface field descriptors and const booleans, field adjustment
+mappings, and one wrapper user value per field. The generalized callable
+action graph, `nil_fill_result`, and
 first-class closure wrappers still add no provider symbol. Target wrapper
 adapters, field allocators, witnesses, and strict relays are consumer-private.
-A 0.25 provider is rejected before its older metadata or wrapper layout is
-used; there is no compatibility adapter, migration, or cleanup path, and
-separately versioned prior-ABI artifacts remain preserved.
+A mismatched provider is rejected before its metadata or wrapper layout is
+used. There is no compatibility adapter or migration path.
 
 The wrapper, concrete module, concrete value, and field snapshots use stock Lua
 reachability. All `2 + field_count` user values are strong traced edges with

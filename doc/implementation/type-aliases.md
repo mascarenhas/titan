@@ -64,9 +64,8 @@ The two maps are serialized independently and deterministically by
 `types.serialize`. A compiled-interface importer therefore rehydrates a
 transparent alias with the same nominal owner name and structural component
 types, whether the interface came from DSO callables or an archive metadata
-section, without inventing a run-time member. Adding this third serialized
-`Module` component was an interface ABI change, so this feature advanced
-`TITAN_VER` to 0.12.
+section, without inventing a run-time member. The third serialized `Module`
+component is therefore part of the compiled-module ABI.
 
 `checker.checkimport` recursively registers records and unions reachable through
 both namespaces. This matters when the alias is the only exported reference to

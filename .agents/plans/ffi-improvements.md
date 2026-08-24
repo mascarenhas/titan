@@ -29,7 +29,7 @@ The completed change provides:
    stack aggregate, a tag-only platform type, or an imported constant. This
    includes DNS submission, `addrinfo` normalization, TCP bind, and TCP connect
    submission while preserving the existing opaque address cell. Obsolete
-   wrappers are physically removed under compiled-module ABI 0.18.
+   wrappers are physically removed at the compiled-module ABI boundary.
 7. Titan-side coroutine transfer rooting through the public Lua uservalue API,
    while retaining only the native coroutine entry/tag boundary.
 8. Complete checker, coder, library, packaging, sanitizer, Linux, and macOS
@@ -108,9 +108,8 @@ address-coercion support already present on `master`; it does not redesign
   the bind/connect path while retaining the normalized opaque address cells.
 - Moving coroutine transfer-root set/clear logic to
   `titan/coroutine.titan` through `lua_setiuservalue`.
-- Bumping the compiled-module ABI to 0.18, migrating every versioned runtime,
-  loader, installer, test, and CI path, and preserving the separate 0.17 tree
-  without trying to load it as compatible.
+- Advancing the compiled-module ABI, updating generated metadata and ABI-keyed
+  caches coherently, and proving clean installation without migration machinery.
 
 ### 2.2 Deliberately out of scope
 
@@ -142,9 +141,8 @@ address-coercion support already present on `master`; it does not redesign
   expressions at Titan run time.
 - Reinterpreting Titan `//` or `^`: they remain Titan floor division and
   exponentiation.
-- Purging the separately versioned 0.17 provider tree. The 0.18 installation
-  replaces only the canonical generated Lua shims and owns a new
-  `lib/titan/0.18` pair.
+- Cross-version provider migration. Installation replaces only the canonical
+  generated Lua shims and owns the active library pair.
 
 ## 3. Design invariants
 
@@ -956,7 +954,7 @@ Add:
   process execution, diagnostics, and session caches.
 
 Add each module to the explicit Lua module table in
-`titan-dev-1.rockspec`. The Makefile's compiler-source wildcard will see the new
+the active rockspec. The Makefile's compiler-source wildcard will see the new
 files, but verify that stdlib completion stamps and installed-compiler
 dependencies also invalidate correctly.
 
@@ -1102,7 +1100,7 @@ parallel FFI:
 - `titan-compiler/driver.lua`
   - effective C configuration and checker configuration;
   - one resolver context across the source graph.
-- `titan-dev-1.rockspec`
+- the active rockspec
   - explicit installed compiler-module inventory.
 
 Existing behavior that must not regress:
@@ -1409,67 +1407,64 @@ operation order:
 anchored `*ffi.Udata`, checked `lua_checkstack`, owner/payload pushes, checked
 `lua_setiuservalue`, and exact top restoration.
 
-### 11.3 Compiled-module ABI 0.18
+### 11.3 Compiled-module ABI boundary
 
 The C FFI source features do not themselves change serialized Titan types or
 ordinary exported Titan native signatures. The complete standard-library
 migration nevertheless changes the static runtime contract:
 
 - the new `titan.a` logical objects directly reference callback trampolines
-  that were `static` inside ABI-0.17 `titan_uv.o`;
-- a final static executable supplies those definitions from `libtitan.a`;
-- an older ABI-0.17 `libtitan.a` therefore cannot link a new provider;
+  that were previously `static` inside `titan_uv.o`;
+- a final static executable supplies those definitions from the runtime SDK
+  archive at `$ROCKS_TREE/lib/titan/<library-version>/libtitan.a`;
+- a pre-boundary runtime SDK archive therefore cannot link a new provider;
 - deleting old wrapper/root symbols also makes an older static provider
   incompatible with the new runtime.
 
 A DSO can hide the first mismatch because its link pulls in the current
 `titan_uv.o`, but ABI compatibility must also hold for archive-backed providers.
 Do not ship a bidirectionally incompatible runtime/provider pair under the same
-number. Bump the compiled-module ABI from 0.17 to 0.18.
+marker. Advance the compiled-module ABI.
 
-The ABI history entry in `titan-runtime/titan.h` states that 0.18:
+The ABI rationale in `titan-runtime/titan.h` states that this boundary:
 
 - promotes the callback trampolines needed by direct standard-library source
   into the runtime's external native symbol contract;
 - removes the replaced libuv/coroutine helper-symbol contract;
-- requires a 0.18 runtime and provider to be built/distributed together.
+- requires the runtime and provider to be built/distributed together.
 
-Perform the complete version migration:
+Update the split version contract coherently:
 
-- `driver.TITAN_VER = "0.18"` and suffix `_0_18`;
-- `TITAN_VER`/suffix in `titan-runtime/titan.h`;
-- `TITAN_ABI_VERSION` and every Makefile path/environment spelling;
-- default compiled lookup and override `TITAN_PATH_0_18`;
-- canonical SDK/stdlib pair at
-  `$ROCKS_TREE/lib/titan/0.18/{titan.so,titan.a}`;
+- `driver.TITAN_ABI_VERSION = "<active-ABI>"` and the matching
+  `TITAN_ABI_VERSION` in `titan-runtime/titan.h`;
+- generated ABI metadata, Makefile ABI inputs, and ABI-keyed caches;
+- independently versioned compiler/stdlib semantic release;
+- default compiled lookup and derived override
+  `TITAN_PATH_<major>_<minor>`;
+- canonical provider pair at
+  `$ROCKS_TREE/lib/titan/<library-version>/{titan.so,titan.a}` and runtime SDK
+  archive at `$ROCKS_TREE/lib/titan/<library-version>/libtitan.a`;
 - the prefix Lua configuration input/stamp and rebuilt `luaconf.h` whose
-  compiled Titan C-module path must name `lib/titan/0.18`, never stale 0.17;
+  compiled Titan C-module path must name
+  `lib/titan/<library-version>`;
 - bootstrap staging, generated metadata, shims, validation images, snapshots,
   mode smokes, and all ABI fixtures/specs;
-- documentation and `AGENTS.md` ABI history.
+- documentation and `AGENTS.md` ABI rationale.
 
-The 0.18 installer:
+The installer:
 
-- treats a 0.18 bootstrap, legacy complete 0.18 DSO-without-archive, or complete
-  0.18 pair as predecessor states for same-version publication/rollback;
-- publishes and validates only the 0.18 pair;
+- treats a bootstrap or complete active pair as supported predecessor states
+  for publication/rollback;
+- publishes and validates only the active pair;
 - replaces the seven unversioned generated Lua shims only at final commit;
-- leaves the complete `lib/titan/0.17` tree untouched;
-- restores the exact prior 0.18 pair state and the exact preexisting
-  unversioned shim set on injected failure. During same-prefix migration those
-  seven shims may still be the ABI-0.17-generated set, so tests begin from that
-  state and compare restored shim presence/content/mode/mtime rather than
-  assuming every predecessor shim was generated by 0.18;
+- restores the exact prior pair state and the exact preexisting unversioned
+  shim set on injected failure, comparing presence/content/mode/mtime;
 - does not claim crash/power-loss/signal atomicity.
 
-Update the CI migration producer to prepare an ABI-0.17 prefix, run the
-supported `make lua`/`make luarocks` plus first 0.18 rock installation in that
-same prefix, prove that 0.17 artifacts remain separate, and prove bare
-`require "titan"` after 0.18 publication with no stale 0.17 compiled cpath.
-Tests also compile explicit 0.17 DSO/archive fixtures and require an ABI
-mismatch before metadata use or native link rather than a late missing symbol.
-Update current-version documentation broadly while retaining the historical
-statement that dense Array boundary semantics began at ABI 0.17.
+Use a fresh CI prefix, run the supported `make lua`/`make luarocks` and rock
+installation, and prove bare `require "titan"` after publication. Tests compile
+synthetic mismatched DSO/archive fixtures and require an ABI mismatch before
+metadata use or native link rather than a late missing symbol.
 
 With the ABI bump in place, physically delete retired wrapper/root prototypes
 and definitions after all current source callers are gone. No compatibility
@@ -1575,7 +1570,7 @@ Files:
 - `titan-compiler/foreigntypes.lua`
 - `titan-compiler/symtab.lua`
 - `titan-compiler/types.lua`
-- `titan-dev-1.rockspec`
+- the active rockspec
 - `spec/ctypes_spec.lua`
 - `spec/foreigntypes_spec.lua`
 - `spec/symtab_spec.lua`
@@ -1657,7 +1652,7 @@ Files:
 - `c-parser/cdefines.lua`
 - `titan-compiler/csemantics.lua`
 - `titan-compiler/foreigntypes.lua`
-- `titan-dev-1.rockspec`
+- the active rockspec
 - new `spec/cprobe_spec.lua`
 - `spec/csemantics_spec.lua`
 - `spec/foreigntypes_spec.lua`
@@ -1894,18 +1889,18 @@ Files:
 - `spec/support/ci_stdlib_snapshot.sh`
 - `spec/support/ci_libuv_mode_smoke.sh`
 - `.github/workflows/ci.yml`
-- ABI-0.17 DSO/archive and stdlib migration fixtures/specs
+- synthetic ABI-mismatch DSO/archive and stdlib fixtures/specs
 - relevant stdlib specs
 - delayed filesystem callback fixture/anchor generator
 
 Work:
 
-1. Own the complete ABI-0.18 foundation before emitting any new callback
-   reference: runtime/compiler constants, `_0_18` symbols, default and override
-   lookup, Lua configuration/cpath input, Make/staging paths, installer
-   predecessor recognition, snapshots/smokes, and explicit ABI-0.17
+1. Own the complete ABI foundation before emitting any new callback reference:
+   runtime/compiler constants, generated metadata, default and override lookup,
+   Lua configuration/cpath input, Make/staging paths, installer predecessor
+   recognition, snapshots/smokes, and explicit mismatched-ABI
    DSO/archive mismatch fixtures. Phase 12 later exercises final publication
-   and rollback; it must not introduce the first usable 0.18 path.
+   and rollback; it must not introduce the first usable active path.
 2. Expose required callback trampoline symbols, including the DNS/connect
    callbacks needed by Phase 10, before any generated source refers to them.
 3. Replace the section 10.2 wrapper calls with direct libuv calls.
@@ -1919,8 +1914,8 @@ Work:
 7. Run each owning stdlib suite without LuaCov before beginning process spawn.
 
 Exit criterion: new generated `titan.so`/`titan.a` contains no current references
-to cast-only wrappers; the compiler/runtime/installer already agree on every
-0.18 versioned path and reject 0.17 fixtures at the ABI check; and TCP, pipe,
+to cast-only wrappers; the compiler/runtime/installer already agree on the ABI
+marker and reject synthetic mismatched fixtures at the ABI check; and TCP, pipe,
 timer, FS, signal, process cleanup, and late-callback behavior are unchanged.
 
 ### Phase 9: Migrate constants, process spawn, buffers, signals, and stat
@@ -1966,7 +1961,7 @@ Work:
 9. Replace `UV_BUF_MAX` with a proven `UINT_MAX` path.
 10. Remove `as integer` only where C-mode expressions make it redundant.
 11. Delete all newly obsolete prototypes/definitions and assert neither the
-    source tree nor generated 0.18 provider refers to them, including an
+    source tree nor generated provider refers to them, including an
     explicit absence check for `titan_uvshim_ignore_sigpipe_if_default`.
 
 Exit criterion: process spawn/communicate, signals, filesystem stat, buffers,
@@ -2056,7 +2051,7 @@ Exit criterion: DNS submission, result normalization, bind, and connect
 submission are implemented in Titan; the opaque address cell remains in the
 shared header and the two callback trampolines remain C; all net suites and
 bundled/system/static/sanitizer smokes pass; and neither the active header,
-runtime, nor 0.18 provider references a removed DNS/address helper.
+runtime, nor generated provider references a removed DNS/address helper.
 
 ### Phase 11: Migrate coroutine transfer rooting
 
@@ -2071,7 +2066,7 @@ Work:
 
 1. Implement private Titan root/clear helpers through public Lua APIs.
 2. Replace every transfer site while preserving exact ordering.
-3. Delete the old root/clear prototypes and definitions under ABI 0.18.
+3. Delete the old root/clear prototypes and definitions at the ABI boundary.
 4. Extend generated-C ordering assertions.
 5. Inject `lua_checkstack` failure and prove no push occurs and the exact top is
    restored.
@@ -2087,29 +2082,28 @@ root/clear helpers and all GC stress cases pass.
 Files include:
 
 - `Makefile`
-- `titan-dev-1.rockspec`
+- the active rockspec
 - `scripts/stdlib_installer.lua`
-- `spec/support/ci_abi_migration_smoke.sh`
+- clean-prefix CI support
 - packaging/installer specs
 - both manual indexes/chapters listed in section 14
 - `AGENTS.md`
 
 Work:
 
-1. Exercise the already-landed Phase-8 0.17-to-0.18
-   driver/runtime/Makefile/installer/spec/CI migration through clean
-   installation, same-prefix upgrade, publication, and rollback, and verify the
-   old versioned tree is preserved.
+1. Exercise the already-landed Phase-8 ABI boundary through clean installation,
+   publication, and rollback.
 2. Verify new compiler modules install and source/stamp dependencies invalidate
    the pair.
 3. Rebuild all seven standard roots in one compiler process.
 4. Validate the canonical DSO/archive pair, seven shims, eight `luaopen_*`
    entries, exact seven archive metadata keys, bundled payload, and system-mode
    external link requirements.
-5. Preserve exact `libtitan.a` members:
+5. Preserve the exact baseline
+   `$ROCKS_TREE/lib/titan/<library-version>/libtitan.a` members:
    `titan.o`, `titan_coro.o`, and `titan_uv.o`.
-6. Test explicit 0.17 DSO/archive rejection by the 0.18 loader and the
-   same-prefix upgrade/publication/rollback path.
+6. Test explicit mismatched DSO/archive rejection and the
+   publication/rollback path.
 7. Update both manuals and repository guidance in the same commit series as the
    implementation.
 8. Run the complete validation ladder in section 15.
@@ -2320,7 +2314,7 @@ Update:
   value-first C-module expression lookup, complete-object/frontier checks, and
   collided pseudo-member diagnostics;
 - `doc/implementation/libuv-runtime.md` with the new native/Titan ownership
-  table, ABI-0.18 callback/runtime boundary, direct constants, Titan-owned DNS
+  table, callback/runtime ABI boundary, direct constants, Titan-owned DNS
   submission/normalization/bind/connect and inherited-`SIGPIPE` logic, and the
   retained opaque address cell plus native callbacks;
 - `doc/implementation/libuv-networking.md` with Titan-owned DNS submission,
@@ -2345,7 +2339,7 @@ Update `AGENTS.md` after the implementation so future work knows:
   hooks, and no-installed-hooks invariant alongside the existing delayed-FS
   exception;
 - automatic aggregates and C operators are supported;
-- ABI 0.18 is required because archive-backed providers directly reference
+- The ABI boundary is required because archive-backed providers directly reference
   newly external callback trampolines and no longer reference old helpers.
 
 ## 15. Validation ladder
@@ -2495,13 +2489,14 @@ The feature is done only when all of the following are true:
   tag comparison remain C. The inherited-`SIGPIPE` policy runs in Titan through
   reusable macro-value and macro-field FFI behavior.
 - Retired wrapper/root symbols are absent from the active headers/runtime, and
-  the 0.18 provider references only the new callback/runtime boundary.
-- Direct inspection of 0.18 logical archive objects shows required undefined
+  the provider references only the new callback/runtime boundary.
+- Direct inspection of logical archive objects shows required undefined
   callback references and no removed-helper references; DSO linkage is not used
   as a proxy for this proof.
-- Explicit 0.17 DSO/archive fixtures fail at the 0.18 ABI check rather than at a
-  later native link, while the separate installed 0.17 tree remains untouched.
-- `libtitan.a` retains exactly its three intended members.
+- Explicit mismatched DSO/archive fixtures fail at the ABI check rather than at
+  a later native link.
+- The baseline `$ROCKS_TREE/lib/titan/<library-version>/libtitan.a` retains
+  exactly its three intended members.
 - The canonical standard DSO/archive pair advertises exactly seven logical
   modules and validates in bundled and system modes.
 - Both manuals, implementation ownership docs, and `AGENTS.md` match the
@@ -2568,10 +2563,11 @@ raw struct/union/enum prefixes as separate C tag namespaces, silently skip kind
 conflicts, or intern a genuinely local prototype tag globally: the base name is
 shared within a scope.
 
-### Missing an ABI-versioned path
+### Missing an ABI-sensitive cache and library-versioned path
 
 Private-looking runtime symbols are native dependencies of archive-backed
-providers, which is why this plan chooses ABI 0.18. Audit every `0.17`,
-`_0_17`, and `TITAN_PATH_0_17` source/test/doc occurrence: the new toolchain
-must consistently use 0.18, migration tests must intentionally retain 0.17
-fixtures, and the installer must never overwrite/purge the separate 0.17 tree.
+providers, which is why this plan advances the ABI. Audit every stale ABI
+constant, generated claim, cache namespace, and path/environment spelling. The
+new toolchain must consistently use its active ABI marker, independent semantic
+release, and derived library path without migration fixtures or historical
+layout handling.

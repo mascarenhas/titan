@@ -762,10 +762,8 @@ it may select another local declaration. Ordinary imports, binary metadata, and
 transitive imports remain public-only. A type argument cannot smuggle a source-
 private owner across that boundary.
 
-Generics enter the compiled-module contract in ABI 0.24. ABI 0.25 retains that
-schema and erased implementation; its separate boundary changes public
-`titan.fs` and `titan.async` signatures. ABI 0.26 extends generic Interface
-metadata with fields while retaining erased implementation. An older provider is rejected before
+Generic schemas, erased implementation, and Interface field metadata are part
+of ABI 2. A mismatched provider is rejected before
 its type metadata is decoded; this is a clean rebuild boundary, not a
 compatibility or migration protocol.
 

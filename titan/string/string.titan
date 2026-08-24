@@ -4,7 +4,7 @@ local ffi = foreign import "titan/ffi.h"
 local cstring = foreign import "string.h"
 local cctype = foreign import "ctype.h"
 local peg = import "peg"
-local gc = import "titan.gc"
+local gc = import "gc"
 
 -- The canonical folder main is the complete public surface. Contributors
 -- contain only module-local records, state, and shared helpers.

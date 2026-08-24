@@ -12,7 +12,7 @@ through the cell.
 The box is **module-internal**: it backs a captured local inside one module's
 closures, and only the module that defined the variable ever generates code that
 touches it. A box never crosses a module boundary, so this representation change
-does **not** alter the cross-module ABI — `TITAN_VER` is unchanged.
+does **not** alter the cross-module ABI, so the ABI marker is unchanged.
 
 ## The change: CClosure box -> Udata box
 

@@ -1,7 +1,7 @@
 # Type-relation consistency audit and repair plan
 
 Status: **second audit and implementation complete; separated relation APIs,
-ABI-0.20 Array/function runtime layouts, focused regressions, both manuals,
+the coordinated Array/function ABI layouts, focused regressions, both manuals,
 repository instructions, independent reviews, the final requirement audit,
 isolated full-suite/coverage/library validation, and the local commit are
 complete. Draft PR #42 is published. Its first exact-head Linux run exposed
@@ -63,7 +63,7 @@ Implementation spans the separated relation and plan APIs in
 `titan-compiler/checker.lua`, plan-consuming guards/open runs/function entries
 in `titan-compiler/coder.lua`, the two-user-value Array proxy in
 `titan-runtime/titan.c` and `titan-runtime/titan.h`, standalone argument Arrays
-in `titan-compiler/driver.lua`, and the coordinated ABI-0.20
+in `titan-compiler/driver.lua`, and the coordinated ABI
 driver/installer/CI fixtures. Focused relation, boundary-parity, compiled-DSO,
 and selected-archive regressions pass. Separate language-manual,
 implementation-manual, repository-instruction, code, and completion reviews
@@ -845,16 +845,16 @@ closures generated from the same semantic conversion rule. No Titan
 operation compares their identities.
 
 This changes the proxy shape (`nuvalue == 1` to `nuvalue == 2`) and therefore
-requires the normal clean Titan ABI-0.20 bump and provider/metadata
+requires the normal clean Titan ABI advance and provider/metadata
 incompatibility checks. It does not change the exact/native `Table *` Array
 representation or the one-to-one backing/proxy identity.
 
 Coordinate that bump with `.agents/plans/interfaces-v1.md`: both changes share
-the one ABI-0.20 cutover even if implementation is reviewed as two PRs. The
+one ABI cutover even if implementation is reviewed as two PRs. The
 PR split is not an ABI boundary. The PRs must be stacked or otherwise
-coordinated so no ABI-0.20 release, installed provider set, or compatibility
+coordinated so no release, installed provider set, or compatibility
 claim is made from the intermediate layout; validation between their heads
-uses clean rebuilds, and the final ABI-0.20 tree contains both changes.
+uses clean rebuilds, and the final tree contains both changes.
 
 ### 5.3 Titan writes
 
@@ -2272,44 +2272,45 @@ Remove claims that:
 - every Array/Map element read already supports every boxable type; or
 - lightuserdata can prove a raw C pointer's pointee type.
 
-The ABI history, installation layout, provider compatibility, and generated
-shim documentation must move coherently to ABI 0.20. Old ABI-0.19
+The ABI rationale, provider compatibility, and generated shim documentation
+must move coherently across the boundary. Pre-boundary
 one-user-value/no-strict-trailer providers must fail the normal ABI/metadata
 checks rather than being accepted and misread by the new runtime.
 
-### 12.1 Shared ABI-0.20 migration and Interface-cutover coordination
+### 12.1 Shared ABI and Interface-cutover coordination
 
 Treat this as a clean ABI cutover, not compatibility machinery:
 
-- update `TITAN_VER` and the Array ABI history in `titan-runtime/titan.h`;
-- update driver compiled-provider suffixes/default paths and
-  `TITAN_PATH_0_20`;
-- update Makefile, rockspec, bootstrap/provider installation paths, standard
-  library publication, generated shims, installer validation/rollback, and
-  workflow/cache ABI variables;
+- update `TITAN_ABI_VERSION` and the Array ABI rationale in
+  `titan-runtime/titan.h` and `titan-compiler/driver.lua`;
+- update generated compatibility metadata and ABI-keyed probe/cache namespaces;
+- keep compiler/stdlib release `TITAN_VERSION` and library path
+  `TITAN_LIBRARY_VERSION` independent of this ABI-only transition;
+- update Makefile, generated shims, installer validation/rollback, and workflow
+  ABI variables;
 - regenerate/update DSO, archive, serialized-metadata, and ABI-mismatch
   fixtures across driver/static-provider/multi-module specs;
 - rebuild every generated function closure with the fixed brand at upvalue 3,
   shifted capture/bound-receiver indices, and strict trailing LCF;
-- prove an ABI-0.20 compiler/runtime rejects ABI-0.19 DSOs and archives before
+- prove the compiler/runtime rejects mismatched DSOs and archives before
   exchanging an Array or function value;
-- update the clean-prefix CI proof to require `lib/titan/0.20/?.so` and reject
-  the active 0.19 template;
+- update the clean-prefix CI proof to require
+  `lib/titan/<library-version>/?.so`;
 - on a relation-only review head, rebuild the existing nine-module provider
   and shims only as clean non-published validation; on the final coordinated
   tree, rebuild and validate the Interface plan's ten modules/keys/shims and
-  eleven openers under the same ABI 0.20; and
+  eleven openers under the same ABI; and
 - update `README.md`, `AGENTS.md`, and both manuals so commands, paths, and
   ownership statements describe the active ABI consistently.
 
-The relation/Array/function repair and Interfaces jointly define ABI 0.20.
+The relation/Array/function repair and Interfaces jointly define this ABI boundary.
 They may be separate review units, but neither PR's intermediate
 generated/runtime layout is a separately published ABI. If the relation PR
-lands first, that PR owns the one mechanical 0.19-to-0.20 marker/path advance,
-but ABI-0.20 release/publication remains gated on the Interface PR. The
-Interface PR inherits and completes that version rather than advancing it
+lands first, that PR owns the one mechanical ABI-marker advance, but
+release/publication remains gated on the Interface PR. The Interface PR
+inherits and completes that boundary rather than advancing it
 again. Provider tests must rebuild rather than mix artifacts from the two
-heads. The completed cutover rejects ABI 0.19 and contains both layouts without
+heads. The completed cutover rejects mismatched metadata and contains both layouts without
 a second version advance.
 
 `.agents/plans/interfaces-v1.md` has been reconciled with this design: its
@@ -2416,7 +2417,7 @@ Gate:
    one `DynamicCoercionPlan` matrix, and use them consistently for written
    casts and every genuine Lua boundary.
 3. When the work is split, make this relation PR own the single mechanical
-   ABI 0.19-to-0.20 advance; migrate Array proxy/runtime helpers to two user
+   ABI-marker advance; migrate Array proxy/runtime helpers to two user
    values while retaining the shared proxy metatable.
 4. Emit/cache module-local writer closures, attach them at every fixed, empty,
    open, nested, and imported-type Array construction, and update standalone
@@ -2466,9 +2467,9 @@ Gate:
    Map-read, and Interface Lua-discovery drift.
 4. Verify the already reconciled Interfaces plan remains synchronized with
    the final relation APIs and tests.
-5. Update ABI history, 0.20 paths, provider/metadata fixtures, installer/rockspec,
+5. Update ABI rationale, provider/metadata fixtures, installer/rockspec,
    generated shims, CI cache/layout checks, and repository instructions for
-   ABI 0.20.
+   the coordinated ABI boundary.
 6. Run targeted and complete validation.
 7. Perform independent semantic, generated-C, runtime-layout, and
    documentation reviews.
@@ -2535,13 +2536,13 @@ This evidence is deliberately labeled local rather than exact-head: the latter
 is recorded only after the reviewed commit is pushed and the Linux workflow
 finishes for that exact SHA.
 
-Because this is also the ABI-0.20 cutover, the Linux producer evidence must
-include the clean-prefix/path assertion, ABI-0.19 DSO/archive rejection,
-canonical 0.20 standard-provider publication, standalone-main writer case,
+Because this is also the ABI cutover, the Linux producer evidence must include
+the clean-prefix/path assertion, mismatched-ABI DSO/archive rejection,
+canonical standard-provider publication, standalone-main writer case,
 three-path function-entry/provider cases, and packaging/install rollback
 suites. Do not treat `make test` alone as evidence that old/new Array proxies
 or function closures cannot mix. Final release evidence is taken only after
-the coordinated Interface changes are also present in ABI 0.20.
+the coordinated Interface changes are also present in the published ABI.
 
 ## 15. Completion criteria
 

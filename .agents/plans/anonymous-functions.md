@@ -590,7 +590,7 @@ crossable — with no special handling downstream.
 defining module and reached by the same cross-module symbol machinery as method
 native entries (`ctx.functions`, the `function_sig` externs at
 `coder.lua:3247/3260`), a bound reference created in an importer works against a
-`.so`-only dependency. (This rides on the same `_fn` ABI / `TITAN_VER` bump as the
+`.so`-only dependency. (This rides on the same `_fn` ABI boundary as the
 rest — §7.5.) Add a `so_import`-style test for a cross-module bound method.
 
 **Why per-method, always.** A method may be bound in a module that imports the
@@ -701,8 +701,8 @@ step. Run it first after §4.1, before any closure feature.
    `function_sig` changes every native-entry signature, including the cross-`.so`
    value fast path (`spec/coder/so_import_spec.lua:183`) and cross-module externs
    (`coder.lua:3247/3260`). Old and new compiled `.so`s are **ABI-incompatible**;
-   mixing them is undefined behavior. **Bump `TITAN_VER` 0.5 → 0.6**
-   (`titan-runtime/titan.h:16-20` — changes the search path and version suffix)
+   mixing them is undefined behavior. **Advance the compiled-module ABI marker**
+   (`titan-runtime/titan.h` — this requires rebuilding every provider)
    and document that all dependency `.so`s must be recompiled. This is mandatory,
    not "verify."
 6. **Inference soundness** (D1/D6): checking-vs-synthesis mode selection; both
@@ -840,7 +840,7 @@ interval must be inclusive of the innermost frame** (R3); `$function` needs its
 own `with_block` in the lambda checker (R3); push the frame before declaring
 params/self (R3); **top-level `local x = function…end` must be rejected via
 `isconst`** else the checker/codegen crashes (R4); **`_fn` is a hard cross-`.so`
-ABI break → bump `TITAN_VER`** (R2, R5); function-value equality is raw pointer
+ABI break → advance the ABI marker** (R2, R5); function-value equality is raw pointer
 compare → define/document for lambdas (R5); lazy lambda emission must re-read
 `#lambdas` for nested lambdas (R5). ABI uniformity dimension reviewed **SOUND**
 with a complete call-site checklist (R2, in §4.1). Minor/nit items (parser

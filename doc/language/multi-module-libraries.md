@@ -124,8 +124,8 @@ a/b.so
 a/b/c.so
 ```
 
-The binary path comes from `TITAN_PATH_0_26` when set, otherwise `TITAN_PATH`,
-otherwise the default `.;<root>/lib/titan/0.26`. In an override, `;;` inserts
+The binary path comes from `TITAN_PATH_0_6` when set, otherwise `TITAN_PATH`,
+otherwise the default `.;<root>/lib/titan/0.6`. In an override, `;;` inserts
 that default at the same position. Search is **path-root first**: Titan walks
 all candidates in the first path root before moving to the second root. Once
 an earlier root contains a file at a relative candidate such as `a/b.so`, that
@@ -135,7 +135,7 @@ still advance to a deeper candidate such as `a/b/c.so`.
 
 A candidate claims `a.b.c` when it exports either member of the requested
 metadata pair, `a_b_c_abi` and `a_b_c_types`. Once claimed, validation is
-terminal: both entries must exist, the ABI marker must be `0.26`, and the type
+terminal: both entries must exist, the ABI marker must be `2`, and the type
 metadata must describe `a.b.c`. Broken, half-present, mismatched, or malformed
 metadata is an error rather than permission to skip to another file. An
 ancestor with neither entry is an unrelated nonclaim; an exact `a/b/c.so`
@@ -195,8 +195,9 @@ the generated loaders on `package.path` and the provider on `package.cpath`.
 Titan's installed Lua configures those paths for the standard library.
 `package.cpath` is independent of Titan's compile-time binary path; a Lua
 loader does not silently fall back to the provider selected by `TITAN_PATH`.
-Install one canonical provider for an ABI, or explicitly put the intended
-output root first in `package.cpath` when running checkout and fixture builds.
+Install one canonical provider in the active library namespace, or explicitly
+put the intended output root first in `package.cpath` when running checkout and
+fixture builds.
 
 The initial `require "titan"` is an ordinary eager/local Lua C-module load.
 For a different provider, the logical loader performs its first native mapping
@@ -220,74 +221,18 @@ The standard library is the canonical provider with this name.
 
 ## Compiled compatibility
 
-ABI 0.20 introduced two private user values on every Array proxy—backing and
-construction-time Lua writer—and a fixed opaque brand upvalue plus final
-strict generic-entry trailer on every Titan function closure. ABI 0.21
-retained those representations while advancing the embedded Lua contract from
-5.5.0 to 5.5.1. ABI 0.22 is the source-local `titan.uv`
-surface/private-provider boundary: its serialized public schema and
-reconstructible module-state prefix change while Lua 5.5.1 and the other
-value/native-call layouts remain unchanged. Every generated module also gains
-a fixed physical-provider identity slot so explicit source collaborators reject
-canonical private state installed by another provider. ABI 0.23 retains those
-value/module layouts but moves standard callback definitions from retired
-runtime/adapter objects into generated Titan modules and gives callable entries
-injective module/nominal/member native separators. ABI 0.24 extends serialized
-interfaces for generic declarations while retaining the erased native layouts.
-ABI 0.25 changes the public `titan.fs.stat`/`lstat` results and
-`titan.async.suspend` parameter in both serialized interfaces and exact native
-signatures while retaining the other 0.24 layouts. ABI 0.26 advances the
-serialized/generated boundary for the public `titan.fs.Stat` identity fields,
-const descriptors, Interface fields, and qualified Array runtime tags. The
-current marker, `TITAN_PATH_0_26`, and
-`lib/titan/0.26` namespace advance together.
-Conditional [closure adjustment wrappers](closure-adjustment-wrappers.md) reuse the fixed closure header and native signature retained through 0.26:
-target adapters and strict relays are private to the consuming translation unit,
-so they add no provider symbol/schema/slot and require no further native-layout
-bump. Ordinary DSO/archive metadata validation rejects 0.25 before either side
-can exchange a value; there is no compatibility adapter, migration, or cleanup
-path. A separately versioned 0.25 installation remains preserved prior-version
-state.
+Every provider carries ABI marker `2`, checked before serialized metadata is
+decoded or native entries are used. The current contract covers canonical
+Array proxies, function-closure branding, unions, Interfaces, generic metadata,
+source-private provider identity, source foreign callbacks, callable naming,
+public standard-library signatures, and const-qualified descriptors and
+wrappers. Consumer-private closure adjustment wrappers add no provider symbol,
+schema, or module-state slot. A mismatched provider is rejected rather than
+adapted.
 
-ABI 0.19 introduced serialized union/variant schemas and made the module-state
-public prefix reconstruct public record and union static closures after
-exported variables and top-level function closures. That preserved
-first-class imported constructor/static identity, but its Arrays still had
-one proxy user value and its non-exact Titan calls reused the coercive Lua
-entry.
-
-ABI 0.18 changed the standard-library archive/runtime contract: logical
-objects began referring directly to callback trampolines promoted into the
-runtime's external symbol contract and stopped referring to the retired
-libuv/coroutine helpers. A provider and runtime therefore both had to be 0.18;
-either direction of a 0.17/0.18 static pairing was incompatible.
-
-ABI 0.17 introduced the canonical-proxy Array meaning: `{T}` is a proxy over
-private dense-capacity backing storage, not an ordinary table. That semantic
-break changed what the existing native Array pointer slots mean, along with
-generated container code and Lua boundary checks, so 0.16 and 0.17 providers
-could not be mixed. ABI 0.18 and 0.19 preserved its one-user-value proxy;
-ABI 0.20 retained the canonical identity while adding the writer user value;
-ABI 0.21 retained that representation, and ABIs 0.22 through 0.25 retained it.
-ABI 0.26 keeps the dense `Table *` backing and two user values but adds a
-distinct const proxy tag, a paired per-module metatable cache, and the
-copy/freeze runtime operations.
-
-Historically, ABI 0.16 introduced prefix-container discovery: a 0.15 consumer
-recorded only an imported module's exact child-DSO pathname and could not
-discover a shallower 0.16 container. The installation creates no compatibility
-child copies for either transition.
-
-ABI 0.20 also introduced Interfaces. Serialized metadata carries each
-Interface's nominal owner and declaration-order method signatures; each module
-initializes its per-state Interface identities, and generated wrappers,
-vtables, and method trampolines use the new layout. The same version therefore
-covers the Interface, relation, Array-writer, and strict-function-entry changes
-as one clean break. A 0.19 artifact has none of these Interface contracts and
-is rejected rather than adapted. ABI 0.26 extends that schema with
-declaration-order fields and checker-frozen field adjustment mappings. Wrappers
-retain the two owner/receiver user values and add one traced snapshot user
-value per field; method-only wrappers retain the ABI-0.20 two-value shape.
+The release version is independently `TITAN_VERSION` `0.6.0`; its derived
+`0.6` library version selects `TITAN_PATH_0_6` and `lib/titan/0.6`. Earlier
+Titan installations are neither migrated nor cleaned up.
 
 ## Standalone programs
 
@@ -304,8 +249,8 @@ model. One
 paired provider:
 
 ```text
-$ROCKS_TREE/lib/titan/0.26/titan.so
-$ROCKS_TREE/lib/titan/0.26/titan.a
+$ROCKS_TREE/lib/titan/0.6/titan.so
+$ROCKS_TREE/lib/titan/0.6/titan.a
 ```
 
 contains the native support entry plus the independent logical modules
@@ -337,7 +282,7 @@ $ROCKS_TREE/share/lua/5.5/titan/test.lua
 ```
 
 The compiler also installs canonical test support source at
-`$ROCKS_TREE/share/titan/0.26/src/titan/test.titan`; it is compiler data for
+`$ROCKS_TREE/share/titan/0.6/src/titan/test.titan`; it is compiler data for
 the generated runner's explicit `import "titan.test.titan"` collaboration edge,
 not another logical provider.
 

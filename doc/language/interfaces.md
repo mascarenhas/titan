@@ -756,19 +756,13 @@ same for source dependencies, individual shared providers, regular static
 archives, multi-module prefix providers, and standalone executables.
 
 Interface field and method order is ABI-significant and is preserved in compiled module
-metadata. Interfaces entered the compiled-module contract in ABI 0.20 together
-with the two-user-value Array proxy and strict generic function-entry protocol.
-ABI 0.21 retained that model while advancing the matched Lua runtime to
-5.5.1; ABI 0.23 retains the metadata and value layouts while renaming
-Interface bound and metatable entries into the separated nominal callable
-family. ABI 0.24 retains that representation while extending generic declaration
-metadata, including applied Interface constraints. ABI 0.25 retained that
-Interface representation while changing the public `titan.fs` and
-`titan.async` interfaces and exact signatures. ABI 0.26 adds ordered Interface
-field metadata and one traced snapshot user value per field; it also makes
+metadata. ABI 2 includes the two-user-value Array proxy, strict generic
+function-entry protocol, separated nominal callable family, generic declaration
+metadata, ordered Interface field metadata, and one traced snapshot user value
+per field. It also makes
 field-adjustment mappings part of each concrete-to-Interface plan. Providers
-from ABI 0.25 are rejected before their older descriptor or wrapper layout can
-be used. Compiler-witnessed discovery still adds only private generated
+with another ABI are rejected before their descriptor or wrapper layout can be
+used. Compiler-witnessed discovery still adds only private generated
 functions and per-state metatable entries. Prior-ABI providers are rejected
 rather than adapted in place.
 

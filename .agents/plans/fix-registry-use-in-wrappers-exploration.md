@@ -601,7 +601,7 @@ Showing lines 530 to 600
 The following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.
 530: end
 531: 
-532: -- Every ABI-0.26-or-newer module reserves consecutive private uservalue slots
+532: -- Every module using this ABI contract reserves consecutive private uservalue slots
 533: -- for the canonical mutable and const Array proxy metatables. Importers
 534: -- reconstruct only the public variable/function prefix and never need these
 535: -- private slots. Array's native representation remains Table*: only boxed/
@@ -713,7 +713,7 @@ The following code has been modified to include a line number before every line,
 951: 
 952:     -- Every module has the mutable and const Array-metatable caches
 953:     -- immediately after the public prefix. Their consecutive order is the
-954:     -- ABI-0.26 private-state contract reconstructed by source importers.
+954:     -- ABI private-state contract reconstructed by source importers.
 955:     tlcontext.array_metatable_upvalue = nextupvalue(tlcontext)
 956:     tlcontext.const_array_metatable_upvalue = nextupvalue(tlcontext)
 957: 
@@ -987,7 +987,7 @@ The following code has been modified to include a line number before every line,
 529:     return entry.slot
 530: end
 531: 
-532: -- Every ABI-0.26-or-newer module reserves consecutive private uservalue slots
+532: -- Every module using this ABI contract reserves consecutive private uservalue slots
 533: -- for the canonical mutable and const Array proxy metatables. Importers
 534: -- reconstruct only the public variable/function prefix and never need these
 535: -- private slots. Array's native representation remains Table*: only boxed/

@@ -4,7 +4,7 @@
 
 This is an audit of `feature/ffi-wrapup` at `6976f13`. I did not edit compiler,
 runtime, documentation, or test implementation. The current branch has the
-ABI-0.23 top-level boundary
+top-level ABI naming boundary
 
 ```text
 <mangled module>_\u2133_<top-level function>
@@ -26,10 +26,10 @@ Mach-O, DWARF, libbacktrace, `nm`, and `dlsym` see UTF-8 `ℳ` and `ℱ`.
 
 The change is a native symbol-contract change even though callable signatures,
 serialized `Type.Record`/`Type.Union` descriptors, module-state slots, and the
-static metadata container do not change. If it lands before the unreleased
-`feature/ffi-wrapup` ABI 0.23 is merged/published, it should be folded into the
-existing 0.22-to-0.23 boundary and its rationale expanded. If an ABI-0.23
-provider has already become a supported artifact, the marker must advance
+static metadata container do not change. If it lands before the associated
+`feature/ffi-wrapup` ABI boundary is merged/published, it should be folded into
+that boundary and its rationale expanded. If a provider using the old naming
+contract has already become a supported artifact, the marker must advance
 again; an old and new provider can serialize identical types while exporting
 different method/static symbols.
 
@@ -356,8 +356,8 @@ for all metamethod templates.
 Generic ABI mismatch coverage already exists in `spec/abi_spec.lua`, DSO
 rehydration tests, and static protocol mismatch tests. Keep the ordering
 invariant: reject the predecessor ABI before decoding types or trying a renamed
-method/static symbol. If the ABI remains 0.23 because this is folded into the
-unreleased branch, update the 0.22-to-0.23 rationale rather than inventing a
+method/static symbol. If the ABI remains unchanged because this is folded into
+the unreleased branch, update the feature rationale rather than inventing a
 metadata migration test. If the marker advances, add one old-name provider
 fixture proving the diagnostic is an ABI mismatch, not a late missing-symbol
 error.
@@ -403,12 +403,12 @@ Explain both C-source UCN and UTF-8 linkage spellings. The formulas should use a
 split canonical owner `(module, nominal leaf)`, not imply that flattening the
 whole FQTN remains safe.
 
-### ABI-0.23 rationale
+### ABI rationale
 
 Expand the current “top-level separator” wording to cover the complete native
 entry hierarchy in:
 
-- `titan-runtime/titan.h` 0.22-to-0.23 history comment (currently mentions only
+- `titan-runtime/titan.h` ABI rationale (currently mentions only
   callback relocation and omits even the top-level name change);
 - `AGENTS.md` current ABI summary and coder ABI history;
 - `README.md` active ABI summary;
@@ -422,24 +422,24 @@ entry hierarchy in:
 - `doc/implementation/unions.md` current ABI summary;
 - `AGENTS.md` project-context ABI invariant.
 
-The language and implementation manuals should state that ABI 0.23 changes
-native names while retaining ABI-0.22 serialized layouts. No new manual chapter
+The language and implementation manuals should state that this ABI boundary
+changes native names while retaining the existing serialized layouts. No new manual chapter
 is needed.
 
 ### Metadata/version constants
 
-If folded into the unreleased 0.23 boundary, leave these values unchanged:
+If folded into the same unreleased ABI boundary, leave these values unchanged:
 
-- `driver.TITAN_VER`, `TITAN_VER_SUFFIX`;
-- `TITAN_VER`/`TITAN_VER_SUFFIX` in `titan.h`;
-- `Makefile`/workflow ABI values and `TITAN_PATH_0_23`;
-- `lib/titan/0.23`, `share/titan/0.23`, `stdlib_0_23`;
-- static metadata `abi = "0.23"` fixtures.
+- `driver.TITAN_ABI_VERSION` and the matching `TITAN_ABI_VERSION` in `titan.h`;
+- the compiler/stdlib release and derived library-layout constants;
+- the Makefile/workflow ABI value and active versioned `TITAN_PATH` override;
+- the canonical library and compiler-data paths; and
+- static metadata ABI fixtures.
 
 Only the textual rationale and symbol expectations change. The stdlib completion
 stamp already depends on coder/compiler inputs, so a current installation must
-be rebuilt; do not add cross-ABI or old-name compatibility aliases. If 0.23 is
-already supported/published, all of those coordinated values must instead move
+be rebuilt; do not add cross-ABI or old-name compatibility aliases. If the
+boundary is already supported/published, all of those coordinated values must instead move
 together to the next ABI.
 
 ## Suggested validation order

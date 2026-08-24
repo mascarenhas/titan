@@ -298,8 +298,8 @@ if (ttisCclosure(&_fv) && clCvalue(&_fv)->nupvalues >= 3
 ## Part 4 — Implementation plan (by workstream)
 
 Ordered so each builds on the last. Compiler edits + compilation share one build
-env and **cannot run in parallel unless using git worktrees**; re-run `luarocks make --local
-titan-dev-1.rockspec` before any `busted`.
+env and **cannot run in parallel unless using git worktrees**; rebuild the
+active rock with `luarocks make --local` before any `busted`.
 
 ### Workstream A — Type system & zero-return canonical form (`types.lua`)
 - `types.tostring`: emit `(P…) -> ()` for `#rettypes == 0` (currently emits just
@@ -442,7 +442,7 @@ regression; budget for it in the implementation phase.
 
 ## Part 6 — Verification
 
-- `luarocks make --local titan-dev-1.rockspec && busted` — full suite green
+- `luarocks make --local && busted` with the then-active rockspec — full suite green
   (current baseline 882; expect a net increase). Single files:
   `busted spec/coder_spec.lua`, etc.
 - Smoke via the working tree directly (no rock): `./titanc <module>` on small

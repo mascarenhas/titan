@@ -202,7 +202,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
                 return adjusted
             end
         ]])
-        local csrc = coder.generate("test", tree, {}, driver.TITAN_VER)
+        local csrc = coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION)
         local signature =
             "static TITAN_NOINLINE TString* test_callable_adapter_0("
         local declaration = assert(csrc:find(signature, 1, true))
@@ -245,7 +245,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
                 return adjusted
             end
         ]])
-        local csrc = coder.generate("test", tree, {}, driver.TITAN_VER)
+        local csrc = coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION)
         local signature =
             "static TITAN_NOINLINE void test_callable_adapter_0("
         local declaration = assert(csrc:find(signature, 1, true))
@@ -323,7 +323,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
 
         -- The ordinary checked tree uses the shared adjusted-open builder.
         local tree = checked(source)
-        local csrc = coder.generate("test", tree, {}, driver.TITAN_VER)
+        local csrc = coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION)
         assert_conditional_root_only(
             native_body(csrc, "forwarded"), "_open_vargs_")
 
@@ -338,7 +338,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
         assert.truthy(call._open_args)
         call._arg_adjustment = nil
         local legacy_csrc = coder.generate(
-            "test", legacy_tree, {}, driver.TITAN_VER)
+            "test", legacy_tree, {}, driver.TITAN_ABI_VERSION)
         assert_conditional_root_only(
             native_body(legacy_csrc, "forwarded_value"), "_varg_")
     end)
@@ -346,7 +346,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
     it("allocates and initializes wrapper CClosures without API stack assembly",
     function()
         local tree = checked(FIXED_SOURCE)
-        local csrc = coder.generate("test", tree, {}, driver.TITAN_VER)
+        local csrc = coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION)
         assert.truthy(csrc:find(
             "CClosure *_ca_wrapper =", 1, true), csrc)
         assert.truthy(csrc:find(
@@ -387,7 +387,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
                 return adjusted(callback)
             end
         ]])
-        local csrc = coder.generate("test", tree, {}, driver.TITAN_VER)
+        local csrc = coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION)
         local signature =
             "static TITAN_NOINLINE TValue test_callable_adapter_0("
         local declaration = assert(csrc:find(signature, 1, true))
@@ -1108,7 +1108,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
         local cast = find_function(tree, "probe").block.stats[1].exps[1]
         cast._adjustment._callable_adapter = nil
         local ok, err = pcall(
-            coder.generate, "test", tree, {}, driver.TITAN_VER)
+            coder.generate, "test", tree, {}, driver.TITAN_ABI_VERSION)
         assert.is_false(ok)
         assert.matches("lacks its frozen adapter", err)
 
@@ -1116,7 +1116,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
         cast = find_function(tree, "probe").block.stats[1].exps[1]
         cast._callable_adapter.dense.argument_count = 999
         ok, err = pcall(coder.generate,
-            "test", tree, {}, driver.TITAN_VER)
+            "test", tree, {}, driver.TITAN_ABI_VERSION)
         assert.is_false(ok)
         assert.matches("dense inventory", err)
 
@@ -1125,7 +1125,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
         cast._callable_adapter.rooting.construction.result.condition =
             "always"
         ok, err = pcall(coder.generate,
-            "test", tree, {}, driver.TITAN_VER)
+            "test", tree, {}, driver.TITAN_ABI_VERSION)
         assert.is_false(ok)
         assert.matches("construction result root", err)
 
@@ -1133,7 +1133,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
         cast = find_function(tree, "probe").block.stats[1].exps[1]
         cast._callable_adapter.strict_relay.parameters[1].index = 2
         ok, err = pcall(coder.generate,
-            "test", tree, {}, driver.TITAN_VER)
+            "test", tree, {}, driver.TITAN_ABI_VERSION)
         assert.is_false(ok)
         assert.matches("boundary slot", err)
 
@@ -1141,7 +1141,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
         cast = find_function(tree, "probe").block.stats[1].exps[1]
         cast._callable_adapter.source = cast._callable_adapter.target
         ok, err = pcall(coder.generate,
-            "test", tree, {}, driver.TITAN_VER)
+            "test", tree, {}, driver.TITAN_ABI_VERSION)
         assert.is_false(ok)
         assert.matches("mismatched identity/signatures", err)
 
@@ -1149,7 +1149,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
         cast = find_function(tree, "probe").block.stats[1].exps[1]
         cast._callable_adapter.arguments[1].kind = "ignore_argument"
         ok, err = pcall(coder.generate,
-            "test", tree, {}, driver.TITAN_VER)
+            "test", tree, {}, driver.TITAN_ABI_VERSION)
         assert.is_false(ok)
         assert.matches("mismatched kind", err)
 
@@ -1157,7 +1157,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
         cast = find_function(tree, "probe").block.stats[1].exps[1]
         cast._callable_adapter.rebase_points[1].reason = "corrupt"
         ok, err = pcall(coder.generate,
-            "test", tree, {}, driver.TITAN_VER)
+            "test", tree, {}, driver.TITAN_ABI_VERSION)
         assert.is_false(ok)
         assert.matches("mismatched rebase point", err)
     end)

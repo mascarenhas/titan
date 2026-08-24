@@ -179,18 +179,16 @@ symbols, direct libuv references, close guard, and combined-provider ownership.
 The serialized standard-library fixture pins the appended public
 `titan.fs` interface.
 
-These changes advance the compiled-module ABI from 0.24 to 0.25. In particular,
-`stat` and `lstat` now return `Stat?`, changing their exact raw C return carrier
+These changes are ABI-visible. In particular, `stat` and `lstat` return
+`Stat?`, changing their exact raw C return carrier
 from `Udata *` to `TValue`, while the cancellation protocol adds an optional
 action parameter to `titan.async.suspend` and its source-private `titan.uv`
-entry. Both the serialized public interfaces and native signatures therefore
-require the 0.25 marker; every other ABI-0.24 layout and contract is retained.
-A 0.24 provider is rejected before either boundary is used and remains
-preserved rather than migrated or cleaned up.
+entry. Both serialized public interfaces and native signatures therefore
+require ABI 2. A mismatched provider is rejected before either boundary is
+used rather than migrated or adapted.
 
-The active, unreleased ABI-0.26 boundary also adds `device` and `inode` to the
+The current ABI also adds `device` and `inode` to the
 serialized public `Stat` record. Libuv exposes both as unsigned 64-bit values;
 the implementation carries their complete bit patterns through Lua's signed
 integer carrier. They may therefore appear negative and are meaningful only as
-an equality pair. This public-record shape change is covered by the existing
-0.26 marker; it does not introduce another ABI version.
+an equality pair.

@@ -1,9 +1,9 @@
-# ABI 0.23 function-entry naming and generated-header audit
+# Function-entry ABI naming and generated-header audit
 
 ## Scope
 
 Audit only. I inspected the dirty `feature/ffi-wrapup` checkout and did not edit
-compiler/runtime/test implementation files. The required scope is the ABI-0.23
+compiler/runtime/test implementation files. The required scope is the ABI
 top-level function family:
 
 ```text
@@ -34,7 +34,7 @@ renamed mechanically as part of this rule.
    `c_string_literal`, which doubles the backslash and installs the literal key
    `"...\\u2133..."`; libbacktrace reports `"...ℳ..."`. Qualified Titan frame
    names will consequently fail to replace raw native symbols.
-3. **Two existing provider-collision tests now assert behavior that ABI 0.23 is
+3. **Two existing provider-collision tests now assert behavior that this ABI boundary is
    specifically meant to remove.** `(a, b_c)` and `(a.b, c)` no longer share a
    function symbol. Flattened *module-prefix* checks and inventories of all the
    other symbol families must remain.
@@ -45,7 +45,7 @@ renamed mechanically as part of this rule.
    untracked in this checkout: `titan/coroutine.titan.h`,
    `titan/uv/uv.titan.h`, and `titan/http/http.titan.h`. I left them untouched.
 5. **There is one concrete suffix inconsistency to resolve.** The design draft
-   shows top-level Lua/strict names ending `_0_23_lua` / `_0_23_strict`, while
+   shows draft ABI-suffixed top-level Lua/strict names, while
    current code emits `_titanentry_lua` / `_titanentry_strict` after the new
    stem. The audit requirement mandates the common stem, so both satisfy that
    narrower statement, but the branch must choose one exact ABI spelling before
@@ -227,7 +227,7 @@ coder coverage: public native/Lua/strict, local native/Lua/strict when used as a
 value, local native-only when not used as a value, and foreign native-only.
 Assert no `titan_source_<hex>` spelling anywhere.
 
-If the exact `_0_23_lua` / `_0_23_strict` suffixes from the design draft are
+If the ABI-suffixed `_lua` / `_strict` names from the design draft are
 adopted, additionally update:
 
 - top-level entry assertions in the files above;
@@ -385,7 +385,7 @@ Update the following naming references/examples:
 
 - `doc/implementation/codegen-overview.md`: generated example, symbol-family
   table, external-symbol preflight rationale, dynamic import declarations and
-  `loadsym` strings, and ABI-0.23 history;
+  `loadsym` strings, and ABI rationale;
 - `doc/implementation/codegen-constructs.md`: `dep_mk_titan` and
   `test_two_titan` examples;
 - `doc/implementation/lua-interop-internals.md`: ordinary top-level Lua/native
@@ -418,8 +418,8 @@ Update generated-header/artifact documentation in:
 - `AGENTS.md` artifact/cleanup/sanitizer-snapshot invariants.
 
 The same README/AGENTS/manual pass must also remove stale runtime-member/header
-statements (`titan_uv.o`, `titan/{coro,uv}.h`) and advance 0.22 paths where the
-broader ABI-0.23 work already changed them, but that is wider than the naming
+statements (`titan_uv.o`, `titan/{coro,uv}.h`) and update active paths where the
+broader ABI work already changed them, but that is wider than the naming
 mechanism itself.
 
 ## Suggested implementation order

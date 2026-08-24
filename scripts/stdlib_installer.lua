@@ -14,7 +14,7 @@ if direct then
     package.path = source_root .. "/?.lua;" ..
         source_root .. "/?/init.lua;" .. package.path
     package.cpath = cli_stage .. "/?.so;" ..
-        cli_root .. "/lib/titan/0.26/?.so;" ..
+        cli_root .. "/lib/titan/0.6/?.so;" ..
         cli_root .. "/lib/lua/5.5/?.so;" .. package.cpath
 end
 
@@ -324,10 +324,10 @@ local function inspect_image(image, module_names, options)
             return nil, "native image inspection omitted module '" ..
                 name .. "'"
         end
-        if entry.abi ~= driver.TITAN_VER then
+        if entry.abi ~= driver.TITAN_ABI_VERSION then
             return nil, "native image ABI for module '" .. name ..
                 "' is " .. tostring(entry.abi) .. " instead of " ..
-                driver.TITAN_VER
+                driver.TITAN_ABI_VERSION
         end
         local decoded, decode_err = driver.decode_module_interface(
             entry.types, name, image)
@@ -347,7 +347,7 @@ end
 
 local function scan_archive(archive)
     return staticmetadata.scan_archive(archive, {
-        expected_abi = driver.TITAN_VER,
+        expected_abi = driver.TITAN_ABI_VERSION,
         validate_types = function(name, serialized, origin)
             return driver.decode_module_interface(serialized, name, origin)
         end,
@@ -564,14 +564,16 @@ function installer.publish(options)
         options.image_validator or validate_native_pair, options)
     if not valid then return nil, validation_err end
 
-    local abi_dir = join(root, "lib/titan/0.26")
+    local version_dir = join(
+        root, "lib/titan/" .. driver.TITAN_LIBRARY_VERSION)
     local shim_dir = join(root, "share/lua/5.5/titan")
     local shim_root = join(root, "share/lua/5.5")
     local lua_cdir = join(root, "lib/lua/5.5")
-    local public_dso = join(abi_dir, "titan.so")
-    local public_archive = join(abi_dir, "titan.a")
+    local public_dso = join(version_dir, "titan.so")
+    local public_archive = join(version_dir, "titan.a")
     local public_test_source =
-        join(root, "share/titan/0.26/src/titan/test.titan")
+        join(root, "share/titan/" .. driver.TITAN_LIBRARY_VERSION ..
+            "/src/titan/test.titan")
 
     local destination_ok, destination_err =
         validate_public_native_destination(public_dso)
@@ -599,7 +601,7 @@ function installer.publish(options)
     end
     add_entry(entries, seen, public_test_source, test_source, "file",
         "test-source")
-    add_entry(entries, seen, join(abi_dir, "titan.so.dSYM"),
+    add_entry(entries, seen, join(version_dir, "titan.so.dSYM"),
         is_darwin and join(stage, "titan.so.dSYM") or nil,
         is_darwin and "directory" or nil, "dsym")
 
@@ -631,10 +633,12 @@ function installer.publish(options)
     local stale = {}
     for _, module in ipairs(MODULES) do
         for _, path in ipairs({
-            join(abi_dir, "titan/" .. module .. ".so"),
-            join(abi_dir, module .. ".so"),
+            join(version_dir, "titan/" .. module .. ".so"),
+            join(version_dir, module .. ".so"),
             join(lua_cdir, "titan/" .. module .. ".so"),
-            join(lua_cdir, "titan/stdlib_0_26/" .. module .. ".so"),
+            join(lua_cdir, "titan/stdlib" ..
+                driver.TITAN_LIBRARY_VERSION_SUFFIX .. "/" ..
+                module .. ".so"),
         }) do
             stale[#stale + 1] = path
             stale[#stale + 1] = path .. ".dSYM"

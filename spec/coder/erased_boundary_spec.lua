@@ -24,7 +24,7 @@ local function checked()
 end
 
 local function generate(tree)
-    return coder.generate(MODULE, tree, {}, driver.TITAN_VER)
+    return coder.generate(MODULE, tree, {}, driver.TITAN_ABI_VERSION)
 end
 
 local function generate_and_capture_metadata(tree)

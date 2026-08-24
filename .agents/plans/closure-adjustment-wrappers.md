@@ -283,14 +283,14 @@ adapter with the wrapper as `_fn`.
 This relay avoids two bad alternatives:
 
 * relaxing every declaration strict entry to accept arbitrary tags; and
-* cloning an old ABI-0.22 provider's strict entry, whose compiled source-tag
+* cloning a provider from before this ABI boundary, whose compiled source-tag
   check would reject a consumer-created target-tagged wrapper.
 
-The fixed CClosure header and native signatures remain ABI 0.22; no serialized
+The fixed CClosure header and native signatures remain ABI-compatible; no serialized
 schema, provider symbol, or module-state slot changes. Add fresh-process
 source/DSO/archive coverage to prove new consumers work with ordinary providers.
 If implementation reveals a required fixed-slot/layout change, stop and
-coordinate an ABI bump rather than silently extending 0.22.
+coordinate an ABI bump rather than silently extending the current contract.
 
 ## Error attribution and effects
 
@@ -455,7 +455,7 @@ make luarocks
 
 $PREFIX/bin/luac -p titan-compiler/types.lua \
     titan-compiler/checker.lua titan-compiler/coder.lua
-$PREFIX/bin/luarocks make titan-dev-1.rockspec
+$PREFIX/bin/luarocks make
 busted spec/types_spec.lua
 busted spec/checker/closure_adjustment_wrappers_spec.lua
 busted spec/coder/closure_adjustment_wrappers_spec.lua

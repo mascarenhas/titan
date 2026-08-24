@@ -110,7 +110,6 @@ source view is not serialized. Co-residence, static linkage, registry state, and
 `static_deps` do not grant local access.
 
 The generic mechanism does not add a metadata constructor. The release still
-advances to ABI 0.22 because dogfooding deliberately localizes most of
+advances the ABI boundary because dogfooding deliberately localizes most of
 `titan.uv`, changing that module's serialized public members and public closure
-prefix. Existing ABI-0.21 installations are preserved as prior-version state;
-there is no migration or cleanup path.
+prefix. This is a clean rebuild boundary; there is no migration or cleanup path.

@@ -444,7 +444,7 @@ Documented the anonymous-functions / closures feature (branch
   and captured variables" section (the trap-stub `CClosure`-cell box and
   its uniform forward `luaC_barrier`, the `3 + N` upvalue layout, capture
   lists, file-scope lambda hoisting, transitive capture, bound-method
-  trampolines, and the `TITAN_VER` 0.5 → 0.6 ABI bump). `checker.md`: added
+  trampolines, and the required ABI bump). `checker.md`: added
   a "Closures: capture analysis and lambda inference" section (the
   `func_stack`, `_funcdepth`, `_captured`/`_assigned`/forced-`_used`, the
   inclusive transitive capture interval, and checking-vs-synthesis
@@ -501,7 +501,7 @@ multiple results remain available without weakening an already typed callable.
 * **Native and Lua call paths.** Flexible native entries receive caller-owned
   typed output backing plus a finite/open budget. Exact module, static, method,
   bound-method, lambda, and exactly tagged first-class calls retain the native
-  path. At this ABI-0.14 milestone, non-exact Titan values and Lua callables
+  path. At this milestone, non-exact Titan values and Lua callables
   used the generic stack path; statically open producers uniformly requested
   `LUA_MULTRET`, preserved their raw count on the Lua stack, and were trimmed or
   checked by the Titan sink. The later
@@ -511,8 +511,8 @@ multiple results remain available without weakening an already typed callable.
 * **Lifetime and interface work.** Flexible result backing is paired with
   traced roots for GC-bearing elements, including pending returns that cross
   allocating or nested `finally` blocks. Callable serialization, compiled
-  symbols, installed module paths, and `TITAN_PATH_0_14` now use compiled-module
-  ABI 0.14; ABI 0.13 modules fail through the normal mismatch diagnostic.
+  symbols, installed module paths, and versioned search override were updated
+  together; mismatched modules fail through the normal ABI diagnostic.
 * **Manuals and tests.** Added and indexed
   `language/flexible-returns.md` and
   `implementation/flexible-returns.md`, reconciled the surrounding language
@@ -541,8 +541,8 @@ artifact identity.
   exported records and API beside the related implementation.
 * **Compatibility boundary.** Moving public declarations changes ordered
   module-member and canonical-closure slots, so compiler/runtime constants,
-  install/search paths, tests, and CI advance from ABI 0.14 to 0.15. The exact
-  deterministic 0.15 `titan_uv_types` interface is pinned as a fixture.
+  install/search paths, tests, and CI advance together. The exact deterministic
+  `titan_uv_types` interface is pinned as a fixture.
 * **Declaration-order follow-up.** Generalized the checker from a source-order
   signature sweep to dependency-staged collection without rearranging the AST.
   The parser marks synthesized record `new`; the checker records each root's
@@ -560,7 +560,7 @@ artifact identity.
   `file.titan`. The main now retains shared imports, shared constants, module
   state, bootstrap, program-argument setup, and the sole initializer. These changes
   alter private slot/initialization order, but the exact `titan_uv_types`
-  fixture and importer-visible slots are unchanged and the ABI remains 0.15.
+  fixture and importer-visible slots are unchanged, so no ABI bump is needed.
 * **Build and packaging.** `UV_TITAN_SOURCES` explicitly owns the ensemble,
   nested generated artifacts clean correctly, the delayed-FS variant patches
   an isolated folder copy, and bundled/system modes still produce one
@@ -586,4 +586,4 @@ convention's no-copy input rule.
   Interface, flexible/variadic, named-call, closure-wrapper, coroutine, and AST
   chapters. Generated-C assertions cover every input form and distinguish real
   VM/upvalue transport from tracing copies; the complete local suite passes
-  without an ABI change (still 0.22).
+  without an ABI change.

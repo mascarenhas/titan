@@ -165,13 +165,13 @@ decisions.
 - Pin and checksum llhttp 9.4.3 and always build its three generated C sources
   into a private deterministic archive.
 - Carry the private HTTP adapter separately. Neither dependency archive nor the
-  HTTP callback header is installed in Titan's runtime SDK, and `libtitan.a`
-  retains its exact existing members.
+  HTTP callback header is installed in Titan's runtime SDK, and
+  `lib/titan/<library-version>/libtitan.a` retains its exact existing members.
 - Add `ssl`, `url`, and `http` to the coordinated standard provider, producing
   seventeen logical modules/shims/archive keys and eighteen `luaopen_*`
   entries.
-- Preserve recoverable publication and explicitly test upgrade/rollback from a
-  valid fourteen-module ABI-0.20 predecessor.
+- Preserve recoverable publication and explicitly test rollback from a valid
+  fourteen-module predecessor.
 - Attribute and ship the OpenSSL, llhttp, and derivative lpeg_patterns
   licenses/notices.
 

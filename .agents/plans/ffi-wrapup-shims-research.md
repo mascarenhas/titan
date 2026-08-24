@@ -8,7 +8,7 @@ Status: research only. This document does not modify the draft plan or propose c
 2. **Do not add generic function-like macro exposure to the same change.** The preprocessor already retains enough metadata to recognize a function macro, but a replacement list is not a callable prototype. Arity alone does not provide parameter types, result type, addressability, evaluation count, or a way to type a polymorphic macro. Direct support is sound only with an explicit trusted signature contract and a declaration-only macro-call category distinct from `Type.CFunction`.
 3. **Remove the callback trampolines, not all of `titan_coro.c`.** `titan_uv.c` and `titan/http/native/titan_httpshim.{c,h}` can disappear. `titan_coro.c` cannot: it is the one `MINICORO_IMPL` translation unit and also supplies the immutable Lua-value tag comparator selected by `MCO_TAG_COMPARATOR`. Reduce it to those two responsibilities, make the comparator translation-unit-local, remove only `titan_coro_entry`, and delete `titan/coro.h`.
 4. **Preserve the existing callback protocols mechanically.** In particular, stack-root the callback **owner**, not merely the module closure upvalue, and keep the filesystem callback's current no-extra-result shape. The example in `ffi-wrapup.md` pushes `callback.upvalue[0]` and passes an extra filesystem result; neither matches the current reviewed boundary.
-5. **Bump the compiled-module ABI if the old native symbols are actually removed.** ABI 0.18 explicitly made the promoted `titan_uvshim_*` callbacks part of the runtime/provider native-symbol contract. Removing those symbols (and `titan_coro_entry`) is the inverse boundary. Follow Titan's clean-start prototype policy rather than retaining compatibility wrappers or deleting old-version installations.
+5. **Bump the compiled-module ABI if the old native symbols are actually removed.** The existing ABI made the promoted `titan_uvshim_*` callbacks part of the runtime/provider native-symbol contract. Removing those symbols (and `titan_coro_entry`) is the inverse boundary. Follow Titan's clean-start prototype policy rather than retaining compatibility wrappers or deleting old-version installations.
 
 The `lmacro_` choice is intentionally scoped to the trusted, pinned Lua 5.5.1 headers used by Titan's own standard library. It is not a claim that arbitrary third-party function macros are ordinary C functions.
 
@@ -166,7 +166,7 @@ Remove:
 * the shim include directory from `STDLIB_HTTP_CPPFLAGS` (leaving `LLHTTP_CPPFLAGS`);
 * dry-run fixture overrides and expected bundled/system `-X` payload strings in `spec/libuv_build_spec.lua`.
 
-Keep the exact three-member llhttp archive and its normal tool/configuration validation. `titan-dev-1.rockspec` delegates its build to Make and has no separate object list, but `spec/rockspec_spec.lua` explicitly expects `titan_httpshim.{c,h}` in the source rock; remove those entries. Its assertion that the private header is not installed becomes obsolete once the source is deleted.
+Keep the exact three-member llhttp archive and its normal tool/configuration validation. The active rockspec delegates its build to Make and has no separate object list, but `spec/rockspec_spec.lua` explicitly expects `titan_httpshim.{c,h}` in the source rock; remove those entries. Its assertion that the private header is not installed becomes obsolete once the source is deleted.
 
 ### Generated foreign headers and payload identity
 
@@ -312,7 +312,11 @@ This is user-visible language work, so land both a language chapter for `foreign
 * `doc/language/{modules,multi-module-libraries,static-compiled-modules}.md` where runtime/archive/ABI history is stated;
 * `README.md`, `doc/style-guide.md`, and `AGENTS.md` exact archive, callback-boundary, and SDK-header descriptions.
 
-Do not rewrite the historical fact that ABI 0.18 introduced promoted libuv callback symbols. Add the new ABI transition explaining that generated foreign callbacks retire those symbols and that old providers/runtimes cannot be mixed. Advance `TITAN_VER`, mangled ABI suffix/path/environment variables, stdlib stamps, shims, tests, and docs together according to the existing ABI bump checklist.
+Retain the feature rationale that the earlier ABI boundary introduced promoted
+libuv callback symbols. Add the new ABI transition explaining that generated
+foreign callbacks retire those symbols and that old providers/runtimes cannot
+be mixed. Advance `TITAN_ABI_VERSION`, generated metadata, ABI-keyed caches,
+stdlib stamps, shims, tests, and docs together according to the ABI checklist.
 
 ## Suggested implementation order
 

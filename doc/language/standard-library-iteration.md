@@ -1,14 +1,12 @@
 # Iteration standard library
 
-The `titan.iteration` module provides generic Map and Array iterators. Import it
-by its qualified name:
+The `titan.iteration` module provides generic Map and Array iterators:
 
 ```titan
-local iteration = import "titan.iteration"
+local iteration = import "iteration"
 ```
 
-There is deliberately no compiler-level `iteration` import alias. Lua code
-loads the same installed standard-provider module with
+Lua code loads the same installed standard-provider module with
 `require "titan.iteration"`.
 
 ## Map iteration
