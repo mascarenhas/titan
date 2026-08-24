@@ -85,7 +85,7 @@ describe("folder modules through the public compiler", function()
             "-u", "LUA_PATH", "-u", "LUA_CPATH",
             "-u", "LUA_PATH_5_5", "-u", "LUA_CPATH_5_5",
             "CCACHE_DISABLE=1",
-            "TITAN_PATH_0_26=" .. workspace,
+            "TITAN_PATH_0_6=" .. workspace,
             "TITAN_PATH=",
         }
         if USE_CHECKOUT_COMPILER then

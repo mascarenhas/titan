@@ -1964,7 +1964,7 @@ describe("Titan code generator", function()
             "dollar$line", ast, code, "dollar.titan")
         assert.equal(0, #errors, table.concat(errors, "\n"))
         local ok, generate_err = pcall(
-            coder.generate, "dollar$line", ast, {}, driver.TITAN_VER)
+            coder.generate, "dollar$line", ast, {}, driver.TITAN_ABI_VERSION)
         assert.falsy(ok)
         assert.match(
             "coder.generate requires a valid logical module name",

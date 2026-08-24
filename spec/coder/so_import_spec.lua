@@ -1296,7 +1296,7 @@ describe(".so-only cross-module imports", function()
             typedef struct lua_State lua_State;
             extern const char *lua_pushstring(lua_State *L, const char *s);
             int notype_provider_abi(lua_State *L) {
-                lua_pushstring(L, "0.26");
+                lua_pushstring(L, "2");
                 return 1;
             }
         ]])
@@ -1316,4 +1316,3 @@ describe(".so-only cross-module imports", function()
         assert.truthy(rok, out)
     end)
 end)
-

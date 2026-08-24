@@ -21,8 +21,8 @@ consumer annotations never replace the callee's `Type.Function` as the source
 of native ABI truth.
 
 This chapter describes the completed implementation, including the generic
-open-consumer and pending-`finally` lifetime paths. Flexible returns introduced
-compiled-module ABI 0.14; current installed-module paths use ABI 0.26.
+open-consumer and pending-`finally` lifetime paths. Flexible-return metadata and
+native signatures are part of ABI 2.
 
 ## Representation in the AST and type graph
 
@@ -51,7 +51,7 @@ Type.StaticMethod(fqtn, name, params, rettypes,
 ```
 
 The third `Type.Function` position remains a required reserved-false sentinel
-in ABI 0.26. `varargtype` is Titan's typed input tail, while `flexrettype` is
+in ABI 2. `varargtype` is Titan's typed input tail, while `flexrettype` is
 Titan's typed output tail; the two may coexist. Direct C declarations instead
 use `Type.CFunction(params, ret, vararg, abi)`: C `...` belongs only to its
 `vararg` bit, and a C signature has neither a flexible result tail nor any
@@ -690,7 +690,7 @@ return, flex-only fallthrough, the existing `(nil, ...: T)` fallthrough case,
 and an empty pending body/catch return resumed after finally. It prevents stale
 descriptor counts from a prior call from becoming visible.
 
-## Serialization and ABI 0.14
+## Serialization and ABI boundary
 
 The working-tree interface serializer includes `flexrettype` in every callable
 shape:
@@ -709,18 +709,15 @@ declaration-only `paramnames` on methods and statics. Interface recovery and
 all recursive nominal walkers consume the same position, while
 `types.tostring` includes a present tail in the canonical function tag.
 
-These changes define compiled-module ABI **0.14**. The marker, paths, fixtures,
-and installed images move together. Two independent incompatibilities require
-the bump from 0.13:
+Two independent incompatibilities make these shapes ABI-visible:
 
 * serialized `Function`, `Method`, and `StaticMethod` constructor payloads
   gained the flexible-return field; and
 * every native flexible-return entry gained the trailing caller-owned
   `_flexout, _flexwant` pair.
 
-The native signatures of fixed-only functions are unchanged, but a 0.13
-module cannot safely be decoded under the new constructor schema. Import
-loading must therefore check the new module ABI marker before interface
-rehydration and report the ordinary clear mismatch for 0.13 artifacts. Exact function
+The native signatures of fixed-only functions are unchanged, but a provider
+with another callable schema cannot be decoded safely. Import loading therefore
+checks the module ABI marker before interface rehydration. Exact function
 tags and imported native declarations are reconstructed only after that check,
-so no old callable can be cast to the 0.14 flexible ABI.
+so no mismatched callable can be cast to the current flexible ABI.

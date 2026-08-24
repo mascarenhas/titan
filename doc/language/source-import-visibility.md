@@ -151,19 +151,12 @@ that a compiled provider and the selected source were built from different
 public APIs.
 
 The generic source overlay is compiler-only and is not a serialized interface
-format. Titan ABI 0.22 nevertheless accompanies this feature for two concrete
-layout changes: the standard-library dogfood pass deliberately made most of
-`titan.uv` local, changing that module's serialized public members and
-reconstructible public closure prefix, and every generated module now carries
-the fixed physical-provider identity slot used before source-private access.
-ABI 0.23 retains those layout rules while adding source-defined foreign
-collaboration and separating module, nominal owner, and member in native
-callable names. ABI 0.24 retains those visibility and native-layout rules while
-extending generic declaration metadata. ABI 0.25 retains the same rules while
-changing the public `titan.fs` and `titan.async` signatures. ABI 0.26 retains
-the visibility model while extending the public `titan.fs.Stat` record plus
-const and Interface metadata. The explicit
+format. ABI 2 covers the source-local `titan.uv` public/private boundary, its
+reconstructible public closure prefix, every module's physical-provider
+identity slot, source-defined foreign collaboration, the callable-name
+hierarchy, generic declarations, and current public standard-library and const
+metadata. The explicit
 `.titan` marker changes lookup and checker permission only; because it is
 stripped before logical identity and serialization, it requires no further ABI
-change. A 0.25 binary remains public-only and is rejected by the 0.26 toolchain;
-older providers must be rebuilt and no migration is performed.
+change. Mismatched providers remain public-only, must be rebuilt, and are not
+migrated.

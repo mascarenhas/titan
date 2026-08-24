@@ -26,7 +26,7 @@ int $LUAOPEN_NAME(lua_State *L) {
 
 modabi = [[
 int $ABINAME(lua_State* L) {
-    lua_pushliteral(L, TITAN_VER);
+    lua_pushliteral(L, TITAN_ABI_VERSION);
     return 1;
 }
 ]]
@@ -956,7 +956,7 @@ function allocate_upvalues(tlcontext, ast)
 
     -- Every module has the mutable and const Array-metatable caches
     -- immediately after the public prefix. Their consecutive order is the
-    -- ABI-0.26 private-state contract reconstructed by source importers.
+    -- private-state contract reconstructed by source importers.
     tlcontext.array_metatable_upvalue = nextupvalue(tlcontext)
     tlcontext.const_array_metatable_upvalue = nextupvalue(tlcontext)
 

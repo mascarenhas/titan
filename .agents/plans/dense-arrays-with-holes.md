@@ -127,7 +127,7 @@ This feature delivers:
 - safe ordinary-language Array/Map separation at Lua and `value` boundaries;
 - contextual positional constructors for integer-keyed Maps;
 - Lua table-border length for integer-keyed Maps;
-- a compiled-module ABI bump from 0.16 to 0.17;
+- a compiled-module ABI boundary;
 - updated standalone argument behavior;
 - focused runtime/checker/coder/ABI/packaging coverage; and
 - updates to both language and implementation manuals.
@@ -515,7 +515,7 @@ typed Array reads/writes do not load the module slot or query the registry.
 Populate the slot immediately after the new module Udata is registry-anchored,
 before import/global/record initialization and, in particular, before
 `INITVARS`; module-variable initializers can construct or box Arrays. A
-recovered ABI-0.17 module already has the populated private slot. Test a
+recovered module using this ABI contract already has the populated private slot. Test a
 module-global Array initializer, repeated recovery, multiple providers, and
 multiple Lua states.
 
@@ -523,7 +523,7 @@ Importers continue to reconstruct only the public exported-variable and
 canonical-function-closure prefix. They do not compute or access this private
 cache slot.
 
-This cache is a normal ABI-0.17 module-layout detail. It does not require a
+This cache is a normal ABI module-layout detail. It does not require a
 runtime capability marker, patched-state sentinel, custom registry state
 machine, or bootstrap preflight.
 
@@ -793,7 +793,7 @@ cache slot after:
 
 Place it before other private slots. Initialize/cache it in the normal module
 initialization path, using the shared runtime metatable and a module-Udata
-back-barrier. Imported and recovered modules must agree on the same ABI-0.17
+back-barrier. Imported and recovered modules must agree on the same ABI
 layout.
 
 Only boxing/unboxing and proxy construction use this slot. Dense typed reads
@@ -963,13 +963,13 @@ slots, and set length to `argc - 1`.
   the backing `Table *`.
 - Both routes observe `args[0] == nil`.
 
-## 7. ABI 0.17 and installation migration
+## 7. ABI and installation boundary
 
 ### 7.1 Why this is an ABI break
 
-Keep the exact physical Array signatures as `Table *`/`Table **`, but bump the
-compiled-module ABI from 0.16 to 0.17. Old and new generated code cannot safely
-share Array values because 0.16 code may:
+Keep the exact physical Array signatures as `Table *`/`Table **`, but advance
+the compiled-module ABI. Generated code from before and after the boundary
+cannot safely share Array values because pre-boundary code may:
 
 - treat `lenhint` as a mutable border cache: old writes/resizes can first
   violate the new dense invariant, after which old `#`/`luaH_getn` can commit a
@@ -984,13 +984,14 @@ The serialized `Array(...)` type text and exact pointer width are unchanged;
 the ABI gate protects the representation invariants and boundary protocol, not
 a C pointer-size change.
 
-Update the historical ABI comment in `titan-runtime/titan.h` with this exact
-rationale and set:
+Update the ABI rationale in `titan-runtime/titan.h` with this exact explanation.
+The authoritative split keeps the identities independent:
 
 ```text
-TITAN_VER        = "0.17"
-TITAN_VER_SUFFIX = "_0_17"
-TITAN_PATH_0_17
+TITAN_ABI_VERSION     = "<active-ABI>"
+TITAN_VERSION         = "<semantic-version>"
+TITAN_LIBRARY_VERSION = "<major>.<minor>"
+TITAN_PATH_<major>_<minor>
 ```
 
 Do not claim a `Table * -> Udata *` or `Table ** -> Udata **` migration.
@@ -1011,25 +1012,24 @@ Update live version/path/environment references in at least:
 - `spec/support/ci_libuv_mode_smoke.sh`;
 - async/stdlib support helpers;
 - README, AGENTS, and both manuals; and
-- fixtures/comments that say an interface is unchanged through 0.16.
+- fixtures/comments that make stale ABI claims.
 
-Finish with:
+Finish with an audit for stale conflated names and numbered paths:
 
 ```sh
-rg -n '0\.16|0_16|TITAN_PATH_0_16' \
+rg -n 'TITAN_|lib/titan/' \
   titan-compiler titan-runtime spec scripts doc Makefile README.md AGENTS.md \
   .github/workflows
 ```
 
-Classify remaining hits as intentional history/old-tree migration or errors.
-Do not mechanically rewrite historical explanations.
+Classify remaining hits as current split-version references or errors.
 
-### 7.3 Providers, installer, and migration smoke
+### 7.3 Providers, installer, and clean-prefix smoke
 
-Publish ABI-0.17 standard artifacts at:
+Publish the active standard artifacts at:
 
 ```text
-$ROCKS_TREE/lib/titan/0.17/{titan.so,titan.a}
+$ROCKS_TREE/lib/titan/<library-version>/{titan.so,titan.a}
 $ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,fs,net,os}.lua
 ```
 
@@ -1037,26 +1037,12 @@ Rebuild all seven logical standard modules because generated module layout and
 Array boundary helpers change even if an individual serialized interface does
 not mention Array.
 
-Preserve a separately installed 0.16 tree. New 0.17 providers reject 0.16
-compiled dependencies through the existing ABI protocol; installer rollback
-must continue to restore the exact predecessor pair/shims/dSYM.
-
-Advance the existing configured-prefix migration smoke from 0.15 -> 0.16 to
-0.16 -> 0.17:
-
-1. configure a disposable prefix's stock Lua/LuaRocks for ABI 0.16;
-2. prove its `package.cpath` selects 0.16 and not 0.17;
-3. remove only the disposable prefix's registered Titan rock/known shims;
-4. rerun supported `make lua`/`make luarocks` for ABI 0.17;
-5. install the first 0.17 Titan rock/provider;
-6. prove bare `require "titan"` selects the 0.17 provider; and
-7. prove ABI mismatch rejection with focused 0.16 fixtures/providers.
-
-Keep the claims separated: `ci_abi_migration_smoke.sh` proves configured
-`package.cpath` migration and the first 0.17 install. It does not claim to have
-built a real 0.16 standard provider unless one is explicitly seeded.
-`spec/stdlib_installer_spec.lua` must seed a controlled 0.16 pair/predecessor
-state and own the byte-for-byte preservation and rollback assertions.
+Providers reject pre-boundary compiled dependencies through the existing ABI
+protocol; installer rollback must continue to restore the exact predecessor
+pair/shims/dSYM. Use a fresh disposable prefix to prove `package.cpath` selects
+the active library layout, bare `require "titan"` selects the active
+provider, and a focused synthetic mismatch is rejected before metadata use.
+Do not add cross-version migration machinery.
 
 Retain the current Linux producer/consumer topology and its prepared-prefix
 artifact contract. Do not add a frozen predecessor checkout, a patched-Lua
@@ -1264,7 +1250,7 @@ Generated-C assertions must prove:
 - the post-load conversion for an Array-typed nested element is the explicit
   structural-validation exception.
 
-Add focused 0.16/0.17 DSO/static mismatch coverage even though serialized
+Add focused synthetic DSO/static ABI-mismatch coverage even though serialized
 Array type text is unchanged.
 
 ### 8.7 Standalone and standard library
@@ -1279,8 +1265,8 @@ For direct and `titan.uv.bootstrap` main paths, prove:
   unboxes before the exact native `main` call.
 
 Update the seven-module bundled/system stdlib smokes, async helpers, and
-snapshot/restore paths for ABI 0.17 without moving library behavior under
-LuaCov.
+snapshot/restore paths for the active library namespace and ABI-sensitive
+caches without moving library behavior under LuaCov.
 
 ### 8.8 Build, installer, and CI
 
@@ -1296,9 +1282,9 @@ Update:
 - `spec/support/ci_libuv_mode_smoke.sh`; and
 - `.github/workflows/ci.yml`.
 
-Prove fresh and warm stock-Lua prefixes, ABI-0.17 path selection, first 0.17
-rock install, preserved 0.16 tree, rollback, bundled/system providers, and
-bare support loading. Do not add patch/capability/source-rejection cases.
+Prove fresh and warm stock-Lua prefixes, active library-path selection, clean
+installation, rollback, bundled/system providers, and bare support loading. Do
+not add patch/capability/source-rejection cases.
 
 ## 9. Documentation plan
 
@@ -1361,7 +1347,7 @@ Document:
 - checker positional elaboration;
 - read/write/constructor/length lowering;
 - exact versus generic calls;
-- ABI-0.17 semantic break; and
+- ABI semantic break; and
 - failure/performance boundaries.
 
 Cross-update:
@@ -1399,7 +1385,7 @@ with:
 - Table element barriers and rooting;
 - internal-versus-boxed conversion rule;
 - unchanged `Table **` descriptors;
-- ABI-0.17 paths;
+- active ABI and library paths;
 - positive-only standalone args; and
 - topical specs/sanitizer/CI placement.
 
@@ -1424,21 +1410,21 @@ native evidence and no Lua patch is required.
 3. Add both-direction structural validation and barriers.
 4. Land the focused native runtime and sanitizer cases.
 
-Do not wire these helpers into generated ABI-0.16 modules in this phase.
+Do not wire these helpers into generated modules before the atomic cutover.
 
 Exit criterion: the isolated runtime harness preserves key `0`, explicit
 length, growth, Lua callbacks, barriers, and normal collection without
 changing generated module layout or behavior.
 
-### Phase 3 — atomic ABI-0.17 Array cutover
+### Phase 3 — atomic Array ABI cutover
 
 Land the following as one coherent cutover; no tested/published intermediate
-compiler may advertise ABI 0.16 with the new cache, or box an old constructor's
+compiler may advertise the old ABI marker with the new cache, or box an old constructor's
 ownerless Table:
 
-1. bump ABI constants/metadata/default paths and the live
-   Make/rockspec/installer path constants needed for a coherent first 0.17
-   install;
+1. bump ABI constants, metadata, and ABI-sensitive cache namespaces while
+   keeping semantic-release and library-path constants independent; update the
+   live Make/rockspec/installer constants needed for a coherent first install;
 2. add and initialize the private module metatable cache before `INITVARS`;
 3. rewrite every Array constructor, including standalone argv, to create the
    complete backing/proxy pair;
@@ -1448,7 +1434,7 @@ ownerless Table:
 7. audit value/options/records/modules/Maps/calls/variadics/flexible returns;
 8. migrate existing plain-Table Array fixtures and the variadic Lua-border
    design pin; and
-9. add nested/exact/generic/generated-C and 0.16 mismatch tests.
+9. add nested/exact/generic/generated-C and synthetic ABI-mismatch tests.
 
 Exit criterion: every constructed Array has its owner cycle, no raw backing
 escapes a Lua/value/Map boundary, and no proxy load appears in the common
@@ -1479,14 +1465,14 @@ sharing representation or length rules.
 
 1. Exercise the already-cut-over positive-only argv representation in the
    production direct/bootstrap paths.
-2. Complete ABI-0.17 rollback, migration, CI, SDK, and provider-path coverage
+2. Complete ABI rollback, clean-install, CI, SDK, and provider-path coverage
    beyond the live cutover already required by Phase 3.
 3. Update installer rollback and shims.
-4. Advance the configured-prefix migration smoke to 0.16 -> 0.17.
+4. Replace the configured-prefix migration smoke with a clean-prefix selection smoke.
 5. Run DSO/archive and bundled/system stdlib gates.
 
-Exit criterion: production artifacts are coherent ABI-0.17 pairs, 0.16 is
-preserved/rejected, and both main routes see the canonical logical Array.
+Exit criterion: production artifacts are coherent same-ABI pairs, pre-boundary
+fixtures are rejected, and both main routes see the canonical logical Array.
 
 ### Phase 7 — manuals and guidance
 
@@ -1494,7 +1480,7 @@ preserved/rejected, and both main routes see the canonical logical Array.
 2. Add/index the implementation chapter and update affected chapters.
 3. Update README and repository guidance from proven behavior.
 4. Search for stale table-equivalence, `args[0]`, `luaH_getn(Array)`,
-   Udata-native, embedded-Table, patched-Lua, and ABI-0.16 claims.
+   Udata-native, embedded-Table, patched-Lua, and stale ABI claims.
 
 Exit criterion: user and implementer documentation fully describes the shipped
 model.
@@ -1525,7 +1511,7 @@ export PATH="$PREFIX/bin:$PATH"
 make lua
 make luarocks
 make libuv
-"$PREFIX/bin/luarocks" make titan-dev-1.rockspec
+"$PREFIX/bin/luarocks" make
 
 busted spec/dense_array_runtime_spec.lua
 busted spec/checker/dense_arrays_spec.lua
@@ -1598,10 +1584,10 @@ The maintainer explicitly waived that manual dispatch for this delivery.
 
 ### ABI and delivery
 
-- [x] ABI-0.17 rationale cites semantic/boundary/invariant incompatibility,
+- [x] ABI rationale cites semantic/boundary/invariant incompatibility,
       not a false pointer-layout change.
-- [x] 0.17 paths/providers/shims/install/rollback are complete.
-- [x] 0.16 artifacts are preserved and rejected as dependencies.
+- [x] Active paths/providers/shims/install/rollback are complete.
+- [x] Pre-boundary fixtures are rejected as dependencies.
 - [x] Focused runtime/checker/coder/cross-provider/standalone/packaging tests
       pass in their correct shards.
 - [x] Sanitizer and full `make test` pass.
@@ -1639,7 +1625,7 @@ The maintainer explicitly waived that manual dispatch for this delivery.
 - Inspect generated hot writes for direct Table barriers and no extra backing
   load.
 - Confirm guards precede unsigned conversion and any hash lookup/store.
-- Inventory every live ABI-0.16 reference and installed artifact.
+- Inventory every stale ABI reference and installed artifact.
 
 ### Documentation/test reviewer
 

@@ -1,14 +1,14 @@
 # Variadic parameters
 
 > **Historical design note.** This unindexed document records the original
-> variadic-parameter design, including the pre-0.10 inline descriptor layout
+> variadic-parameter design, including the superseded inline descriptor layout
 > and the old strict finite-truncation rule. It is not the current language or
 > implementation reference. See
 > [Variadic parameters](language/variadic-parameters.md),
 > [Flexible returns](language/flexible-returns.md), and
 > [Variadic parameter internals](implementation/variadic-parameters.md) for the
 > shipped semantics and caller-owned descriptor representation. In particular,
-> ABI 0.17 positional construction also accepts an exact integer-keyed Map;
+> Current positional construction also accepts an exact integer-keyed Map;
 > Array results use private backing Tables plus canonical Lua userdata proxies.
 > See [Dense Arrays](implementation/dense-arrays.md). The Array-only
 > constructor and plain-table representation below are retained solely as

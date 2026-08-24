@@ -416,14 +416,21 @@ STDLIB_INSTALL_STAGE       ?= $(CURDIR)
 # pairs for failure-only sanitizer symbolization before later tests can replace
 # those outputs. Ordinary builds leave this empty and pay no snapshot cost.
 TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT ?=
-TITAN_ABI_VERSION          := 0.26
-TITAN_STDLIB_ABI_DIR       ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_ABI_VERSION)
-TITAN_CANONICAL_SUPPORT_SO ?= $(TITAN_STDLIB_ABI_DIR)/titan.so
-TITAN_CANONICAL_STATIC_ARCHIVE ?= $(TITAN_STDLIB_ABI_DIR)/titan.a
-TITAN_STDLIB_DIR           ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_ABI_VERSION)/titan
+# ABI compatibility is independent from the semantic compiler/stdlib release.
+# Installed library paths use the release's derived major/minor component so
+# patch releases share one provider namespace.
+TITAN_ABI_VERSION          := 2
+TITAN_VERSION              := 0.6.0
+TITAN_VERSION_COMPONENTS   := $(subst ., ,$(TITAN_VERSION))
+TITAN_LIBRARY_VERSION      := $(word 1,$(TITAN_VERSION_COMPONENTS)).$(word 2,$(TITAN_VERSION_COMPONENTS))
+TITAN_LIBRARY_VERSION_SUFFIX := _$(subst .,_,$(TITAN_LIBRARY_VERSION))
+TITAN_STDLIB_VERSION_DIR   ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)
+TITAN_CANONICAL_SUPPORT_SO ?= $(TITAN_STDLIB_VERSION_DIR)/titan.so
+TITAN_CANONICAL_STATIC_ARCHIVE ?= $(TITAN_STDLIB_VERSION_DIR)/titan.a
+TITAN_STDLIB_DIR           ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan
 TITAN_STDLIB_LUA_DIR       ?= $(TITAN_INSTALL_TREE)/share/lua/$(LUA_ABI_VERSION)/titan
 LUA_LIBDIR                 ?= $(TITAN_INSTALL_TREE)/lib/lua/$(LUA_ABI_VERSION)
-TITAN_STDLIB_LEGACY_DIR    ?= $(LUA_LIBDIR)/titan/stdlib_$(subst .,_,$(TITAN_ABI_VERSION))
+TITAN_STDLIB_LEGACY_DIR    ?= $(LUA_LIBDIR)/titan/stdlib$(TITAN_LIBRARY_VERSION_SUFFIX)
 TITAN_SHARE_DIR            ?= $(TITAN_INSTALL_TREE)/share/titan
 
 # libbacktrace is cloned + built into ./libbacktrace (gitignored), mirroring the
@@ -907,11 +914,11 @@ $(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) $(READLINE_SELECTION_CONFIG) FORCE
 		$(call make_shell_quote,LUA_MYCFLAGS=$(LUA_MYCFLAGS)) \
 		$(call make_shell_quote,LUA_MYLDFLAGS=$(LUA_MYLDFLAGS)) \
 		$(call make_shell_quote,LUA_MYLIBS=$(LUA_MYLIBS)) \
-		$(call make_shell_quote,TITAN_ABI_VERSION=$(TITAN_ABI_VERSION)); } \
+		$(call make_shell_quote,TITAN_LIBRARY_VERSION=$(TITAN_LIBRARY_VERSION)); } \
 		> "$$tmp"; \
 	cat "$(READLINE_SELECTION_CONFIG)" >> "$$tmp"; \
 	awk -v root=$(call make_shell_quote,$(PREFIX)) \
-	    -v titan_abi=$(call make_shell_quote,$(TITAN_ABI_VERSION)) \
+	    -v titan_library=$(call make_shell_quote,$(TITAN_LIBRARY_VERSION)) \
 	  '$$1 == "#define" && $$2 == "LUA_TITAN_CDIR" { next } \
 	   { if ($$1 == "#define" && index($$2, "LUA_ROOT") == 1) { \
 	       printf("#define LUA_ROOT %c%s/%c\n", 34, root, 34); next; \
@@ -920,7 +927,7 @@ $(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) $(READLINE_SELECTION_CONFIG) FORCE
 	         index($$0, "LUA_ROOT") != 0) { \
 	       print; \
 	       printf("#define LUA_TITAN_CDIR%cLUA_ROOT %clib/titan/%s/%c\n", \
-	              9, 34, titan_abi, 34); \
+	              9, 34, titan_library, 34); \
 	       next; \
 	     } \
 	     line = $$0; \
@@ -1777,7 +1784,7 @@ $(TITAN_BOOTSTRAP_SO): $(LTITANLIB_O)
 		status=$$?; rm -f "$$tmp"; exit $$status; \
 	fi
 
-# The active ABI path initially needs only Titan's bare Lua support entry. A
+# The active library path initially needs only Titan's bare Lua support entry. A
 # valid support/full image already at that path is deliberately preserved: a
 # repeated source build must never shrink a complete stdlib back to bootstrap.
 stage-titan-bootstrap: $(TITAN_BOOTSTRAP_SO)
@@ -1793,7 +1800,7 @@ stage-titan-bootstrap: $(TITAN_BOOTSTRAP_SO)
 	mkdir -p "$$(dirname "$$canonical")"; \
 	if test -e "$$canonical" || test -L "$$canonical"; then \
 	  if ! validate_support "$$canonical"; then \
-	    echo "ERROR: existing Titan $(TITAN_ABI_VERSION) image is not a usable support provider: $$canonical" >&2; \
+	    echo "ERROR: existing Titan library image is not a usable support provider: $$canonical" >&2; \
 	    exit 1; \
 	  fi; \
 	else \
@@ -1838,15 +1845,17 @@ install-titan-sdk: $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) $(LUA_LIB) \
 	@set -e; \
 	mkdir -p "$(ROCKS_TREE)"; \
 	rocks_tree=$$(CDPATH= cd "$(ROCKS_TREE)" && pwd -P); \
+	version_dir="$$rocks_tree/lib/titan/$(TITAN_LIBRARY_VERSION)"; \
 	echo "==> Installing Titan SDK into $$rocks_tree"; \
 	rm -f "$$rocks_tree/include/titan_longjmp.h"; \
 	mkdir -p "$$rocks_tree/src/$(LUA_DIR)" \
-		"$$rocks_tree/include/titan" "$$rocks_tree/lib"; \
+		"$$rocks_tree/include/titan" "$$rocks_tree/lib" \
+		"$$version_dir"; \
 	install -m 0644 $(LUA_DIR)/src/*.c $(LUA_DIR)/src/*.h \
 		"$$rocks_tree/src/$(LUA_DIR)/"; \
 	install -m 0644 "$(LUA_LIB)" "$$rocks_tree/lib/liblua.a"; \
-	install -m 0644 "$(TITAN_RUNTIME_LIB)" \
-		"$$rocks_tree/lib/libtitan.a"; \
+	rm -f "$$rocks_tree/lib/libtitan.a"; \
+	install -m 0644 "$(TITAN_RUNTIME_LIB)" "$$version_dir/libtitan.a"; \
 	install -m 0644 "$(LIBBT_LIB)" "$$rocks_tree/lib/libbacktrace.a"; \
 	install -m 0644 $(TITAN_SDK_ROOT_HEADERS) "$$rocks_tree/include/"; \
 	install -m 0644 $(TITAN_SDK_NAMESPACED_HEADERS) \
@@ -1920,6 +1929,8 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
 		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
 		$(call make_shell_quote,TITAN_ABI_VERSION=$(TITAN_ABI_VERSION)) \
+		$(call make_shell_quote,TITAN_VERSION=$(TITAN_VERSION)) \
+		$(call make_shell_quote,TITAN_LIBRARY_VERSION=$(TITAN_LIBRARY_VERSION)) \
 		$(call make_shell_quote,CC=$(CC)) \
 		$(call make_shell_quote,AR=$(AR)) \
 		$(call make_shell_quote,RANLIB=$(RANLIB)) \
@@ -2019,7 +2030,7 @@ $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
 	  CC=$(call make_shell_quote,$(CC)) \
 	    AR=$(call make_shell_quote,$(AR)) \
 	    RANLIB=$(call make_shell_quote,$(RANLIB)) \
-	    TITAN_PATH_0_26=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+	    TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 	    TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)) \
 	    TITAN_RUNTIME_PREBUILT=1 \
 	    TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
@@ -2060,7 +2071,7 @@ install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 	  export CC=$(call make_shell_quote,$(CC)); \
 	  export AR=$(call make_shell_quote,$(AR)); \
 	  export RANLIB=$(call make_shell_quote,$(RANLIB)); \
-	  export TITAN_PATH_0_26=$(call make_shell_quote,$(CURDIR)); \
+	  export TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(CURDIR)); \
 	  export TITAN_PATH=; \
 	  export TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)); \
 	  export TITAN_RUNTIME_PREBUILT=1; \
@@ -2094,15 +2105,15 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 	  echo "ERROR: rock-post-install requires ROCK_LUA" >&2; exit 1; \
 	}
 	@set -e; \
-	mkdir -p "$(ROCKS_TREE)/lib/titan/$(TITAN_ABI_VERSION)"; \
+	mkdir -p "$(ROCKS_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)"; \
 	rocks_tree=$$(CDPATH= cd "$(ROCKS_TREE)" && pwd -P); \
-	abi_dir="$$rocks_tree/lib/titan/$(TITAN_ABI_VERSION)"; \
+	version_dir="$$rocks_tree/lib/titan/$(TITAN_LIBRARY_VERSION)"; \
 	share_dir="$$rocks_tree/share/titan"; \
 	mkdir -p "$$share_dir/LICENSES"; \
 	install -m 0644 THIRD_PARTY_NOTICES.md \
 	  "$$share_dir/THIRD_PARTY_NOTICES.md"; \
 	install -m 0644 $(STDLIB_LICENSES) "$$share_dir/LICENSES/"; \
-	stage=$$(mktemp -d "$$abi_dir/.titan-stdlib-stage.XXXXXX"); \
+	stage=$$(mktemp -d "$$version_dir/.titan-stdlib-stage.XXXXXX"); \
 	trap 'rm -rf "$$stage"' EXIT HUP INT TERM; \
 	echo "==> Building paired Titan stdlib providers with $(ROCK_TITANC)"; \
 	( cd "$$stage"; \
@@ -2110,7 +2121,7 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 	  mkdir -p titan; \
 	  install -m 0644 "$(CURDIR)/titan/test.titan" titan/test.titan; \
 	  export TITAN_ROCKS_ROOT="$$rocks_tree"; \
-	  export TITAN_PATH_0_26="$$abi_dir"; \
+	  export TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)="$$version_dir"; \
 	  export TITAN_PATH=; \
 	  export TITAN_RUNTIME_PREBUILT=1; \
 	  export CC=$(call make_shell_quote,$(CC)); \
@@ -2127,7 +2138,7 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 	      "$(CURDIR)/spec/support/ci_asan_generated_c_context.lua" \
 	      snapshot \
 	      $(call make_shell_quote,$(strip $(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT))) \
-	      "$$stage/titan.so" "$(CURDIR)/titan" "$$abi_dir/titan.so" \
+	      "$$stage/titan.so" "$(CURDIR)/titan" "$$version_dir/titan.so" \
 	      "$(CURDIR)/titan"; \
 	  fi; \
 	  "$(ROCK_LUA)" -E "$(CURDIR)/scripts/stdlib_installer.lua" \

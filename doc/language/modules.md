@@ -373,7 +373,7 @@ tails, so calls through a source or compiled-module interface use the same
 finite projection and open-run rules as local calls.
 
 Imported public record and union statics are first-class with the same stable
-identity. ABI 0.19 makes their canonical closures part of the reconstructible
+identity. Their canonical closures are part of the reconstructible
 public module-state prefix: exported variables, exported top-level function
 closures, then public nominal static closures in module-member and bytewise
 static-name order. Variants remain metadata and are not first-class types.
@@ -442,8 +442,8 @@ titanc [--print-ast] [--pretty-print] [-v] [-j jobs] [--static] [--test] \
 * `--lua <luasrc>` points a source-checkout compiler at a complete Lua
   source/build tree. Checkout developer mode otherwise uses
   `lua-5.5.1/src`. An installed compiler rejects this override and always
-  uses its matched `<root>/src/lua-5.5.1` headers, `liblua.a`, and
-  `libtitan.a`.
+  uses its matched `<root>/src/lua-5.5.1` headers,
+  `<root>/lib/liblua.a`, and `<root>/lib/titan/0.6/libtitan.a`.
 * `-l/--link` adds extra C libraries to the link line (FFI use).
 * `-j/--jobs <jobs>` bounds concurrent generated-C object compilations. It
   defaults to the positive integer in `TITAN_JOBS`, or to `1` when that
@@ -527,7 +527,7 @@ executable. The folder program's `__main` suffix avoids colliding with its
 source directory; the logical module name and entrypoint path remain
 unchanged.
 
-An installed compiler links `<root>/lib/libtitan.a`; compiler development
+An installed compiler links `<root>/lib/titan/0.6/libtitan.a`; compiler development
 directly from the repository lazily rebuilds and links
 `titan-runtime/libtitan.a`. Both archives contain exactly `titan.o` and `minicoro.o`; source-defined
 foreign callbacks live in their generated module objects, and neither driver
@@ -557,8 +557,8 @@ the structure of the generated C is in
   directory, as described above.
 * **Compiled modules** are looked up along the *binary search path*: a
   semicolon-separated list of plain directories taken from
-  `TITAN_PATH_0_26`, or `TITAN_PATH` if that is unset. Otherwise the default
-  is `.;<root>/lib/titan/0.26`. An installed `titanc` recovers `<root>` from
+  `TITAN_PATH_0_6`, or `TITAN_PATH` if that is unset. Otherwise the default
+  is `.;<root>/lib/titan/0.6`. An installed `titanc` recovers `<root>` from
   the first literal `package.cpath` entry ending in
   `/lib/lua/5.5/?.so`. For logical `a.b.c`, the default performs a complete
   pass over `a.so`, `a/b.so`, and exact `a/b/c.so`, then a complete pass over
@@ -612,16 +612,14 @@ Lua's `require`, for its part, finds a generated logical loader through
 `package.cpath`, loads it globally, and invokes the module's exact
 `luaopen_*` entry (see [Requiring a Titan
 module](lua-interop.md#requiring-a-titan-module)). Titan's installed Lua
-default includes `<root>/lib/titan/0.26/?.so` and the standard loader root.
+default includes `<root>/lib/titan/0.6/?.so` and the standard loader root.
 A qualified standard name such as `titan.os` therefore runs
 `<root>/share/lua/5.5/titan/os.lua`, which opens the canonical DSO
-`<root>/lib/titan/0.26/titan.so`. Default Titan imports select that same
+`<root>/lib/titan/0.6/titan.so`. Default Titan imports select that same
 physical file by validating the `titan.os` callable metadata; `--static`
 prefers the paired self-describing `titan.a`. Installation creates no child
-DSOs, parent-level or `lib/lua` copies, symbolic links, or hard links.
-ABI 0.26 does not migrate or clean up a separately installed 0.25 provider;
-that versioned directory remains preserved prior-version state and is not on
-the active default path.
+DSOs, parent-level or `lib/lua` copies, symbolic links, or hard links. The
+installer does not provide cross-version migration or cleanup.
 
 ## Static and dynamic linking
 
@@ -718,7 +716,7 @@ dynamic. Qualified standard-library dependencies therefore use the installed
 `titan.so` by default, while `--static` prefers `titan.a`.
 After `luaL_openlibs`, the executable parses the
 inherited `package.cpath` for its `/lib/lua/5.5/?.so` entry, adds
-`<root>/lib/titan/0.26/?.so` if it is absent, and initializes the Titan module
+`<root>/lib/titan/0.6/?.so` if it is absent, and initializes the Titan module
 path from that same root. Deploy the standard provider and loaders as described
 under [where modules are found](#where-modules-are-found). `args[1]` onward
 contain only the user-supplied arguments; index 0 is absent and the executable
@@ -785,11 +783,11 @@ Titan's configured search paths with:
 
 ```sh
 export LUA_PATH_5_5="$ROCKS_TREE/share/lua/5.5/?.lua;$ROCKS_TREE/share/lua/5.5/?/init.lua;;"
-export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.26/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
+export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.6/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
 ```
 
 The ordinary `/lib/lua/5.5/?.so` template is Titan's root-discovery anchor. If
 it is omitted, also set
-`TITAN_PATH_0_26="$ROCKS_TREE/lib/titan/0.26"`. Titan still targets the exact
+`TITAN_PATH_0_6="$ROCKS_TREE/lib/titan/0.6"`. Titan still targets the exact
 Lua 5.5 runtime ABI and internals; using the stock loader does not make a module
 compatible with another Lua version or configuration.

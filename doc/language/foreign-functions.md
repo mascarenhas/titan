@@ -239,7 +239,7 @@ two translation units may yield different addresses.
 
 ## Native C names and ABI
 
-ABI 0.23 uses C99 universal-character-name separators in generated callable
+The current ABI uses C99 universal-character-name separators in generated callable
 names. `_\u2133_` separates a flattened logical module from the remaining
 signature, while `_\u2131_` separates a record, union, or Interface owner from
 its static, constructor, variant, method, bound, or metamethod role. For
@@ -257,15 +257,10 @@ source-private scheme. A foreign function has only the native C entry; it has
 no Lua or strict entry and no module-state closure slot. Generated C retains
 the UCN spellings; object and tool names contain UTF-8 `ℳ` and `ℱ`.
 
-The naming change and the removal of the old standard-library callback symbols
-are part of the ABI-0.23 clean boundary. ABI-0.22 providers and objects must be
-rebuilt rather than mixed with an ABI-0.23 compiler/runtime. ABI 0.24 retains
-these native names but extends serialized interfaces for generics, so ABI-0.23
-providers likewise remain preserved prior-version state and cannot be mixed
-with the active compiler/runtime. ABI 0.26 retains the native FFI naming while
-changing the public `titan.fs` and `titan.async` interfaces and exact native
-signatures; ABI-0.24 providers are preserved and rejected before metadata is
-decoded.
+The callable hierarchy, source-defined standard-library callbacks, generic
+interface metadata, and affected public standard-library signatures are all
+part of ABI 2. Providers built for another ABI must be rebuilt and are rejected
+before metadata is decoded.
 
 ## Related chapters
 

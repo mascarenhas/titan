@@ -311,13 +311,13 @@ end
 local function installed_stdlib_container()
     local prefix = assert(prefix_from_cpath(package.cpath),
         "cannot find the active Lua prefix in package.cpath")
-    return prefix .. "/lib/titan/0.26/" .. STDLIB_CONTAINER
+    return prefix .. "/lib/titan/0.6/" .. STDLIB_CONTAINER
 end
 
 local function installed_stdlib_archive()
     local prefix = assert(prefix_from_cpath(package.cpath),
         "cannot find the active Lua prefix in package.cpath")
-    return prefix .. "/lib/titan/0.26/" .. STDLIB_STATIC_ARCHIVE
+    return prefix .. "/lib/titan/0.6/" .. STDLIB_STATIC_ARCHIVE
 end
 
 local function quote(word)
@@ -1743,7 +1743,7 @@ describe("libuv Makefile configuration", function()
                 assert.truthy(makefile:find(contract, 1, true), contract)
             end
 
-            file = assert(io.open("titan-dev-1.rockspec", "rb"))
+            file = assert(io.open("titan-0.6.0-1.rockspec", "rb"))
             local rockspec = file:read("*a")
             file:close()
             for _, contract in ipairs({
@@ -1800,6 +1800,9 @@ describe("libuv Makefile configuration", function()
                 "titan-runtime/.titan-stdlib-build-config",
                 "STDLIB_COMPLETION_STAMP := " ..
                 "titan-runtime/.titan-stdlib-complete",
+                'rm -f "$$rocks_tree/lib/libtitan.a"',
+                'install -m 0644 "$(TITAN_RUNTIME_LIB)" ' ..
+                    '"$$version_dir/libtitan.a"',
                 "rm -f $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_QUALIFIED_SOS) " ..
                 "$(STDLIB_SOS)",
             }) do
@@ -1832,7 +1835,7 @@ describe("libuv Makefile configuration", function()
             local first = assert(makefile:find(
                 "$(TITAN_BOOTSTRAP_SO): $(LTITANLIB_O)", 1, true))
             local last = assert(makefile:find(
-                "\n\n# The active ABI path", first, true))
+                "\n\n# The active library path", first, true))
             local rule = makefile:sub(first, last - 1)
             assert.truthy(rule:find(
                 "$(ROCK_LD) $(ROCK_LIBFLAG) -o \"$$tmp\" \"$<\"",
@@ -2232,7 +2235,7 @@ esac
             local build_log = root .. "/build.log"
 
             local payload = assert(staticmetadata.render(
-                "fixture.module", "0.26", "{}"))
+                "fixture.module", "2", "{}"))
             local initializer = assert(staticmetadata.c_initializer(payload))
             write_file(source, string.format([[
 #if defined(__APPLE__)
@@ -2348,7 +2351,7 @@ printf 'build\n' >> %s
                     tostring(code) .. ")")
                 assert.equal("build\nbuild\nbuild\n", read_file(build_log))
                 assert.truthy(staticmetadata.scan_archive(static_archive, {
-                    expected_abi = "0.26",
+                    expected_abi = "2",
                 }))
 
                 assert.truthy(os.remove(provider))
@@ -3171,7 +3174,7 @@ done
                 "$(call make_shell_quote,$(strip " ..
                 "$(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT)))",
                 '"$$stage/titan.so" "$(CURDIR)/titan" ' ..
-                '"$$abi_dir/titan.so"',
+                '"$$version_dir/titan.so"',
                 '"$(CURDIR)/titan"',
             }) do
                 assert.truthy(rock_post_install:find(contract, 1, true),
@@ -3225,7 +3228,7 @@ done
                 '"$shim_dir/peg.lua" "$shim_dir/string.lua"',
                 '"$shim_dir/math.lua" "$shim_dir/lua.lua"',
                 '"$shim_dir/iteration.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"',
-                'test_source=$prefix_rel/share/titan/0.26/src/titan/test.titan',
+                'test_source=$prefix_rel/share/titan/0.6/src/titan/test.titan',
                 '"$test_source"',
                 'rm -f "$test_source"',
                 '"$shim_dir/io.lua"',
@@ -3238,6 +3241,8 @@ done
             local mode_smoke =
                 read_file("spec/support/ci_libuv_mode_smoke.sh")
             for _, contract in ipairs({
+                'RUNTIME_ARCHIVE="$LIBRARY_ROOT/libtitan.a"',
+                'test ! -e "$PREFIX/lib/libtitan.a"',
                 'local async = import "async"',
                 'local timer = import "timer"',
                 'local titan_io = import "io"',
@@ -3755,7 +3760,7 @@ done
                 "http os peg string math lua iteration gc test; do",
                 1, true), workflow)
             assert.truthy(workflow:find(
-                "share/titan/0.26/src/titan/test.titan", 1, true), workflow)
+                "share/titan/0.6/src/titan/test.titan", 1, true), workflow)
 
             local groups = read_file("spec/support/ci_test_groups.sh")
             for _, retained in ipairs({

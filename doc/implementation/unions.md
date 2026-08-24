@@ -17,7 +17,7 @@ cross-cutting invariants are:
 * arms and `else` are ordinary full blocks, so existing
   `catch`/`finally`/`defer` machinery applies unchanged; and
 * imported first-class nominal statics require the ABI-visible public module
-  prefix introduced in ABI 0.19.
+  prefix described below.
 
 ## AST and parser lowering
 
@@ -343,7 +343,7 @@ the original union Udata in user value 1; a written Interface-to-union cast
 checks that payload's exact union metatable. No union tag or payload is exposed
 through Interface dispatch. See [Interfaces](interfaces.md).
 
-## Serialized interfaces: ABI 0.19 origin and current 0.26 boundary
+## Serialized interfaces and ABI boundary
 
 `types.serialize` adds canonical schemas:
 
@@ -383,8 +383,7 @@ ordered fields; a record with omitted private fields instead omits that
 constructor. Field names remain disjoint from the record's static and method
 namespaces.
 
-ABI 0.19 also extends the reconstructible public prefix of every module
-userdata. Producers and importers allocate:
+The reconstructible public prefix of every module userdata allocates:
 
 1. exported module variables in module-member order;
 2. exported top-level function closures in module-member order; then
@@ -397,36 +396,16 @@ record constructor, union constructor, or user nominal static as the exact
 canonical first-class closure without loading a Lua namespace table or
 inventing another identity.
 
-The union schemas, userdata/tag protocol, and public-prefix change formed the
-ABI 0.19 compatibility boundary. ABI 0.20 retained those schemas and prefix
-unchanged while changing Array proxies and first-class function closures and
-adding Interface descriptors, wrappers, and bound-method symbols. ABI 0.21
-retained those Titan layouts while advancing the embedded Lua contract from
-5.5.0 to 5.5.1. ABI 0.22 retains the union schema and Lua contract, but the
-source-local `titan.uv` surface/private-provider boundary changes that module's
-serialized public schema and reconstructible public module-state prefix, and
-every generated module gains the fixed physical-provider identity slot for
-source-private access. ABI 0.23 retains that schema while changing the native
-callback contract and separating module, nominal owner, and member in every
-union constructor/static/method entry name. ABI 0.24 extends serialized
-interfaces for generic binders, applied nominals, schemes, owners, methods, and
-constructor-preserving aliases while retaining the erased union representation.
-ABI 0.25 retains that union representation and generic schema while changing
-the public `titan.fs.stat`/`lstat` option results and `titan.async.suspend`
-cancellation-action parameter, including their exact native signatures. ABI
-0.26 retains the union representation while extending serialized const and
-Interface member state.
-`TITAN_VER` is now `0.26`, its suffix is `_0_26`, the versioned search variable
-is `TITAN_PATH_0_26`, the installed provider namespace is `lib/titan/0.26`, and
-the generated standard-library support namespace is `stdlib_0_26`. A 0.25
-interface is rejected before type rehydration or native linking.
+The union schemas, userdata/tag protocol, and public-prefix layout are part of
+ABI 2 together with Array and function representations, Interface and generic
+metadata, source-private provider identity, callable symbol hierarchy, and
+serialized const/member state. A mismatched interface is rejected before type
+rehydration or native linking.
 
-ABI 0.26 is the current versioned prototype boundary, not a migration layer.
-Installed 0.18 through 0.25 trees remain separately versioned predecessors.
-Build preparation creates or replaces only exact known active-0.26 Titan
-artifacts, establishes its ABI-keyed caches, and verifies that `package.cpath`
-selects 0.26 rather than 0.25. It does not migrate or clean up the preserved
-0.25 state.
+`TITAN_VERSION` is `0.6.0`; its derived `0.6` library version selects
+`TITAN_PATH_0_6`, `lib/titan/0.6`, and `stdlib_0_6`. Build preparation replaces
+only exact known active artifacts and establishes ABI-keyed caches. Earlier
+Titan installations are not migrated or cleaned up.
 
 ## Standard-library dogfooding
 

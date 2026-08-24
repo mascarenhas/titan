@@ -1,7 +1,7 @@
 # The Titan grammar
 
 This chapter is the reference grammar of Titan as implemented by the
-0.26 prototype compiler: lexical conventions, the complete syntactic
+0.6.0 prototype compiler: lexical conventions, the complete syntactic
 grammar, operator precedence, and the restrictions the EBNF alone does
 not show. It replaces the old manual's stale grammar.
 
@@ -201,7 +201,7 @@ type Coordinates = {float}           -- exported transparent type alias
 interface Movable
     function move(dx: float, dy: float)
 end
-version = "0.5"                      -- exported module variable, inferred
+release_stage = "development"        -- exported module variable, inferred
 function Point:move(dx: float, dy: float)
     self.x = self.x + dx
     self.y = self.y + dy

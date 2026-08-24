@@ -40,12 +40,12 @@ local function fresh_workspace_path(label)
     return path
 end
 
-local function production_layout(abi_root, shim_root)
+local function production_layout(library_root, shim_root)
     return {
         kind = "container",
-        abi_root = abi_root,
+        library_root = library_root,
         shim_root = shim_root,
-        container = abi_root .. "/titan.so",
+        container = library_root .. "/titan.so",
     }
 end
 
@@ -64,27 +64,23 @@ local function find_standard_layout()
     local prefix = os.getenv("PREFIX")
     if prefix and prefix ~= "" then
         layouts[#layouts + 1] = production_layout(
-            prefix .. "/lib/titan/0.26", prefix .. "/share/lua/5.5")
+            prefix .. "/lib/titan/0.6", prefix .. "/share/lua/5.5")
     end
 
     -- Discover the two owners independently. The supported installation puts
     -- both under one rocks tree today, but PREFIX/ROCKS_TREE equality is
-    -- deployment policy rather than a helper invariant. During a clean ABI
-    -- branch transition the preserved prior container may locate that root;
-    -- only the current sibling below is ever selected as the provider.
+    -- deployment policy rather than a helper invariant.
     local installed_container = package.searchpath("titan", package.cpath)
     local installed_shim = package.searchpath(
         "titan.coroutine", package.path)
-    local installed_abi_root = installed_container and
-        (installed_container:match(
-            "^(.*)/lib/titan/0%.26/titan%.so$") or
-         installed_container:match(
-            "^(.*)/lib/titan/0%.25/titan%.so$"))
+    local installed_root = installed_container and
+        installed_container:match(
+            "^(.*)/lib/titan/0%.6/titan%.so$")
     local installed_shim_root = installed_shim and
         installed_shim:match("^(.*)/titan/coroutine%.lua$")
-    if installed_abi_root and installed_shim_root then
+    if installed_root and installed_shim_root then
         layouts[#layouts + 1] = production_layout(
-            installed_abi_root .. "/lib/titan/0.26", installed_shim_root)
+            installed_root .. "/lib/titan/0.6", installed_shim_root)
     end
 
     layouts[#layouts + 1] = production_layout(REPO, REPO)
@@ -104,7 +100,7 @@ local function exact_layout(root)
             root)
     return {
         kind = "exact",
-        abi_root = root,
+        library_root = root,
         shim_root = root,
         providers = {},
     }
@@ -115,18 +111,18 @@ local function assert_layout(layout)
     assert.truthy(type(layout) == "table", "stdlib layout must be a table")
     assert.truthy(layout.kind == "container" or layout.kind == "exact",
         "unknown stdlib layout kind: " .. tostring(layout.kind))
-    assert.truthy(type(layout.abi_root) == "string",
-        "stdlib layout is missing abi_root")
+    assert.truthy(type(layout.library_root) == "string",
+        "stdlib layout is missing library_root")
     assert.truthy(type(layout.shim_root) == "string",
         "stdlib layout is missing shim_root")
     if layout.kind == "container" then
-        assert.equals(layout.abi_root .. "/titan.so", layout.container)
+        assert.equals(layout.library_root .. "/titan.so", layout.container)
     elseif layout.container then
-        assert.equals(layout.abi_root .. "/titan.so", layout.container)
+        assert.equals(layout.library_root .. "/titan.so", layout.container)
         assert.truthy(exists(layout.container),
             "exact standard-library variant is missing its grouped provider")
     else
-        assert.falsy(exists(layout.abi_root .. "/titan.so"),
+        assert.falsy(exists(layout.library_root .. "/titan.so"),
             "exact standard-library variant has an unregistered titan.so")
     end
     return layout
@@ -135,7 +131,7 @@ end
 local function register_exact_provider(layout, modname)
     assert.equals("exact", assert_layout(layout).kind)
     local relative = modname:gsub("%.", "/")
-    local provider = layout.abi_root .. "/" .. relative .. ".so"
+    local provider = layout.library_root .. "/" .. relative .. ".so"
     local shim = layout.shim_root .. "/" .. relative .. ".lua"
     assert.truthy(exists(provider),
         "exact variant is missing provider " .. provider)
@@ -150,7 +146,7 @@ end
 M.register_exact_provider = register_exact_provider
 
 local function canonical_cpath(layout)
-    return assert_layout(layout).abi_root .. "/?.so"
+    return assert_layout(layout).library_root .. "/?.so"
 end
 M.canonical_cpath = canonical_cpath
 
@@ -272,7 +268,7 @@ function M.compile(workspace, modname, options)
     local environment = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1",
-        "TITAN_PATH_0_26=" .. quote(layout.abi_root),
+        "TITAN_PATH_0_6=" .. quote(layout.library_root),
         "TITAN_PATH=",
     }
     if options.cppflags then
@@ -328,7 +324,7 @@ function M.compile_bundle(workspace, roots, options)
     local environment = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1",
-        "TITAN_PATH_0_26=" .. quote(layout.abi_root),
+        "TITAN_PATH_0_6=" .. quote(layout.library_root),
         "TITAN_PATH=",
     }
     if options.cppflags and #options.cppflags > 0 then
@@ -375,7 +371,7 @@ function M.compile_bundle(workspace, roots, options)
     end
     local ok, _, output = run(table.concat(command, " "), workspace)
     assert.truthy(ok, output)
-    layout.container = layout.abi_root .. "/titan.so"
+    layout.container = layout.library_root .. "/titan.so"
     assert_layout(layout)
 end
 
@@ -462,7 +458,7 @@ function M.run_lua_source(workspace, source, options)
     local cpath = workspace .. "/?.so;" .. canonical_cpath(layout)
     if not layout.container then
         local support_layout = find_standard_layout()
-        if support_layout.abi_root ~= layout.abi_root then
+        if support_layout.library_root ~= layout.library_root then
             cpath = cpath .. ";" .. canonical_cpath(support_layout)
         end
     end
@@ -474,7 +470,7 @@ function M.run_lua_source(workspace, source, options)
     local command = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5",
-        "TITAN_PATH_0_26=" .. quote(layout.abi_root),
+        "TITAN_PATH_0_6=" .. quote(layout.library_root),
         "TITAN_PATH=",
         "LUA_PATH=" .. quote(lua_path),
         "LUA_PATH_5_5=" .. quote(lua_path),
@@ -502,7 +498,7 @@ local function app_command(workspace, modname)
     end
     return "env -u LUA_PATH -u LUA_CPATH" ..
         " -u LUA_PATH_5_5 -u LUA_CPATH_5_5" ..
-        " TITAN_PATH_0_26=" .. quote(layout.abi_root) .. " " ..
+        " TITAN_PATH_0_6=" .. quote(layout.library_root) .. " " ..
         "TITAN_PATH= " .. quote(workspace .. "/" .. program_output)
 end
 

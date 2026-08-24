@@ -318,9 +318,9 @@ site. If it escapes the callback, the entry boundary then treats it like
 any other uncaught coroutine-body error and returns a staged traceback to
 the resumer.
 
-This work ships with ABI 0.18 because generated standard-library archive
-objects now refer directly to promoted callback trampolines and no longer
-refer to the retired libuv/coroutine helpers. The provider and runtime must
+Generated standard-library archive objects refer directly to promoted callback
+trampolines and no longer refer to retired libuv/coroutine helpers. This is
+part of the current ABI, so the provider and runtime must
 therefore be built and distributed together. Moving the coroutine root update
 from a private C helper to public `lua_setiuservalue`, while retaining Titan's
 existing raw-`TValue` push bridge, does not itself change the coroutine module's
@@ -611,9 +611,9 @@ Build `titan/coroutine.titan` as the ordinary qualified logical Titan module
 `titan.coroutine`. The combined standard binary exports `titan_coroutine_init`,
 `titan_coroutine_abi`, `titan_coroutine_types`, and
 `luaopen_titan_coroutine`. Install the paired physical standard provider as
-`<root>/lib/titan/0.26/{titan.so,titan.a}` and the generated logical shim as
+`<root>/lib/titan/0.6/{titan.so,titan.a}` and the generated logical shim as
 `<root>/share/lua/5.5/titan/coroutine.lua`. Titan's configured module path
-contains `<root>/lib/titan/0.26`; the parser desugars `import "coroutine"` to
+contains `<root>/lib/titan/0.6`; the parser desugars `import "coroutine"` to
 that qualified identity and prefix lookup claims it from the preferred native
 form.
 `require "titan.coroutine"` uses the shim to promote/map that provider and
@@ -625,12 +625,10 @@ Titan code reaches this binary with `import "coroutine"`, while Lua code
 uses `require "titan.coroutine"`. The bare Lua name `coroutine` remains
 owned by Lua's standard library.
 
-ABI 0.17 introduced the rule that a coroutine `value` containing an Array
-carries the canonical proxy Udata rather than the private backing Table. ABI
-0.18 and 0.19 preserved that `TValue` transport rule. ABI 0.20 preserved it
-while adding the proxy's construction-selected Lua writer and the strict
-generic function-closure trailer; ABI 0.21 retained that representation while
-advancing the embedded Lua contract to 5.5.1, and ABI 0.22 retains it. Exact
+Under ABI 2, a coroutine `value` containing an Array carries the canonical
+proxy Udata rather than the private backing Table, including the proxy's
+construction-selected Lua writer and strict generic function-closure trailer.
+The embedded Lua contract is 5.5.1. Exact
 typed Array paths continue to use backing `Table *`. See
 [Dense Arrays](implementation/dense-arrays.md#exact-and-generic-call-paths).
 

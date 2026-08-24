@@ -117,35 +117,18 @@ records exactly:
 
 There is no union-specific forward-only scope rule.
 
-### 0.4 ABI 0.19 retires the historical canary
+### 0.4 Clean ABI boundary
 
-The active ABI advances from 0.18 to **0.19**. There is no in-place
-0.18-to-0.19 migration promise:
+The feature advances the ABI because it changes serialized union schemas and
+module layout. There is no in-place migration promise. Development and CI use
+a fresh prefix, and focused synthetic mismatch tests prove incompatible
+providers fail before their type metadata is decoded.
 
-1. leave the versioned 0.18 tree untouched;
-2. require a fresh/clean 0.19 prefix in development and CI;
-3. retain focused rejection tests proving 0.18 providers fail before their
-   type metadata is decoded; and
-4. retire `spec/support/ci_abi_migration_smoke.sh` and the active historical
-   0.17-to-0.18 producer canary, updating repository instructions to record
-   the decision.
-
-The canary's `prepare` invocation cannot simply disappear. It currently
-creates `$PREFIX/bin/lua`, runs `make lua` and `make luarocks`, rewrites Lua's
-compiled `package.cpath`, and cleans cached Titan-owned install state before
-`luarocks make`. Its replacement Linux preparation step must:
-
-- run `make lua` and `make luarocks` for the checkout's default ABI 0.19 after
-  cache restore;
-- key/version the restored LuaRocks dependency cache by the active Titan ABI
-  so 0.18 completion stamps/configuration cannot masquerade as 0.19 state;
-- remove or force-replace only the same known cached Titan rock/direct-shim
-  ownership before the first 0.19 install; and
-- assert that the resulting clean interpreter's `package.cpath` contains
-  `lib/titan/0.19/?.so` and not the 0.18 path.
-
-Do not preserve the retired proof by freezing an old compiler/runtime or
-adding a multi-version build path.
+Linux preparation creates `$PREFIX/bin/lua`, runs `make lua` and `make
+luarocks`, configures Lua's compiled `package.cpath`, and clears only known
+Titan-owned active-install state before `luarocks make`. Dependency and probe
+caches remain keyed by `TITAN_ABI_VERSION`; install/search paths use
+`TITAN_LIBRARY_VERSION`. Do not add a multi-version build path.
 
 ### 0.5 Settled v1 edge semantics
 
@@ -215,7 +198,8 @@ This feature delivers:
   values;
 - source, DSO, and static-archive module-interface support;
 - Lua-facing constructor/static/method support without exposing tag/payload;
-- compiled-module ABI 0.19 and its versioned installation/search paths;
+- the compiled-module ABI boundary and independently release-versioned
+  installation/search paths;
 - a new language chapter and implementation chapter, integrated into both
   manuals; and
 - conversion of the private regular-expression AST from integer-kind records
@@ -242,7 +226,7 @@ This iteration does **not** add:
 - inheritance, interfaces, generic unions, or open/extensible unions;
 - C `union` interoperation beyond the already-supported nominal identity cast;
 - a generalized “enum” integer representation;
-- an installation migration from ABI 0.18; or
+- an installation migration across the ABI boundary; or
 - changes to the static metadata container format. Its embedded Titan
   interface gains new type constructors, but the existing ABI gate remains the
   discriminator.
@@ -256,8 +240,8 @@ Titan's safety contract, as it does for record and Array internals.
 
 `union`, `case`, and `when` become reserved words. Longer identifiers such as
 `unionized`, `casefold`, and `whenever` remain ordinary names. Existing Titan
-source must not use any exact new keyword as an ordinary identifier after ABI
-0.19. The contextual FFI-symbol path remains able to represent C identifiers
+source must not use any exact new keyword as an ordinary identifier after this
+ABI boundary. The contextual FFI-symbol path remains able to represent C identifiers
 spelled `when`, because C does not reserve it.
 
 With the arm decision in §0.1, the grammar is:
@@ -730,7 +714,7 @@ module being generated. Imported module initialization reconstructs slots for
 public top-level function closures, not record statics; falling through to the
 module-variable path would be invalid.
 
-ABI 0.19 therefore extends the deterministic public prefix of every module
+The ABI boundary therefore extends the deterministic public prefix of every module
 userdata. Allocate, in this exact order:
 
 1. exported module variables in module-member order;
@@ -756,24 +740,25 @@ across Titan and the unmodified Lua namespace just as for records.
 
 This general protocol also makes imported record statics first-class rather
 than adding a union-only lookup path. It adds no runtime table search and no
-new external symbol family, but it is part of the 0.19 module-layout ABI and
+new external symbol family, but it is part of the module-layout ABI and
 must be documented and tested for source, DSO, archive, transitive-container,
 and Lua namespace paths.
 
-### 3.5 ABI 0.19
+### 3.5 ABI boundary and version split
 
-The compiled-module ABI becomes **0.19**:
+The current authoritative values are distinct:
 
 ```text
-TITAN_VER        "0.19"
-TITAN_VER_SUFFIX "_0_19"
-TITAN_PATH_0_19
-lib/titan/0.19
-stdlib_0_19
+TITAN_ABI_VERSION     "<active-ABI>"
+TITAN_VERSION         "<semantic-version>"
+TITAN_LIBRARY_VERSION "<major>.<minor>"
+TITAN_PATH_<major>_<minor>
+lib/titan/<library-version>
+stdlib_<major>_<minor>
 ```
 
 The rationale recorded in `titan-runtime/titan.h`, the manuals, README, and
-`AGENTS.md` is that ABI 0.19 adds serialized Union/Variant schemas, the
+`AGENTS.md` is that this ABI boundary adds serialized Union/Variant schemas, the
 generated nominal namespace/metatable/tag/payload contract, and the extended
 public canonical-static-closure module prefix. Native union values still use
 `Udata *`, but an older compiler cannot decode the interface or
@@ -792,23 +777,11 @@ Update active-version references coherently in:
 - generated/current interface fixtures; and
 - all current-version documentation and instructions.
 
-Delete the retired historical migration-smoke invocation and script, replacing
-its runtime/tool preparation duties exactly as specified in §0.4. This is an
-intentional owner-approved policy change, not a failed or waived check.
-
-Use `rg --hidden` to classify every `0.18`, `_0_18`, `0_18`,
-`TITAN_PATH_0_18`, and `lib/titan/0.18` occurrence. Do not mechanically rewrite
-historical explanations of the 0.17 and 0.18 changes. Append 0.19 to histories
-and update only active paths/contracts.
-
-The 0.19 installer owns its versioned DSO/archive/dSYM and the shared generated
-Lua shims. It does not inspect, migrate, remove, or overwrite either the
-canonical `lib/titan/0.18/**` tree or the explicitly versioned old legacy
-`lib/lua/5.5/titan/stdlib_0_18/**` layout. The shared unversioned generated
-shims are the deliberate exception: 0.19 transactionally replaces/restores
-those public module names. Bootstrap/full-image preservation and rollback are
-tested within the 0.19 destination. An explicit 0.18 provider is rejected
-before type decoding.
+Use a repository-wide audit to classify every stale ABI constant, path suffix,
+and environment-variable name. The installer owns only the active versioned
+DSO/archive/dSYM and shared generated Lua shims. It does not migrate or inspect
+historical layouts. Publication remains transactional, and a synthetic
+mismatched provider is rejected before type decoding.
 
 ## 4. Compiler architecture and exact change map
 
@@ -1241,7 +1214,7 @@ should be reused, not duplicated.
 Do not implement imported constructor values with a Lua table lookup or a
 fresh closure at each reference. Producer namespace installation, same-module
 selection, imported selection, and Lua exposure all point at the one canonical
-closure allocated by the 0.19 public-prefix protocol in §3.4.
+closure allocated by the public-prefix protocol in §3.4.
 
 ### 4.7 Constructor lowering
 
@@ -1371,7 +1344,7 @@ Files include:
 
 Extend decoded-interface validation and registration for `Type.Union`.
 Static metadata bytes need no new container version; their serialized types
-are ABI-0.19-gated.
+are gated by the compiled-module ABI.
 
 Reject malformed recovered unions before registering or generating from them.
 Validation must prove:
@@ -1420,9 +1393,9 @@ recovery. `coder.interface_external_symbols` must enumerate public union
 constructors/statics, method natives, and bound-method entries so provider
 collision preflight matches AST-based compilation.
 
-Perform the active-path 0.19 sweep from §3.5. Keep publication transactional
-inside the new ABI directory, update stale-layout names from `stdlib_0_18` to
-`stdlib_0_19`, and do not add links or compatibility copies.
+Perform the active-path sweep from §3.5. Keep publication transactional
+inside the active library directory, use `stdlib_<major>_<minor>` for the stale-layout
+name, and do not add links or compatibility copies.
 
 ## 5. Documentation deliverables
 
@@ -1473,7 +1446,7 @@ The implementation chapter covers:
 - deterministic public static-closure prefix and imported selectors;
 - the shared checker-to-coder always-return decoration used by block, if, try,
   and case statements; and
-- ABI 0.19.
+- the ABI boundary.
 
 Use the variadic-parameters chapters as the completeness model.
 
@@ -1504,8 +1477,8 @@ At minimum audit and update:
 - `doc/language/multi-module-libraries.md`
 - `doc/language/static-compiled-modules.md`
 
-Update the reference/compiler version to 0.19 and active paths without erasing
-historical ABI explanations. The defer chapter must list case arms and `else`
+Update the reference/compiler semantic version and its derived active library
+paths independently. The defer chapter must list case arms and `else`
 as ordinary block consumers with the same clause-bounded transformation as
 `if` branches. The option chapter must include case as an ordinary forced
 bare-value context. The type/cast chapters must distinguish the union type from
@@ -1590,11 +1563,11 @@ through the current broad owner-result heuristic.
 
 - Remove the README “tagged variants” roadmap item and describe shipped
   unions/case in the feature list.
-- Update README installation paths and ABI section to 0.19.
+- Update README installation paths and the ABI section to the current split values.
 - Update `AGENTS.md` with the union architecture, spec locations, test
   placement, active paths, ABI rationale, retirement of the old migration
   smoke, and its replacement producer-preparation duties.
-- Keep historical 0.18 documentation explicitly historical.
+- Retain the feature rationale without a historical numbering timeline.
 
 All manual examples should be compiled in tests or copied from tested fixtures
 where practical. In particular, do not reintroduce `number`, Titan-side
@@ -2024,15 +1997,14 @@ Update and extend:
 
 Prove:
 
-- all active constants/paths use 0.19;
-- `TITAN_PATH_0_18` cannot select a 0.19 compile/run dependency;
-- DSO and archive ABI-0.18 claims fail before type decoding;
-- both canonical `lib/titan/0.18/**` and explicitly versioned legacy
-  `lib/lua/5.5/titan/stdlib_0_18/**` artifacts remain byte/metadata-identical,
-  while shared unversioned shims are replaced transactionally;
-- fresh 0.19 bootstrap, full pair, reinstall, failure rollback, dSYM, and shims
+- all active ABI constants agree and library paths use the derived major/minor
+  release component;
+- `TITAN_PATH_<major>_<minor>` selects the active compile/run dependency;
+- DSO and archive mismatched ABI claims fail before type decoding;
+- shared unversioned shims are replaced transactionally;
+- fresh bootstrap, full pair, reinstall, failure rollback, dSYM, and shims
   retain existing guarantees;
-- all nine stdlib logical interfaces serialize under 0.19; and
+- all nine stdlib logical interfaces serialize under the current ABI; and
 - bundled/system static consumers still link against the canonical pair.
 
 Prove that the historical canary/script is gone, its producer-preparation
@@ -2072,9 +2044,8 @@ Run:
 
 1. Enforce the compiler-manual reading gate in §4.1.
 2. Before emitting or decoding any new schema, advance the compiler/runtime
-   active ABI and search-path constants to 0.19, prepare a fresh ABI-keyed 0.19
-   prefix/cache path, and prove that no Phase 1/2 test can publish Union data or
-   the later closure-prefix layout under a 0.18 label.
+   ABI marker, prepare a fresh ABI-keyed prefix/cache path, and prove that no
+   Phase 1/2 test can publish Union data under a mismatched marker.
 3. Add lexer/parser/contextual-FFI-name support, AST/type descriptors, and
    constructor synthesis.
 4. Add checker staging, shared record/payload slot validation, visibility,
@@ -2086,7 +2057,7 @@ Run:
 7. Run a semantic adversarial review before code generation begins.
 
 Gate: parser/types/checker tests green; serialized hidden tags proven; every
-new interface is labeled 0.19 in an isolated prefix; no unresolved language
+new interface has the current ABI marker in an isolated prefix; no unresolved language
 decision.
 
 ### Phase 2 — constructor, nominal namespace, methods, case, and GC
@@ -2110,7 +2081,7 @@ mandatory loop-break regression passes.
 1. Retire the historical canary/script as decided in §0.4.
 2. Replace its producer-preparation duties and ABI-key the dependency cache;
    do not merely delete the step.
-3. Complete and audit the provider/installer/CI side of the ABI-0.19 contract
+3. Complete and audit the provider/installer/CI side of the ABI contract
    whose compiler/runtime constants were bumped before Phase 1 schema work.
 4. Add source/DSO/archive/transitive/prefix-container tests.
 5. Update installer/publication/rollback and production fixtures.
@@ -2118,7 +2089,7 @@ mandatory loop-break regression passes.
 7. Update README and `AGENTS.md`.
 8. Run independent ABI/packaging and docs/example reviews.
 
-Gate: no stale active 0.18 reference, provider/installer focused tests green,
+Gate: no stale active ABI/path reference, provider/installer focused tests green,
 manual examples compile.
 
 ### Phase 4 — regex dogfood
@@ -2163,7 +2134,7 @@ Local validation evidence (2026-07-29):
 - `make test` performed a fresh forced rock installation and passed with
   **2507 successes, 0 failures, 0 errors, and 0 pending**;
 - the bundled dynamic/static production smoke passed against the installed
-  ABI-0.19 `titan.so`/`titan.a` pair, including process and OS behavior;
+  current-ABI `titan.so`/`titan.a` pair, including process and OS behavior;
 - the focused provider/import matrix, installer/packaging suites,
   PEG/string behavior, and final adversarial reviews are green; and
 - Lua syntax, shell syntax, workflow YAML, Markdown links, `git diff --check`,
@@ -2176,7 +2147,7 @@ evidence. The owner-waived macOS dispatch remains intentionally unstarted.
 
 ## 9. Verification commands
 
-Use a fresh isolated ABI-0.19 prefix and run from repository root. Busted loads
+Use a fresh isolated prefix and run from repository root. Busted loads
 compiler Lua from the installed rock, so running it immediately against an
 ordinary long-lived developer prefix can silently test stale compiler code.
 Keep the serial packaging/native gates and the complete library gate ahead of
@@ -2186,7 +2157,7 @@ generated artifacts (including paired archives) and must treat the shared
 runtime and canonical standard-library image as read-only.
 
 ```sh
-export UNION_VERIFY_PREFIX="$(mktemp -d /tmp/titan-unions-0.19-XXXXXX)"
+export UNION_VERIFY_PREFIX="$(mktemp -d /tmp/titan-unions-XXXXXX)"
 export PREFIX="$UNION_VERIFY_PREFIX"
 export PATH="$PREFIX/bin:$PATH"
 unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 LUA_INIT LUA_INIT_5_5
@@ -2196,8 +2167,7 @@ make luarocks
 "$PREFIX/bin/luarocks" make --force
 "$PREFIX/bin/luarocks" test --prepare
 "$PREFIX/bin/lua" -E -e \
-  'assert(package.cpath:find("/lib/titan/0.19/?.so", 1, true), package.cpath);
-   assert(not package.cpath:find("/lib/titan/0.18/?.so", 1, true), package.cpath)'
+  'assert(package.cpath:find("/lib/titan/<library-version>/?.so", 1, true), package.cpath)'
 
 "$PREFIX/bin/busted" spec/libuv_build_spec.lua
 "$PREFIX/bin/busted" spec/rockspec_spec.lua
@@ -2235,12 +2205,12 @@ Final static checks:
 
 ```sh
 git diff --check
-rg --hidden -n -g '!.git/**' '0\.18|0_18|_0_18' .
+rg --hidden -n -g '!.git/**' 'TITAN_|lib/titan/' .
 rg -n 'REGEX_(EMPTY|LITERAL|ANY|CLASS|SEQUENCE|CHOICE|GROUP|REPEAT|BACKREFERENCE|WORD_START|WORD_END)|node\.kind' \
   titan/string/regex_parser.titan titan/string/regex_compile.titan
 ```
 
-Classify historical hits rather than demanding zero global `0.18` text.
+Classify every hit against the split ABI/release/library contract.
 
 ## 10. Completion criteria
 
@@ -2281,9 +2251,9 @@ The feature is done only when:
 11. union values remain immutable/opaque at Titan and Lua boundaries while
     reference payload mutation aliases correctly;
 12. source, DSO, archive, transitive, and multi-module provider behavior agrees;
-13. the ABI is bumped before any new schema/layout test, the complete active
-    search/install contract is 0.19, old providers are rejected, the 0.18 tree
-    is untouched, and the retired canary's preparation duties remain covered;
+13. the ABI is bumped before any new schema/layout test, every active ABI
+    marker agrees, the search/install path uses the active library version, and mismatched
+    providers are rejected;
 14. both new manual chapters and every affected existing chapter are updated;
 15. regex dogfooding uses the documented language feature with no shadow kind
     or public API/roster change;

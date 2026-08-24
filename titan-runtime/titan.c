@@ -1007,7 +1007,7 @@ static void push_root_path(lua_State *L, const char *suffix) {
 
 static void push_default_titan_path(lua_State *L) {
     const char *installed;
-    push_root_path(L, "/lib/titan/" TITAN_VER);
+    push_root_path(L, "/lib/titan/" TITAN_LIBRARY_VERSION);
     installed = lua_tostring(L, -1);
     lua_pushfstring(L, ".;%s", installed);
     lua_remove(L, -2);
@@ -1020,7 +1020,8 @@ static void pushpath (lua_State *L) {
         lua_pop(L, 1);
 
         /* Try the versioned name for the Titan Path variable */
-        const char *path = getenv(TITAN_PATH_VAR TITAN_VER_SUFFIX);
+        const char *path = getenv(
+            TITAN_PATH_VAR TITAN_LIBRARY_VERSION_SUFFIX);
         if (path == NULL) {
             /* Try the unversioned name for the Titan Path variable */
             path = getenv(TITAN_PATH_VAR);
@@ -1069,7 +1070,7 @@ static void add_titan_package_cpath(lua_State *L) {
         size_t template_len;
         const char *path = lua_tolstring(L, -1, &path_len);
         const char *template;
-        push_root_path(L, "/lib/titan/" TITAN_VER "/?.so");
+        push_root_path(L, "/lib/titan/" TITAN_LIBRARY_VERSION "/?.so");
         template = lua_tolstring(L, -1, &template_len);
         if(!path_has_template(path, path_len, template, template_len)) {
             if(path_len == 0) {
@@ -1203,7 +1204,7 @@ void titan_check_abi(lua_State *L, void *lib, const char *sym,
         const char *err = dlerror();
         luaL_error(L,
             "Titan compiled module '%s' is missing ABI symbol '%s' "
-            "(expected ABI " TITAN_VER "): %s",
+            "(expected ABI " TITAN_ABI_VERSION "): %s",
             file, sym, err ? err : "symbol not found");
     }
     fn = titan_cast_func(titan_abi_fn, raw);
@@ -1212,13 +1213,14 @@ void titan_check_abi(lua_State *L, void *lib, const char *sym,
         lua_settop(L, top);
         luaL_error(L,
             "Titan compiled module '%s' has an invalid ABI marker '%s' "
-            "(expected ABI " TITAN_VER ")",
+            "(expected ABI " TITAN_ABI_VERSION ")",
             file, sym);
     }
     actual = lua_tostring(L, -1);
-    if (strcmp(actual, TITAN_VER) != 0) {
+    if (strcmp(actual, TITAN_ABI_VERSION) != 0) {
         luaL_error(L,
-            "Titan compiled module '%s' ABI mismatch: expected " TITAN_VER
+            "Titan compiled module '%s' ABI mismatch: expected "
+            TITAN_ABI_VERSION
             " but found %s",
             file, actual);
     }

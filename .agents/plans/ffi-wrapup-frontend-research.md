@@ -450,7 +450,12 @@ This is user-visible syntax/semantics, so implementation must add and link both 
 * generated header/linkage/inline pointer-identity consequence;
 * direct-source-only availability and binary absence.
 
-The syntax and source-only generated headers alone require **no compiled-module ABI bump**: they reuse `Type.CFunction`, add no serialized member, and change no module-userdata prefix. The full wrap-up does require the separately researched ABI 0.23 boundary if the ABI-0.18 `titan_uvshim_*`/coroutine native symbols are removed. Do not retain compatibility wrappers or migration machinery merely to avoid that clean-start bump.
+The syntax and source-only generated headers alone require **no compiled-module
+ABI bump**: they reuse `Type.CFunction`, add no serialized member, and change no
+module-userdata prefix. The full wrap-up does require the separately researched
+ABI boundary if the existing `titan_uvshim_*`/coroutine native symbols are
+removed. Do not retain compatibility wrappers or migration machinery merely to
+avoid that clean-start bump.
 
 ## Suggested implementation order
 

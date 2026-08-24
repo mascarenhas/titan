@@ -46,7 +46,7 @@ native boundary:
 7. coroutine, thirteen-libuv-callback, and eight-llhttp-callback migrations,
    including the five narrow typed `titan/ffi.h` bridges;
 8. the C99 `\u2133` module/member separator, C-source versus UTF-8 linkage
-   spelling, symbol collision preflight, and the ABI-0.23 boundary.
+   spelling, symbol collision preflight, and the ABI boundary.
 
 The paired `doc/language/foreign-functions.md` describes the user-visible
 syntax and semantics and both manuals link to each other.
@@ -55,7 +55,7 @@ syntax and semantics and both manuals link to each other.
 
 Both manual indexes link the new chapters and describe target-directed C
 storage rather than claiming every allocation is a Lua allocation. The language
-index and grammar identify the 0.23 prototype and the FFI summary distinguishes
+index and grammar identify the prototype and the FFI summary distinguishes
 ordinary closures from exact source foreign callbacks.
 
 Closely related documentation was reconciled with the completed feature:
@@ -65,7 +65,7 @@ Closely related documentation was reconciled with the completed feature:
   replay without granting transitive Titan permission;
 * driver/folder/provider/static-provider chapters document final header planning,
   canonical folder-main companions, no contributor header, no published or
-  installed companion, and the current 0.23 marker/path;
+  installed companion, and the current ABI marker/library path;
 * coroutine, libuv runtime/networking/extension, and HTTP chapters now describe
   source foreign callbacks rather than `titan_coro_entry`, `titan_uv.c`,
   `titan/uv.h`, or `titan_httpshim` trampolines;
@@ -76,9 +76,9 @@ Closely related documentation was reconciled with the completed feature:
   `.new(count)`, count provenance, automatic lifetime, copies, and spills, while
   retaining the general function-like-macro limitation outside the five typed
   bridges; and
-* generated-C examples use the ABI-0.23 `\u2133` top-level function family.
-  Historical 0.22 references remain only where they describe that release or
-  the preserved predecessor boundary.
+* generated-C examples use the ABI-boundary `\u2133` top-level function family.
+  The rationale describes the predecessor boundary without retaining a
+  historical version timeline.
 
 ## Final invariants checked
 
@@ -97,7 +97,7 @@ Closely related documentation was reconciled with the completed feature:
 * The standard provider still has eighteen logical metadata keys and nineteen
   DSO openers; foreign callbacks add neither a logical module nor publication
   artifact.
-* ABI 0.23 retains Lua 5.5.1 and the 0.22 serialized/module-state layouts but is
+* the ABI boundary retains Lua 5.5.1 and the existing serialized/module-state layouts but is
   incompatible at the native callback and top-level symbol boundary.
 
 ## Validation
@@ -112,7 +112,7 @@ all documentation bytes                                     -> no stray controls
 stale callback/header/payload grep                           -> only explicit
                                                                "removed/absent"
                                                                statements
-current marker/path/version grep                            -> 0.23
+current marker/path/version grep                            -> clean
 ```
 
 The updated manual claims were cross-checked against the implementation and

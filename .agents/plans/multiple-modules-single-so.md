@@ -84,8 +84,8 @@ The implementation includes:
   generated shims;
 - a distinct bootstrap-only Titan support image and post-install replacement by
   the full standard-library image;
-- migration of the standard library, installation layout, test harness, CI,
-  both manuals, and compiled-module ABI namespace to 0.16.
+- coordinated updates to the standard library, installation layout, test
+  harness, CI, both manuals, and compiled-module ABI boundary.
 
 The implementation does **not** add:
 
@@ -226,7 +226,7 @@ module such as `a` has only `a.so`; do not probe it twice.
 
 Before walking, expand `TITAN_BIN_PATH` with the same semantics as runtime
 `pushpath`: a versioned override wins, then the unversioned override, and `;;`
-inserts the ordinary `.;<installed ABI root>` default at that position. Do not
+inserts the ordinary `.;<installed library root>` default at that position. Do not
 let Lua's current `gmatch("[^;]+")` behavior silently discard this runtime
 default. Add a driver path-expansion helper and cross-contract tests rather
 than allowing the Lua and C parsers to drift again.
@@ -305,7 +305,7 @@ module and validation is terminal:
 
 - both symbols must exist;
 - `_abi` must execute successfully, return one string, and equal the current
-  ABI `0.16`;
+  current ABI marker;
 - `_types` must execute successfully and return valid serialized Titan type
   metadata;
 - deserialization must yield the requested logical module interface.
@@ -627,10 +627,10 @@ titan-runtime/bootstrap/titan.so
 ```
 
 It is linked only from `titanlib.o`. `make titan` builds this bootstrap plus the
-native runtime/SDK. When `ROCKS_TREE` is provided and the canonical 0.16 path is
+native runtime/SDK. When `ROCKS_TREE` is provided and the canonical active path is
 absent, it atomically stages the bootstrap there before LuaRocks deploys the
 compiler. A repeated install validates and preserves an existing usable support
-or full 0.16 image until its complete replacement is ready; a present but
+or full image until its complete replacement is ready; a present but
 incompatible file is an error and is left untouched. The build never shrinks a
 full image back to bootstrap form. This target does not compile standard Titan
 sources.
@@ -644,12 +644,13 @@ paths remain cleared.
 
 The source installation becomes:
 
-1. `build_target = "titan"` builds `libtitan.a`, `libbacktrace.a`, the private
-   bootstrap image, and the SDK exactly as today.
+1. `build_target = "titan"` builds the checkout runtime archive and stages it
+   as `lib/titan/<library-version>/libtitan.a`, keeps `libbacktrace.a` under `lib/`, and builds
+   the private bootstrap image and SDK.
 2. `install-titan-sdk` ensures
-   `$ROCKS_TREE/lib/titan/0.16/titan.so` can provide `luaopen_titan`: install the
+   `$ROCKS_TREE/lib/titan/<library-version>/titan.so` can provide `luaopen_titan`: install the
    private bootstrap atomically only if the path is absent; retain an existing
-   valid 0.16 support/full image; fail without clobbering an incompatible file.
+   valid active-layout support/full image; fail without clobbering an incompatible file.
 3. The rockspec installs the compiler Lua/script files but no manifest-owned
    `titan` Lua or C module. The configured Lua C path finds the directly staged
    canonical image before ordinary `lib/lua` templates.
@@ -659,7 +660,7 @@ The source installation becomes:
 5. Before touching public paths, validate the staged DSO's eight `luaopen_*`
    entries and seven metadata pairs, every generated shim's provider/entry and
    banner, and the presence of the one staged dSYM on macOS.
-6. Save the prior public DSO, dSYM, seven exact shim paths, and stale active-0.16
+6. Save the prior public DSO, dSYM, seven exact shim paths, and stale active-layout
    child/parent/`lib/lua` copies as rollback entries. Atomically rename the
    shims one by one without replacing their parent directory or touching
    unrelated Lua files, refresh/remove the platform-appropriate dSYM, remove
@@ -669,20 +670,20 @@ The source installation becomes:
 7. Treat the final DSO rename as the commit point, disarm the rollback, and
    remove backups best-effort without turning a coherent committed install into
    a reported hook failure. Do not create aliases and do not automatically
-   purge a separately versioned 0.15 tree.
+   add migration or compatibility aliases.
 
 This sequencing makes repeated `luarocks make --force` deterministic without
 destroying the last working full image at the start of the build. The
 multi-path commit is recoverable under ordinary hook failures rather than
-literally atomic across the ABI DSO directory and Lua share directory; tests
+literally atomic across the library-versioned DSO directory and Lua share directory; tests
 inject failures at each commit point and assert rollback. No claim is made
 about surviving process kill or power loss between cross-directory renames.
 
 The canonical installed artifacts are exactly:
 
 ```text
-$ROCKS_TREE/lib/titan/0.16/titan.so
-$ROCKS_TREE/lib/titan/0.16/titan.so.dSYM   # macOS only
+$ROCKS_TREE/lib/titan/<library-version>/titan.so
+$ROCKS_TREE/lib/titan/<library-version>/titan.so.dSYM   # macOS only
 $ROCKS_TREE/share/lua/5.5/titan/coroutine.lua
 $ROCKS_TREE/share/lua/5.5/titan/uv.lua
 $ROCKS_TREE/share/lua/5.5/titan/async.lua
@@ -694,7 +695,7 @@ $ROCKS_TREE/share/lua/5.5/titan/os.lua
 
 The dSYM is a canonical direct artifact only on macOS. It is staged, backed up,
 committed, restored, and snapshotted with the DSO; non-macOS installation
-removes a stale active-0.16 dSYM left by a prior cross-platform tree copy.
+removes a stale active-layout dSYM left by a prior cross-platform tree copy.
 
 The canonical DSO, conditional dSYM, and SDK remain direct files outside
 LuaRocks' manifest, as the current standard DSOs are. The manifest owns only
@@ -712,7 +713,7 @@ its private root: that root contains no shallow `titan.so`, so the new finder
 reaches the exact terminal candidates. This is a test-only separately compiled
 variant, not a supported way to construct the production combined image.
 
-Update the async helper's production discovery to return the ABI root containing
+Update the async helper's production discovery to return the library root containing
 `titan.so` plus the installed shim root, rather than a directory containing
 four child DSOs. Variant helpers explicitly describe their exact-DSO layout so
 the two cases cannot be confused.
@@ -722,33 +723,35 @@ save/restore the complete production container and generated coroutine shim.
 A shallow production `titan.so` in the same Titan path would intentionally win
 before `titan/coroutine.so`.
 
-## 7. Compatibility and ABI 0.16
+## 7. Compatibility and ABI boundary
 
 Per-module metadata shapes and native signatures do not change. Nevertheless,
 this is a compiled-module compatibility boundary:
 
-- every 0.15-generated dynamic import hard-codes the exact logical DSO path,
+- pre-boundary generated dynamic imports hard-code the exact logical DSO path,
   such as `titan/uv.so`;
-- its statically linked 0.15 runtime cannot discover a new shallow container;
-- the 0.16 installation intentionally removes those exact child DSOs;
+- their statically linked runtime cannot discover a new shallow container;
+- the new installation intentionally removes those exact child DSOs;
 - therefore an old consumer would fail at run time despite seeing the same
   nominal ABI marker if the version were not advanced.
 
-Bump the compiled-module ABI and search namespace together:
+Advance the compiled-module ABI for this physical provider-contract change.
+The current repository keeps the ABI marker distinct from release/search
+versioning:
 
 ```text
-TITAN_VER             0.15 -> 0.16
-TITAN_VER_SUFFIX      _0_15 -> _0_16
-TITAN_ABI_VERSION     0.15 -> 0.16
-TITAN_PATH_0_15       -> TITAN_PATH_0_16
-lib/titan/0.15        -> lib/titan/0.16
+TITAN_ABI_VERSION      <active-ABI>
+TITAN_VERSION          <semantic-version>
+TITAN_LIBRARY_VERSION  <major>.<minor>
+TITAN_PATH_<major>_<minor>
+lib/titan/<library-version>
 ```
 
-Add the history note that 0.15 -> 0.16 changes the generated/imported physical
+Document that the boundary changes the generated/imported physical
 DSO-resolution contract and canonical standard-library layout, even though the
 serialized type schema and native call convention remain unchanged.
 
-New 0.16 loaders can still consume a 0.16 module packaged at its exact path,
+Loaders can still consume a same-ABI module packaged at its exact path,
 because exact is the final candidate. Version separation, rather than
 compatibility child copies, protects old consumers and installations.
 
@@ -879,27 +882,25 @@ Exit: both Titan imports and Lua shims meet the stated lazy/global contract,
 and the eager/local support bootstrap is promoted by the first logical shim
 without initializing any unrelated logical module.
 
-### Phase F — Advance the ABI and configured search namespace
+### Phase F — Advance the ABI and configure library search independently
 
 Files: `Makefile`, `titan-compiler/driver.lua`, `titan-runtime/titan.h`,
 `spec/abi_spec.lua`, Lua configuration-stamp coverage, and live workflow/support
 paths.
 
-- Move the compiler/runtime ABI, suffix, environment override, default Titan
-  path, and every live build/test path to 0.16 before installing a combined
-  image.
+- Advance the compiler/runtime ABI marker and generated metadata before
+  installing a combined image; keep the release and library-layout constants
+  independent.
 - Make the Lua configuration stamp regenerate `luaconf.h` with
-  `lib/titan/0.16/?.so` and force the matching Lua reinstall when migrating an
-  existing prefix.
-- Require `make lua` and `make luarocks` before the first 0.16 rock install;
-  `luarocks make --force` alone cannot repair a Lua binary configured for the
-  0.15 Titan C path.
-- Add an isolated migration test that starts from an actually 0.15-configured
-  prefix, advances the Make ABI input, and proves bare `require "titan"` finds
-  the staged 0.16 bootstrap without ambient path overrides.
+  `lib/titan/<library-version>/?.so` and force the matching Lua reinstall when the active
+  library-layout version changes.
+- Require `make lua` and `make luarocks` before the first rock install into a
+  fresh prefix.
+- Add an isolated clean-prefix test that proves bare `require "titan"` finds
+  the staged active bootstrap without ambient path overrides.
 
 Exit: the active compiler, runtime, configured Lua search path, Make variables,
-and ABI specs all agree on 0.16 before the new build/install graph consumes
+and ABI specs all agree before the new build/install graph consumes
 them.
 
 ### Phase G — Collapse the standard-library build
@@ -923,12 +924,12 @@ one dSYM where applicable, seven shims, and no child DSO.
 
 ### Phase H — Rework source installation and test infrastructure
 
-Files: `titan-dev-1.rockspec`, `spec/rockspec_spec.lua`,
+Files: the active rockspec, `spec/rockspec_spec.lua`,
 `spec/support/async_stdlib.lua`, `spec/support/async_stdlib_compile.lua`,
 `spec/stdlib/coroutine_spec.lua`, delayed-FS support, snapshot/mode-smoke
 scripts, and `.github/workflows/ci.yml`.
 
-- Stage the private bootstrap at the canonical ABI path only when that path is
+- Stage the private bootstrap at the canonical library path only when that path is
   absent; preserve a usable prior support/full image and fail untouched on an
   incompatible occupant rather than beginning a forced reinstall by clobbering
   it.
@@ -940,7 +941,7 @@ scripts, and `.github/workflows/ci.yml`.
 - Add first-install, failed-install, and repeated-force-install coverage proving
   the public set is never left bootstrap-plus-mixed-shims or new-DSO-plus-partial
   shims after the hook reports failure.
-- Teach production helpers to discover one ABI-root container and shim tree.
+- Teach production helpers to discover one library-root container and shim tree.
 - Keep private exact-DSO variants isolated and explicit.
 - Snapshot/restore `titan.so`, its dSYM, completion/config stamps, and shims.
 - Rebuild the whole combined image for system-mode smoke and inspect only its
@@ -955,15 +956,14 @@ and failed hook commands restore the previously documented artifact set.
 
 Files: new `doc/language/multi-module-libraries.md` and
 `doc/implementation/multi-module-libraries.md`; both indexes; cross-references
-listed in section 11; ABI history; `README.md`; `AGENTS.md`.
+listed in section 11; ABI rationale; `README.md`; `AGENTS.md`.
 
-- Record 0.15 -> 0.16 as a loader/deployment compatibility boundary.
+- Record the loader/deployment compatibility boundary in feature-based terms.
 - Document logical identity, provider derivation, lookup ordering, metadata
   claim rules, shim loading, generated artifacts, and bootstrap/final ownership.
 - Remove active claims that each standard module has a canonical child DSO or
   only `titan.uv` needs a Lua loader.
-- Preserve explicitly historical 0.15 text where it explains the prior folder
-  module transition.
+- Preserve the prior folder-module rationale without a version timeline.
 
 Exit: neither manual nor repository guidance teaches the old exact-only,
 seven-DSO, special-uv-shim model.
@@ -1106,9 +1106,8 @@ Prove:
 - no `titan/{coroutine,uv,async,timer,fs,net,os}.so` exists or is installed;
 - all seven generated shims are installed and no top-level `titan.lua` is
   required;
-- no active-0.16 parent-level, `lib/lua`, symbolic-link, or hard-link copy
-  exists, while separately versioned older ABI trees are not destructively
-  purged;
+- no active-layout parent-level, `lib/lua`, symbolic-link, or hard-link copy
+  exists;
 - the initial canonical image exposes `luaopen_titan` but no stdlib metadata;
 - post-install replaces it with the full image only after success;
 - an existing valid full image is not downgraded to bootstrap at the start of a
@@ -1118,9 +1117,9 @@ Prove:
   known first-install bootstrap state or the complete prior full set, never a
   partially mixed set after the hook returns failure;
 - macOS installs/snapshots the one canonical `titan.so.dSYM`, while Linux has no
-  stale active-0.16 dSYM;
-- an isolated prefix genuinely configured for 0.15 migrates through `make lua`,
-  `make luarocks`, and the first 0.16 rock install without path overrides;
+  stale active-layout dSYM;
+- an isolated fresh prefix configures through `make lua`, `make luarocks`, and
+  the rock install without path overrides;
 - `require "titan"`, every `require "titan.*"`, and Titan short imports work
   outside the checkout with only configured default paths;
 - `luarocks test` works with `PREFIX`/`ROCKS_TREE` unset when prefix `bin` is on
@@ -1133,12 +1132,12 @@ Prove:
 
 Update `spec/abi_spec.lua` to prove:
 
-- driver, runtime header, Makefile, workflow, and docs agree on 0.16 / `_0_16`;
-- `TITAN_PATH_0_15` is ignored as the previous path override;
-- a 0.15 marker is rejected before its types metadata executes;
+- driver, runtime header, Makefile, workflow, and docs agree on the active ABI;
+- the active versioned override is `TITAN_PATH_<major>_<minor>`;
+- a synthetic mismatched marker is rejected before its types metadata executes;
 - old exact-only generated C is not claimed compatible;
-- an exact 0.16 DSO remains the terminal supported layout;
-- a shallow 0.16 container with the requested metadata is accepted;
+- an exact same-ABI DSO remains the terminal supported layout;
+- a shallow same-ABI container with the requested metadata is accepted;
 - a shallow wrong-ABI claim stops before a deeper valid DSO.
 
 ## 11. Documentation plan
@@ -1195,8 +1194,8 @@ Create `doc/implementation/multi-module-libraries.md` and link it from
 - ordinary C-searcher bootstrap, separate handle caches, and provider promotion;
 - reserved bare `titan`, private bootstrap versus full image, recoverable
   cross-directory publication, and macOS dSYM ownership;
-- ABI 0.16 rationale despite unchanged type/native shapes;
-- Lua configured-path migration plus build/test/CI migration.
+- ABI rationale despite unchanged type/native shapes;
+- Lua configured-path regeneration plus build/test/CI coverage.
 
 Update:
 
@@ -1211,13 +1210,12 @@ Update:
 - `doc/implementation/libuv-runtime.md` and `coroutines.md` for the combined
   provider and test variants;
 - `README.md` for commands and installed artifacts;
-- `AGENTS.md` for ABI 0.16, standard source/build ownership, generated shims,
+- `AGENTS.md` for the current ABI, standard source/build ownership, generated shims,
   one-container CI/snapshot rules, and exact test-only variants.
 
-Run final searches for `0.15`, `_0_15`, `titan/uv.so`, every other standard
-child DSO, and `titan/uv.lua`. Classify historical worklog/ABI history text
-rather than blindly rewriting it; all live instructions and behavior claims
-must use the new model.
+Run final searches for stale ABI/path constants, `titan/uv.so`, every other
+standard child DSO, and `titan/uv.lua`. All live instructions and behavior
+claims must use the new model.
 
 ## 12. Validation commands
 
@@ -1341,20 +1339,19 @@ and wait for the complete manual macOS workflow before merge.
 16. Production bundled mode has one private libuv instance in `titan.so`; system
     mode records only the selected shared dependency on that same image.
 17. Source-rock build creates a distinct bootstrap-only image, stages it only
-    when the canonical 0.16 path is absent, preserves a usable existing image,
+    when the canonical active path is absent, preserves a usable existing image,
     fails untouched on an incompatible occupant, and restores the complete
     prior public DSO/dSYM/shim set until a verified full replacement commits.
 18. Installation contains one versioned canonical `titan.so` and seven logical
     shims plus one canonical dSYM on macOS, with no top-level `titan.lua`, child
     DSO, active-layout compatibility copy, symlink, or hard link.
-19. ABI/search namespace 0.16 isolates the new physical resolution/deployment
-    contract from old 0.15 exact-path consumers, while exact 0.16 DSOs remain
-    valid terminal candidates; upgrading first regenerates Lua's configured
-    `lib/titan/0.16` C path before the rock install.
+19. The ABI boundary isolates the new physical resolution/deployment contract,
+    while exact same-ABI DSOs remain valid terminal candidates; installation
+    first configures Lua's `lib/titan/<library-version>` C path before the rock install.
 20. The delayed-FS and other private exact-DSO variants remain isolated and
     continue working only in roots without a shallow combined container.
 21. Both manuals, their indexes, active cross-references, README, and AGENTS
-    describe provider lookup, shims, stdlib ownership, and ABI 0.16 accurately.
+    describe provider lookup, shims, stdlib ownership, and the ABI accurately.
 22. Focused specs, compiler/library groups, `make test`, bundled/system smokes,
     push Linux CI, and manually dispatched macOS CI pass before merge.
 
@@ -1411,11 +1408,11 @@ and wait for the complete manual macOS workflow before merge.
   beside the logical DSO tree under the compiler working directory.
 - **Broadly cleaning `*.lua`.** User-authored Lua sources are not generated
   standard shims.
-- **Keeping ABI 0.15 because symbol shapes look unchanged.** Old generated
+- **Keeping the ABI marker unchanged because symbol shapes look unchanged.** Pre-boundary generated
   consumers contain an exact physical filename and cannot use the new install.
-- **Installing 0.16 with a Lua still configured for 0.15.** Re-running the rock
+- **Installing with Lua configured for a stale library path.** Re-running the rock
   cannot change `luaconf.h`; `make lua` and `make luarocks` precede the first
-  0.16 install.
+  install.
 - **Leaving CI on the old uv-only boundary.** System/bundled mode now replaces
   and inspects the complete `titan.so`, and snapshots must preserve that image
   plus its shims/stamps.

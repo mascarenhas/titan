@@ -1,7 +1,7 @@
 # Lua 5.3 → 5.5 internal differences that affect Titan
 
 > This is the historical Lua 5.3.5-to-5.5.0 internal-difference catalogue. For
-> the Lua 5.5.1 and Titan ABI 0.21 follow-up, see the
+> the Lua 5.5.1 and Titan ABI follow-up, see the
 > [Lua 5.5.1 Update Audit](implementation/lua-5.5.1-update.md).
 
 Titan's generated C code and its runtime support library compile against

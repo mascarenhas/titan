@@ -21,9 +21,9 @@ local function generate(policy)
     local _, errors = checker.check(MODULE, ast, SOURCE, FILENAME)
     assert.equal(0, #errors, table.concat(errors, "\n"))
     if policy == nil then
-        return coder.generate(MODULE, ast, {}, driver.TITAN_VER)
+        return coder.generate(MODULE, ast, {}, driver.TITAN_ABI_VERSION)
     end
-    return coder.generate(MODULE, ast, {}, driver.TITAN_VER, policy)
+    return coder.generate(MODULE, ast, {}, driver.TITAN_ABI_VERSION, policy)
 end
 
 local function has_line_directive(code)

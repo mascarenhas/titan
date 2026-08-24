@@ -2,9 +2,9 @@
 # Fields: shard spec_file last_observed_seconds
 # Timings are from Linux CI run 31917621820; rebalance with longest-first
 # assignment when compiler test costs change materially.
-# The two const_values entries were measured in a fresh local ABI-0.26 prefix.
+# The two const_values entries were measured in a fresh local Titan prefix.
 # semantic_metadata was measured from the current checkout against an isolated
-# local ABI-0.26 prefix; replace local timings with the next Linux CI result.
+# local Titan prefix; replace local timings with the next Linux CI result.
 2 spec/abi_spec.lua 1.746
 1 spec/cdeclarator_spec.lua 0.046
 4 spec/cdefines_spec.lua 0.070

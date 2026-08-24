@@ -371,84 +371,27 @@ therefore not itself a stack-relocation hazard.
 
 ## ABI and search path
 
-The current compiled-module ABI is `0.26`. The error-handling control-flow
-machinery did not by itself require an ABI bump. The earlier ABI-0.10 change
-changed the `TitanVargX` structs from inline flexible-array backing
-objects to descriptor structs with an `args` pointer. That layout change
-is visible across `.so` boundaries even though the native parameter type
-names stayed the same, so `0.9` and `0.10` modules must not be mixed.
-The later `0.11` ABI keeps those descriptors and additionally changes
-record-interface serialization for module-local records and record members.
-The `0.12` ABI keeps that layout and adds the public type-alias namespace to
-serialized module interfaces. The `0.13` ABI adds formal-name metadata to the
-serialized module-function, method, and record-static descriptor constructors;
-the native function ABI is unchanged.
-
-Flexible result metadata and the trailing native `_flexout`/`_flexwant` pair
-are incompatible with the 0.13 interface/native shape. ABI 0.14 moves the
-serialized constructors, native signature, constants, and paths together and
-does not accept a mixed layout.
-
-ABI 0.15 keeps that callable shape but deliberately reorders the exported
-members of `titan.uv` as its public declarations move into semantic folder
-contributors. Separating 0.15 paths prevents 0.14 importers from reconstructing
-those canonical closure slots with the old order.
-
-ABI 0.16 keeps the callable and serialized-type shapes again, but changes the
-physical provider contract: compiled lookup may select a prefix container and
-the standard library's dynamic form is one `titan.so` plus logical-module
-shims. A 0.15 runtime hard-codes exact module DSOs and cannot discover that
-layout. The later self-describing `titan.a` repeats the same ABI/types
-protocol, so paired static providers do not require another ABI bump.
-
-ABI 0.17 keeps the same error and nonlocal-control-flow machinery but changes
-the meaning of Array values at native and Lua boundaries. Exact paths retain
-`Table *` / `Table **`; generic paths use canonical proxy Udata, and a resize
-must keep backing, proxy, RHS, and pending flexible values rooted across any
-allocation or `luaL_error`. A 0.16 module cannot safely participate in that
-protocol. See [Dense Arrays](dense-arrays.md#failure-and-performance-boundaries).
-
-ABI 0.18 also left this error and nonlocal-control-flow machinery unchanged.
-It advances the compiled-module boundary because standard-library archive
-objects now directly reference promoted libuv callback trampolines and no
-longer reference replaced libuv/coroutine helper symbols. A 0.18 provider and
-runtime had to be distributed together.
-
-ABI 0.19 likewise kept the pending-action and longjmp machinery unchanged.
-It advanced the boundary for serialized union/variant schemas, union userdata
-dispatch, and the reconstructible public nominal-static slot prefix. A case
-arm still runs through the ordinary `StatTry` cleanup path.
-
-ABI 0.20 again left pending actions and longjmp unwinding unchanged. Its
-boundary covered the two-user-value Array proxy, the strict-entry-bearing
-first-class function closure, and Interface metadata/wrappers/bound
-trampolines. ABI 0.21 retained this machinery while advancing the matched Lua
-internal-header/runtime contract to 5.5.1. ABI 0.22 retained it while changing
-the source-local `titan.uv` schema/module prefix and adding the fixed physical-
-provider identity slot. ABI 0.23 retained all of this error machinery while
-moving callbacks into source and separating the module/nominal/member native-name
-contract. ABI 0.24 retains the machinery again while extending serialized
-interfaces for generic declarations. ABI 0.25 retains all of this error
-machinery while changing the public `titan.fs.stat`/`lstat` results and
-`titan.async.suspend` parameter in serialized metadata and exact native
-signatures. ABI 0.26 retains the same error machinery while advancing the
-serialized and generated boundary for const descriptors, Interface fields,
-and qualified Array runtime tags. Errors raised by an Interface adapter,
-strict guard, dynamic conversion, or failed exact downcast still use the same
-Titan error handler; all wrapper and adapter roots are ordinary Lua-traced
-values, so unwinding requires no resource-specific cleanup path.
+The error-handling control-flow machinery is part of compiled-module ABI `2`.
+That ABI also covers variadic and flexible-result descriptors, module schemas,
+physical-provider selection, canonical Array proxies, unions, Interfaces,
+generic metadata, source-private identity, foreign callbacks, and const-qualified
+descriptors. Errors raised by adapters, guards, conversions, or downcasts still
+use the same Titan error handler; all wrapper roots are ordinary Lua-traced
+values, so unwinding needs no resource-specific cleanup path.
 
 The compiler and runtime therefore agree on:
 
-* `TITAN_VER "0.26"`
-* `TITAN_VER_SUFFIX "_0_26"`
-* versioned binary path variable `TITAN_PATH_0_26`
-* default binary path `.;<root>/lib/titan/0.26`, with `<root>` recovered from
+* `TITAN_ABI_VERSION "2"`
+* `TITAN_VERSION "0.6.0"`
+* `TITAN_LIBRARY_VERSION "0.6"`
+* `TITAN_LIBRARY_VERSION_SUFFIX "_0_6"`
+* versioned binary path variable `TITAN_PATH_0_6`
+* default binary path `.;<root>/lib/titan/0.6`, with `<root>` recovered from
   the Lua `PREFIX`'s `package.cpath` in the currently supported layout where
   that path also names the equal Titan `ROCKS_TREE`
 
 Every generated module also exports `<mangled>_abi`, a Lua C function
-returning `TITAN_VER`. DSO rehydration checks that marker before trusting
+returning `TITAN_ABI_VERSION`. DSO rehydration checks that marker before trusting
 `<mangled>_types`, and generated dynamic imports call `titan_check_abi` and
 `titan_check_types` after `loadlib` and before `dlsym`ing native entries.
 Static-provider rehydration checks the same ABI value in the canonical

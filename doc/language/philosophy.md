@@ -188,28 +188,27 @@ static-when-source, dynamic-otherwise linking policy (#237); option types
 story (#257). The [implementation documentation](../implementation/index.md)
 describes where each of these lives today.
 
-The 0.19 prototype adds nominal tagged unions and non-exhaustive `case`.
+The current prototype includes nominal tagged unions and non-exhaustive `case`.
 Variants are deliberately not first-class types, constructors are positional,
 and every arm is an ordinary full block. The first version therefore reuses
 the existing nominal, function, option, and error-handling models instead of
 creating parallel ones.
 
-Starting with 0.20, the prototype separates gradual consistency from direct
-and written coercions. Typed Array/Map observations and branded exact-tag
+The prototype separates gradual consistency from direct and written coercions.
+Typed Array/Map observations and branded exact-tag
 mismatches use strict guards, while written `value as/is T` and genuine Lua
 boundaries share a broader target-directed conversion. Arrays carry their Lua-write
 policy, and function closures distinguish exact native, strict Titan-generic,
-and coercive Lua entries. ABI 0.22 later reuses that fixed closure/native
-contract for conditional non-exact target wrappers: eligible source closures
+and coercive Lua entries. The fixed closure/native contract supports
+conditional non-exact target wrappers: eligible source closures
 get a consumer-local native adapter and strict relay, while other values retain
 the generic fallback. This adds no provider ABI surface. It also adds nominal Interface declarations,
 structural record/union satisfaction at statically known conversion sites,
 fresh wrappers, concrete downcasts, and compiler-witnessed dynamic Interface
 boundaries. The discovery protocol adds private generated functions and
-per-state metatable entries without changing the provider ABI.
-These coordinated representation changes accounted for that ABI advance; ABI
-0.21 retained the language model while advancing the matched Lua runtime to
-5.5.1, and ABIs 0.22 through 0.26 retain that model.
+per-state metatable entries without changing the provider ABI. These
+coordinated representations are part of ABI 2 and use the matched Lua 5.5.1
+runtime.
 
 ## Principles, distilled
 

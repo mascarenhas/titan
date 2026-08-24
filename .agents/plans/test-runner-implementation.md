@@ -10,8 +10,8 @@ any eventual divergence from the draft.
 - Branch: `feat/test-runner`
 - Draft-only initial commit: `eed38db` (`Add draft Titan test runner specification`)
 - Phase: implementation published; explicit-Runtime and zero-Lua-stdlib follow-up in local validation
-- ABI decision: retain 0.22; the immediately preceding canonical seventeen-key
-  pair is a supported bounded transactional predecessor
+- ABI decision: retain the current marker; the canonical seventeen-key pair is
+  a supported bounded transactional predecessor
 - Architecture decisions: reviewed and closed in
   `/tmp/titan-test-runner-design-decisions.md`
 - Implementation divergences: recorded below
@@ -99,7 +99,7 @@ source path. This prevents `--tree spec` from unexpectedly source-building all
 stdlib modules while still letting the synthetic runner see `titan.test`'s
 local runner contract. In a source checkout the override reads
 `titan/test.titan`; an installed compiler reads the transactionally installed,
-ABI-versioned support source. Missing support source is a test-mode diagnostic,
+library-versioned support source. Missing support source is a test-mode diagnostic,
 not an ordinary compiler startup failure.
 
 The loader should support an in-memory source descriptor so the runner passes
@@ -230,7 +230,7 @@ Update together:
 - `scripts/stdlib_installer.lua`: exact module/shim set, stage validation,
   backup/commit/rollback plan, and publication of the versioned canonical
   `titan.test` support source.
-- `titan-dev-1.rockspec`: install `titan-compiler.test_runner`.
+- the active rockspec: install `titan-compiler.test_runner`.
 - `spec/fixtures/stdlib/titan_stdlib_types.lua`: exact `test` interface.
 - `spec/fixtures/libuv/stdlib_provider_smoke.lua` and static/system smokes:
   require `titan.test` and prove `testing()` is false outside the runner.
@@ -243,7 +243,7 @@ Update together:
 
 The installed support source is part of the same recoverable publication as the
 provider/shim set and is committed before `titan.so`; rollback restores its
-exact predecessor. It lives under the ABI-versioned Titan SDK namespace, not
+exact predecessor. It lives under the library-versioned Titan SDK namespace, not
 under Lua's public module tree and not as a second runtime module.
 
 ## Validation plan
@@ -358,9 +358,9 @@ suite stays a manually dispatched pre-merge gate.
 
 The final Titan design review established these invariants:
 
-1. **ABI/provider generation:** retain ABI 0.22 because the independent
+1. **ABI/provider generation:** retain the current ABI because the independent
    `titan.test` key and compiler-data source change no existing serialized,
-   userdata, native-call, or loader contract. The canonical eighteen-key 0.22
+   userdata, native-call, or loader contract. The canonical eighteen-key
    pair may be replaced transactionally; rollback restores the immediately
    preceding seventeen-key pair and the prior absence of the new source/shim. This is bounded same-ABI additive
    publication, not cross-ABI migration.

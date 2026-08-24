@@ -37,7 +37,7 @@ Do not introduce a second duplicate C signature. Reuse `Type.CFunction`; if decl
 - Remove the `Type.Function` `_c_function`, `_c_return_type`, `_paramstyle`, and `_return_declaration_qualifiers` compatibility path once no producer remains.
 - Remove the foreign-C `vararg` role from `Type.Function`. Its constructor should carry only Titan/Lua callable shape information. Decide whether to remove the positional field immediately or in a mechanical follow-up; do not silently reinterpret it as the Titan typed tail.
 
-Audit every Type tag visitor and serializer by hand as required by `AGENTS.md`. C-bearing types remain unexportable, so this should not change compiled-module metadata or ABI 0.22.
+Audit every Type tag visitor and serializer by hand as required by `AGENTS.md`. C-bearing types remain unexportable, so this should not change compiled-module metadata or the ABI marker.
 
 ### 2. Share call checking without sharing the value type
 

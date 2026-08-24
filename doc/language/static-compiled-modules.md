@@ -116,7 +116,7 @@ module key:
 ```lua
 return {
     ["geometry.shape"] = {
-        abi = "0.26",
+        abi = "2",
         types = "Module(...)",
     },
 }
@@ -129,23 +129,13 @@ containers, duplicate logical keys, incompatible ABIs, invalid type
 interfaces, or disagreement between the embedded and callable forms before
 publishing or consuming an artifact.
 
-ABI 0.20 introduced Interfaces, the two-user-value Array proxy, and the
-fixed-brand/strict-trailer function-closure protocol. Interface schemas,
-per-state nominal metatables, wrapper payloads, vtables, and method trampolines
-are part of the same compiled contract. Its generated layout cannot be mixed
-with a 0.19 provider, so archive metadata is rejected before native composition
-rather than adapted. ABI 0.19 added serialized union/variant schemas and the
-reconstructible public module prefix for first-class record/union statics; its
-generated userdata/tag contract could not be mixed with a 0.18 interface.
-ABI 0.18 previously required
-generated standard-library archives and the matching runtime to agree on
-promoted callback trampolines and retired libuv/coroutine helpers. ABI 0.17
-introduced the current Array
-backing/proxy contract even though `Array(...)` serialization and exact native
-pointer widths stayed unchanged. A separately installed 0.17 archive remains
-in its versioned directory but is rejected as a dependency.
+ABI 2 covers Interfaces, the two-user-value Array proxy, the
+fixed-brand/strict-trailer function-closure protocol, union and variant schemas,
+the reconstructible public module prefix, callback symbols, and the current
+Array backing/proxy contract. A mismatched archive is rejected before native
+composition rather than adapted.
 
-Interface descriptors introduced in ABI-0.20 metadata preserve nominal owner and
+Interface descriptors preserve nominal owner and
 declaration-order method signatures. A consumer can therefore validate and use
 an imported Interface without seeing a concrete implementation; concrete
 record/union-to-Interface wrapper construction remains a statically known
@@ -222,16 +212,16 @@ behavior, not a hidden dependency manifest.
 
 ## The standard library and libuv
 
-The canonical installed ABI directory contains:
+The canonical installed library-version directory contains:
 
 ```text
-$ROCKS_TREE/lib/titan/0.26/titan.so
-$ROCKS_TREE/lib/titan/0.26/titan.a
+$ROCKS_TREE/lib/titan/0.6/titan.so
+$ROCKS_TREE/lib/titan/0.6/titan.a
 ```
 
 Both contain the eighteen `titan.*` logical standard modules, including
 `titan.io`, `titan.ssl`, `titan.url`, `titan.http`, and `titan.test`, under
-ABI 0.26. The DSO also
+ABI 2. The DSO also
 contains bare native `require "titan"` support, and the archive carries that
 support object without inventing a logical module named `titan`.
 

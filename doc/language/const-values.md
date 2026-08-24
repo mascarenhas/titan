@@ -78,7 +78,7 @@ At module level the form is:
 An initialized const module variable is read-only after its declaration:
 
 ```titan
-const version = "0.26"
+const version = "0.6.0"
 local const retries: integer = 3
 ```
 
@@ -328,7 +328,6 @@ pointee is not frozen. See [C FFI declarations and expressions](c-ffi-expression
 ## ABI boundary
 
 Const module/field metadata, Interface fields and wrapper snapshots, and
-qualified Array tags are part of ABI 0.26. An ABI-0.26 compiler rejects a
-0.25 provider before decoding its older descriptor or exchanging values. Old
-installed version directories remain preserved; there is no in-place
-compatibility adapter.
+qualified Array tags are part of ABI 2. The compiler rejects a mismatched
+provider before decoding its descriptor or exchanging values; there is no
+in-place compatibility adapter.

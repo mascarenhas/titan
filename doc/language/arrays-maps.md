@@ -614,11 +614,8 @@ Lua, `value`, Map storage, and other generic boundaries pay a constant-time
 proxy validation or lookup. See [Dense Arrays](../implementation/dense-arrays.md)
 for the backing/proxy protocol, GC barriers, and lowering details.
 
-The second proxy user value was an ABI change in Titan 0.20. Providers from ABI
-0.17 through 0.19 use the earlier one-user-value Array layout. ABI 0.21
-retained the two-user-value layout while advancing the matched Lua runtime to
-5.5.1, and ABIs 0.22 through 0.25 retained it. ABI 0.26 extends the boundary
-with a distinct const Array tag and a two-metatable module cache while retaining
+ABI 2 includes the two-user-value proxy layout, a distinct const Array tag,
+and a two-metatable module cache while retaining
 the dense `Table *` backing and two-user-value proxy. The ordinary
-compiled-provider ABI check rejects every prior ABI before either side
+compiled-provider ABI check rejects every mismatched provider before either side
 exchanges an Array; Titan does not attempt an in-place compatibility shim.

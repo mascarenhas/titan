@@ -99,7 +99,7 @@ Use these additional decisions:
     `uv_buf_t.base` is a borrowed pointer and does not keep the bytes alive.
 13. No general ABI migration machinery is added. These modules and the runtime
     are rebuilt together in the prototype. The source syntax and private
-    owner-slot change do not require ABI 0.19; if later work independently
+    owner-slot change do not require an ABI advance; if later work independently
     requires a bump, users clean and rebuild from scratch.
 14. The existing explicit waiver for a manual macOS workflow on this branch
     remains in force. Final validation needs exact-head Linux, sanitizer, and

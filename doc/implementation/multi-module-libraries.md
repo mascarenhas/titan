@@ -61,7 +61,7 @@ a/b/c.so
 ```
 
 The exact historical location is therefore the final candidate. The compiler
-first expands the selected `TITAN_PATH_0_26`/`TITAN_PATH` with the runtime's
+first expands the selected `TITAN_PATH_0_6`/`TITAN_PATH` with the runtime's
 `;;` default-insertion semantics. It then searches **root-major**: all
 shallow-to-exact candidates in the first path root, then all candidates in the
 second root, and so on.
@@ -97,7 +97,7 @@ The states are deliberately strict:
 * an exact candidate with neither symbol retains the markerless-binary error
   instead of falling through to source.
 
-The ABI marker must return exactly one string equal to `0.26`. The types entry
+The ABI marker must return exactly one string equal to `2`. The types entry
 must return exactly one serialized `Type.Module` for the requested logical
 name, with a canonical public schema. The loader does not scan later images
 after a claim; visible duplicate providers are resolved by ordinary first
@@ -310,7 +310,7 @@ artifacts, or installed headers.
 
 `make titan` builds a distinct private bootstrap at
 `titan-runtime/bootstrap/titan.so`, linked only from `ltitanlib.o`. During a
-source-rock install it is staged at `<root>/lib/titan/0.26/titan.so` only when
+source-rock install it is staged at `<root>/lib/titan/0.6/titan.so` only when
 that pathname is absent. A usable existing bootstrap or full image is
 preserved, so a repeated build never replaces a full library with the smaller
 bootstrap. An incompatible existing image is an error and is not overwritten.
@@ -332,18 +332,17 @@ paired bundle with the DSO last. It recognizes bootstrap-only and current
 complete-pair predecessors in that same namespace. Injected failures restore
 the exact supported predecessor. After the DSO commit, backup cleanup is best
 effort and cannot turn the coherent install into a reported hook failure.
-Separately versioned 0.17 through 0.25 artifacts are not purged, migrated, or
-cleaned up.
+The publisher does not implement cross-version migration or cleanup.
 
 The canonical installed files are the provider pair (plus the DSO's macOS
 dSYM), eighteen Lua shims, and the canonical test-support source:
 
 ```text
-<root>/lib/titan/0.26/titan.so
-<root>/lib/titan/0.26/titan.a
-<root>/lib/titan/0.26/titan.so.dSYM          # macOS only
+<root>/lib/titan/0.6/titan.so
+<root>/lib/titan/0.6/titan.a
+<root>/lib/titan/0.6/titan.so.dSYM          # macOS only
 <root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iteration,gc,test}.lua
-<root>/share/titan/0.26/src/titan/test.titan
+<root>/share/titan/0.6/src/titan/test.titan
 ```
 
 These remain direct Titan artifacts outside the source-rock manifest. The
@@ -363,68 +362,21 @@ canonical compiler source around compiler groups; its system-libuv/system-OpenSS
 paired generation rather than one logical child, while the prepared artifact retains the
 bundled generation.
 
-## ABI 0.16 through 0.26 and test-only exact providers
+## ABI and test-only exact providers
 
-ABI 0.16 changed neither per-module serialized type shapes nor Titan's native
-calling convention. It is nevertheless a mandatory compatibility boundary:
-0.15 generated imports hard-coded exact logical DSO paths, while ABI 0.16
-introduced the shallow combined `titan.so`; the later self-describing
-`titan.a` repeats that unchanged ABI/types protocol and therefore does not
-require another bump. The marker, `TITAN_PATH_0_16`, and
-`lib/titan/0.16` namespace move together so an old consumer cannot appear
-compatible and then fail to locate a removed child DSO. Within the ABI-0.16
-loader, exact-path DSOs and archives remained valid because exact was the final
-candidate in each format; current loaders still reject their old ABI marker.
+The current provider contract covers shallow prefix-container discovery, the
+paired dynamic and self-describing static formats, canonical Array proxies,
+union and Interface metadata, callable branding, generic declarations,
+source-private provider identity, source-defined callback symbols, and
+const-qualified descriptors and wrappers. The dynamic and static forms carry
+the same ABI and logical type manifests. Exact-path test providers remain valid
+as the final candidate in each format, but a mismatched marker is terminal
+before metadata decoding or native linking.
 
-ABI 0.17 preserves that provider model but changes the Array runtime contract.
-Exact signatures still use `Table *` and descriptors still use `Table **`;
-those pointers now denote private backing Tables paired one-to-one with
-canonical Lua proxy Udata. Every generated module also caches the per-state
-Array metatable. Since 0.16 code could expose or mutate a backing as an
-ordinary table, 0.16 and 0.17 providers must never be mixed. Current lookup
-uses `TITAN_PATH_0_26` and `lib/titan/0.26`; installed 0.17 through 0.25
-trees are preserved only as separately versioned predecessors. See
-[Dense Arrays](dense-arrays.md#abi-017-020-021-022-023-024-and-025-boundaries).
-
-ABI 0.18 preserved the provider model and Array protocol, but the generated
-standard-library archive objects now reference callback trampolines promoted
-into the runtime's external native contract and no longer reference replaced
-libuv/coroutine helpers. Either direction of a 0.17/0.18 static pairing is
-incompatible, so its marker, path variable, and installed namespace advanced
-together.
-
-ABI 0.19 preserved both provider formats and the metadata container, but added
-union/variant interface schemas and the public nominal-static slot prefix.
-Its marker rejected 0.18 before decoding those constructors or reconstructing
-closure slots.
-
-ABI 0.20 retained both provider formats and the metadata container, but changed
-two runtime layouts: every Array proxy carries a second traced user value for
-its genuine-Lua writer, and every Titan function closure carries a fixed
-opaque brand upvalue plus a final strict-entry light C function. Its marker must
-reject 0.19 before any native value crosses that boundary. ABI 0.21 retained
-those layouts while advancing the embedded Lua contract from 5.5.0 to 5.5.1;
-its marker rejects 0.20 before schema decoding or native linking. ABI 0.22 is
-the source-local `titan.uv` surface/private-provider boundary: its public schema
-and reconstructible module-userdata prefix change while Lua 5.5.1 and the other
-value/native-call layouts remain unchanged. Every generated module additionally
-reserves the fixed physical-provider identity slot that authenticates direct
-source-private state. Its marker rejects 0.21 before schema decoding or native
-linking. ABI 0.23 retains that public schema and module-state layout but changes
-the native contract: generated standard objects now own the coroutine, libuv,
-and llhttp callback entries formerly supplied by runtime/adapter objects, and
-callable entry families use injective module/nominal/member UCN separators. Its
-marker rejects 0.22 before metadata decoding or native linking. ABI 0.24 extends
-serialized interfaces for generic declarations while retaining the erased
-provider layouts; its marker rejects 0.23 before decoding or linking. ABI 0.25
-changes the serialized public interfaces and exact native signatures of
-`titan.fs.stat`/`lstat` and `titan.async.suspend` while retaining every other
-ABI-0.24 provider layout and contract. Its marker rejects 0.24 before metadata
-decoding or native linking. ABI 0.26 changes serialized const/member state,
-Interface field wrapper slots, and qualified Array runtime state; its marker
-rejects 0.25 before metadata decoding or native linking. The 0.26 publisher
-does not migrate, clean up, or otherwise consume the preserved 0.25 tree, and
-there is no retained historical cutover canary.
+Current lookup uses `TITAN_PATH_0_6` and `lib/titan/0.6`; those paths derive
+from `TITAN_VERSION` `0.6.0`, independently of ABI `2`. Earlier Titan
+installations are not migrated, cleaned up, or used as compatibility inputs.
+See [Dense Arrays](dense-arrays.md#abi-boundary).
 
 Production, installed, and native standard-library behavior tests use the
 combined image; the uv redesign has no delayed-callback source variant,

@@ -36,7 +36,7 @@ Two evidence streams feed this:
      itself). Reuses all existing Titan array codegen; elements are boxed `TValue`s, which
      is unavoidable for pointer-typed elements on the Lua heap anyway.
    - The metatable pointer **is** the type tag (consistent with how records already work,
-     coder.lua / ABI 0.8) and carries the Lua-facing `__index`/`__newindex`/`__len`.
+     coder.lua / current ABI) and carries the Lua-facing `__index`/`__newindex`/`__len`.
 
 3. **Unboxed vs. boxed under one surface type** = specialize the representation per element
    type — the **.NET reified-generics** pattern `[dotnet-list]`, *not* Java/Pallene erasure
@@ -435,8 +435,8 @@ The only thing growth *adds* is untethering, which we document.
   index read/write (bare C array load/store for scalar; `luaH_*`+`luaC_barrierback` for
   boxed), `#s` → read `header.raw.len`, sub-slice construction, `append`/growth, and the
   caller-side variadic collection. Reuse the `checkandget`/`setwrapped` cast plumbing for
-  the gradual boundary. Bump the **module ABI** (slices are part of signatures): next after
-  `0.8`.
+  the gradual boundary. Advance the **module ABI** because slices are part of
+  signatures.
 - **runtime (titan.h / titan-runtime):** small helpers for slice alloc/grow/sub-slice and
   the metatable `__index`/`__newindex`/`__len` C functions, plus the per-element-type
   metatable registration (one per element type per module, like record metatables live in

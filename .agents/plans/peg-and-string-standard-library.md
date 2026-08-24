@@ -118,7 +118,7 @@ Use these decisions:
   `__tostring` semantics. `format`'s `%s` conversion shares that helper and is
   therefore the one other string operation that can invoke `__tostring`.
   No other ordinary string operation calls Lua's base or string libraries.
-- Keep standard-library ABI 0.18. Adding two logical modules changes the
+- Keep the standard-library ABI unchanged. Adding two logical modules changes the
   provider's key set, not the Titan native ABI. Do not add bespoke
   seven-to-nine or cross-ABI migration machinery: this prototype supports a
   clean install and reinstallation over the current generated layout, and
@@ -1634,7 +1634,7 @@ built only for `stdlib` or the later post-install phase.
 
 ### 11.2 Source rock
 
-Keep `titan-dev-1.rockspec` source-only and retain:
+Keep the active rockspec source-only and retain:
 
 ```lua
 "lpeglabel >= 1.5.0"
@@ -1743,7 +1743,7 @@ source revision at the top of each derivative.
   `types.compatible` or widen `as`.
 - `scripts/stdlib_installer.lua`: nine-module validation using the existing
   publication/rollback model; no historical migration layer.
-- `titan-dev-1.rockspec`: source-package/comment/license coverage while
+- the active rockspec: source-package/comment/license coverage while
   retaining compiler dependency.
 - `THIRD_PARTY_NOTICES.md`.
 - `AGENTS.md`: current prerequisite/provider/root/shim/key/import instructions
@@ -2190,7 +2190,7 @@ export PATH="$PREFIX/bin:$PATH"
 make lua PREFIX="$PREFIX"
 make luarocks PREFIX="$PREFIX"
 make libuv PREFIX="$PREFIX"
-"$PREFIX/bin/luarocks" make titan-dev-1.rockspec
+"$PREFIX/bin/luarocks" make
 bash spec/support/ci_libuv_mode_smoke.sh bundled
 ```
 
@@ -2223,7 +2223,7 @@ acceptance is:
 | Add `tostring` and identify other Lua conversion use | Section 8.3: only `format %s` shares `luaL_tolstring` |
 | No installed lpeglabel/relabel runtime dependency | Private archive, clean search-path, static/dynamic isolation proofs |
 | Static link into standard-library DSO/archive | `STDLIB_EXTRA_OBJECTS`, nine-key provider, both mode smokes |
-| Prototype ABI policy | Keep 0.18 here; no historical migration/conflict machinery; clean install on future ABI bumps |
+| Prototype ABI policy | Keep the current marker here; no migration/conflict machinery; clean install on future ABI bumps |
 | Add test suite | Section 13 across behavior, defects, GC, packaging, sanitizer, macOS |
 | Keep docs part of done | Two language and two implementation chapters plus index/current-provider updates |
 

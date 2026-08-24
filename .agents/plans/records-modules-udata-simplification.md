@@ -1,8 +1,8 @@
 # Design plan: collapse records & modules to a single Lua 5.5 `Udata`
 
 **Status:** IN IMPLEMENTATION (branch `records-modules-single-udata`). The
-anonymous-functions work (`_fn` ABI, TITAN_VER 0.6) is merged to `master`, so the
-ABI is frozen and only one ABI moves now.
+anonymous-functions work and its `_fn` ABI boundary are merged to `master`, so
+the prerequisite ABI is frozen and only this feature advances it.
 
 **Scope (decided by the owner): convert BOTH records AND modules to a single
 `Udata`, and ELIMINATE the Lua-facing module table.** This supersedes the
@@ -515,19 +515,17 @@ Udata.
 
 ## 6. Migration / sequencing & cross-`.so` ABI
 
-1. **Land after anonymous functions.** Recent history: `698e952` (TITAN_VER
-   0.5→0.6, `_fn` ABI), `ed7e40f`/`77b8508` (anon-fn frontend + closure
+1. **Land after anonymous functions.** Recent history: `698e952` (`_fn` ABI
+   boundary), `ed7e40f`/`77b8508` (anon-fn frontend + closure
    codegen). This plan is the **next** big ABI change; doing it on top of an
    unsettled `_fn` ABI would mean two moving ABIs at once. Wait until the
    anon-functions branch is merged and stable.
-2. **New `TITAN_VER` bump: 0.6 → 0.7.** `titan-runtime/titan.h:19-20`
-   (`TITAN_VER`/`TITAN_VER_SUFFIX`). The comment block at titan.h:16-18 already
-   documents the 0.5→0.6 rationale; add a 0.6→0.7 note: "record instances are a
-   single Udata (was CClosure+Udata), so the native ABI of every function
+2. **New ABI boundary.** Update the authoritative ABI marker and document that
+   record instances are a single Udata (rather than CClosure+Udata), so the
+   native ABI of every function
    taking/returning a record changed; `<mangled>_init`'s return type changed
-   only if `_mod` was also converted." `.so` modules compiled for 0.6 are
-   ABI-incompatible and live under a different `TITAN_PATH` directory
-   (`.../titan/0.7`).
+   only if `_mod` was also converted. `.so` modules compiled before this
+   boundary are ABI-incompatible and must be rebuilt.
 3. **Cross-`.so` interface recovery (`<mangled>_types`) keeps working unchanged**
    — it serializes *checker types* (`types.serialize`, coder.lua:4139), which are
    representation-agnostic. Records still serialize as `Type.Record`/nominal; the
@@ -537,9 +535,9 @@ Udata.
 4. **But the `.so` native-call ABI does change** for record-typed functions
    (param/return ctype `CClosure*`→`Udata*`): the `static`-function-pointer
    decls in `init_data_from_other_modules` (coder.lua:3594, 3607) and the
-   fast-path typedef (1435) regenerate from `ctype`, so a 0.7 caller and a 0.7
-   `.so` callee agree; a 0.6/0.7 mix does not — hence the `TITAN_VER` bump and
-   path separation. Verify `build_so_chain`/`so_check` still pass (they build the
+   fast-path typedef (1435) regenerate from `ctype`, so callers and `.so`
+   callees built on the same side of the boundary agree; a mixed pair does not.
+   Verify `build_so_chain`/`so_check` still pass (they build the
    dep `.so` from memory and assert dynamic resolution).
 5. **If `_mod` is converted (only if §8 chooses to):** `<mangled>_init`'s return
    type changes `CClosure*`→`Udata*`, which appears in `import_module`'s extern
@@ -568,7 +566,7 @@ Udata.
    `self`-typed paths (these fall out of `ctype`).
 5. Run `spec/checker/*` then `spec/coder/coder_spec.lua` then the `.so` specs.
 6. **(Optional, gated on §8)** convert `_mod` to `Udata` in a separate commit.
-7. Bump `TITAN_VER`, update docs.
+7. Advance the ABI marker and update docs.
 
 ---
 
@@ -657,7 +655,7 @@ Udata.
    reserved `uv[0]` for a minimal diff; the 0-based rebase followed immediately.)
 3. **`Type.Nominal` ctype** flips `CClosure*` → `Udata*`; accepted, along with the
    full ABI fan-out (every record-typed param/return/local/`self`/out-param, and
-   every `_mod`/`_init` signature) and the **`TITAN_VER` 0.6→0.7** bump it forces.
+   every `_mod`/`_init` signature) and the **ABI marker advance** it forces.
 4. **Empty-record / zero-field layout:** with 0-based fields, `nuvalue = #fields`,
    so an empty record is a 0-user-value `Udata` (`luaS_newudata(L, sizeof(void*),
    0)`); the tag still lives in `getudatamem` and the metatable on the udata, so
@@ -676,7 +674,7 @@ Udata.
    `titan_pushmodule`).
 3. Remove the module table; build the member-map metatable on the `Udata`;
    `require`/postamble return the `Udata`; per-record namespace uv slots.
-4. Bump `TITAN_VER`, update docs, add GC-stress tests, run the full suite.
+4. Advance the ABI marker, update docs, add GC-stress tests, run the full suite.
 
 ---
 

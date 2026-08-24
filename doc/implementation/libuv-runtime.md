@@ -105,12 +105,10 @@ the same Task to resume on its ordinary next-turn timer. Suspend submits no nati
 and registers the Task on no persistent handle. The suspension remains inert
 until `Task:resume` or cancellation requests a wake.
 
-This public change is part of compiled-module ABI 0.25. ABI 0.24 exposed no
-formal `suspend` parameter; ABI 0.25 publishes `SuspendCancelAction` and adds a
-`TValue` option parameter to the exact native entry, changing the serialized
-`titan.async` interface and exact signature. Every other ABI-0.24 layout and
-contract is retained. ABI-0.24 providers remain preserved prior-version state
-and are not migrated or cleaned up.
+This public change is part of compiled-module ABI 2. `SuspendCancelAction` and
+the `TValue` option parameter appear in the exact native entry, changing the
+serialized `titan.async` interface and exact signature. A mismatched provider
+is rejected rather than migrated or adapted.
 
 `Task:resume` is synchronous, does not yield its caller, and never enters the
 target coroutine inline. If the target is explicitly suspended, nonterminal,

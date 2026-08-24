@@ -2,8 +2,8 @@
 
 Status: **approved for implementation. The separate type-relation remediation
 was merged as PR #42, including the relation/Array/function-layout half of the
-shared ABI-0.20 cutover. Interfaces v1 is the immediately chained feature and
-inherits ABI 0.20 without another version transition. For this implementation
+shared ABI cutover. Interfaces v1 is the immediately chained feature and
+inherits that ABI boundary without another transition. For this implementation
 PR the maintainer waived the manual macOS run; exact-head Linux CI and Codecov
 remain required**.
 
@@ -43,9 +43,9 @@ wrapper, never a bare implementer.
 
 The relation/Array/function-layout and Interface changes may be separate
 stacked or coordinated PRs, but the intermediate head is not a published ABI
-boundary: ABI-0.20 release/provider compatibility begins only once both
-layouts are present. The relation branch therefore proves its own 0.19
-rejection and 0.20 internal consistency, while Interface-specific release
+boundary: release/provider compatibility begins only once both layouts are
+present. The relation branch therefore proves synthetic pre-boundary rejection
+and internal consistency, while Interface-specific release
 evidence remains a final gate of this plan.
 
 ### 0.1 Correct `read_until` to `chop: boolean?`
@@ -319,7 +319,7 @@ The feature delivers:
   `value`, Lua calls, and concrete `is`/`as` downcasts;
 - a two-uservalue `Udata` wrapper with a copied function-pointer array;
 - source, DSO, regular archive, prefix-container, and standalone support;
-- the shared compiled-module ABI 0.20 cutover described by §3.8;
+- the shared compiled-module ABI cutover described by §3.8;
 - a `titan.io` module containing seven nominal interfaces;
 - `fs.File`, `net.Connection`, and OS process pipes as initial implementers;
 - a new chapter in **both** manuals, plus a standard-library IO chapter; and
@@ -346,7 +346,7 @@ V1 does **not** add:
 - C-compatible struct/vtable layout;
 - a source-level vtable or unsafe interface construction API;
 - readonly record fields for OS process pipes; or
-- migration of an existing ABI-0.19 installation in place.
+- migration of an existing installation across the ABI boundary.
 
 Debug-library or C-API mutation of userdata uservalues/payload opts out of
 Titan's safety contract, as it already does for record, union, and Array
@@ -1157,41 +1157,41 @@ Hostile metadata must fail while the candidate provider is still the
 diagnostic subject, before codegen or symbol loading trusts method indices.
 Transitive nominal-owner recovery walks every interface method signature.
 
-### 3.8 Shared ABI 0.20 cutover
+### 3.8 Shared ABI cutover
 
 Language interfaces change serialized schemas, userdata conventions, exported
 method symbols, metatable protocols, and callable dispatch. The prerequisite
 relation repair changes the Array proxy from one to two user values and adds
 the strict trailing entry to every Titan function closure. Advance all of
-these together from ABI 0.19 to **ABI 0.20**.
+these together as one compiled-module ABI boundary.
 
 The work may be split into two PRs for review, but that split does not create
 two ABI transitions. Stack or otherwise coordinate the PRs, require clean
-rebuilds when validating each head, and do not publish an ABI-0.20 release,
-provider set, or compatibility promise from the intermediate layout. The
-final ABI-0.20 tree contains the relation/Array/function and Interface changes.
-When split, the prerequisite relation PR owns the one mechanical
-0.19-to-0.20 marker/path advance. The Interface PR inherits, completes, and
-validates ABI 0.20; it does not advance to another version.
+rebuilds when validating each head, and do not publish a release, provider set,
+or compatibility promise from the intermediate layout. The final tree contains
+the relation/Array/function and Interface changes. When split, the prerequisite
+relation PR owns the marker advance. The Interface PR inherits, completes, and
+validates that boundary; it does not advance to another version.
 
 Advance together:
 
-- `driver.TITAN_VER` and `TITAN_VER_SUFFIX`;
-- `TITAN_VER`/history in `titan-runtime/titan.h`;
-- Make's `TITAN_ABI_VERSION`;
-- versioned path/environment suffix `_0_20` (not generated C symbol names);
-- `TITAN_PATH_0_20`;
-- active install path `lib/titan/0.20`;
+- `driver.TITAN_ABI_VERSION` and the matching `TITAN_ABI_VERSION` in
+  `titan-runtime/titan.h`;
+- generated DSO/archive ABI metadata and ABI-keyed caches;
+- compiler/stdlib `TITAN_VERSION` and derived `TITAN_LIBRARY_VERSION` only when
+  the release itself changes;
+- active override `TITAN_PATH_<major>_<minor>` and install path
+  `lib/titan/<library-version>`;
 - runtime loader defaults and generated shims;
 - Make/LuaRocks/installer active paths;
 - workflow environment, cache keys, cleanup, canaries, and support scripts;
 - fixtures and ABI/static-provider specs; and
 - current-version language/implementation documentation.
 
-Treat 0.19 as the preserved previous ABI. Use a fresh/clean active-0.20 prefix,
-leave installed 0.17/0.18/0.19 trees untouched, reject 0.19 before metadata
-rehydration, and do not add an in-place migration layer. The Linux preparation
-assertion changes from “contains 0.19, not 0.18” to “contains 0.20, not 0.19.”
+Use a fresh/clean prefix, reject a synthetic mismatched ABI before metadata
+rehydration, and do not add an in-place migration layer. Linux preparation
+asserts that the configured C path contains
+`lib/titan/<library-version>/?.so`.
 
 Do not blindly replace historical ABI mentions: descriptions of the union ABI
 transition and older retained layouts remain historical facts.
@@ -1696,7 +1696,7 @@ The exact method path must not pay for or emit a wrapper.
 Generate one native/coercive-Lua/strict-Titan bound trampoline set per
 Interface method in the owner module. Use stable names with Titan's existing
 symbol mangling plus the owner fqtn, method name, and bound-entry role. Do not
-append `_0_20`; ABI rejection and provider selection, not per-symbol version
+append an ABI-number suffix; ABI rejection and provider selection, not per-symbol version
 spelling, gate these symbols.
 
 At a bind site, create a six-upvalue closure using the repaired ordinary
@@ -2033,7 +2033,7 @@ Add `io` to `scripts/stdlib_installer.lua`'s canonical module list. Its loops
 must validate, back up, publish, roll back, and restore all ten shims and the
 exact ten-key archive. Preserve the commit order: shims/dSYM, archive, DSO
 last. The existing bootstrap/legacy-complete/complete-pair predecessor states
-remain, now in active ABI 0.20.
+remain under the active ABI contract.
 
 The rockspec has no per-module manifest entry to add; ensure `titan/io.titan`
 is in the source rock and the source-only post-install compiler invocation
@@ -2171,7 +2171,7 @@ Add `doc/implementation/interfaces.md` and link it from
 - closed serialized-schema validation;
 - source/DSO/archive separate compilation;
 - external symbols and public-prefix effects;
-- ABI 0.20; and
+- the ABI boundary; and
 - failure/GC behavior.
 
 Remove or replace the current statement in
@@ -2561,7 +2561,7 @@ Hostile schema cases include:
 - escaped free `Type.Method`;
 - C FFI/local nominal in public signature;
 - recursive legal graph; and
-- ABI 0.19 rejection before any Interface decoding/symbol load.
+- mismatched-ABI rejection before any Interface decoding/symbol load.
 
 The separate-compilation matrix must run exact and adjusted calls with
 `consumer` knowing only `api.I`, while provider `R` is introduced by `bridge`,
@@ -2786,20 +2786,20 @@ modes.
 layout, independent of its emitting TU; all providers agree on ordered
 metadata and callable ABI.
 
-### Phase 4 — complete ABI 0.20, manuals, packaging, and clean-prefix proof
+### Phase 4 — complete the ABI boundary, manuals, packaging, and clean-prefix proof
 
-1. Inherit the relation PR's single mechanical 0.19-to-0.20 marker/path
+1. Inherit the relation PR's single ABI marker
    advance; complete and verify every active ABI reference and add the runtime
    history paragraph without a second version transition.
 2. Extend the closed DSO/archive validator and ABI rejection tests.
 3. Update all current manuals, README, repository instructions, workflows,
-   support scripts, and active-prefix checks without rewriting history.
-4. Prepare a fresh isolated ABI-0.20 prefix and prove 0.19 providers fail before
-   Interface rehydration.
+   support scripts, and active-prefix checks using feature-based rationale.
+4. Prepare a fresh isolated prefix and prove a synthetic mismatched provider
+   fails before Interface rehydration.
 5. Review loader/static/provider/installer changes adversarially.
 
 **Gate:** source, DSO, archive, prefix-container, and standalone modes are
-green on a clean 0.20 tree before stdlib publication expands.
+green on a clean tree before stdlib publication expands.
 
 ### Phase 5 — language-doc-gated stdlib dogfood
 
@@ -2968,8 +2968,8 @@ The feature is done only when all of these are true:
   suite;
 - the consumer-knows-only-I topology passes source, DSO, archive, prefix, and
   standalone modes;
-- ABI 0.20 contains the inherited single marker/path advance, every Interface
-  addition, and clean rejection of 0.19 without another version transition;
+- the ABI contains the inherited single marker advance, every Interface
+  addition, and clean rejection of mismatched metadata without another transition;
 - the Interface chapters in both manuals and
   `doc/language/standard-library-io.md` are linked, and all affected current
   documentation is accurate;
@@ -3011,7 +3011,7 @@ The feature is done only when all of these are true:
    declaration, not a transparent alias and not a runtime `members` slot.
 8. **Synthetic traceback leakage.** Private adapter symbols need stable
    attribution without pretending they are public declarations.
-9. **ABI partial bump.** One stale `_0_19`, `TITAN_PATH_0_19`, active path, or
+9. **ABI partial bump.** One stale ABI claim, environment suffix, active path, or
    fixture can create misleading loader behavior.
 10. **Provider symbol asymmetry.** Bound trampolines must be equally reachable
     in source, DSO, archive, ancestor-container, and standalone modes.

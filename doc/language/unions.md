@@ -396,5 +396,4 @@ Union version one deliberately keeps the model small:
 
 The compiled-module interface carries union and variant metadata so imported
 modules preserve constructor, method, visibility, and tag information. That
-interface and the corresponding run-time layout begin at compiled-module ABI
-0.19.
+interface and the corresponding run-time layout are part of ABI 2.

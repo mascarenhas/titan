@@ -42,7 +42,7 @@ element C type exactly [OWNER §2.F]. Struct shape is `{ lu_byte n_args; T args[
 so forwarding never mutates a shared struct. `n_args` is the total backing count; a callee's
 logical length is `n_args − start`. A statically-sized call builds the struct on the **C
 stack**; the generic/Lua entry and the "fresh copy" forwarding case build it as a GC-anchored
-**`Udata0`**. Module ABI bumps `0.8 → 0.9`.
+**`Udata0`**. This change advances the module ABI.
 
 ### First-class
 
@@ -532,11 +532,11 @@ gradual `value` difference) → the generic Lua-stack branch (push args, expandi
 element-by-element), and the callee's `genluaentry` (§5.4) coerces + rebuilds. The fast-path
 typedef and the tag both include the vararg element + `_start` (§5.2 / #2).
 
-### 5.8 Module ABI bump
+### 5.8 Module ABI boundary
 
-`titan.h:36-37`: `TITAN_VER "0.8" → "0.9"`, `TITAN_VER_SUFFIX "_0_8" → "_0_9"`, with a rationale
-comment: the cross-module native signature gains a trailing `TitanVargX*` + `int _start` for
-variadic functions, and `<mangled>_types` now encodes `varargtype` (§4.1). Update `CLAUDE.md` ABI
+Advance `TITAN_ABI_VERSION`, with a rationale that the cross-module native
+signature gains a trailing `TitanVargX*` + `int _start` for variadic functions,
+and `<mangled>_types` now encodes `varargtype` (§4.1). Update `CLAUDE.md` ABI
 notes. The internal `Udata0` reuse does not itself force the bump.
 
 ---
@@ -560,7 +560,7 @@ notes. The internal `Udata0` reuse does not itself force the bump.
   fresh-`Udata0` + cap guard (§2.C) + recursion. Tests: `spec/coder/` (chained-forward GC,
   overflow-cap at 200).
 - **Phase 5 — `{...}` / `return ...` / `#...`.** Runtime-sized array build (§5.6), back barriers.
-- **Phase 6 — Lua interop + `.so` ABI + first-class.** ABI 0.9 (§5.8), `_types` round-trip of
+- **Phase 6 — Lua interop + `.so` ABI + first-class.** ABI boundary (§5.8), `_types` round-trip of
   `varargtype` (§4.1), variadic function called from Lua and as a first-class value (fast path on
   tag match, generic path on gradual mismatch), `.so`-only import. Tests:
   `spec/coder/so_import_spec.lua`, `spec/checker/so_rehydration_spec.lua`.

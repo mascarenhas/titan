@@ -195,7 +195,7 @@ static int counter_\u2133_inc_titanentry_strict(lua_State *L) {
 
 static int __index(lua_State *L) { ... }    /* module metatable: member read  */
 static int __newindex(lua_State *L) { ... } /* module metatable: member write */
-int counter_abi(lua_State* L) { ... }       /* returns TITAN_VER */
+int counter_abi(lua_State* L) { ... }       /* returns TITAN_ABI_VERSION */
 int counter_types(lua_State* L) { ... }     /* serialized interface, below  */
 
 static int _initialized = 0; /* tags and external functions are set up */
@@ -222,7 +222,7 @@ and `-` with `_`. The driver has already restricted every logical component to
 bytes. Module `foo.bar` yields `foo_bar_init`, `foo_bar_abi`, `foo_bar_types`,
 and `luaopen_foo_bar`.
 
-ABI 0.23 gives callable names two structural boundaries. `_function_prefix`
+Callable names have two structural boundaries. `_function_prefix`
 separates the flattened module prefix from the remaining callable with the C99
 UCN `_\u2133_` (U+2133 SCRIPT CAPITAL M). A top-level function `f` therefore
 becomes `foo_bar_\u2133_f_titan` / `..._titanentry_lua` /
@@ -381,7 +381,7 @@ It comes **immediately after `_mod` and before the method `self`**, and
 *every* Titan function takes it even when the body never reads it: the
 fast value-call path dispatches purely on the function-type tag, so all
 native entries of a given `Type.Function` must share one ABI. This type is
-exclusively a boxed Titan/Lua callable; its ABI-0.26 third constructor
+exclusively a boxed Titan/Lua callable; its ABI-2 third constructor
 position remains reserved `false`, not C variadicity. Its value at a call site
 depends on the
 path:
@@ -762,131 +762,26 @@ trampolines for cross-provider bind sites. Full
 wrapper layout, pair initialization, and all four dispatch paths are in
 [Interfaces](interfaces.md#four-dispatch-paths).
 
-### The `.so` ABI bump
+### Compiled-module ABI
 
-Adding `_fn` to `function_sig` changes **every** native-entry signature,
-including the cross-`.so` value fast path and the cross-module externs.
-Old (`TITAN_VER` 0.5) and new compiled `.so`s are therefore
-**ABI-incompatible** — mixing them is undefined behavior — so this work
-bumps `TITAN_VER` from **0.5 to 0.6** (`titan-runtime/titan.h`), which
-also changes the compiled-module search-path suffix. All dependency `.so`s
-must be recompiled against 0.6.
+`TITAN_ABI_VERSION` is the monotonic compatibility marker carried by every
+compiled provider, currently `2`. It covers native entry signatures, serialized
+type schemas, module-state layout, canonical Array proxies, unions, Interfaces,
+generic metadata, source-private provider identity, foreign callback symbols,
+and const-qualified descriptors and wrappers. A mismatched provider is rejected
+before interface rehydration or native value exchange.
 
-A later change bumped `TITAN_VER` again, **0.6 to 0.7**: record instances
-and module state (`_mod`) collapsed from a `CClosure`+`Udata` pair to a
-single `Udata`, so `_mod` and every record-typed parameter/return/`self`
-changed C type (`CClosure*`→`Udata*`) and `<mangled>_init` now returns
-`Udata*` — all cross-`.so` ABI points. 0.6 and 0.7 `.so`s are likewise
-ABI-incompatible and live under different `TITAN_PATH` directories.
+The compiler and standard-library release version is independently
+`TITAN_VERSION` `0.6.0`. Its derived `0.6` library version selects
+`TITAN_PATH_0_6` and the `lib/titan/0.6` provider namespace; patch releases
+share that namespace. The reset provides no migration, compatibility alias, or
+cleanup path for earlier Titan installations.
 
-A further change bumped `TITAN_VER`, **0.7 to 0.8**: a record's type
-identity moved from a `void*` tag word in the udata's raw payload to the
-udata's **metatable pointer**, so record instances now carry no raw
-payload (`luaS_newudata(L, 0, N)`) and a cross-module type check compares
-`uvalue(v)->metatable` rather than reading `getudatamem`. A 0.7 checker
-reading a 0.8 record's `getudatamem` would read out of bounds, so 0.7 and
-0.8 `.so`s are ABI-incompatible and live under different `TITAN_PATH`
-directories.
-
-The 0.10 to 0.11 bump covers module-local
-records and record members: `<mangled>_types` omits local records and local
-fields/methods/record functions from the serialized public interface, while retaining
-the full record field-slot count so an imported `.so` still reads public fields
-from their original `Udata` user-value slots. A 0.10 checker would not know how
-to interpret that layout metadata. The 0.11 to 0.12 bump added the separately
-serialized `Type.Module.type_members` map for public type aliases (later also
-used by public Interface declarations); a 0.11 checker cannot rehydrate that
-interface shape. ABI **0.13** introduced the
-named-argument metadata.
-The 0.12 to 0.13 bump adds declaration `paramnames` to the serialized
-`Type.ModuleMember`, `Type.Method`, and `Type.StaticMethod` constructor shapes
-for named calls. Native entry signatures are unchanged, but a 0.12 checker
-cannot evaluate the new interface descriptors safely.
-
-Flexible result types add `flexrettype` to callable interface descriptors and
-the trailing native `_flexout`/`_flexwant` pair shown above. That ABI and
-serialization-shape change shipped as 0.14 rather than making 0.13 accept both
-layouts. ABI **0.15** made `titan.uv` order exported module
-members by semantic contributor, so marker constants and installed paths move
-together rather than letting 0.14 importers reconstruct the changed slots. The
-later checker staging, relocation of private uv records, and move of the
-private `FS` constants instance alter private slot/initialization order but add
-no serialized descriptor field, native parameter, or importer-visible slot
-change: the exact `titan_uv_types` interface remained unchanged.
-
-ABI **0.16** kept per-module descriptor and native-call shapes but changed the
-generated/imported physical-provider contract from an exact logical DSO to a
-compiler-selected prefix container. A 0.15 runtime cannot discover the
-combined standard `titan.so`.
-
-ABI **0.17** introduced the current Array contract. `Type.Array` keeps
-`Table *` in exact native
-signatures and `Table **` in variadic/flexible descriptors, but the Table is
-now private backing storage and every Lua-visible Array is a canonical proxy
-Udata. Generated modules also reserve a per-state Array-metatable cache and
-use explicit internal-versus-boxed conversions. A 0.16 module would
-misinterpret Array values even when a serialized interface happens not to
-mention one, so the semantic/runtime boundary requires a full rebuild. See
-[Dense Arrays](dense-arrays.md#abi-017-020-021-022-023-024-and-025-boundaries).
-
-ABI **0.18** preserved those generated Array shapes and the ordinary module
-protocol, but made standard-library archive objects directly reference
-promoted libuv callback trampolines while removing replaced libuv/coroutine
-helper symbols. A 0.18 provider and runtime therefore had to be distributed
-together.
-
-ABI **0.19** added serialized union/variant schemas, the
-union userdata/tag protocol, and a reconstructible public module-slot prefix
-that includes exported nominal statics. An importer and producer must agree on
-that prefix before an imported record or union constructor can be used as the
-same canonical first-class closure.
-
-ABI **0.20** introduced Array proxies with two traced user values,
-with the per-construction-type Lua writer closure in the second; function
-closures add a fixed opaque brand upvalue and a strict-entry trailer.
-Serialized module type members now include ordered `Type.Interface`/
-`Type.Method` declarations. Runtime Interface values are two-user-value
-wrappers with an ordered `TitanInterfaceMethod` payload; generated modules
-also publish the exact/adjusted direct and bound entry artifacts needed by
-that payload. The standard `titan.uv` schema also exports the nominal
-`uv_stdio_t` process-stream wrapper used by `titan.os`. Its private
-implementation selects the appropriate pipe-or-TTY native handle while the
-high-level stream facades retain their parent-facing endpoints. ABI 0.21
-retained those 0.20 layouts while advancing the embedded Lua contract from
-5.5.0 to 5.5.1. ABI 0.22 introduced the source-local
-`titan.uv` surface/private-provider boundary, changing its serialized public
-schema and reconstructible module-userdata prefix while retaining Lua 5.5.1
-and the other value/native-call layouts from 0.21. Every generated module also
-added one fixed compiler-private, ABI-visible physical-provider identity slot so
-an explicit source importer can reject canonical state installed by another
-provider. ABI 0.23 retains those layouts while source foreign callbacks and the
-injective module/nominal/member native-entry hierarchy change the native symbol
-contract. ABI 0.24 extends serialized interfaces for generic declarations while
-retaining the erased generated layouts and Lua contract. ABI 0.25 changes the
-public standard-module interfaces and exact entries for `titan.fs.stat` and
-`titan.fs.lstat` from a `Udata *` result to a `TValue` option result, and adds a
-`TValue` optional cancellation-action parameter to `titan.async.suspend`. All
-other ABI-0.24 serialized layouts, generated layouts, and runtime contracts are
-retained.
-Compiler-witnessed dynamic Interface discovery was added within ABI 0.25. It
-adds only translation-unit-private wrapper functions, ordinary one-upvalue
-closures, and raw entries in per-state nominal metatables; the serialized type
-graph, wrapper/vtable layout, exported symbols, and module-userdata prefix are
-unchanged. Earlier ABI-0.25 objects remained loadable within that boundary but
-did not advertise pairs they were not compiled to witness. ABI 0.26 changes
-serialized const/member state, Interface wrappers, the module-state Array
-metatable cache, and qualified Array runtime support.
-The active marker is `_0_26`, the search variable is `TITAN_PATH_0_26`, and the
-provider namespace is `lib/titan/0.26`; older providers are rejected before
-interface rehydration. Existing 0.25 artifacts remain separately versioned and
-are not migrated or cleaned up.
-
-Closure adjustment wrappers reuse the fixed CClosure header and `function_sig`
-shapes retained through ABI 0.26; their target adapters and strict relays are
-private consumer artifacts, with no serialized field, provider symbol, or
-module-state slot. A consumer may therefore wrap an ordinary ABI-0.26
-source/DSO/archive function. Any implementation that needed another fixed slot
-or signature would instead require a coordinated ABI advance.
+Closure adjustment wrappers reuse the fixed current `CClosure` header and native
+call shapes. Their target adapters and strict relays are private consumer
+artifacts, with no serialized field, provider symbol, or module-state slot. Any
+implementation that needs another fixed slot or signature requires a coordinated
+ABI advance.
 
 ## The module protocol
 
@@ -996,7 +891,7 @@ per public record or union (carrying its public nominal functions and union
 constructors) — are all served by a metatable on the
 `Udata` ([Lua interop internals](lua-interop-internals.md)).
 `<prefix>_abi` is a tiny marker function that returns the current
-`TITAN_VER`; both the compile-time DSO loader and generated dynamic imports
+`TITAN_ABI_VERSION`; both the compile-time DSO loader and generated dynamic imports
 check it before trusting any other callable symbol. Static providers embed
 the same ABI and serialized interface in each logical object, and archive
 validation compares those bytes with the callable protocol before
@@ -1004,7 +899,7 @@ publication. `<prefix>_types` is the separate-compilation interface:
 
 ```c
 int counter_abi(lua_State* L) {
-    lua_pushliteral(L, TITAN_VER);
+    lua_pushliteral(L, TITAN_ABI_VERSION);
     return 1;
 }
 
@@ -1048,27 +943,15 @@ The tests' in-memory `tableloader` exercises the same serialization
 round-trip. See [driver and toolchain](driver.md) and [Static compiled
 modules](static-compiled-modules.md).
 
-Folder and provider representation change none of this logical protocol. Mangled symbols,
-nominal names, registry keys, `luaopen_*`, and the serialized module identity
-remain derived solely from logical `modname`; there is no contributor ABI.
-The repository's historical 0.15 transition is a compatibility boundary for the
-intentional `titan.uv` public-member reorder caused by semantic ownership.
-Moving local record declarations and the private `FS` constants instance among
-contributors after that boundary changes private initialization layout but
-does not alter the serialized interface. ABI 0.16 changes how the physical
-provider is found and recorded transiently; ABI 0.17 then changes Array
-representation and adds the module-local metatable cache without changing the
-serialized `Type.Array` constructor. ABI 0.18 preserved that logical protocol
-while advancing the standard-library archive/runtime native-symbol boundary.
-ABI 0.19 added union/variant schemas and the public nominal-static slot prefix;
-it did not change the metadata container itself. ABI 0.20 added the second
-Array-proxy user value and callable strict-entry/brand protocol; those runtime
-layouts require a full boundary even though the metadata container is still
-unchanged. ABI 0.21 retained those layouts and advanced the matched Lua
-internal-header/runtime contract. ABI 0.22 retains them and Lua 5.5.1 while
-changing `titan.uv`'s serialized public schema and reconstructible public
-prefix and adding the fixed physical-provider identity slot to every generated
-module.
+Folder and provider representation change none of this logical protocol.
+Mangled symbols, nominal names, registry keys, `luaopen_*`, and the serialized
+module identity remain derived solely from logical `modname`; there is no
+contributor ABI. Moving local declarations or private state among contributors
+can change private initialization layout without changing the serialized
+interface. Physical-provider selection, Array representation, union and
+Interface schemas, public nominal-static slots, callable branding, and the
+fixed provider-identity slot are instead coordinated parts of the current
+compiled-module ABI.
 
 ## Static vs dynamic dependency wiring
 
@@ -1173,8 +1056,7 @@ bound-method closure and must copy a live exact tag into it. First-use private
 objects are filled by `init_data_from_other_modules` or the module
 initializer. Thus all private slots, beginning with the Array cache and fixed
 provider-identity token, come *after* the importer-visible public prefix. Their
-fixed header was introduced in ABI 0.22 and is retained through 0.26, while later
-inventory/first-use slots remain
+fixed header is part of the current ABI, while later inventory/first-use slots remain
 coder-private and do not perturb the public importer slot math.
 
 An importing module never sees this module's AST: it recomputes the complete

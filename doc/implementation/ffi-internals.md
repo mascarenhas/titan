@@ -13,7 +13,7 @@ For user-facing behavior see [the C FFI](../language/ffi.md),
 probe, contextual-conversion, and C-operator machinery is covered in
 [C FFI declarations and expressions](c-ffi-expressions.md); the restricted
 raw-C checker/lowering, generated source headers, target-directed allocation,
-and ABI-0.23 callback boundary are in
+and current callback ABI boundary are in
 [Foreign-function implementation](foreign-functions.md).
 
 ## Import Pipeline
@@ -24,7 +24,8 @@ compiler, C99 language mode, and already parsed `TITAN_EXTRA_CPPFLAGS`.
 The driver also supplies its current fixed runtime and Lua include directories.
 In source-checkout mode, `titanc --lua` updates that configuration before
 checking begins. Installed mode rejects the override so FFI parsing, generated
-C, `liblua.a`, and `libtitan.a` continue to use one matched SDK. On success it
+C, `lib/liblua.a`, and `lib/titan/0.6/libtitan.a` continue to use one matched
+SDK. On success it
 gets:
 
 * a TypeList from the C parser;

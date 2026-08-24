@@ -81,16 +81,14 @@ zero-parameter declaration) and `false` (metadata unavailable). The imported
 module's `<mangled>_types` function re-evaluates those descriptors through the
 normal constructor environment.
 
-Changing those serialized constructor arities is why the compiled-module ABI
-advanced from **0.12 to 0.13**. The native function signature and call ABI did
-not change. Loader code checks `<mangled>_abi` before it evaluates
-`<mangled>_types`, so an old 0.12 DSO is rejected as an ABI mismatch instead of
-being interpreted with the new descriptor constructors.
+Changing those serialized constructor arities is ABI-visible, although the
+native function signature and call ABI do not change. Loader code checks
+`<mangled>_abi` before it evaluates `<mangled>_types`, so a mismatched DSO is
+rejected instead of being interpreted with the current constructors.
 
 Callable types now also carry `flexrettype`, and Method/StaticMethod constructor
 expressions serialize it before `paramnames`. That is a separate interface
-shape and native-signature change, shipped under ABI 0.14 rather than teaching
-0.13 to accept both schemas.
+shape and native-signature change covered by the current ABI.
 
 ## C prototype metadata
 

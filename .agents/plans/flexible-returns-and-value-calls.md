@@ -434,7 +434,8 @@ these existing control points:
 - `titan-runtime/titan.h`: the seven `TitanVarg*` descriptor families and
   `TITAN_VARARG_MAX`.
 - `titan-compiler/driver.lua`, `Makefile`, CI, and path-sensitive specs: the
-  compiled-module ABI version and installed-module path.
+  compiled-module ABI version plus the independently release-versioned
+  installed-module path.
 
 The existing input-variadic finite projection in `expand_dots_adjustup` is the
 behavioral model: a demanded non-option slot gets the raw value plus a bounds
@@ -800,30 +801,32 @@ overflow, leaked stack slots, or broken pending return.
 ### Phase G — Bump and validate the compiled-module ABI
 
 The serialized callable interface and flexible native signature are
-incompatible with ABI 0.13. Bump the compiled-module ABI to 0.14.
+incompatible with pre-feature providers. Advance the compiled-module ABI.
 
-1. Update current constants, mangled ABI symbols, compiled lookup paths, and
-   environment variable names in `titan-compiler/driver.lua`,
+1. Update the ABI marker, mangled ABI symbols, generated metadata, and
+   ABI-sensitive cache namespaces in `titan-compiler/driver.lua`,
    `titan-runtime/titan.h`, `Makefile`, and `.github/workflows/ci.yml`.
-2. Update current-path expectations in ABI, driver, rockspec, standard-library,
-   and support-helper specs, plus README and repository instructions.
-3. Preserve historical prose and old completed-plan records when they are
-   describing earlier ABI transitions; update only statements that claim the
-   current version/path.
-4. Extend serialized `Function`, `Method`, and `StaticMethod` payloads with the
+2. Keep compiled lookup paths and versioned environment-variable names derived
+   from the independent semantic release; change them only when that release
+   changes.
+3. Update ABI and path expectations in driver, rockspec, standard-library, and
+   support-helper specs, plus README and repository instructions.
+4. Preserve the semantic rationale for earlier ABI transitions without
+   retaining their historical numbering.
+5. Extend serialized `Function`, `Method`, and `StaticMethod` payloads with the
    flexible return field and test `.so` interface rehydration.
-5. Verify that importing an ABI 0.13 module gives the ordinary clear mismatch
-   diagnostic rather than decoding it as 0.14.
+6. Verify that importing a pre-boundary module gives the ordinary clear
+   mismatch diagnostic before decoding.
 
 Use a targeted inventory such as:
 
 ```sh
-rg -n '0\.13|0_13|TITAN_PATH_0_13' \
+rg -n 'TITAN_|lib/titan/' \
   titan-compiler titan-runtime spec doc Makefile README.md AGENTS.md \
   .github/workflows
 ```
 
-Phase exit: a clean installation contains only canonical 0.14 standard DSOs
+Phase exit: a clean installation contains only canonical active standard DSOs
 and all binary-interface/rehydration tests pass.
 
 ### Phase H — Documentation and repository guidance
@@ -835,7 +838,7 @@ Add and index both required manuals in the same change:
   arguments/results, compatibility, examples, and the 200-result open bound.
 - `doc/implementation/flexible-returns.md`: AST/type fields, checker demand
   elaboration, synthesized function types, exact/generic split, native output
-  descriptors, Lua wrapper behavior, GC/rooting, serialization, and ABI 0.14.
+  descriptors, Lua wrapper behavior, GC/rooting, serialization, and the ABI boundary.
 
 Cross-update `doc/language/functions.md`, `expressions.md`, `statements.md`,
 `types.md`, `option-types.md`, `closures.md`, `lua-interop.md`, `ffi.md`,
@@ -977,7 +980,7 @@ they become large enough to justify a separate topical suite.
 - Zero-count initialization for bare return, flexible-only fallthrough,
   `(nil, ...: T)` fallthrough, and empty pending returns in both named and
   anonymous generated epilogues.
-- ABI 0.14 interface rehydration and clean 0.13 rejection.
+- interface rehydration at the new ABI and clean pre-boundary rejection.
 
 ## 7. Diagnostics
 
@@ -1058,7 +1061,7 @@ The feature is complete when all of the following are true:
   across calls, errors, and `finally`.
 - Ordinary finite generic function-value requests respect Lua 5.5's independent
   250-result VM bound; open generic and direct native Titan calls remain exempt.
-- Compiled-module ABI 0.14 round-trips the new callable metadata and rejects
+- The compiled-module ABI round-trips the new callable metadata and rejects
   older modules cleanly.
 - Checker/coder/runtime/GC/ABI suites pass, the full test suite passes, and both
   manuals plus repository guidance describe the shipped behavior.
@@ -1087,5 +1090,5 @@ The feature is complete when all of the following are true:
 - **Breaking pending returns in `finally`.** Save fixed and flexible pieces as
   one logical return value, preserve them through normal cleanup, and let only
   the existing raise path override them.
-- **Partial ABI updates.** Inventory every current `0.13` path/symbol while
-  preserving historical descriptions of earlier versions.
+- **Partial ABI updates.** Inventory every current ABI claim and generated
+  symbol while preserving the feature rationale.

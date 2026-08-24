@@ -633,11 +633,10 @@ a `Udata` or a `Table`; used for:
 
 (The argument shape differs from the forward barrier: back takes the
 *value* and an `obj2gco`-wrapped container; forward takes the *slot
-pointer*.) Both `_mod` and record instances became `Udata` in the 0.7
-ABI, flipping these stores from the forward barrier the closure
-representation used. (The 0.8 ABI changed only a record's *type
-identity* — from a `getudatamem` tag word to the udata's metatable
-pointer — not its barriers.)
+pointer*.) Both `_mod` and record instances are `Udata`, so these stores use
+the back barrier rather than the forward barrier used by the superseded closure
+representation. Moving record type identity from a `getudatamem` tag word to
+the udata metatable pointer did not change its barriers.
 
 **Forward barrier — `luaC_barrier(L, owner, slot)`** remains for the
 owners that are still `CClosure`s — every store of a captured value into

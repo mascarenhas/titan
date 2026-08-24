@@ -109,7 +109,7 @@ snapshot:
   **1 success**.
 - `spec/rockspec_spec.lua`: **7 successes** (installed file and manifest
   inventory included).
-- `$PREFIX/bin/luarocks make titan-dev-1.rockspec`: succeeded, including the
+- `$PREFIX/bin/luarocks make` with the then-active rockspec: succeeded, including the
   eighteen-root standard-provider post-install build/publication.
 - Manual real-tool smoke with a generated path containing spaces: succeeded.
 - Manual missing-formatter compiler smoke: exited 1 with the generated path and

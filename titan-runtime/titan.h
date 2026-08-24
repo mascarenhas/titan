@@ -67,112 +67,15 @@ typedef struct lua_longjmp {
 #define TITAN_NOINLINE
 #endif
 
-/* 0.5 -> 0.6: the native ABI changed (every entry gained the _fn closure
-   parameter for lexical closures), so 0.5-compiled .so modules are
-   ABI-incompatible and must not be mixed with 0.6 ones.
-   0.6 -> 0.7: record instances and module state (_mod) are now a single Lua 5.5
-   Udata (was a CClosure + Udata wrapper). The native ABI of every function
-   taking/returning a record changed (ctype CClosure* -> Udata*), and
-   <mangled>_init now returns Udata* (was CClosure*). 0.6-compiled .so modules
-   are ABI-incompatible with 0.7 ones and live under a different TITAN_PATH dir.
-   0.7 -> 0.8: a record's type identity moved from a getudatamem tag word to the
-   udata's metatable pointer. Record instances now carry no raw payload
-   (luaS_newudata(L, 0, N)), and a type check compares uvalue(v)->metatable
-   against the expected record metatable. A 0.7 checker reading a 0.8 record's
-   getudatamem would read out-of-bounds, so 0.7 and 0.8 .so modules are
-   ABI-incompatible and live under a different TITAN_PATH dir.
-   0.8 -> 0.9: variadic parameters. A variadic function's native signature
-   gained a trailing `TitanVargX *_varargs, int _start` pair (after the declared
-   params, before the out-params), and <mangled>_types now encodes the
-   `varargtype` element type for variadic functions and methods. A 0.8 module
-   has neither, so 0.8 and 0.9 .so modules are ABI-incompatible and live under a
-   different TITAN_PATH dir. 0.9 -> 0.10: TitanVargX changed from an inline
-   flexible-array backing object
-   (`lu_byte n_args; T args[]`) to a descriptor (`lu_byte n_args; T *args`).
-   The native parameter type name is unchanged, but its layout and the meaning
-   of the bytes following n_args are not: mixing the two forms across a .so
-   boundary misreads argument storage. 0.9 and 0.10 modules are therefore
-   ABI-incompatible and must live under different TITAN_PATH directories.
-   0.10 -> 0.11: records can have module-local declarations and members. The
-   serialized <mangled>_types interface omits local records and local record
-   members while preserving record field-slot counts, so 0.10 and 0.11 .so
-   modules disagree about what a compiled record interface means.
-   0.11 -> 0.12: Type.Module's serialized interface gained a separate
-   type_members namespace for transparent exported type aliases. Generated
-   code can also resolve record entry points provided transitively by an
-   RTLD_GLOBAL dependency through loadglobalsym. Older checkers cannot read
-   the new interface shape, and older runtimes do not provide that helper.
-   0.12 -> 0.13: declaration descriptors in the serialized <mangled>_types
-   interface gained fixed-parameter name lists for compile-time named calls.
-   Native call frames are unchanged, but older constructor environments cannot
-   safely interpret the new descriptor shape.
-   0.13 -> 0.14: Function, Method, and StaticMethod descriptors gained a
-   flexible-return element type. Flexible-return native functions also gain a
-   caller-owned TitanVargX output descriptor and an explicit result demand.
-   Older checkers cannot decode the serialized shape, and older callers cannot
-   safely invoke the new native signature.
-   0.14 -> 0.15: titan.uv moved its exported members into semantic folder
-   contributors, changing its ordered module-member slots.
-   0.15 -> 0.16: compiled-module lookup and generated imports can select a
-   shared physical DSO provider for several logical modules. The serialized
-   type schema and native call convention are unchanged, but 0.15-generated
-   imports hard-code exact logical-module DSOs that the 0.16 standard-library
-   layout no longer installs.
-   0.16 -> 0.17: exact Array signatures remain Table * / Table ** and the
-   serialized Array type text and pointer width are unchanged, but old and new
-   generated code cannot safely share Array values. ABI-0.16 code may treat
-   lenhint as a mutable border cache, resize without restoring the new explicit
-   length, read or write reserved key 0 and expose/destroy the canonical proxy,
-   preserve negative keys, place high positive indices in the hash, or accept
-   and expose raw Tables at Lua/value boundaries. The ABI gate protects those
-   representation invariants and the boundary protocol; it is not a
-   Table * -> Udata * or Table ** -> Udata ** migration.
-   0.17 -> 0.18: standard-library archive objects directly reference callback
-   trampolines promoted into the runtime's external native symbol contract,
-   and no longer reference the replaced libuv and coroutine helper symbols.
-   A 0.18 provider and runtime must therefore be built and distributed
-   together; either direction of a 0.17/0.18 static pairing is incompatible.
-   0.18 -> 0.19: serialized interfaces add Union and Variant schemas, generated
-   unions add a nominal namespace/metatable/tag/payload contract, and the
-   public module-userdata prefix gains canonical closure slots for exported
-   record and union statics. Older compilers cannot decode those interfaces or
-   safely reconstruct imported first-class static selectors.
-   0.19 -> 0.20: Array proxies gain a second traced user value for their
-   construction-selected Lua writer, and Titan function closures gain the
-   strict generic-entry trailer and fixed closure-brand upvalue. This version is
-   also the coordinated Interface representation cutover; relation-only and
-   Interface-only intermediate layouts are not separately publishable ABIs.
-   0.20 -> 0.21: the embedded Lua contract advances from 5.5.0 to 5.5.1.
-   Generated code follows the revised stack-slot and numeric-operation macros,
-   and native-layout consumers follow Lua's revised LUAI_MAXALIGN contract.
-   Providers compiled against the two internal-header sets must not mix.
-   0.21 -> 0.22: titan.uv localizes its source-local surface, changing its
-   serialized public schema and reconstructible module-userdata prefix. This
-   is a private-provider boundary; Lua 5.5.1 and the other 0.21 layouts remain
-   unchanged.
-   0.22 -> 0.23: source-defined foreign callback entries replace the runtime
-   and standard-provider callback shim objects. Generated callable names also
-   use injective module/nominal/member separators. The runtime archive and
-   generated modules therefore expose and consume a different native symbol
-   contract; 0.22 and 0.23 objects must not be mixed.
-   0.23 -> 0.24: serialized module interfaces gain generic binder scopes,
-   parameter references, applied nominal arguments, declaration schemes,
-   generic owners and methods, and constructor-preserving aliases. Older
-   compilers cannot decode the extended metadata, so 0.23 and 0.24 providers
-   must not be mixed.
-   0.24 -> 0.25: titan.fs stat/lstat results become optional and titan.async
-   suspend gains an optional synchronous cancellation action. Their serialized
-   public interfaces and exact native call signatures change, so 0.24 and 0.25
-   standard providers must not be mixed.
-   0.25 -> 0.26: the serialized titan.fs.Stat record gains opaque device and
-   inode identity fields; serialized Array, Field, ModuleVariable, and
-   Interface descriptors gain const/member-shape state; Interface wrappers
-   gain field uservalues; and generated module state/runtime support
-   distinguish mutable and const Array tags. The public record, descriptor,
-   wrapper, and runtime layouts are not compatible, so 0.25 and 0.26 providers
-   must not be mixed. */
-#define TITAN_VER "0.26"
-#define TITAN_VER_SUFFIX "_0_26"
+/* TITAN_ABI_VERSION is the monotonic compiled-module compatibility integer,
+   encoded as a canonical decimal string in module metadata. TITAN_VERSION is
+   the compiler and standard-library semantic version.
+   TITAN_LIBRARY_VERSION is its major/minor component and owns installed
+   library paths plus the versioned TITAN_PATH override. */
+#define TITAN_ABI_VERSION "2"
+#define TITAN_VERSION "0.6.0"
+#define TITAN_LIBRARY_VERSION "0.6"
+#define TITAN_LIBRARY_VERSION_SUFFIX "_0_6"
 #define TITAN_PATH_VAR "TITAN_PATH"
 #define TITAN_PATH_SEP "/"
 #define TITAN_ROOT_DEFAULT "/usr/local"

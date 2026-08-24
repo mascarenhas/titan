@@ -5,8 +5,7 @@ implemented in Titan source. They reuse the imported-C type graph and the
 configured target profile, but they do **not** reuse the ordinary Titan
 function ABI. This chapter follows the feature from parser and source
 collaboration through raw-C lowering and generated headers. It also records the
-target-directed allocation work and callback migrations that make up the
-ABI-0.23 FFI boundary.
+target-directed allocation work and callback ownership in the current ABI.
 
 For the source contract, see [Foreign functions](../language/foreign-functions.md).
 The imported-header pipeline and ordinary FFI boundary remain documented in
@@ -457,7 +456,7 @@ cannot establish a Titan recovery boundary.
 
 ## Standard-library callback migrations
 
-ABI 0.23 dogfoods foreign declarations at the three former hand-written
+The standard library dogfoods foreign declarations at the three former hand-written
 callback boundaries:
 
 * `titan.coroutine` defines `coro_entry_trampoline` in
@@ -500,7 +499,7 @@ LPegLabel, the selected libuv payload, private llhttp, and the selected OpenSSL
 payload; it has no `titan_uv.o`, `titan/coro.h`, `titan/uv.h`, or
 `titan_httpshim.o`.
 
-## Native names and ABI 0.23
+## Native names and ABI
 
 `coder._function_prefix` separates a flattened logical module name from the
 remaining callable with `_\u2133_` (U+2133 SCRIPT CAPITAL M):
@@ -537,26 +536,16 @@ encodings. Library preflight calls `coder.external_symbols`, so hidden
 cross-object foreign and local entries still participate in collision checks
 before the linker runs.
 
-The complete change advances the compiled-module ABI to 0.23 for two native
-reasons: generated standard objects now define their callbacks while the former
-runtime/HTTP symbols and `titan_uv.o` are absent, and callable entry families
-use the separated module/nominal/member hierarchy. ABI-0.22 objects cannot be paired with the
-0.23 runtime or generated objects even when their serialized public types happen
-to match.
+The native symbol contract has two ABI-visible properties: generated standard
+objects define callbacks absent from the runtime/HTTP support objects, and
+callable entry families use the separated module/nominal/member hierarchy.
+ABI 2 carries that contract together with generic and public standard-library
+metadata. A mismatched runtime or generated object is rejected even when its
+serialized public types happen to match.
 
-`TITAN_VER`, `_0_23`, `TITAN_PATH_0_23`, `lib/titan/0.23`,
-`share/titan/0.23`, and `stdlib_0_23` advance together. A separately versioned
-0.22 installation is preserved as prior state; there is no migration,
-active-layout predecessor, compatibility object, or cleanup path. ABI 0.24
-retains these native names and callback locations while extending serialized
-interfaces for generics; its marker, `_0_24`, `TITAN_PATH_0_24`,
-`lib/titan/0.24`, `share/titan/0.24`, and `stdlib_0_24` reject and preserve the
-0.23 provider without migration or cleanup. ABI 0.25 retains those native
-names, callback locations, and generic layouts while changing the public
-`titan.fs` and `titan.async` interfaces and exact signatures. ABI 0.26 retains
-those native names while `_0_26`, `TITAN_PATH_0_26`, `lib/titan/0.26`,
-`share/titan/0.26`, and `stdlib_0_26` reject and preserve the 0.25 provider
-without migration or cleanup.
+`TITAN_VERSION` `0.6.0` derives the `0.6` library namespace used by
+`TITAN_PATH_0_6`, `lib/titan/0.6`, `share/titan/0.6`, and `stdlib_0_6`.
+Earlier Titan installations are not migration or compatibility inputs.
 
 Foreign declarations, allocation plans, and generated headers remain
 compiler-local. They add no public type descriptor or module-state slot, so the

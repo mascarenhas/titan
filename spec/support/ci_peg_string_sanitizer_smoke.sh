@@ -10,18 +10,21 @@ if [[ $PREFIX != /* ]]; then PREFIX=$PWD/$PREFIX; fi
 PREFIX=$(CDPATH= cd "$PREFIX" && pwd -P)
 LUA="$PREFIX/bin/lua"
 TITANC="$PREFIX/bin/titanc"
-ABI_ROOT="$PREFIX/lib/titan/0.26"
-PROVIDER="$ABI_ROOT/titan.so"
+LIBRARY_ROOT="$PREFIX/lib/titan/0.6"
+PROVIDER="$LIBRARY_ROOT/titan.so"
+RUNTIME_ARCHIVE="$LIBRARY_ROOT/libtitan.a"
 SHIM_DIR="$PREFIX/share/lua/5.5/titan"
 
 test -x "$LUA"
 test -x "$TITANC"
 test -f "$PROVIDER" && test ! -L "$PROVIDER"
-test -f "$ABI_ROOT/titan.a" && test ! -L "$ABI_ROOT/titan.a"
+test -f "$LIBRARY_ROOT/titan.a" && test ! -L "$LIBRARY_ROOT/titan.a"
+test -f "$RUNTIME_ARCHIVE" && test ! -L "$RUNTIME_ARCHIVE"
+test ! -e "$PREFIX/lib/libtitan.a"
 test -d "$SHIM_DIR" && test ! -L "$SHIM_DIR"
 
 SMOKE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/titan-peg-string-san.XXXXXX")
-PROVIDER_HIDDEN="$ABI_ROOT/.titan.so.peg-string-san.$$"
+PROVIDER_HIDDEN="$LIBRARY_ROOT/.titan.so.peg-string-san.$$"
 SHIMS_HIDDEN="$PREFIX/share/lua/5.5/.titan.peg-string-san.$$"
 
 restore_provider() {
@@ -43,7 +46,7 @@ trap cleanup EXIT HUP INT TERM
 local prefix = assert(arg[1])
 package.path = prefix .. "/share/lua/5.5/?.lua;" ..
                prefix .. "/share/lua/5.5/?/init.lua"
-package.cpath = prefix .. "/lib/titan/0.26/?.so;" ..
+package.cpath = prefix .. "/lib/titan/0.6/?.so;" ..
                 prefix .. "/lib/lua/5.5/?.so"
 
 local peg = require "titan.peg"
@@ -101,7 +104,7 @@ TITAN
     cd "$SMOKE_TMP"
     env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
         TITAN_ROCKS_ROOT="$PREFIX" \
-        TITAN_PATH_0_26="$ABI_ROOT" TITAN_PATH= \
+        TITAN_PATH_0_6="$LIBRARY_ROOT" TITAN_PATH= \
         TITAN_RUNTIME_PREBUILT=1 \
         TITAN_EXTRA_CPPFLAGS="${TITAN_EXTRA_CPPFLAGS:-} -I$PREFIX/include -D_GNU_SOURCE" \
         TITAN_EXTRA_CFLAGS="${TITAN_EXTRA_CFLAGS:-}" \

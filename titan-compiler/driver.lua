@@ -17,12 +17,19 @@ local driver = {}
 
 driver.imported = {}
 
-driver.TITAN_VER = "0.26"
-driver.TITAN_VER_SUFFIX = "_0_26"
+-- Compiled-module metadata encodes the monotonic ABI integer as its canonical
+-- decimal string. The semantic release and its major/minor library namespace
+-- are deliberately independent from that compatibility marker.
+driver.TITAN_ABI_VERSION = "2"
+driver.TITAN_VERSION = "0.6.0"
+driver.TITAN_LIBRARY_VERSION =
+    assert(driver.TITAN_VERSION:match("^(%d+%.%d+)%.[0-9]+$"))
+driver.TITAN_LIBRARY_VERSION_SUFFIX =
+    "_" .. driver.TITAN_LIBRARY_VERSION:gsub("%.", "_")
 driver.LUA_VERSION = "5.5"
 
 -- Version of the additive compiler contract consumed by the Titan language
--- server. This is intentionally independent from TITAN_VER: matching the
+-- server. This is intentionally independent from TITAN_ABI_VERSION: matching the
 -- generated-code ABI does not imply support for semantic AST metadata,
 -- incremental source/interface caches, analysis-local FFI include paths, or
 -- cooperative scheduling. API 2 additionally guarantees exact C-header
@@ -179,25 +186,26 @@ function driver.probe_cache_directory(cpath, override, abi)
     local root = driver.resolve_installation_root(cpath, override)
     if not root then return nil end
     return root_join(root, "var/cache/titan-probes/" ..
-        tostring(abi or driver.TITAN_VER))
+        tostring(abi or driver.TITAN_ABI_VERSION))
 end
 
 function driver.installed_paths(root)
     root = normalize_root(root)
     if not root then return nil end
-    local titan_lib = root_join(root, "lib/titan/" .. driver.TITAN_VER)
+    local titan_lib = root_join(
+        root, "lib/titan/" .. driver.TITAN_LIBRARY_VERSION)
     return {
         root = root,
         lua_source = root_join(root, "src/lua-5.5.1"),
         include = root_join(root, "include"),
         lib = root_join(root, "lib"),
-        libtitan = root_join(root, "lib/libtitan.a"),
+        libtitan = titan_lib .. "/libtitan.a",
         libbacktrace = root_join(root, "lib/libbacktrace.a"),
         liblua = root_join(root, "lib/liblua.a"),
         titan_bin = titan_lib,
         lua_cpath = titan_lib .. "/?.so",
-        test_source = root_join(root, "share/titan/" .. driver.TITAN_VER ..
-            "/src/titan/test.titan"),
+        test_source = root_join(root, "share/titan/" ..
+            driver.TITAN_LIBRARY_VERSION .. "/src/titan/test.titan"),
     }
 end
 
@@ -275,12 +283,12 @@ local preliminary_probe_root = probe_prefix and
     normalize_absolute_path(probe_prefix) or driver.TITAN_ROOT
 driver.PROBE_CACHE_DIRECTORY = not probe_cache_disabled and
     preliminary_probe_root and root_join(preliminary_probe_root,
-        "var/cache/titan-probes/" .. driver.TITAN_VER) or nil
+        "var/cache/titan-probes/" .. driver.TITAN_ABI_VERSION) or nil
 local probe_cache_identity = os.getenv("TITAN_PROBE_CACHE_IDENTITY")
 if probe_cache_identity == "" then probe_cache_identity = nil end
 driver.PROBE_CACHE_IDENTITY = probe_cache_identity
 local configured_titan_bin_path =
-    os.getenv("TITAN_PATH" .. driver.TITAN_VER_SUFFIX)
+    os.getenv("TITAN_PATH" .. driver.TITAN_LIBRARY_VERSION_SUFFIX)
     or os.getenv("TITAN_PATH")
 
 local function apply_layout(source_root)
@@ -300,7 +308,7 @@ local function apply_layout(source_root)
 
     local bin_default = driver.INSTALL_PATHS and
         (".;" .. driver.INSTALL_PATHS.titan_bin) or
-        (".;/usr/local/lib/titan/" .. driver.TITAN_VER)
+        (".;/usr/local/lib/titan/" .. driver.TITAN_LIBRARY_VERSION)
     driver.DEFAULT_TITAN_BIN_PATH = bin_default
     if driver.TITAN_BIN_PATH == nil or
        driver.TITAN_BIN_PATH == previous_bin_default then
@@ -355,7 +363,7 @@ function driver.initialize_layout(context)
         cache_root, cache_error = normalize_root(cache_root, context.io)
         if not cache_root then return nil, cache_error end
         driver.PROBE_CACHE_DIRECTORY = root_join(cache_root,
-            "var/cache/titan-probes/" .. driver.TITAN_VER)
+            "var/cache/titan-probes/" .. driver.TITAN_ABI_VERSION)
     else
         driver.PROBE_CACHE_DIRECTORY = nil
     end
@@ -2553,9 +2561,9 @@ local function probe_compiled_interface(modname, binf)
     local abi_or_err, abi_call_err = one_metadata_result(
         abif, "compiled module ABI marker '" .. abiname .. "'")
     if not abi_or_err then return "error", abi_call_err end
-    if abi_or_err ~= driver.TITAN_VER then
+    if abi_or_err ~= driver.TITAN_ABI_VERSION then
         return "error", "compiled module '" .. modname
-            .. "' ABI mismatch: expected " .. driver.TITAN_VER
+            .. "' ABI mismatch: expected " .. driver.TITAN_ABI_VERSION
             .. " but found " .. tostring(abi_or_err)
     end
 
@@ -2625,7 +2633,7 @@ function driver.find_dynamic_interface(paths, modname, context)
                     elseif index == #candidates then
                         return nil, "compiled module '" .. modname ..
                             "' has no compatible Titan ABI marker (expected " ..
-                            driver.TITAN_VER .. "): " ..
+                            driver.TITAN_ABI_VERSION .. "): " ..
                             tostring(value and value.abi)
                     end
                 end
@@ -2649,7 +2657,7 @@ local function inspect_static_provider(context, filename, relative)
 
     local provider, scan_err = staticmetadata.scan_archive(filename, {
         io = context.io,
-        expected_abi = driver.TITAN_VER,
+        expected_abi = driver.TITAN_ABI_VERSION,
         validate_types = function(name, serialized, origin)
             return driver.decode_module_interface(
                 serialized, name, origin)
@@ -4517,7 +4525,7 @@ local function prepare_compile(
         if not header_ok then return nil, header_err end
     end
     local code, native_references =
-        coder.generate(modname, ast, static_deps, driver.TITAN_VER,
+        coder.generate(modname, ast, static_deps, driver.TITAN_ABI_VERSION,
             driver.EMIT_LINE_DIRECTIVES)
     local output_ok, output_err = ensure_output_parent(filename)
     if not output_ok then return nil, output_err end
@@ -5419,7 +5427,7 @@ end
 local function metadata_scan_options(target)
     return {
         target = target,
-        expected_abi = driver.TITAN_VER,
+        expected_abi = driver.TITAN_ABI_VERSION,
         validate_types = function(name, serialized, origin)
             return driver.decode_module_interface(serialized, name, origin)
         end,
@@ -5434,7 +5442,7 @@ local function scan_native_file(filename, target, validate_types)
     end
     local options = {
         target = target,
-        expected_abi = driver.TITAN_VER,
+        expected_abi = driver.TITAN_ABI_VERSION,
     }
     if validate_types then
         options.validate_types = function(name, serialized, origin)

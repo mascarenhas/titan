@@ -6,7 +6,7 @@ fixed decisions, and the researched defaults for process/runtime behavior are
 adopted unless implementation exposes a genuine architectural contradiction.
 
 This work discharges the `minimal standard library, continued` roadmap item.
-It keeps the Titan ABI at **0.20** and is a standard-library project: do not
+It keeps the Titan ABI unchanged and is a standard-library project: do not
 change the compiler to make an API convenient. If a requested API cannot be
 expressed using current Titan semantics, stop and align on the intended
 language or library model instead of adding a compiler workaround.
@@ -437,7 +437,7 @@ hide this dependency through checkout-local paths.
 
 1. Focused specs for each workstream in its isolated prefix/worktree.
 2. Rebuild the canonical fourteen-root `titan.so`/`titan.a` pair and shims;
-   prove exact ABI-0.20 metadata, DSO entries, archive keys, rollback, bundled
+   prove exact current-ABI metadata, DSO entries, archive keys, rollback, bundled
    and system-libuv production modes.
 3. Run all explicit non-LuaCov library shards, then the full authoritative
    `make test` from a clean ambient policy (`ROCKS_TREE`, `TITAN_ROCKS_ROOT`,

@@ -33,7 +33,10 @@ end
 describe("compiler installation discovery", function()
     it("exports the language-server compiler API independently of the ABI",
        function()
-        assert.equal("0.26", driver.TITAN_VER)
+        assert.equal("2", driver.TITAN_ABI_VERSION)
+        assert.equal("0.6.0", driver.TITAN_VERSION)
+        assert.equal("0.6", driver.TITAN_LIBRARY_VERSION)
+        assert.equal("_0_6", driver.TITAN_LIBRARY_VERSION_SUFFIX)
         assert.equal(3, driver.LANGUAGE_SERVER_API_VERSION)
         assert.is_function(driver.serialize_source_interface)
         assert.is_function(driver.restat_c_header_dependencies)
@@ -371,7 +374,7 @@ describe("compiler installation discovery", function()
 
     it("uses the first literal Lua 5.5 C-module prefix", function()
         local cpath = table.concat({
-            "/first prefix/lib/titan/0.26/?.so",
+            "/first prefix/lib/titan/0.6/?.so",
             "/wrong/lib/lua/5.4/?.so",
             "/also-wrong/lib/lua/5.5/?.dylib",
             "/first prefix/lib/lua/5.5/?.so",
@@ -405,14 +408,14 @@ describe("compiler installation discovery", function()
     it("derives the ABI-owned probe cache from an explicit prefix first",
        function()
         local cpath = "/installed/lib/lua/5.5/?.so"
-        assert.equal("/explicit/var/cache/titan-probes/0.26",
-            driver.probe_cache_directory(cpath, "/explicit", "0.26"))
-        assert.equal("/installed/var/cache/titan-probes/0.26",
-            driver.probe_cache_directory(cpath, "", "0.26"))
-        assert.equal("/var/cache/titan-probes/0.26",
+        assert.equal("/explicit/var/cache/titan-probes/2",
+            driver.probe_cache_directory(cpath, "/explicit", "2"))
+        assert.equal("/installed/var/cache/titan-probes/2",
+            driver.probe_cache_directory(cpath, "", "2"))
+        assert.equal("/var/cache/titan-probes/2",
             driver.probe_cache_directory(
-                "/lib/lua/5.5/?.so", nil, "0.26"))
-        assert.is_nil(driver.probe_cache_directory(nil, nil, "0.26"))
+                "/lib/lua/5.5/?.so", nil, "2"))
+        assert.is_nil(driver.probe_cache_directory(nil, nil, "2"))
     end)
 
     it("honors the test-only persistent-probe-cache disable switch",
@@ -466,23 +469,23 @@ assert(driver.PROBE_CACHE_DIRECTORY == nil)
             lua_source = "/opt/titan/src/lua-5.5.1",
             include = "/opt/titan/include",
             lib = "/opt/titan/lib",
-            libtitan = "/opt/titan/lib/libtitan.a",
+            libtitan = "/opt/titan/lib/titan/0.6/libtitan.a",
             libbacktrace = "/opt/titan/lib/libbacktrace.a",
             liblua = "/opt/titan/lib/liblua.a",
-            titan_bin = "/opt/titan/lib/titan/0.26",
-            lua_cpath = "/opt/titan/lib/titan/0.26/?.so",
+            titan_bin = "/opt/titan/lib/titan/0.6",
+            lua_cpath = "/opt/titan/lib/titan/0.6/?.so",
             test_source =
-                "/opt/titan/share/titan/0.26/src/titan/test.titan",
+                "/opt/titan/share/titan/0.6/src/titan/test.titan",
         }, paths)
 
         assert.same({
-            "/opt/titan/lib/libtitan.a",
+            "/opt/titan/lib/titan/0.6/libtitan.a",
             "/opt/titan/lib/libbacktrace.a",
             "/opt/titan/lib/liblua.a",
             "-ldl", "-lm",
         }, driver.installed_link_inputs(paths, false))
         assert.same({
-            "/opt/titan/lib/libtitan.a",
+            "/opt/titan/lib/titan/0.6/libtitan.a",
             "/opt/titan/lib/libbacktrace.a",
             "/opt/titan/lib/liblua.a",
             "-lm",
@@ -1474,7 +1477,7 @@ describe("compiler module loader", function()
             for name, modtype in pairs(module_types) do
                 local prefix = driver.mangle_module_name(name)
                 if symbol == prefix .. "_abi" then
-                    return function() return driver.TITAN_VER end
+                    return function() return driver.TITAN_ABI_VERSION end
                 elseif symbol == prefix .. "_types" then
                     local serialized = types.serialize(modtype)
                     return function() return serialized end
@@ -2847,7 +2850,7 @@ end
             assert.equal(binary .. "/titan/timer.so", filename)
             symbols[#symbols + 1] = symbol
             if symbol == "titan_timer_abi" then
-                return function() return driver.TITAN_VER end
+                return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "titan_timer_types" then
                 return function() return "Module('titan.timer',{})" end
             end
@@ -3084,7 +3087,7 @@ end
         titan._loadlib = function(filename, symbol)
             assert.equal(binary .. "/fallback.so", filename)
             if symbol == "fallback_abi" then
-                return function() return driver.TITAN_VER end
+                return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "fallback_types" then
                 return function() return "Module('fallback',{})" end
             end
@@ -3135,7 +3138,7 @@ end
         titan._loadlib = function(filename, symbol)
             assert.equal(binary .. "/fallback_static.so", filename)
             if symbol == "fallback_static_abi" then
-                return function() return driver.TITAN_VER end
+                return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "fallback_static_types" then
                 return function()
                     return "Module('fallback_static',{})"
@@ -3929,7 +3932,7 @@ typedef double titan_driver_symlink_value;
         titan._loadlib = function(filename, symbol)
             assert.equal(first .. "/a/b/c.so", filename)
             if symbol == "a_b_c_abi" then
-                return function() return driver.TITAN_VER end
+                return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "a_b_c_types" then
                 return function() return "Module('a.b.c',{})" end
             end
@@ -3963,7 +3966,7 @@ typedef double titan_driver_symlink_value;
         titan._loadlib = function(filename, symbol)
             assert.equal(dynamic, filename)
             if symbol == "choice_abi" then
-                return function() return driver.TITAN_VER end
+                return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "choice_types" then
                 return function() return "Module('choice',{})" end
             end
@@ -4224,7 +4227,7 @@ typedef double titan_driver_symlink_value;
             end
             assert.equal(second .. "/a/b.so", filename)
             if symbol == "a_b_c_abi" then
-                return function() return driver.TITAN_VER end
+                return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "a_b_c_types" then
                 return function() return "Module('a.b.c',{})" end
             end
@@ -4251,7 +4254,7 @@ typedef double titan_driver_symlink_value;
             end
             assert.equal(binary .. "/titan.so", filename)
             if symbol == "titan_timer_abi" then
-                return function() return driver.TITAN_VER end
+                return function() return driver.TITAN_ABI_VERSION end
             end
             return nil, "undefined symbol: " .. symbol, "init"
         end
@@ -4322,19 +4325,19 @@ typedef double titan_driver_symlink_value;
         local cases = {
             {
                 name = "meta.malformed",
-                abi = function() return driver.TITAN_VER end,
+                abi = function() return driver.TITAN_ABI_VERSION end,
                 metadata = function() return "@" end,
                 expected = "unexpected symbol near '@'",
             },
             {
                 name = "meta.call_error",
-                abi = function() return driver.TITAN_VER end,
+                abi = function() return driver.TITAN_ABI_VERSION end,
                 metadata = function() error("types metadata exploded") end,
                 expected = "types metadata exploded",
             },
             {
                 name = "meta.arity",
-                abi = function() return driver.TITAN_VER, "extra" end,
+                abi = function() return driver.TITAN_ABI_VERSION, "extra" end,
                 metadata = function()
                     error("types metadata must not execute")
                 end,
@@ -4343,14 +4346,14 @@ typedef double titan_driver_symlink_value;
             },
             {
                 name = "meta.non_string",
-                abi = function() return driver.TITAN_VER end,
+                abi = function() return driver.TITAN_ABI_VERSION end,
                 metadata = function() return 42 end,
                 expected = "compiled module type metadata " ..
                     "'meta_non_string_types' must return exactly one string",
             },
             {
                 name = "meta.noncanonical",
-                abi = function() return driver.TITAN_VER end,
+                abi = function() return driver.TITAN_ABI_VERSION end,
                 metadata = function()
                     return [[{ _tag = "Type.Module",
                         name = "meta.noncanonical", members = {} }]]
@@ -4359,7 +4362,7 @@ typedef double titan_driver_symlink_value;
             },
             {
                 name = "meta.member_schema",
-                abi = function() return driver.TITAN_VER end,
+                abi = function() return driver.TITAN_ABI_VERSION end,
                 metadata = function()
                     return [[Module("meta.member_schema", {
                         ModuleMember("meta.member_schema", "bad",
@@ -4371,7 +4374,7 @@ typedef double titan_driver_symlink_value;
             },
             {
                 name = "meta.interface_schema",
-                abi = function() return driver.TITAN_VER end,
+                abi = function() return driver.TITAN_ABI_VERSION end,
                 metadata = function()
                     return [[Module("meta.interface_schema", {}, {
                         I = {
@@ -4421,7 +4424,7 @@ typedef double titan_driver_symlink_value;
             end
             assert.equal(binary .. "/titan.so", filename)
             if symbol == "titan_timer_abi" then
-                return function() return driver.TITAN_VER end
+                return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "titan_timer_types" then
                 return function() return "Module('titan.other',{})" end
             end
@@ -4463,7 +4466,7 @@ typedef double titan_driver_symlink_value;
             assert.equal(binary .. "/dup.so", filename)
             table.insert(symbols, symbol)
             if symbol == "dup_item_abi" then
-                return function() return driver.TITAN_VER end
+                return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "dup_item_types" then
                 return function() return "Module('dup.item',{})" end
             end
@@ -4483,11 +4486,11 @@ typedef double titan_driver_symlink_value;
        function()
         write_file(binary .. "/bundle.so", "two logical interfaces\n")
         local functions = {
-            bundle_left_abi = function() return driver.TITAN_VER end,
+            bundle_left_abi = function() return driver.TITAN_ABI_VERSION end,
             bundle_left_types = function()
                 return "Module('bundle.left',{})"
             end,
-            bundle_right_abi = function() return driver.TITAN_VER end,
+            bundle_right_abi = function() return driver.TITAN_ABI_VERSION end,
             bundle_right_types = function()
                 return "Module('bundle.right',{})"
             end,
@@ -4844,7 +4847,7 @@ typedef double titan_driver_symlink_value;
         titan._loadlib = function(filename, symbol)
             assert.equal(child_binary, filename)
             if symbol == "titan_sample_child_abi" then
-                return function() return driver.TITAN_VER end
+                return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "titan_sample_child_types" then
                 return function()
                     return "Module('titan.sample.child',{})"

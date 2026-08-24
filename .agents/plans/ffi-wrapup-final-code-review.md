@@ -45,7 +45,7 @@ and an end-to-end nested-array regression was added.
   full-backing longjmp spill/reload stay distinct.
 * Long-lived libuv/llhttp/minicoro objects in standard sources use explicit
   owners; callback protocols root their owner and restore the Lua stack.
-* Runtime/archive payload and ABI-0.23 symbol/path assertions match the retired
+* Runtime/archive payload and ABI symbol/path assertions match the retired
   callback shims and new `\u2133` entry family.
 
 ## Validation after review

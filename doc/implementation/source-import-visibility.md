@@ -159,7 +159,7 @@ closure slot, preserving identity across importers and Lua GC cycles.
 
 Native entries needed across source translation units have hidden visibility.
 Ordinary local/public top-level functions and source foreign declarations all
-use ABI 0.23's injective module/member UCN separator. Local nominal statics and
+use the current ABI's injective module/member UCN separator. Local nominal statics and
 methods use the same module/owner/member hierarchy as public ones; visibility,
 not an alternate spelling, keeps private entries out of the DSO's dynamic API. They
 remain linkable within one source/static composition. The coder rejects a module-state slot count larger than
@@ -172,20 +172,11 @@ or private layout. Binary imports therefore use public closure slots and public
 native symbols exactly as before. A static provider selected as a dependency
 cannot grant local access merely because its objects enter the final link.
 
-The overlay itself introduces no serialized constructor. ABI 0.22 is required
-because localizing the `titan.uv` implementation deliberately removes members
-from its public schema and public closure prefix, and because every module's
-userdata gains the fixed physical-provider identity slot used to authenticate
-source-private state. ABI 0.21 providers are rejected before metadata decoding.
-ABI 0.23 retains that overlay/layout but adds source foreign collaboration and
-changes the separated callable symbol families; 0.22 providers are rejected
-before metadata decoding or native linking. ABI 0.24 retains the overlay and
-native layout while extending generic declaration metadata; 0.23 providers are
-rejected before decoding. ABI 0.25 retains the overlay and layout while
-changing the public `titan.fs` and `titan.async` signatures; 0.24 providers are
-rejected before decoding. ABI 0.26 retains the overlay while extending the
-public `titan.fs.Stat` record plus const and Interface metadata; 0.25 providers
-are rejected before decoding. Earlier
-trees are neither migrated nor deleted. The explicit `.titan` parser marker and
+The overlay itself introduces no serialized constructor. ABI 2 covers the
+localized `titan.uv` public schema and closure prefix, every module's physical-
+provider identity slot, source foreign collaboration, callable symbol families,
+generic declarations, and current public standard-library and const metadata.
+A mismatched provider is rejected before decoding or native linking. Earlier
+installations are neither migrated nor deleted. The explicit `.titan` parser marker and
 source-required request add no serialized field or native identity and
 therefore require no additional ABI change.

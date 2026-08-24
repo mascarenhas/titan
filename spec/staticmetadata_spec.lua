@@ -312,7 +312,7 @@ local function fat_container(slice_specs, options)
     return assemble(offset, parts)
 end
 
-local ABI = "0.26"
+local ABI = "2"
 local TYPES = "Module(\"pkg.mod\",{}, {})"
 local PAYLOAD = assert(staticmetadata.render("pkg.mod", ABI, TYPES))
 
@@ -404,7 +404,7 @@ describe("static compiled-module metadata", function()
 -- Titan archive module metadata v1
 return {
     ["pkg.mod"] = {
-        abi = "0.26",
+        abi = "2",
         types = "Module(\"pkg.mod\",{}, {})",
     },
 }
@@ -457,8 +457,8 @@ return {
             local variants = {
                 (PAYLOAD:gsub("return {", "return  {", 1)),
                 (PAYLOAD:gsub(
-                    '        abi = "0.26",\n        types = ([^\n]+)',
-                    "        types = %1\n        abi = \"0.26\",", 1)),
+                    '        abi = "2",\n        types = ([^\n]+)',
+                    "        types = %1\n        abi = \"2\",", 1)),
                 (PAYLOAD:gsub('%["pkg.mod"%]', "['pkg.mod']", 1)),
             }
             for _, payload in ipairs(variants) do
@@ -515,27 +515,27 @@ return {
                 },
                 {
                     staticmetadata.BANNER ..
-                        "return { ['bad..name'] = { abi='0.26', types='x' } }\n",
+                        "return { ['bad..name'] = { abi='2', types='x' } }\n",
                     "invalid logical Titan module key",
                 },
                 {
                     staticmetadata.BANNER ..
-                        "return { [{}] = { abi='0.26', types='x' } }\n",
+                        "return { [{}] = { abi='2', types='x' } }\n",
                     "invalid logical Titan module key",
                 },
                 {
                     staticmetadata.BANNER ..
-                        "return { m = { abi='0.26', types='x', extra=true } }\n",
+                        "return { m = { abi='2', types='x', extra=true } }\n",
                     "unknown field",
                 },
                 {
                     staticmetadata.BANNER ..
-                        "return { m = { [1]='0.26', types='x' } }\n",
+                        "return { m = { [1]='2', types='x' } }\n",
                     "unknown field",
                 },
                 {
                     staticmetadata.BANNER ..
-                        "return { m = { abi='0.26', types='x', [{}]=true } }\n",
+                        "return { m = { abi='2', types='x', [{}]=true } }\n",
                     "unknown field",
                 },
             }
@@ -547,7 +547,7 @@ return {
             end
 
             local old_abi = assert(staticmetadata.render(
-                "pkg.mod", "0.17", TYPES))
+                "pkg.mod", "1", TYPES))
             local entry, err = staticmetadata.validate(
                 old_abi, "abi", { expected_abi = ABI })
             assert.falsy(entry)
@@ -789,7 +789,7 @@ return {
         end)
 
         it("invalidates the whole provider when an unused entry is malformed", function()
-            local malformed = PAYLOAD:gsub("0.26", "0.25", 1)
+            local malformed = PAYLOAD:gsub('abi = "2"', 'abi = "1"', 1)
             local result, err = scan(archive({
                 ar_member("wanted.o/", elf_object(PAYLOAD)),
                 ar_member("unused.o/", elf_object(malformed)),

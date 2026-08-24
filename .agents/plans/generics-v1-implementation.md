@@ -15,8 +15,7 @@ is normative for implementation.
 
 - Branch: `generics-v1`
 - Draft-only preservation commit: `074a269` (`Add generics v1 design draft`)
-- Current compiler/provider ABI before this work: 0.23
-- Generics ABI: 0.24, a clean-start prototype boundary
+- ABI policy: a clean-start prototype boundary for the generics metadata change
 - Implementation strategy: one erased body per generic declaration and one
   shared owner identity, with checker-frozen surface applications and one
   erased-core cast-elaboration
@@ -286,7 +285,7 @@ gradual guarantee.
 8. Module declarations remain staged and AST order remains authoritative for
    duplicate precedence, module variables, initializers, serialization order,
    and code generation.
-9. ABI 0.24 is a clean rebuild boundary. Preserve 0.23 state; add no migration,
+9. This is a clean ABI rebuild boundary. Add no migration,
    cross-version cleanup, symbolic links, compatibility providers, or generic
    stale-file reconciliation.
 
@@ -616,7 +615,7 @@ The checker maintains two distinct products:
 
 1. the **declared module type**, containing generic owners, schemes, binders,
    applications, aliases, and constraints exactly as required for source
-   checking and ABI 0.24 metadata; and
+   checking and compiled-module metadata; and
 2. an **erased ordinary AST**, containing only Titan's existing monomorphic AST
    and `Type.*` shapes plus existing concrete adjustment annotations.
 
@@ -884,10 +883,10 @@ arrays, functions, and function pointers are compile-time errors; generics add
 no conversion to make them eligible. Raw C `TValue` uses its existing structural
 whole-slot conversion. Foreign functions cannot declare type parameters.
 
-### Metadata and ABI 0.24
+### Metadata and ABI boundary
 
-Serialize `ast._declared_type`, not erased `ast._type` or expression types. ABI 0.24
-extends metadata with scopes, binders, Parameter references, applied nominal
+Serialize `ast._declared_type`, not erased `ast._type` or expression types. The
+new ABI extends metadata with scopes, binders, Parameter references, applied nominal
 arguments, schemes, generic owners/methods, and forwarding aliases. There is no
 runtime type argument, specialization, witness, or provenance schema.
 
@@ -897,10 +896,10 @@ arity, constraints, public visibility, and canonical member projections. During
 ordinary referenced-nominal recovery, load external generic owners/alias targets
 before reconciling their arity and constraints; do not add speculative hardening
 or a second registry architecture. DSO and archive metadata remain identical,
-and ABI 0.24 rejects 0.23 before decoding.
+and the ABI marker rejects pre-boundary providers before decoding.
 
-Advance all current ABI paths/constants/stamps/scripts/fixtures together,
-preserve prior 0.23 state, and add no migration or cleanup machinery.
+Advance all current ABI constants, stamps, scripts, and fixtures together; add
+no migration or cleanup machinery.
 
 ## Standard-library dogfood
 
@@ -914,8 +913,8 @@ snapshot manifests, metadata fixtures, build/smoke tests, README/quick tour,
 style/agent guidance, and generated-shim ignore entries. The provider remains
 18 logical modules and 19 Lua openers.
 
-A fresh 0.24 prefix is required. An old unversioned `titan/iter.lua` in an
-in-place prefix is prior-version state and is not removed by cross-ABI cleanup.
+A fresh prefix is required. Do not add cleanup for old unversioned
+`titan/iter.lua` state.
 
 Use these exact types:
 
@@ -1210,7 +1209,7 @@ uses exactly today's ordinary representation for its erased source type:
 unconstrained leaves use `value`/`TValue`, constrained leaves use their erased
 Interface/`Udata *`, and Option, vararg, and flex forms use the existing ordinary
 descriptor rules for those erased types. Then update exact stdlib metadata
-fixtures from a validated generated 0.24 provider.
+fixtures from a validated generated current-ABI provider.
 
 ### Standard-library behavior
 
@@ -1232,7 +1231,7 @@ polluted success/complex projection failures, terminal-listener remover
 closures (idempotence, duplicate registration, cancellation cleanup, and
 removal during detached delivery), zero/nil-result Tasks, Lua-erased Tasks, and the existing
 HTTP timeout ownership asymmetry. Regenerate exact `titan.uv`/`titan.async`
-provider fixtures from the validated 0.24 image.
+provider fixtures from the validated current-ABI image.
 
 ## Documentation
 
@@ -1244,12 +1243,12 @@ Create and link:
 - `doc/implementation/generics.md`: AST/elaboration, type model, solver,
   staging, erased-core cast elaboration, unchanged codegen layouts, GC, Interface
   adapters, metadata validator,
-  and ABI 0.24.
+  and the ABI boundary.
 
 Update the grammar, types, functions, records, unions, Interfaces, aliases,
 expressions, closures, foreign-functions, modules/providers, Lua interop,
 version history, and both indexes. Remove generics from roadmap/limitations.
-Update `AGENTS.md` in the same change for ABI 0.24 paths/constants, the
+Update `AGENTS.md` in the same change for the current ABI constants, the
 `titan.iteration` root, all new Type tags/dispatch duties, retained parse-time
 constructor desugaring, constraint-directed rigid erasure ABI, all-value Task
 Runtime, and
@@ -1282,7 +1281,7 @@ Docs are reviewed alongside the code at each phase, not appended after tests.
    frozen declared module type and reject
    leaked generic forms.
 5. **Separate compilation/ABI:** closed validator, DSO/archive/container tests,
-   0.24 sweep, and publication fixtures.
+   current-ABI sweep, and publication fixtures.
 6. **Dogfood/docs:** iteration hard rename/generic APIs, generic finalizable,
    SSL cleanup, generic uv/async owners and fixed-arity combinators with an
    all-value Runtime, both manuals, API chapters, and standard-library tests.
@@ -1294,7 +1293,7 @@ Docs are reviewed alongside the code at each phase, not appended after tests.
    pre-merge dispatch for this generics-v1 task.
 
 After compiler-source edits, reinstall the rock before Busted so tests do not
-load a stale snapshot. Use an isolated absolute 0.24 prefix with no ambient
+load a stale snapshot. Use an isolated absolute prefix with no ambient
 `ROCKS_TREE`, `TITAN_ROCKS_ROOT`, `TITAN_EXTRA_CPPFLAGS`, or
 `TITAN_NO_LINE_DIRECTIVES` for canonical validation.
 

@@ -30,7 +30,7 @@ local m = require "sum"
 print(m.sum_list(m.sample())) --> 10
 ```
 
-This is the reference for the language as implemented by the Titan 0.26
+This is the reference for the language as implemented by the Titan 0.6.0
 prototype compiler in this repository. It replaces the old single-file
 manual. For how the compiler itself works — including how each construct
 is translated to C — see the
@@ -97,12 +97,12 @@ use the chapters below for the normative language reference.
 
 ## Status and limitations
 
-Titan is a working prototype, version 0.26. The language documented here is
+Titan is a working prototype, version 0.6.0. The language documented here is
 implemented and covered by the compiler's test suite. Its boundaries are
 mostly missing features, plus a handful of constructs the compiler rejects
 with a clean error; each links to the chapter that documents it in full.
 
-Interfaces were introduced in ABI 0.20 and remain part of ABI 0.26. A record
+Interfaces are part of ABI 2. A record
 or union satisfies an Interface structurally at a statically known conversion
 site, but the conversion constructs a fresh wrapper; it is not subtyping or
 gradual consistency and does not lift through containers or functions. Dynamic
