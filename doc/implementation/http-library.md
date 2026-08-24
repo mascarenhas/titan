@@ -8,7 +8,7 @@ callback bridge, streaming parser ownership, and high-level server composition.
 ## Folder-module structure and layering
 
 The canonical `titan/http/http.titan` main uses the short `net`, `ssl`, `url`,
-`io`, `async`, and `string` imports plus qualified `titan.math`. The parser
+`io`, `async`, `math`, and `string` imports. The parser
 resolves every short spelling to its ordinary `titan.*` logical identity before
 checking. Its immediate contributors share one module-private scope:
 

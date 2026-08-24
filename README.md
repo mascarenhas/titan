@@ -469,26 +469,14 @@ callable declaration. Logical source order continues to determine duplicate
 precedence, interface/member and module-slot ordering, module-variable
 initialization, and code generation.
 
-The standard-library short names (`coroutine`, `uv`, `async`, `timer`, `io`,
-`fs`, `net`, `ssl`, `url`, `http`, `os`, `peg`, `string`, and `test`) are parser
-sugar
-for the corresponding `titan.*` module
-names. Module resolution checks binary dependencies before source, so an
+The standard-library short names are parser sugar
+for the corresponding `titan.*` module names. Module resolution checks binary dependencies before source, so an
 ordinary `./titan/uv/uv.titan` folder cannot displace the installed compiled
 provider;
 someone who explicitly changes `TITAN_PATH` to hide that provider is choosing
 a different module installation. Modules explicitly named on the `titanc`
-command line must come from source and use the folder-before-flat rule. Titan
-code uses those fourteen short imports; the four qualified-only modules are
-imported as `titan.math`, `titan.lua`, `titan.iteration`, and `titan.gc`. Lua uses the
-qualified
-names `require "titan.coroutine"`, `require "titan.async"`,
-`require "titan.timer"`, `require "titan.io"`, `require "titan.fs"`,
-`require "titan.net"`, `require "titan.ssl"`, `require "titan.url"`,
-`require "titan.http"`, and
-`require "titan.os"`, plus `require "titan.peg"`,
-`require "titan.string"`, `require "titan.math"`, `require "titan.lua"`,
-`require "titan.iteration"`, `require "titan.gc"`, and `require "titan.test"`.
+command line must come from source and use the folder-before-flat rule. Lua
+always uses the qualified stdlib module names with the `titan.` prefix.
 The private `titan.uv` logical module remains available
 for runtime plumbing and direct-libuv extensions. Lua's own `coroutine` and
 `os` modules remain unchanged.

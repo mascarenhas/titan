@@ -201,9 +201,9 @@ remains rejected.
   `http` short imports;
   portable `os` helpers and direct child processes;
   typed PEG construction; byte-oriented string/regex operations; the
-  qualified `titan.math`, `titan.lua`, `titan.iteration`, and `titan.gc` modules,
+  `math`, `lua`, `iteration`, and `gc` modules,
   including explicit weak-map policy and table/userdata finalizer ownership;
-  and native test infrastructure through `titan.test`.
+  and native test infrastructure through `test`.
   Lua loads every standard module through its qualified `titan.*` name,
   leaving Lua's own standard modules unchanged.
 

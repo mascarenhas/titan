@@ -1,4 +1,4 @@
-local gc = import "titan.gc"
+local gc = import "gc"
 
 local function fresh_value_map(name: string?): value
   local map: {value: value} = {}

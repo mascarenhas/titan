@@ -208,9 +208,6 @@ Another Titan module uses `local greeting = import "greeting"`. Lua uses
 different: Titan uses established short imports such as `import "fs"`,
 `import "url"`, and `import "http"`, while Lua uses the qualified identities
 `require "titan.fs"`, `require "titan.url"`, and `require "titan.http"`.
-Modules without short-import sugar use qualified Titan imports too, such as
-`import "titan.math"`. The qualified names do not replace Lua's own `io`,
-`os`, `math`, or `string` libraries.
 
 A dotted module name maps to directories: `import "app.model"` resolves the
 logical module `app.model`. One logical module may be a flat source
@@ -428,17 +425,13 @@ process APIs target Titan's current Linux and macOS hosts.
 
 ## Math, collection iteration, GC, and dynamic Lua
 
-The newer `math`, `iteration`, `gc`, and `lua` modules use qualified Titan names.
-They do not replace Lua's libraries and do not add compiler short-import
-sugar.
-
-`titan.math` exposes a deliberately typed numerical surface. Operations that
+`math` exposes a deliberately typed numerical surface. Operations that
 produce floating-point values take and return `float`; integer-only operations
 say so explicitly. Its random generator follows Lua 5.5's xoshiro256** stream,
 including deterministic two-word seeds:
 
 ```titan
-local math = import "titan.math"
+local math = import "math"
 
 function numerical_example(): boolean
   math.randomseed(17, 29)
@@ -451,14 +444,14 @@ end
 ```
 
 `tonumber` returns `value?` because a successful numeral may be an integer or
-a float. `titan.math` deliberately has no `type` operation: use Titan's static
+a float. `math` deliberately has no `type` operation: use Titan's static
 types or the ordinary `is`/`as` gradual checks at a `value` boundary.
 
-`titan.iteration` supplies the familiar collection iterators without adding methods
+`iteration` supplies the familiar collection iterators without adding methods
 to Array or Map types:
 
 ```titan
-local iteration = import "titan.iteration"
+local iteration = import "iteration"
 
 function total(scores: {string: integer}): integer
   local result = 0
@@ -481,13 +474,13 @@ Unlike Lua's `ipairs`, this Array iterator visits every position through
 `#values`, including an interior nil element. Its first result is the nonnil
 integer index, so the nil item does not end generic iteration.
 
-`titan.gc` exposes explicit collector actions, observation, tuning, weak Map
+`gc` exposes explicit collector actions, observation, tuning, weak Map
 configuration, and reachability-owned finalizers for tables and full
 userdata. The stop action and status query are intentionally different
 functions:
 
 ```titan
-local gc = import "titan.gc"
+local gc = import "gc"
 
 local function finish_owner(_: {value: value}): ()
   -- Clear and release reachability-owned state here.
@@ -515,12 +508,12 @@ receives the finalized value at the same exact `T` selected by the caller.
 Cleanup should clear owned state before releasing it so the callback remains
 safe if cleanup is retried or partially completed.
 
-Finally, `titan.lua` is the audited dynamic boundary for compiling Lua chunks,
+Finally, `lua` is the audited dynamic boundary for compiling Lua chunks,
 executing Lua files, and loading modules. Flexible arguments and results,
 including inner nil values, pass through unchanged:
 
 ```titan
-local lua = import "titan.lua"
+local lua = import "lua"
 
 function dynamic_results(): (...: value)
   local chunk = lua.load("return ...", "=quick-tour", nil)
@@ -531,7 +524,7 @@ end
 `load` uses the complete byte length, accepts text and binary chunks, and
 raises a load error instead of returning `(nil, message)`. `load_from_reader`
 does not close its Reader. `dofile` owns and closes its File, and
-`titan.lua.require` replaces the blocking source-file search with asynchronous
+`lua.require` replaces the blocking source-file search with asynchronous
 filesystem operations while retaining preload, C-module, Titan-shim, and
 `package.loaded` behavior. See the four standard-library chapters in the
 [language reference](language/index.md) for the complete contracts.

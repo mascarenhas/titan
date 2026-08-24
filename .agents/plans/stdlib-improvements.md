@@ -20,11 +20,6 @@ language or library model instead of adding a compiler workaround.
   `titan.gc`. Together with the ten current roots, the canonical provider will
   contain fourteen logical metadata keys and fourteen generated shims (plus
   the bare native `luaopen_titan` support opener).
-- Use qualified imports for those four new modules. They resolve today and do
-  not require edits to the compiler's short-import table. Every established
-  standard module continues to use its compiler-provided short import even
-  inside stdlib sources; spelling one as `"titan.<name>"` is a style
-  violation.
 - Titan generic-for tuples are `(iterator, state, initial_control, close)`.
   Therefore `iter.pairs` returns `next, map, nil, nil`; the original draft's
   reversed tuple and `map.pairs` example were typos.

@@ -1,5 +1,5 @@
 local test = import "test"
-local gclib = import "titan.gc"
+local gclib = import "gc"
 local support = import "support.common.titan"
 local lua_api = foreign import "lua.h"
 

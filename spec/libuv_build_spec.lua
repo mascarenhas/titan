@@ -1802,7 +1802,7 @@ describe("libuv Makefile configuration", function()
                 "titan-runtime/.titan-stdlib-complete",
                 'rm -f "$$rocks_tree/lib/libtitan.a"',
                 'install -m 0644 "$(TITAN_RUNTIME_LIB)" ' ..
-                    '"$$version_dir/libtitan.a"',
+                '"$$version_dir/libtitan.a"',
                 "rm -f $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_QUALIFIED_SOS) " ..
                 "$(STDLIB_SOS)",
             }) do
@@ -2561,7 +2561,7 @@ printf 'sharded\n' > "$TITAN_ROUTING_SHARD_LOG"
                     "BUSTED=" .. fake_busted,
                     "TITAN_ROCK_TEST_INTERNAL=1",
                     "TITAN_ROCK_TEST_STDLIB_SPECS=" ..
-                        table.concat(stdlib_specs, " "),
+                    table.concat(stdlib_specs, " "),
                     "TITAN_ROUTING_ARGV_LOG=" .. argv_log,
                     "TITAN_ROUTING_SHARD_LOG=" .. shard_log,
                 }
@@ -2630,7 +2630,7 @@ printf '%s\0' "$@" > "$TITAN_SELECTOR_ARGV_LOG"
                 local expected = { {}, {}, {}, {} }
                 for line in read_file(
                     "spec/support/ci_compiler_test_groups.txt"):
-                    gmatch("[^\r\n]+") do
+                gmatch("[^\r\n]+") do
                     local shard, path = line:match("^([1-4])%s+(%S+)")
                     if shard then
                         local paths = expected[tonumber(shard)]
@@ -2820,7 +2820,7 @@ if [[ ${TITAN_FIXTURE_FAIL_SHARD:-} == "$shard" ]]; then exit 23; fi
             end
 
             local function run_case(jobs, fail_shard, extra_environment,
-                bounded)
+                                    bounded)
                 reset_state()
                 local argv = {}
                 if bounded then
@@ -2860,7 +2860,7 @@ if [[ ${TITAN_FIXTURE_FAIL_SHARD:-} == "$shard" ]]; then exit 23; fi
                 end
                 argv[#argv + 1] = "bash"
                 argv[#argv + 1] =
-                    "spec/support/run_parallel_compiler_tests.sh"
+                "spec/support/run_parallel_compiler_tests.sh"
                 return run_argv(argv)
             end
 
@@ -2877,7 +2877,7 @@ if [[ ${TITAN_FIXTURE_FAIL_SHARD:-} == "$shard" ]]; then exit 23; fi
                 local temporary_directories = {}
                 local observed_shards = {}
                 for line in read_file(state .. "/observations"):
-                    gmatch("[^\r\n]+") do
+                gmatch("[^\r\n]+") do
                     local shard, worker, tmpdir, busted =
                         line:match("^(%d)\t([^\t]+)\t([^\t]+)\t([^\t]+)$")
                     assert.truthy(shard, line)
@@ -2892,7 +2892,7 @@ if [[ ${TITAN_FIXTURE_FAIL_SHARD:-} == "$shard" ]]; then exit 23; fi
                 end
                 local finished = {}
                 for shard in read_file(state .. "/finished"):
-                    gmatch("[^\r\n]+") do
+                gmatch("[^\r\n]+") do
                     finished[shard] = true
                 end
                 for shard = 1, 4 do
@@ -2929,7 +2929,7 @@ if [[ ${TITAN_FIXTURE_FAIL_SHARD:-} == "$shard" ]]; then exit 23; fi
                 reset_state()
                 return run_argv({
                     "bash", lfs.currentdir() ..
-                        "/spec/support/run_with_timeout.sh", "10",
+                "/spec/support/run_with_timeout.sh", "10",
                     "bash", "-c", [==[
 workspace=$1
 state=$2
@@ -3258,10 +3258,10 @@ done
                 'strings.len("static\\0string") == 13',
                 'local found = strings.match("static42", "([0-9]+)")',
                 'strings.find("static\\0string", "\\0str")',
-                'local math = import "titan.math"',
-                'local lua = import "titan.lua"',
-                'local iteration = import "titan.iteration"',
-                'local gc = import "titan.gc"',
+                'local math = import "math"',
+                'local lua = import "lua"',
+                'local iteration = import "iteration"',
+                'local gc = import "gc"',
                 'local testing = import "test"',
                 'not testing.testing() and not testing.verbose()',
                 "local peer = async.run<value, value>(",

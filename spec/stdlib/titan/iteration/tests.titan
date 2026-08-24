@@ -1,5 +1,5 @@
 local test = import "test"
-local iteration = import "titan.iteration"
+local iteration = import "iteration"
 local support = import "support.common.titan"
 
 -- A literal value crosses an unconstrained generic boundary as its erased

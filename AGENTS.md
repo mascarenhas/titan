@@ -708,10 +708,8 @@ system-mode dependencies remain final-link inputs. The DSO exposes those
 eighteen protocols plus bare `luaopen_titan` support, for nineteen
 `luaopen_*` entries total. `titan.io`
 owns the standard Interface vocabulary and high-level I/O helpers.
-`import "async"` is parser sugar for `import "titan.async"` (likewise for
-`coroutine`, `uv`, `timer`, `io`, `fs`, `net`, `ssl`, `url`, `http`, `os`, `peg`, `string`, and `test`). The `titan.math`, `titan.lua`, `titan.iteration`, and
-  `titan.gc` modules
-use their qualified names and deliberately add no compiler short-import sugar.
+`import "async"` is parser sugar for `import "titan.async"` (likewise for the other modules under
+`titan/`).
 Dependencies resolve binaries before sources; modules explicitly named on the
 `titanc` command line are built from source. There is no parallel root
 `stdlib/` source tree.

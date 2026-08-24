@@ -2,14 +2,13 @@
 
 The `titan.gc` module configures weak Maps, attaches reachability-owned
 finalizers to tables and full userdata, and exposes explicit control of the
-Lua 5.5 collector used by Titan. Import it by its qualified name:
+Lua 5.5 collector used by Titan:
 
 ```titan
-local gc = import "titan.gc"
+local gc = import "gc"
 ```
 
-There is deliberately no compiler-level `gc` import alias. Lua code loads the
-same installed standard-provider module with `require "titan.gc"`.
+Lua code loads the same installed standard-provider module with `require "titan.gc"`.
 
 Collector state belongs to the complete Lua state, not to one Titan module or
 Task. Pausing it, changing its mode, or changing a parameter affects all Titan
