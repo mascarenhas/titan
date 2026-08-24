@@ -432,6 +432,31 @@ assert(driver.PROBE_CACHE_DIRECTORY == nil)
         assert.is_true(os.execute(command))
     end)
 
+    it("uses the ABI version for initialized persistent probe caches",
+       function()
+        local module_name = "titan-compiler.driver"
+        local loaded_driver = package.loaded[module_name]
+        local original_getenv = os.getenv
+        package.loaded[module_name] = nil
+        os.getenv = function(name)
+            if name == "TITAN_PREFIX" then return "/explicit" end
+            if name == "TITAN_PROBE_CACHE_DISABLE" then return nil end
+            return original_getenv(name)
+        end
+
+        local loaded, value = pcall(require, module_name)
+
+        os.getenv = original_getenv
+        package.loaded[module_name] = loaded_driver
+        assert.truthy(loaded, value)
+
+        local expected = "/explicit/var/cache/titan-probes/2"
+        assert.equal(expected, value.PROBE_CACHE_DIRECTORY)
+        local context = value.new_resolver_context()
+        assert.equal(expected, value.PROBE_CACHE_DIRECTORY)
+        assert.is_true(value.close_resolver_context(context))
+    end)
+
     it("preserves ordinary root spelling but resolves symlink parent traversal",
        function()
         local workspace = os.tmpname()
