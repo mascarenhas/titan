@@ -1214,6 +1214,7 @@ describe("libuv Makefile configuration", function()
             local short = {
                 "coroutine", "uv", "async", "timer", "io", "fs", "net",
                 "ssl", "url", "http", "os", "peg", "string", "test",
+                'math', 'gc', 'lua', 'iteration'
             }
             for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES")) do
                 if source ~= "$(UV_TITAN_SOURCES)" and
@@ -1255,10 +1256,6 @@ describe("libuv Makefile configuration", function()
                     'import "' .. dependency .. '"', 1, true), dependency)
                 assert.falsy(http:find(
                     'import "titan.' .. dependency .. '"', 1, true), dependency)
-            end
-            for _, dependency in ipairs({ "titan.math" }) do
-                assert.truthy(http:find(
-                    'import "' .. dependency .. '"', 1, true), dependency)
             end
             local url = read_file("titan/url.titan")
             for _, dependency in ipairs({ "peg", "string" }) do
