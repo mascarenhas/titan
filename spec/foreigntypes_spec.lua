@@ -150,8 +150,7 @@ describe("foreign C type conversion", function()
         local uint = assert(foreigntypes.convert(
             st, registered.UINT_MAX))
         assert.equal("unsigned int", uint.spelling)
-        assert.equal("4294967295",
-            registered.UINT_MAX._macro_evaluation.value)
+        assert.is_nil(registered.UINT_MAX._macro_evaluation)
     end)
 
     it("preserves array element qualifiers at the exact declarator level",

@@ -174,6 +174,7 @@ describe("C FFI cdriver", function()
                 source_dir = source,
                 compiler_include_dirs = {},
                 cppflags = { "-I", early, "-I", late },
+                process_analysis = cdriver.new_process_analysis(),
             }
 
             local _, first = assert_process_file("outer.h", options)
@@ -193,6 +194,7 @@ describe("C FFI cdriver", function()
 
             write_file(early_header,
                 "typedef long titan_selected_header_value;\n")
+            options.process_analysis = cdriver.new_process_analysis()
             local _, shadowed = assert_process_file("outer.h", options)
             assert.equal(early_header,
                 shadowed.c_header_dependencies[2].path)
@@ -445,6 +447,21 @@ describe("C FFI cdriver", function()
             cdriver._set_process_cache_limits_for_test()
         end)
 
+        it("rejects forged analysis reuse authorities", function()
+            cdriver.clear_process_cache()
+            local header = tmp_header(
+                "typedef int titan_invalid_analysis_type;\n")
+
+            local types, err = cdriver.process_file(header, {
+                process_analysis = {},
+            })
+
+            assert.is_nil(types)
+            assert.equal("process_analysis is not a cdriver analysis", err)
+            assert.equal(0, cdriver.process_cache_stats().lookups)
+            os.remove(header)
+        end)
+
         it("returns isolated graphs without reparsing an unchanged header",
         function()
             cdriver.clear_process_cache()
@@ -530,6 +547,136 @@ extern titan_cdriver_cache_type titan_cdriver_cache_value;
             os.remove(header)
         end)
 
+        it("validates and clones once for each explicit analysis",
+        function()
+            cdriver.clear_process_cache()
+            local original_identity = cdriver.header_input_identity
+            local identity_reads = 0
+            cdriver.header_input_identity = function(...)
+                identity_reads = identity_reads + 1
+                return original_identity(...)
+            end
+            local phases = {}
+            local function trace(_, _, phase, outcome)
+                local key = phase .. ":" .. outcome
+                phases[key] = (phases[key] or 0) + 1
+            end
+            local header = tmp_header(
+                "typedef int titan_analysis_cache_type;\n")
+            local base = { compiler_include_dirs = {} }
+
+            local ok, err = pcall(function()
+                assert_process_file(header, base)
+                local after_seed = identity_reads
+
+                local first_analysis = cdriver.new_process_analysis()
+                local first_options = {
+                    compiler_include_dirs = {},
+                    process_analysis = first_analysis,
+                    process_trace = trace,
+                }
+                local first = assert_process_file(header, first_options)
+                local after_first = identity_reads
+                local repeated = assert_process_file(header, first_options)
+                local repeated_again =
+                    assert_process_file(header, first_options)
+                assert.is_true(after_first > after_seed)
+                assert.equal(after_first, identity_reads)
+                assert.equal(first, repeated)
+                assert.equal(first, repeated_again)
+
+                first.titan_analysis_cache_type.def[1] = "long"
+                local second_options = {
+                    compiler_include_dirs = {},
+                    process_analysis = cdriver.new_process_analysis(),
+                    process_trace = trace,
+                }
+                local second = assert_process_file(header, second_options)
+                assert.is_true(identity_reads > after_first)
+                assert.not_equal(first, second)
+                assert.same(
+                    { "int" }, second.titan_analysis_cache_type.def)
+
+                local ordinary = assert_process_file(header, base)
+                assert.not_equal(second, ordinary)
+                assert.same(
+                    { "int" }, ordinary.titan_analysis_cache_type.def)
+                assert.equal(2, phases["hit_validation:current"])
+                assert.equal(2, phases["hit_validation:analysis_reuse"])
+                assert.equal(2, phases["graph_clone:hit"])
+                assert.equal(2, phases["graph_clone:analysis_reuse"])
+            end)
+            cdriver.header_input_identity = original_identity
+            os.remove(header)
+            assert.truthy(ok, err)
+        end)
+
+        it("treats one analysis as a snapshot and revalidates the next",
+        function()
+            cdriver.clear_process_cache()
+            local c99 = require "c-parser.c99"
+            local original_match = c99.match_language_grammar
+            local matches = 0
+            c99.match_language_grammar = function(...)
+                matches = matches + 1
+                return original_match(...)
+            end
+            local root = tmp_dir()
+            local outer = root .. "/outer.h"
+            local nested = root .. "/nested.h"
+            write_file(outer, '#include "nested.h"\n')
+            write_file(nested,
+                "typedef int titan_analysis_snapshot_type;\n")
+            local base = {
+                source_dir = root,
+                compiler_include_dirs = {},
+            }
+
+            local ok, err = pcall(function()
+                assert_process_file("outer.h", base)
+                local first_options = {
+                    source_dir = root,
+                    compiler_include_dirs = {},
+                    process_analysis = cdriver.new_process_analysis(),
+                }
+                local first, first_include =
+                    assert_process_file("outer.h", first_options)
+                write_file(nested,
+                    "typedef long titan_analysis_snapshot_type;\n")
+
+                local same_analysis, same_include =
+                    assert_process_file("outer.h", first_options)
+                assert.equal(first, same_analysis)
+                assert.same({ "int" },
+                    same_analysis.titan_analysis_snapshot_type.def)
+                assert.same(first_include.c_header_dependencies,
+                    same_include.c_header_dependencies)
+
+                local old_nested_identity
+                for _, input in ipairs(
+                        same_include.c_header_dependencies) do
+                    if input.path == nested then
+                        old_nested_identity = input.identity
+                    end
+                end
+                assert.truthy(old_nested_identity)
+                assert.not_equal(old_nested_identity,
+                    assert(cdriver.header_input_identity("file", nested)))
+
+                local next_analysis = assert_process_file("outer.h", {
+                    source_dir = root,
+                    compiler_include_dirs = {},
+                    process_analysis = cdriver.new_process_analysis(),
+                })
+                assert.same({ "long" },
+                    next_analysis.titan_analysis_snapshot_type.def)
+                assert.equal(2, matches)
+            end)
+            c99.match_language_grammar = original_match
+            remove_tree({ outer, nested }, { root })
+            assert.truthy(ok, err)
+        end)
+
         it("isolates probed predefined macros from caller mutation",
         function()
             cdriver.clear_process_cache()
@@ -587,22 +734,37 @@ extern titan_cdriver_cache_type titan_cdriver_cache_value;
             local name = "shared-cache.h"
             local header = fallback .. "/" .. name
             write_file(header, "typedef int titan_shared_cache_type;\n")
+            local analysis = cdriver.new_process_analysis()
 
             local ok, err = pcall(function()
                 local _, first_include = assert_process_file(name, {
                     source_dir = first_source,
                     cppflags = { "-I", fallback },
                     compiler_include_dirs = {},
+                    process_analysis = analysis,
                 })
+                local dependency_identity =
+                    first_include.c_header_dependencies[1].identity
+                local fallback_search_identity =
+                    first_include.c_header_search_inputs[2].identity
+                first_include.c_header_dependencies[1].identity =
+                    "poisoned dependency"
+                first_include.c_header_search_inputs[2].identity =
+                    "poisoned search"
                 local _, second_include, second_context =
                     assert_process_file(name, {
                         source_dir = second_source,
                         cppflags = { "-I", fallback },
                         compiler_include_dirs = {},
+                        process_analysis = analysis,
                     })
                 assert.equal(1, matches)
                 assert.equal(header, first_include.resolved)
                 assert.equal(header, second_include.resolved)
+                assert.equal(dependency_identity,
+                    second_include.c_header_dependencies[1].identity)
+                assert.equal(fallback_search_identity,
+                    second_include.c_header_search_inputs[2].identity)
 
                 local observed = {}
                 for _, input in ipairs(
@@ -633,18 +795,21 @@ typedef TITAN_CACHE_CONFIG_TYPE titan_cache_config_type;
                 language_mode = "c99",
                 compiler_include_dirs = {},
             }
+            local analysis = cdriver.new_process_analysis()
 
             local first = assert_process_file(header, {
                 compiler = base.compiler,
                 language_mode = base.language_mode,
                 compiler_include_dirs = base.compiler_include_dirs,
                 cppflags = { "-DTITAN_CACHE_CONFIG_TYPE=int" },
+                process_analysis = analysis,
             })
             local second = assert_process_file(header, {
                 compiler = base.compiler,
                 language_mode = base.language_mode,
                 compiler_include_dirs = base.compiler_include_dirs,
                 cppflags = { "-DTITAN_CACHE_CONFIG_TYPE=long" },
+                process_analysis = analysis,
             })
             assert.same({ "int" }, first.titan_cache_config_type.def)
             assert.same({ "long" }, second.titan_cache_config_type.def)
@@ -654,6 +819,7 @@ typedef TITAN_CACHE_CONFIG_TYPE titan_cache_config_type;
                 language_mode = base.language_mode,
                 compiler_include_dirs = base.compiler_include_dirs,
                 cppflags = { "-DTITAN_CACHE_CONFIG_TYPE=int" },
+                process_analysis = analysis,
             })
             assert.same({ "int" }, repeated.titan_cache_config_type.def)
             local stats = cdriver.process_cache_stats()
@@ -731,11 +897,21 @@ typedef TITAN_CACHE_CONFIG_TYPE titan_cache_config_type;
             end
             local header = tmp_header(
                 "typedef int titan_provider_cache_type;\n")
+            local analysis = cdriver.new_process_analysis()
 
             local ok, err = pcall(function()
-                assert_process_file(header, { io = first_strategy })
-                assert_process_file(header, { io = first_strategy })
-                assert_process_file(header, { io = second_strategy })
+                assert_process_file(header, {
+                    io = first_strategy,
+                    process_analysis = analysis,
+                })
+                assert_process_file(header, {
+                    io = first_strategy,
+                    process_analysis = analysis,
+                })
+                assert_process_file(header, {
+                    io = second_strategy,
+                    process_analysis = analysis,
+                })
                 assert.equal(2, matches)
                 assert.equal(1,
                     cdriver.process_cache_stats(first_strategy).hits)
@@ -813,6 +989,7 @@ typedef TITAN_CACHE_CONFIG_TYPE titan_cache_config_type;
                 assert.same(
                     { "int" }, seeded.titan_replaced_cache_type.def)
                 assert.equal(1, matches)
+                options.process_analysis = cdriver.new_process_analysis()
 
                 local saw_first = false
                 local interleaved = false
@@ -858,6 +1035,75 @@ typedef TITAN_CACHE_CONFIG_TYPE titan_cache_config_type;
             cdriver.header_input_identity = original_identity
             c99.match_language_grammar = original_match
             remove_tree({ outer, first, second }, { root })
+            assert.truthy(ok, err)
+        end)
+
+        it("retries a memoized analysis hit replaced while tracing yielded",
+        function()
+            cdriver.clear_process_cache()
+            local c99 = require "c-parser.c99"
+            local original_match = c99.match_language_grammar
+            local matches = 0
+            c99.match_language_grammar = function(...)
+                matches = matches + 1
+                return original_match(...)
+            end
+            local header = tmp_header(
+                "typedef int titan_replaced_analysis_type;\n")
+            local analysis = cdriver.new_process_analysis()
+            local options = {
+                compiler_include_dirs = {},
+                process_analysis = analysis,
+            }
+
+            local ok, err = pcall(function()
+                assert_process_file(header, {
+                    compiler_include_dirs = {},
+                })
+                local first = assert_process_file(header, options)
+                assert.same(
+                    { "int" }, first.titan_replaced_analysis_type.def)
+
+                local interleaved = false
+                local replacement
+                local replacement_error
+                options.process_trace = function(_, _, phase, outcome)
+                    if not interleaved
+                       and phase == "hit_validation"
+                       and outcome == "analysis_reuse" then
+                        interleaved = true
+                        write_file(header,
+                            "typedef long titan_replaced_analysis_type;\n")
+                        replacement, replacement_error = cdriver.process_file(
+                            header, {
+                                compiler_include_dirs = {},
+                                process_analysis =
+                                    cdriver.new_process_analysis(),
+                            })
+                    end
+                end
+
+                local current = assert_process_file(header, options)
+                assert.is_true(interleaved)
+                assert.is_nil(replacement_error)
+                assert.is_table(replacement)
+                assert.same({ "long" },
+                    replacement.titan_replaced_analysis_type.def)
+                assert.same({ "long" },
+                    current.titan_replaced_analysis_type.def)
+                local repeated = assert_process_file(header, options)
+                assert.equal(current, repeated)
+                assert.equal(2, matches)
+
+                local stats = cdriver.process_cache_stats()
+                assert.equal(5, stats.lookups)
+                assert.equal(3, stats.hits)
+                assert.equal(2, stats.misses)
+                assert.equal(1, stats.invalidations)
+                assert.equal(2, stats.stores)
+            end)
+            c99.match_language_grammar = original_match
+            os.remove(header)
             assert.truthy(ok, err)
         end)
 
@@ -1058,6 +1304,7 @@ typedef TITAN_CACHE_CONFIG_TYPE titan_cache_config_type;
             local options = {
                 source_dir = root,
                 compiler_include_dirs = {},
+                process_analysis = cdriver.new_process_analysis(),
             }
 
             local first, first_error =

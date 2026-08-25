@@ -32,6 +32,32 @@ local configured_process_cache_limit = PROCESS_CACHE_LIMIT
 local configured_process_cache_weight_limit = PROCESS_CACHE_WEIGHT_LIMIT
 local configured_process_cache_tracks_weight = false
 local process_caches = setmetatable({}, { __mode = "k" })
+local process_analysis_mt = {}
+
+-- An analysis is an explicit narrow reuse authority. Long-lived compiler
+-- clients create one for a coherent analysis that has its own final
+-- publication-time header validation. Ordinary cdriver callers omit it and
+-- retain clone-per-call isolation.
+function cdriver.new_process_analysis()
+    return setmetatable({
+        providers = setmetatable({}, { __mode = "k" }),
+    }, process_analysis_mt)
+end
+
+local function process_analysis_entries(options, strategy)
+    local analysis = options and options.process_analysis
+    if analysis == nil then return nil end
+    if type(analysis) ~= "table"
+       or getmetatable(analysis) ~= process_analysis_mt then
+        return false, "process_analysis is not a cdriver analysis"
+    end
+    local entries = analysis.providers[strategy]
+    if not entries then
+        entries = {}
+        analysis.providers[strategy] = entries
+    end
+    return entries
+end
 
 local function process_cache_for(strategy)
     local cache = process_caches[strategy]
@@ -363,6 +389,27 @@ local function normalize_options(options)
     return {}
 end
 
+-- Internal compiler-client telemetry. The language server supplies a
+-- non-yielding sink only at trace log level; ordinary compiler calls pay no
+-- clock or allocation cost. Telemetry is best-effort and can never change a
+-- parse result.
+function cdriver.process_phase_clock(options)
+    options = normalize_options(options)
+    if type(options.process_trace) ~= "function" then return nil end
+    return os.clock()
+end
+
+function cdriver.emit_process_phase(
+        options, filename, include, phase, outcome, started)
+    options = normalize_options(options)
+    local sink = options.process_trace
+    if type(sink) ~= "function" or started == nil then return end
+    local resolved = type(include) == "table"
+        and tostring(include.resolved or "") or ""
+    pcall(sink, tostring(filename), resolved, tostring(phase),
+        tostring(outcome or ""), (os.clock() - started) * 1000)
+end
+
 local function resolve_include(filename, options, incdirs, observe)
     options = normalize_options(options)
     local strategy = io_for(options)
@@ -538,6 +585,9 @@ end
 function cdriver.process_file(filename, options)
     options = normalize_options(options)
     local strategy = io_for(options)
+    local analysis_entries, analysis_error =
+        process_analysis_entries(options, strategy)
+    if analysis_entries == false then return nil, analysis_error end
     local ctx, err = new_cpp_context(options)
     if not ctx then
         return nil, "failed configuring C preprocessor: " .. err
@@ -636,13 +686,26 @@ function cdriver.process_file(filename, options)
     while true do
         local cached = cache.entries[cache_key]
         if not cached then break end
-        local compatible =
+        local analysis_entry = analysis_entries
+            and analysis_entries[cache_key] or nil
+        local analysis_reuse = analysis_entry ~= nil
+            and analysis_entry.entry == cached
+        local validation_started = cdriver.process_phase_clock(options)
+        local prefix_compatible =
             input_tail_matches_prefix(
                 cached.dependencies, dependency_identities)
             and input_tail_matches_prefix(
                 cached.search_inputs, search_identities)
-            and input_tail_is_current(cached.dependencies, strategy)
-            and input_tail_is_current(cached.search_inputs, strategy)
+        local compatible = prefix_compatible
+            and (analysis_reuse
+                or (input_tail_is_current(cached.dependencies, strategy)
+                    and input_tail_is_current(
+                        cached.search_inputs, strategy)))
+        cdriver.emit_process_phase(options, filename, include,
+            "hit_validation", compatible and
+                (analysis_reuse and "analysis_reuse" or "current")
+                or "changed",
+            validation_started)
         -- Identity checks use the compiler I/O strategy and may yield. A
         -- concurrent Task can invalidate and replace this same key while the
         -- captured entry is being validated, so never publish or touch a
@@ -650,21 +713,44 @@ function cdriver.process_file(filename, options)
         if cache.entries[cache_key] ~= cached then
             -- Retry without charging another logical lookup or miss.
         elseif compatible then
-            for _, input in ipairs(cached.dependencies) do
-                assert(record_dependency(input.path, input.identity))
+            local ffi_types
+            if analysis_reuse then
+                ffi_types = analysis_entry.ffi_types
+                local reuse_started = cdriver.process_phase_clock(options)
+                cdriver.emit_process_phase(options, filename, include,
+                    "graph_clone", "analysis_reuse", reuse_started)
+            else
+                local clone_started = cdriver.process_phase_clock(options)
+                ffi_types = clone_graph(cached.ffi_types)
+                cdriver.emit_process_phase(options, filename, include,
+                    "graph_clone", "hit", clone_started)
             end
-            for _, input in ipairs(cached.search_inputs) do
-                assert(record_search(input.path, input.identity))
-            end
-            include.c_header_dependencies = dependencies
-            include.c_header_search_inputs = search_inputs
+            -- Identity checks may yield. The optional trace sink is required
+            -- to be non-yielding, but it is arbitrary reentrant Lua and can
+            -- still replace this key synchronously. Memoize or publish only
+            -- while the exact validated entry object remains current.
+            if cache.entries[cache_key] == cached then
+                if analysis_entries and not analysis_reuse then
+                    analysis_entries[cache_key] = {
+                        entry = cached,
+                        ffi_types = ffi_types,
+                    }
+                end
+                for _, input in ipairs(cached.dependencies) do
+                    assert(record_dependency(input.path, input.identity))
+                end
+                for _, input in ipairs(cached.search_inputs) do
+                    assert(record_search(input.path, input.identity))
+                end
+                include.c_header_dependencies = dependencies
+                include.c_header_search_inputs = search_inputs
 
-            local ffi_types = clone_graph(cached.ffi_types)
-            local context = result_context(
-                ffi_types, strategy, dependencies, search_inputs)
-            cache.hits = cache.hits + 1
-            touch_cache_entry(cache, cached)
-            return ffi_types, nil, include, context
+                local context = result_context(
+                    ffi_types, strategy, dependencies, search_inputs)
+                cache.hits = cache.hits + 1
+                touch_cache_entry(cache, cached)
+                return ffi_types, nil, include, context
+            end
         elseif remove_cache_entry(
                 cache, cache_key, true, cached) then
             break
@@ -672,7 +758,11 @@ function cdriver.process_file(filename, options)
     end
     cache.misses = cache.misses + 1
 
+    local preprocessing_started = cdriver.process_phase_clock(options)
     ctx, err = cpp.parse_file(parse_filename, nil, ctx)
+    cdriver.emit_process_phase(options, filename, include,
+        "preprocessing", ctx and "complete" or "failed",
+        preprocessing_started)
     if not ctx then
         return nil, "failed preprocessing '"..filename.."': " .. err
     end
@@ -701,7 +791,10 @@ function cdriver.process_file(filename, options)
 
     local srccode = table.concat(ctx.output, "\n").." $EOF$"
 
+    local c_parse_started = cdriver.process_phase_clock(options)
     local res, err, line, col, fragment = c99.match_language_grammar(srccode)
+    cdriver.emit_process_phase(options, filename, include,
+        "c_parse", res and "complete" or "failed", c_parse_started)
     if not res then
         return nil, ("failed parsing: %s:%d:%d: %s\n%s"):format(filename, line, col, err, fragment)
     end
@@ -765,20 +858,27 @@ function cdriver.process_file(filename, options)
         declaration._source_position = nil
     end
 
+    local type_conversion_started = cdriver.process_phase_clock(options)
     local ffi_types, err = ctypes.register_types(res, {
         header = filename,
         resolved_header = include.resolved,
     })
+    cdriver.emit_process_phase(options, filename, include,
+        "c_type_conversion", ffi_types and "complete" or "failed",
+        type_conversion_started)
     if not ffi_types then
         return nil, err
     end
 
+    local macro_conversion_started = cdriver.process_phase_clock(options)
     cdefines.register_defines(ffi_types, ctx.defines)
     ffi_types.macro_definitions = ctx.defines
     ffi_types.macro_changes = {}
     for name in pairs(ctx.macro_changes or {}) do
         ffi_types.macro_changes[name] = true
     end
+    cdriver.emit_process_phase(options, filename, include,
+        "macro_conversion", "complete", macro_conversion_started)
 
     -- The live result remains owned by this caller. Cache a separate complete
     -- graph so later checker mutation cannot leak into another resolver, then
@@ -808,8 +908,17 @@ function cdriver.process_file(filename, options)
     end
     entry.weight = cache_weight
     if make_cache_room(cache, cache_key, cache_weight) then
+        local retained_clone_started = cdriver.process_phase_clock(options)
         entry.ffi_types = clone_graph(ffi_types)
         store_cache_entry(cache, cache_key, entry)
+        if analysis_entries then
+            analysis_entries[cache_key] = {
+                entry = entry,
+                ffi_types = ffi_types,
+            }
+        end
+        cdriver.emit_process_phase(options, filename, include,
+            "graph_clone", "retained_store", retained_clone_started)
     end
 
     -- The fourth result is deliberately contextual rather than process-global:

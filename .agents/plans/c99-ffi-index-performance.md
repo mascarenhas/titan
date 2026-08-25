@@ -1,8 +1,9 @@
 # C99 and FFI indexing performance
 
-Status: both implementation workstreams, final profiling, and refreshed local
-gates are complete; review and merge are pending. The final PR heads must pass
-the ordinary Linux CI and Codecov gates recorded in the delivery section.
+Status: all three implementation workstreams, refreshed profiling, and both
+complete local gates are green. Publication and final CI evidence remain. The
+final PR heads must pass the ordinary Linux CI and Codecov gates recorded in
+the delivery section.
 
 This plan records the compiler-side work discovered while profiling cold Titan
 language-server indexing. It complements the language-server cache and
@@ -237,6 +238,95 @@ attempt CPU by 67.74%. The controlled 342-request trace above remains the
 cache-specific comparison because it intentionally preserves both identical
 passes; the integrated run verifies the shipped one-pass path.
 
+## Workstream C: one-analysis validation and graph reuse
+
+Issue #107 follows the provider-lifetime cache rather than replacing it. The
+normal one-pass Titan-repository index still spent 12.635s CPU validating and
+cloning completed-cache hits: `lua.h` accounted for 49 hits and 4.205s,
+`titan/ffi.h` for 27 hits and 4.260s, `lauxlib.h` for 11 hits and 1.403s, and
+`uv.h` for three hits and 0.907s. Those repeated calls belong to fresh resolver
+contexts created for roots within one compatible compiler analysis.
+
+The language-server bridge creates one explicit C-header analysis object for
+each `analyze_incremental` call and passes it through every resolver context,
+target-profile acquisition, probe service, and cdriver request in that call.
+The process cache remains provider-owned and authoritative. A completed entry
+must pass its exact dependency/search validation once before the analysis may
+remember it; after any yielding validation, the caller must still prove that
+the same cache entry is current. A later analysis receives a fresh object and
+therefore revalidates. Ordinary cdriver callers that supply no analysis object
+retain the existing clone-per-hit isolation contract.
+
+Within one analysis, the first compatible retained-cache hit receives one
+private clone and later root resolvers share that analysis-owned graph. A miss
+continues returning its caller-owned graph while retaining a separate private
+process-cache clone; if that miss successfully publishes the cache entry, the
+same live graph may become the analysis-owned view. Separate analyses and
+ordinary callers never share mutable graphs. The project service's existing
+just-before-publication restat of both prior and newly observed complete header
+closures remains unchanged and authoritative if files move while an analysis
+is in flight.
+
+- [x] Emit trace-level per-root/per-header phase events for cache-hit
+  validation, graph cloning/reuse, preprocessing, C parsing, CType/macro
+  conversion, and downstream Titan FFI conversion.
+- [x] Capture a fresh normal one-pass Titan-repository baseline from those
+  events, including aggregate/per-header hit CPU, attempt CPU/wall, and RSS.
+- [x] Plumb one explicit analysis object through the driver and cprobe without
+  changing preprocessing configuration keys or the released compiler API/ABI
+  versions.
+- [x] Reuse successful validation and one analysis-owned graph only for the
+  exact still-current process-cache entry; preserve yielded same-key
+  replacement retries, prefix compatibility, failure exclusion, and complete
+  dependency/search provenance.
+- [x] Add deterministic regressions for identity-read counts, clone counts,
+  separate-analysis isolation, exact header/search/config/provider changes,
+  and replacement during yielding validation.
+- [x] Rebuild vscode-titan's isolated compiler, run both complete gates, and
+  benchmark cold plus representative saved-edit reindex CPU/wall/RSS.
+- [x] Keep Titan `0.6.0`, library path `0.6`, ABI `2`, and the unreleased
+  language-server API marker unchanged.
+
+The fresh pre-reuse trace is `/tmp/titan-107-baseline.json`, SHA-256
+`e2700de0bc0501ce2931623a4412558722fa126b54fd10770dca6ff70eb85e5a`.
+It captured one normal 69-root analysis with 89 snapshots, 3,783 diagnostics,
+92.629s compiler-attempt CPU, 92.648s analysis CPU, and 1,580,328 KiB direct
+peak RSS. Its 138 completed-cache hits spent 10.324s validating dependency and
+search identities plus 2.030s cloning graphs, or 12.354s combined. Downstream
+Titan FFI conversion accounted for another 26.974s. The original harness
+subsequently started a hover-triggered cancelled chain, so its process elapsed
+and terminal-chain wall fields are deliberately not used as the cold-chain
+wall baseline.
+
+The validated post-reuse artifact is `/tmp/titan-107-post-analysis.json`,
+SHA-256
+`3f60c7943a83112107c15b28cab0c5c8dba9c5612015d5fcf92f8c427423cc55`.
+Its exactly correlated cold pass took 121.717s wall and 94.288s pass CPU;
+compiler attempts consumed 81.948s CPU and the compiler analysis consumed
+81.975s. All 138 repeated calls used the analysis-owned entry: validation
+bookkeeping took 7.539ms and graph-reuse bookkeeping took 0.150ms, 7.689ms
+combined. That removes 12.346s, or 99.94%, of the repeated hit work and reduces
+attempt CPU by 10.681s (11.53%) without changing the 89 snapshots, 3,783
+diagnostics, 43 semantic files, or 8,530 occurrences. Direct peak RSS rose to
+2,001,148 KiB, 420,820 KiB (26.63%) above the fresh baseline, because the
+analysis deliberately owns one live graph for every successful header in
+addition to the provider cache's isolated graph.
+
+A saved line-comment edit to
+`spec/stdlib/titan/fs/test_support.titan` then produced one clean, correlated
+one-module publication. It took 29.498s status wall and 29.110s pass CPU. The
+single compiler attempt used 1.546s CPU, while the fresh analysis deliberately
+revalidated and cloned five process-cache graphs in 650.370ms and downstream
+FFI conversion used 434.809ms. The complete analysis phase consumed 13.684s
+and project refresh consumed 28.888s, showing that most remaining saved-edit
+latency lies outside compiler/header work. Direct sampled peak RSS during the
+edit was 2,190,700 KiB. The harness at
+`/tmp/profile-titan-saved-edit.mjs`, SHA-256
+`b02183306001f28f2048f56226a6140aee71893fd089c707c9bfde6ff1dea2d9`,
+hash-verified all copied sources, correlated watcher/epoch/ready events, joined
+its `/proc` sampler, restored the source unchanged, and removed its temporary
+tree after a clean server exit.
+
 ## Verification
 
 1. Run focused C parser, ctypes, cdefines, cdriver/cprobe, and resolver specs
@@ -260,11 +350,11 @@ The completed-header cache's focused suite passed all 15 cases, including the
 yielded replacement race and provider-lifetime retention beyond the former
 production bound. A clean vscode-titan toolchain rebuilt from this worktree
 reports semantic version `0.6.0`, library path version `0.6`, and ABI `2`; its
-full `xvfb-run -a make -j1 verify` consumer gate also passed: 180 Titan tests,
+full `xvfb-run -a make -j1 verify` consumer gate also passed: 181 Titan tests,
 the native protocol and Codex smokes, 46 JavaScript tests, 11 Extension Host
 tests, and the package/linkage/plugin/install/VSIX inspections were green.
 
-Titan PR #106 is the delivery vehicle and closes issues #104 and #105.
+Titan PR #106 is the delivery vehicle and closes issues #104, #105, and #107.
 Its required ordinary Ubuntu 24.04 evidence is the stdlib/runtime,
 compiler/LuaCov, and ASan+UBSan jobs plus both Codecov project and patch gates;
 the macOS-only job remains intentionally skipped. Companion vscode-titan PR
