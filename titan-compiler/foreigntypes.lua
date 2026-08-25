@@ -1138,7 +1138,6 @@ local function convert_declaration(st, ftype, member_name)
             return nil, "unsupported target integer macro expression: " ..
                 tostring(evaluation_error)
         end
-        ftype._macro_evaluation = evaluated
         return evaluated.type
     end
     local converted, err, declaration_qualifiers

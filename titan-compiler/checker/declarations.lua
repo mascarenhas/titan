@@ -634,6 +634,7 @@ toplevel_visitor = util.make_visitor({
         local name = node.headername
         local ftypes, err, include
         local strategy
+        local process_options
         if foreign_c_config_error then
             err = foreign_c_config_error
         else
@@ -643,6 +644,7 @@ toplevel_visitor = util.make_visitor({
                 local options
                 options, err = service:cdriver_process_options()
                 if options then
+                    process_options = options
                     strategy = options.io
                     options.source_dir = st.source_dir
                     ftypes, err, include =
@@ -677,6 +679,8 @@ toplevel_visitor = util.make_visitor({
             local type_members = {}
             local ordinary_declarations = {}
             local ordinary_order = {}
+            local conversion_started =
+                cdriver.process_phase_clock(process_options)
             for _, item in ipairs(ftypes) do
                 local fname = item.name
                 local ftype = item.type
@@ -735,6 +739,10 @@ toplevel_visitor = util.make_visitor({
                 -- rest of the header still imports. Referencing a skipped
                 -- member is then a clean "not a member" error, never a crash.
             end
+            cdriver.emit_process_phase(
+                process_options, name, include,
+                "downstream_ffi_conversion", "complete",
+                conversion_started)
             -- The registrar can expose several source forms for one ordinary
             -- name within a single independently parsed header (notably stdio
             -- object declarations plus macro projections). Compare only the

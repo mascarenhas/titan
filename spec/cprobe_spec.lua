@@ -308,6 +308,8 @@ describe("session-scoped C probe service", function()
 
     it("exposes one authoritative cdriver process context", function()
         local profile = target_profile()
+        local analysis = cdriver.new_process_analysis()
+        local function trace() end
         local service = new_fake_service({
             compiler_argv = { "wrapper", "configured cc" },
             compile_flags = { "--target=fake" },
@@ -316,9 +318,13 @@ describe("session-scoped C probe service", function()
             cflags = { "-Wall" },
             include_dirs = { "/sdk/first", "/sdk/second" },
             profile = profile,
+            process_analysis = analysis,
+            process_trace = trace,
         })
 
         local options = assert(service:cdriver_process_options())
+        assert.equal(analysis, options.process_analysis)
+        assert.equal(trace, options.process_trace)
         assert.same({ "wrapper", "configured cc" }, options.compiler)
         assert.same({
             "--target=fake",

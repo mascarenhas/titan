@@ -2419,6 +2419,8 @@ function Service:cdriver_process_options()
 
     return {
         io = self.io,
+        process_trace = self.process_trace,
+        process_analysis = self.process_analysis,
         compiler = copy_array(self.compiler_argv),
         language_mode = self.language_mode,
         language_flag = false,
@@ -2530,6 +2532,14 @@ function cprobe.new_service(options)
         profile = deep_copy(profile)
         profile.identity = derived_identity
     end
+
+    local process_trace = option(
+        options, toolchain, "process_trace", nil)
+    if process_trace ~= nil and type(process_trace) ~= "function" then
+        return nil, "process_trace must be a function"
+    end
+    local process_analysis = option(
+        options, toolchain, "process_analysis", nil)
 
     -- `-c ... -o private.o` is the portable non-linking baseline. A caller may
     -- opt into `-fsyntax-only` only after establishing that its configured
@@ -2663,6 +2673,8 @@ function cprobe.new_service(options)
 
     return setmetatable({
         io = strategy,
+        process_trace = process_trace,
+        process_analysis = process_analysis,
         compiler_argv = compiler_argv,
         compile_flags = compile_flags,
         language_mode = language_mode,

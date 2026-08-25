@@ -483,6 +483,7 @@ function driver.configure_foreign_c(context)
         error("foreign C configuration requires a resolver context", 2)
     end
     compiler_io.validate(context.io, 2)
+    local io_strategy = context.io
     local platform_ok, platform_result = driver.initialize_platform(context)
     local platform_err = not platform_ok and platform_result or nil
 
@@ -494,7 +495,9 @@ function driver.configure_foreign_c(context)
         toolchain, toolchain_err = driver.toolchain_descriptor(context)
     end
     local options = {
-        io = context.io,
+        io = io_strategy,
+        process_trace = context.c_header_process_trace,
+        process_analysis = context.c_header_analysis,
         compiler = driver.CC,
         language_mode = "c99",
         cppflags = toolchain and {} or (driver.EXTRA_CPPFLAGS or {}),
@@ -502,7 +505,7 @@ function driver.configure_foreign_c(context)
         compiler_include_dirs = driver.foreign_include_dirs(),
         toolchain = toolchain,
         probe_runner = function(argv, run_options)
-            return context.io:run(argv, run_options)
+            return io_strategy:run(argv, run_options)
         end,
         probe_cache_directory = driver.PROBE_CACHE_DIRECTORY,
         probe_cache_identity = driver.PROBE_CACHE_IDENTITY,
@@ -527,6 +530,13 @@ function driver.configure_foreign_c(context)
         driver.FOREIGN_C_CONFIGURATION_ID + 1
     context.foreign_c_configuration_id =
         driver.FOREIGN_C_CONFIGURATION_ID
+    -- Driver-backed checks acquire their probe service from the resolver
+    -- context below. Keep analysis-scoped reuse and telemetry out of the
+    -- checker module's process-global fallback configuration so the last root
+    -- cannot retain a completed analysis (or its per-root trace closure) while
+    -- the language server is idle.
+    options.process_trace = nil
+    options.process_analysis = nil
     checker.configure_foreign_c(
         options, driver.TOOLCHAIN_ERROR or platform_err or toolchain_err or
             profile_error)
@@ -536,6 +546,13 @@ end
 
 local CIRCULAR_MARK = {}
 local loader_contexts = setmetatable({}, { __mode = "k" })
+
+-- Long-lived compiler clients use one explicit analysis object across their
+-- short-lived resolver contexts. It is intentionally separate from the I/O
+-- provider, whose completed-header cache outlives any one analysis.
+function driver.new_c_header_analysis()
+    return cdriver.new_process_analysis()
+end
 
 function driver.new_resolver_context(options)
     options = options or {}
@@ -566,6 +583,8 @@ function driver.new_resolver_context(options)
         used_compiled_interfaces = {},
         probe_verbose = options.verbose == true,
         pretty_print = options.pretty_print == true,
+        c_header_process_trace = options.c_header_process_trace,
+        c_header_analysis = options.c_header_analysis,
         extra_ffi_include_dirs = extra_ffi_include_dirs,
     }
     local initialized, layout_error = driver.initialize_layout(context)
@@ -873,6 +892,8 @@ function driver.get_probe_service(context)
     local service
     service, err = cprobe.new_service({
         io = context.io,
+        process_trace = context.c_header_process_trace,
+        process_analysis = context.c_header_analysis,
         toolchain = toolchain,
         verbose = context.probe_verbose,
         cache_directory = driver.PROBE_CACHE_DIRECTORY,

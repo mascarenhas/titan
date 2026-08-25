@@ -58,6 +58,89 @@ describe("compiler installation discovery", function()
         end, "compiler I/O strategy method 'cwd' must be callable")
     end)
 
+    it("keeps analysis-scoped C state out of checker fallback configuration",
+    function()
+        local cdriver = require "c-parser.cdriver"
+        local csemantics = require "titan-compiler.csemantics"
+        local checker = require "titan-compiler.checker"
+        local originals = {
+            initialize_platform = driver.initialize_platform,
+            toolchain_descriptor = driver.toolchain_descriptor,
+            target_profile_inputs = cdriver.target_profile_inputs,
+            build_profile = csemantics.build_profile,
+            configure_foreign_c = checker.configure_foreign_c,
+            target_profile = driver.TARGET_PROFILE,
+            configuration_id = driver.FOREIGN_C_CONFIGURATION_ID,
+        }
+        local captured
+        local target_analysis
+        local target_trace
+
+        local completed, failure = xpcall(function()
+            driver.initialize_platform = function()
+                return true, "TestOS", false
+            end
+            driver.toolchain_descriptor = function(context)
+                return {
+                    io = context.io,
+                    compiler_argv = { "cc" },
+                    compile_flags = {},
+                    language_mode = "c99",
+                    language_flag = false,
+                    cppflags = {},
+                    cflags = {},
+                    include_dirs = {},
+                }
+            end
+            cdriver.target_profile_inputs = function(options)
+                target_analysis = options.process_analysis
+                target_trace = options.process_trace
+                return {}
+            end
+            csemantics.build_profile = function()
+                return { identity = "fixture-profile" }
+            end
+            checker.configure_foreign_c = function(options, config_error)
+                assert.is_nil(config_error)
+                captured = options
+            end
+
+            local analysis = driver.new_c_header_analysis()
+            local function trace() end
+            local context = driver.new_resolver_context({
+                io = compiler_io.new_sync(),
+                c_header_analysis = analysis,
+                c_header_process_trace = trace,
+            })
+            assert.is_true(driver.configure_foreign_c(context))
+            assert.equal(analysis, target_analysis)
+            assert.equal(trace, target_trace)
+            assert.is_nil(captured.process_analysis)
+            assert.is_nil(captured.process_trace)
+
+            local saw_strategy = false
+            local upvalue = 1
+            while true do
+                local name, value =
+                    debug.getupvalue(captured.probe_runner, upvalue)
+                if name == nil then break end
+                assert.not_equal(context, value)
+                if value == context.io then saw_strategy = true end
+                upvalue = upvalue + 1
+            end
+            assert.is_true(saw_strategy)
+        end, debug.traceback)
+
+        driver.initialize_platform = originals.initialize_platform
+        driver.toolchain_descriptor = originals.toolchain_descriptor
+        cdriver.target_profile_inputs = originals.target_profile_inputs
+        csemantics.build_profile = originals.build_profile
+        checker.configure_foreign_c = originals.configure_foreign_c
+        driver.TARGET_PROFILE = originals.target_profile
+        driver.FOREIGN_C_CONFIGURATION_ID = originals.configuration_id
+        assert.truthy(completed, failure)
+    end)
+
     it("releases sibling tmpname reservations with cancellation ownership",
     function()
         local calls = {}
