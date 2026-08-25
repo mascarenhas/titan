@@ -46,10 +46,24 @@ end
 
 local typedefs = {}
 
+-- Parser-private classification for expressions which were recognized through
+-- unaryExpression. C assignment syntax requires every operand to the left of
+-- an assignment operator to have that form. Keeping the marker out-of-band
+-- preserves the public AST while allowing the factored assignment rule to
+-- retain the old syntactic restriction without reparsing its recursive prefix.
+local assignment_lhs = {}
+
 -- Number of top-level declarations skipped by the error-recovery rule during the
 -- last match_language_grammar call (see the `recover` rule). Exposed as
 -- c99.recoveries so callers can report how many declarations were not understood.
 local recoveries = 0
+
+-- Furthest end of the leading declaration-specifier run explored by the
+-- current top-level declaration attempt. LPeg does not roll match-time side
+-- effects back with an ordered choice, which is useful here: if both the
+-- function-definition and declaration branches fail after walking the same
+-- long prefix, recovery can advance over that already-proven prefix once.
+local recovery_specifier_end
 
 local function elem(xs, e)
     for _, x in ipairs(xs) do
@@ -71,6 +85,26 @@ end)
 defs["recover"] = function(_, _)
     recoveries = recoveries + 1
     return true
+end
+
+defs["begin_external_declaration"] = function(_, _)
+    recovery_specifier_end = nil
+    return true
+end
+
+defs["note_external_specifier"] = function(_, position)
+    if not recovery_specifier_end or position > recovery_specifier_end then
+        recovery_specifier_end = position
+    end
+    return true
+end
+
+defs["recover_external_specifiers"] = function(_, position)
+    if recovery_specifier_end and recovery_specifier_end >= position then
+        recoveries = recoveries + 1
+        return recovery_specifier_end
+    end
+    return false
 end
 
 -- Match-time action used to drop a rule's captures: succeeds (keeping the match
@@ -98,8 +132,12 @@ defs["decl_ids"] = typed("string, number, table -> boolean, Decl?", function(_, 
 end)
 
 defs["is_typedef"] = function(_, _, id)
-    --print("is " .. id .. " a typedef? " .. tostring(not not typedefs[id]))
-    return typedefs[id], typedefs[id] and id
+    -- The former copied scope normalized every truthy member to `true` and did
+    -- not consult a caller metatable. Preserve that public set behavior while
+    -- borrowing the table: LPeg match-time success must never receive an
+    -- arbitrary truthy value as its next-position result.
+    local present = not not rawget(typedefs, id)
+    return present, present and id
 end
 
 defs["empty_table"] = function()
@@ -114,6 +152,39 @@ defs["nest_exp"] = typed("string, number, {Exp} -> boolean, Exp", function(_, _,
     end
     return true, exp
 end)
+
+-- Assignment operators associate from right to left. Capture the whole chain
+-- once and fold it after the match instead of recursively retrying the complete
+-- unary-expression prefix before falling back to a conditional expression.
+-- The old ordered choice made nested non-assignment parentheses exponential.
+defs["fold_assignment"] = function(_, _, items)
+    if #items == 1 then
+        return true, items[1]
+    end
+
+    for operator_index = 2, #items - 1, 2 do
+        if not assignment_lhs[items[operator_index - 1]] then
+            return false
+        end
+    end
+
+    local rhs = items[#items]
+    for index = #items - 1, 2, -2 do
+        local exp = {
+            items[index - 1],
+            rhs,
+            op = items[index],
+        }
+        typed.set_type(exp, "Exp")
+        rhs = exp
+    end
+    return true, rhs
+end
+
+defs["mark_assignment_lhs"] = function(_, _, exp)
+    assignment_lhs[exp] = true
+    return true, exp
+end
 
 -- Primary expression tables
 defs["prim_exp"] = typed("string, number, {string} -> boolean, Exp", function(_, _, exp)
@@ -165,6 +236,24 @@ end)
 defs["litstruct"] = typed("string, number, number -> boolean, string", function(_, _, _)
     return true, "litstruct"
 end)
+
+defs["inline_union_member"] = function(_, _, member)
+    if member.ids then
+        member.type = { member.union }
+        for _, specifier in ipairs(member.tail) do
+            member.type[#member.type + 1] = specifier
+        end
+    else
+        -- The ordinary struct-declaration production requires declarators
+        -- whenever anything follows the inline union specifier. Only the
+        -- bare body may use C's anonymous-union member form.
+        if #member.tail > 0 then return false end
+        member.type = member.union
+    end
+    member.union = nil
+    member.tail = nil
+    return true, member
+end
 
 --==============================================================================
 -- Lexical Rules (used in both preprocessing and language processing)
@@ -300,9 +389,11 @@ local language_rules = [[--lpeg.re
 
 translationUnit <- %s* {| (externalDeclaration / recover)* |} "$EOF$"
 
-externalDeclaration <- staticAssertDeclaration
-                     / functionDefinition
-                     / declaration
+externalDeclaration <- ({} => begin_external_declaration)
+                       ( staticAssertDeclaration
+                       / functionDefinition
+                       / externalOrdinaryDeclaration
+                       )
 
 -- Error recovery: system headers (e.g. GCC's SIMD intrinsics pulled in via
 -- SDL's <SDL_cpuinfo.h>) contain declarations this C99 grammar does not model.
@@ -314,7 +405,8 @@ externalDeclaration <- staticAssertDeclaration
 -- rather than failing the whole parse. The generated C still #includes the real
 -- header, so only the types Titan references must be understood here;
 -- c99.recoveries counts the skipped items.
-recover <- recoverItem => recover
+recover <- (recoverItem ({} => recover_external_specifiers)) => discard
+         / recoverItem => recover
 recoverItem <- ";" _
              / functionBody
              / stringSkip
@@ -326,7 +418,7 @@ recoverItem <- ";" _
 -- so its parentheses don't confuse paren matching.
 staticAssertDeclaration <- ( ("_Static_assert" / "static_assert") _ "(" _ constantExpression ("," _ STRING_LITERAL+)? ")" _ ";" _ ) => discard
 
-functionDefinition <- {| {:_source_position: {} :} {:spec: {| declarationSpecifier+ |} :} {:func: declarator :} {:decls: declaration* :} functionBody |} => decl_func
+functionDefinition <- {| {:_source_position: {} :} {:spec: {| externalDeclarationSpecifier+ |} :} {:func: declarator :} {:decls: declaration* :} functionBody |} => decl_func
 
 -- The FFI only needs a function's signature, never its body (and headers carry
 -- `static inline` definitions whose bodies use the full C statement grammar,
@@ -345,6 +437,14 @@ charSkip <- ("'" / "L'") cChar+ "'" _
 -- Declarations
 
 declaration <- {| {:_source_position: {} :} gccExtensionSpecifier? {:spec: {| declarationSpecifier+ |} :} gccExtensionSpecifier* ({:ids: initDeclarationList :})? gccExtensionSpecifier* ";" _ |} => decl_ids
+
+-- Use a distinct leading-specifier rule only at translation-unit scope. If a
+-- declaration attempt fails later, the recovery branch can skip this complete
+-- speculative prefix rather than retrying all of its suffixes one token at a
+-- time. Nested/block declarations retain the ordinary rule and AST shape.
+externalOrdinaryDeclaration <- {| {:_source_position: {} :} gccExtensionSpecifier? {:spec: {| externalDeclarationSpecifier+ |} :} gccExtensionSpecifier* ({:ids: initDeclarationList :})? gccExtensionSpecifier* ";" _ |} => decl_ids
+
+externalDeclarationSpecifier <- declarationSpecifier ({} => note_external_specifier)
 
 declarationSpecifier <- storageClassSpecifier
                       / typeSpecifier
@@ -419,10 +519,15 @@ structOrUnionSpecifier <- {| {:type: structOrUnion :} gccExtensionSpecifier* ({:
 structOrUnion <- { "struct" } _
                / { "union"  } _
 
-anonymousUnion <- {| {:type: {| {:type: { "union" } :} _ "{" _ {:fields: {| structDeclaration+ |} :} "}" _ |} :} |} ";" _
+-- Parse an inline union body once, then choose whether it is an anonymous
+-- member or has ordinary field declarators. The former anonymousUnion / generic
+-- choice reparsed the complete body for every named inline-union member, which
+-- doubled at each nested member. The guard keeps a malformed exact `union {`
+-- prefix from falling back and rebuilding the same recursive body.
+inlineUnionMember <- ({| {:union: {| {:type: { "union" } :} _ "{" _ {:fields: {| structDeclaration+ |} :} "}" _ |} :} {:tail: {| specifierQualifier* |} :} ({:ids: structDeclaratorList :})? |} ";" _) => inline_union_member
 
-structDeclaration <- anonymousUnion
-                   / {| {:type: {| specifierQualifier+ |} :} {:ids: structDeclaratorList :} |} ";" _
+structDeclaration <- inlineUnionMember
+                   / !("union" _ "{") {| {:type: {| specifierQualifier+ |} :} {:ids: structDeclaratorList :} |} ";" _
 
 specifierQualifier <- typeSpecifier
                     / typeQualifier
@@ -469,8 +574,7 @@ arrayDeclaratorQualifiers <- {:array_qualifiers: {| typeQualifier+ |} :}
 
 pointer <- {| ({ "*"/"^" } _ typeQualifier*)+ |}
 
-parameterTypeList <- {| parameterList "," _ {| { "..." } |} _ |} => join
-                   / parameterList
+parameterTypeList <- {| parameterList ("," _ {| { "..." } |} _)? |} => join
 
 parameterList <- {| parameterDeclaration ("," _ parameterDeclaration)* |}
 
@@ -593,29 +697,29 @@ peRec <- {| "[" _ {:idx: expression :} "]" _ peRec |}
 
 argumentExpressionList <- {| assignmentExpression ("," _ assignmentExpression)* |}
 
-unaryExpression <- {| {:op: prefixOp :} unaryExpression     |} => nest_exp
-                 / {| {:op: unaryOperator :} castExpression  |} => nest_exp
-                 / sizeofOrPostfixExpression
+unaryExpression <- ( {| {:op: prefixOp :} unaryExpression     |} => nest_exp
+                   / {| {:op: unaryOperator :} castExpression  |} => nest_exp
+                   / sizeofOrPostfixExpression
+                   ) => mark_assignment_lhs
 
 prefixOp <- { "++" } _
           / { "--" } _
 
 unaryOperator <- { [-+~!*&] } _
 
-assignmentExpression <- unaryExpression assignmentOperator assignmentExpression
-                      / conditionalExpression
+assignmentExpression <- {| conditionalExpression (assignmentOperator conditionalExpression)* |} => fold_assignment
 
-assignmentOperator <- "=" _
-                    / "*=" _
-                    / "/=" _
-                    / "%=" _
-                    / "+=" _
-                    / "-=" _
-                    / "<<=" _
-                    / ">>=" _
-                    / "&=" _
-                    / "^=" _
-                    / "|=" _
+assignmentOperator <- { "="
+                      / "*="
+                      / "/="
+                      / "%="
+                      / "+="
+                      / "-="
+                      / "<<="
+                      / ">>="
+                      / "&="
+                      / "^="
+                      / "|=" } _
 
 --------------------------------------------------------------------------------
 -- Language whitespace
@@ -831,25 +935,34 @@ end
 
 function c99.match_language_grammar(subject)
     typedefs = {}
+    assignment_lhs = {}
     recoveries = 0
+    recovery_specifier_end = nil
     local res, err, l, c, fragment = match(language_grammar, subject)
+    assignment_lhs = {}
+    recovery_specifier_end = nil
     c99.recoveries = recoveries
     return res, err, l, c, fragment
 end
 
 function c99.match_language_expression_grammar(subject)
-    return match(language_expression_grammar, subject)
+    assignment_lhs = {}
+    local results = table.pack(match(language_expression_grammar, subject))
+    assignment_lhs = {}
+    return table.unpack(results, 1, results.n)
 end
 
 function c99.match_typed_language_expression_grammar(subject, typedef_names)
     local previous_typedefs = typedefs
-    local scoped_typedefs = {}
-    for name, present in pairs(typedef_names or {}) do
-        if present then scoped_typedefs[name] = true end
-    end
-    typedefs = scoped_typedefs
+    -- This grammar only reads typedef names through is_typedef; declaration
+    -- rules that populate the map are unreachable from typedExpression. Borrow
+    -- the caller's immutable map for this synchronous match instead of copying
+    -- every typedef for every object-like macro in a header.
+    typedefs = typedef_names or {}
+    assignment_lhs = {}
     local results = table.pack(match(
         typed_language_expression_grammar, subject))
+    assignment_lhs = {}
     typedefs = previous_typedefs
     return table.unpack(results, 1, results.n)
 end

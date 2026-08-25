@@ -5,11 +5,178 @@ local c99 = require("c-parser.c99")
 local ctypes = require("c-parser.ctypes")
 local cdefines = require("c-parser.cdefines")
 local compiler_io = require("titan-compiler.io")
+local sha256 = require("titan-compiler.sha256")
 
 local SEP = package.config:sub(1, 1)
 local default_io = compiler_io.new_sync()
 
 local compiler_include_dirs = setmetatable({}, { __mode = "k" })
+
+-- A language-server compiler instance owns one long-lived I/O strategy while
+-- constructing many short-lived resolver contexts. Keep completed header
+-- interpretation with that provider, not with a resolver, and bound retained
+-- graphs so an unusual project which imports many unrelated SDKs cannot grow
+-- the compiler process without limit.
+local PROCESS_CACHE_LIMIT = 16
+-- Approximate the complete graphs actually cloned into retained entries,
+-- including unique string bytes and the preprocessor's token-provenance side
+-- tables. These constants track ordinary 64-bit Lua object and slot costs
+-- closely enough to enforce a conservative process budget without allocator
+-- APIs.
+local PROCESS_CACHE_WEIGHT_LIMIT = 64 * 1024 * 1024
+-- Charge the cache.entries hash slot separately from the entry graph. The
+-- graph estimator uses the same ordinary 64-bit Lua hash-slot approximation.
+local PROCESS_CACHE_MAP_SLOT_WEIGHT = 32
+local configured_process_cache_limit = PROCESS_CACHE_LIMIT
+local configured_process_cache_weight_limit = PROCESS_CACHE_WEIGHT_LIMIT
+local process_caches = setmetatable({}, { __mode = "k" })
+
+local function process_cache_for(strategy)
+    local cache = process_caches[strategy]
+    if not cache then
+        cache = {
+            entries = {},
+            size = 0,
+            weight = 0,
+            clock = 0,
+            lookups = 0,
+            hits = 0,
+            misses = 0,
+            invalidations = 0,
+            stores = 0,
+            evictions = 0,
+            oversized = 0,
+            entry_limit = configured_process_cache_limit,
+            weight_limit = configured_process_cache_weight_limit,
+        }
+        process_caches[strategy] = cache
+    end
+    return cache
+end
+
+local function touch_cache_entry(cache, entry)
+    cache.clock = cache.clock + 1
+    entry.last_used = cache.clock
+end
+
+local function remove_cache_entry(cache, key, invalidated, expected)
+    local entry = cache.entries[key]
+    if entry == nil or (expected ~= nil and entry ~= expected) then
+        return false
+    end
+    cache.entries[key] = nil
+    cache.size = cache.size - 1
+    cache.weight = cache.weight - entry.weight
+    if invalidated then
+        cache.invalidations = cache.invalidations + 1
+    end
+    return true
+end
+
+local function oldest_cache_key(cache)
+    local oldest_key
+    local oldest_use
+    for candidate_key, candidate in pairs(cache.entries) do
+        if oldest_use == nil or candidate.last_used < oldest_use then
+            oldest_key = candidate_key
+            oldest_use = candidate.last_used
+        end
+    end
+    return oldest_key
+end
+
+-- Evict before cloning a miss. In particular, never allocate a second large
+-- OpenSSL graph while unrelated retained graphs still occupy the cache budget.
+local function make_cache_room(cache, key, weight)
+    if weight > cache.weight_limit then
+        cache.oversized = cache.oversized + 1
+        return false
+    end
+    -- I/O methods may yield into another Titan Task. If that Task completed
+    -- the same miss while this caller was preprocessing, keep its entry rather
+    -- than replacing a result which may have observed newer input state.
+    if cache.entries[key] ~= nil then return false end
+    while cache.size >= cache.entry_limit
+      or cache.weight + weight > cache.weight_limit do
+        local oldest_key = oldest_cache_key(cache)
+        if not oldest_key then return false end
+        remove_cache_entry(cache, oldest_key, false)
+        cache.evictions = cache.evictions + 1
+    end
+    return true
+end
+
+local function store_cache_entry(cache, key, entry)
+    assert(cache.entries[key] == nil)
+    assert(cache.size < cache.entry_limit)
+    assert(cache.weight + entry.weight <= cache.weight_limit)
+    cache.size = cache.size + 1
+    cache.entries[key] = entry
+    cache.weight = cache.weight + entry.weight
+    touch_cache_entry(cache, entry)
+    cache.stores = cache.stores + 1
+end
+
+-- Test and embedding hooks. Clearing without a strategy drops every
+-- provider-owned cache; statistics without one address the synchronous
+-- standalone cdriver provider.
+function cdriver.clear_process_cache(strategy)
+    if strategy == nil then
+        process_caches = setmetatable({}, { __mode = "k" })
+    else
+        process_caches[strategy] = nil
+    end
+end
+
+-- Keep production constants immutable while allowing focused tests to drive
+-- weight-only eviction and oversized-entry rejection without allocating tens
+-- of MiB. Calling with no limits restores the production configuration. Each
+-- cache captures its limits at creation so accounting cannot change under a
+-- live cache.
+function cdriver._set_process_cache_limits_for_test(entry_limit, weight_limit)
+    if entry_limit == nil and weight_limit == nil then
+        configured_process_cache_limit = PROCESS_CACHE_LIMIT
+        configured_process_cache_weight_limit = PROCESS_CACHE_WEIGHT_LIMIT
+    else
+        assert(type(entry_limit) == "number"
+            and entry_limit > 0
+            and entry_limit == math.floor(entry_limit),
+            "process-cache entry limit must be a positive integer")
+        assert(type(weight_limit) == "number"
+            and weight_limit > 0
+            and weight_limit == math.floor(weight_limit),
+            "process-cache weight limit must be a positive integer")
+        configured_process_cache_limit = entry_limit
+        configured_process_cache_weight_limit = weight_limit
+    end
+    cdriver.clear_process_cache()
+end
+
+function cdriver.process_cache_stats(strategy)
+    strategy = strategy or default_io
+    local cache = process_caches[strategy]
+    if not cache then
+        return {
+            size = 0, lookups = 0, hits = 0, misses = 0,
+            invalidations = 0, stores = 0, evictions = 0, oversized = 0,
+            weight = 0, entry_limit = configured_process_cache_limit,
+            weight_limit = configured_process_cache_weight_limit,
+        }
+    end
+    return {
+        size = cache.size,
+        lookups = cache.lookups,
+        hits = cache.hits,
+        misses = cache.misses,
+        invalidations = cache.invalidations,
+        stores = cache.stores,
+        evictions = cache.evictions,
+        oversized = cache.oversized,
+        weight = cache.weight,
+        entry_limit = cache.entry_limit,
+        weight_limit = cache.weight_limit,
+    }
+end
 
 local function io_for(options)
     return options and options.io or default_io
@@ -279,6 +446,84 @@ function cdriver.forced_header_inputs(options)
     }
 end
 
+local function encode_sequence(values)
+    local encoded = {}
+    for index, value in ipairs(values) do
+        value = tostring(value or "")
+        encoded[index] = #value .. ":" .. value
+    end
+    return table.concat(encoded)
+end
+
+-- source_dir is intentionally absent. resolve_include has already observed
+-- every source-relative candidate and the selected absolute header is in this
+-- key. The cached parse tail contains only lookups made from that selected
+-- header; a caller's own source-relative observations are reconstructed below.
+local function process_cache_key(filename, include, ctx, cwd)
+    local identity = encode_sequence({
+        "titan-cdriver-process-v2",
+        ctx.preprocessor_configuration_key,
+        cwd,
+        filename,
+        include.original,
+        include.resolved,
+        include.include_kind,
+        include.include_name,
+    })
+    -- The exact tuple above can include a complete compiler argv and forced
+    -- header manifest. Retain a fixed-size collision-resistant identity rather
+    -- than allowing those transient configuration strings to escape the byte
+    -- bound as a cache-table key.
+    return "titan-cdriver-process-v2:sha256:" .. sha256.hex(identity)
+end
+
+local function copy_input_tail(inputs, prefix_length)
+    local copy = {}
+    for index = prefix_length + 1, #inputs do
+        local input = inputs[index]
+        copy[#copy + 1] = {
+            kind = input.kind,
+            path = input.path,
+            identity = input.identity,
+        }
+    end
+    return copy
+end
+
+local clone_graph = cpp.clone_graph
+local graph_weight = cpp.graph_weight
+
+-- The fourth process_file result exists for target-profile acquisition. Its
+-- only semantic payload is the exact macro context which cdefines has already
+-- attached to ffi_types. Reconstruct the I/O and observed-input conveniences
+-- per caller instead of retaining flattened preprocessor output, origins,
+-- include roots, current-directory stacks, or observer bookkeeping.
+local function result_context(ffi_types, strategy, dependencies, search_inputs)
+    return {
+        defines = ffi_types.macro_definitions,
+        io = strategy,
+        c_header_dependencies = dependencies,
+        c_header_search_inputs = search_inputs,
+    }
+end
+
+local function input_tail_is_current(inputs, strategy)
+    for _, input in ipairs(inputs) do
+        local identity = cdriver.header_input_identity(
+            input.kind, input.path, strategy)
+        if identity ~= input.identity then return false end
+    end
+    return true
+end
+
+local function input_tail_matches_prefix(inputs, identities)
+    for _, input in ipairs(inputs) do
+        local present = identities[input.path]
+        if present ~= nil and present ~= input.identity then return false end
+    end
+    return true
+end
+
 function cdriver.process_file(filename, options)
     options = normalize_options(options)
     local strategy = io_for(options)
@@ -368,6 +613,54 @@ function cdriver.process_file(filename, options)
     local parse_filename = file_exists(include.resolved, strategy)
         and include.resolved or filename
 
+    -- Forced headers and this caller's top-level search have already been
+    -- observed. A reusable entry owns only the subsequent parse tail, which
+    -- makes the interpreted header independent of irrelevant source_dir
+    -- misses while preserving the exact observations returned to each caller.
+    local dependency_prefix_length = #dependencies
+    local search_prefix_length = #search_inputs
+    local cache = process_cache_for(strategy)
+    local cache_key = process_cache_key(filename, include, ctx, cwd)
+    cache.lookups = cache.lookups + 1
+    while true do
+        local cached = cache.entries[cache_key]
+        if not cached then break end
+        local compatible =
+            input_tail_matches_prefix(
+                cached.dependencies, dependency_identities)
+            and input_tail_matches_prefix(
+                cached.search_inputs, search_identities)
+            and input_tail_is_current(cached.dependencies, strategy)
+            and input_tail_is_current(cached.search_inputs, strategy)
+        -- Identity checks use the compiler I/O strategy and may yield. A
+        -- concurrent Task can invalidate and replace this same key while the
+        -- captured entry is being validated, so never publish or touch a
+        -- detached result. Retry against the current entry instead.
+        if cache.entries[cache_key] ~= cached then
+            -- Retry without charging another logical lookup or miss.
+        elseif compatible then
+            for _, input in ipairs(cached.dependencies) do
+                assert(record_dependency(input.path, input.identity))
+            end
+            for _, input in ipairs(cached.search_inputs) do
+                assert(record_search(input.path, input.identity))
+            end
+            include.c_header_dependencies = dependencies
+            include.c_header_search_inputs = search_inputs
+
+            local ffi_types = clone_graph(cached.ffi_types)
+            local context = result_context(
+                ffi_types, strategy, dependencies, search_inputs)
+            cache.hits = cache.hits + 1
+            touch_cache_entry(cache, cached)
+            return ffi_types, nil, include, context
+        elseif remove_cache_entry(
+                cache, cache_key, true, cached) then
+            break
+        end
+    end
+    cache.misses = cache.misses + 1
+
     ctx, err = cpp.parse_file(parse_filename, nil, ctx)
     if not ctx then
         return nil, "failed preprocessing '"..filename.."': " .. err
@@ -392,6 +685,8 @@ function cdriver.process_file(filename, options)
     include.c_header_search_inputs = search_inputs
     ctx.c_header_dependencies = dependencies
     ctx.c_header_search_inputs = search_inputs
+    ctx.header_dependency_observer = nil
+    ctx.include_search_observer = nil
 
     local srccode = table.concat(ctx.output, "\n").." $EOF$"
 
@@ -474,11 +769,39 @@ function cdriver.process_file(filename, options)
         ffi_types.macro_changes[name] = true
     end
 
+    -- The live result remains owned by this caller. Cache a separate complete
+    -- graph so later checker mutation cannot leak into another resolver, then
+    -- clone that private graph on every hit. Size and evict first so a large
+    -- clone is never allocated alongside entries which cannot remain resident.
+    local dependency_tail = copy_input_tail(
+        dependencies, dependency_prefix_length)
+    local search_tail = copy_input_tail(
+        search_inputs, search_prefix_length)
+    local entry = {
+        ffi_types = ffi_types,
+        dependencies = dependency_tail,
+        search_inputs = search_tail,
+        weight = 0,
+        last_used = 0,
+    }
+    -- Weigh the actual retained entry shape before cloning. The clone has the
+    -- same graph topology, while the fixed-size key and cache hash slot are
+    -- separate retained allocations which must also fit under the bound.
+    local cache_weight = graph_weight(entry)
+        + graph_weight(cache_key)
+        + PROCESS_CACHE_MAP_SLOT_WEIGHT
+    entry.weight = cache_weight
+    if make_cache_room(cache, cache_key, cache_weight) then
+        entry.ffi_types = clone_graph(ffi_types)
+        store_cache_entry(cache, cache_key, entry)
+    end
+
     -- The fourth result is deliberately contextual rather than process-global:
     -- target-profile acquisition needs the exact macro context that parsed the
     -- configured Lua headers, while ordinary callers retain the historical
     -- first three results.
-    return ffi_types, nil, include, ctx
+    return ffi_types, nil, include,
+        result_context(ffi_types, strategy, dependencies, search_inputs)
 end
 
 local function primitive_typedef_spelling(ffi_types, name)

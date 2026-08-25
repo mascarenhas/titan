@@ -1,4 +1,5 @@
 local cdefines = require "c-parser.cdefines"
+local c99 = require "c-parser.c99"
 
 local function register(text)
     local types = {}
@@ -52,6 +53,198 @@ local L = { "long", false, "long" }
 local UL = { "long", true, "unsigned long" }
 local LL = { "long_long", false, "long long" }
 local ULL = { "long_long", true, "unsigned long long" }
+
+local function call_with_instruction_count(fn, ...)
+    local arguments = table.pack(...)
+    local quantum = 100
+    local instructions = 0
+    local previous_hook, previous_mask, previous_count = debug.gethook()
+    debug.sethook(function()
+        instructions = instructions + quantum
+    end, "", quantum)
+    local results = table.pack(pcall(
+        fn, table.unpack(arguments, 1, arguments.n)))
+    debug.sethook(previous_hook, previous_mask, previous_count)
+
+    assert.is_true(results[1], results[2])
+    return results[2], instructions,
+        table.unpack(results, 3, results.n)
+end
+
+describe("C expression parsing", function()
+    it("right-folds assignment operator chains", function()
+        local exp = assert(c99.match_language_expression_grammar(
+            "left = middle += right "))
+
+        assert.equal("=", exp.op)
+        assert.same({ "left" }, exp[1])
+        assert.equal("+=", exp[2].op)
+        assert.same({ "middle" }, exp[2][1])
+        assert.same({ "right" }, exp[2][2])
+    end)
+
+    it("requires a unary expression on each assignment left-hand side",
+    function()
+        assert.is_nil(c99.match_language_expression_grammar(
+            "left + right = value "))
+        assert.is_nil(c99.match_language_expression_grammar(
+            "condition ? yes : no = value "))
+
+        -- Parentheses make the complete inner expression a primary, and thus
+        -- a unary expression at the C grammar level. Whether it is an lvalue
+        -- is deliberately left to the real C compiler.
+        local parenthesized = assert(
+            c99.match_language_expression_grammar(
+                "( left + right ) = value "))
+        assert.equal("=", parenthesized.op)
+        assert.equal("+", parenthesized[1].op)
+    end)
+
+    it("does not recursively retry nested non-assignment expressions",
+    function()
+        local depth = 18
+        local subject =
+            string.rep("( ", depth) .. "value " ..
+            string.rep(") ", depth)
+        local parsed, instructions, err = call_with_instruction_count(
+            c99.match_language_expression_grammar, subject)
+
+        assert.is_truthy(parsed, err)
+        -- The factored grammar takes fewer than 3,000 instructions here. The
+        -- old recursive ordered choice took more than 81 million because each
+        -- parenthesis doubled the complete inner parse.
+        assert.is_true(instructions < 100000, tostring(instructions))
+    end)
+
+    it("borrows the typedef scope without traversing or mutating it",
+    function()
+        local typedef_names = setmetatable({
+            ffi_handler = true,
+            numeric_handler = 1,
+            table_handler = {},
+            untouched = false,
+        }, {
+            __pairs = function()
+                error("typedef scope must not be copied", 0)
+            end,
+            __index = function()
+                error("typedef scope metatable must not be consulted", 0)
+            end,
+        })
+
+        local exp = assert(c99.match_typed_language_expression_grammar(
+            "( ( ffi_handler ) 0 ) ", typedef_names))
+        assert.same({ "ffi_handler" }, exp.cast_type)
+        assert.is_true(rawget(typedef_names, "ffi_handler"))
+        assert.is_false(rawget(typedef_names, "untouched"))
+        assert.is_nil(rawget(typedef_names, "new_name"))
+        local numeric = assert(c99.match_typed_language_expression_grammar(
+            "( ( numeric_handler ) 0 ) ", typedef_names))
+        local tabular = assert(c99.match_typed_language_expression_grammar(
+            "( ( table_handler ) 0 ) ", typedef_names))
+        assert.same({ "numeric_handler" }, numeric.cast_type)
+        assert.same({ "table_handler" }, tabular.cast_type)
+        assert.is_truthy(c99.match_typed_language_expression_grammar(
+            "ordinary_identifier ", typedef_names))
+
+        -- The borrowed scope is restored even after a failed complete match.
+        assert.is_nil(c99.match_typed_language_expression_grammar(
+            "( ( ffi_handler ) 0 ) trailing ", typedef_names))
+        assert.is_nil(c99.match_typed_language_expression_grammar(
+            "( ( ffi_handler ) 0 ) ", {}))
+    end)
+end)
+
+describe("C declaration parsing", function()
+    it("parses nested callback parameter lists once", function()
+        local depth = 16
+        local parameter = "int value "
+        for index = depth, 1, -1 do
+            parameter =
+                "void ( * callback" .. index .. " ) ( " ..
+                parameter .. ") "
+        end
+        local subject =
+            "extern void root ( " .. parameter .. ") ; $EOF$"
+        local parsed, instructions, err = call_with_instruction_count(
+            c99.match_language_grammar, subject)
+
+        assert.is_truthy(parsed, err)
+        assert.equal(1, #parsed)
+        -- Retrying the complete ordinary parameter list as a possible vararg
+        -- list doubled at each nested callback and took over 4.9 million
+        -- instructions at this depth. One optional vararg tail stays linear.
+        assert.is_true(instructions < 100000, tostring(instructions))
+    end)
+
+    it("parses nested named inline-union members once", function()
+        local depth = 16
+        local field = "int leaf ; "
+        for index = depth, 1, -1 do
+            field =
+                "union { " .. field .. "} field" .. index .. " ; "
+        end
+        local parsed, instructions, err = call_with_instruction_count(
+            c99.match_language_grammar,
+            "struct Root { " .. field .. "} ; $EOF$")
+
+        assert.is_truthy(parsed, err)
+        assert.equal(1, #parsed)
+        local outer = parsed[1].spec[1].fields[1]
+        assert.equal("field1", outer.ids[1].name)
+        assert.equal("union", outer.type[1].type)
+        -- Trying the complete body first as an anonymous union and then again
+        -- as a named field took over three million instructions at this depth.
+        assert.is_true(instructions < 100000, tostring(instructions))
+    end)
+
+    it("preserves trailing inline-union specifier qualifiers", function()
+        local parsed, err = c99.match_language_grammar(
+            "struct Root { union { int leaf ; } const value ; } ; $EOF$")
+
+        assert.is_truthy(parsed, err)
+        assert.equal(1, #parsed)
+        local field = parsed[1].spec[1].fields[1]
+        assert.equal("value", field.ids[1].name)
+        assert.equal("union", field.type[1].type)
+        assert.equal("const", field.type[2])
+    end)
+
+    it("rejects an inline-union specifier tail without a declarator", function()
+        local parsed, err = c99.match_language_grammar(
+            "struct Root { union { int leaf ; } const ; } ; $EOF$")
+
+        assert.is_truthy(parsed, err)
+        assert.equal(0, #parsed)
+    end)
+end)
+
+describe("C declaration recovery", function()
+    it("advances over a failed leading specifier run once", function()
+        local count = 640
+        local parsed, instructions, err = call_with_instruction_count(
+            c99.match_language_grammar,
+            string.rep("int ", count) .. "$EOF$")
+
+        assert.is_truthy(parsed, err)
+        assert.equal(0, #parsed)
+        assert.equal(1, c99.recoveries)
+        -- The failed prefix is explored once and then skipped. Retrying every
+        -- remaining suffix took over 2.5 million instructions at this size;
+        -- the progress-aware recovery takes fewer than 20,000.
+        assert.is_true(instructions < 100000, tostring(instructions))
+    end)
+
+    it("still resynchronizes after unsupported prefix tokens", function()
+        local parsed, err = c99.match_language_grammar(
+            "extern garbage extern int recovered ; $EOF$")
+
+        assert.is_truthy(parsed, err)
+        assert.equal(1, #parsed)
+        assert.equal("recovered", parsed[1].ids[1].decl.name)
+        assert.equal(2, c99.recoveries)
+    end)
+end)
 
 describe("C object-like macro metadata", function()
     it("registers a final macro map in deterministic byte order", function()

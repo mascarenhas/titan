@@ -255,6 +255,80 @@ local function copy_map(t)
     return u
 end
 
+-- Preprocessing token arrays carry spacing and raw-spelling provenance in
+-- weak side tables. Define them before context construction so any graph
+-- copied out of the probe cache can preserve that metadata as well as the
+-- ordinary Lua table contents.
+local pp_spacing = setmetatable({}, { __mode = "k" })
+local pp_raw_spelling = setmetatable({}, { __mode = "k" })
+
+local function clone_graph(value, seen)
+    if type(value) ~= "table" then return value end
+    seen = seen or {}
+    if seen[value] then return seen[value] end
+
+    local copy = {}
+    seen[value] = copy
+    for key, item in pairs(value) do
+        copy[clone_graph(key, seen)] = clone_graph(item, seen)
+    end
+    local metatable = getmetatable(value)
+    if type(metatable) == "table" then
+        setmetatable(copy, clone_graph(metatable, seen))
+    end
+    local spacing = pp_spacing[value]
+    if spacing then pp_spacing[copy] = clone_graph(spacing, seen) end
+    local raw_spelling = pp_raw_spelling[value]
+    if raw_spelling then
+        pp_raw_spelling[copy] = clone_graph(raw_spelling, seen)
+    end
+    return copy
+end
+
+
+function cpp.clone_graph(value)
+    return clone_graph(value)
+end
+
+
+local function graph_weight(value, seen)
+    local kind = type(value)
+    if kind ~= "table" and kind ~= "string" then return 0 end
+    if kind == "string" then
+        -- Long Lua strings are not interned, so equal spellings may still be
+        -- distinct retained allocations. Charge every occurrence to keep the
+        -- budget conservative; repeated interned short strings merely make
+        -- the estimate safer.
+        return 25 + #value
+    end
+    seen = seen or {}
+    if seen[value] then return 0 end
+    seen[value] = true
+
+    local weight = 56
+    for key, item in pairs(value) do
+        weight = weight + 32
+            + graph_weight(key, seen)
+            + graph_weight(item, seen)
+    end
+    local metatable = getmetatable(value)
+    if type(metatable) == "table" then
+        weight = weight + graph_weight(metatable, seen)
+    end
+    local spacing = pp_spacing[value]
+    if spacing then weight = weight + graph_weight(spacing, seen) end
+    local raw_spelling = pp_raw_spelling[value]
+    if raw_spelling then
+        weight = weight + graph_weight(raw_spelling, seen)
+    end
+    return weight
+end
+
+
+function cpp.graph_weight(value)
+    return graph_weight(value)
+end
+
 local function copy_incdirs(incdirs)
     local copy = { quote = {}, system = {} }
     for _, mode in ipairs({ "quote", "system" }) do
@@ -443,6 +517,51 @@ local function key_argv(argv)
         table.insert(parts, #arg .. ":" .. arg)
     end
     return table.concat(parts, "|")
+end
+
+local function append_canonical(parts, value, active)
+    local kind = type(value)
+    parts[#parts + 1] = kind
+    if kind ~= "table" then
+        parts[#parts + 1] = tostring(value)
+        return
+    end
+    if active[value] then
+        error("cyclic configured preprocessor context", 2)
+    end
+    active[value] = true
+    local keys = {}
+    for key in pairs(value) do keys[#keys + 1] = key end
+    table.sort(keys, function(left, right)
+        local left_kind, right_kind = type(left), type(right)
+        if left_kind ~= right_kind then return left_kind < right_kind end
+        if left_kind == "number" then return left < right end
+        return tostring(left) < tostring(right)
+    end)
+    parts[#parts + 1] = tostring(#keys)
+    for _, key in ipairs(keys) do
+        append_canonical(parts, key, active)
+        append_canonical(parts, value[key], active)
+    end
+    local spacing = pp_spacing[value]
+    parts[#parts + 1] = spacing and "spacing" or "no-spacing"
+    if spacing then append_canonical(parts, spacing, active) end
+    local raw_spelling = pp_raw_spelling[value]
+    parts[#parts + 1] = raw_spelling and "raw-spelling" or "no-raw-spelling"
+    if raw_spelling then
+        append_canonical(parts, raw_spelling, active)
+    end
+    active[value] = nil
+end
+
+-- Include both what the configured compiler was asked and the authoritative
+-- include/macro world it reported. The latter makes cdriver's higher-level
+-- cache key describe C interpretation inputs, not merely an argv spelling.
+local function preprocessor_semantic_digest(incdirs, defines)
+    local parts = { "titan-cpp-semantic-context-v1" }
+    append_canonical(parts, incdirs, {})
+    append_canonical(parts, defines, {})
+    return "sha256:" .. sha256.hex(key_argv(parts))
 end
 
 -- A process may host more than one compiler context (the language server does
@@ -864,19 +983,33 @@ function cpp.new_context(options)
             end
             forced = stable
         end
-        probed = { incdirs = incdirs, defines = defines }
+        probed = {
+            incdirs = incdirs,
+            defines = defines,
+            semantic_digest =
+                preprocessor_semantic_digest(incdirs, defines),
+        }
         probe_cache[key] = probed
     end
 
     local ctx = {
         io = config.io,
         incdirs = copy_incdirs(probed.incdirs),
-        defines = copy_map(probed.defines),
+        defines = clone_graph(probed.defines),
         macro_changes = copy_map(forced.macro_changes),
         ifmode = { true },
         output = { table.unpack(forced.output) },
         output_origins = { table.unpack(forced.output_origins) },
         current_dir = {},
+        -- cdriver caches completed header interpretation across resolver
+        -- contexts owned by the same I/O provider. Publish the exact ordered
+        -- compiler argv plus the forced-header world used to construct this
+        -- context, and retain language_mode even when a caller deliberately
+        -- suppresses the synthesized -std flag.
+        preprocessor_configuration_key = key_argv({
+            "titan-cpp-context-v1", config.language_mode, key,
+            probed.semantic_digest,
+        }),
         forced_header_dependencies = forced.dependencies,
         forced_header_search_inputs = forced.search_inputs,
         forced_header_manifest = forced.manifest,
@@ -1120,9 +1253,6 @@ end)
 -- preprocessor can continue to use ordinary string arrays. Raw spelling is
 -- separate because C digraphs behave canonically during expansion but retain
 -- their original spelling under `#`.
-local pp_spacing = setmetatable({}, { __mode = "k" })
-local pp_raw_spelling = setmetatable({}, { __mode = "k" })
-
 local pp_token_spellings = {
     ["##"] = { "##", "%:%:" },
     ["#"] = { "#", "%:" },
