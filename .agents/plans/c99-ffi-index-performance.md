@@ -1,7 +1,7 @@
 # C99 and FFI indexing performance
 
-Status: both implementation workstreams, focused verification, full local
-gates, and final cold-index profiling are complete; delivery and CI are pending.
+Status: both implementation workstreams, final profiling, local and Linux CI
+gates, Codecov, and PR delivery are complete; review and merge are pending.
 
 This plan records the compiler-side work discovered while profiling cold Titan
 language-server indexing. It complements the language-server cache and
@@ -249,6 +249,13 @@ The completed-header cache's focused suite passed all 14 cases, including the
 yielded replacement race. A clean vscode-titan toolchain rebuilt from this
 worktree reports semantic version `0.6.0`, library path version `0.6`, and ABI
 `2`; its full `xvfb-run -a make -j1 verify` consumer gate also passed.
+
+Implementation commit `0951cf4446a52dde70815421f4ba00ba247232ca` is
+published as Titan PR #106 and closes issues #104 and #105. Its ordinary Ubuntu
+24.04 stdlib/runtime, compiler/LuaCov, and ASan+UBSan jobs passed, as did both
+Codecov project and patch gates; the macOS-only job remained intentionally
+skipped. Companion vscode-titan PR #28 pins that exact compiler commit and its
+Ubuntu 24.04 Ubicloud build/test/package gate passed.
 
 ## Delivery
 
