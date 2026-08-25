@@ -11,6 +11,11 @@ function symtab.new(modname)
         foreign_names = {},
         foreign_name_history = {},
         foreign_macro_definitions = nil,
+        -- Union of the macro names actively changed by this module's ordered
+        -- C-header closure.  A direct source importer replays this delta from
+        -- compiler-owned source metadata instead of reparsing the generated
+        -- `*.titan.h` companion as though it were a user foreign import.
+        foreign_macro_changes = {},
         foreign_field_macro_cache = {},
         c_file_tags = {},
         c_prototype_tags = {},
@@ -185,6 +190,9 @@ end
 -- classification is lazy in the checker so a later change to a transitive
 -- replacement dependency is reflected when the public field token is used.
 function symtab:apply_foreign_macro_changes(changes, definitions)
+    for name in pairs(changes or {}) do
+        self.foreign_macro_changes[name] = true
+    end
     if not self.foreign_macro_definitions then
         self.foreign_macro_definitions = {}
         for name, definition in pairs(definitions or {}) do

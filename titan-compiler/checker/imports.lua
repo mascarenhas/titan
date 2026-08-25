@@ -678,6 +678,7 @@ function makemoduletype(modname, modast, st)
     local type_members = {}
     local source_members = {}
     local source_type_members = {}
+    local has_source_foreign = false
 
     local function add_source_member(member)
         member.islocal = true
@@ -713,6 +714,7 @@ function makemoduletype(modname, modast, st)
                 local member = types.ModuleMember(modname, tlnode.name,
                     tlnode._type, tlnode._paramnames)
                 member._foreign_source = true
+                has_source_foreign = true
                 add_source_member(member)
             elseif tag == "Ast.TopLevelRecord"
                    or tag == "Ast.TopLevelUnion" then
@@ -739,6 +741,53 @@ function makemoduletype(modname, modast, st)
     modtype._source = true
     modtype.source_members = source_members
     modtype.source_type_members = source_type_members
+    if has_source_foreign then
+        local header_inputs = {}
+        for index, input in ipairs(modast._c_header_dependencies or {}) do
+            header_inputs[index] = {
+                kind = input.kind,
+                path = input.path,
+                identity = input.identity,
+            }
+        end
+        local macro_changes = {}
+        for name in pairs(st.foreign_macro_changes or {}) do
+            macro_changes[name] = true
+        end
+        local macro_definitions = {}
+        local macro_environment = st:foreign_macro_environment() or {}
+        for name, definition in pairs(macro_environment) do
+            macro_definitions[name] = definition
+        end
+        local generated_header_aliases = {}
+        local seen_generated_headers = {}
+        for _, node in ipairs(modast) do
+            local public_header = node._tag == "Ast.TopLevelImport"
+                and node._source_import
+                and node._foreign_header_probe_identity or nil
+            local identity = node._source_foreign_generated_identity
+            if type(public_header) == "string"
+               and type(identity) == "string"
+               and not seen_generated_headers[public_header] then
+                seen_generated_headers[public_header] = true
+                generated_header_aliases[#generated_header_aliases + 1] = {
+                    public_header = public_header,
+                    identity = identity,
+                }
+            end
+        end
+        -- Source-only compiler metadata.  The callable descriptors already
+        -- live in `source_members`; this context carries only the generated
+        -- companion's transitive real-header inputs, nested generated-header
+        -- identities, and final macro environment plus changed-name delta.
+        -- Binary metadata validation rejects this field.
+        modtype._source_c_context = {
+            header_inputs = header_inputs,
+            generated_header_aliases = generated_header_aliases,
+            macro_changes = macro_changes,
+            macro_definitions = macro_definitions,
+        }
+    end
     return modtype
 end
 

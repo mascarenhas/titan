@@ -230,16 +230,23 @@ Angle headers keep their angle spelling. A source-relative quoted header is
 rendered as its resolved absolute quoted path before the probe source moves
 under `/tmp`. An explicit source import is the exception to exposing that physical
 spelling: its generated checking header deliberately has a unique randomized
-sibling name, so the checker replaces it in the probe context with a private
-hash-named wrapper derived from the logical module and eventual public-header
-path. The probe includes the stable wrapper name, and the wrapper includes the
-unique physical header by its absolute quoted spelling. Thus nested quoted
-includes still begin at the physical header's directory, while the rendered
-probe text and every descriptor field used by `header_context_key` remain
-stable across rebuilds. One service rejects conflicting bindings for the same
-wrapper identity. The forwarding wrapper is necessarily one additional C
-preprocessor include level; extension macros such as `__INCLUDE_LEVEL__` can
-observe that level even though ordinary quoted-header origin is preserved.
+sibling name. The checker synthesizes its descriptor from the producer's
+already checked real-header inputs and complete macro context instead of sending that
+compiler-generated file through `cdriver`. It then replaces the physical
+spelling in the probe context with a private hash-named wrapper derived from the
+logical module and eventual public-header path. The probe includes the stable
+wrapper name, and the wrapper includes the unique physical header by its
+absolute quoted spelling. Thus nested quoted includes still begin at the
+physical header's directory, while the rendered probe text and every descriptor
+field used by `header_context_key` remain stable across rebuilds. When one
+generated header includes another resolver-owned companion, its identity
+stream replaces that randomized spelling with the dependency's public path and
+stable generated identity; real byte changes still propagate into the outer
+digest. One service
+rejects conflicting bindings for the same wrapper identity. The forwarding
+wrapper is necessarily one additional C preprocessor include level; extension
+macros such as `__INCLUDE_LEVEL__` can observe that level even though ordinary
+quoted-header origin is preserved.
 
 Alias construction fails closed unless both the physical descriptor and public
 identity are absolute and the physical include is quoted. The persistent marker
@@ -368,6 +375,14 @@ for different header worlds and run with `TITAN_PROBE_CACHE_DISABLE=1`; that
 test-only switch leaves production caching enabled for the preceding build.
 This direct policy is intentional; do not turn the marker into a
 compiler-verdict record or dependency graph.
+
+An embedding may give `cprobe.Service` a
+`persistent_cache_trace(stage, hit, key, path)` callback. Titan invokes it once
+for each enabled persistent-marker lookup, before either the cached-success
+return or the ordinary probe path. All arguments are scalars, the callback is
+protected, and it is independent of verbose evidence: enabling cache telemetry
+does not retain probe sources or commands and never prints them. The driver
+adapts this to the resolver-level callback documented below.
 
 The service creates a private `mktemp -d` workspace, writes deterministic
 collision-free sources, and invokes a non-linking compiler mode. Production

@@ -562,6 +562,42 @@ function driver.new_resolver_context(options)
     local io_strategy = options.io
     if io_strategy == nil then io_strategy = compiler_io.new_sync() end
     compiler_io.validate(io_strategy, 2)
+    local source_process_trace = options.source_process_trace
+    if source_process_trace ~= nil and
+       type(source_process_trace) ~= "function" then
+        error("source_process_trace must be a function", 2)
+    end
+    local c_probe_cache_trace = options.c_probe_cache_trace
+    if c_probe_cache_trace ~= nil and
+       type(c_probe_cache_trace) ~= "function" then
+        error("c_probe_cache_trace must be a function", 2)
+    end
+    local source_profile_stack = {}
+    local client_header_trace = options.c_header_process_trace
+    if client_header_trace ~= nil and
+       type(client_header_trace) ~= "function" then
+        error("c_header_process_trace must be a function", 2)
+    end
+    local c_header_process_trace = client_header_trace
+    if source_process_trace ~= nil then
+        -- A complete header request and its later Titan FFI conversion are
+        -- child work of the source check which requested them. Preserve the
+        -- existing phase stream while recording only those two non-overlapping
+        -- terminal durations for exclusive source-module attribution.
+        c_header_process_trace = function(
+                filename, resolved, phase, outcome, cpu_ms, identity)
+            local frame = source_profile_stack[#source_profile_stack]
+            if frame and type(cpu_ms) == "number" and
+               (phase == "process_total" or
+                phase == "downstream_ffi_conversion") then
+                frame.child_cpu_ms = frame.child_cpu_ms + cpu_ms
+            end
+            if client_header_trace ~= nil then
+                return client_header_trace(
+                    filename, resolved, phase, outcome, cpu_ms, identity)
+            end
+        end
+    end
     local extra_ffi_include_dirs, include_error =
         cdriver.resolve_compiler_include_dirs(
             options.extra_ffi_include_dirs or {}, io_strategy)
@@ -583,8 +619,11 @@ function driver.new_resolver_context(options)
         used_compiled_interfaces = {},
         probe_verbose = options.verbose == true,
         pretty_print = options.pretty_print == true,
-        c_header_process_trace = options.c_header_process_trace,
+        c_header_process_trace = c_header_process_trace,
         c_header_analysis = options.c_header_analysis,
+        source_process_trace = source_process_trace,
+        c_probe_cache_trace = c_probe_cache_trace,
+        _source_profile_stack = source_profile_stack,
         extra_ffi_include_dirs = extra_ffi_include_dirs,
     }
     local initialized, layout_error = driver.initialize_layout(context)
@@ -890,10 +929,19 @@ function driver.get_probe_service(context)
     end
     toolchain.include_dirs = include_dirs
     local service
+    local persistent_cache_trace
+    if context.c_probe_cache_trace ~= nil then
+        persistent_cache_trace = function(stage, hit, key, path)
+            return context.c_probe_cache_trace(
+                context._c_probe_source_module or "",
+                stage, hit, key, path)
+        end
+    end
     service, err = cprobe.new_service({
         io = context.io,
         process_trace = context.c_header_process_trace,
         process_analysis = context.c_header_analysis,
+        persistent_cache_trace = persistent_cache_trace,
         toolchain = toolchain,
         verbose = context.probe_verbose,
         cache_directory = driver.PROBE_CACHE_DIRECTORY,
@@ -2830,6 +2878,37 @@ function driver.defaultloader(static_deps, options)
             "options.io with a yield method", 2)
     end
     local dependency_stack = {}
+    local source_process_trace = context.source_process_trace
+    local source_profile_stack = context._source_profile_stack or {}
+    local function begin_source_profile()
+        if source_process_trace == nil then return nil end
+        local frame = {
+            started = os.clock(),
+            child_cpu_ms = 0,
+            parse_cpu_ms = 0,
+            check_cpu_ms = 0,
+        }
+        source_profile_stack[#source_profile_stack + 1] = frame
+        return frame
+    end
+
+    local function finish_source_profile(
+            frame, modname, filename, outcome)
+        if frame == nil then return nil end
+        local total_cpu_ms = (os.clock() - frame.started) * 1000
+        if total_cpu_ms < 0 then total_cpu_ms = 0 end
+        local self_cpu_ms = total_cpu_ms - frame.child_cpu_ms
+        if self_cpu_ms < 0 then self_cpu_ms = 0 end
+        source_profile_stack[#source_profile_stack] = nil
+        local parent = source_profile_stack[#source_profile_stack]
+        if parent then
+            parent.child_cpu_ms = parent.child_cpu_ms + total_cpu_ms
+        end
+        pcall(source_process_trace, modname, tostring(filename or ""),
+            outcome, self_cpu_ms, total_cpu_ms,
+            frame.parse_cpu_ms or 0, frame.check_cpu_ms or 0)
+        return parent
+    end
     for name in pairs(source_roots) do
         context.source_modules[name] = true
     end
@@ -2981,7 +3060,7 @@ function driver.defaultloader(static_deps, options)
 
     local cached_source_loading = {}
     local load_cached_source_entry
-    load_cached_source_entry = function(modname, active_loader)
+    local function load_cached_source_entry_inner(modname, active_loader)
         local candidate = cached_source_entries[modname]
         if candidate == nil then return nil end
         local valid, validation_error =
@@ -3073,6 +3152,21 @@ function driver.defaultloader(static_deps, options)
         context.source_modules[modname] = true
         cached_source_loading[modname] = nil
         return candidate
+    end
+
+    load_cached_source_entry = function(modname, active_loader)
+        local candidate = cached_source_entries[modname]
+        if source_process_trace == nil or candidate == nil then
+            return load_cached_source_entry_inner(modname, active_loader)
+        end
+        local frame = begin_source_profile()
+        local loaded, load_error =
+            load_cached_source_entry_inner(modname, active_loader)
+        local filename = type(candidate) == "table"
+            and candidate.filename or ""
+        finish_source_profile(frame, modname, filename,
+            loaded and "complete" or "failed")
+        return loaded, load_error
     end
 
     -- Decode clean project interfaces lazily, only when a dirty module imports
@@ -3239,7 +3333,7 @@ function driver.defaultloader(static_deps, options)
         end
     end
 
-    local function parse_source(modname, source, loader)
+    local function parse_source_inner(modname, source, loader, profile_frame)
         local ast = {}
         local main_input
         local main_initializer
@@ -3256,7 +3350,14 @@ function driver.defaultloader(static_deps, options)
                 input, err = context.io:read_file(filename)
                 if not input then return false, err end
             end
+            local parse_started = profile_frame and os.clock() or nil
             local nodes, perr = parser.parse(filename, input)
+            if profile_frame then
+                local parse_cpu_ms = (os.clock() - parse_started) * 1000
+                if parse_cpu_ms < 0 then parse_cpu_ms = 0 end
+                profile_frame.parse_cpu_ms =
+                    profile_frame.parse_cpu_ms + parse_cpu_ms
+            end
             if not nodes then
                 return false, parser.error_to_string(perr, filename)
             end
@@ -3284,12 +3385,33 @@ function driver.defaultloader(static_deps, options)
         driver.imported[modname] = CIRCULAR_MARK
         local direct_deps = {}
         table.insert(dependency_stack, direct_deps)
+        local previous_probe_source_module
+        if context.c_probe_cache_trace ~= nil then
+            previous_probe_source_module = context._c_probe_source_module
+            context._c_probe_source_module = modname
+        end
+        local check_started = profile_frame and os.clock() or nil
+        local check_child_started = profile_frame
+            and profile_frame.child_cpu_ms or 0
         local modt, errors = checker.check(
             modname, ast, main_input, source.main, loader, {
                 probe_service_provider = function()
                     return driver.get_probe_service(context)
                 end,
             })
+        if profile_frame then
+            local inclusive_check_cpu_ms =
+                (os.clock() - check_started) * 1000
+            local child_check_cpu_ms =
+                profile_frame.child_cpu_ms - check_child_started
+            local check_cpu_ms =
+                inclusive_check_cpu_ms - child_check_cpu_ms
+            if check_cpu_ms < 0 then check_cpu_ms = 0 end
+            profile_frame.check_cpu_ms = check_cpu_ms
+        end
+        if context.c_probe_cache_trace ~= nil then
+            context._c_probe_source_module = previous_probe_source_module
+        end
         table.remove(dependency_stack)
         check_used_compiled_interface(context, modname, modt, errors)
         local has_foreign = driver.ast_has_foreign_functions(ast)
@@ -3343,7 +3465,6 @@ function driver.defaultloader(static_deps, options)
         -- must close the resolver and discard the whole analysis state.
         context.checked_source_modules[
             #context.checked_source_modules + 1] = modname
-        context.io:yield(modname)
         return true, modt, errors, {
             kind = "source",
             filename = source.main,
@@ -3351,6 +3472,37 @@ function driver.defaultloader(static_deps, options)
             foreign_header_for_check = checking_foreign_header ~= nil,
             foreign_header_probe_identity = foreign_header,
         }
+    end
+
+    local function parse_source(modname, source, loader)
+        if source_process_trace == nil then
+            local ok, modtype, errors, info =
+                parse_source_inner(modname, source, loader, nil)
+            if ok then context.io:yield(modname) end
+            return ok, modtype, errors, info
+        end
+
+        local frame = begin_source_profile()
+        local ok, modtype, errors, info =
+            parse_source_inner(modname, source, loader, frame)
+        local parent = finish_source_profile(
+            frame, modname, source.main, ok and "complete" or "failed")
+        if ok then
+            -- The module itself is complete before this cooperative checkpoint.
+            -- Its caller's frame is still live, so exclude process CPU consumed
+            -- by other Tasks while this source-check Task is suspended rather
+            -- than charging that scheduler work to the importing module.
+            local yield_started = os.clock()
+            context.io:yield(modname)
+            if parent then
+                local yield_cpu_ms = (os.clock() - yield_started) * 1000
+                if yield_cpu_ms > 0 then
+                    parent.child_cpu_ms =
+                        parent.child_cpu_ms + yield_cpu_ms
+                end
+            end
+        end
+        return ok, modtype, errors, info
     end
 
     local function recover_contextual_owner(modname, request)

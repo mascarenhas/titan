@@ -264,6 +264,46 @@ Omitting it constructs the canonical synchronous Lua implementation from
 `titan-compiler.io`, so ordinary compiler callers retain blocking behavior.
 Missing or non-callable methods are rejected while the context is created.
 
+`options.source_process_trace` is an optional best-effort observability
+callback with the scalar signature
+`(module_name, filename, outcome, self_cpu_ms, total_cpu_ms, parse_cpu_ms,
+check_cpu_ms)`. Callbacks which consume only the original five arguments remain
+valid because Lua ignores trailing arguments. The driver emits one event for
+each source module it checks or rehydrates as a cached source entry. `outcome`
+is `complete` or `failed`; all durations are process CPU milliseconds measured
+with `os.clock`, so they exclude native child-process CPU and can include
+process CPU consumed by other Tasks during cooperative I/O. `total_cpu_ms`
+spans the whole module operation, including recursively checked source
+dependencies. `self_cpu_ms` subtracts each direct source child's total, the
+cooperative checkpoint following a completed child, and exactly the two
+non-overlapping C-header terminal phases: `process_total` and
+`downstream_ffi_conversion`. Header component phases such as preprocessing and
+C parsing are already contained by `process_total`; they remain trace detail
+and are not subtracted again.
+
+`parse_cpu_ms` sums the direct `parser.parse` calls for every constituent of a
+folder module. It includes a parser call which reports a syntax error, but is
+zero for cached-source rehydration or a failure before parsing starts.
+`check_cpu_ms` measures the direct `checker.check` call and subtracts source
+children, post-child cooperative checkpoints, complete C-header processing,
+and downstream FFI conversion which occur during that call; it is zero when
+checking is not reached or a cached source entry is rehydrated. Both exclusive
+components are clamped to zero. The remaining direct source-driver CPU can be
+derived as `max(self_cpu_ms - parse_cpu_ms - check_cpu_ms, 0)`. The event is
+emitted before the module's own cooperative checkpoint. The callback is
+protected, so a tracing failure cannot change analysis, and an invariant or
+cancellation which raises may omit this best-effort terminal event together
+with the discarded analysis.
+
+`options.c_probe_cache_trace` is an optional best-effort observability callback
+with the scalar signature `(module_name, stage, hit, key, path)`. `module_name`
+is the source module whose checker requested the probe, or the empty string for
+a lookup outside a source check; `stage` is the C-probe stage; `hit` is a
+boolean; `key` is the persistent marker digest; and `path` is its absolute
+pathname. The driver and C-probe service protect the callback, so a tracing
+failure cannot change analysis. This callback is separate from verbose probe
+evidence and never writes to stdout.
+
 The following is the complete normative strategy contract for language-server
 API 3. Signatures use Lua multiple-return notation. Every table that crosses
 this boundary is an ordinary Lua table: implementations must not expose
@@ -453,9 +493,13 @@ instead of leaving a cache entry pinned to its former target.
 Configured `-imacros` and `-include` inputs are part of this same per-module
 closure, including their transitive includes and every candidate consulted to
 resolve a relative operand. Resolver-owned
-generated checking headers do not escape as restattable temporary paths; saved
-Titan source identity covers their regeneration while physical nested headers
-remain in the array.
+generated checking headers are not reparsed by `cdriver` and do not escape as
+restattable temporary paths. Their source module types carry the already checked
+final macro environment, changed-name delta, nested generated-header identities,
+and real-header input closure; saved Titan source identity covers
+their regeneration while physical nested headers remain in the array. The C
+probe baseline still includes the generated companion and remains the
+authoritative compilation check.
 
 For a DSO hit, `find_dynamic_interface` uses
 `titan._loadlib(path, symbol)` to map each existing candidate with
@@ -1381,8 +1425,10 @@ the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 | `options.cached_source_entries` | semantic clients / `driver.defaultloader` | `{}` | Caller-certified complete raw source entries, including exact C-header inputs, eligible for clean project-AST reuse; resolver-owned source foreign headers are regenerated. |
 | `options.cached_interfaces` | semantic clients / `driver.defaultloader` | `{}` | Serialized clean source interfaces plus exact source and C-header provenance; used without AST for ordinary imports and as transient reparse input for explicit `.titan` edges. |
 | `options.io` / `context.io` | semantic clients / `driver.new_resolver_context` | `compiler_io.new_sync()` | Validated context-owned filesystem, process, and cooperative-yield strategy. The omitted default preserves synchronous compiler and `titanc` behavior. |
+| `options.source_process_trace` | semantic clients / `driver.new_resolver_context` | `nil` | Best-effort scalar `(module_name, filename, outcome, self_cpu_ms, total_cpu_ms, parse_cpu_ms, check_cpu_ms)` observer for exclusive source-module process CPU. Parse time sums folder constituents; check and self time exclude nested source work, post-child checkpoints, complete C-header processing, and downstream FFI conversion. Cached rehydration reports zero parse/check CPU; five-argument Lua callbacks remain valid. |
 | `context.checked_source_modules` | `driver.defaultloader` | `{}` | Ordered dense list of source modules checked during this resolver run. A module is appended after its complete result is published and before `context.io:yield()`; retained cached modules are excluded. |
 | `options.extra_ffi_include_dirs` | semantic clients / `driver.new_resolver_context` | `{}` | Analysis-local include roots appended to a fresh foreign-C probe descriptor without process-global reconfiguration. |
+| `options.c_probe_cache_trace` | semantic clients / `driver.new_resolver_context` | `nil` | Best-effort scalar `(module_name, stage, hit, key, path)` observer for persistent successful-probe marker lookups; it neither enables verbose evidence nor writes to stdout. |
 | `titan._loadlib` | `ltitanlib.c` / `driver.lua` | internal `RTLD_LAZY` + `RTLD_LOCAL` loader | Maps DSO candidates lazily for callable ABI/type interface recovery without initializing them or globalizing their symbols; archive candidates are parsed in-process instead. |
 | `titan._loadlibglobal` | `ltitanlib.c` / generated shims | internal canonical-path `RTLD_LAZY` + `RTLD_GLOBAL` loader | Maps or promotes a Lua-selected provider in a separate per-state cache and returns the requested logical `luaopen_*` entry. |
 | `Type.Module.file` | `types.lua`, `driver.lua`, `coder.lua` | exact logical `.so` path for a DSO claim, overwritten after dynamic lookup | Transient selected relative DSO used by generated handle imports; deliberately omitted from serialized interfaces and never populated with an archive path. |

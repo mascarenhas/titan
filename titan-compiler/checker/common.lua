@@ -211,7 +211,7 @@ function generic_bare_forwarding_alias_target(node, st, errors)
             return nil, false, false
         end
         local include_source = declaration._source_import == true
-        local member = types.module_type_member(
+        local member, member_islocal = types.module_type_member(
             module, node.name, include_source)
         if member and member._tag == "Type.GenericAlias" then
             node._decl = {
@@ -219,7 +219,7 @@ function generic_bare_forwarding_alias_target(node, st, errors)
                 modname = module.name,
                 name = node.name,
                 type = member,
-                islocal = member.islocal and true or false,
+                islocal = member_islocal,
             }
             local owner = types.registry[member.target_owner_fqtn]
             local target_alias_fqtn = false
@@ -233,7 +233,7 @@ function generic_bare_forwarding_alias_target(node, st, errors)
                 modname = module.name,
                 name = node.name,
                 type = member,
-                islocal = member.islocal and true or false,
+                islocal = member_islocal,
             }
             return member, false, true
         end

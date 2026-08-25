@@ -170,11 +170,24 @@ therefore not authorization.
 
 The consumer checker must see the same preprocessing environment as its final
 C compiler. After all direct Titan and C imports have been visited,
-`apply_source_foreign_headers` processes source-generated headers in AST order,
-adds their normalized include descriptors to the module probe context, and
-replays their macro changes before aliases, declarations, module initializers,
-or bodies are checked. This keeps macro projections and contextual probes aligned with the emitted
-translation unit. As elsewhere in the trusted C FFI, deliberately
+`apply_source_foreign_headers` adds source-generated headers to the module probe
+context in AST order and replays their producer-owned final macro environments
+and changed-name deltas before aliases, declarations, module initializers, or
+bodies are checked. The source module type carries only that compiler-private
+macro state and the exact transitive real-header inputs already established
+while checking the producer. Keeping the complete final environment is
+necessary when a source companion is the consumer's first C include:
+compiler-default and configured `-D` macros are part of that environment even
+though the header itself did not change them. The
+consumer synthesizes the generated-companion include descriptor from those
+facts; it does not preprocess, parse, or convert the resolver-owned temporary
+header through `cdriver` a second time. Nested randomized checking-header paths
+are canonicalized to the dependency's public path and stable generated identity
+before the companion contributes to a probe-cache key. The authoritative C probe baseline still
+includes the physical companion, so its declarations and emitted include order
+are checked by the same C compiler that will compile the module. This keeps
+macro projections and contextual probes aligned with the emitted translation
+unit without treating compiler output as a new foreign API. As elsewhere in the trusted C FFI, deliberately
 configuration-dependent cross-translation-unit ABI declarations remain the C
 programmer's responsibility.
 
