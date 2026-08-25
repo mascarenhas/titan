@@ -1,7 +1,8 @@
 # C99 and FFI indexing performance
 
-Status: both implementation workstreams, final profiling, local and Linux CI
-gates, Codecov, and PR delivery are complete; review and merge are pending.
+Status: both implementation workstreams, final profiling, and refreshed local
+gates are complete; review and merge are pending. The final PR heads must pass
+the ordinary Linux CI and Codecov gates recorded in the delivery section.
 
 This plan records the compiler-side work discovered while profiling cold Titan
 language-server indexing. It complements the language-server cache and
@@ -136,22 +137,27 @@ specifier run is now advanced as one unit; its declaration AST is unchanged.
 ## Workstream B: repeated-header reuse
 
 The cache lives in `c-parser/cdriver.lua`, weakly scoped to the compiler I/O
-strategy shared by a long-lived language-server compiler instance and bounded
-by both a 16-entry LRU and a 64 MiB approximate retained-graph budget. A replay
-of the exact 342-request trace projected 201, 232, and 270 hits at entry bounds
-8, 12, and 16 respectively (versus 302 when all 26 successful headers remain),
-so 16 preserves most reuse while limiting unrelated SDK growth. The byte bound
-charges table/slot storage, every string occurrence, and the preprocessor's
-weak-side-table token spelling/spacing metadata. It evicts before cloning a
-miss, which also prevents a second large graph from being allocated beside
-entries which cannot remain resident. `c-parser/cpp.lua` publishes its existing
-exact ordered compiler-argv/forced-header configuration key, extended with the
-explicit language mode and a deterministic digest of the authoritative include
-roots and predefined macro world reported by that compiler. `cdriver` combines
+strategy shared by a long-lived language-server compiler instance. Production
+retains every successful completed header graph for that provider's lifetime:
+the entry and weight limits are `math.maxinteger`, and production skips the
+recursive graph-weight walk entirely. This deliberately favors lower repeated
+developer-tool latency over a small resident-memory bound. A focused test hook
+still installs finite count and approximate retained-graph limits, exercises
+LRU/oversized behavior, and charges table/slot storage, every string occurrence,
+and the preprocessor's weak-side-table token spelling/spacing metadata. A replay
+of the exact 342-request trace had projected 201, 232, and 270 hits at entry
+bounds 8, 12, and 16, versus 302 when all 26 successful headers remain; that
+initial bounded policy is retained below only as a measured comparison.
+
+`c-parser/cpp.lua` publishes its existing exact ordered compiler-argv/forced-
+header configuration key, extended with the explicit language mode and a
+deterministic digest of the authoritative include roots and predefined macro
+world reported by that compiler. `cdriver` combines
 that context with the provider's current working directory, requested spelling,
 and selected absolute header, reduces the complete tuple to a fixed-size
-SHA-256 cache key, and charges that key, the actual entry table, and its cache
-hash slot to the same byte budget. It deliberately does not key on `source_dir`:
+SHA-256 cache key, and, under a finite test budget, charges that key, the actual
+entry table, and its cache hash slot together. It deliberately does not key on
+`source_dir`:
 the current caller resolves and observes its own top-level candidates first,
 while the reusable entry owns only the dependency/search tail observed from
 the selected header.
@@ -189,42 +195,47 @@ never retained.
 - [x] Add focused hit, caller-search reconstruction, graph-isolation,
   transitive-byte invalidation, provider-scope, yielded same-key completion,
   yielded hit replacement, macro-token sidecar preservation, probe-baseline
-  isolation, hit-refreshed LRU, weight eviction, oversized rejection, and
+  isolation, provider-lifetime retention beyond the former production bound,
+  finite hit-refreshed LRU, weight eviction, oversized rejection, and
   failure-exclusion tests.
 - [x] Re-run the cold-index trace after both workstreams land and record cache
   hits, residual parses, CPU/wall time, and peak memory.
 - [x] Refresh the cache trace's exact weight/counter measurements after the
   final fixed-key and entry-overhead accounting refinement.
 
-The final fixed-key, entry-overhead, sidecar/string-aware controlled trace
-retained at `/tmp/titan-cache-final-accounting.nKT56k.tsv` made the same 342
-requests and produced the same 3,783 diagnostics and 89 snapshots in each of
-two deliberately preserved fixed-point passes. Its SHA-256 is
-`af613e884f3e6a6002c71d114df06fd783a2790c3a844918af1c50e447cb1a0e`.
-The bounded cache recorded 260 hits, 82 misses (68 successful real parses and
-14 expected failures), 64 stores, and 51 evictions. `openssl/x509v3.h` and
-`openssl/ssl.h` each exceeded 64 MiB in both passes and accounted for the four
-successful but deliberately unstored parses. Header processing consumed
-71.970s CPU (25.556s validating/cloning hits, 46.359s successful misses, and
-0.055s failed misses), down from the uncached 169.150s. The maximum retained
-graph weight was 67,042,715 bytes (63.94 MiB) across at most 16 entries; every
-sample remained within both configured bounds. End-to-end controlled indexing
-took 203.341s wall and 172.985s compiler-attempt CPU, improving on the 328.526s
-/ 274.873s baseline by 38.10% / 37.06%. Peak server RSS was 1,226,104 KiB
-(1.169 GiB), and the sampled process-tree peak was 2,297,464 KiB (2.191 GiB).
-The controlled process-tree peak includes transient compiler children and is
-not a retained-cache bound.
+The final provider-lifetime controlled trace retained at
+`/tmp/titan-cache-final-unbounded.kL4lgP.tsv` made the same 342 requests and
+produced the same 3,783 diagnostics and 89 snapshots in each of two deliberately
+preserved fixed-point passes. Its SHA-256 is
+`df249037100810d0a2777fdb8c30c7edeaf52d915c0a55f221ed2d60bf8a385c`.
+It recorded 302 hits, 40 misses (26 successful real parses and 14 expected
+failures), 26 stores, zero evictions, zero oversized rejections, and 26 retained
+entries. Header processing consumed 53.769s CPU (31.601s validating/cloning
+hits, 22.095s successful misses, and 0.073s failed misses), 25.29% below the
+71.970s bounded-cache result and 68.21% below the uncached 169.150s result.
+End-to-end controlled indexing took 190.372s wall and 160.387s compiler-attempt
+CPU, 6.38% / 7.28% below the bounded result and 42.05% / 41.65% below the
+uncached baseline. Peak server RSS was 1,517,000 KiB (1.447 GiB), 23.73% above
+the bounded run; sampled process-tree peak was 1,570,944 KiB (1.498 GiB) and
+includes transient compiler children. An immediately preceding measurement-
+only run of the same 26 retained graphs estimated 294,384,594 bytes of graph
+weight; final production stats intentionally report `tracks_weight=false` and
+do not pay that traversal cost.
 
 With the language server's redundant cold fixed-point analysis removed, the
-final integrated actual-usage run indexed the Titan checkout in one compiler
-analysis: 130.209s wall, 92.242s compiler-attempt CPU, 69 root attempts, 89
-project snapshots, and the same 3,783 diagnostics. Peak server RSS was
-1,241,444 KiB and the sampled process-tree peak was 1,295,312 KiB. Relative to
-the original uncached/two-pass 328.526s wall and 274.873s attempt-CPU baseline,
-the combined parser, cache, and language-server work reduced wall time by
-60.37% and compiler-attempt CPU by 66.44%. The controlled 342-request trace
-above remains the cache-specific comparison because it intentionally preserves
-both identical passes; the integrated run verifies the shipped one-pass path.
+final clean-build actual-usage run indexed the Titan checkout in one compiler
+analysis: 117.966s wall, 88.683s compiler-attempt CPU, 69 root attempts, 89
+project snapshots, and the same 3,783 diagnostics. It built the semantic index
+for the same 43 files and 8,530 occurrences. Peak server RSS was 1,495,236 KiB
+(1.426 GiB), and the sampled process-tree peak was 1,549,384 KiB (1.478 GiB).
+Relative to the earlier bounded-cache one-pass run at 130.209s / 92.242s, the
+provider-lifetime policy reduced wall time by 9.40% and attempt CPU by 3.86%
+while increasing peak server RSS by 20.44%. Relative to the original uncached/
+two-pass 328.526s wall and 274.873s attempt-CPU baseline, the combined parser,
+cache, and language-server work reduced wall time by 64.09% and compiler-
+attempt CPU by 67.74%. The controlled 342-request trace above remains the
+cache-specific comparison because it intentionally preserves both identical
+passes; the integrated run verifies the shipped one-pass path.
 
 ## Verification
 
@@ -245,24 +256,27 @@ both identical passes; the integrated run verifies the shipped one-pass path.
 Final local verification passed `make test PREFIX=/tmp/titan-c99-final
 CCACHE_DISABLE=1`: the 124-test root suite, all four isolated compiler shards,
 and the 197-test native standard-library suite completed with zero failures.
-The completed-header cache's focused suite passed all 14 cases, including the
-yielded replacement race. A clean vscode-titan toolchain rebuilt from this
-worktree reports semantic version `0.6.0`, library path version `0.6`, and ABI
-`2`; its full `xvfb-run -a make -j1 verify` consumer gate also passed.
+The completed-header cache's focused suite passed all 15 cases, including the
+yielded replacement race and provider-lifetime retention beyond the former
+production bound. A clean vscode-titan toolchain rebuilt from this worktree
+reports semantic version `0.6.0`, library path version `0.6`, and ABI `2`; its
+full `xvfb-run -a make -j1 verify` consumer gate also passed: 180 Titan tests,
+the native protocol and Codex smokes, 46 JavaScript tests, 11 Extension Host
+tests, and the package/linkage/plugin/install/VSIX inspections were green.
 
-Implementation commit `0951cf4446a52dde70815421f4ba00ba247232ca` is
-published as Titan PR #106 and closes issues #104 and #105. Its ordinary Ubuntu
-24.04 stdlib/runtime, compiler/LuaCov, and ASan+UBSan jobs passed, as did both
-Codecov project and patch gates; the macOS-only job remained intentionally
-skipped. Companion vscode-titan PR #28 pins that exact compiler commit and its
-Ubuntu 24.04 Ubicloud build/test/package gate passed.
+Titan PR #106 is the delivery vehicle and closes issues #104 and #105.
+Its required ordinary Ubuntu 24.04 evidence is the stdlib/runtime,
+compiler/LuaCov, and ASan+UBSan jobs plus both Codecov project and patch gates;
+the macOS-only job remains intentionally skipped. Companion vscode-titan PR
+#28 must pin the exact final compiler implementation commit and run its Ubuntu
+24.04 Ubicloud build/test/package gate.
 
 ## Delivery
 
 - Keep compiler work on `codex/c99-ffi-index-performance` and language-server
   work in its separate vscode-titan PR.
-- Review and commit exact paths, push the Titan branch, and open one Titan PR
-  describing both complementary workstreams and their measured effects.
+- Review and commit exact paths, push the Titan branch, and update Titan PR
+  #106 with both complementary workstreams and their measured effects.
 - Link the relevant GitHub issues and update the project board when credentials
   permit. Report any items that cannot be added rather than silently dropping
   them.

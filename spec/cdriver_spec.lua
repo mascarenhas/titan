@@ -555,6 +555,8 @@ extern titan_cdriver_cache_type titan_cdriver_cache_value;
         it("charges retained macro string bytes to the cache budget",
         function()
             cdriver.clear_process_cache()
+            cdriver._set_process_cache_limits_for_test(
+                math.maxinteger, math.maxinteger)
             local payload = string.rep("x", 100000)
             local header = tmp_header(
                 '#define TITAN_CACHE_LARGE_STRING "' .. payload .. '"\n' ..
@@ -562,7 +564,9 @@ extern titan_cdriver_cache_type titan_cdriver_cache_value;
                 "typedef int titan_large_string_cache_type;\n")
 
             assert_process_file(header)
-            assert.is_true(cdriver.process_cache_stats().weight > 2 * #payload)
+            local stats = cdriver.process_cache_stats()
+            assert.is_true(stats.tracks_weight)
+            assert.is_true(stats.weight > 2 * #payload)
             os.remove(header)
         end)
 
@@ -854,6 +858,50 @@ typedef TITAN_CACHE_CONFIG_TYPE titan_cache_config_type;
             cdriver.header_input_identity = original_identity
             c99.match_language_grammar = original_match
             remove_tree({ outer, first, second }, { root })
+            assert.truthy(ok, err)
+        end)
+
+        it("retains more than the former production entry bound", function()
+            cdriver.clear_process_cache()
+            local root = tmp_dir()
+            local files = {}
+            local options = {
+                source_dir = root,
+                compiler_include_dirs = {},
+            }
+            for index = 1, 17 do
+                local name = ("unbounded-cache-%02d.h"):format(index)
+                local path = root .. "/" .. name
+                files[#files + 1] = path
+                write_file(path,
+                    ("typedef int titan_unbounded_cache_%02d;\n")
+                        :format(index))
+            end
+
+            local ok, err = pcall(function()
+                local initial = cdriver.process_cache_stats()
+                assert.equal(math.maxinteger, initial.entry_limit)
+                assert.equal(math.maxinteger, initial.weight_limit)
+                assert.is_false(initial.tracks_weight)
+
+                for index = 1, 17 do
+                    assert_process_file(
+                        ("unbounded-cache-%02d.h"):format(index), options)
+                end
+                assert_process_file("unbounded-cache-01.h", options)
+
+                local stats = cdriver.process_cache_stats()
+                assert.equal(17, stats.size)
+                assert.equal(17, stats.stores)
+                assert.equal(17, stats.misses)
+                assert.equal(1, stats.hits)
+                assert.equal(0, stats.evictions)
+                assert.equal(0, stats.oversized)
+                assert.equal(0, stats.weight)
+                assert.is_false(stats.tracks_weight)
+            end)
+
+            remove_tree(files, { root })
             assert.truthy(ok, err)
         end)
 

@@ -14,21 +14,23 @@ local compiler_include_dirs = setmetatable({}, { __mode = "k" })
 
 -- A language-server compiler instance owns one long-lived I/O strategy while
 -- constructing many short-lived resolver contexts. Keep completed header
--- interpretation with that provider, not with a resolver, and bound retained
--- graphs so an unusual project which imports many unrelated SDKs cannot grow
--- the compiler process without limit.
-local PROCESS_CACHE_LIMIT = 16
+-- interpretation with that provider, not with a resolver. This cache serves a
+-- developer tool whose repeated preprocessing cost matters more than a small
+-- resident-memory bound, so production retention lasts for the provider's
+-- lifetime. Focused tests can still install finite limits below.
+local PROCESS_CACHE_LIMIT = math.maxinteger
 -- Approximate the complete graphs actually cloned into retained entries,
 -- including unique string bytes and the preprocessor's token-provenance side
 -- tables. These constants track ordinary 64-bit Lua object and slot costs
--- closely enough to enforce a conservative process budget without allocator
--- APIs.
-local PROCESS_CACHE_WEIGHT_LIMIT = 64 * 1024 * 1024
+-- closely enough to report retained size and exercise finite test limits
+-- without allocator APIs.
+local PROCESS_CACHE_WEIGHT_LIMIT = math.maxinteger
 -- Charge the cache.entries hash slot separately from the entry graph. The
 -- graph estimator uses the same ordinary 64-bit Lua hash-slot approximation.
 local PROCESS_CACHE_MAP_SLOT_WEIGHT = 32
 local configured_process_cache_limit = PROCESS_CACHE_LIMIT
 local configured_process_cache_weight_limit = PROCESS_CACHE_WEIGHT_LIMIT
+local configured_process_cache_tracks_weight = false
 local process_caches = setmetatable({}, { __mode = "k" })
 
 local function process_cache_for(strategy)
@@ -48,6 +50,7 @@ local function process_cache_for(strategy)
             oversized = 0,
             entry_limit = configured_process_cache_limit,
             weight_limit = configured_process_cache_weight_limit,
+            tracks_weight = configured_process_cache_tracks_weight,
         }
         process_caches[strategy] = cache
     end
@@ -85,8 +88,9 @@ local function oldest_cache_key(cache)
     return oldest_key
 end
 
--- Evict before cloning a miss. In particular, never allocate a second large
--- OpenSSL graph while unrelated retained graphs still occupy the cache budget.
+-- Production limits are practically unbounded. Finite test configurations
+-- evict before cloning a miss, preserving the embedding policy mechanism and
+-- exercising count, retained-weight, and oversized-entry behavior.
 local function make_cache_room(cache, key, weight)
     if weight > cache.weight_limit then
         cache.oversized = cache.oversized + 1
@@ -129,14 +133,15 @@ function cdriver.clear_process_cache(strategy)
 end
 
 -- Keep production constants immutable while allowing focused tests to drive
--- weight-only eviction and oversized-entry rejection without allocating tens
--- of MiB. Calling with no limits restores the production configuration. Each
--- cache captures its limits at creation so accounting cannot change under a
--- live cache.
+-- count/weight eviction and oversized-entry rejection without allocating tens
+-- of MiB. Calling with no limits restores provider-lifetime production
+-- retention. Each cache captures its limits at creation so accounting cannot
+-- change under a live cache.
 function cdriver._set_process_cache_limits_for_test(entry_limit, weight_limit)
     if entry_limit == nil and weight_limit == nil then
         configured_process_cache_limit = PROCESS_CACHE_LIMIT
         configured_process_cache_weight_limit = PROCESS_CACHE_WEIGHT_LIMIT
+        configured_process_cache_tracks_weight = false
     else
         assert(type(entry_limit) == "number"
             and entry_limit > 0
@@ -148,10 +153,14 @@ function cdriver._set_process_cache_limits_for_test(entry_limit, weight_limit)
             "process-cache weight limit must be a positive integer")
         configured_process_cache_limit = entry_limit
         configured_process_cache_weight_limit = weight_limit
+        configured_process_cache_tracks_weight = true
     end
     cdriver.clear_process_cache()
 end
 
+-- The weight field is meaningful only when tracks_weight is true. Production
+-- caches deliberately return zero and leave it untracked so serving ordinary
+-- compiler calls never walks a retained graph solely for observability.
 function cdriver.process_cache_stats(strategy)
     strategy = strategy or default_io
     local cache = process_caches[strategy]
@@ -161,6 +170,7 @@ function cdriver.process_cache_stats(strategy)
             invalidations = 0, stores = 0, evictions = 0, oversized = 0,
             weight = 0, entry_limit = configured_process_cache_limit,
             weight_limit = configured_process_cache_weight_limit,
+            tracks_weight = configured_process_cache_tracks_weight,
         }
     end
     return {
@@ -175,6 +185,7 @@ function cdriver.process_cache_stats(strategy)
         weight = cache.weight,
         entry_limit = cache.entry_limit,
         weight_limit = cache.weight_limit,
+        tracks_weight = cache.tracks_weight,
     }
 end
 
@@ -784,12 +795,17 @@ function cdriver.process_file(filename, options)
         weight = 0,
         last_used = 0,
     }
-    -- Weigh the actual retained entry shape before cloning. The clone has the
-    -- same graph topology, while the fixed-size key and cache hash slot are
-    -- separate retained allocations which must also fit under the bound.
-    local cache_weight = graph_weight(entry)
-        + graph_weight(cache_key)
-        + PROCESS_CACHE_MAP_SLOT_WEIGHT
+    -- Production retention has no practical byte bound, so avoid traversing
+    -- and allocating a proportional `seen` table solely to estimate weight.
+    -- Finite test configurations still weigh the actual retained entry shape
+    -- before cloning; the fixed-size key and cache hash slot are separate
+    -- retained allocations which must also fit under their configured bound.
+    local cache_weight = 0
+    if cache.tracks_weight then
+        cache_weight = graph_weight(entry)
+            + graph_weight(cache_key)
+            + PROCESS_CACHE_MAP_SLOT_WEIGHT
+    end
     entry.weight = cache_weight
     if make_cache_room(cache, cache_key, cache_weight) then
         entry.ffi_types = clone_graph(ffi_types)
