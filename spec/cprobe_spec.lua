@@ -2798,7 +2798,63 @@ describe("persistent semantic C probe results", function()
         assert.is_true(service:close())
     end)
 
-    it("bounds retained probe keys independently of header closure size",
+    it("bounds retained probe keys for a covered header sample", function()
+        local function dependencies(count, changed_last)
+            local result = {}
+            for index = 1, count do
+                result[index] = {
+                    kind = "file",
+                    path = ("/headers/dependency-%04d.h"):format(index),
+                    identity = ("c-header-file-v1:sha256:%064d"):format(
+                        changed_last and index == count and 1 or 0),
+                    restat = false,
+                }
+            end
+            return result
+        end
+        local function context(service, inputs)
+            return assert(service:module_context({ includes = {{
+                original = "public.h",
+                resolved = "/headers/public.h",
+                include_kind = "quote",
+                include_name = "public.h",
+                c_header_dependencies = inputs,
+            }}}))
+        end
+
+        local service = new_fake_service()
+        local small = context(service, dependencies(1))
+        local large_dependencies = dependencies(24)
+        local large = context(service, large_dependencies)
+        local changed = context(service, dependencies(24, true))
+        local unbounded = {}
+        for _, input in ipairs(large_dependencies) do
+            unbounded[#unbounded + 1] = input.path
+            unbounded[#unbounded + 1] = input.identity
+        end
+
+        assert.is_true(#table.concat(unbounded) > 1024)
+        assert.equal(#small.header_key, #large.header_key)
+        assert.equal(#small.baseline_key, #large.baseline_key)
+        assert.not_equal(large.header_key, changed.header_key)
+        assert.not_equal(large.baseline_key, changed.baseline_key)
+
+        local result = large:probe_unsafe_object_pointer(
+            cpointer("covered_header_source"),
+            cpointer("covered_header_target"))
+        local changed_result = changed:probe_unsafe_object_pointer(
+            cpointer("covered_header_source"),
+            cpointer("covered_header_target"))
+        assert.equal("success", result.status, result.message)
+        assert.equal("success", changed_result.status,
+            changed_result.message)
+        assert.not_equal(result.key, changed_result.key)
+        assert.equal(#result.key, #changed_result.key)
+        assert.is_true(#result.key < 1024)
+        assert.is_true(service:close())
+    end)
+
+    it("bounds retained probe keys independently of header closure size #stress",
     function()
         local function dependencies(count, changed_last)
             local result = {}

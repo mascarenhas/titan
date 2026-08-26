@@ -1,6 +1,7 @@
 local lfs = require "lfs"
 
 local cdriver = require "c-parser.cdriver"
+local compiler_io = require "titan-compiler.io"
 
 local function write_file(filename, contents)
     local fd = assert(io.open(filename, "wb"))
@@ -78,33 +79,144 @@ describe("C FFI cdriver", function()
         end)
 
         it("uses angle descriptors for system headers", function()
-            local _, include = assert_process_file("stdio.h")
+            local root = tmp_dir()
+            local header = root .. "/fixture-system.h"
+            write_file(header, "typedef int fixture_system_value;\n")
+            local _, include = assert_process_file("fixture-system.h", {
+                cppflags = { "-I", root },
+                compiler_include_dirs = {},
+            })
 
-            assert.equal("stdio.h", include.original)
-            assert.is_string(include.resolved)
+            assert.equal("fixture-system.h", include.original)
+            assert.equal(header, include.resolved)
             assert.equal("angle", include.include_kind)
-            assert.equal("stdio.h", include.include_name)
+            assert.equal("fixture-system.h", include.include_name)
+
+            remove_tree({ header }, { root })
         end)
 
         it("uses angle descriptors for compiler-provided headers", function()
-            local _, include = assert_process_file("titan/ffi.h")
+            local root = tmp_dir()
+            local titan = mkdir(root, "titan")
+            local header = titan .. "/ffi.h"
+            write_file(header, "typedef int fixture_compiler_value;\n")
+            local _, include = assert_process_file("titan/ffi.h", {
+                compiler_include_dirs = { root },
+            })
 
             assert.equal("titan/ffi.h", include.original)
-            assert.matches("/titan/ffi%.h$", include.resolved)
+            assert.equal(header, include.resolved)
             assert.equal("angle", include.include_kind)
             assert.equal("titan/ffi.h", include.include_name)
+
+            remove_tree({ header }, { titan, root })
         end)
 
-        it("resolves compiler-provided headers independently of cwd", function()
+        it("does no cwd I/O for an absolute language-server module path",
+        function()
+            local checkout = assert(lfs.currentdir())
+            local module_path = checkout .. "/c-parser/cdriver.lua"
+            local chunk = assert(loadfile(module_path))
+            local original_new_sync = compiler_io.new_sync
+            compiler_io.new_sync = function()
+                local strategy = original_new_sync()
+                function strategy:cwd()
+                    error("absolute module load queried synchronous cwd")
+                end
+                return strategy
+            end
+
+            local loaded, fresh = pcall(
+                chunk, "c-parser.cdriver", module_path)
+
+            compiler_io.new_sync = original_new_sync
+            assert.truthy(loaded, fresh)
+            assert.is_table(fresh)
+
+            local strategy = original_new_sync()
+            function strategy:cwd()
+                error("absolute module discovery queried request cwd")
+            end
+            local dirs, discovery_error =
+                fresh.resolve_compiler_include_dirs(nil, strategy)
+            assert.truthy(dirs, discovery_error)
+            assert.matches("/titan%-runtime$", dirs[1])
+        end)
+
+        it("captures a relative module root without trusting PWD", function()
+            local checkout = assert(lfs.currentdir())
+            local chunk = assert(loadfile("c-parser/cdriver.lua"))
+            local original_new_sync = compiler_io.new_sync
+            local original_getenv = os.getenv
+            local cwd_calls = 0
+            compiler_io.new_sync = function()
+                local strategy = original_new_sync()
+                function strategy:cwd()
+                    cwd_calls = cwd_calls + 1
+                    return checkout
+                end
+                return strategy
+            end
+            os.getenv = function(name)
+                if name == "PWD" then
+                    error("cdriver module root must not read PWD")
+                end
+                return original_getenv(name)
+            end
+
+            local loaded, fresh = pcall(
+                chunk, "c-parser.cdriver", "c-parser/cdriver.lua")
+
+            compiler_io.new_sync = original_new_sync
+            os.getenv = original_getenv
+            assert.truthy(loaded, fresh)
+            assert.equal(1, cwd_calls)
+
             local olddir = assert(lfs.currentdir())
             assert(lfs.chdir("/tmp"))
-            local ok, err = pcall(function()
-                local _, include = assert_process_file("titan/ffi.h")
-                assert.matches("/titan/ffi%.h$", include.resolved)
-                assert.equal("angle", include.include_kind)
+            local resolved, failure = pcall(function()
+                local strategy = original_new_sync()
+                function strategy:cwd()
+                    error("discovery rebound the captured module root")
+                end
+                return assert(fresh.resolve_compiler_include_dirs(
+                    nil, strategy))
             end)
             assert(lfs.chdir(olddir))
-            assert.truthy(ok, err)
+            assert.truthy(resolved, failure)
+            assert.matches("/titan%-runtime$", failure[1])
+        end)
+
+        it("defers a failed relative-root capture for explicit roots",
+        function()
+            local chunk = assert(loadfile("c-parser/cdriver.lua"))
+            local original_new_sync = compiler_io.new_sync
+            compiler_io.new_sync = function()
+                local strategy = original_new_sync()
+                function strategy:cwd()
+                    return nil, "simulated load-time cwd failure"
+                end
+                return strategy
+            end
+
+            local loaded, fresh = pcall(
+                chunk, "c-parser.cdriver", "c-parser/cdriver.lua")
+
+            compiler_io.new_sync = original_new_sync
+            assert.truthy(loaded, fresh)
+            local strategy = original_new_sync()
+            function strategy:cwd()
+                error("default discovery retried cwd after module load")
+            end
+            assert.same({ "/explicit/compiler/include" },
+                assert(fresh.resolve_compiler_include_dirs({
+                    "/explicit/compiler/include",
+                }, strategy)))
+            local dirs, discovery_error =
+                fresh.resolve_compiler_include_dirs(nil, strategy)
+            assert.is_nil(dirs)
+            assert.matches("simulated load%-time cwd failure",
+                discovery_error)
         end)
     end)
 
@@ -1633,22 +1745,190 @@ typedef TITAN_CACHE_CONFIG_TYPE titan_cache_config_type;
 
 
     describe("configured preprocessor toolchain", function()
+        local SYNTHETIC_LUA_PROFILE = [[
+typedef long long lua_Integer;
+typedef double lua_Number;
+typedef unsigned long size_t;
+typedef long ptrdiff_t;
+
+#define SCHAR_MIN (-__SCHAR_MAX__ - 1)
+#define SHRT_MIN (-__SHRT_MAX__ - 1)
+#define INT_MIN (-__INT_MAX__ - 1)
+#define LONG_MIN (-__LONG_MAX__ - 1L)
+#define LLONG_MIN (-__LONG_LONG_MAX__ - 1LL)
+]]
+
+        local function synthetic_profile_root()
+            local root = tmp_dir()
+            local header = root .. "/lua.h"
+            write_file(header, SYNTHETIC_LUA_PROFILE)
+            return root, header
+        end
+
+        local function synthetic_preamble_roots(lua_root)
+            local runtime_root = tmp_dir()
+            local files = {}
+            local function header(root, name, contents)
+                local path = root .. "/" .. name
+                write_file(path, contents or "")
+                files[#files + 1] = path
+            end
+
+            header(runtime_root, "titan.h", [[
+#if defined(__GNUC__) || defined(__clang__)
+#define TITAN_UNUSED __attribute__((unused))
+#else
+#define TITAN_UNUSED
+#endif
+]])
+            header(lua_root, "lstate.h", [[
+typedef unsigned char lu_byte;
+typedef struct TValue { int fixture; } TValue;
+typedef TValue *StkId;
+typedef struct FixtureStackPointer { StkId p; } FixtureStackPointer;
+typedef struct CallInfo { FixtureStackPointer top; } CallInfo;
+typedef struct lua_State {
+    long errfunc;
+    FixtureStackPointer top;
+    CallInfo *ci;
+} lua_State;
+typedef int (*lua_CFunction)(lua_State *L);
+typedef struct TString { int fixture; } TString;
+typedef struct Table { unsigned int asize; } Table;
+typedef struct global_State { TValue l_registry; } global_State;
+typedef struct Node { int fixture; } Node;
+
+static int errorhandler(lua_State *L) { (void)L; return 0; }
+#define restorestack(L, offset) ((StkId)0)
+#define s2v(slot) (slot)
+#define ttislcf(value) 0
+#define fvalue(value) ((lua_CFunction)0)
+#define setnilvalue(value) ((void)(value))
+#define luaS_new(L, key) ((TString *)0)
+#define lua_assert(condition) ((void)0)
+#define G(L) ((global_State *)0)
+#define ttistable(value) 1
+#define hvalue(value) ((Table *)0)
+#define luaH_getstr(table, key, result) ((lu_byte)0)
+#define HOK 0
+#define HNOTFOUND 1
+#define luaH_psetstr(table, key, value) HOK
+#define allocsizenode(table) 0u
+#define gnode(table, index) ((Node *)0)
+#define keyisnil(node) 1
+#define ttisnil(value) 0
+#define luaH_resize(L, table, asize, hsize) ((void)0)
+#define setsvalue(L, target, string) ((void)0)
+#define luaH_finishset(L, table, key, value, result) ((void)0)
+#define invalidateTMcache(table) ((void)0)
+#define luaC_barrierback(L, object, value) ((void)0)
+#define obj2gco(value) (value)
+#define luaD_checkstack(L, slots) ((void)0)
+]])
+            for _, name in ipairs({
+                "luaconf.h", "lauxlib.h", "lgc.h", "ltable.h",
+                "ltm.h", "lfunc.h", "lstring.h", "lvm.h",
+                "lobject.h", "ldo.h",
+            }) do
+                header(lua_root, name)
+            end
+            return runtime_root, files
+        end
+
+        local function with_synthetic_driver_profile(
+                root, body, before_context)
+            local driver = require "titan-compiler.driver"
+            local csemantics = require "titan-compiler.csemantics"
+            local original_target_profile_inputs =
+                cdriver.target_profile_inputs
+            local original_build_profile = csemantics.build_profile
+            local old_profile = driver.TARGET_PROFILE
+            local old_installed = driver.INSTALLED
+            local old_include_path = driver.INCLUDE_PATH
+            local old_lua_path = driver.LUA_SOURCE_PATH
+            local old_runtime_path = driver.TITAN_RUNTIME_PATH
+            local old_cflags = driver.CFLAGS
+            local restoring = false
+
+            cdriver.target_profile_inputs = function(options)
+                if restoring then return {} end
+                local synthetic = {}
+                for key, value in pairs(options) do synthetic[key] = value end
+                synthetic.compiler_include_dirs = { root }
+                return original_target_profile_inputs(synthetic)
+            end
+            csemantics.build_profile = function(inputs, ...)
+                if restoring then return old_profile end
+                return original_build_profile(inputs, ...)
+            end
+
+            local context
+            local ran, failure = xpcall(function()
+                if before_context then before_context(driver) end
+                context = driver.new_resolver_context()
+                body(driver, context)
+            end, debug.traceback)
+            local closed = table.pack(true, true)
+            if context then
+                closed = table.pack(pcall(
+                    driver.close_resolver_context, context))
+            end
+
+            driver.LUA_SOURCE_PATH = old_lua_path
+            driver.TITAN_RUNTIME_PATH = old_runtime_path
+            driver.INCLUDE_PATH = old_include_path
+            driver.CFLAGS = old_cflags
+            driver.INSTALLED = old_installed
+            restoring = true
+            local restored = table.pack(pcall(function()
+                local restore_context = driver.new_resolver_context()
+                local configured, configure_error =
+                    driver.configure_foreign_c(restore_context)
+                local restore_closed, close_error =
+                    driver.close_resolver_context(restore_context)
+                assert.truthy(configured, configure_error)
+                assert.truthy(restore_closed, close_error)
+            end))
+
+            cdriver.target_profile_inputs =
+                original_target_profile_inputs
+            csemantics.build_profile = original_build_profile
+
+            assert.truthy(closed[1], closed[2])
+            assert.truthy(closed[2], closed[3])
+            assert.truthy(restored[1], restored[2])
+            assert.truthy(ran, failure)
+        end
+
         setup(function()
             require("c-parser.cpp").clear_probe_cache()
         end)
 
-        it("imports libuv X-macro error enumerators under production flags", function()
-            local types = assert_process_file("uv.h", {
+        it("imports libuv-shaped X-macro error enumerators under flags",
+        function()
+            local root = tmp_dir()
+            local header = root .. "/uv-shaped.h"
+            write_file(header, [[
+#ifdef _GNU_SOURCE
+#define UV_CONFIGURED_ERROR(XX) XX(ECANCELED, -125)
+#else
+#define UV_CONFIGURED_ERROR(XX)
+#endif
+#define UV_ERRNO_MAP(XX) \
+    XX(EIO, -5) \
+    UV_CONFIGURED_ERROR(XX) \
+    XX(EOF, -4095)
+typedef enum {
+#define XX(code, value) UV_ ## code = value,
+    UV_ERRNO_MAP(XX)
+#undef XX
+} uv_errno_t;
+]])
+            local types = assert_process_file(header, {
                 compiler = { os.getenv("CC") or "cc" },
                 language_mode = "c99",
-                cppflags = {
-                    "-Ilibuv-v1.52.1/include",
-                    "-D_GNU_SOURCE",
-                },
-                compiler_include_dirs = {
-                    "titan-runtime",
-                    "lua-5.5.1/src",
-                },
+                cppflags = { "-D_GNU_SOURCE" },
+                compiler_include_dirs = {},
             })
 
             local function enum_value(name)
@@ -1668,34 +1948,40 @@ typedef TITAN_CACHE_CONFIG_TYPE titan_cache_config_type;
             assert.is_true(canceled < 0)
             assert.equal(-4095, enum_value("UV_EOF"))
             assert.equal("typedef", assert(types.uv_errno_t).type)
+
+            os.remove(header)
         end)
 
         it("publishes compile-flag aliases to renamed C functions", function()
-            local types = assert_process_file("lua.h", {
+            local header = tmp_header([[
+typedef struct fixture_state fixture_state;
+void *fixture_newuserdatauv(
+    fixture_state *state, int uservalues);
+]])
+            local types = assert_process_file(header, {
                 compiler = { os.getenv("CC") or "cc" },
                 language_mode = "c99",
                 language_flag = false,
                 compile_flags = {
                     "--std=c99",
-                    "-Dlua_newuserdatauv=titan_uv_test_newuserdatauv",
+                    "-Dfixture_newuserdatauv=fixture_test_newuserdatauv",
                 },
                 cppflags = {},
-                compiler_include_dirs = {
-                    "titan-runtime",
-                    "lua-5.5.1/src",
-                },
+                compiler_include_dirs = {},
             })
 
-            local alias = assert(types.lua_newuserdatauv)
-            local target = assert(types.titan_uv_test_newuserdatauv)
+            local alias = assert(types.fixture_newuserdatauv)
+            local target = assert(types.fixture_test_newuserdatauv)
             assert.equal("function", target.type)
             assert.equal("function", alias.type)
-            assert.equal("lua_newuserdatauv", alias.name)
+            assert.equal("fixture_newuserdatauv", alias.name)
             assert.equal(target.ret, alias.ret)
             assert.equal(target.params, alias.params)
             assert.equal(target.paramnames, alias.paramnames)
             assert.equal(target.paramnames_state, alias.paramnames_state)
             assert.equal(target.vararg, alias.vararg)
+
+            os.remove(header)
         end)
 
         it("uses -I and -D flags for top-level and recursive header parsing", function()
@@ -2126,131 +2412,133 @@ typedef double compiler_selection;
 
         it("refreshes fixed FFI includes after the driver Lua path changes",
            function()
-            local driver = require "titan-compiler.driver"
-            local checker = require "titan-compiler.checker"
-            local parser = require "titan-compiler.parser"
-            local root = tmp_dir()
-            local header = root .. "/alternate_lua_path.h"
-            local old_lua_path = driver.LUA_SOURCE_PATH
-            local original_lua_path = old_lua_path
-            if original_lua_path:sub(1, 1) ~= "/" then
-                original_lua_path =
-                    assert(lfs.currentdir()) .. "/" .. original_lua_path
-            end
-            local files = { header, root .. "/lua.h" }
-            write_file(header, "typedef int alternate_lua_path_marker;\n")
-            write_file(root .. "/lua.h", [[
-typedef long long lua_Integer;
-typedef double lua_Number;
-]])
-            -- The checker baseline now compiles the exact fixed generated-C
-            -- prefix. Keep this target-profile fixture's alternate `lua.h`
-            -- while making the remaining real internal headers available
-            -- through the same selected Lua source directory.
-            for _, name in ipairs({
-                "luaconf.h", "lauxlib.h", "llimits.h",
-                "lstate.h", "lgc.h",
-                "ltable.h", "ltm.h", "lfunc.h", "lstring.h",
-                "lvm.h", "lobject.h", "ldo.h",
-            }) do
-                local wrapper = root .. "/" .. name
-                files[#files + 1] = wrapper
-                write_file(wrapper,
-                    '#include "' .. original_lua_path
-                        .. "/" .. name .. '"\n')
-            end
+            local lua_root, lua_header = synthetic_profile_root()
+            local runtime_root, files = synthetic_preamble_roots(lua_root)
+            local alternate = lua_root .. "/alternate_lua_path.h"
+            files[#files + 1] = lua_header
+            files[#files + 1] = alternate
+            write_file(alternate,
+                "typedef int alternate_lua_path_marker;\n")
 
-            local ok, err = pcall(function()
-                driver.LUA_SOURCE_PATH = root
-                driver.configure_foreign_c()
-                local code = [[
-                    local alt = foreign import "alternate_lua_path.h"
-                    function size(): integer
-                        return alt.alternate_lua_path_marker.sizeof
-                            as integer
-                    end
-                ]]
-                local ast = assert(parser.parse("alternate.titan", code))
-                local _, errors = checker.check(
-                    "alternate", ast, code, "alternate.titan")
-                assert.equal(0, #errors, table.concat(errors, "\n"))
-            end)
-            driver.LUA_SOURCE_PATH = old_lua_path
-            driver.configure_foreign_c()
-            remove_tree(files, { root })
+            local ok, err = xpcall(function()
+                with_synthetic_driver_profile(lua_root,
+                    function(driver, context)
+                        local checker = require "titan-compiler.checker"
+                        local parser = require "titan-compiler.parser"
+                        driver.INCLUDE_PATH = runtime_root
+                        local configured, configure_error =
+                            driver.configure_foreign_c(context)
+                        assert.truthy(configured, configure_error)
+                        local expected_include_dirs = {
+                            runtime_root,
+                            lua_root,
+                        }
+                        if not driver.INSTALLED then
+                            expected_include_dirs[#expected_include_dirs + 1] =
+                                driver.LIBBACKTRACE_PATH
+                        end
+                        assert.same(expected_include_dirs,
+                            driver.foreign_include_dirs())
+
+                        local code = [[
+                            local alt = foreign import "alternate_lua_path.h"
+                            function size(): integer
+                                return alt.alternate_lua_path_marker.sizeof
+                                    as integer
+                            end
+                        ]]
+                        local ast = assert(
+                            parser.parse("alternate.titan", code))
+                        local _, errors = checker.check(
+                            "alternate", ast, code, "alternate.titan", nil, {
+                                probe_service_provider = function()
+                                    return driver.get_probe_service(context)
+                                end,
+                            })
+                        assert.equal(0, #errors,
+                            table.concat(errors, "\n"))
+                    end,
+                    function(driver)
+                        driver.TITAN_RUNTIME_PATH = runtime_root
+                        driver.LUA_SOURCE_PATH = lua_root
+                    end)
+            end, debug.traceback)
+            remove_tree(files, { runtime_root, lua_root })
             assert.truthy(ok, err)
         end)
 
         it("acquires Lua numeric spellings and target macros under exact flags",
            function()
-            local inputs = assert(cdriver.target_profile_inputs({
-                compiler = { os.getenv("CC") or "cc" },
-                language_mode = "c99",
-                language_flag = false,
-                compile_flags = {
-                    "--std=c99",
-                    "-funsigned-char",
-                    "-DTITAN_PROFILE_FLAG=23",
-                },
-                cppflags = {},
-                compiler_include_dirs = {
-                    "titan-runtime",
-                    "lua-5.5.1/src",
-                },
-            }))
+            local root, header = synthetic_profile_root()
+            local ok, err = xpcall(function()
+                local inputs = assert(cdriver.target_profile_inputs({
+                    compiler = { os.getenv("CC") or "cc" },
+                    language_mode = "c99",
+                    language_flag = false,
+                    compile_flags = {
+                        "--std=c99",
+                        "-funsigned-char",
+                        "-DTITAN_PROFILE_FLAG=23",
+                    },
+                    cppflags = {},
+                    compiler_include_dirs = { root },
+                }))
 
-            assert.equal("long long", inputs.lua_integer)
-            assert.equal("double", inputs.lua_number)
-            assert.is_string(inputs.size_t)
-            assert.is_string(inputs.ptrdiff_t)
-            assert.is_table(inputs.signed_minima)
-            for _, spelling in ipairs({
-                "signed char", "short", "int", "long", "long long",
-            }) do
-                assert.is_table(inputs.signed_minima[spelling])
-            end
-            assert.same({ "1" }, inputs.macros.__CHAR_UNSIGNED__)
-            assert.same({ "23" }, inputs.macros.TITAN_PROFILE_FLAG)
-            assert.same({
-                "titan-runtime",
-                "lua-5.5.1/src",
-            }, inputs.fixed_include_dirs)
-            assert.equal("lua.h", inputs.lua_header.original)
-            assert.matches("/lua%.h$", inputs.lua_header.resolved)
-            local profile = assert(
-                require("titan-compiler.csemantics").build_profile(inputs))
-            assert.is_false(
-                profile.integers[profile.size_t].type.signed)
-            assert.is_true(
-                profile.integers[profile.ptrdiff_t].type.signed)
+                assert.equal("long long", inputs.lua_integer)
+                assert.equal("double", inputs.lua_number)
+                assert.is_string(inputs.size_t)
+                assert.is_string(inputs.ptrdiff_t)
+                assert.is_table(inputs.signed_minima)
+                for _, spelling in ipairs({
+                    "signed char", "short", "int", "long", "long long",
+                }) do
+                    assert.is_table(inputs.signed_minima[spelling])
+                end
+                assert.same({ "1" }, inputs.macros.__CHAR_UNSIGNED__)
+                assert.same({ "23" }, inputs.macros.TITAN_PROFILE_FLAG)
+                assert.same({ root }, inputs.fixed_include_dirs)
+                assert.equal("lua.h", inputs.lua_header.original)
+                assert.equal(header, inputs.lua_header.resolved)
+                local profile = assert(require(
+                    "titan-compiler.csemantics").build_profile(inputs))
+                assert.is_false(
+                    profile.integers[profile.size_t].type.signed)
+                assert.is_true(
+                    profile.integers[profile.ptrdiff_t].type.signed)
+            end, debug.traceback)
+            remove_tree({ header }, { root })
+            assert.truthy(ok, err)
         end)
 
         it("rebuilds profiles and resolver probe services after reconfiguration",
            function()
-            local driver = require "titan-compiler.driver"
-            local old_cflags = driver.CFLAGS
-            local context = driver.new_resolver_context()
-            local first = assert(driver.get_probe_service(context))
-            local first_configuration =
-                driver.FOREIGN_C_CONFIGURATION_ID
+            local root, header = synthetic_profile_root()
+            local ok, err = xpcall(function()
+                with_synthetic_driver_profile(root,
+                    function(driver, context)
+                        local first = assert(
+                            driver.get_probe_service(context))
+                        local first_configuration =
+                            driver.FOREIGN_C_CONFIGURATION_ID
+                        driver.CFLAGS =
+                            driver.CFLAGS .. " -funsigned-char"
+                        local configured, configure_error =
+                            driver.configure_foreign_c(context)
+                        assert.truthy(configured, configure_error)
+                        assert.is_true(
+                            driver.FOREIGN_C_CONFIGURATION_ID >
+                            first_configuration)
+                        assert.is_false(driver.TARGET_PROFILE.char_signed)
 
-            local ok, err = pcall(function()
-                driver.CFLAGS = old_cflags .. " -funsigned-char"
-                driver.configure_foreign_c()
-                assert.is_true(
-                    driver.FOREIGN_C_CONFIGURATION_ID >
-                    first_configuration)
-                assert.is_false(driver.TARGET_PROFILE.char_signed)
-
-                local second = assert(driver.get_probe_service(context))
-                assert.not_equal(first, second)
-                assert.is_true(first.closed)
-                assert.equal(driver.TARGET_PROFILE.identity,
-                    second.profile_identity)
-            end)
-            driver.close_resolver_context(context)
-            driver.CFLAGS = old_cflags
-            driver.configure_foreign_c()
+                        local second = assert(
+                            driver.get_probe_service(context))
+                        assert.not_equal(first, second)
+                        assert.is_true(first.closed)
+                        assert.equal(driver.TARGET_PROFILE.identity,
+                            second.profile_identity)
+                    end)
+            end, debug.traceback)
+            remove_tree({ header }, { root })
             assert.truthy(ok, err)
         end)
 

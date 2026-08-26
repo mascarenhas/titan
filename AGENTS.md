@@ -115,8 +115,12 @@ not add epicycles around what may be a misunderstood simpler design.
   Each group runs in a private extraction of the prepared checkout, because
   compiler specs share checkout-root artifact names; tagged Busted output
   streams to the job log. In Linux coverage CI each group owns one LuaCov stats
-  file, and the job merges all four only after every worker passes; local shards
-  do not collect LuaCov. The installed prefix is shared read-only. The
+  file, and the job merges all four only after every worker passes. Each Linux
+  shard excludes explicit `#stress` cases from its covered invocation, then
+  runs its listed stress oracles in a separate ordinary Busted invocation
+  without LuaCov. Every stress oracle retains a small covered companion over
+  the same compiler paths; local shards do not collect LuaCov. The installed
+  prefix is shared read-only. The
   aggregate native Titan suite also remains one fast executable.
 
   1. `test-linux-stdlib` is the prepared-tree producer. It prepares a clean
@@ -439,9 +443,10 @@ the aggregate native suite without coverage; the independent sanitizer selects
 only focused native-memory cases and does not publish coverage. This includes
 both async-I/O and coroutine behavior, which must still run in full in the
 regular uncovered job. The repository `.luacov` limits debug-hook collection to
-the same compiler, root-spec, and `titanc` paths emitted by the one report
-command; keep those filters aligned. If a library suite exposes a compiler
-coverage gap, add a small focused compiler/checker test for that code path
+the same compiler and `titanc` paths emitted by the one report command; test
+source itself is not coverage. Keep those filters aligned. If a library suite
+exposes a compiler coverage gap, add a small focused compiler/checker test for
+that code path
 instead of covering the library integration suite.
 
 **Spec layout.** Pure, layer-level specs live at `spec/` root (`abi_spec`,

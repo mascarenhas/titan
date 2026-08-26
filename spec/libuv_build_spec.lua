@@ -2687,6 +2687,132 @@ printf '%s\0' "$@" > "$TITAN_SELECTOR_ARGV_LOG"
             if not tested then error(test_error, 0) end
         end)
 
+    it("runs covered and uncovered stress compiler tests in each shard",
+        function()
+            local root = make_temp_dir()
+            local tested, test_error = xpcall(function()
+                local fake_busted = root .. "/busted"
+                write_file(fake_busted, [==[#!/usr/bin/env bash
+set -eu
+: "${TITAN_SELECTOR_ARGV_LOG:?}"
+printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
+]==])
+                local chmod_ok, chmod_output = run_argv({
+                    "chmod", "+x", fake_busted,
+                })
+                assert.truthy(chmod_ok, chmod_output)
+
+                local expected = { {}, {}, {}, {} }
+                for line in read_file(
+                    "spec/support/ci_compiler_test_groups.txt"):
+                gmatch("[^\r\n]+") do
+                    local shard, path = line:match("^([1-4])%s+(%S+)")
+                    if shard then
+                        local paths = expected[tonumber(shard)]
+                        paths[#paths + 1] = path
+                    end
+                end
+                local stress = {}
+                for line in read_file(
+                    "spec/support/ci_compiler_stress_files.txt"):
+                gmatch("[^\r\n]+") do
+                    if line:sub(1, 1) ~= "#" then stress[line] = true end
+                end
+
+                local function has_argument(argv, expected_argument)
+                    for _, argument in ipairs(argv) do
+                        if argument == expected_argument then return true end
+                    end
+                    return false
+                end
+
+                local function decoded_calls(path)
+                    local encoded = read_file(path)
+                    local calls = {}
+                    local current
+                    local offset = 1
+                    while offset <= #encoded do
+                        local finish = assert(encoded:find(
+                            "\0", offset, true))
+                        local argument = encoded:sub(offset, finish - 1)
+                        offset = finish + 1
+                        if argument == "__TITAN_BUSTED_CALL__" then
+                            current = {}
+                            calls[#calls + 1] = current
+                        else
+                            assert.truthy(current)
+                            current[#current + 1] = argument
+                        end
+                    end
+                    return calls
+                end
+
+                for shard = 1, 4 do
+                    local log = root .. "/shard-" .. shard
+                    local ok, output = run_argv({
+                        "env",
+                        "BUSTED=" .. fake_busted,
+                        "TITAN_SELECTOR_ARGV_LOG=" .. log,
+                        "bash", "spec/support/ci_test_groups.sh",
+                        "compiler-shard-" .. shard,
+                    })
+                    assert.truthy(ok, output)
+                    assert.truthy(output:find("with LuaCov", 1, true), output)
+                    assert.truthy(output:find(
+                        "without LuaCov", 1, true), output)
+
+                    local covered = {}
+                    local uncovered_stress = {}
+                    local covered_calls = 0
+                    local stress_calls = 0
+                    for _, argv in ipairs(decoded_calls(log)) do
+                        local with_coverage = has_argument(argv, "-c")
+                        if with_coverage then
+                            covered_calls = covered_calls + 1
+                            assert.truthy(has_argument(
+                                argv, "--exclude-tags=stress"))
+                            assert.falsy(has_argument(argv, "--tags=stress"))
+                        else
+                            stress_calls = stress_calls + 1
+                            assert.truthy(has_argument(argv, "--tags=stress"))
+                            assert.falsy(has_argument(
+                                argv, "--exclude-tags=stress"))
+                        end
+                        for _, argument in ipairs(argv) do
+                            if argument:match("^spec/.+_spec[.]lua$") then
+                                if with_coverage then
+                                    assert.falsy(covered[argument], argument)
+                                    covered[argument] = true
+                                else
+                                    assert.truthy(stress[argument], argument)
+                                    assert.falsy(
+                                        uncovered_stress[argument], argument)
+                                    uncovered_stress[argument] = true
+                                end
+                            end
+                        end
+                    end
+                    assert.is_true(covered_calls > 0)
+
+                    local expected_covered = {}
+                    local expected_stress = {}
+                    for _, path in ipairs(expected[shard]) do
+                        expected_covered[path] = true
+                        if stress[path] then expected_stress[path] = true end
+                    end
+                    if next(expected_stress) then
+                        assert.is_true(stress_calls > 0)
+                    else
+                        assert.equal(0, stress_calls)
+                    end
+                    assert.same(expected_covered, covered)
+                    assert.same(expected_stress, uncovered_stress)
+                end
+            end, debug.traceback)
+            remove_tree(root)
+            if not tested then error(test_error, 0) end
+        end)
+
     it("isolates and bounds all four local compiler workers", function()
         local root = make_temp_dir()
         local tested, test_error = xpcall(function()
@@ -3430,7 +3556,7 @@ done
             assert.equal(1, count_literal(stdlib_job,
                 "runs-on: ubicloud-standard-2"), stdlib_job)
             assert.equal(1, count_literal(stdlib_job,
-                "timeout-minutes: 60"), stdlib_job)
+                "timeout-minutes: 30"), stdlib_job)
             assert.equal(1, count_literal(stdlib_job,
                 "contents: read"), stdlib_job)
             assert.falsy(stdlib_job:find("id-token: write", 1, true),
@@ -3635,7 +3761,7 @@ done
             assert.equal(1, count_literal(compiler_job,
                 "runs-on: ubicloud-standard-2"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
-                "timeout-minutes: 60"), compiler_job)
+                "timeout-minutes: 30"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
                 "actions/download-artifact@v8"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
@@ -3652,8 +3778,8 @@ done
                 "- name: Restore prepared Linux tree and environment",
                 1, true))
             local compiler_tests_index = assert(compiler_job:find(
-                "- name: Run four isolated compiler and language shards " ..
-                "two at a time with coverage",
+                "- name: Run four isolated compiler shards with covered " ..
+                "and stress invocations",
                 compiler_unpack_index, true))
             assert.is_true(compiler_unpack_index < compiler_tests_index)
             assert.falsy(compiler_job:find(
@@ -3661,6 +3787,21 @@ done
             assert.truthy(read_file(
                 "spec/support/ci_test_groups.sh"):find(
                 "TITAN_PROBE_CACHE_DISABLE=1", 1, true))
+            local compiler_groups = read_file(
+                "spec/support/ci_test_groups.sh")
+            for _, required in ipairs({
+                "ci_compiler_stress_files.txt",
+                "compiler_stress_tests=()",
+                "compiler_unit_stress_tests=()",
+                "compiler_isolated_stress_tests=()",
+                "run_compiler_stress",
+                "run_isolated_compiler_stress",
+                "--exclude-tags=stress",
+                "--tags=stress",
+            }) do
+                assert.truthy(compiler_groups:find(required, 1, true),
+                    required)
+            end
             assert.equal(3, count_literal(workflow,
                 "TITAN_PROBE_CACHE_DISABLE=1"), workflow)
             assert_codecov_job(compiler_job, "compiler")
@@ -3773,7 +3914,8 @@ done
                 "spec/rockspec_spec.lua",
                 "spec/stdlib_installer_spec.lua",
                 "run_isolated_compiler_coverage",
-                '"$BUSTED" -c -o gtest -v "$test_file"',
+                '"$BUSTED" -c -o gtest -v --exclude-tags=stress ' ..
+                    '"$test_file"',
                 "compiler | compiler-shard-[1-4])",
                 "compiler-uncovered | compiler-uncovered-shard-[1-4])",
                 "compiler-shard-{1..4}",
@@ -3855,8 +3997,8 @@ done
                 'sed -u "s/^/[compiler shard $shard] /"',
                 'tee "$log"',
                 'pipeline_status=("${PIPESTATUS[@]}")',
-                "starting compiler coverage shard",
-                "finished compiler coverage shard",
+                "starting compiler covered+stress shard",
+                "finished compiler covered+stress shard",
                 "merge_luacov_stats.lua",
                 "luacov.stats.out",
             }) do
@@ -3887,8 +4029,25 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 29, 26, 28, 30 }, shard_counts)
+            assert.same({ 28, 27, 29, 29 }, shard_counts)
             assert.equal(113, assigned_count)
+
+            local stress_partition = read_file(
+                "spec/support/ci_compiler_stress_files.txt")
+            local stress_assigned = {}
+            local stress_count = 0
+            for line in stress_partition:gmatch("[^\n]+") do
+                if line:sub(1, 1) ~= "#" then
+                    assert.truthy(line:match("^spec/.+_spec[.]lua$"), line)
+                    assert.falsy(stress_assigned[line], line)
+                    assert.truthy(assigned[line], line)
+                    assert.truthy(read_file(line):find(
+                        "#stress", 1, true), line)
+                    stress_assigned[line] = true
+                    stress_count = stress_count + 1
+                end
+            end
+            assert.equal(8, stress_count)
 
             assert.equal(1, count_literal(sanitizer_job,
                     "name: sanitizer (ubuntu-24.04, ASan+UBSan)"),
@@ -3896,7 +4055,7 @@ done
             assert.equal(1, count_literal(sanitizer_job,
                 "runs-on: ubicloud-standard-2"), sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
-                "timeout-minutes: 90"), sanitizer_job)
+                "timeout-minutes: 35"), sanitizer_job)
             assert.falsy(sanitizer_job:find("id-token: write", 1, true),
                 sanitizer_job)
             assert.falsy(sanitizer_job:find(

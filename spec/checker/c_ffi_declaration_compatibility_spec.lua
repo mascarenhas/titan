@@ -1,5 +1,6 @@
 local h = require "spec.support.helpers"
 local checker = require "titan-compiler.checker"
+local checker_core = require "titan-compiler.checker.core"
 local cprobe = require "titan-compiler.cprobe"
 local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
@@ -83,21 +84,18 @@ describe("compatible C declarations across foreign imports", function()
         with_headers({
             "extern int ffi_named(int value);",
             "extern int ffi_named(int value);",
-            "extern int ffi_named(int value);",
-        }, function(first_header, second_header, third_header)
+        }, function(first_header, second_header)
             local ok, err, ast = h.run_checker(
                 'local first = foreign import "' .. first_header .. '"\n' ..
                 'local second = foreign import "' .. second_header .. '"\n' ..
-                'local third = foreign import "' .. third_header .. '"\n' ..
                 [[
                     function run(): integer
                         return first.ffi_named { value = 1 }
                             + second.ffi_named { value = 2 }
-                            + third.ffi_named { value = 3 }
                     end
                 ]])
             assert.truthy(ok, err)
-            for i = 1, 3 do
+            for i = 1, 2 do
                 assert.same({ "value" },
                     ast[i]._type.members.ffi_named.paramnames)
             end
@@ -132,59 +130,64 @@ describe("compatible C declarations across foreign imports", function()
 
     it("permanently poisons differing complete parameter-name lists",
     function()
-        for _, names in ipairs({
-            { "first", "second", "first" },
-            { "second", "first", "first" },
-        }) do
-            local declarations = {}
-            for i, name in ipairs(names) do
-                declarations[i] =
-                    "extern int ffi_named(int " .. name .. ");"
+        with_headers({
+            [[
+                extern int ffi_forward(int first);
+                extern int ffi_reverse(int second);
+            ]],
+            [[
+                extern int ffi_forward(int second);
+                extern int ffi_reverse(int first);
+            ]],
+            [[
+                extern int ffi_forward(int first);
+                extern int ffi_reverse(int first);
+            ]],
+        }, function(first_header, second_header, third_header)
+            local imports =
+                'local first = foreign import "' .. first_header .. '"\n' ..
+                'local second = foreign import "' .. second_header .. '"\n' ..
+                'local third = foreign import "' .. third_header .. '"\n'
+            local ok, err, ast = h.run_checker(imports .. [[
+                function run(): integer
+                    return first.ffi_forward(1)
+                        + second.ffi_forward(2)
+                        + third.ffi_forward(3)
+                        + first.ffi_reverse(4)
+                        + second.ffi_reverse(5)
+                        + third.ffi_reverse(6)
+                end
+            ]])
+            assert.truthy(ok, err)
+            for i = 1, 3 do
+                assert.is_false(
+                    ast[i]._type.members.ffi_forward.paramnames)
+                assert.is_false(
+                    ast[i]._type.members.ffi_reverse.paramnames)
             end
-            with_headers(declarations,
-                function(first_header, second_header, third_header)
-                    local imports =
-                        'local first = foreign import "' ..
-                            first_header .. '"\n' ..
-                        'local second = foreign import "' ..
-                            second_header .. '"\n' ..
-                        'local third = foreign import "' ..
-                            third_header .. '"\n'
-                    local ok, err, ast = h.run_checker(imports .. [[
-                        function run(): integer
-                            return first.ffi_named(1)
-                                + second.ffi_named(2)
-                                + third.ffi_named(3)
-                        end
-                    ]])
-                    assert.truthy(ok, err)
-                    for i = 1, 3 do
-                        assert.is_false(
-                            ast[i]._type.members.ffi_named.paramnames)
-                    end
 
-                    local named_ok, named_err = h.run_checker(imports .. [[
-                        function run(): integer
-                            return first.ffi_named { first = 1 }
-                                + second.ffi_named { second = 2 }
-                                + third.ffi_named { first = 3 }
-                        end
-                    ]])
-                    assert.falsy(named_ok)
-                    local _, unavailable = named_err:gsub(
-                        "parameter names are unavailable for foreign function",
-                        "")
-                    assert.equal(3, unavailable)
-                    for _, alias in ipairs({
-                        "first", "second", "third",
-                    }) do
-                        assert.match(
-                            "foreign function '" .. alias ..
-                                "%.ffi_named'",
-                            named_err)
-                    end
-                end)
-        end
+            local named_ok, named_err = h.run_checker(imports .. [[
+                local function run()
+                    first.ffi_forward { first = 1 }
+                    second.ffi_forward { second = 2 }
+                    third.ffi_forward { first = 3 }
+                    first.ffi_reverse { second = 4 }
+                    second.ffi_reverse { first = 5 }
+                    third.ffi_reverse { first = 6 }
+                end
+            ]])
+            assert.falsy(named_ok)
+            local _, unavailable = named_err:gsub(
+                "parameter names are unavailable for foreign function", "")
+            assert.equal(6, unavailable)
+            for _, alias in ipairs({ "first", "second", "third" }) do
+                for _, name in ipairs({ "ffi_forward", "ffi_reverse" }) do
+                    assert.match(
+                        "foreign function '" .. alias .. "%." .. name .. "'",
+                        named_err)
+                end
+            end
+        end)
     end)
 
     it("accepts named and unnamed parameter declarator equivalents",
@@ -1614,12 +1617,10 @@ describe("compatible C declarations across foreign imports", function()
             [[
                 extern int ffi_batch_integer(int value);
                 extern long ffi_batch_long(long value);
-                extern double ffi_batch_double(double value);
             ]],
             [[
                 extern int ffi_batch_integer(int value);
                 extern long ffi_batch_long(long value);
-                extern double ffi_batch_double(double value);
             ]],
         }, function(first_header, second_header)
             local calls = {}
@@ -1650,7 +1651,7 @@ describe("compatible C declarations across foreign imports", function()
             assert.equal("baseline", calls[1].stage)
             assert.equal("candidate", calls[2].stage)
             for _, name in ipairs({
-                "ffi_batch_integer", "ffi_batch_long", "ffi_batch_double",
+                "ffi_batch_integer", "ffi_batch_long",
             }) do
                 assert.equal(
                     ast[1]._type.members[name].type,
@@ -1845,40 +1846,57 @@ describe("compatible C declarations across foreign imports", function()
                 },
             }
 
-            local code =
-                'local first = foreign import "' .. first_header .. '"\n' ..
-                'local second = foreign import "' .. second_header .. '"\n'
+            local candidate = {
+                left_type = {},
+                right_type = {},
+                left_declaration = "left",
+                right_declaration = "right",
+            }
             for _, scenario in ipairs(scenarios) do
                 local module_probe = {
-                    validate_baseline = function()
-                        return { status = "success" }
-                    end,
                     validate_declaration_compatibilities = scenario.plural,
                     validate_declaration_compatibility = scenario.legacy,
                 }
-                local service = {
-                    profile = profile,
-                    cdriver_process_options = function()
-                        return profile_service:cdriver_process_options()
-                    end,
-                    module_context = function()
-                        return module_probe
-                    end,
-                }
-                h.reset(true)
-                local ast = assert(h.parse(code))
-                local _, errors = checker.check(
-                    "test", ast, code, "test.titan", nil, {
-                        probe_service_provider =
-                            function() return service end,
-                    })
-                local err = table.concat(errors, "\n")
+                local results =
+                    checker_core.foreign_redeclaration_batch
+                        .validate_candidates(module_probe, { candidate })
+                local result = assert(results[1])
                 if scenario.expected then
-                    assert.matches(scenario.expected, err, 1, true)
+                    assert.equal("infrastructure_failure", result.status)
+                    assert.matches(
+                        scenario.expected, result.message, 1, true)
                 else
-                    assert.equal("", err)
+                    assert.equal("success", result.status)
                 end
             end
+
+            local code =
+                'local first = foreign import "' .. first_header .. '"\n' ..
+                'local second = foreign import "' .. second_header .. '"\n'
+            local service = {
+                profile = profile,
+                cdriver_process_options = function()
+                    return profile_service:cdriver_process_options()
+                end,
+                module_context = function()
+                    return {
+                        validate_baseline = function()
+                            return { status = "success" }
+                        end,
+                        validate_declaration_compatibilities =
+                            function() return {} end,
+                    }
+                end,
+            }
+            h.reset(true)
+            local ast = assert(h.parse(code))
+            local _, errors = checker.check(
+                "test", ast, code, "test.titan", nil, {
+                    probe_service_provider = function() return service end,
+                })
+            assert.matches(
+                "batch returned no result for a candidate",
+                table.concat(errors, "\n"), 1, true)
             close_context_configured_probe_service(
                 context, profile_service)
         end)

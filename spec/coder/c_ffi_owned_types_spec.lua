@@ -206,27 +206,33 @@ describe("source-written owned C type code generation", function()
 
     it("casts counted character owners with their exact binary length",
     function()
-        h.run_coder([[
-            local ffi = foreign import "titan/ffi.h"
+        with_header([[
+            typedef char ffi_char;
+            typedef signed char ffi_signed_char;
+            typedef unsigned char ffi_unsigned_char;
+            typedef int ffi_int;
+        ]], function(header)
+            h.run_coder([[
+            local ffi = foreign import "]] .. header .. [["
 
-            local type Chars = owned ffi.titan_ffi_char[]
+            local type Chars = owned ffi.ffi_char[]
             local type SignedChars =
-                owned ffi.titan_ffi_signed_char[]
+                owned ffi.ffi_signed_char[]
             local type UnsignedChars =
-                owned ffi.titan_ffi_unsigned_char[]
+                owned ffi.ffi_unsigned_char[]
 
             local module_bytes: Chars =
-                ffi.titan_ffi_char.new_array(4)
+                ffi.ffi_char.new_array(4)
 
             local record Box
                 local bytes: Chars
             end
 
             local function fill(bytes: Chars)
-                bytes[0] = 65 as ffi.titan_ffi_char
-                bytes[1] = 0 as ffi.titan_ffi_char
-                bytes[2] = 66 as ffi.titan_ffi_char
-                bytes[3] = 0 as ffi.titan_ffi_char
+                bytes[0] = 65 as ffi.ffi_char
+                bytes[1] = 0 as ffi.ffi_char
+                bytes[2] = 66 as ffi.ffi_char
+                bytes[3] = 0 as ffi.ffi_char
             end
 
             local function captured(bytes: Chars): () -> string
@@ -236,44 +242,44 @@ describe("source-written owned C type code generation", function()
             end
 
             function zero(): string
-                return ffi.titan_ffi_char.new_array(0) as string
+                return ffi.ffi_char.new_array(0) as string
             end
 
             function one(): string
                 local bytes: Chars =
-                    ffi.titan_ffi_char.new_array(1)
-                bytes[0] = 90 as ffi.titan_ffi_char
+                    ffi.ffi_char.new_array(1)
+                bytes[0] = 90 as ffi.ffi_char
                 return bytes as string
             end
 
             function plain(): string
                 local bytes: Chars =
-                    ffi.titan_ffi_char.new_array(4)
+                    ffi.ffi_char.new_array(4)
                 fill(bytes)
                 return bytes as string
             end
 
             function signed_bytes(): string
                 local bytes: SignedChars =
-                    ffi.titan_ffi_signed_char.new_array(2)
-                bytes[0] = (255 as ffi.titan_ffi_int)
-                    as ffi.titan_ffi_signed_char
-                bytes[1] = 0 as ffi.titan_ffi_signed_char
+                    ffi.ffi_signed_char.new_array(2)
+                bytes[0] = (255 as ffi.ffi_int)
+                    as ffi.ffi_signed_char
+                bytes[1] = 0 as ffi.ffi_signed_char
                 return bytes as string
             end
 
             function unsigned_bytes(): string
                 local bytes: UnsignedChars =
-                    ffi.titan_ffi_unsigned_char.new_array(3)
-                bytes[0] = 0 as ffi.titan_ffi_unsigned_char
-                bytes[1] = 254 as ffi.titan_ffi_unsigned_char
-                bytes[2] = 0 as ffi.titan_ffi_unsigned_char
+                    ffi.ffi_unsigned_char.new_array(3)
+                bytes[0] = 0 as ffi.ffi_unsigned_char
+                bytes[1] = 254 as ffi.ffi_unsigned_char
+                bytes[2] = 0 as ffi.ffi_unsigned_char
                 return bytes as string
             end
 
             function through_field_option_and_closure(): string
                 local bytes: Chars =
-                    ffi.titan_ffi_char.new_array(4)
+                    ffi.ffi_char.new_array(4)
                 fill(bytes)
                 local box = Box.new(bytes)
                 local optional: Chars? = box.bytes
@@ -282,15 +288,15 @@ describe("source-written owned C type code generation", function()
 
             function pointer_string(): string
                 local bytes: Chars =
-                    ffi.titan_ffi_char.new_array(4)
+                    ffi.ffi_char.new_array(4)
                 fill(bytes)
-                return (bytes as *ffi.titan_ffi_char) as string
+                return (bytes as *ffi.ffi_char) as string
             end
 
             local predicate_calls = 0
             local function make_for_predicate(): Chars
                 predicate_calls = predicate_calls + 1
-                return ffi.titan_ffi_char.new_array(1)
+                return ffi.ffi_char.new_array(1)
             end
 
             function predicate_once(): boolean
@@ -303,21 +309,46 @@ describe("source-written owned C type code generation", function()
                 fill(module_bytes)
                 return module_bytes as string
             end
-        ]], [[
-            assert(test.zero() == "")
-            assert(test.one() == "Z")
-            assert(test.plain() == "A\0B\0")
-            assert(#test.plain() == 4)
-            assert(test.signed_bytes() == string.char(255, 0))
-            assert(test.unsigned_bytes() == string.char(0, 254, 0))
-            assert(test.through_field_option_and_closure() == "A\0B\0")
-            assert(test.pointer_string() == "A")
-            assert(test.predicate_once())
-            assert(test.module_value() == "A\0B\0")
-        ]])
+            ]], [[
+                assert(test.zero() == "")
+                assert(test.one() == "Z")
+                assert(test.plain() == "A\0B\0")
+                assert(#test.plain() == 4)
+                assert(test.signed_bytes() == string.char(255, 0))
+                assert(test.unsigned_bytes() == string.char(0, 254, 0))
+                assert(test.through_field_option_and_closure() == "A\0B\0")
+                assert(test.pointer_string() == "A")
+                assert(test.predicate_once())
+                assert(test.module_value() == "A\0B\0")
+            ]])
+        end)
     end)
 
-    it("roots temporary counted character owners while strings allocate",
+    it("covers temporary counted-character owner rooting during string creation",
+    function()
+        with_header([[
+            typedef char ffi_char;
+        ]], function(header)
+            local csrc = h.compile_and_read_c([[
+                local c = foreign import "]] .. header .. [["
+
+                function temporary(size: integer): string
+                    return c.ffi_char.new_array(size) as string
+                end
+            ]])
+
+            assert.matches("luaS_newlstr", csrc, 1, true)
+            assert.matches("getudatamem", csrc, 1, true)
+            assert.matches("%->len", csrc)
+
+            local ok, err = h.call("test", [[
+                assert(#test.temporary(4) == 4)
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
+    it("roots temporary counted character owners while strings allocate #stress",
     function()
         local csrc = h.compile_and_read_c([[
             local ffi = foreign import "titan/ffi.h"
@@ -356,7 +387,48 @@ describe("source-written owned C type code generation", function()
         assert.truthy(ok, err)
     end)
 
-    it("casts a record identity to void pointer once and keeps it rooted",
+    it("covers a temporary record identity cast before a later argument call",
+    function()
+        with_header([[
+            typedef void *ffi_void_pointer;
+            static int ffi_present_record(void *record, int marker) {
+                return record != 0 ? marker : 0;
+            }
+        ]], function(header)
+            local csrc = h.compile_and_read_c([[
+                local c = foreign import "]] .. header .. [["
+
+                local record Owner
+                    local marker: integer
+                end
+
+                local function make_owner(): Owner
+                    return Owner.new(57)
+                end
+
+                local function later_argument(): integer
+                    return 11
+                end
+
+                function exercise(): integer
+                    return c.ffi_present_record(
+                        make_owner() as c.ffi_void_pointer,
+                        later_argument()) as integer
+                end
+            ]])
+
+            assert.not_match("lua_togco", csrc, 1, true)
+            assert.match("setuvalue", csrc, 1, true)
+            assert.match("%(ffi_void_pointer%)%(_tmp_%d+%)", csrc)
+
+            local ok, err = h.call("test", [[
+                assert(test.exercise() == 11)
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
+    it("casts a record identity to void pointer once and keeps it rooted #stress",
     function()
         with_header([[
             #include "titan/ffi.h"
@@ -427,7 +499,85 @@ describe("source-written owned C type code generation", function()
         end)
     end)
 
-    it("casts every stable GC representation and C function pointer to void",
+    it("covers stable GC identities and a C function pointer cast to void",
+    function()
+        with_header([[
+            typedef void *ffi_void_pointer;
+            typedef int (*ffi_callback_pointer)(int);
+
+            static int ffi_same_identity(
+                const void *left,
+                const void *right
+            ) {
+                return left == right;
+            }
+
+            static int ffi_increment(int value) {
+                return value + 1;
+            }
+
+            static ffi_callback_pointer ffi_get_callback(void) {
+                return ffi_increment;
+            }
+        ]], function(header)
+            local csrc = h.compile_and_read_c([[
+                local c = foreign import "]] .. header .. [["
+
+                function identities(): integer
+                    local values: {integer} = {17}
+                    local by_name: {string: integer} = {
+                        ["answer"] = 19
+                    }
+                    local answer = 23
+                    local callback = function(): integer
+                        return answer
+                    end
+                    local score = 0
+                    if c.ffi_same_identity(
+                        values as c.ffi_void_pointer,
+                        values as c.ffi_void_pointer) ~= 0 then
+                        score = score + 1
+                    end
+                    if c.ffi_same_identity(
+                        by_name as c.ffi_void_pointer,
+                        by_name as c.ffi_void_pointer) ~= 0 then
+                        score = score + 2
+                    end
+                    if c.ffi_same_identity(
+                        callback as c.ffi_void_pointer,
+                        callback as c.ffi_void_pointer) ~= 0 then
+                        score = score + 4
+                    end
+                    return score + values[1]
+                        + by_name["answer"] + callback()
+                end
+
+                function roundtrip_c_function_pointer(): integer
+                    local pointer =
+                        c.ffi_get_callback() as c.ffi_void_pointer
+                    local callback = pointer as c.ffi_callback_pointer
+                    return callback(41) as integer
+                end
+            ]])
+
+            assert.not_match("lua_togco", csrc, 1, true)
+            assert.match("sethvalue", csrc, 1, true)
+            assert.match("setobj2t", csrc, 1, true)
+            assert.match("gcvalue%(&_tmp_%d+%)", csrc)
+            assert.match("iscollectable%(&_tmp_%d+%)", csrc)
+            assert.match(
+                "titan_cast_func%s*%(%s*ffi_void_pointer,%s*[_%w]+%s*%)",
+                csrc)
+
+            local ok, err = h.call("test", [[
+                assert(test.identities() == 66)
+                assert(test.roundtrip_c_function_pointer() == 42)
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
+    it("casts every stable GC representation and C function pointer to void #stress",
     function()
         with_header([[
             typedef void *ffi_void_pointer;

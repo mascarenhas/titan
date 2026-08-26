@@ -35,6 +35,7 @@ case "$group" in
 esac
 
 partition_file=spec/support/ci_compiler_test_groups.txt
+stress_partition_file=spec/support/ci_compiler_stress_files.txt
 partition_files=()
 partition_shards=()
 partition_seen=()
@@ -57,9 +58,29 @@ while read -r shard test_file observed_seconds extra; do
     partition_shards+=("$shard")
 done < "$partition_file"
 
+stress_files=()
+stress_seen=()
+while read -r test_file extra; do
+    if [[ -z ${test_file:-} || $test_file == \#* ]]; then continue; fi
+    if [[ $test_file != spec/*_spec.lua || -n ${extra:-} ]]; then
+        echo "invalid compiler stress row: $test_file ${extra:-}" >&2
+        exit 2
+    fi
+    for existing in "${stress_files[@]}"; do
+        if [[ $existing == "$test_file" ]]; then
+            echo "duplicate compiler stress entry: $test_file" >&2
+            exit 2
+        fi
+    done
+    stress_files+=("$test_file")
+done < "$stress_partition_file"
+
 compiler_tests=()
 compiler_unit_tests=()
 compiler_isolated_coverage_tests=()
+compiler_stress_tests=()
+compiler_unit_stress_tests=()
+compiler_isolated_stress_tests=()
 partition_status=0
 while IFS= read -r test_file; do
     category=
@@ -106,6 +127,28 @@ while IFS= read -r test_file; do
             ;;
     esac
 
+    stress_index=
+    for index in "${!stress_files[@]}"; do
+        if [[ ${stress_files[$index]} == "$test_file" ]]; then
+            stress_index=$index
+            stress_seen[$index]=true
+            break
+        fi
+    done
+    if [[ -n $category ]]; then
+        if grep -q '#stress' "$test_file"; then
+            if [[ -z $stress_index ]]; then
+                echo "tagged compiler stress spec is missing from " \
+                    "$stress_partition_file: $test_file" >&2
+                partition_status=1
+            fi
+        elif [[ -n $stress_index ]]; then
+            echo "listed compiler stress spec has no #stress tag: " \
+                "$test_file" >&2
+            partition_status=1
+        fi
+    fi
+
     if [[ -n $category ]]; then
         shard=
         partition_index=
@@ -128,7 +171,20 @@ while IFS= read -r test_file; do
                 unit) compiler_unit_tests+=("$test_file") ;;
                 isolated) compiler_isolated_coverage_tests+=("$test_file") ;;
             esac
+            if [[ -n $stress_index ]]; then
+                case "$category" in
+                    main) compiler_stress_tests+=("$test_file") ;;
+                    unit) compiler_unit_stress_tests+=("$test_file") ;;
+                    isolated)
+                        compiler_isolated_stress_tests+=("$test_file")
+                        ;;
+                esac
+            fi
         fi
+    elif [[ -n $stress_index ]]; then
+        echo "stress spec is outside the compiler/language group: " \
+            "$test_file" >&2
+        partition_status=1
     fi
 done < <(find spec -type f -name '*_spec.lua' -print | LC_ALL=C sort)
 
@@ -136,6 +192,12 @@ for index in "${!partition_files[@]}"; do
     if [[ -z ${partition_seen[$index]-} ]]; then
         echo "stale or excluded compiler partition entry: " \
             "${partition_files[$index]}" >&2
+        partition_status=1
+    fi
+done
+for index in "${!stress_files[@]}"; do
+    if [[ -z ${stress_seen[$index]-} ]]; then
+        echo "stale compiler stress entry: ${stress_files[$index]}" >&2
         partition_status=1
     fi
 done
@@ -150,7 +212,8 @@ run_isolated_compiler_coverage() {
     local test_file
     local status=0
     for test_file in "${compiler_isolated_coverage_tests[@]}"; do
-        "$BUSTED" -c -o gtest -v "$test_file" || status=$?
+        "$BUSTED" -c -o gtest -v --exclude-tags=stress "$test_file" ||
+            status=$?
     done
     return "$status"
 }
@@ -167,11 +230,13 @@ run_compiler_coverage() {
         "with LuaCov"
 
     if (( ${#compiler_tests[@]} > 0 )); then
-        "$BUSTED" -c -o gtest -v "${compiler_tests[@]}" ||
+        "$BUSTED" -c -o gtest -v --exclude-tags=stress \
+            "${compiler_tests[@]}" ||
             compiler_status=$?
     fi
     if (( ${#compiler_unit_tests[@]} > 0 )); then
-        "$BUSTED" -c -o gtest -v "${compiler_unit_tests[@]}" ||
+        "$BUSTED" -c -o gtest -v --exclude-tags=stress \
+            "${compiler_unit_tests[@]}" ||
             unit_status=$?
     fi
     run_isolated_compiler_coverage || isolated_status=$?
@@ -183,9 +248,54 @@ run_compiler_coverage() {
     fi
 }
 
+run_isolated_compiler_stress() {
+    local test_file
+    local status=0
+    for test_file in "${compiler_isolated_stress_tests[@]}"; do
+        "$BUSTED" -o gtest -v --tags=stress "$test_file" || status=$?
+    done
+    return "$status"
+}
+
+run_compiler_stress() {
+    local compiler_status=0
+    local unit_status=0
+    local isolated_status=0
+    local stress_count=$((${#compiler_stress_tests[@]} +
+        ${#compiler_unit_stress_tests[@]} +
+        ${#compiler_isolated_stress_tests[@]}))
+    local label=${requested_shard:+ shard $requested_shard}
+    echo "Running $stress_count compiler stress spec files${label}" \
+        "without LuaCov"
+
+    if (( ${#compiler_stress_tests[@]} > 0 )); then
+        "$BUSTED" -o gtest -v --tags=stress \
+            "${compiler_stress_tests[@]}" || compiler_status=$?
+    fi
+    if (( ${#compiler_unit_stress_tests[@]} > 0 )); then
+        "$BUSTED" -o gtest -v --tags=stress \
+            "${compiler_unit_stress_tests[@]}" || unit_status=$?
+    fi
+    run_isolated_compiler_stress || isolated_status=$?
+    if (( compiler_status != 0 || unit_status != 0 ||
+        isolated_status != 0 )); then
+        echo "compiler stress status: main=$compiler_status " \
+            "unit=$unit_status isolated=$isolated_status" >&2
+        return 1
+    fi
+}
+
 case "$group" in
     compiler | compiler-shard-[1-4])
-        run_compiler_coverage
+        coverage_status=0
+        stress_status=0
+        run_compiler_coverage || coverage_status=$?
+        run_compiler_stress || stress_status=$?
+        if (( coverage_status != 0 || stress_status != 0 )); then
+            echo "compiler lane status: coverage=$coverage_status " \
+                "stress=$stress_status" >&2
+            exit 1
+        fi
         ;;
     compiler-uncovered | compiler-uncovered-shard-[1-4])
         compiler_count=$((${#compiler_tests[@]} +

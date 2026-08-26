@@ -638,7 +638,7 @@ describe("foreign functions (checker)", function()
 
     it("keeps source foreign members direct-only and out of compiled interfaces",
     function()
-        with_header(declarations, function(header)
+        with_header("typedef int ffi_int;\n", function(header)
             local quoted = string.format("%q", header)
             local modules = {
                 provider = 'local c = foreign import ' .. quoted .. [[
@@ -703,33 +703,15 @@ describe("foreign functions (checker)", function()
             ]]
             modules.consumer = 'local c = foreign import ' .. quoted .. [[
                 local bridge = import "bridge.titan"
-                foreign function bad(
+                local provider = import "provider.titan"
+
+                foreign function transitive_view(
                     input: c.ffi_int
                 ): c.ffi_int
                     return bridge.increment(input)
                 end
-            ]]
-            ok, err = h.run_checker_modules(
-                modules, "consumer", { interface = "source" })
-            assert.falsy(ok)
-            assert.match("member 'increment' not found inside module 'bridge'", err)
 
-            modules.consumer = 'local c = foreign import ' .. quoted .. [[
-                local bridge = import "bridge.titan"
-                local provider = import "provider.titan"
-                foreign function direct(
-                    input: c.ffi_int
-                ): c.ffi_int
-                    return bridge.through(input) + provider.increment(input)
-                end
-            ]]
-            ok, err = h.run_checker_modules(
-                modules, "consumer", { interface = "source" })
-            assert.truthy(ok, err)
-
-            modules.consumer = 'local c = foreign import ' .. quoted .. [[
-                local provider = import "provider.titan"
-                foreign function bad(
+                foreign function ordinary_member(
                     input: c.ffi_int
                 ): c.ffi_int
                     return provider.ordinary(input as integer)
@@ -739,7 +721,11 @@ describe("foreign functions (checker)", function()
             ok, err = h.run_checker_modules(
                 modules, "consumer", { interface = "source" })
             assert.falsy(ok)
-            assert.match("ordinary Titan member 'provider%.ordinary' is not visible", err)
+            assert.match(
+                "member 'increment' not found inside module 'bridge'", err)
+            assert.match(
+                "ordinary Titan member 'provider%.ordinary' is not visible",
+                err)
         end)
     end)
 

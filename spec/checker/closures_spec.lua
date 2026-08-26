@@ -7,6 +7,18 @@ local run_checker = h.run_checker
 local assert_type_check = h.assert_type_check
 local assert_type_error = h.assert_type_error
 
+local function with_header(contents, fn)
+    local header = os.tmpname() .. ".h"
+    local file = assert(io.open(header, "w"))
+    assert(file:write(contents))
+    assert(file:close())
+
+    local results = table.pack(pcall(fn, header))
+    os.remove(header)
+    if not results[1] then error(results[2], 0) end
+    return table.unpack(results, 2, results.n)
+end
+
 local function captured_lambda_source(count)
     local declarations, terms = {}, {}
     for i = 1, count do
@@ -494,12 +506,15 @@ describe("bound method references (obj:m)", function()
     end)
 
     it("rejects a foreign (C) method reference", function()
-        assert_type_error("trying to access module 'm' as a first%-class value", [[
-            local m = foreign import "math.h"
-            function use()
-                local f = m:fabs
-            end
-        ]])
+        with_header("extern double ffi_abs(double value);\n", function(header)
+            assert_type_error(
+                "trying to access module 'm' as a first%-class value", [[
+                    local m = foreign import "]] .. header .. [["
+                    function use()
+                        local f = m:ffi_abs
+                    end
+                ]])
+        end)
     end)
 
     it("accepts a top-level method-ref initializer with a const receiver", function()

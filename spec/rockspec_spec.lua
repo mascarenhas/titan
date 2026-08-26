@@ -640,7 +640,6 @@ describe("standalone-prefix source installation", function()
             "spec/fixtures/test_runner/nested/tests/tests.titan",
             "spec/fixtures/test_runner/test_runner_dependency.titan",
             "spec/fixtures/test_runner/test_runner_edge.titan",
-            "spec/fixtures/test_runner/test_runner_empty.titan",
             "spec/fixtures/test_runner/test_runner_fixture.titan",
             "spec/fixtures/test_runner/test_runner_folder/contributor.titan",
             "spec/fixtures/test_runner/test_runner_folder/test_runner_folder.titan",

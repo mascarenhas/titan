@@ -773,30 +773,31 @@ describe("type-relation soundness (end-to-end)", function()
 
     it("reads and dynamically writes C scalar container values", function()
         run_coder([[
-            local ffi = foreign import "titan/ffi.h"
+            local ffi =
+                foreign import "spec/fixtures/c_numeric_soundness.h"
 
             function read_array(): integer
-                local one = 1 as ffi.titan_ffi_int
-                local xs: {ffi.titan_ffi_int} = {one}
+                local one = 1 as ffi.titan_spec_i8
+                local xs: {ffi.titan_spec_i8} = {one}
                 return xs[1]
             end
 
             function read_map(): integer
-                local one = 1 as ffi.titan_ffi_int
-                local map: {string: ffi.titan_ffi_int} = {
+                local one = 1 as ffi.titan_spec_i8
+                local map: {string: ffi.titan_spec_i8} = {
                     ["one"] = one
                 }
                 return map["one"]
             end
 
             function new_array(): value
-                local one = 1 as ffi.titan_ffi_int
+                local one = 1 as ffi.titan_spec_i8
                 return {one}
             end
 
             function read_array_value(values: value): integer
                 local typed =
-                    values as {ffi.titan_ffi_int}
+                    values as {ffi.titan_spec_i8}
                 return typed[1]
             end
         ]], [[
@@ -812,7 +813,65 @@ describe("type-relation soundness (end-to-end)", function()
         ]])
     end)
 
-    it("keeps C numeric and recursive Option dynamic sinks in parity",
+    it("covers representative C numeric and recursive Option dynamic sinks",
+    function()
+        run_coder([[
+            local c =
+                foreign import "spec/fixtures/c_numeric_soundness.h"
+
+            local record SmallBox
+                number: c.titan_spec_i8
+                optional: integer?
+            end
+
+            function new_box(): value
+                return SmallBox.new(1 as c.titan_spec_i8, 1)
+            end
+
+            function read_box(v: value): (integer, integer?)
+                local box = v as SmallBox
+                return box.number, box.optional
+            end
+
+            function i8_as(v: value): integer
+                local narrowed = v as c.titan_spec_i8
+                return narrowed
+            end
+
+            function option_as(v: value): integer?
+                return v as integer?
+            end
+
+            function new_values(): value
+                local one = 1 as c.titan_spec_i8
+                return {one}
+            end
+
+            function read_values(v: value): integer
+                local values = v as {c.titan_spec_i8}
+                return values[1]
+            end
+        ]], [[
+            assert(test.i8_as(2.0) == 2)
+            assert(not pcall(test.i8_as, 2.5))
+            assert(test.option_as(nil) == nil)
+            assert(test.option_as(3.0) == 3)
+
+            local box = test.new_box()
+            box.number = 4.0
+            box.optional = nil
+            local number, optional = test.read_box(box)
+            assert(number == 4 and optional == nil)
+
+            local values = test.new_values()
+            values[1] = 5.0
+            assert(test.read_values(values) == 5)
+            assert(not pcall(function() values[2] = 5.5 end))
+            assert(#values == 1)
+        ]])
+    end)
+
+    it("keeps C numeric and recursive Option dynamic sinks in parity #stress",
     function()
         run_coder([[
             local c =
@@ -1052,7 +1111,61 @@ describe("type-relation soundness (end-to-end)", function()
         ]])
     end)
 
-    it("covers owned C and raw TValue dynamic target rows", function()
+    it("covers representative owned C and raw TValue dynamic targets",
+    function()
+        run_coder([[
+            local ffi =
+                foreign import "spec/fixtures/c_tvalue_soundness.h"
+            local type Owner = owned ffi.titan_spec_tvalue_i8[]
+
+            local record DynamicBox
+                owner: Owner
+                raw: ffi.TValue
+            end
+
+            function new_owner(): value
+                return ffi.titan_spec_tvalue_i8.new_array(2)
+            end
+
+            function owner_length(v: value): integer
+                local owner = v as Owner
+                return #owner
+            end
+
+            function raw_roundtrip(v: value): value
+                local raw = v as ffi.TValue
+                return raw
+            end
+
+            function new_box(): value
+                local owner: Owner =
+                    ffi.titan_spec_tvalue_i8.new_array(2)
+                local raw: ffi.TValue = "initial"
+                return DynamicBox.new(owner, raw)
+            end
+
+            function read_box(v: value): (integer, value)
+                local box = v as DynamicBox
+                return #box.owner, box.raw
+            end
+        ]], [[
+            local owner = test.new_owner()
+            assert(test.owner_length(owner) == 2)
+            assert(not pcall(test.owner_length, "owner"))
+
+            local table_value = {}
+            assert(test.raw_roundtrip(table_value) == table_value)
+            assert(test.raw_roundtrip(nil) == nil)
+
+            local box = test.new_box()
+            box.owner = owner
+            box.raw = table_value
+            local length, raw = test.read_box(box)
+            assert(length == 2 and raw == table_value)
+        ]])
+    end)
+
+    it("covers owned C and raw TValue dynamic target rows #stress", function()
         run_coder([[
             local c =
                 foreign import "spec/fixtures/c_numeric_soundness.h"
@@ -1238,7 +1351,8 @@ describe("type-relation soundness (end-to-end)", function()
     it("lowers Option inner conversions and C TValue as one checked edge",
     function()
         run_coder([[
-            local ffi = foreign import "titan/ffi.h"
+            local ffi =
+                foreign import "spec/fixtures/c_tvalue_soundness.h"
 
             function force_float(x: integer?): float
                 return x
@@ -1262,12 +1376,12 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             function force_c_integer(x: value?): integer
-                local raw: ffi.titan_ffi_int = x
+                local raw: ffi.titan_spec_tvalue_int = x
                 return raw
             end
 
             function force_c_float(x: value?): float
-                local raw: ffi.titan_ffi_double = x
+                local raw: ffi.titan_spec_tvalue_double = x
                 return raw
             end
         ]], [[
@@ -1313,7 +1427,55 @@ describe("type-relation soundness (end-to-end)", function()
         ]])
     end)
 
-    it("checks C integer bounds before casts, boxing, and mutation", function()
+    it("covers C integer range guards before boxing and mutation",
+    function()
+        run_coder([[
+            local c =
+                foreign import "spec/fixtures/c_numeric_soundness.h"
+
+            function value_as_i8(v: value): integer
+                return v as c.titan_spec_i8
+            end
+
+            function widest_to_value(): value
+                return c.titan_spec_ull_max()
+            end
+
+            function checked_call(v: value): integer
+                c.titan_spec_take_i8(v as c.titan_spec_i8)
+                return c.titan_spec_numeric_mutation_count()
+            end
+
+            function mutation_count(): integer
+                return c.titan_spec_numeric_mutation_count()
+            end
+
+            local type I8s = owned c.titan_spec_i8[]
+            local values: I8s = c.titan_spec_i8.new_array(1)
+
+            function write_owned(v: integer): integer
+                values[0] = v
+                return values[0]
+            end
+        ]], [[
+            assert(test.value_as_i8(-128) == -128)
+            assert(test.value_as_i8(127) == 127)
+            assert(not pcall(test.value_as_i8, 128))
+            assert(not pcall(test.widest_to_value))
+
+            local before = test.mutation_count()
+            assert(not pcall(test.checked_call, 128))
+            assert(test.mutation_count() == before)
+            assert(test.checked_call(127) == before + 1)
+
+            assert(test.write_owned(7) == 7)
+            assert(not pcall(test.write_owned, 128))
+            assert(test.write_owned(7) == 7)
+        ]])
+    end)
+
+    it("checks C integer bounds before casts, boxing, and mutation #stress",
+    function()
         run_coder([[
             local c =
                 foreign import "spec/fixtures/c_numeric_soundness.h"
@@ -1487,7 +1649,37 @@ describe("type-relation soundness (end-to-end)", function()
         ]])
     end)
 
-    it("checks C float narrowing and float-to-integer conversion", function()
+    it("covers C float narrowing and float-to-integer conversion",
+    function()
+        run_coder([[
+            local c =
+                foreign import "spec/fixtures/c_numeric_soundness.h"
+
+            function double_as_float(): float
+                return c.titan_spec_double_max()
+                    as c.titan_spec_float
+            end
+
+            function double_as_i8(v: float): integer
+                local source = v as c.titan_spec_double
+                return source as c.titan_spec_i8
+            end
+
+            function double_infinity(): float
+                return c.titan_spec_double_inf()
+            end
+        ]], [[
+            assert(not pcall(test.double_as_float))
+            assert(test.double_as_i8(3.75) == 3)
+            assert(test.double_as_i8(-128.75) == -128)
+            assert(not pcall(test.double_as_i8, 128.0))
+            assert(not pcall(test.double_as_i8, math.huge))
+            assert(test.double_infinity() == math.huge)
+        ]])
+    end)
+
+    it("checks C float narrowing and float-to-integer conversion #stress",
+    function()
         run_coder([[
             local c =
                 foreign import "spec/fixtures/c_numeric_soundness.h"

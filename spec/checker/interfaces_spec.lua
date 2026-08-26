@@ -4,6 +4,18 @@ local types = require "titan-compiler.types"
 local run_checker = h.run_checker
 local run_checker_modules = h.run_checker_modules
 
+local function with_header(contents, fn)
+    local header = os.tmpname() .. ".h"
+    local file = assert(io.open(header, "w"))
+    assert(file:write(contents))
+    assert(file:close())
+
+    local results = table.pack(pcall(fn, header))
+    os.remove(header)
+    if not results[1] then error(results[2], 0) end
+    return table.unpack(results, 2, results.n)
+end
+
 local function find_toplevel(ast, tag, name)
     for _, node in ipairs(ast) do
         if node._tag == tag and node.name == name then
@@ -1221,30 +1233,32 @@ describe("interfaces (typechecker)", function()
 
     it("rejects C FFI types anywhere in a public Interface signature",
     function()
-        local session = h.new_checker_probe_session()
-        local ok, err
-        local ran, failure = pcall(function()
-            ok, err = h.run_checker([[
-                local c = foreign import "stdint.h"
+        with_header("typedef int ffi_int;\n", function(header)
+            local session = h.new_checker_probe_session()
+            local ok, err
+            local ran, failure = pcall(function()
+                ok, err = h.run_checker([[
+                local c = foreign import "]] .. header .. [["
 
                 interface Foreign
-                    function use(input: c.int32_t): c.int32_t
+                    function use(input: c.ffi_int): c.ffi_int
                 end
-            ]], session)
+                ]], session)
+            end)
+            h.close_checker_probe_session(session)
+            assert.is_true(ran, failure)
+            assert.falsy(ok)
+            assert.match("cannot export C FFI type 'ffi_int'", err)
         end)
-        h.close_checker_probe_session(session)
-        assert.is_true(ran, failure)
-        assert.falsy(ok)
-        assert.match("cannot export C FFI type 'int32_t'", err)
     end)
 
     it("freezes visible local C scalar views but rejects raw pointers",
     function()
-        local session = h.new_checker_probe_session()
-        local ok, err, ast
-        local ran, failure = pcall(function()
-            ok, err, ast = h.run_checker([[
-                local c = foreign import "stdint.h"
+        with_header("typedef int ffi_int;\n", function(header)
+            local session = h.new_checker_probe_session()
+            local ran, failure = pcall(function()
+                local ok, err, ast = h.run_checker([[
+                local c = foreign import "]] .. header .. [["
 
                 interface DynamicC
                     function adapt(input: value): value
@@ -1254,34 +1268,29 @@ describe("interfaces (typechecker)", function()
                 end
 
                 local function Concrete:adapt(
-                    input: c.int32_t
-                ): c.int32_t
+                    input: c.ffi_int
+                ): c.ffi_int
                     return input
                 end
 
                 function wrap(value_: Concrete): DynamicC
                     return value_
                 end
-            ]], session)
-        end)
-        h.close_checker_probe_session(session)
-        assert.is_true(ran, failure)
-        assert.truthy(ok, err)
-        local adapter = find_function(ast, "wrap")
-            .block.stats[1].exps[1]
-            ._interface_conversion.methods[1]
-            .interface_adapter
-        assert.equal("gradual_guard",
-            adapter.arguments[1].operation.kind)
-        assert.equal("c_integer",
-            adapter.arguments[1].operation.guard.op)
-        assert.equal("gradual_inject",
-            adapter.results[1].operation.kind)
+                ]], session)
+                assert.truthy(ok, err)
+                local adapter = find_function(ast, "wrap")
+                    .block.stats[1].exps[1]
+                    ._interface_conversion.methods[1]
+                    .interface_adapter
+                assert.equal("gradual_guard",
+                    adapter.arguments[1].operation.kind)
+                assert.equal("c_integer",
+                    adapter.arguments[1].operation.guard.op)
+                assert.equal("gradual_inject",
+                    adapter.results[1].operation.kind)
 
-        session = h.new_checker_probe_session()
-        ran, failure = pcall(function()
-            ok, err = h.run_checker([[
-                local c = foreign import "stdint.h"
+                ok, err = h.run_checker([[
+                local c = foreign import "]] .. header .. [["
 
                 interface DynamicC
                     function adapt(input: value)
@@ -1291,19 +1300,20 @@ describe("interfaces (typechecker)", function()
                 end
 
                 local function Concrete:adapt(
-                    input: *c.int32_t
+                    input: *c.ffi_int
                 )
                 end
 
                 function wrap(value_: Concrete): DynamicC
                     return value_
                 end
-            ]], session)
+                ]], session)
+                assert.falsy(ok)
+                assert.match("method 'adapt' has incompatible type", err)
+            end)
+            h.close_checker_probe_session(session)
+            assert.is_true(ran, failure)
         end)
-        h.close_checker_probe_session(session)
-        assert.is_true(ran, failure)
-        assert.falsy(ok)
-        assert.match("method 'adapt' has incompatible type", err)
     end)
 
     it("freezes the complete callable shape matrix for adapters", function()

@@ -194,7 +194,7 @@ describe("call sequencing regressions", function()
         assert.is_true(copy < call)
     end)
 
-    it("retains allocation and post-native-call roots through later setup",
+    it("retains allocation and post-native-call roots through later setup #stress",
     function()
         -- Constructor results acquire mandatory post-native-call roots in the
         -- still-active caller; the lambda acquires its initial allocation root.
@@ -333,6 +333,79 @@ describe("call sequencing regressions", function()
         ]])
     end)
 
+    it("covers allocation and post-native-call setup shapes", function()
+        run_coder([[
+            record R
+                id: integer
+            end
+
+            current: R = R.new(0)
+
+            local function consume(r: R): integer
+                current = R.new(101)
+                return r.id
+            end
+
+            function replaced_inside_callee(): integer
+                current = R.new(1)
+                return consume(current)
+            end
+
+            local function replace_argument(): integer
+                current = R.new(102)
+                return 0
+            end
+
+            local function take(r: R, _unused: integer): integer
+                return r.id
+            end
+
+            function replaced_by_later_argument(): integer
+                current = R.new(2)
+                return take(current, replace_argument())
+            end
+
+            current_fn: (integer) -> integer = function (_n: integer): integer
+                return -99
+            end
+
+            local function replace_callee(): integer
+                current_fn = function (_n: integer): integer return -98 end
+                return 0
+            end
+
+            function replaced_first_class_callee(): integer
+                local held = R.new(3)
+                current_fn = function (_n: integer): integer
+                    return held.id
+                end
+                return current_fn(replace_callee())
+            end
+
+            local function make_result(): R
+                return R.new(4)
+            end
+
+            local function later_effect(): integer
+                current = R.new(104)
+                return 0
+            end
+
+            local function take_result(r: R, _unused: integer): integer
+                return r.id
+            end
+
+            function returned_by_native_call(): integer
+                return take_result(make_result(), later_effect())
+            end
+        ]], [[
+            assert(test.replaced_inside_callee() == 1)
+            assert(test.replaced_by_later_argument() == 2)
+            assert(test.replaced_first_class_callee() == 3)
+            assert(test.returned_by_native_call() == 4)
+        ]])
+    end)
+
     it("discards a non-void static result without compiler warnings", function()
         local oldflags = driver.CFLAGS
         driver.CFLAGS = oldflags .. " -Werror"
@@ -346,6 +419,170 @@ describe("call sequencing regressions", function()
         ]])
         driver.CFLAGS = oldflags
         assert.truthy(ok, err)
+    end)
+end)
+
+describe("basic synthetic C FFI runtime matrix", function()
+    local HEADER = "tmp_titan_basic_ffi_runtime.h"
+    local MODULE = "ffi_basic_runtime"
+
+    lazy_setup(function()
+        clean()
+        local header = assert(io.open(HEADER, "w"))
+        header:write([[
+typedef struct TValue TValue;
+typedef void *fixture_void_pointer;
+typedef int *fixture_int_pointer;
+typedef int fixture_scalar;
+typedef long fixture_chain_base;
+typedef fixture_chain_base fixture_chain_one;
+typedef fixture_chain_one fixture_chain_two;
+typedef struct fixture_object { int marker; } fixture_object;
+
+#define FIXTURE_CONSTANT 41
+
+static int fixture_box = 0;
+static fixture_scalar fixture_global = 11;
+static fixture_object fixture_present_object = { 1 };
+
+static inline TValue fixture_value_echo(TValue value) { return value; }
+static inline int fixture_value_seen(TValue value) {
+    return !ttisnil(&value);
+}
+static inline void fixture_value_store(TValue *out, TValue value) {
+    *out = value;
+}
+static inline fixture_void_pointer fixture_box_void(void) {
+    return &fixture_box;
+}
+static inline void fixture_write_int(fixture_int_pointer p, int value) {
+    *p = value;
+}
+static inline int fixture_read_int(fixture_int_pointer p) { return *p; }
+static inline int fixture_first_byte(fixture_void_pointer p) {
+    return *(const unsigned char *)p;
+}
+static inline fixture_scalar fixture_scalar_value(void) { return 4; }
+static inline fixture_chain_two fixture_chain_value(void) { return 23; }
+static inline void fixture_set_global(fixture_scalar value) {
+    fixture_global = value;
+}
+static inline fixture_object *fixture_pointer(fixture_scalar present) {
+    return present ? &fixture_present_object : 0;
+}
+]])
+        assert(header:close())
+
+        local generated, generate_error = generate_modules({
+            [MODULE] = [[
+                local c = foreign import "]] .. HEADER .. [["
+
+                function echo(): value
+                    return c.fixture_value_echo("ok")
+                end
+
+                function store(v: value): value
+                    local raw: c.TValue = nil
+                    c.fixture_value_store(raw, v)
+                    return raw
+                end
+
+                function seen(v: value): integer
+                    return c.fixture_value_seen(v)
+                end
+
+                function write_box(): integer
+                    local p: c.fixture_int_pointer = c.fixture_box_void()
+                    c.fixture_write_int(p, 77)
+                    return c.fixture_read_int(
+                        c.fixture_box_void() as c.fixture_int_pointer)
+                end
+
+                function string_first_byte(): integer
+                    local text = "Titan"
+                    return c.fixture_first_byte(
+                        text as c.fixture_void_pointer) as integer
+                end
+
+                function scalar_value(): value
+                    return c.fixture_scalar_value() as value
+                end
+
+                function chained_value(): value
+                    return c.fixture_chain_value() as value
+                end
+
+                function global_value(): integer
+                    c.fixture_set_global(29 as c.fixture_scalar)
+                    return c.fixture_global as integer
+                end
+
+                function pointer_present(present: integer): boolean
+                    local pointer = c.fixture_pointer(
+                        present as c.fixture_scalar)
+                    if not pointer then return false end
+                    return true
+                end
+
+                function defined_value(): integer
+                    return c.FIXTURE_CONSTANT
+                end
+            ]],
+        }, MODULE)
+        assert.truthy(generated, generate_error)
+    end)
+
+    lazy_teardown(function()
+        os.remove(HEADER)
+        clean()
+    end)
+
+    local function assert_call(code)
+        local ok, err = call(MODULE, code)
+        assert.truthy(ok, err)
+    end
+
+    it("runs TValue and void pointer FFI lowering paths", function()
+        assert_call([[
+            assert(ffi_basic_runtime.echo() == "ok")
+            local marker = {}
+            assert(ffi_basic_runtime.store(marker) == marker)
+            assert(ffi_basic_runtime.seen(function() end) == 1)
+            assert(ffi_basic_runtime.write_box() == 77)
+        ]])
+    end)
+
+    it("can cast a string to void pointer in foreign calls", function()
+        assert_call([[assert(ffi_basic_runtime.string_first_byte() == 84)]])
+    end)
+
+    it("casts a scalar foreign typedef to value", function()
+        assert_call([[
+            assert(ffi_basic_runtime.scalar_value() == 4)
+            assert(ffi_basic_runtime.scalar_value() + 1 == 5)
+        ]])
+    end)
+
+    it("casts a multi-level (chained) foreign typedef to value", function()
+        assert_call([[
+            local value = ffi_basic_runtime.chained_value()
+            assert(type(value) == "number" and value == 23)
+        ]])
+    end)
+
+    it("can read foreign global variables", function()
+        assert_call([[assert(ffi_basic_runtime.global_value() == 29)]])
+    end)
+
+    it("uses a foreign pointer in a boolean context", function()
+        assert_call([[
+            assert(ffi_basic_runtime.pointer_present(0) == false)
+            assert(ffi_basic_runtime.pointer_present(1) == true)
+        ]])
+    end)
+
+    it("can use foreign defines", function()
+        assert_call([[assert(ffi_basic_runtime.defined_value() == 41)]])
     end)
 end)
 
@@ -1971,32 +2208,6 @@ describe("Titan code generator", function()
             generate_err, 1, true)
     end)
 
-    it("loads C headers with foreign import", function ()
-        local modules = {
-            foo = [[
-                local stdio = foreign import "stdio.h"
-                function fun()
-                    local fd = stdio.fopen("tmp_test_hello.txt", "w")
-                    local msg = "Hello, Titan!\n"
-                    local n = stdio.fwrite(msg, #msg, 1, fd)
-                    local err = stdio.fclose(fd)
-                end
-            ]]
-        }
-        local ok, err = generate_modules(modules, "foo")
-        assert.truthy(ok, err)
-        local ok, err = call("foo", [[
-            os.remove('tmp_test_hello.txt')
-            foo.fun()
-            local fd = io.open('tmp_test_hello.txt', 'r')
-            local data = fd:read('*a')
-            fd:close()
-            os.remove('tmp_test_hello.txt')
-            assert(data == 'Hello, Titan!\n')
-        ]])
-        assert.truthy(ok, err)
-    end)
-
     it("uses quoted includes for local foreign headers", function()
         local suffix = os.tmpname():match("[^/]+$"):gsub("%W", "_")
         local header = "tmp_titan_ffi_local_header_" .. suffix .. ".h"
@@ -2126,257 +2337,6 @@ static struct titan_symlink_origin *titan_symlink_origin_get(void) {
         assert_dollar_foreign_header(
             "$HEADERNAME", "ffi_dollar_headername_header",
             "TITAN_DOLLAR_HEADERNAME_HEADER", 73)
-    end)
-
-    it("runs TValue and void pointer FFI lowering paths", function()
-        local suffix = os.tmpname():match("[^/]+$"):gsub("%W", "_")
-        local header = "tmp_titan_ffi_tvalue_runtime_" .. suffix .. ".h"
-        local f = assert(io.open(header, "w"))
-        f:write([[
-            #include "lua-5.5.1/src/lobject.h"
-
-            typedef void *ffi_vptr;
-            typedef int *ffi_iptr;
-
-            static int ffi_box = 0;
-
-            static inline TValue ffi_value_echo(TValue value) {
-                return value;
-            }
-
-            static inline int ffi_value_seen(TValue value) {
-                return !ttisnil(&value);
-            }
-
-            static inline void ffi_value_store(TValue *out, TValue value) {
-                *out = value;
-            }
-
-            static inline ffi_vptr ffi_box_void(void) {
-                return &ffi_box;
-            }
-
-            static inline void ffi_write_int(ffi_iptr p, int value) {
-                *p = value;
-            }
-
-            static inline int ffi_read_int(ffi_iptr p) {
-                return *p;
-            }
-        ]])
-        f:close()
-
-        local modules = {
-            foo = [[
-                local c = foreign import "]] .. header .. [["
-
-                function echo(): value
-                    return c.ffi_value_echo("ok")
-                end
-
-                function store(v: value): value
-                    local raw: c.TValue = nil
-                    c.ffi_value_store(raw, v)
-                    return raw
-                end
-
-                function seen(v: value): integer
-                    return c.ffi_value_seen(v)
-                end
-
-                function write_box(): integer
-                    local p: c.ffi_iptr = c.ffi_box_void()
-                    c.ffi_write_int(p, 77)
-                    return c.ffi_read_int(c.ffi_box_void() as c.ffi_iptr)
-                end
-            ]]
-        }
-        local ok, err = pcall(function()
-            local gok, gerr = generate_modules(modules, "foo")
-            assert.truthy(gok, gerr)
-            local cok, cerr = call("foo", [[
-                assert(foo.echo() == "ok")
-                local marker = {}
-                assert(foo.store(marker) == marker)
-                assert(foo.seen(function() end) == 1)
-                assert(foo.write_box() == 77)
-            ]])
-            assert.truthy(cok, cerr)
-        end)
-        os.remove(header)
-        if not ok then error(err, 0) end
-    end)
-
-    it("can cast a string to void pointer in foreign calls", function ()
-        local suffix = os.tmpname():match("[^/]+$"):gsub("%W", "_")
-        local header = "tmp_titan_ffi_voidptr_" .. suffix .. ".h"
-        local f = assert(io.open(header, "w"))
-        f:write("typedef void *ffi_vptr;\n")
-        f:close()
-
-        local modules = {
-            foo = [[
-                local c = foreign import "]] .. header .. [["
-                local stdio = foreign import "stdio.h"
-                function fun(): integer
-                    local h = "Hello, cast"
-                    local p = h as c.ffi_vptr
-                    local fd = stdio.fopen("tmp_test_hello.txt", "w")
-                    local n = stdio.fwrite(p, #h, 1, fd)
-                    local err = stdio.fclose(fd)
-                    return n as integer
-                end
-            ]]
-        }
-        local ok, err = pcall(function()
-            local gok, gerr = generate_modules(modules, "foo")
-            assert.truthy(gok, gerr)
-            local cok, cerr = call("foo", [[
-                os.remove('tmp_test_hello.txt')
-                assert(foo.fun() == 1)
-                local fd = io.open('tmp_test_hello.txt', 'r')
-                local data = fd:read('*a')
-                fd:close()
-                os.remove('tmp_test_hello.txt')
-                assert(data == 'Hello, cast')
-            ]])
-            assert.truthy(cok, cerr)
-        end)
-        os.remove(header)
-        if not ok then error(err, 0) end
-    end)
-
-    it("casts a scalar foreign typedef to value", function ()
-        -- `strlen` returns `size_t`, which stays a `Type.Typedef` (resolving to
-        -- the underlying `integer` only at the storage layer). Explicitly casting
-        -- that typedef-typed value with `as value` is the typedef cast Titan
-        -- permits (the written-cast plan normalizes transparent scalar
-        -- typedefs). The coder resolves the `Type.Typedef` source to its
-        -- underlying scalar at the cast site, so the wrapped slot stores the
-        -- integer length; before the fix this raised `invalid type size_t` in
-        -- `setslot`. The returned `value` must carry the string length back to Lua.
-        local modules = {
-            foo = [[
-                local string_h = foreign import "string.h"
-                function len(s: string): value
-                    local n = string_h.strlen(s)   -- n: size_t scalar typedef
-                    return n as value              -- Type.Typedef -> Type.Value cast
-                end
-            ]]
-        }
-        local ok, err = generate_modules(modules, "foo")
-        assert.truthy(ok, err)
-        local ok, err = call("foo", [[
-            assert(foo.len("abcd") == 4)
-            assert(foo.len("") == 0)
-            assert(foo.len("hello, world") == 12)
-            -- the value carries an integer payload usable in arithmetic
-            assert(foo.len("titan") + 1 == 6)
-        ]])
-        assert.truthy(ok, err)
-    end)
-
-    it("casts a multi-level (chained) foreign typedef to value", function ()
-        -- Regression for a macOS-only CI hang. glibc's `size_t` is a single
-        -- typedef, but macOS's is chained: `size_t` -> `__darwin_size_t` ->
-        -- `unsigned long`. The cast-site typedef resolver must unwrap ALL levels;
-        -- a one-level unwrap kept re-wrapping the original operand and re-entered
-        -- the cast-normalization arm forever on a chained typedef (CPU-spin hang).
-        -- `clock_t` is chained on glibc too (`clock_t` -> `__clock_t` -> long), so
-        -- this reproduces the loop on Linux.
-        local modules = {
-            foo = [[
-                local time_h = foreign import "time.h"
-                function ticks(): value
-                    local c = time_h.clock()   -- c: clock_t (chained typedef)
-                    return c as value
-                end
-            ]]
-        }
-        local ok, err = generate_modules(modules, "foo")
-        assert.truthy(ok, err)
-        local ok, err = call("foo", [[
-            local t = foo.ticks()
-            assert(type(t) == "number")
-            assert(t >= 0)
-        ]])
-        assert.truthy(ok, err)
-    end)
-
-    it("can read foreign global variables", function ()
-        local modules = {
-            foo = [[
-                local stdio = foreign import "stdio.h"
-                local errno = foreign import "errno.h"
-                function fun(name: string): integer
-                    local f = stdio.fopen(name, "r")
-                    if f ~= nil then
-                        stdio.fclose(f)
-                    end
-                    return errno.errno
-                end
-            ]]
-        }
-        local ok, err = generate_modules(modules, "foo")
-        assert.truthy(ok, err)
-        local ok, err = call("foo", [[
-            os.remove('file_that_doesnt_exist.txt')
-            assert(foo.fun('file_that_doesnt_exist.txt') > 0)
-        ]])
-        assert.truthy(ok, err)
-    end)
-
-    it("uses a foreign pointer in a boolean context", function ()
-        local modules = {
-            foo = [[
-                local stdio = foreign import "stdio.h"
-                function opened(name: string): boolean
-                    local f = stdio.fopen(name, "r")
-                    if not f then
-                        return false
-                    end
-                    stdio.fclose(f)
-                    return true
-                end
-            ]]
-        }
-        local ok, err = generate_modules(modules, "foo")
-        assert.truthy(ok, err)
-        local ok, err = call("foo", [[
-            os.remove('file_that_doesnt_exist.txt')
-            assert(foo.opened('file_that_doesnt_exist.txt') == false)
-            local p = os.tmpname()
-            local fd = io.open(p, 'w'); fd:write('x'); fd:close()
-            assert(foo.opened(p) == true)
-            os.remove(p)
-        ]])
-        assert.truthy(ok, err)
-    end)
-
-    it("can use foreign defines", function ()
-        local modules = {
-            foo = [[
-                local stdio = foreign import "stdio.h"
-                local errno = foreign import "errno.h"
-                function enoent(): integer
-                    return errno.ENOENT
-                end
-                function fun(name: string, err: integer): boolean
-                    local f = stdio.fopen(name, "r")
-                    if f ~= nil then
-                        stdio.fclose(f)
-                    end
-                    return errno.errno == err
-                end
-            ]]
-        }
-        local ok, err = generate_modules(modules, "foo")
-        assert.truthy(ok, err)
-        local ok, err = call("foo", [[
-            os.remove('file_that_doesnt_exist.txt')
-            assert(foo.fun('file_that_doesnt_exist.txt', foo.enoent()))
-        ]])
-        assert.truthy(ok, err)
     end)
 
     it("and between two integers", function()

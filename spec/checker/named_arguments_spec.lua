@@ -324,30 +324,26 @@ describe("named arguments (typechecker)", function()
                 extern int ffi_nullable(struct ffi_node *pointer, int required);
             ]], function(header)
                 local prefix = 'local c = foreign import "' .. header .. '"\n'
-
-                assert_checker_error(
+                local ok, err = run_checker(prefix .. [[
+                    function unknown(): integer
+                        return c.ffi_named { left = 1, unknown = 2 }
+                    end
+                    function duplicate(): integer
+                        return c.ffi_named { left = 1, left = 2, right = 3 }
+                    end
+                    function required(): integer
+                        return c.ffi_nullable { pointer = nil }
+                    end
+                ]])
+                assert.falsy(ok)
+                assert.match(
                     "function 'c%.ffi_named' has no parameter named 'unknown'",
-                    prefix .. [[
-                        function run(): integer
-                            return c.ffi_named { left = 1, unknown = 2 }
-                        end
-                    ]])
-
-                assert_checker_error(
-                    "named argument 'left' is supplied more than once",
-                    prefix .. [[
-                        function run(): integer
-                            return c.ffi_named { left = 1, left = 2, right = 3 }
-                        end
-                    ]])
-
-                assert_checker_error(
+                    err)
+                assert.match("named argument 'left' is supplied more than once",
+                    err)
+                assert.match(
                     "parameter 'required'.-cannot be omitted because it does not accept nil",
-                    prefix .. [[
-                        function run(): integer
-                            return c.ffi_nullable { pointer = nil }
-                        end
-                    ]])
+                    err)
             end)
         end)
 
@@ -362,17 +358,26 @@ describe("named arguments (typechecker)", function()
                 extern int ffi_conflict(int left, int right);
                 extern int ffi_conflict(int first, int second);
             ]], function(header)
-                for _, name in ipairs({
+                local names = {
                     "ffi_old", "ffi_unnamed", "ffi_partial", "ffi_duplicate",
                     "ffi_conflict",
-                }) do
-                    local ok, err = run_checker(
-                        'local c = foreign import "' .. header .. [["
-                        function run(): integer
-                            return c.]] .. name .. [[ {}
-                        end
-                    ]])
-                    assert.falsy(ok)
+                }
+                local ok, err = run_checker(
+                    'local c = foreign import "' .. header .. [["
+                    local function run()
+                        c.ffi_old {}
+                        c.ffi_unnamed {}
+                        c.ffi_partial {}
+                        c.ffi_duplicate {}
+                        c.ffi_conflict {}
+                    end
+                ]])
+                assert.falsy(ok)
+                local _, unavailable = err:gsub(
+                    "parameter names are unavailable for foreign function",
+                    "")
+                assert.equal(5, unavailable)
+                for _, name in ipairs(names) do
                     assert.match(
                         "parameter names are unavailable for foreign function 'c%."
                             .. name .. "'", err)
@@ -383,26 +388,24 @@ describe("named arguments (typechecker)", function()
         it("rejects C function pointers and pseudo-constructors", function()
             with_header([[
                 typedef int (*ffi_callback)(int value);
+                typedef int ffi_int;
             ]], function(header)
-                assert_checker_error(
-                    "named arguments require a direct Titan module function",
+                local ok, err = run_checker(
                     'local c = foreign import "' .. header .. [["
-                    function run(cb: c.ffi_callback): integer
+                    local function callback(cb: c.ffi_callback): integer
                         return cb { value = 1 } as integer
                     end
+                    local function constructors()
+                        local one = c.ffi_int.new {}
+                        local many = c.ffi_int.new_array { count = 2 }
+                    end
                 ]])
+                assert.falsy(ok)
+                local _, rejected = err:gsub(
+                    "named arguments require a direct Titan module function",
+                    "")
+                assert.equal(3, rejected)
             end)
-
-            local ok, err = run_checker([[
-                local ffi = foreign import "titan/ffi.h"
-
-                function run()
-                    local one = ffi.titan_ffi_int.new {}
-                    local many = ffi.titan_ffi_int.new_array { count = 2 }
-                end
-            ]])
-            assert.falsy(ok)
-            assert.match("named arguments require a direct Titan module function", err)
         end)
 
         it("rejects C variadic named calls", function()

@@ -352,45 +352,39 @@ describe("C FFI code generation", function()
     end)
 
     it("preserves Udata pointers as full-userdata TValues", function()
-        h.run_coder([[
-            local lua = foreign import "lua.h"
-            local ffi = foreign import "titan/ffi.h"
+        with_header([[
+            typedef struct Udata Udata;
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
 
-            function pushed_module(): value
-                local top = lua.lua_gettop(L)
-                ffi.lua_pushtvalue(L, M)
-                local module = ffi.lua_totvalue(L, -1)
-                lua.lua_settop(L, top)
-                return module
-            end
+                function module_value(): value
+                    return M
+                end
 
-            function module_value(): value
-                return M
-            end
+                function same_module(item: value): boolean
+                    local module = item as *c.Udata
+                    return module == M
+                end
 
-            function same_module(item: value): boolean
-                local module = item as *ffi.Udata
-                return module == M
-            end
+                function null_roundtrip(): boolean
+                    local module: *c.Udata = nil
+                    local item: value = module
+                    return item == nil and (item as *c.Udata) == nil
+                end
+            ]], [[
+                assert(rawequal(test.module_value(), test))
+                assert(test.same_module(test))
+                assert(test.null_roundtrip())
 
-            function null_roundtrip(): boolean
-                local module: *ffi.Udata = nil
-                local item: value = module
-                return item == nil and (item as *ffi.Udata) == nil
-            end
-        ]], [[
-            assert(rawequal(test.pushed_module(), test))
-            assert(rawequal(test.module_value(), test))
-            assert(test.same_module(test))
-            assert(test.null_roundtrip())
-
-            local captured = 1
-            local function closure() return captured end
-            local light = debug.upvalueid(closure, 1)
-            local ok, err = pcall(test.same_module, light)
-            assert(not ok)
-            assert(tostring(err):match("expected C userdata pointer"))
-        ]])
+                local captured = 1
+                local function closure() return captured end
+                local light = debug.upvalueid(closure, 1)
+                local ok, err = pcall(test.same_module, light)
+                assert(not ok)
+                assert(tostring(err):match("expected C userdata pointer"))
+            ]])
+        end)
     end)
 
     it("keeps top-level owned C state rooted in the module", function()
@@ -1392,28 +1386,42 @@ describe("C FFI code generation", function()
     end)
 
     it("passes owned C arrays and Titan strings to C vararg functions", function()
-        h.run_coder([[
-            local ffi = foreign import "titan/ffi.h"
-            local stdio = foreign import "stdio.h"
+        with_header([[
+            #include <stdarg.h>
+            typedef char ffi_char;
 
-            function formatted_len(s: string): integer
-                local buf = ffi.titan_ffi_char.new_array(32)
-                return stdio.snprintf(buf, 32, "%s", s)
-            end
+            static int ffi_vararg_string_length(int marker, ...) {
+                const char *value;
+                int length = 0;
+                va_list args;
+                (void)marker;
+                va_start(args, marker);
+                value = va_arg(args, const char *);
+                va_end(args);
+                while (value[length] != '\0') length++;
+                return length;
+            }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
 
-            function formatted_owned_len(): integer
-                local out = ffi.titan_ffi_char.new_array(32)
-                local msg = ffi.titan_ffi_char.new_array(3)
-                msg[0] = 79 as ffi.titan_ffi_char
-                msg[1] = 75 as ffi.titan_ffi_char
-                msg[2] = 0 as ffi.titan_ffi_char
-                return stdio.snprintf(out, 32, "%s", msg)
-            end
-        ]], [[
-            assert(test.formatted_len("abc") == 3)
-            assert(test.formatted_len("titan") == 5)
-            assert(test.formatted_owned_len() == 2)
-        ]])
+                function formatted_len(s: string): integer
+                    return c.ffi_vararg_string_length(0, s)
+                end
+
+                function formatted_owned_len(): integer
+                    local msg = c.ffi_char.new_array(3)
+                    msg[0] = 79 as c.ffi_char
+                    msg[1] = 75 as c.ffi_char
+                    msg[2] = 0 as c.ffi_char
+                    return c.ffi_vararg_string_length(0, msg)
+                end
+            ]], [[
+                assert(test.formatted_len("abc") == 3)
+                assert(test.formatted_len("titan") == 5)
+                assert(test.formatted_owned_len() == 2)
+            ]])
+        end)
     end)
 
     it("uses runtime truthiness for C pointer typedefs", function()

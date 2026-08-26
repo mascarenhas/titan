@@ -242,42 +242,19 @@ describe("C FFI type checking", function()
         assert.equal(2, type_errors)
     end)
 
-    it("imports the compiler-provided C primitive header", function()
-        local ok, err = run_checker([[
-            local ffi = foreign import "titan/ffi.h"
+    it("types the built-in Lua state against a canonical declaration", function()
+        with_header([[
+            typedef struct lua_State lua_State;
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
 
-            local function id(x: ffi.titan_ffi_int): ffi.titan_ffi_int
-                return x
-            end
-        ]])
-        assert.truthy(ok, err)
-    end)
-
-    it("imports lua_State from the compiler-provided FFI header", function()
-        local ok, err = run_checker([[
-            local ffi = foreign import "titan/ffi.h"
-
-            local function state_is_truthy(): boolean
-                return L
-            end
-        ]])
-        assert.truthy(ok, err)
-    end)
-
-    it("imports bundled Lua headers through the compiler include path", function()
-        local ok, err = run_checker([[
-            local lua = foreign import "lua.h"
-            local lual = foreign import "lauxlib.h"
-
-            local function top(): integer
-                return lua.lua_gettop(L)
-            end
-
-            local function metatable_created(): integer
-                return lual.luaL_newmetatable(L, "titan_ffi_header_test")
-            end
-        ]])
-        assert.truthy(ok, err)
+                local function current_state(): *c.lua_State
+                    return L
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
     end)
 
     it("compares a returned status with direct libuv-shaped UV_E enumerators", function()
@@ -363,17 +340,18 @@ describe("C FFI type checking", function()
 
     it("coerces Titan functions with C pointer parameters to TValue", function()
         with_header([[
+            typedef struct TValue TValue;
             typedef struct ffi_coro ffi_coro;
+            extern void ffi_accept_value(TValue value);
         ]], function(header)
             local ok, err = run_checker([[
-                local ffi = foreign import "titan/ffi.h"
                 local c = foreign import "]] .. header .. [["
 
                 local function entry(func: (value) -> value, co: *c.ffi_coro)
                 end
 
                 local function store_entry()
-                    ffi.lua_pushtvalue(L, entry)
+                    c.ffi_accept_value(entry)
                 end
             ]])
             assert.truthy(ok, err)
@@ -1176,54 +1154,59 @@ describe("C FFI type checking", function()
     end)
 
     it("offers sizeof and alignof pseudo-members on C types", function()
-        local ok, err, ast = run_checker([[
-            local ffi = foreign import "titan/ffi.h"
+        with_header([[
+            typedef int ffi_int;
+            typedef struct ffi_record { int value; } ffi_record;
+        ]], function(header)
+            local ok, err, ast = run_checker([[
+            local c = foreign import "]] .. header .. [["
 
             function f(): integer
-                return ffi.titan_ffi_int.sizeof + ffi.titan_ffi_int.alignof
-                    + ffi.TValue.sizeof + ffi.TValue.alignof
+                return c.ffi_int.sizeof + c.ffi_record.alignof
             end
-        ]])
-        assert.truthy(ok, err)
+            ]])
+            assert.truthy(ok, err)
 
-        local seen = {}
-        local count = 0
-        local function visit(node)
-            if type(node) ~= "table" or seen[node] then return end
-            seen[node] = true
-            if node._decl and node._decl._tag == "Type.CPseudoSize" then
-                count = count + 1
-                local source = node._decl.result_source
-                assert.equal("Type.CInteger", source._tag)
-                assert.is_false(source.signed)
-                assert.equal(
-                    source._c_numeric_carriers.size_t.spelling,
-                    source.spelling)
+            local seen = {}
+            local count = 0
+            local function visit(node)
+                if type(node) ~= "table" or seen[node] then return end
+                seen[node] = true
+                if node._decl and node._decl._tag == "Type.CPseudoSize" then
+                    count = count + 1
+                    local source = node._decl.result_source
+                    assert.equal("Type.CInteger", source._tag)
+                    assert.is_false(source.signed)
+                    assert.equal(
+                        source._c_numeric_carriers.size_t.spelling,
+                        source.spelling)
+                end
+                for _, child in pairs(node) do visit(child) end
             end
-            for _, child in pairs(node) do visit(child) end
-        end
-        visit(ast)
-        assert.equal(4, count)
+            visit(ast)
+            assert.equal(2, count)
+        end)
     end)
 
     it("allows source-level pointer types over imported C types", function()
-        local ok, err = run_checker([[
-            local ffi = foreign import "titan/ffi.h"
+        with_header([[
+            typedef int ffi_int;
+            typedef void ffi_void;
+        ]], function(header)
+            local errors = check_errs([[
+            local c = foreign import "]] .. header .. [["
 
-            local function f(p: const *ffi.titan_ffi_int): const *ffi.titan_ffi_void
+            local function accepted(p: const *c.ffi_int): const *c.ffi_void
                 return p
             end
-        ]])
-        assert.truthy(ok, err)
-
-        ok, err = run_checker([[
-            local ffi = foreign import "titan/ffi.h"
 
             local function bad(p: *integer)
             end
-        ]])
-        assert.falsy(ok)
-        assert.match("C pointer type can only point to a C FFI type", err)
+            ]])
+            assert.equal(1, #errors, table.concat(errors, "\n"))
+            assert.match("C pointer type can only point to a C FFI type",
+                errors[1])
+        end)
     end)
 
     it("coerces by-value C expressions but not values to const C pointers", function()
@@ -1326,38 +1309,27 @@ describe("C FFI type checking", function()
     end)
 
     it("rejects allocation for C types that are not v1 object allocations", function()
-        local ok, err = run_checker([[
-            local ffi = foreign import "titan/ffi.h"
-
-            function f()
-                local v = ffi.titan_ffi_void.new()
-            end
-        ]])
-        assert.falsy(ok)
-        assert.match("cannot allocate C void", err)
-
         with_header([[
+            typedef void ffi_void;
             typedef int ffi_array[4];
             typedef struct ffi_incomplete ffi_incomplete;
         ]], function(header)
-            ok, err = run_checker([[
+            local ok, err = run_checker([[
                 local c = foreign import "]] .. header .. [["
 
-                function f()
+                function bad_void()
+                    local v = c.ffi_void.new()
+                end
+                function bad_array()
                     local a = c.ffi_array.new()
                 end
-            ]])
-            assert.falsy(ok)
-            assert.match("C array typedefs", err)
-
-            ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
-
-                function f()
+                function bad_incomplete()
                     local p = c.ffi_incomplete.new()
                 end
             ]])
             assert.falsy(ok)
+            assert.match("cannot allocate C void", err)
+            assert.match("C array typedefs", err)
             assert.match("incomplete C struct", err)
         end)
     end)
@@ -1795,109 +1767,70 @@ describe("C FFI type checking", function()
                 return ffi_wide_result;
             }
         ]], function(header)
-            local unused_ok, unused_err = run_checker([[
+            local accepted_ok, accepted_err = run_checker([[
                 local c = foreign import "]] .. header .. [["
-                function f(): integer return 1 end
-            ]])
-            assert.truthy(unused_ok, unused_err)
 
-            local safe_ok, safe_err = run_checker([[
-                local c = foreign import "]] .. header .. [["
-                function f(): integer
+                local function safe(): integer
                     return c.ffi_safe_take(c.FFI_SAFE_HIGH) as integer
                 end
-            ]])
-            assert.truthy(safe_ok, safe_err)
 
-            local enumerator_ok, enumerator_err = run_checker([[
-                local c = foreign import "]] .. header .. [["
-                function f(): integer
+                local function wide_zero(): integer
                     return c.FFI_WIDE_ZERO as integer
                 end
-            ]])
-            assert.truthy(enumerator_ok, enumerator_err)
 
-            local high_ok, high_err = run_checker([[
-                local c = foreign import "]] .. header .. [["
-                function f(): integer
-                    return c.FFI_WIDE_HIGH as integer
-                end
-            ]])
-            assert.falsy(high_ok)
-            assert.truthy(high_err:find(
-                "C enumerator 'FFI_WIDE_HIGH' is outside the range of " ..
-                    "lua_Integer", 1, true), high_err)
-            assert.falsy(high_err:find("cannot cast", 1, true), high_err)
-
-            local named_zero_ok, named_zero_err = run_checker([[
-                local c = foreign import "]] .. header .. [["
-                function f(): integer
+                local function named_zero(): integer
                     return c.FFI_NAMED_WIDE_ZERO as integer
                 end
-            ]])
-            assert.truthy(named_zero_ok, named_zero_err)
 
-            local object_ok, object_err = run_checker([[
-                local c = foreign import "]] .. header .. [["
-                function f(): integer
+                local function object_value(): integer
                     return c.ffi_enum_object as integer
                 end
-            ]])
-            assert.truthy(object_ok, object_err)
 
-            local named_high_ok, named_high_err = run_checker([[
-                local c = foreign import "]] .. header .. [["
-                function f(): integer
-                    return c.FFI_NAMED_WIDE_HIGH as integer
-                end
-            ]])
-            assert.falsy(named_high_ok)
-            assert.truthy(named_high_err:find(
-                "C enumerator 'FFI_NAMED_WIDE_HIGH' is outside the range " ..
-                    "of lua_Integer", 1, true), named_high_err)
-
-            local wide_ok, wide_err = run_checker([[
-                local c = foreign import "]] .. header .. [["
-                function f(): integer
-                    return c.ffi_wide_take(c.FFI_WIDE_ZERO) as integer
-                end
-            ]])
-            assert.falsy(wide_ok)
-            assert.truthy(wide_err:find(
-                "full range fits in lua_Integer", 1, true), wide_err)
-            assert.falsy(wide_err:find("cannot cast", 1, true), wide_err)
-
-            local address_ok, address_err = run_checker([[
-                local c = foreign import "]] .. header .. [["
-                function f(): integer
+                local function address_only(): integer
                     local callback: c.ffi_wide_callback = c.ffi_wide_result
+                    local returned_callback = c.ffi_wide_pointer()
                     return 1
                 end
             ]])
-            assert.truthy(address_ok, address_err)
+            assert.truthy(accepted_ok, accepted_err)
 
-            local address_call_ok, address_call_err = run_checker([[
+            local rejected_ok, rejected_err = run_checker([[
                 local c = foreign import "]] .. header .. [["
-                function f(): integer
+
+                local function high(): integer
+                    return c.FFI_WIDE_HIGH as integer
+                end
+
+                local function named_high(): integer
+                    return c.FFI_NAMED_WIDE_HIGH as integer
+                end
+
+                local function wide_value(): integer
+                    return c.ffi_wide_take(c.FFI_WIDE_ZERO) as integer
+                end
+
+                local function address_call(): integer
                     local callback: c.ffi_wide_callback = c.ffi_wide_result
                     return callback() as integer
                 end
-            ]])
-            assert.falsy(address_call_ok)
-            assert.truthy(address_call_err:find(
-                "full range fits in lua_Integer", 1, true),
-                address_call_err)
 
-            local pointer_ok, pointer_err = run_checker([[
-                local c = foreign import "]] .. header .. [["
-                function f(): integer
+                local function pointer_call(): integer
                     local callback = c.ffi_wide_pointer()
                     return callback() as integer
                 end
             ]])
-            assert.falsy(pointer_ok)
-            assert.truthy(pointer_err:find(
-                "full range fits in lua_Integer", 1, true), pointer_err)
+            assert.falsy(rejected_ok)
+            assert.truthy(rejected_err:find(
+                "C enumerator 'FFI_WIDE_HIGH' is outside the range of " ..
+                    "lua_Integer", 1, true), rejected_err)
+            assert.truthy(rejected_err:find(
+                "C enumerator 'FFI_NAMED_WIDE_HIGH' is outside the range " ..
+                    "of lua_Integer", 1, true), rejected_err)
+            local _, wide_carrier_errors = rejected_err:gsub(
+                "full range fits in lua_Integer", "")
+            assert.equal(3, wide_carrier_errors)
+            assert.falsy(rejected_err:find("cannot cast", 1, true),
+                rejected_err)
         end)
     end)
 

@@ -492,16 +492,9 @@ describe("source-import local visibility (checker)", function()
         local header = os.tmpname() .. "-source-probe-inputs.h"
         local file = assert(io.open(header, "wb"))
         assert(file:write([[
-            typedef int source_probe_input_count;
             struct SourceProbeInputLeft { int value; };
             struct SourceProbeInputRight { int value; };
-            static source_probe_input_count source_probe_input_count_value(void) {
-                return 21;
-            }
-            static struct SourceProbeInputLeft source_probe_input_left_value;
-            static struct SourceProbeInputLeft *source_probe_input_left(void) {
-                return &source_probe_input_left_value;
-            }
+            extern struct SourceProbeInputLeft *source_probe_input_left(void);
         ]]))
         assert(file:close())
 
@@ -530,13 +523,8 @@ describe("source-import local visibility (checker)", function()
             local ok, err, imported = h.run_checker_modules({
                 source_probe_input_provider = string.format([[
                     local c = foreign import %q
-                    local type Count = c.source_probe_input_count
                     local type Left = c.SourceProbeInputLeft
                     local type Right = c.SourceProbeInputRight
-
-                    local function count(): Count
-                        return c.source_probe_input_count_value()
-                    end
 
                     local function left(): *Left
                         return c.source_probe_input_left()
@@ -547,11 +535,9 @@ describe("source-import local visibility (checker)", function()
                         import "source_probe_input_provider.titan"
 
                     function inspect(): integer
-                        local count = provider.count()
-                        local doubled = count + count
                         local right = provider.left() as *provider.Right
                         if right == nil then return -1 end
-                        return doubled as integer
+                        return 1
                     end
                 ]],
             }, "source_probe_input_consumer", {

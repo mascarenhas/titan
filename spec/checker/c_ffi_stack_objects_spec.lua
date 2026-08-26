@@ -204,7 +204,10 @@ describe("automatic C objects and fixed arrays", function()
 
     it("rejects transitively GC-bearing automatic allocation storage", function()
         with_header([[
-            #include "lobject.h"
+            typedef struct TValue {
+                int placeholder;
+            } TValue;
+            typedef struct Udata Udata;
 
             typedef struct ffi_value_holder {
                 TValue value;
@@ -214,21 +217,23 @@ describe("automatic C objects and fixed arrays", function()
                 Udata *owner;
             } ffi_owner_holder;
         ]], function(header)
-            for _, declaration in ipairs({
-                "local object = c.ffi_value_holder.new()",
-                "local object: c.ffi_value_holder = c.ffi_value_holder.new()",
-                "local object = c.ffi_owner_holder.new()",
-                "local objects = c.ffi_value_holder.new_array(2)",
-                "local objects: c.ffi_value_holder[2] = "
-                    .. "c.ffi_value_holder.new_array(2)",
-            }) do
-                local ok, err = check_with_header(header,
-                    "local function bad()\n"
-                    .. declaration .. "\nend")
-                assert.falsy(ok)
-                assert.match("GC%-bearing FFI storage", err)
-                assert.match("do not trace", err)
-            end
+            local ok, err = check_with_header(header, [[
+                local function bad()
+                    local inferred = c.ffi_value_holder.new()
+                    local exact: c.ffi_value_holder =
+                        c.ffi_value_holder.new()
+                    local owner_pointer = c.ffi_owner_holder.new()
+                    local inferred_array =
+                        c.ffi_value_holder.new_array(2)
+                    local exact_array: c.ffi_value_holder[2] =
+                        c.ffi_value_holder.new_array(2)
+                end
+            ]])
+            assert.falsy(ok)
+            local _, bearing = err:gsub("GC%-bearing FFI storage", "")
+            local _, tracing = err:gsub("do not trace", "")
+            assert.equal(5, bearing)
+            assert.equal(5, tracing)
         end)
     end)
 

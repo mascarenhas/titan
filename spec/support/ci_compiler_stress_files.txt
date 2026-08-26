@@ -1,0 +1,11 @@
+# Compiler specs containing intentional scale or exhaustive #stress oracles.
+# The covered invocation excludes the tagged cases; a second ordinary Busted
+# invocation in the same Linux shard runs them without LuaCov.
+spec/coder/c_ffi_operators_spec.lua
+spec/coder/c_ffi_owned_types_spec.lua
+spec/coder/closures_spec.lua
+spec/coder/coder_spec.lua
+spec/coder/flexible_returns_spec.lua
+spec/coder/type_relations_soundness_spec.lua
+spec/coder/unions_spec.lua
+spec/cprobe_spec.lua

@@ -85,24 +85,28 @@ describe("C FFI operator type checking", function()
         probe_session = nil
     end)
 
-    it("imports the real UINT_MAX with unsigned rank and no pre-narrowing",
+    it("keeps an unsigned macro at unsigned rank without pre-narrowing",
     function()
-        local ok, err, ast = run_checker([[
-            local limits = foreign import "limits.h"
+        with_header([[
+            #define FFI_UNSIGNED_MAX 0xffffffffU
+        ]], function(header)
+            local ok, err, ast = run_checker([[
+            local limits = foreign import "]] .. header .. [["
 
             local function exceeds_buffer_limit(length: integer): boolean
-                return length > limits.UINT_MAX
+                return length > limits.FFI_UNSIGNED_MAX
             end
-        ]])
-        assert.truthy(ok, err)
-        local operators = collect_operators(ast)
-        assert.equal(1, #operators)
-        local node = operators[1]
-        assert.equal("unsigned int",
-            types.resolve_c_typedef(node.rhs._type).spelling)
-        assert.equal("long long", node._c_operator.lhs_target.spelling)
-        assert.equal("long long", node._c_operator.rhs_target.spelling)
-        assert.equal("Type.Boolean", node._type._tag)
+            ]])
+            assert.truthy(ok, err)
+            local operators = collect_operators(ast)
+            assert.equal(1, #operators)
+            local node = operators[1]
+            assert.equal("unsigned int",
+                types.resolve_c_typedef(node.rhs._type).spelling)
+            assert.equal("long long", node._c_operator.lhs_target.spelling)
+            assert.equal("long long", node._c_operator.rhs_target.spelling)
+            assert.equal("Type.Boolean", node._type._tag)
+        end)
     end)
 
     it("covers the accepted matrix with complete frozen traits", function()

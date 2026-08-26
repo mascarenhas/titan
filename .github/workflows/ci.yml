@@ -360,17 +360,19 @@ jobs:
           .lua/bin/lua -v
 
       # Each worker gets a private copy of the prepared checkout, so legacy
-      # compiler cleanup and checkout-root fixture names cannot race. They share
-      # only the prepared installed prefix, and their LuaCov stats are merged
-      # after all four deterministic shards pass.
-      - name: Run four isolated compiler and language shards two at a time with coverage
+      # compiler cleanup and checkout-root fixture names cannot race. Each
+      # shard first runs ordinary compiler tests with LuaCov and then its
+      # explicitly tagged stress oracles without LuaCov. They share only the
+      # prepared installed prefix, and their LuaCov stats are merged after all
+      # four deterministic shards pass.
+      - name: Run four isolated compiler shards with covered and stress invocations
         env:
           TITAN_EXTRA_CFLAGS: "-O0"
         run: bash spec/support/ci_parallel_compiler_tests.sh
 
       - name: Generate compiler coverage report
         run: |
-          luacov "titan%-compiler/" "spec/[^/]+$" "titanc$"
+          luacov "titan%-compiler/" "titanc$"
           grep "Summary" -B1 -A1000 luacov.report.out
 
       - name: Upload compiler coverage to Codecov

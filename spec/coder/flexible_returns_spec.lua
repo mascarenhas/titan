@@ -628,7 +628,91 @@ describe("flexible return code generation", function()
         ]])
     end)
 
-    it("keeps exact finite truncation separate from generic open forwarding", function()
+    it("covers exact truncation and generic open forwarding below the cap",
+    function()
+        with_header([[
+            typedef struct lua_State lua_State;
+
+            int flex_small_zero(lua_State *L) {
+                (void)L;
+                return 0;
+            }
+
+            int flex_small_three(lua_State *L) {
+                lua_pushinteger(L, 7);
+                lua_pushinteger(L, 8);
+                lua_pushinteger(L, 9);
+                return 3;
+            }
+        ]], function(header)
+            run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function exact_base(): (...: integer)
+                    return 2, 3
+                end
+
+                function exact(): (...: integer)
+                    return 1, exact_base()
+                end
+
+                function generic(
+                    f: () -> (...: value)
+                ): (...: value)
+                    return f()
+                end
+
+                function finite(): integer
+                    local first: value, second: value = generic(
+                        function(): (...: value) return 4, 5, 6 end)
+                    return (first as integer) + (second as integer)
+                end
+
+                function c_forward(
+                    f: () -> (...: value)
+                ): (...: value)
+                    return f()
+                end
+
+                function maybe_nil(present: boolean): (...: value)
+                    if present then return nil end
+                    return
+                end
+
+                function typed_maybe_nil(
+                    present: boolean
+                ): (...: integer)
+                    local boxed: value = maybe_nil
+                    local f: (boolean) -> (...: integer) = boxed
+                    return f(present)
+                end
+            ]], [[
+                assert(select("#", test.exact()) == 3)
+                local a, b = test.exact()
+                assert(a == 1 and b == 2)
+                assert(select("#", test.generic(
+                    function() return 4, nil, 6 end)) == 3)
+                assert(test.finite() == 9)
+
+                local c_zero = assert(package.loadlib(
+                    "./test.so", "flex_small_zero"))
+                local c_three = assert(package.loadlib(
+                    "./test.so", "flex_small_three"))
+                assert(select("#", test.c_forward(c_zero)) == 0)
+                assert(select("#", test.c_forward(c_three)) == 3)
+                local first, second = test.c_forward(c_three)
+                assert(first == 7 and second == 8)
+
+                assert(test.typed_maybe_nil(false) == nil)
+                assert(not pcall(function()
+                    local explicit_nil = test.typed_maybe_nil(true)
+                end))
+            ]])
+        end)
+    end)
+
+    it("keeps exact finite truncation separate from generic open forwarding #stress",
+    function()
         -- Keep each written expression list within Titan's independent
         -- 100-element parser limit while avoiding the 200-deep native recursion
         -- that collides with Lua's C-call guard in this boundary test.

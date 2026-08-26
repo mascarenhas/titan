@@ -94,25 +94,33 @@ describe("type-test expressions (typechecker)", function()
     end)
 
     it("mirrors the admitted value-to-C scalar and pointer targets", function()
-        h.assert_type_check([[
-            local ffi = foreign import "titan/ffi.h"
+        with_header([[
+            typedef int ffi_int;
+            typedef double ffi_double;
+            typedef void *ffi_void_ptr;
+            typedef struct Udata Udata;
+            typedef struct TValue TValue;
+        ]], function(header)
+            h.assert_type_check([[
+            local c = foreign import "]] .. header .. [["
 
             function c_integer(v: value): boolean
-                return v is ffi.titan_ffi_int
+                return v is c.ffi_int
             end
             function c_float(v: value): boolean
-                return v is ffi.titan_ffi_double
+                return v is c.ffi_double
             end
             function c_pointer(v: value): boolean
-                return v is ffi.titan_ffi_void_ptr
+                return v is c.ffi_void_ptr
             end
             function c_userdata(v: value): boolean
-                return v is *ffi.Udata
+                return v is *c.Udata
             end
             function c_tvalue(v: value): boolean
-                return v is ffi.TValue
+                return v is c.TValue
             end
-        ]])
+            ]])
+        end)
     end)
 
     it("rejects value tests against C arrays and by-value aggregates", function()

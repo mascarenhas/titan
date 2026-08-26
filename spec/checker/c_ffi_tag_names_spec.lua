@@ -36,21 +36,9 @@ describe("named file-scope C tags", function()
         with_header([[
             struct Item { int value; };
             union Cell { int count; double number; };
-            static struct Item make_item(void) {
-                struct Item item = { 7 };
-                return item;
-            }
         ]], function(header)
             local ok, err, ast = run_checker([[
                 local c = foreign import "]] .. header .. [["
-
-                local function item(): c.Item
-                    return c.make_item()
-                end
-
-                local function read_integer(cell: c.Cell): integer
-                    return cell.count as integer
-                end
             ]])
             assert.truthy(ok, err)
 

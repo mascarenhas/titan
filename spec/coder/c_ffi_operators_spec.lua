@@ -150,7 +150,99 @@ describe("C FFI operator code generation", function()
         if not h.verbose then clean_module() end
     end)
 
-    it("executes raw C arithmetic, comparison, and pointer semantics",
+    it("covers C arithmetic, bitwise, comparison, and pointer lowering once",
+    function()
+        with_header([[
+            typedef unsigned int ffi_uint;
+            typedef unsigned char ffi_uchar;
+
+            static int ffi_neg(void) { return -7; }
+            static int ffi_three(void) { return 3; }
+            static ffi_uint ffi_bits(void) { return 0xf0U; }
+            static ffi_uint ffi_mask(void) { return 0xaaU; }
+            static ffi_uchar ffi_one(void) { return 1U; }
+            static ffi_uint ffi_max(void) { return 0xffffffffU; }
+
+            static int ffi_values[3] = { 11, 22, 33 };
+            static int *ffi_begin(void) { return ffi_values; }
+            static int *ffi_end(void) { return ffi_values + 3; }
+            static int *ffi_null(void) { return (int *)0; }
+
+            typedef struct ffi_left { int value; } ffi_left;
+            typedef struct ffi_right { int value; } ffi_right;
+            static union {
+                ffi_left left;
+                ffi_right right;
+            } ffi_shared;
+            static ffi_left *ffi_left_pointer(void) {
+                return &ffi_shared.left;
+            }
+            static ffi_right *ffi_right_pointer(void) {
+                return &ffi_shared.right;
+            }
+
+            typedef int (*ffi_callback)(int);
+            static int ffi_increment(int value) { return value + 1; }
+            static ffi_callback ffi_get_callback(void) {
+                return ffi_increment;
+            }
+
+            static int ffi_log;
+            static void ffi_reset_log(void) { ffi_log = 0; }
+            static int ffi_first(void) {
+                ffi_log = ffi_log * 10 + 1;
+                return 1;
+            }
+            static int ffi_second(void) {
+                ffi_log = ffi_log * 10 + 2;
+                return 2;
+            }
+            static int ffi_get_log(void) { return ffi_log; }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function arithmetic(): integer
+                    return (c.ffi_neg() / c.ffi_three()) as integer
+                        + (c.ffi_neg() % c.ffi_three()) as integer
+                        + (-c.ffi_three()) as integer
+                end
+
+                function bitwise(): integer
+                    local mixed =
+                        (c.ffi_bits() & c.ffi_mask())
+                        | (~c.ffi_mask())
+                    return ((mixed ~ c.ffi_bits())
+                        >> c.ffi_one()) as integer
+                        + (c.ffi_one() << c.ffi_one()) as integer
+                end
+
+                function comparisons(): boolean
+                    return c.ffi_max() ~= c.ffi_one()
+                        and c.ffi_end() - c.ffi_begin() == 3
+                        and c.ffi_null() == nil
+                        and c.ffi_left_pointer()
+                            == c.ffi_right_pointer()
+                        and c.ffi_get_callback()
+                            == c.ffi_get_callback()
+                end
+
+                function evaluation_order(): integer
+                    c.ffi_reset_log()
+                    local sum = c.ffi_first() + c.ffi_second()
+                    return (sum as integer) * 100
+                        + (c.ffi_get_log() as integer)
+                end
+            ]], [[
+                assert(test.arithmetic() == -6)
+                assert(math.type(test.bitwise()) == "integer")
+                assert(test.comparisons())
+                assert(test.evaluation_order() == 312)
+            ]])
+        end)
+    end)
+
+    it("executes raw C arithmetic, comparison, and pointer semantics #stress",
     function()
         with_header(declarations, function(header)
             local source = [[

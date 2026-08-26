@@ -4,6 +4,18 @@ local types = require "titan-compiler.types"
 local check_errs = h.check_errs
 local run_checker = h.run_checker
 
+local function with_header(contents, fn)
+    local header = os.tmpname() .. ".h"
+    local file = assert(io.open(header, "w"))
+    assert(file:write(contents))
+    assert(file:close())
+
+    local results = table.pack(pcall(fn, header))
+    os.remove(header)
+    if not results[1] then error(results[2], 0) end
+    return table.unpack(results, 2, results.n)
+end
+
 local function assert_rejected(source, first_sink)
     local errors = check_errs(source)
     assert.is_true(#errors > 0, "expected program to be rejected")
@@ -168,16 +180,18 @@ describe("type-relation soundness (checker)", function()
     end)
 
     it("does not lift C numeric conversions through Arrays", function()
-        assert_rejected([[
-            local ffi = foreign import "titan/ffi.h"
+        with_header("typedef double ffi_double;\n", function(header)
+            assert_rejected([[
+            local c = foreign import "]] .. header .. [["
 
             function bridge(): integer
                 local source: {float} = {2.0}
-                local middle: {ffi.titan_ffi_double} = source
+                local middle: {c.ffi_double} = source
                 local final: {integer} = middle
                 return final[1]
             end
-        ]], "middle")
+            ]], "middle")
+        end)
     end)
 
     it("does not lift scalar coercions through fixed Function slots", function()
@@ -367,110 +381,111 @@ describe("type-relation soundness (checker)", function()
     end)
 
     it("admits C scalar Array and Map reads for complete lowering", function()
-        local errors = check_errs([[
-            local ffi = foreign import "titan/ffi.h"
+        with_header("typedef int ffi_int;\n", function(header)
+            local errors = check_errs([[
+            local c = foreign import "]] .. header .. [["
 
             function read_array(): integer
-                local one = 1 as ffi.titan_ffi_int
-                local xs: {ffi.titan_ffi_int} = {one}
+                local one = 1 as c.ffi_int
+                local xs: {c.ffi_int} = {one}
                 return xs[1]
             end
 
             function read_map(): integer
-                local one = 1 as ffi.titan_ffi_int
-                local map: {string: ffi.titan_ffi_int} = {
+                local one = 1 as c.ffi_int
+                local map: {string: c.ffi_int} = {
                     ["one"] = one
                 }
                 return map["one"]
             end
-        ]])
-        assert.equal(0, #errors, table.concat(errors, "\n"))
+            ]])
+            assert.equal(0, #errors, table.concat(errors, "\n"))
+        end)
     end)
 
     it("keeps raw C pointers out of implicit and Array dynamic paths", function()
-        assert_rejected([[
-            local ffi = foreign import "titan/ffi.h"
+        with_header("typedef int ffi_int;\n", function(header)
+            local errors = check_errs([[
+                local c = foreign import "]] .. header .. [["
 
-            function implicit(v: value): nil
-                local pointer: *ffi.titan_ffi_int = v
-            end
-        ]], "pointer")
+                local function implicit(v: value): nil
+                    local pointer: *c.ffi_int = v
+                end
 
-        assert_rejected([[
-            local ffi = foreign import "titan/ffi.h"
+                local function compare(
+                    pointer: *c.ffi_int,
+                    dynamic: value
+                ): boolean
+                    return pointer == dynamic
+                end
 
-            function compare(
-                pointer: *ffi.titan_ffi_int,
-                dynamic: value
-            ): boolean
-                return pointer == dynamic
-            end
-        ]], "C binary operator")
+                local function construct(
+                    pointer: *c.ffi_int
+                ): {*c.ffi_int}
+                    return {pointer}
+                end
 
-        assert_rejected([[
-            local ffi = foreign import "titan/ffi.h"
+                local function raw(pointer: *c.ffi_int): nil
+                end
 
-            local function construct(
-                pointer: *ffi.titan_ffi_int
-            ): {*ffi.titan_ffi_int}
-                return {pointer}
-            end
-        ]], "cannot construct an array")
-
-        assert_rejected([[
-            local ffi = foreign import "titan/ffi.h"
-
-            local function raw(pointer: *ffi.titan_ffi_int): nil
-            end
-
-            function expose(): value
-                return raw
-            end
-        ]], "return")
+                local function expose(): value
+                    return raw
+                end
+            ]])
+            assert.same(4, #errors)
+            local joined = table.concat(errors, "\n")
+            assert.match("pointer", joined)
+            assert.match("C binary operator", joined)
+            assert.match("cannot construct an array", joined)
+            assert.match("return", joined)
+        end)
     end)
 
     it("rejects raw C pointer Array and Map observations statically", function()
-        assert_rejected([[
-            local ffi = foreign import "titan/ffi.h"
+        with_header("typedef int ffi_int;\n", function(header)
+            local errors = check_errs([[
+                local c = foreign import "]] .. header .. [["
 
-            local function read(
-                pointers: {*ffi.titan_ffi_int}
-            )
-                local pointer = pointers[1]
-            end
-        ]], "cannot read array elements")
+                local function read_array(
+                    pointers: {*c.ffi_int}
+                )
+                    local pointer = pointers[1]
+                end
 
-        assert_rejected([[
-            local ffi = foreign import "titan/ffi.h"
-
-            local function read(
-                pointers: {string: *ffi.titan_ffi_int}
-            )
-                local pointer = pointers["one"]
-            end
-        ]], "cannot read map values")
+                local function read_map(
+                    pointers: {string: *c.ffi_int}
+                )
+                    local pointer = pointers["one"]
+                end
+            ]])
+            assert.same(2, #errors)
+            assert.match("cannot read array elements", errors[1])
+            assert.match("cannot read map values", errors[2])
+        end)
     end)
 
     it("allows raw C pointer Array and Map write-only lvalues", function()
-        local errors = check_errs([[
-            local ffi = foreign import "titan/ffi.h"
+        with_header("typedef int ffi_int;\n", function(header)
+            local errors = check_errs([[
+            local c = foreign import "]] .. header .. [["
 
             local function write_array(
-                pointers: {*ffi.titan_ffi_int},
-                pointer: *ffi.titan_ffi_int
+                pointers: {*c.ffi_int},
+                pointer: *c.ffi_int
             )
                 pointers[1] = pointer
             end
 
             local function write_map(
-                pointer: *ffi.titan_ffi_int
+                pointer: *c.ffi_int
             )
-                local pointers: {string: *ffi.titan_ffi_int} = {
+                local pointers: {string: *c.ffi_int} = {
                     ["one"] = pointer,
                 }
                 pointers["two"] = pointer
             end
-        ]])
-        assert.equal(0, #errors, table.concat(errors, "\n"))
+            ]])
+            assert.equal(0, #errors, table.concat(errors, "\n"))
+        end)
     end)
 end)

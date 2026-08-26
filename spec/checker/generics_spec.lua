@@ -7,6 +7,18 @@ local checker = require "titan-compiler.checker"
 local run_checker = h.run_checker
 local run_checker_modules = h.run_checker_modules
 
+local function with_header(contents, fn)
+    local header = os.tmpname() .. ".h"
+    local file = assert(io.open(header, "w"))
+    assert(file:write(contents))
+    assert(file:close())
+
+    local results = table.pack(pcall(fn, header))
+    os.remove(header)
+    if not results[1] then error(results[2], 0) end
+    return table.unpack(results, 2, results.n)
+end
+
 local function assert_check(source)
     local ok, err, ast, modtype = run_checker(source)
     assert.truthy(ok, err)
@@ -466,24 +478,18 @@ describe("generic declarations and explicit calls", function()
 
     it("rejects duplicate binders, owner shadowing, and incomplete lists",
     function()
-        assert_error("duplicate type parameter 'T'", [[
-            function bad<T, T>(item: T): T return item end
-        ]])
+        local errors = h.check_errs([[
+            function duplicate<T, T>(item: T): T return item end
 
-        assert_error("cannot shadow an active owner type parameter", [[
             record Box<T>
                 item: T
             end
-            function Box:bad<T>(item: T): T return item end
-        ]])
+            function Box:shadow<T>(item: T): T return item end
 
-        assert_error("cyclic type parameter constraints involving 'T'", [[
             interface Loop<T: Loop<T>>
                 function get(): T
             end
-        ]])
 
-        assert_error("does not satisfy constraint 'test.Show'", [[
             interface Show
                 function render(): string
             end
@@ -493,27 +499,33 @@ describe("generic declarations and explicit calls", function()
             interface Holder<T: Show>
                 function get(): T
             end
-        ]])
 
-        assert_error("expected 1 type arguments but found 2", [[
             function id<T>(item: T): T return item end
-            function bad(): integer
+            function too_many(): integer
                 return id<integer, string>(1)
             end
-        ]])
 
-        assert_error("is not generic and cannot receive type arguments", [[
-            function id(item: integer): integer return item end
-            function bad(): integer return id<string>(1) end
+            function plain(item: integer): integer return item end
+            function non_generic(): integer return plain<string>(1) end
         ]])
+        assert.truthy(#errors >= 6)
+        local joined = table.concat(errors, "\n")
+        assert.match("duplicate type parameter 'T'", joined)
+        assert.match("cannot shadow an active owner type parameter", joined)
+        assert.match("cyclic type parameter constraints involving 'T'", joined)
+        assert.match("does not satisfy constraint 'test.Show'", joined)
+        assert.match("expected 1 type arguments but found 2", joined)
+        assert.match("is not generic and cannot receive type arguments", joined)
 
-        assert_error("has no sound transient round trip", [[
-            local c = foreign import "stdint.h"
-            local function id<T>(item: T): T return item end
-            local function bad(pointer: *c.intptr_t): value
-                return id<*c.intptr_t>(pointer)
+        with_header("typedef long ffi_intptr;\n", function(header)
+            assert_error("has no sound transient round trip", [[
+            local c = foreign import "]] .. header .. [["
+            local function transient_id<T>(item: T): T return item end
+            local function bad(pointer: *c.ffi_intptr): value
+                return transient_id<*c.ffi_intptr>(pointer)
             end
-        ]])
+            ]])
+        end)
     end)
 
     it("preserves generic owner applicability through bare aliases", function()
@@ -1693,57 +1705,62 @@ describe("generic declarations and explicit calls", function()
             function use(item: Renderable): string return render(item) end
         ]])
 
-        assert_error("does not satisfy constraint 'test.Show'", [[
-            interface Show
-                function show(): string
-            end
-            function render<T: Show>(item: T): string return item:show() end
-            function bad(): string return render("no") end
-        ]])
+        with_header("typedef long ffi_intptr;\n", function(header)
+            local errors = h.check_errs([[
+                local c = foreign import "]] .. header .. [["
 
-        assert_error("inferred type argument 'intptr_t %*'.-has no sound transient round trip", [[
-            local c = foreign import "stdint.h"
-            local function id<T>(item: T): T return item end
-            local function bad(pointer: *c.intptr_t)
-                local copy = id(pointer)
-            end
-        ]])
+                interface Show
+                    function show(): string
+                end
+                local function render<T: Show>(item: T): string
+                    return item:show()
+                end
+                local function bad_constraint(): string
+                    return render("no")
+                end
 
+                local function id<T>(item: T): T return item end
+                local function bad_pointer(pointer: *c.ffi_intptr)
+                    local copy = id(pointer)
+                end
 
-        local ordered_errors = h.check_errs([[
-            local c = foreign import "stdint.h"
-            local function same<T>(left: T, right: T): T return left end
-            local function bad(pointer: *c.intptr_t)
-                local got = same(pointer, 42)
-            end
-        ]])
-        assert.same(2, #ordered_errors)
-        assert.match("inferred type argument 'intptr_t %*'.-no sound transient round trip",
-            ordered_errors[1])
-        assert.match("argument 2.-expected intptr_t %* but found integer",
-            ordered_errors[2])
+                local function same<T>(left: T, right: T): T return left end
+                local function bad_ordered(pointer: *c.ffi_intptr)
+                    local got = same(pointer, 42)
+                end
 
-        local invalid_reconstructions = {
-            [[
-                function make<K>(key: K): {K: string}
+                local function make<K>(key: K): {K: string}
                     return {[key] = "x"}
                 end
-                function bad() local got = make(nil) end
-            ]],
-            [[
-                function consume<T>(...: T) end
-                function bad() consume(nil) end
-            ]],
-            [[
-                function produce<T>(item: T): (...: T) return item end
-                function bad() local got = produce(nil) end
-            ]],
-        }
-        for _, source in ipairs(invalid_reconstructions) do
-            local reconstruction_errors = h.check_errs(source)
-            assert.same(1, #reconstruction_errors)
-            assert.match("cannot close", reconstruction_errors[1])
-        end
+                local function bad_key() local got = make(nil) end
+
+                local function consume<T>(...: T) end
+                local function bad_variadic() consume(nil) end
+
+                local function produce<T>(item: T): (...: T)
+                    return item
+                end
+                local function bad_flexible()
+                    local got = produce(nil)
+                end
+            ]])
+            assert.same(7, #errors)
+            assert.match("does not satisfy constraint 'test.Show'", errors[1])
+            assert.match("has no sound transient round trip", errors[2])
+            assert.match("has no sound transient round trip", errors[3])
+            assert.match(
+                "argument 2.-expected ffi_intptr %* but found integer",
+                errors[4])
+            for index = 5, 7 do
+                assert.match("cannot close", errors[index])
+            end
+            local joined = table.concat(errors, "\n")
+            local _, transient = joined:gsub(
+                "has no sound transient round trip", "")
+            assert.equal(2, transient)
+            local _, cannot_close = joined:gsub("cannot close", "")
+            assert.equal(3, cannot_close)
+        end)
     end)
 
     it("keeps inference fresh, ordinary-checks later mismatches, and closes free cells",

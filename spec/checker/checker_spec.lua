@@ -10,6 +10,18 @@ local assert_type_error = h.assert_type_error
 local assert_ast = h.assert_ast
 local check_errs = h.check_errs
 
+local function with_header(contents, fn)
+    local header = os.tmpname() .. ".h"
+    local file = assert(io.open(header, "w"))
+    assert(file:write(contents))
+    assert(file:close())
+
+    local results = table.pack(pcall(fn, header))
+    os.remove(header)
+    if not results[1] then error(results[2], 0) end
+    return table.unpack(results, 2, results.n)
+end
+
 describe("zero-return () functions (typechecker)", function()
     it("discards return values in a () function", function()
         local ok, err, tree = run_checker([[
@@ -563,12 +575,14 @@ describe("Titan type checker", function()
     end)
 
     it("rejects assignment to a foreign variable cleanly", function ()
-        local ok, err = run_checker([[
-            local errno = foreign import "errno.h"
-            function f() errno.errno = 0 end
-        ]])
-        assert.falsy(ok)
-        assert.match("cannot assign to foreign variable", err)
+        with_header("extern int test_errno;\n", function(header)
+            local errors = check_errs([[
+                local c = foreign import "]] .. header .. [["
+                function f() c.test_errno = 0 end
+            ]])
+            assert.equal(1, #errors, table.concat(errors, "\n"))
+            assert.match("cannot assign to foreign variable", errors[1])
+        end)
     end)
 
     it("rejects assignment to the for control variable", function ()
@@ -1443,34 +1457,28 @@ describe("Titan type checker", function()
         end)
     end
 
-    for _, op in ipairs({"==", "~="}) do
-        it("can compare pointers using " .. op, function()
-            local code = [[
-                local stdio = foreign import "stdio.h"
-                function fn(): boolean
-                    local f1 = stdio.fopen("a.txt", "w")
-                    local f2 = stdio.fopen("a.txt", "w")
-                    return f1 ]] .. op .. [[ f2
+    it("compares C pointers with each other and nil in both directions",
+    function()
+        with_header([[
+            typedef struct ffi_file ffi_file;
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                local function compare(
+                    left: *c.ffi_file,
+                    right: *c.ffi_file
+                ): boolean
+                    return left == right
+                        and left ~= right
+                        and left == nil
+                        and left ~= nil
+                        and nil == right
+                        and nil ~= right
                 end
-            ]]
-            local ok, err = run_checker(code)
+            ]])
             assert.truthy(ok, err)
         end)
-    end
-
-    for _, op in ipairs({"==", "~="}) do
-        it("can compare pointers to nil using " .. op, function()
-            local code = [[
-                local stdio = foreign import "stdio.h"
-                function fn(): boolean
-                    local f1 = stdio.fopen("a.txt", "w")
-                    return f1 ]] .. op .. [[ nil
-                end
-            ]]
-            local ok, err = run_checker(code)
-            assert.truthy(ok, err)
-        end)
-    end
+    end)
 
     for _, op in ipairs({"<", ">", "<=", ">="}) do
         it("can compare compatible object pointers using " .. op, function()
@@ -2002,63 +2010,72 @@ describe("Titan type checker", function()
 
     it("converts unrelated object pointers through the checked C boundary",
        function()
-        local code = [[
-            local stdio = foreign import "stdio.h"
-            local dirent = foreign import "dirent.h"
-            function f()
-                local dd = dirent.opendir(".")
-                local n = stdio.fwrite("alo", 3, 1, dd)
-            end
-        ]]
-        local ok, err = run_checker(code)
-        assert.truthy(ok, err)
+        with_header([[
+            typedef struct ffi_left ffi_left;
+            typedef struct ffi_right ffi_right;
+            extern void ffi_consume(void *pointer);
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                local function use(
+                    left: *c.ffi_left,
+                    right: *c.ffi_right
+                )
+                    c.ffi_consume(left)
+                    c.ffi_consume(right)
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
     end)
 
     it("cannot convert void pointer to string without a cast", function()
-        local code = [[
-            local stdlib = foreign import "stdlib.h"
-            local string_h = foreign import "string.h"
-            function f()
-                local mem = stdlib.realloc(nil, 100)
-                local s = string_h.strcpy(mem, "Hello")
-            end
-        ]]
-        local ok, err = run_checker(code)
-        assert.falsy(ok)
-        assert.match("expected char %* but found void %*", err)
+        with_header([[
+            extern void *ffi_allocate(void);
+            extern char *ffi_copy(char *target, const char *source);
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                function f()
+                    local mem = c.ffi_allocate()
+                    local s = c.ffi_copy(mem, "Hello")
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("expected char %* but found void %*", err)
+        end)
     end)
 
     it("can convert void pointer to string with a cast", function()
-        local code = [[
-            local stdlib = foreign import "stdlib.h"
-            local string_h = foreign import "string.h"
-            function f()
-                local mem = stdlib.realloc(nil, 100)
-                local s = string_h.strcpy(mem as string, "Hello")
-            end
-        ]]
-        local ok, err = run_checker(code)
-        assert.truthy(ok, err)
+        with_header([[
+            extern void *ffi_allocate(void);
+            extern char *ffi_copy(char *target, const char *source);
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                function f()
+                    local mem = c.ffi_allocate()
+                    local s = c.ffi_copy(mem as string, "Hello")
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
     end)
 
     it("can check foreign module variables", function()
-        local code = [[
-            local errno = foreign import "errno.h"
-            function fun(name: string): integer
-                return errno.errno
-            end
-        ]]
-        local ok, err = run_checker(code)
-        assert.truthy(ok)
-        code = [[
-            local errno = foreign import "errno.h"
-            function fun(name: string): string
-                return errno.errno
-            end
-        ]]
-         ok, err = run_checker(code)
-        assert.falsy(ok)
-        assert.match("expected string but found int", err)
+        with_header("extern int ffi_count;\n", function(header)
+            local errors = check_errs([[
+                local c = foreign import "]] .. header .. [["
+                function accepted(): integer
+                    return c.ffi_count
+                end
+                function rejected(): string
+                    return c.ffi_count
+                end
+            ]])
+            assert.equal(1, #errors, table.concat(errors, "\n"))
+            assert.match("expected string but found int", errors[1])
+        end)
     end)
 
     it("can check typedef'd enum constants imported by the FFI", function()
