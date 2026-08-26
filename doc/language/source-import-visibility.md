@@ -108,11 +108,13 @@ declarations such as `sizeof(__FILE__)` agree.
 A producer that defines `foreign function` declarations additionally generates
 one source-adjacent `*.titan.h`. Every explicit source importer includes that
 companion, which contains the prototypes/eligible inline definitions and the C
-headers required to render them. The consumer checker processes the same
-companion before checking declarations and bodies, so its macros and C probes
-match final generated C. Temporary companions make this possible during
-recursive checking; the compiler rewrites them to final paths and removes them
-from the resolver context afterward.
+headers required to render them. The consumer checker reuses the producer's
+already established real-header and complete macro context before checking declarations
+and bodies, while its authoritative C probe still includes the same companion.
+The compiler therefore does not reinterpret its generated temporary as a new C
+foreign import. Temporary companions make recursive checking possible; the
+compiler rewrites them to final paths and removes them from the resolver context
+afterward.
 
 Neither mechanism exposes the producer's `foreign import` alias or grants Titan
 visibility transitively. A generated C header is declaration plumbing;

@@ -5,14 +5,15 @@ local _ENV = core
 -- itself, which deliberately loses the alias spelling. Preserve the selected
 -- module/name identity in a private checker descriptor for semantic tools;
 -- ordinary type checking and serialization continue to use `target`.
-local function bind_qualified_type(node, module_decl, module_type, target)
+local function bind_qualified_type(node, module_decl, module_type, target,
+                                   islocal)
     node._module_decl = module_decl
     node._decl = {
         _tag = "Checker.TypeMember",
         modname = module_type.name,
         name = node.name,
         type = target,
-        islocal = target and target.islocal and true or false,
+        islocal = islocal and true or false,
     }
 end
 
@@ -115,8 +116,9 @@ typefromnode = util.make_visitor({
                 node.name)
         end
         if mod and mod._type and mod._type._tag == "Type.Module" then
-            local type_member = types.module_type_member(
-                mod._type, node.name, mod._source_import)
+            local type_member, type_member_islocal =
+                types.module_type_member(
+                    mod._type, node.name, mod._source_import)
             local subject = "type '" .. mod._type.name .. "." ..
                 node.name .. "'"
             if type_member and type_member._tag == "Type.GenericAlias" then
@@ -126,7 +128,8 @@ typefromnode = util.make_visitor({
                         "nominal type '%s' is local to module '%s'",
                         owner.name, mod._type.name)
                 end
-                bind_qualified_type(node, mod, mod._type, type_member)
+                bind_qualified_type(node, mod, mod._type, type_member,
+                    type_member_islocal)
                 return generic_apply_generic_alias(
                     type_member, node.typeargs, st, errors,
                     node.loc, subject)
@@ -136,7 +139,8 @@ typefromnode = util.make_visitor({
                         "interface type '%s' is local to module '%s'",
                         node.name, mod._type.name)
                 end
-                bind_qualified_type(node, mod, mod._type, type_member)
+                bind_qualified_type(node, mod, mod._type, type_member,
+                    type_member_islocal)
                 return generic_apply_named_owner(
                     type_member, node.typeargs, st, errors,
                     node.loc, subject)
@@ -158,7 +162,8 @@ typefromnode = util.make_visitor({
                 if checker._ensure_c_enum_supported(
                         st, type_member, node.loc, errors, nil,
                         defer_c_enum_carrier and true or false) then
-                    bind_qualified_type(node, mod, mod._type, type_member)
+                    bind_qualified_type(node, mod, mod._type, type_member,
+                        type_member_islocal)
                     return type_member
                 end
                 return types.Invalid()
@@ -182,7 +187,8 @@ typefromnode = util.make_visitor({
                     member.type._tag == "Type.Record" and "record" or "union",
                     node.name, mod._type.name)
             end
-            bind_qualified_type(node, mod, mod._type, member)
+            bind_qualified_type(node, mod, mod._type, member,
+                member.islocal)
             return generic_apply_named_owner(member.type, node.typeargs,
                 st, errors, node.loc, "type '" .. fqtn .. "'")
         elseif mod and mod._type and mod._type._tag == "Type.CModule" then

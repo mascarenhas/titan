@@ -406,8 +406,13 @@ function cdriver.emit_process_phase(
     if type(sink) ~= "function" or started == nil then return end
     local resolved = type(include) == "table"
         and tostring(include.resolved or "") or ""
+    local identity = options.process_trace_identity
+    if type(identity) ~= "string" or identity == "" then
+        identity = resolved ~= "" and resolved or tostring(filename)
+    end
     pcall(sink, tostring(filename), resolved, tostring(phase),
-        tostring(outcome or ""), (os.clock() - started) * 1000)
+        tostring(outcome or ""), (os.clock() - started) * 1000,
+        identity)
 end
 
 local function resolve_include(filename, options, incdirs, observe)
@@ -582,7 +587,7 @@ local function input_tail_matches_prefix(inputs, identities)
     return true
 end
 
-function cdriver.process_file(filename, options)
+local function process_file_inner(filename, options)
     options = normalize_options(options)
     local strategy = io_for(options)
     local analysis_entries, analysis_error =
@@ -927,6 +932,27 @@ function cdriver.process_file(filename, options)
     -- first three results.
     return ffi_types, nil, include,
         result_context(ffi_types, strategy, dependencies, search_inputs)
+end
+
+-- Trace the complete top-level header request in addition to its component
+-- phases. Language-server profiling uses this terminal duration to separate
+-- header work from the source module which requested it; recursive C includes
+-- remain part of the selected header's own preprocessing request. Ordinary
+-- parse failures return through this wrapper. A thrown invariant/cancellation
+-- aborts its analysis and may omit terminal best-effort telemetry.
+function cdriver.process_file(filename, options)
+    options = normalize_options(options)
+    if type(options.process_trace) ~= "function" then
+        return process_file_inner(filename, options)
+    end
+
+    local started = os.clock()
+    local processed, process_error, include, context =
+        process_file_inner(filename, options)
+    cdriver.emit_process_phase(
+        options, filename, include, "process_total",
+        processed and "complete" or "failed", started)
+    return processed, process_error, include, context
 end
 
 local function primitive_typedef_spelling(ffi_types, name)

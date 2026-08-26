@@ -237,6 +237,70 @@ describe("checker semantic metadata", function()
         end
     end)
 
+    it("retains source visibility on qualified type aliases", function()
+        local ok, err, imported = h.run_checker_modules({
+            provider = [[
+                record Box<T>
+                    item: T
+                end
+                local type Hidden = integer
+                type Public = Hidden
+                local type HiddenBox = Box
+                type PublicBox = HiddenBox
+            ]],
+            consumer = [[
+                local provider = import "provider.titan"
+                local type ForwardHiddenBox = provider.HiddenBox
+                type ForwardPublicBox = provider.PublicBox
+                function use(number: provider.Hidden): provider.Public
+                    local hidden: provider.HiddenBox<string> =
+                        provider.HiddenBox<string>.new("hidden")
+                    local public: provider.PublicBox<string> = hidden
+                    if public.item == "" then return 0 end
+                    return number
+                end
+            ]],
+        }, "consumer")
+        assert.truthy(ok, err)
+
+        local provider = imported.provider.ast
+        assert.is_true(find_toplevel(provider,
+            "Ast.TopLevelTypeAlias", "Hidden").islocal)
+        assert.is_true(find_toplevel(provider,
+            "Ast.TopLevelTypeAlias", "HiddenBox").islocal)
+
+        local consumer = imported.consumer.ast
+        local forward_hidden = find_toplevel(
+            consumer, "Ast.TopLevelTypeAlias", "ForwardHiddenBox")
+        local forward_public = find_toplevel(
+            consumer, "Ast.TopLevelTypeAlias", "ForwardPublicBox")
+        assert.is_true(forward_hidden.type._decl.islocal)
+        assert.is_false(forward_public.type._decl.islocal)
+
+        local use = find_toplevel(consumer, "Ast.TopLevelFunc", "use")
+        local refs = {
+            { node = use.params[1].type, name = "Hidden", islocal = true },
+            { node = use.rettypes[1], name = "Public", islocal = false },
+            { node = use.block.stats[1].decls[1].type,
+              name = "HiddenBox", islocal = true },
+            { node = use.block.stats[2].decls[1].type,
+              name = "PublicBox", islocal = false },
+        }
+        for _, expected in ipairs(refs) do
+            local declaration = expected.node._decl
+            assert.equal("Checker.TypeMember", declaration._tag)
+            assert.equal("provider", declaration.modname)
+            assert.equal(expected.name, declaration.name)
+            assert.equal(expected.islocal, declaration.islocal)
+        end
+
+        local constructor = unwrap_cast(use.block.stats[1].exps[1])
+        local namespace = constructor.exp.var.exp.var
+        assert.equal("HiddenBox", namespace.name)
+        assert.equal("Checker.TypeMember", namespace._decl._tag)
+        assert.is_true(namespace._decl.islocal)
+    end)
+
     it("retains named labels bound to callable parameters and aliases",
     function()
         local ok, err, imported = h.run_checker_modules({

@@ -1794,6 +1794,100 @@ describe("persistent successful C probe markers", function()
         return out
     end
 
+    it("traces one persistent miss and the matching later hit", function()
+        local cache = temporary_directory()
+        local source = "int titan_traced_persistent_success;\n"
+        local first_events = {}
+        local first, first_state = new_fake_service({
+            cache_directory = cache,
+            persistent_cache_trace = function(stage, hit, key, path)
+                first_events[#first_events + 1] = {
+                    stage = stage,
+                    hit = hit,
+                    key = key,
+                    path = path,
+                }
+            end,
+        })
+        local first_run = first:_run_source(
+            "baseline", source, "same-semantic-key")
+        assert.is_true(first_run.ok)
+        assert.equal(1, #first_state.calls)
+        assert.same({}, first.evidence)
+        assert.equal(1, #first_events)
+        assert.same({
+            stage = "baseline",
+            hit = false,
+            key = first_run.cache_path:match("([^/.]+)[.]success$"),
+            path = first_run.cache_path,
+        }, first_events[1])
+        assert.is_true(first:close())
+
+        local second_events = {}
+        local second, second_state = new_fake_service({
+            cache_directory = cache,
+            persistent_cache_trace = function(stage, hit, key, path)
+                second_events[#second_events + 1] = {
+                    stage = stage,
+                    hit = hit,
+                    key = key,
+                    path = path,
+                }
+            end,
+        }, function()
+            error("a traced persistent hit must not invoke the compiler")
+        end)
+        local second_run = second:_run_source(
+            "baseline", source, "same-semantic-key")
+        assert.is_true(second_run.ok)
+        assert.is_true(second_run.persistent_cached)
+        assert.equal(0, #second_state.calls)
+        assert.same({}, second.evidence)
+        assert.same({ {
+            stage = "baseline",
+            hit = true,
+            key = first_events[1].key,
+            path = first_events[1].path,
+        } }, second_events)
+        assert.is_true(second:close())
+
+        assert(os.remove(first_run.cache_path))
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("isolates persistent cache trace sink failures", function()
+        local cache = temporary_directory()
+        local source = "int titan_failing_cache_trace_sink;\n"
+        local first = new_fake_service({
+            cache_directory = cache,
+            persistent_cache_trace = function()
+                error("injected cache trace failure")
+            end,
+        })
+        local first_run = first:_run_source(
+            "candidate", source, "same-semantic-key")
+        assert.is_true(first_run.ok)
+        assert.is_true(first:close())
+
+        local second, second_state = new_fake_service({
+            cache_directory = cache,
+            persistent_cache_trace = function()
+                error("injected cache trace failure")
+            end,
+        }, function()
+            error("a persistent hit must not invoke the compiler")
+        end)
+        local second_run = second:_run_source(
+            "candidate", source, "same-semantic-key")
+        assert.is_true(second_run.ok)
+        assert.is_true(second_run.persistent_cached)
+        assert.equal(0, #second_state.calls)
+        assert.is_true(second:close())
+
+        assert(os.remove(first_run.cache_path))
+        assert(lfs.rmdir(cache))
+    end)
+
     it("partitions contexts by restattable header and search identities",
     function()
         local service = new_fake_service()
@@ -2323,6 +2417,13 @@ describe("persistent successful C probe markers", function()
 
     it("rejects invalid persistent cache configuration", function()
         local rejected, err = cprobe.new_service({
+            persistent_cache_trace = false,
+        })
+        assert.is_nil(rejected)
+        assert.matches("persistent_cache_trace must be a function",
+            err, 1, true)
+
+        rejected, err = cprobe.new_service({
             cache_directory = false,
         })
         assert.is_nil(rejected)

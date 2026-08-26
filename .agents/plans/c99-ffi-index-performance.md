@@ -1,9 +1,8 @@
 # C99 and FFI indexing performance
 
-Status: all three implementation workstreams, refreshed profiling, and both
-complete local gates are green. Publication and final CI evidence remain. The
-final PR heads must pass the ordinary Linux CI and Codecov gates recorded in
-the delivery section.
+Status: all four workstreams and the fresh trace-level Titan-repository profile
+are complete. Both complete local gates are green; publication and CI evidence
+remain.
 
 This plan records the compiler-side work discovered while profiling cold Titan
 language-server indexing. It complements the language-server cache and
@@ -327,6 +326,86 @@ hash-verified all copied sources, correlated watcher/epoch/ready events, joined
 its `/proc` sampler, restored the source unchanged, and removed its temporary
 tree after a clean server exit.
 
+## Workstream D: exclusive cold-index attribution
+
+The earlier `compiler.module.complete` event is a progress checkpoint: its
+clock starts at the root attempt, so a dependency's displayed time includes
+everything visited before it. It cannot answer which physical module or header
+actually consumed cold-start CPU.
+
+Trace-level profiling now records one inclusive source-module duration around
+each ordinary source check. A resolver-local stack subtracts the inclusive
+duration of each directly nested source dependency. It also subtracts exactly
+the non-overlapping C-header `process_total` and downstream Titan FFI conversion
+durations from the source module which requested them. Component header phases
+remain detail inside `process_total` and are never subtracted or summed a second
+time. The language-server bridge separately times each nonrecursive
+`snapshot_module` normalization and joins that cost to the same module in the
+benchmark report.
+
+`cdriver.process_file` appends a stable identity to its existing trace callback.
+Ordinary imports default to the resolved physical header. Generated source-
+foreign `.check.tmp.*` headers never enter `cdriver`, so they produce no header
+parse row; their probe identity canonicalizes nested randomized spellings to
+stable public paths and transitive generated identities. A header row's
+attributed total is `process_total + downstream_ffi_conversion`; its
+preprocessing, C PEG, CType, macro, cache-validation, and graph-clone figures
+are retained only as a phase breakdown.
+
+All values are explicitly process CPU milliseconds measured with `os.clock`.
+They are not wall time and do not include native child-process CPU. Cooperative
+I/O can suspend between clock reads, although the compiler scheduler serializes
+compiler ownership and the production trace sink is non-reentrant. An invariant
+or cancellation which raises rather than returning may omit terminal
+best-effort telemetry because that complete analysis is discarded.
+
+Persistent C-probe marker reuse has a separate scalar trace hook. The C-probe
+service reports `(stage, hit, key, path)` once per enabled lookup without
+enabling verbose evidence or retaining probe sources; the resolver adapts it to
+`(module_name, stage, hit, key, path)` using the currently checked source
+module. Both sinks are protected and never print to stdout. This distinguishes
+compiler-validation cache misses from C-header parsing time in a language-
+server profile.
+
+- [x] Add returned-request `process_total` header telemetry and stable physical
+  identities without changing existing five-argument trace consumers.
+- [x] Attribute source parsing/checking to exclusive module self time and emit
+  terminal timing before the cooperative module checkpoint.
+- [x] Time bridge snapshot normalization per module and aggregate repeated
+  roots by module/physical file with call counts.
+- [x] Add focused header miss/hit/failure, sink-isolation, generated-identity,
+  nested-module, and checkpoint-order regressions.
+- [x] Trace persistent C-probe marker hits and misses with source-module
+  attribution, scalar-only payloads, and sink-failure isolation.
+- [x] Rebuild the isolated vscode-titan compiler/server and capture the complete
+  Titan-repository trace-level cold-index breakdown.
+- [x] Record the largest module/header rows, attributed totals, global residual,
+  wall/CPU/RSS, and complete verification evidence here before publication.
+
+The fresh clean-toolchain artifact is
+`/tmp/vscode-titan-cold-profile-phases.json`, SHA-256
+`5ac2b57223cb87483010a3d8156261ff94ff6f991ddcddac64d0dd2879dcae31`.
+It captured exactly one generation-89 analysis over 143 saved Titan files:
+314.637s wall, 185.590s server-process CPU, and 2,757,148 KiB peak RSS. The
+trace attributed 162.984s CPU, leaving 22.606s outside the source/header/
+normalization spans. Source modules accounted for 73.293s: 0.960s parsing,
+65.897s checking and direct probe work, 2.110s other self work, and 4.326s
+bridge normalization. Foreign headers accounted for 89.691s: 31.711s header
+processing and 57.980s downstream Titan FFI conversion. Header processing
+included 19.755s preprocessing, 2.941s macro conversion, 1.568s graph cloning,
+0.698s C-type conversion, 0.448s C PEG parsing, and 0.014s hit validation.
+
+The largest attributed source rows were `titan.uv` at 18.335s over 28 calls
+(17.824s first call, 0.511s all 27 reuses), `titan.http` at 11.898s, and
+`titan.ssl` at 7.057s. The largest header rows were `titan/ffi.h` at 19.879s,
+`openssl/ssl.h` at 15.635s, `openssl/x509v3.h` at 12.827s,
+`openssl/pem.h` at 12.057s, and `uv.h` at 8.924s. The freshly rebuilt success-
+only persistent probe cache recorded 10 hits and 1,075 misses across 1,085
+requests. That result exposed the deterministic negative-result cache work now
+tracked separately as Titan issue #108. An unchanged hover/definition batch
+after readiness took 14.600ms wall and 10ms server CPU and emitted zero
+indexing-status notifications.
+
 ## Verification
 
 1. Run focused C parser, ctypes, cdefines, cdriver/cprobe, and resolver specs
@@ -343,30 +422,30 @@ tree after a clean server exit.
 5. Confirm all version constants and installed search paths still resolve as
    `0.6.0` / `0.6` before publication.
 
-Final local verification passed `make test PREFIX=/tmp/titan-c99-final
-CCACHE_DISABLE=1`: the 124-test root suite, all four isolated compiler shards,
-and the 197-test native standard-library suite completed with zero failures.
-The completed-header cache's focused suite passed all 15 cases, including the
-yielded replacement race and provider-lifetime retention beyond the former
-production bound. A clean vscode-titan toolchain rebuilt from this worktree
-reports semantic version `0.6.0`, library path version `0.6`, and ABI `2`; its
-full `xvfb-run -a make -j1 verify` consumer gate also passed: 181 Titan tests,
-the native protocol and Codex smokes, 46 JavaScript tests, 11 Extension Host
-tests, and the package/linkage/plugin/install/VSIX inspections were green.
+Final local verification passed the canonical isolated
+`TITAN_JOBS=4 make -j4 test` gate at `/tmp/titan-vscode-pr-test`: the 124-test
+root suite, all four isolated compiler shards, and the 197-test native
+standard-library suite completed with zero failures. A clean vscode-titan
+toolchain rebuilt from this worktree reports semantic version `0.6.0`, library
+path version `0.6`, and ABI `2`; its full `xvfb-run -a make -j1 verify`
+consumer gate also passed the Titan/unit/protocol/Codex suites, all 12 Extension
+Host scenarios, and the package/linkage/plugin/install/VSIX inspections.
 
-Titan PR #106 is the delivery vehicle and closes issues #104, #105, and #107.
-Its required ordinary Ubuntu 24.04 evidence is the stdlib/runtime,
+The current Titan companion PR delivers the new compiler/project configuration,
+source-import identity, and profiling APIs required by vscode-titan issues #29
+and #31. Its required ordinary Ubuntu 24.04 evidence is the stdlib/runtime,
 compiler/LuaCov, and ASan+UBSan jobs plus both Codecov project and patch gates;
-the macOS-only job remains intentionally skipped. Companion vscode-titan PR
-#28 must pin the exact final compiler implementation commit and run its Ubuntu
-24.04 Ubicloud build/test/package gate.
+the macOS-only job remains intentionally skipped. The companion vscode-titan PR
+for issues #29 through #32 must pin the exact final compiler implementation
+commit and run its Ubuntu 24.04 Ubicloud build/test/package gate.
 
 ## Delivery
 
-- Keep compiler work on `codex/c99-ffi-index-performance` and language-server
+- Keep compiler work on `codex/project-ffi-cppflags` and language-server
   work in its separate vscode-titan PR.
-- Review and commit exact paths, push the Titan branch, and update Titan PR
-  #106 with both complementary workstreams and their measured effects.
+- Review and commit exact paths, push the Titan branch, and open its companion
+  PR with the configuration, source-import, and profiling contracts plus their
+  measured effects.
 - Link the relevant GitHub issues and update the project board when credentials
   permit. Report any items that cannot be added rather than silently dropping
   them.

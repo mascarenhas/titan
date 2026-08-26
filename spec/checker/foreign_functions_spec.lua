@@ -2,6 +2,8 @@ local h = require "spec.support.helpers"
 local types = require "titan-compiler.types"
 local checker = require "titan-compiler.checker"
 local driver = require "titan-compiler.driver"
+local cdriver = require "c-parser.cdriver"
+local cprobe = require "titan-compiler.cprobe"
 
 local probe_session
 
@@ -228,49 +230,350 @@ describe("foreign functions (checker)", function()
         end)
     end)
 
-    it("replays an explicit source foreign header before consumer checking",
+    it("replays source C context without parsing the generated companion",
     function()
         with_header([[
-            #define FFI_REPLAY_VALUE 9
+            #define FFI_REPLAY_FIELD nested.value
             typedef int ffi_replay_int;
-        ]], function(header)
-            local cfunc = types.CFunction({},
-                types.CInteger("int", true, 3, 32), false, false)
-            local member = types.ModuleMember(
-                "provider", "callback", cfunc, {})
-            member._foreign_source = true
-            member.islocal = true
-            local provider = types.Module("provider", {})
-            provider._source = true
-            provider.source_members = { member }
-            provider.source_members.callback = member
-            provider.source_type_members = {}
+        ]], function(provider_header)
+            with_header([[
+                typedef struct ffi_replay_nested {
+                    int value;
+                } ffi_replay_nested;
+                typedef struct ffi_replay_item {
+                    ffi_replay_nested nested;
+                } ffi_replay_item;
+            ]], function(consumer_header)
+                local provider_code =
+                    'local c = foreign import "' .. provider_header .. [["
+                    foreign function callback(
+                        input: c.ffi_replay_int
+                    ): c.ffi_replay_int
+                        return input
+                    end
+                ]]
+                local provider_ok, provider_error, _, provider =
+                    h.run_checker(provider_code, probe_session)
+                assert.truthy(provider_ok, provider_error)
+                assert.is_table(provider._source_c_context)
+                assert.is_true(
+                    provider._source_c_context.macro_changes.FFI_REPLAY_FIELD)
 
-            local code = [[
-                local provider = import "provider.titan"
-                local c = foreign import "]] .. header .. [["
-                function observed(): integer return c.FFI_REPLAY_VALUE end
-            ]]
-            local ast = assert(h.parse(code))
-            local loader = function(name)
-                assert.equal("provider", name)
-                return true, provider, {}, {
-                    kind = "source",
-                    foreign_header = header,
-                    foreign_header_for_check = true,
-                    foreign_header_probe_identity = header .. ".public",
-                }
-            end
+                with_header('#include "' .. provider_header .. '"\n',
+                function(companion)
+                    local code = [[
+                        local provider = import "provider.titan"
+                        local c = foreign import "]] .. consumer_header .. [["
+                        local function observed(
+                            item: *c.ffi_replay_item
+                        ): integer
+                            return item.FFI_REPLAY_FIELD
+                        end
+                    ]]
+                    local ast = assert(h.parse(code))
+                    local loader = function(name)
+                        assert.equal("provider", name)
+                        return true, provider, {}, {
+                            kind = "source",
+                            foreign_header = companion,
+                            foreign_header_for_check = true,
+                            foreign_header_probe_identity =
+                                provider_header .. ".titan.h",
+                        }
+                    end
+                    local original_process_file = cdriver.process_file
+                    local original_source_foreign_include_alias =
+                        cprobe.source_foreign_include_alias
+                    local parsed_companion = false
+                    local aliases = {}
+                    cdriver.process_file = function(filename, ...)
+                        if filename == companion then
+                            parsed_companion = true
+                            error("generated companion reached cdriver")
+                        end
+                        return original_process_file(filename, ...)
+                    end
+                    cprobe.source_foreign_include_alias = function(...)
+                        local include, include_error =
+                            original_source_foreign_include_alias(...)
+                        if include then aliases[#aliases + 1] = include end
+                        return include, include_error
+                    end
+                    local exercised, result = pcall(function()
+                        local function check(checked_ast)
+                            types.registry = {}
+                            driver.imported = {}
+                            local modtype, errors = checker.check(
+                                "consumer", checked_ast, code,
+                                "consumer.titan", loader, {
+                                    probe_service_provider = function()
+                                        return driver.get_probe_service(
+                                            probe_session)
+                                    end,
+                                })
+                            assert.equal(0, #errors,
+                                table.concat(errors, "\n"))
+                            return modtype
+                        end
+
+                        local modtype = check(ast)
+                        local first_alias = aliases[#aliases]
+                        assert.is_table(first_alias)
+                        local changed = assert(io.open(companion, "a"))
+                        assert(changed:write(
+                            "/* changed generated bytes */\n"))
+                        assert(changed:close())
+                        aliases = {}
+                        local changed_ast = assert(h.parse(code))
+                        local changed_modtype = check(changed_ast)
+                        local second_alias = aliases[#aliases]
+                        assert.is_table(second_alias)
+
+                        local service = assert(
+                            driver.get_probe_service(probe_session))
+                        local first_context, first_context_error =
+                            service:module_context({
+                                source_dir = ".",
+                                includes = { first_alias },
+                            })
+                        assert.truthy(first_context, first_context_error)
+                        local second_context, second_context_error =
+                            service:module_context({
+                                source_dir = ".",
+                                includes = { second_alias },
+                            })
+                        assert.truthy(second_context, second_context_error)
+                        return {
+                            modtype = modtype,
+                            changed_ast = changed_ast,
+                            changed_modtype = changed_modtype,
+                            first_alias = first_alias,
+                            second_alias = second_alias,
+                            first_header_key = first_context.header_key,
+                            second_header_key = second_context.header_key,
+                        }
+                    end)
+                    cdriver.process_file = original_process_file
+                    cprobe.source_foreign_include_alias =
+                        original_source_foreign_include_alias
+                    assert.truthy(exercised, result)
+                    assert.is_table(result.modtype)
+                    assert.is_table(result.changed_modtype)
+                    assert.is_false(parsed_companion)
+                    assert.is_string(result.first_header_key)
+                    assert.is_string(result.second_header_key)
+                    assert.not_equal(result.first_header_key,
+                        result.second_header_key)
+                    assert.equal("Type.Integer",
+                        ast[3].block.stats[1].exps[1]._type._tag)
+                    assert.is_true(ast[1]._foreign_header_for_check)
+                    assert.equal(provider_header .. ".titan.h",
+                        ast[1]._foreign_header_probe_identity)
+                    local inputs = {}
+                    for _, input in ipairs(ast._c_header_dependencies) do
+                        inputs[input.path] = true
+                    end
+                    assert.is_true(inputs[provider_header])
+                    assert.is_true(inputs[consumer_header])
+                    assert.is_nil(inputs[companion])
+                    local first_generated =
+                        result.first_alias.c_header_dependencies[1]
+                    local second_generated =
+                        result.second_alias.c_header_dependencies[1]
+                    assert.equal(provider_header .. ".titan.h",
+                        first_generated.path)
+                    assert.is_false(first_generated.restat)
+                    assert.match("^c%-header%-generated%-v1:sha256:[0-9a-f]+$",
+                        first_generated.identity)
+                    assert.not_equal(first_generated.identity,
+                        second_generated.identity)
+                end)
+            end)
+        end)
+    end)
+
+    it("seeds a source-only consumer with configured preprocessor macros",
+    function()
+        local previous_cppflags = driver.EXTRA_CPPFLAGS
+        local configured = {}
+        for _, flag in ipairs(previous_cppflags or {}) do
+            configured[#configured + 1] = flag
+        end
+        configured[#configured + 1] =
+            "-DFFI_CONFIG_FIELD=nested.value"
+
+        local session
+        driver.EXTRA_CPPFLAGS = configured
+        local exercised, result = xpcall(function()
+            session = driver.new_resolver_context()
+            with_header([[
+                typedef int ffi_config_int;
+                typedef struct ffi_config_nested {
+                    ffi_config_int value;
+                } ffi_config_nested;
+                typedef struct ffi_config_item {
+                    ffi_config_nested nested;
+                } ffi_config_item;
+            ]], function(header)
+                local provider_code =
+                    'local c = foreign import "' .. header .. [["
+                    local type Item = *c.ffi_config_item
+                    local type Int = c.ffi_config_int
+                    foreign function noop(): ()
+                        return
+                    end
+                ]]
+                local provider_ok, provider_error, _, provider =
+                    h.run_checker(provider_code, session)
+                assert.truthy(provider_ok, provider_error)
+                assert.is_nil(
+                    provider._source_c_context.macro_changes.FFI_CONFIG_FIELD)
+                assert.is_table(
+                    provider._source_c_context.macro_definitions.FFI_CONFIG_FIELD)
+
+                with_header('#include "' .. header .. '"\n',
+                function(companion)
+                    local code = [[
+                        local provider = import "provider.titan"
+                        foreign function observed(
+                            item: provider.Item
+                        ): provider.Int
+                            return item.FFI_CONFIG_FIELD
+                        end
+                    ]]
+                    local ast = assert(h.parse(code))
+                    local loader = function(name)
+                        assert.equal("provider", name)
+                        return true, provider, {}, {
+                            kind = "source",
+                            foreign_header = companion,
+                            foreign_header_for_check = true,
+                            foreign_header_probe_identity =
+                                header .. ".titan.h",
+                        }
+                    end
+                    types.registry = {}
+                    driver.imported = {}
+                    local _, errors = checker.check(
+                        "consumer", ast, code, "consumer.titan", loader, {
+                            probe_service_provider = function()
+                                return driver.get_probe_service(session)
+                            end,
+                        })
+                    assert.equal(0, #errors, table.concat(errors, "\n"))
+                    local projected = ast[2].block.stats[1].exps[1]
+                    assert.equal("Type.CInteger",
+                        types.resolve_c_typedef(projected._type)._tag)
+                    assert.same({ "nested", "value" },
+                        projected.var._decl._macro_projection.path)
+                end)
+            end)
+            return true
+        end, debug.traceback)
+
+        local closed, close_error = true, nil
+        if session then
+            closed, close_error = driver.close_resolver_context(session)
+        end
+        driver.EXTRA_CPPFLAGS = previous_cppflags
+        local restore_context = driver.new_resolver_context()
+        local restored, restore_error =
+            driver.configure_foreign_c(restore_context)
+        local restore_closed, restore_close_error =
+            driver.close_resolver_context(restore_context)
+        assert.truthy(closed, close_error)
+        assert.truthy(restored, restore_error)
+        assert.truthy(restore_closed, restore_close_error)
+        assert.truthy(exercised, result)
+    end)
+
+    it("stabilizes nested generated header identities across resolvers",
+    function()
+        local base = os.tmpname()
+        os.remove(base)
+        local filenames = {
+            leaf = base .. "-leaf.titan",
+            middle = base .. "-middle.titan",
+            root = base .. "-root.titan",
+        }
+        local sources = {
+            leaf = [[
+                foreign function leaf(): ()
+                    return
+                end
+            ]],
+            middle = [[
+                local leaf = import "leaf.titan"
+                foreign function middle(): ()
+                    return
+                end
+            ]],
+            root = [[
+                local middle = import "middle.titan"
+                local function ready(): boolean
+                    return true
+                end
+            ]],
+        }
+
+        local function analyze()
             types.registry = {}
             driver.imported = {}
-            local _, errors = checker.check(
-                "consumer", ast, code, "consumer.titan", loader)
-            assert.equal(0, #errors, table.concat(errors, "\n"))
-            assert.equal("Type.Integer", ast[3].block.stats[1].exps[1]._type._tag)
-            assert.is_true(ast[1]._foreign_header_for_check)
-            assert.equal(header .. ".public",
-                ast[1]._foreign_header_probe_identity)
-        end)
+            local overrides = {}
+            for name, filename in pairs(filenames) do
+                overrides[name] = {
+                    kind = "flat",
+                    main = filename,
+                    native_output = filename,
+                    files = { filename },
+                    contents = { [filename] = sources[name] },
+                }
+            end
+            local context = driver.new_resolver_context()
+            local loader = driver.defaultloader({}, {
+                context = context,
+                source_roots = { root = true },
+                source_overrides = overrides,
+            })
+            local exercised, observed = xpcall(function()
+                local ok, _, errors = loader("root")
+                assert.truthy(ok)
+                assert.equal(0, #errors, table.concat(errors, "\n"))
+                local import = driver.imported.root.ast[1]
+                local include = import._source_foreign_include
+                assert.is_table(include)
+                local generated = include.c_header_dependencies[1]
+                assert.is_table(generated)
+                local service = assert(driver.get_probe_service(context))
+                local module_context, context_error =
+                    service:module_context({
+                        source_dir = base:match("^(.*)/") or ".",
+                        includes = { include },
+                    })
+                assert.truthy(module_context, context_error)
+                return {
+                    physical = import._foreign_header,
+                    identity = generated.identity,
+                    header_key = module_context.header_key,
+                }
+            end, debug.traceback)
+            local loader_closed, loader_close_error =
+                driver.close_loader(loader)
+            local context_closed, context_close_error =
+                driver.close_resolver_context(context)
+            assert.truthy(loader_closed, loader_close_error)
+            assert.truthy(context_closed, context_close_error)
+            assert.truthy(exercised, observed)
+            return observed
+        end
+
+        local first = analyze()
+        local second = analyze()
+        assert.not_equal(first.physical, second.physical)
+        assert.match("^c%-header%-generated%-v1:sha256:[0-9a-f]+$",
+            first.identity)
+        assert.equal(first.identity, second.identity)
+        assert.equal(first.header_key, second.header_key)
     end)
 
     it("keeps source foreign members direct-only and out of compiled interfaces",

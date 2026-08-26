@@ -447,6 +447,75 @@ describe("C FFI cdriver", function()
             cdriver._set_process_cache_limits_for_test()
         end)
 
+        it("traces one complete top-level duration per returned request",
+        function()
+            cdriver.clear_process_cache()
+            local header = tmp_header(
+                "typedef int titan_process_total_type;\n")
+            local stable_identity = "/project/provider.titan.h"
+            local totals = {}
+            local options = {
+                compiler_include_dirs = {},
+                process_trace_identity = stable_identity,
+                process_trace = function(
+                        requested, resolved, phase, outcome, cpu_ms, identity)
+                    if phase == "process_total" then
+                        totals[#totals + 1] = {
+                            requested = requested,
+                            resolved = resolved,
+                            outcome = outcome,
+                            cpu_ms = cpu_ms,
+                            identity = identity,
+                        }
+                    end
+                end,
+            }
+
+            assert_process_file(header, options)
+            assert_process_file(header, options)
+            assert.equal(2, #totals)
+            for _, total in ipairs(totals) do
+                assert.equal(header, total.requested)
+                assert.equal(header, total.resolved)
+                assert.equal("complete", total.outcome)
+                assert.is_true(total.cpu_ms >= 0)
+                assert.equal(stable_identity, total.identity)
+            end
+
+            local failed = {}
+            local missing = header .. ".missing"
+            local processed, process_error = cdriver.process_file(missing, {
+                compiler_include_dirs = {},
+                process_trace = function(
+                        _, _, phase, outcome, cpu_ms, identity)
+                    if phase == "process_total" then
+                        failed[#failed + 1] = {
+                            outcome = outcome,
+                            cpu_ms = cpu_ms,
+                            identity = identity,
+                        }
+                    end
+                end,
+            })
+            assert.is_nil(processed)
+            assert.is_string(process_error)
+            assert.equal(1, #failed)
+            assert.equal("failed", failed[1].outcome)
+            assert.is_true(failed[1].cpu_ms >= 0)
+            assert.equal(missing, failed[1].identity)
+
+            local traced = assert_process_file(header, {
+                compiler_include_dirs = {},
+                process_trace = function(_, _, phase)
+                    if phase == "process_total" then
+                        error("telemetry sink failure")
+                    end
+                end,
+            })
+            assert.is_table(traced)
+            os.remove(header)
+        end)
+
         it("rejects forged analysis reuse authorities", function()
             cdriver.clear_process_cache()
             local header = tmp_header(

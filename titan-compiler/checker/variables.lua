@@ -144,6 +144,12 @@ checkvar = util.make_visitor({
             local module_member = ltype._tag == "Type.Module"
                 and types.module_member(mod, node.name, include_source)
                 or mod.members[node.name]
+            local type_member, type_member_islocal
+            if ltype._tag == "Type.Module" then
+                type_member, type_member_islocal =
+                    types.module_type_member(
+                        mod, node.name, include_source)
+            end
             if module_member then
                 node._decl = module_member
                 node._type = node._decl.type
@@ -168,25 +174,21 @@ checkvar = util.make_visitor({
                 }
                 node._type = node._decl.type
                 node._ctype_namespace = true
-            elseif ltype._tag == "Type.Module"
-                   and types.module_type_member(
-                       mod, node.name, include_source) then
-                local member = types.module_type_member(
-                    mod, node.name, include_source)
-                local namespace = alias_namespace_type(member, st)
+            elseif type_member then
+                local namespace = alias_namespace_type(type_member, st)
                 if namespace then
                     generic_annotate_alias_namespace(
-                        node, member, namespace)
-                    node._alias_type = member
+                        node, type_member, namespace)
+                    node._alias_type = type_member
                     node._decl = {
                         _tag = "Checker.TypeMember",
                         modname = mod.name,
                         name = node.name,
-                        type = member,
-                        islocal = member.islocal and true or false,
+                        type = type_member,
+                        islocal = type_member_islocal,
                     }
                     node._type = namespace
-                elseif member._tag == "Type.Interface" then
+                elseif type_member._tag == "Type.Interface" then
                     node._type = invalid(errors, node.loc,
                         "interface '%s' is a type and has no runtime value",
                         node.name)

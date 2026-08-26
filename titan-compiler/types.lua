@@ -846,10 +846,16 @@ function types.module_member(modtype, name, include_source)
             and modtype.source_members[name])
 end
 
+-- The second result identifies the namespace view which supplied the member.
+-- Transparent aliases can resolve to a type with no declaration-locality
+-- field, so callers must not infer source visibility from the target itself.
 function types.module_type_member(modtype, name, include_source)
-    return (modtype.type_members and modtype.type_members[name])
-        or (include_source and modtype.source_type_members
-            and modtype.source_type_members[name])
+    local member = modtype.type_members and modtype.type_members[name]
+    if member then return member, false end
+    member = include_source and modtype.source_type_members
+        and modtype.source_type_members[name]
+    if member then return member, true end
+    return nil, false
 end
 
 -- Preserve cycles and sharing while isolating mutable checker inputs. Foreign

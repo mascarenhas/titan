@@ -3,6 +3,7 @@ local assert = require "luassert"
 
 local driver = require "titan-compiler.driver"
 local compiler_io = require "titan-compiler.io"
+local cprobe = require "titan-compiler.cprobe"
 local coder = require "titan-compiler.coder"
 local sourceinterface = require "titan-compiler.sourceinterface"
 local staticmetadata = require "titan-compiler.staticmetadata"
@@ -281,6 +282,22 @@ describe("compiler installation discovery", function()
             "foreign C configuration requires a resolver context")
         assert.has_error(function() driver.new_resolver_context("invalid") end,
             "resolver context options must be a table")
+        assert.has_error(function()
+            driver.new_resolver_context({
+                source_process_trace = true,
+            })
+        end, "source_process_trace must be a function")
+        assert.has_error(function()
+            driver.new_resolver_context({
+                source_process_trace = function() end,
+                c_header_process_trace = true,
+            })
+        end, "c_header_process_trace must be a function")
+        assert.has_error(function()
+            driver.new_resolver_context({
+                c_probe_cache_trace = true,
+            })
+        end, "c_probe_cache_trace must be a function")
         assert.has_error(function()
             driver.new_resolver_context({
                 extra_ffi_include_dirs = "invalid",
@@ -2857,6 +2874,57 @@ end
         assert.not_equal(first, second)
     end)
 
+    it("attributes persistent probe cache lookups to the checking source module",
+    function()
+        write_file(source .. "/provider.h", "typedef int provider_int;\n")
+        write_file(source .. "/provider.titan", [[
+            local c = foreign import "provider.h"
+            foreign function identity(input: c.provider_int): c.provider_int
+                return input
+            end
+        ]])
+        local cache = root .. "/probe-cache"
+        assert(lfs.mkdir(cache))
+        local events = {}
+        local context = driver.new_resolver_context({
+            c_probe_cache_trace = function(
+                    module_name, stage, hit, key, path)
+                events[#events + 1] = {
+                    module_name = module_name,
+                    stage = stage,
+                    hit = hit,
+                    key = key,
+                    path = path,
+                }
+            end,
+        })
+        local previous_cache = driver.PROBE_CACHE_DIRECTORY
+        driver.PROBE_CACHE_DIRECTORY = cache
+        local loader = driver.defaultloader({}, {
+            context = context,
+            source_roots = { provider = true },
+        })
+        local called, ok, _, errors = pcall(loader, "provider")
+        local closed, close_error = driver.close_loader(loader)
+        local context_closed, context_close_error =
+            driver.close_resolver_context(context)
+        driver.PROBE_CACHE_DIRECTORY = previous_cache
+
+        assert.truthy(called, ok)
+        assert.truthy(ok)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.truthy(closed, close_error)
+        assert.truthy(context_closed, context_close_error)
+        assert.is_true(#events > 0)
+        for _, event in ipairs(events) do
+            assert.equal("provider", event.module_name)
+            assert.is_string(event.stage)
+            assert.is_boolean(event.hit)
+            assert.matches("^[0-9a-f]+$", event.key)
+            assert.matches(cache, event.path, 1, true)
+        end
+    end)
+
     it("cleans a source checking header when normalization is cancelled",
     function()
         write_file(source .. "/provider.h", "typedef int provider_int;\n")
@@ -2918,10 +2986,25 @@ end
         ]])
 
         local loader
+        local parsed_generated_headers = {}
         local ran, failure = pcall(function()
             driver.TITAN_SOURCE_PATH = relative_root
             loader = driver.defaultloader({}, {
                 source_roots = { ["b.consumer"] = true },
+                source_process_trace = function() end,
+                c_header_process_trace = function(
+                        requested, resolved, phase, outcome, cpu_ms, identity)
+                    if phase == "process_total" and
+                       requested:find(".titan.h.check.tmp.", 1, true) then
+                        parsed_generated_headers[#parsed_generated_headers + 1] = {
+                            requested = requested,
+                            resolved = resolved,
+                            outcome = outcome,
+                            cpu_ms = cpu_ms,
+                            identity = identity,
+                        }
+                    end
+                end,
             })
             local ok, _, errors = loader("b.consumer")
             assert.truthy(ok)
@@ -2935,6 +3018,7 @@ end
             assert.equal(cwd .. "/" .. relative_root ..
                 "/a/provider.titan.h",
                 import._foreign_header_probe_identity)
+            assert.equal(0, #parsed_generated_headers)
             assert.is_true(driver.close_loader(loader))
             loader = nil
             assert.is_nil(lfs.symlinkattributes(physical))
@@ -3654,6 +3738,198 @@ end
         assert.is_true(driver.close_resolver_context(context))
     end)
 
+    it("reports exclusive parse, check, and other source process CPU",
+    function()
+        local parser = require "titan-compiler.parser"
+        local checker = require "titan-compiler.checker"
+        local main_filename = root .. "/exclusive-source-profile.titan"
+        local part_filename = root .. "/exclusive-source-profile-part.titan"
+        write_file(main_filename, [[
+            function answer(): integer return 42 end
+        ]])
+        write_file(part_filename, [[
+            function extra(): integer return 1 end
+        ]])
+
+        local now = 0
+        local strategy = compiler_io.new_sync()
+        local read_file = strategy.read_file
+        function strategy:read_file(path)
+            local contents, read_error = read_file(self, path)
+            if path == main_filename or path == part_filename then
+                now = now + 0.002
+            end
+            return contents, read_error
+        end
+
+        local phases = {}
+        local profiles = {}
+        local context = driver.new_resolver_context({
+            io = strategy,
+            c_header_process_trace = function(
+                    _, _, phase, _, cpu_ms)
+                phases[#phases + 1] = {
+                    phase = phase,
+                    cpu_ms = cpu_ms,
+                }
+            end,
+            source_process_trace = function(
+                    module_name, traced_filename, outcome,
+                    self_cpu_ms, total_cpu_ms,
+                    parse_cpu_ms, check_cpu_ms)
+                profiles[#profiles + 1] = {
+                    module_name = module_name,
+                    filename = traced_filename,
+                    outcome = outcome,
+                    self_cpu_ms = self_cpu_ms,
+                    total_cpu_ms = total_cpu_ms,
+                    parse_cpu_ms = parse_cpu_ms,
+                    check_cpu_ms = check_cpu_ms,
+                }
+            end,
+        })
+        local loader = driver.defaultloader({}, {
+            context = context,
+            source_roots = { profiled = true },
+            source_overrides = {
+                profiled = {
+                    kind = "folder",
+                    main = main_filename,
+                    files = { main_filename, part_filename },
+                    native_output = main_filename,
+                },
+            },
+        })
+
+        local real_clock = os.clock
+        local original_parse = parser.parse
+        local original_check = checker.check
+        local parsed_files = {}
+        os.clock = function() return now end
+        parser.parse = function(filename, input)
+            local results = table.pack(original_parse(filename, input))
+            if filename == main_filename then
+                now = now + 0.004
+                parsed_files[#parsed_files + 1] = filename
+            elseif filename == part_filename then
+                now = now + 0.006
+                parsed_files[#parsed_files + 1] = filename
+            end
+            return table.unpack(results, 1, results.n)
+        end
+        checker.check = function(module_name, ...)
+            if module_name == "profiled" then
+                -- Fifty milliseconds are checker CPU. The remaining fifty
+                -- are complete header processing and downstream conversion;
+                -- their component phases are informational and must not be
+                -- subtracted from the check or source frame again.
+                now = now + 0.040
+                context.c_header_process_trace(
+                    "profile.h", "/profile.h", "preprocessing",
+                    "complete", 7, "/profile.h")
+                context.c_header_process_trace(
+                    "profile.h", "/profile.h", "c_parse",
+                    "complete", 8, "/profile.h")
+                now = now + 0.020
+                context.c_header_process_trace(
+                    "profile.h", "/profile.h", "process_total",
+                    "complete", 20, "/profile.h")
+                now = now + 0.030
+                context.c_header_process_trace(
+                    "profile.h", "/profile.h",
+                    "downstream_ffi_conversion",
+                    "complete", 30, "/profile.h")
+            end
+            local results = table.pack(original_check(module_name, ...))
+            if module_name == "profiled" then now = now + 0.010 end
+            return table.unpack(results, 1, results.n)
+        end
+        local exercised, ok, _, errors = pcall(loader, "profiled")
+        checker.check = original_check
+        parser.parse = original_parse
+        os.clock = real_clock
+
+        local loader_closed, loader_close_error =
+            driver.close_loader(loader)
+        local context_closed, context_close_error =
+            driver.close_resolver_context(context)
+        assert.truthy(loader_closed, loader_close_error)
+        assert.truthy(context_closed, context_close_error)
+        assert.truthy(exercised, ok)
+        assert.truthy(ok)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.same({ main_filename, part_filename }, parsed_files)
+        assert.same({
+            { phase = "preprocessing", cpu_ms = 7 },
+            { phase = "c_parse", cpu_ms = 8 },
+            { phase = "process_total", cpu_ms = 20 },
+            { phase = "downstream_ffi_conversion", cpu_ms = 30 },
+        }, phases)
+        assert.equal(1, #profiles)
+        assert.equal("profiled", profiles[1].module_name)
+        assert.equal(main_filename, profiles[1].filename)
+        assert.equal("complete", profiles[1].outcome)
+        assert.is_true(math.abs(profiles[1].total_cpu_ms - 114) < 0.0001)
+        assert.is_true(math.abs(profiles[1].self_cpu_ms - 64) < 0.0001)
+        -- Folder parse time is the sum of both constituents (4 + 6), check
+        -- time excludes both terminal header phases (100 - 20 - 30), and the
+        -- remainder is the two source reads (2 + 2).
+        assert.is_true(math.abs(profiles[1].parse_cpu_ms - 10) < 0.0001)
+        assert.is_true(math.abs(profiles[1].check_cpu_ms - 50) < 0.0001)
+        local other_cpu_ms = profiles[1].self_cpu_ms -
+            profiles[1].parse_cpu_ms - profiles[1].check_cpu_ms
+        assert.is_true(math.abs(other_cpu_ms - 4) < 0.0001)
+    end)
+
+    it("reports zero parse and check CPU for pre-parse source failures",
+    function()
+        local filename = root .. "/missing-generated-contents.titan"
+        local profiles = {}
+        local context = driver.new_resolver_context({
+            source_process_trace = function(
+                    module_name, traced_filename, outcome,
+                    self_cpu_ms, total_cpu_ms,
+                    parse_cpu_ms, check_cpu_ms)
+                profiles[#profiles + 1] = {
+                    module_name = module_name,
+                    filename = traced_filename,
+                    outcome = outcome,
+                    self_cpu_ms = self_cpu_ms,
+                    total_cpu_ms = total_cpu_ms,
+                    parse_cpu_ms = parse_cpu_ms,
+                    check_cpu_ms = check_cpu_ms,
+                }
+            end,
+        })
+        local loader = driver.defaultloader({}, {
+            context = context,
+            source_roots = { missing_contents = true },
+            source_overrides = {
+                missing_contents = {
+                    kind = "generated",
+                    main = filename,
+                    files = { filename },
+                    contents = {},
+                },
+            },
+        })
+
+        local ok, message = loader("missing_contents")
+        assert.falsy(ok)
+        assert.match("generated source has no contents", message, 1, true)
+        assert.equal(1, #profiles)
+        assert.equal("missing_contents", profiles[1].module_name)
+        assert.equal(filename, profiles[1].filename)
+        assert.equal("failed", profiles[1].outcome)
+        assert.equal(0, profiles[1].parse_cpu_ms)
+        assert.equal(0, profiles[1].check_cpu_ms)
+        assert.is_true(profiles[1].self_cpu_ms >= 0)
+        assert.is_true(
+            profiles[1].self_cpu_ms <= profiles[1].total_cpu_ms)
+        assert.is_true(driver.close_loader(loader))
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
     it("rehydrates cached project foreign headers per resolver", function()
         local provider_filename = root .. "/ffi-provider-generated.titan"
         local provider_loader = driver.defaultloader({}, {
@@ -3690,7 +3966,23 @@ end
         driver.imported = {}
         types.registry = {}
         local consumer_filename = root .. "/ffi-consumer-generated.titan"
-        local context = driver.new_resolver_context()
+        local profiles = {}
+        local context = driver.new_resolver_context({
+            source_process_trace = function(
+                    module_name, filename, outcome,
+                    self_cpu_ms, total_cpu_ms,
+                    parse_cpu_ms, check_cpu_ms)
+                profiles[#profiles + 1] = {
+                    module_name = module_name,
+                    filename = filename,
+                    outcome = outcome,
+                    self_cpu_ms = self_cpu_ms,
+                    total_cpu_ms = total_cpu_ms,
+                    parse_cpu_ms = parse_cpu_ms,
+                    check_cpu_ms = check_cpu_ms,
+                }
+            end,
+        })
         local consumer_loader = driver.defaultloader({}, {
             context = context,
             source_roots = { ffi_consumer = true },
@@ -3724,6 +4016,21 @@ end
         assert.same({ "ffi_consumer" }, context.checked_source_modules)
         assert.equal(fresh_header,
             driver.imported.ffi_consumer.ast[1]._foreign_header)
+        assert.equal(2, #profiles)
+        assert.equal("ffi_provider", profiles[1].module_name)
+        assert.equal(provider_filename, profiles[1].filename)
+        assert.equal("complete", profiles[1].outcome)
+        assert.is_true(
+            profiles[1].self_cpu_ms <= profiles[1].total_cpu_ms)
+        assert.equal(0, profiles[1].parse_cpu_ms)
+        assert.equal(0, profiles[1].check_cpu_ms)
+        assert.equal("ffi_consumer", profiles[2].module_name)
+        assert.equal(consumer_filename, profiles[2].filename)
+        assert.equal("complete", profiles[2].outcome)
+        assert.is_true(
+            profiles[2].self_cpu_ms <= profiles[2].total_cpu_ms)
+        assert.is_true(profiles[2].parse_cpu_ms >= 0)
+        assert.is_true(profiles[2].check_cpu_ms >= 0)
         assert.is_true(driver.close_loader(consumer_loader))
         assert.is_true(driver.close_resolver_context(context))
         assert.is_nil(lfs.symlinkattributes(fresh_header))
@@ -3735,11 +4042,28 @@ end
         local main_filename = root .. "/main-generated.titan"
         local strategy = compiler_io.new_sync()
         local yielded_modules = {}
+        local profiles = {}
         function strategy:yield(module_name)
             yielded_modules[#yielded_modules + 1] = module_name
             coroutine.yield()
         end
-        local context = driver.new_resolver_context({ io = strategy })
+        local context = driver.new_resolver_context({
+            io = strategy,
+            source_process_trace = function(
+                    module_name, filename, outcome,
+                    self_cpu_ms, total_cpu_ms,
+                    parse_cpu_ms, check_cpu_ms)
+                profiles[#profiles + 1] = {
+                    module_name = module_name,
+                    filename = filename,
+                    outcome = outcome,
+                    self_cpu_ms = self_cpu_ms,
+                    total_cpu_ms = total_cpu_ms,
+                    parse_cpu_ms = parse_cpu_ms,
+                    check_cpu_ms = check_cpu_ms,
+                }
+            end,
+        })
         local loader = driver.defaultloader({}, {
             context = context,
             source_roots = { main = true },
@@ -3777,17 +4101,48 @@ end
         assert.equal("suspended", coroutine.status(thread))
         assert.same({ "dep" }, context.checked_source_modules)
         assert.same({ "dep" }, yielded_modules)
+        assert.equal(1, #profiles)
+        assert.equal("dep", profiles[1].module_name)
+        assert.equal(dep_filename, profiles[1].filename)
+        assert.equal("complete", profiles[1].outcome)
+        assert.is_true(profiles[1].self_cpu_ms >= 0)
+        assert.is_true(
+            profiles[1].self_cpu_ms <= profiles[1].total_cpu_ms)
         assert.is_table(driver.imported.dep.ast)
         assert.equal("Ast.TopLevelFunc", driver.imported.dep.ast[1]._tag)
         assert.equal(dep_filename,
             driver.imported.dep.ast[1].loc.filename)
         assert.same({ dep_filename }, driver.imported.dep.source_files)
 
+        -- The importer frame remains live while the dependency checkpoint is
+        -- suspended. Advance the process clock by a deterministic two seconds
+        -- to model unrelated Task CPU; it must be excluded from main's self
+        -- attribution when the source-check Task resumes.
+        local real_clock = os.clock
+        local resumed_clock = real_clock() + 2
+        os.clock = function() return resumed_clock end
         resumed, yielded = coroutine.resume(thread)
+        os.clock = real_clock
         assert.truthy(resumed, yielded)
         assert.is_nil(yielded)
         assert.same({ "dep", "main" }, context.checked_source_modules)
         assert.same({ "dep", "main" }, yielded_modules)
+        assert.equal(2, #profiles)
+        assert.equal("main", profiles[2].module_name)
+        assert.equal(main_filename, profiles[2].filename)
+        assert.equal("complete", profiles[2].outcome)
+        assert.is_true(profiles[2].self_cpu_ms >= 0)
+        assert.is_true(
+            profiles[2].self_cpu_ms <= profiles[2].total_cpu_ms)
+        assert.is_true(profiles[2].parse_cpu_ms >= 0)
+        assert.is_true(profiles[2].check_cpu_ms >= 0)
+        -- The parent checker was suspended for two seconds after its source
+        -- child completed. That checkpoint delta is excluded from check CPU
+        -- as well as from the enclosing source self attribution.
+        assert.is_true(profiles[2].check_cpu_ms < 1900)
+        assert.is_true(
+            profiles[2].total_cpu_ms - profiles[1].total_cpu_ms -
+                profiles[2].self_cpu_ms > 1900)
         assert.is_table(driver.imported.main.ast)
 
         local ok, modtype, errors
