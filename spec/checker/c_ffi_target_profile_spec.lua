@@ -80,6 +80,70 @@ describe("direct-checker target profiles", function()
         assert.truthy(ok, failure)
     end)
 
+    it("preserves checker- and toolchain-owned I/O strategies", function()
+        local header = os.tmpname() .. ".h"
+        local file = assert(io.open(header, "w"))
+        assert(file:write(
+            "#define TITAN_PROFILE_VALUE 0xffffffffU\n"))
+        assert(file:close())
+
+        local failure
+        for _, mode in ipairs({ "io", "toolchain-io" }) do
+            local command = shell_command({
+                lua_executable(),
+                "spec/support/direct_checker_profile.lua",
+                header,
+                mode,
+            })
+            local pipe = assert(io.popen(command .. " 2>&1", "r"))
+            local output = assert(pipe:read("*a"))
+            local ok, why, status = pipe:close()
+            if not ok then
+                failure = ("%s (%s %s)"):format(
+                    output, tostring(why), tostring(status))
+                break
+            end
+            assert.matches("direct%-checker%-io%-strategy%-ok", output)
+        end
+        os.remove(header)
+
+        assert.is_nil(failure, failure)
+    end)
+
+    it("forwards an injected runner to a direct checker probe service",
+       function()
+        local checker = require "titan-compiler.checker"
+        local core = require "titan-compiler.checker.core"
+
+        local runner = function() end
+        local captured
+        local service = { profile = { identity = "test-profile" } }
+        local original_options = core.foreign_c_options
+        local original_config_error = core.foreign_c_config_error
+        local original_new_service = core.cprobe.new_service
+        local ok, failure = xpcall(function()
+            checker.configure_foreign_c({
+                toolchain = {
+                    profile = service.profile,
+                    profile_identity = "runner-forwarding-profile",
+                },
+                probe_runner = runner,
+            })
+            core.cprobe.new_service = function(options)
+                captured = options
+                return service
+            end
+
+            assert.equal(service, core.new_direct_probe_service())
+            assert.equal(runner, captured.runner)
+        end, debug.traceback)
+
+        core.cprobe.new_service = original_new_service
+        checker.configure_foreign_c(
+            original_options, original_config_error)
+        assert.truthy(ok, failure)
+    end)
+
     it("parses headers with an injected service's exact toolchain",
        function()
         local checker = require "titan-compiler.checker"

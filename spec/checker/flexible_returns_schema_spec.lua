@@ -96,25 +96,21 @@ describe("flexible return schemas (typechecker)", function()
             typedef int ffi_int;
             typedef ffi_int *ffi_int_ptr;
         ]], function(header)
-            local pointer_errs = check_errs([[
+            local errs = check_errs([[
                 local c = foreign import "]] .. header .. [["
-                function bad(): (...: c.ffi_int_ptr)
+                function bad_pointer(): (...: c.ffi_int_ptr)
+                end
+                function bad_scalar(): (...: c.ffi_int)
                 end
             ]])
-            assert.truthy(#pointer_errs >= 1)
+            assert.truthy(#errs >= 2)
+            local joined = table.concat(errs, "\n")
             assert.match("flexible return cannot have a foreign pointer type",
-                pointer_errs[1])
-
-            local scalar_errs = check_errs([[
-                local c = foreign import "]] .. header .. [["
-                function bad(): (...: c.ffi_int)
-                end
-            ]])
-            assert.truthy(#scalar_errs >= 1)
+                joined)
             assert.match("flexible return cannot use type ffi_int",
-                scalar_errs[1])
+                joined)
             assert.match("no supported variadic%-value representation",
-                scalar_errs[1])
+                joined)
         end)
     end)
 

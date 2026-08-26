@@ -7,6 +7,18 @@
 local h = require 'spec.support.helpers'
 local check_errs = h.check_errs
 
+local function with_header(contents, fn)
+    local header = os.tmpname() .. ".h"
+    local file = assert(io.open(header, "w"))
+    assert(file:write(contents))
+    assert(file:close())
+
+    local results = table.pack(pcall(fn, header))
+    os.remove(header)
+    if not results[1] then error(results[2], 0) end
+    return table.unpack(results, 2, results.n)
+end
+
 describe("first-class function values (typechecker)", function()
 
     it("accepts a function-type annotation", function()
@@ -69,12 +81,14 @@ describe("first-class function values (typechecker)", function()
     end)
 
     it("rejects a foreign (C) function used as a value", function()
-        local errs = check_errs([[
-            local m = foreign import "math.h"
-            function g(): value
-                return m.sqrt
-            end
-        ]])
-        assert.truthy(#errs >= 1)
+        with_header("extern double ffi_sqrt(double value);\n", function(header)
+            local errs = check_errs([[
+                local m = foreign import "]] .. header .. [["
+                function g(): value
+                    return m.ffi_sqrt
+                end
+            ]])
+            assert.truthy(#errs >= 1)
+        end)
     end)
 end)

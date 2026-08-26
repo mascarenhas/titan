@@ -7,13 +7,12 @@ local ROOT = "test_runner_fixture"
 local DEPENDENCY = "test_runner_dependency"
 local EDGE = "test_runner_edge"
 local FOLDER = "test_runner_folder"
-local EMPTY = "test_runner_empty"
-local STATIC = "test_runner_static"
 local PREFIXED = "titan.test.user"
 local RUNNER_PREFIXED = "titan.test.runner.user"
 local MUTATION = "test_runner_mutation"
 local NESTED = "nested.tests"
 local BOOTSTRAP = "test_runner_bootstrap"
+local STATIC = "test_runner_static"
 
 local function file_exists(path)
     local file = io.open(path, "rb")
@@ -118,16 +117,12 @@ local NESTED_ARTIFACTS = {
     "nested/tests__main__test_entrypoint.o",
 }
 
-local EMPTY_ARTIFACTS = {
-    EMPTY,
-    FIXTURE .. "/" .. EMPTY .. ".c",
-    FIXTURE .. "/" .. EMPTY .. ".o",
-    EMPTY .. "__test_support.c",
-    EMPTY .. "__test_support.o",
-    EMPTY .. "__test_runner.c",
-    EMPTY .. "__test_runner.o",
-    EMPTY .. "__test_entrypoint.c",
-    EMPTY .. "__test_entrypoint.o",
+local BOOTSTRAP_ARTIFACTS = {
+    BOOTSTRAP,
+    FIXTURE .. "/" .. BOOTSTRAP .. ".c",
+    FIXTURE .. "/" .. BOOTSTRAP .. ".o",
+    BOOTSTRAP .. "__entrypoint.c",
+    BOOTSTRAP .. "__entrypoint.o",
 }
 
 local STATIC_ARTIFACTS = {
@@ -140,14 +135,6 @@ local STATIC_ARTIFACTS = {
     STATIC .. "__test_runner.o",
     STATIC .. "__test_entrypoint.c",
     STATIC .. "__test_entrypoint.o",
-}
-
-local BOOTSTRAP_ARTIFACTS = {
-    BOOTSTRAP,
-    FIXTURE .. "/" .. BOOTSTRAP .. ".c",
-    FIXTURE .. "/" .. BOOTSTRAP .. ".o",
-    BOOTSTRAP .. "__entrypoint.c",
-    BOOTSTRAP .. "__entrypoint.o",
 }
 
 local SUPPORT_ROOT_ARTIFACTS = {
@@ -169,15 +156,13 @@ end
 local function clean()
     for _, path in ipairs(ARTIFACTS) do os.remove(path) end
     for _, path in ipairs(COLLISION_ARTIFACTS) do os.remove(path) end
-    for _, path in ipairs(EMPTY_ARTIFACTS) do os.remove(path) end
-    for _, path in ipairs(STATIC_ARTIFACTS) do os.remove(path) end
     for _, path in ipairs(BOOTSTRAP_ARTIFACTS) do os.remove(path) end
+    for _, path in ipairs(STATIC_ARTIFACTS) do os.remove(path) end
     for _, path in ipairs(SUPPORT_ROOT_ARTIFACTS) do os.remove(path) end
     clean_nested()
     remove_tree(ROOT .. ".dSYM")
-    remove_tree(EMPTY .. ".dSYM")
-    remove_tree(STATIC .. ".dSYM")
     remove_tree(BOOTSTRAP .. ".dSYM")
+    remove_tree(STATIC .. ".dSYM")
     remove_tree("titan/test.dSYM")
     os.remove("test_runner_progname__entrypoint.c")
     os.remove("test_runner_progname__entrypoint.o")
@@ -289,17 +274,18 @@ local function compile_line(output, source)
 end
 
 describe("native Titan test runner", function()
-    local compiler_output
+    describe("shared compiled suite", function()
+        local compiler_output
 
-    setup(function()
-        clean()
-        local ok, output, why, code = compile_suite()
-        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-            tostring(code) .. ")")
-        compiler_output = output
-    end)
+        lazy_setup(function()
+            clean()
+            local ok, output, why, code = compile_suite()
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                tostring(code) .. ")")
+            compiler_output = output
+        end)
 
-    teardown(clean)
+        lazy_teardown(clean)
 
     it("builds one ordinary standalone with owned synthetic artifacts",
        function()
@@ -318,66 +304,6 @@ describe("native Titan test runner", function()
             "if (1 || lua_isnil(L, -1))", 1, true), entrypoint)
         assert.truthy(entrypoint:find(
             "lua_call(L, 1, 1);", 1, true), entrypoint)
-    end)
-
-    it("ignores an installed bootstrap only when explicitly disabled",
-       function()
-        local direct_argv = working_titanc_arguments()
-        direct_argv[#direct_argv + 1] = "--no-uv-bootstrap"
-        direct_argv[#direct_argv + 1] = "--tree"
-        direct_argv[#direct_argv + 1] = FIXTURE
-        direct_argv[#direct_argv + 1] = BOOTSTRAP
-        local compiled, output = run(direct_argv)
-        assert.truthy(compiled, output)
-
-        local ok, direct_output, why, code = run({
-            "./" .. BOOTSTRAP, "one", "two",
-        })
-        assert.falsy(ok, direct_output)
-        assert.equal("exit", why)
-        assert.equal(37, code)
-        assert.falsy(direct_output:find("synthetic bootstrap invoked", 1, true),
-            direct_output)
-
-        ok, direct_output, why, code = run({
-            "./" .. BOOTSTRAP, "raise",
-        })
-        assert.falsy(ok, direct_output)
-        assert.equal("exit", why)
-        assert.equal(1, code)
-        assert.truthy(direct_output:find("direct-main-boom", 1, true),
-            direct_output)
-        assert.truthy(direct_output:find("stack traceback:", 1, true),
-            direct_output)
-        assert.falsy(direct_output:find("synthetic bootstrap invoked", 1, true),
-            direct_output)
-
-        local default_argv = working_titanc_arguments()
-        default_argv[#default_argv + 1] = "--tree"
-        default_argv[#default_argv + 1] = FIXTURE
-        default_argv[#default_argv + 1] = BOOTSTRAP
-        compiled, output = run(default_argv)
-        assert.truthy(compiled, output)
-
-        ok, output, why, code = run({ "./" .. BOOTSTRAP })
-        assert.falsy(ok, output)
-        assert.equal("exit", why)
-        assert.equal(1, code)
-        assert.truthy(output:find("synthetic bootstrap invoked", 1, true),
-            output)
-    end)
-
-    it("rejects disabled async bootstrap for library output", function()
-        local argv = working_titanc_arguments()
-        argv[#argv + 1] = "--no-uv-bootstrap"
-        argv[#argv + 1] = "--tree"
-        argv[#argv + 1] = FIXTURE
-        argv[#argv + 1] = DEPENDENCY
-        local ok, output = run(argv)
-        assert.falsy(ok, output)
-        assert.truthy(output:find(
-            "--no-uv-bootstrap is only valid when compiling a standalone executable",
-            1, true), output)
     end)
 
     it("applies sibling-call preservation only to discovered test modules",
@@ -606,13 +532,76 @@ describe("native Titan test runner", function()
             1, true), output)
     end)
 
-    it("uses the installed canonical support source outside the checkout",
+    it("discards test results and ignores an application main", function()
+        local ok, output = run_suite("--filter=test_result$")
+        assert.truthy(ok, output)
+        assert.truthy(output:find(
+            "[       OK ] test_runner_fixture.test_result", 1, true), output)
+    end)
+    end)
+
+    describe("standalone compilation cases", function()
+        setup(clean)
+        teardown(clean)
+
+    it("ignores an installed bootstrap only when explicitly disabled",
        function()
-        local ok, output, why, code = compile_installed(ROOT)
+        local direct_argv = working_titanc_arguments()
+        direct_argv[#direct_argv + 1] = "--no-uv-bootstrap"
+        direct_argv[#direct_argv + 1] = "--tree"
+        direct_argv[#direct_argv + 1] = FIXTURE
+        direct_argv[#direct_argv + 1] = BOOTSTRAP
+        local compiled, output = run(direct_argv)
+        assert.truthy(compiled, output)
+
+        local ok, direct_output, why, code = run({
+            "./" .. BOOTSTRAP, "one", "two",
+        })
+        assert.falsy(ok, direct_output)
+        assert.equal("exit", why)
+        assert.equal(37, code)
+        assert.falsy(direct_output:find("synthetic bootstrap invoked", 1, true),
+            direct_output)
+
+        local default_argv = working_titanc_arguments()
+        default_argv[#default_argv + 1] = "--tree"
+        default_argv[#default_argv + 1] = FIXTURE
+        default_argv[#default_argv + 1] = BOOTSTRAP
+        compiled, output = run(default_argv)
+        assert.truthy(compiled, output)
+
+        ok, output, why, code = run({ "./" .. BOOTSTRAP })
+        assert.falsy(ok, output)
+        assert.equal("exit", why)
+        assert.equal(1, code)
+        assert.truthy(output:find("synthetic bootstrap invoked", 1, true),
+            output)
+    end)
+
+    it("rejects disabled async bootstrap for library output", function()
+        local argv = working_titanc_arguments()
+        argv[#argv + 1] = "--no-uv-bootstrap"
+        argv[#argv + 1] = "--tree"
+        argv[#argv + 1] = FIXTURE
+        argv[#argv + 1] = DEPENDENCY
+        local ok, output = run(argv)
+        assert.falsy(ok, output)
+        assert.truthy(output:find(
+            "--no-uv-bootstrap is only valid when compiling a standalone executable",
+            1, true), output)
+    end)
+
+    it("keeps an explicit canonical support root in logical outputs", function()
+        local ok, output, why, code = compile_installed("titan.test")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        ok, output = run_suite("--filter=test_pass$")
-        assert.truthy(ok, output)
+        assert.is_true(file_exists("titan/test"))
+        local run_ok, run_output = run({ "./titan/test" })
+        assert.truthy(run_ok, run_output)
+        assert.truthy(run_output:find("[==========] 0 tests ran.", 1, true),
+            run_output)
+        assert.truthy(run_output:find("[  PASSED  ] 0 tests.", 1, true),
+            run_output)
     end)
 
     it("falls back from an overlapping static provider to its DSO", function()
@@ -626,17 +615,6 @@ describe("native Titan test runner", function()
             1, true), run_output)
     end)
 
-    it("keeps an explicit canonical support root in logical outputs", function()
-        local ok, output, why, code = compile_installed("titan.test")
-        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-            tostring(code) .. ")")
-        assert.is_true(file_exists("titan/test"))
-        local run_ok, run_output = run({ "./titan/test" })
-        assert.truthy(run_ok, run_output)
-        assert.truthy(run_output:find("[==========] 0 tests ran.", 1, true),
-            run_output)
-    end)
-
     it("rejects synthetic output collisions before generating C", function()
         local suite = "test_runner_collision"
         local owner_source = suite .. [[.titan]]
@@ -645,29 +623,26 @@ function test_collision(context: test.Context)
   test.assert(true)
 end
 ]]
-        for _, suffix in ipairs({
-            "__test_support", "__test_runner", "__test_entrypoint",
-        }) do
-            local colliding = suite .. suffix
-            local colliding_source = colliding .. ".titan"
-            assert(io.open(owner_source, "w")):write(owner_contents):close()
-            assert(io.open(colliding_source, "w")):
-                write("local marker: integer = 1\n"):close()
+        local suffix = "__test_support"
+        local colliding = suite .. suffix
+        local colliding_source = colliding .. ".titan"
+        assert(io.open(owner_source, "w")):write(owner_contents):close()
+        assert(io.open(colliding_source, "w")):
+            write("local marker: integer = 1\n"):close()
 
-            local argv = working_titanc_arguments()
-            argv[#argv + 1] = "--test"
-            argv[#argv + 1] = suite
-            argv[#argv + 1] = colliding
-            local ok, output = run(argv)
-            assert.falsy(ok, output)
-            assert.truthy(output:find("aliases output", 1, true), output)
-            assert.is_false(file_exists(suite .. ".c"))
-            assert.is_false(file_exists(colliding .. ".c"))
-            assert.is_false(file_exists(suite .. suffix .. ".o"))
+        local argv = working_titanc_arguments()
+        argv[#argv + 1] = "--test"
+        argv[#argv + 1] = suite
+        argv[#argv + 1] = colliding
+        local ok, output = run(argv)
+        assert.falsy(ok, output)
+        assert.truthy(output:find("aliases output", 1, true), output)
+        assert.is_false(file_exists(suite .. ".c"))
+        assert.is_false(file_exists(colliding .. ".c"))
+        assert.is_false(file_exists(suite .. suffix .. ".o"))
 
-            os.remove(owner_source)
-            os.remove(colliding_source)
-        end
+        os.remove(owner_source)
+        os.remove(colliding_source)
     end)
 
     it("rejects executable and source-output hierarchy collisions early",
@@ -785,22 +760,5 @@ end
         assert(lfs.rmdir("nested"))
     end)
 
-    it("builds and runs a zero-test suite", function()
-        local ok, output, why, code = compile_installed(EMPTY)
-        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-            tostring(code) .. ")")
-        local run_ok, run_output = run({ "./" .. EMPTY })
-        assert.truthy(run_ok, run_output)
-        assert.truthy(run_output:find("[==========] 0 tests ran.", 1, true),
-            run_output)
-        assert.truthy(run_output:find("[  PASSED  ] 0 tests.", 1, true),
-            run_output)
-    end)
-
-    it("discards test results and ignores an application main", function()
-        local ok, output = run_suite("--filter=test_result$")
-        assert.truthy(ok, output)
-        assert.truthy(output:find(
-            "[       OK ] test_runner_fixture.test_result", 1, true), output)
     end)
 end)

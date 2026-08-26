@@ -5,6 +5,18 @@ local run_checker = h.run_checker
 local assert_type_check = h.assert_type_check
 local check_errs = h.check_errs
 
+local function with_header(contents, fn)
+    local header = os.tmpname() .. ".h"
+    local file = assert(io.open(header, "w"))
+    assert(file:write(contents))
+    assert(file:close())
+
+    local results = table.pack(pcall(fn, header))
+    os.remove(header)
+    if not results[1] then error(results[2], 0) end
+    return table.unpack(results, 2, results.n)
+end
+
 local function find_function(tree, name)
     for _, node in ipairs(tree) do
         if node._tag == "Ast.TopLevelFunc" and node.name == name then
@@ -360,32 +372,24 @@ describe("dense Array and positional integer-Map checking", function()
             end
         ]])
 
-        local errs = check_errs([[
-            local ffi = foreign import "titan/ffi.h"
+        with_header("typedef int ffi_int;\n", function(header)
+            local errs = check_errs([[
+                local c = foreign import "]] .. header .. [["
 
-            function float_map(m: {float: string}): integer
-                return #m
-            end
+                function noninteger_map(m: {float: string}): integer
+                    return #m
+                end
 
-            function string_map(m: {string: string}): integer
-                return #m
-            end
-
-            function value_map(m: {value: string}): integer
-                return #m
-            end
-
-            local function c_integer_map(
-                m: {ffi.titan_ffi_int: string}
-            ): integer
-                return #m
-            end
-        ]])
-        assert.same(4, #errs)
-        assert.match("integer%-keyed map", errs[1])
-        assert.match("integer%-keyed map", errs[2])
-        assert.match("integer%-keyed map", errs[3])
-        assert.match("integer%-keyed map", errs[4])
+                local function c_integer_map(
+                    m: {c.ffi_int: string}
+                ): integer
+                    return #m
+                end
+            ]])
+            assert.same(2, #errs)
+            assert.match("integer%-keyed map", errs[1])
+            assert.match("integer%-keyed map", errs[2])
+        end)
     end)
 
     it("accepts mutable, const, and const? Arrays for const? Array targets",

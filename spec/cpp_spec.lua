@@ -209,6 +209,90 @@ describe("c preprocessor (cpp)", function()
             assert.matches("'=titan%-not%-present%.h'", err)
         end)
 
+        it("partitions preprocessor contexts by exact compiler flags",
+        function()
+            local compiler = assert(
+                cpp.split_shell_words(os.getenv("CC") or "cc"))
+            local function context(compile_flags)
+                return assert(cpp.new_context({
+                    compiler = compiler,
+                    language_mode = "c99",
+                    compile_flags = compile_flags,
+                    fixed_include_dirs = {},
+                }))
+            end
+
+            local ordinary = context({})
+            local warnings = context({ "-Wall" })
+            assert.not_equal(ordinary.preprocessor_configuration_key,
+                warnings.preprocessor_configuration_key)
+        end)
+
+        it("keys forced headers by exact operand spelling and contents",
+        function()
+            local root = os.tmpname() .. "-cpp-forced-identity"
+            os.remove(root)
+            assert(lfs.mkdir(root))
+            local header = root .. "/forced.h"
+            local output = assert(io.open(header, "wb"))
+            assert(output:write([[
+#ifndef TITAN_CPP_FORCED_IDENTITY
+#define TITAN_CPP_FORCED_IDENTITY 1
+#endif
+]]))
+            assert(output:close())
+
+            local completed, failure = xpcall(function()
+                local compiler = assert(
+                    cpp.split_shell_words(os.getenv("CC") or "cc"))
+                local function context(flags)
+                    return assert(cpp.new_context({
+                        compiler = compiler,
+                        language_mode = "c99",
+                        compile_flags = flags,
+                        fixed_include_dirs = {},
+                    }))
+                end
+
+                local ordinary = context({ "-include", header })
+                local equivalent = context({
+                    "-include" .. root .. "/./forced.h",
+                })
+                assert.not_equal(ordinary.forced_header_manifest,
+                    equivalent.forced_header_manifest)
+                assert.not_equal(ordinary.preprocessor_configuration_key,
+                    equivalent.preprocessor_configuration_key)
+
+                local repeated_flags = {}
+                for _ = 1, 64 do
+                    repeated_flags[#repeated_flags + 1] = "-include"
+                    repeated_flags[#repeated_flags + 1] = header
+                end
+                local repeated = context(repeated_flags)
+                assert.is_true(#repeated.forced_header_manifest >
+                    #ordinary.forced_header_manifest)
+                assert.not_equal(ordinary.preprocessor_configuration_key,
+                    repeated.preprocessor_configuration_key)
+
+                output = assert(io.open(header, "wb"))
+                assert(output:write([[
+#ifndef TITAN_CPP_FORCED_IDENTITY
+#define TITAN_CPP_FORCED_IDENTITY 2
+#endif
+]]))
+                assert(output:close())
+                local changed = context({ "-include", header })
+                assert.not_equal(ordinary.forced_header_manifest,
+                    changed.forced_header_manifest)
+                assert.not_equal(ordinary.preprocessor_configuration_key,
+                    changed.preprocessor_configuration_key)
+            end, debug.traceback)
+
+            os.remove(header)
+            lfs.rmdir(root)
+            assert.truthy(completed, failure)
+        end)
+
         it("normalizes a shell-reported child signal as interruption",
             function()
                 local result = cpp.capture_command({
@@ -222,6 +306,7 @@ describe("c preprocessor (cpp)", function()
                 assert.equal(15, result.status)
                 assert.equal(143, result.shell_status)
             end)
+
     end)
 
     describe("object-like macros", function()
@@ -733,6 +818,14 @@ extern int after(void);
         local function on(expr) -- "OK" iff the #if branch is kept
             return expand("#if " .. expr .. "\nOK\n#endif\n")
         end
+        local function assert_left_chain(source, outer, inner)
+            local expression = assert(
+                c99.match_preprocessing_expression_grammar(source))
+            assert.equal(outer, expression.op)
+            assert.equal(inner, expression[1].op)
+            assert.equal(2, #expression)
+            assert.equal(2, #expression[1])
+        end
         it("arithmetic, shift, relational, logical, ternary, unary operators", function()
             assert.equal("OK", on("1 - 1 == 0"))
             assert.equal("OK", on("2 * 3 == 6"))
@@ -750,6 +843,132 @@ extern int after(void);
             assert.equal("", on("!2"))
             assert.equal("", on("!-1"))
             assert.equal("OK", on("(1 ? 2 : 0) == 2"))
+        end)
+        it("uses C integer division and remainder before shifts", function()
+            assert.equal("OK", on("53 / 4 == 13"))
+            assert.equal("OK", on("-7 / 3 == -2"))
+            assert.equal("OK", on("7 / -3 == -2"))
+            assert.equal("OK", on("-7 / -3 == 2"))
+            assert.equal("OK", on("-7 % 3 == -1"))
+            assert.equal("OK", on("7 % -3 == 1"))
+            assert.equal("OK", on("(0x7fffffffffffffffLL >> (53 / 4)) > 0"))
+        end)
+        it("retains and left-folds every binary operator chain", function()
+            assert_left_chain("18 / 3 * 2", "*", "/")
+            assert_left_chain("10 - 3 + 2", "+", "-")
+            assert_left_chain("16 >> 2 << 1", "<<", ">>")
+            assert_left_chain("3 > 2 < 1", "<", ">")
+            assert_left_chain("2 == 2 != 0", "!=", "==")
+            assert_left_chain("7 & 3 & 1", "&", "&")
+            assert_left_chain("7 ^ 3 ^ 1", "^", "^")
+            assert_left_chain("1 | 2 | 4", "|", "|")
+            assert_left_chain("1 && 2 && 3", "&&", "&&")
+            assert_left_chain("0 || 2 || 3", "||", "||")
+
+            assert.equal("OK", on("18 / 3 * 2 == 12"))
+            assert.equal("OK", on("10 - 3 + 2 == 9"))
+            assert.equal("OK", on("16 >> 2 << 1 == 8"))
+            assert.equal("OK", on("(3 > 2 < 1) == 0"))
+            assert.equal("OK", on("2 == 2 != 0"))
+            assert.equal("OK", on("(0 && (1 / 0) && 1) == 0"))
+            assert.equal("OK", on("1 || (1 / 0) || 0"))
+        end)
+        it("keeps conditional expressions right-associative", function()
+            local expression = assert(
+                c99.match_preprocessing_expression_grammar(
+                    "1 ? 2 : 3 ? 4 : 5"))
+            assert.equal("?", expression.op)
+            assert.equal("?", expression[3].op)
+            assert.is_nil(expression[1].op)
+            assert.equal("OK", on("(0 ? 2 : 1 ? 4 : 5) == 4"))
+        end)
+        it("shares the folded binary AST with C language expressions", function()
+            local parsers = {
+                c99.match_language_expression_grammar,
+                function(source)
+                    return c99.match_typed_language_expression_grammar(
+                        source, {})
+                end,
+            }
+            for _, parse in ipairs(parsers) do
+                local expression = assert(parse("18 / 3 * 2 + 1 "))
+                assert.equal("+", expression.op)
+                assert.equal("*", expression[1].op)
+                assert.equal("/", expression[1][1].op)
+
+                local conditional = assert(parse(
+                    "1 ? 2 : 3 ? 4 : 5 "))
+                assert.equal("?", conditional.op)
+                assert.equal("?", conditional[3].op)
+            end
+        end)
+        it("evaluates bitwise and uintmax_t expressions exactly", function()
+            assert.equal("OK", on("(0xf0 & 0x3c) == 0x30"))
+            assert.equal("OK", on("(0xf0 ^ 0x3c) == 0xcc"))
+            assert.equal("OK", on("(0xf0 | 0x0f) == 0xff"))
+            assert.equal("OK", on("~0 == -1"))
+            assert.equal("OK", on("(-3LL >> 1) == -2"))
+            assert.equal("OK", on("(0xffffffffffffffffULL >> 63) == 1"))
+            assert.equal("OK", on("0xffffffffffffffffULL > 0"))
+            assert.equal("OK", on(
+                "18446744073709551615ULL == 0xffffffffffffffffULL"))
+            assert.equal("OK", on(
+                "18446744073709551615ULL / 3 == 6148914691236517205ULL"))
+            assert.equal("OK", on("18446744073709551615ULL % 3 == 0"))
+            assert.equal("OK", on(
+                "0xffffffffffffffffULL / 0xffffffffffffffffULL == 1"))
+            assert.equal("OK", on(
+                "0xffffffffffffffffULL / 0x8000000000000000ULL == 1"))
+            assert.equal("OK", on(
+                "0xffffffffffffffffULL % 0x8000000000000000ULL == " ..
+                "0x7fffffffffffffffULL"))
+            assert.equal("OK", on(
+                "0x8000000000000000ULL / 3 == 3074457345618258602ULL"))
+            assert.equal("OK", on("0x8000000000000000ULL % 3 == 2"))
+            assert.equal("OK", on("1u + 1UL + 1llu + 1ULL == 4U"))
+            assert.equal("OK", on("0XABCDEFULL == 11259375u"))
+        end)
+        it("applies ?: conversions without evaluating the other branch", function()
+            assert.equal("OK", on("(1 ? -1 : 1U) > 0"))
+            assert.equal("OK", on("(0 ? 1U : -1) > 0"))
+            assert.equal("OK", on("(1 ? 7 : 1 / 0) == 7"))
+            assert.equal("OK", on("(0 ? 1 / 0 : 7) == 7"))
+            assert.equal("OK", on("(1 ? (0 ? 0 : -1) : 1U) > 0"))
+        end)
+        it("reports invalid integer operations instead of using Lua floats",
+        function()
+            for _, expression in ipairs({
+                "1 / 0", "1U % 0U", "1 << -1", "1 >> 64", "1.0",
+            }) do
+                local ok, err = pcall(on, expression)
+                assert.is_false(ok)
+                assert.matches("preprocessor expression", tostring(err), 1, true)
+            end
+        end)
+        it("handles character constants and residual identifiers", function()
+            assert.equal("OK", on("'A' == 65"))
+            assert.equal("OK", on("'\\n' == 10"))
+            assert.equal("OK", on("'\\101' == 65"))
+            assert.equal("OK", on("'\\x41' == 65"))
+            assert.equal("OK", on("'\\u0041' == 65"))
+            assert.equal("OK", on("'\\U00000041' == 65"))
+            assert.equal("OK", on("'AB' == 0x4142"))
+            assert.equal("OK", expand([[
+#define SELF SELF
+#if SELF == 0
+OK
+#endif
+]]))
+        end)
+        it("evaluates Titan's integer-fit preamble condition", function()
+            assert.equal("OK", expand([[
+#define LUA_MAXINTEGER 0x7fffffffffffffffLL
+#define TITAN_NBM 53
+#if ((((LUA_MAXINTEGER >> (TITAN_NBM / 4)) >> (TITAN_NBM / 4)) >> \
+      (TITAN_NBM / 4)) >> (TITAN_NBM - (3 * (TITAN_NBM / 4)))) > 0
+OK
+#endif
+]]))
         end)
         it("octal, hex, and parenthesized constants", function()
             assert.equal("OK", on("0x10 == 16"))

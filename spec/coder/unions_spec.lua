@@ -722,7 +722,102 @@ describe("unions (end-to-end)", function()
         assert.truthy(rok, err)
     end)
 
-    it("round-trips the full payload matrix across full and minor GC",
+    it("covers representative union payload storage and case loads once",
+    function()
+        local csrc = h.compile_and_read_c([[
+            local ffi =
+                foreign import "spec/fixtures/c_tvalue_soundness.h"
+
+            local type Owner = owned ffi.titan_spec_tvalue_int[]
+
+            local record Box
+                number: integer
+            end
+
+            local union Payload
+                primitive: integer
+                text: string
+                array: {Box}
+                maybe_array: {Box}?
+                record_item: Box
+                callback: (integer) -> integer
+                pointer: *ffi.titan_spec_tvalue_int
+                owner: Owner
+                raw: ffi.TValue
+            end
+
+            local function payload_value(payload: Payload): integer
+                case payload
+                when primitive: item then
+                    return item
+                when text: item then
+                    return #item
+                when array: values then
+                    return values[1].number
+                when maybe_array: maybe then
+                    local values: {Box} = maybe
+                    return values[1].number
+                when record_item: item then
+                    return item.number
+                when callback: callback then
+                    return callback(1)
+                when pointer: pointer then
+                    return pointer[0] as integer
+                when owner: owner then
+                    return owner[0] as integer
+                when raw: raw then
+                    local boxed: value = raw
+                    local item: string = boxed as string
+                    return #item
+                else
+                    return -1000
+                end
+            end
+
+            function exercise(): integer
+                local pointer_owner: Owner =
+                    ffi.titan_spec_tvalue_int.new_array(1)
+                pointer_owner[0] = 8 as ffi.titan_spec_tvalue_int
+                local pointer: *ffi.titan_spec_tvalue_int = pointer_owner
+
+                local owner: Owner =
+                    ffi.titan_spec_tvalue_int.new_array(1)
+                owner[0] = 7 as ffi.titan_spec_tvalue_int
+
+                local raw: ffi.TValue = "raw"
+                local delta = 5
+                return payload_value(Payload.primitive(1))
+                    + payload_value(Payload.text("ok"))
+                    + payload_value(Payload.array({Box.new(3)}))
+                    + payload_value(Payload.maybe_array({Box.new(4)}))
+                    + payload_value(Payload.record_item(Box.new(5)))
+                    + payload_value(Payload.callback(
+                        function(input: integer): integer
+                            return input + delta
+                        end))
+                    + payload_value(Payload.pointer(pointer))
+                    + payload_value(Payload.owner(owner))
+                    + payload_value(Payload.raw(raw))
+            end
+        ]])
+
+        assert.match(
+            "sethvalue%s*%(%s*L,%s*&_tmp_%d+%->uv%[1%]%.uv,%s*", csrc)
+        assert.match(
+            "hvalue%s*%(%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)", csrc)
+        assert.not_match("titan_array_require_proxy", csrc)
+        assert.match(
+            "luaC_barrierback%s*%(%s*L,%s*obj2gco%s*%(%s*_tmp_%d+%s*%)"
+                .. ",%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)",
+            csrc)
+
+        local ok, err = h.call("test", [[
+            assert(test.exercise() == 39)
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    it("round-trips the full payload matrix across full and minor GC #stress",
     function()
         local csrc = h.compile_and_read_c([[
             local ffi = foreign import "titan/ffi.h"

@@ -1,4 +1,3 @@
-local _uv = import "uv"
 local lua = foreign import "lua.h"
 local lual = foreign import "lauxlib.h"
 local ffi = foreign import "titan/ffi.h"

@@ -3,6 +3,7 @@ local assert = require "luassert"
 
 local driver = require "titan-compiler.driver"
 local compiler_io = require "titan-compiler.io"
+local cdriver = require "c-parser.cdriver"
 local cprobe = require "titan-compiler.cprobe"
 local coder = require "titan-compiler.coder"
 local sourceinterface = require "titan-compiler.sourceinterface"
@@ -118,18 +119,8 @@ describe("compiler installation discovery", function()
             assert.equal(trace, target_trace)
             assert.is_nil(captured.process_analysis)
             assert.is_nil(captured.process_trace)
-
-            local saw_strategy = false
-            local upvalue = 1
-            while true do
-                local name, value =
-                    debug.getupvalue(captured.probe_runner, upvalue)
-                if name == nil then break end
-                assert.not_equal(context, value)
-                if value == context.io then saw_strategy = true end
-                upvalue = upvalue + 1
-            end
-            assert.is_true(saw_strategy)
+            assert.equal(context.io, captured.io)
+            assert.is_nil(captured.probe_runner)
         end, debug.traceback)
 
         driver.initialize_platform = originals.initialize_platform
@@ -298,6 +289,16 @@ describe("compiler installation discovery", function()
                 c_probe_cache_trace = true,
             })
         end, "c_probe_cache_trace must be a function")
+        assert.has_error(function()
+            driver.new_resolver_context({
+                c_probe_semantic_trace = true,
+            })
+        end, "c_probe_semantic_trace must be a function")
+        assert.has_error(function()
+            driver.new_resolver_context({
+                c_probe_execution_trace = true,
+            })
+        end, "c_probe_execution_trace must be a function")
         assert.has_error(function()
             driver.new_resolver_context({
                 extra_ffi_include_dirs = "invalid",
@@ -1647,6 +1648,28 @@ describe("compiler module loader", function()
         return manifest
     end
 
+    local function process_header_inputs(filename, options)
+        local ffi_types, process_error, include =
+            cdriver.process_file(filename, options)
+        assert.truthy(ffi_types, process_error)
+        local inputs = {}
+        for _, input in ipairs(include.c_header_dependencies or {}) do
+            inputs[#inputs + 1] = input
+        end
+        for _, input in ipairs(include.c_header_search_inputs or {}) do
+            inputs[#inputs + 1] = input
+        end
+        return inputs
+    end
+
+    local function header_input_identity(inputs, kind, path)
+        for _, input in ipairs(inputs) do
+            if input.kind == kind and input.path == path then
+                return input.identity
+            end
+        end
+    end
+
     local function generated_source_manifest(contents)
         driver.imported = {}
         types.registry = {}
@@ -2831,61 +2854,11 @@ end
         assert.is_true(driver.close_resolver_context(source_context))
     end)
 
-    it("keeps unique source checking headers behind one public probe identity",
-    function()
-        write_file(source .. "/provider.h", "typedef int provider_int;\n")
-        write_file(source .. "/provider.titan", [[
-            local c = foreign import "provider.h"
-            foreign function identity(input: c.provider_int): c.provider_int
-                return input
-            end
-        ]])
-
-        local function load_once()
-            local loader = driver.defaultloader({}, {
-                source_roots = { provider = true },
-            })
-            local ok, modtype, errors, info = loader("provider")
-            assert.truthy(ok)
-            assert.equal("Type.Module", modtype._tag)
-            assert.equal(0, #errors)
-            assert.equal(source .. "/provider.titan.h",
-                info.foreign_header_probe_identity)
-            assert.not_equal(info.foreign_header_probe_identity,
-                info.foreign_header)
-            assert.matches("provider[.]titan[.]h[.]check[.]tmp[.]",
-                info.foreign_header)
-            assert.equal("file", lfs.attributes(info.foreign_header, "mode"))
-            local cached_ok, _, cached_errors, cached_info = loader("provider")
-            assert.truthy(cached_ok)
-            assert.equal(0, #cached_errors)
-            assert.equal(info.foreign_header, cached_info.foreign_header)
-            assert.equal(info.foreign_header_probe_identity,
-                cached_info.foreign_header_probe_identity)
-            assert.is_true(driver.close_loader(loader))
-            assert.is_nil(lfs.symlinkattributes(info.foreign_header))
-            return info.foreign_header
-        end
-
-        local first = load_once()
-        driver.imported = {}
-        types.registry = {}
-        local second = load_once()
-        assert.not_equal(first, second)
-    end)
-
     it("attributes persistent probe cache lookups to the checking source module",
     function()
-        write_file(source .. "/provider.h", "typedef int provider_int;\n")
-        write_file(source .. "/provider.titan", [[
-            local c = foreign import "provider.h"
-            foreign function identity(input: c.provider_int): c.provider_int
-                return input
-            end
-        ]])
-        local cache = root .. "/probe-cache"
-        assert(lfs.mkdir(cache))
         local events = {}
+        local semantic_events = {}
+        local execution_events = {}
         local context = driver.new_resolver_context({
             c_probe_cache_trace = function(
                     module_name, stage, hit, key, path)
@@ -2897,43 +2870,78 @@ end
                     path = path,
                 }
             end,
+            c_probe_semantic_trace = function(event)
+                semantic_events[#semantic_events + 1] = event
+            end,
+            c_probe_execution_trace = function(event)
+                execution_events[#execution_events + 1] = event
+            end,
         })
-        local previous_cache = driver.PROBE_CACHE_DIRECTORY
-        driver.PROBE_CACHE_DIRECTORY = cache
-        local loader = driver.defaultloader({}, {
-            context = context,
-            source_roots = { provider = true },
-        })
-        local called, ok, _, errors = pcall(loader, "provider")
-        local closed, close_error = driver.close_loader(loader)
-        local context_closed, context_close_error =
-            driver.close_resolver_context(context)
-        driver.PROBE_CACHE_DIRECTORY = previous_cache
+        context.foreign_c_configuration_id =
+            driver.FOREIGN_C_CONFIGURATION_ID
 
-        assert.truthy(called, ok)
-        assert.truthy(ok)
-        assert.equal(0, #errors, table.concat(errors, "\n"))
+        local original_descriptor = driver.toolchain_descriptor
+        local original_new_service = cprobe.new_service
+        local captured
+        local completed, failure = xpcall(function()
+            driver.toolchain_descriptor = function(resolver)
+                return {
+                    io = resolver.io,
+                    compiler_argv = { "cc" },
+                    compile_flags = {},
+                    language_mode = "c99",
+                    language_flag = false,
+                    cppflags = {},
+                    cflags = {},
+                    include_dirs = {},
+                }
+            end
+            cprobe.new_service = function(options)
+                captured = options
+                return { close = function() return true end }
+            end
+
+            assert.is_table(driver.get_probe_service(context))
+            captured.persistent_cache_trace(
+                "lookup", true, "0123abcd", "/cache/result", "provider")
+            local semantic = {
+                module = "provider",
+                event = "semantic_result",
+                key = "0123abcd",
+            }
+            local execution = {
+                module = "provider",
+                event = "compiler_execution",
+                key = "0123abcd",
+            }
+            captured.semantic_trace(semantic)
+            captured.execution_trace(execution)
+
+            assert.same({{
+                module_name = "provider",
+                stage = "lookup",
+                hit = true,
+                key = "0123abcd",
+                path = "/cache/result",
+            }}, events)
+            assert.same({ semantic }, semantic_events)
+            assert.same({ execution }, execution_events)
+        end, debug.traceback)
+        driver.toolchain_descriptor = original_descriptor
+        cprobe.new_service = original_new_service
+        local closed, close_error = driver.close_resolver_context(context)
+        assert.truthy(completed, failure)
         assert.truthy(closed, close_error)
-        assert.truthy(context_closed, context_close_error)
-        assert.is_true(#events > 0)
-        for _, event in ipairs(events) do
-            assert.equal("provider", event.module_name)
-            assert.is_string(event.stage)
-            assert.is_boolean(event.hit)
-            assert.matches("^[0-9a-f]+$", event.key)
-            assert.matches(cache, event.path, 1, true)
-        end
     end)
 
     it("cleans a source checking header when normalization is cancelled",
     function()
-        write_file(source .. "/provider.h", "typedef int provider_int;\n")
-        write_file(source .. "/provider.titan", [[
-            local c = foreign import "provider.h"
-            foreign function identity(input: c.provider_int): c.provider_int
-                return input
-            end
-        ]])
+        local candidate = source_entry("provider")
+        candidate.ast = {{
+            _tag = "Ast.TopLevelForeignFunc",
+            name = "identity",
+        }}
+        candidate.source_manifest = source_manifest(candidate)
 
         local strategy = compiler_io.new_sync()
         local ordinary_read_file = strategy.read_file
@@ -2946,12 +2954,20 @@ end
             return ordinary_read_file(self, path)
         end
         local context = driver.new_resolver_context({ io = strategy })
-        local loader = driver.defaultloader({}, {
-            context = context,
-            source_roots = { provider = true },
-        })
-
-        local loaded, failure = pcall(loader, "provider")
+        local original_generate_foreign_header =
+            coder.generate_foreign_header
+        coder.generate_foreign_header = function()
+            return "/* cached source foreign header */\n"
+        end
+        local loader
+        local loaded, failure = pcall(function()
+            loader = driver.defaultloader({}, {
+                context = context,
+                cached_source_entries = { provider = candidate },
+            })
+            return loader("provider")
+        end)
+        coder.generate_foreign_header = original_generate_foreign_header
         assert.is_false(loaded)
         assert.matches("simulated checking%-header cancellation", failure)
         assert.is_string(checking_header)
@@ -2960,72 +2976,6 @@ end
         assert.is_true(driver.close_loader(loader))
         assert.is_true(driver.close_resolver_context(context))
         assert.is_nil(lfs.symlinkattributes(checking_header))
-    end)
-
-    it("absolutizes source checking headers from a relative cross-directory root",
-    function()
-        local cwd = assert(lfs.currentdir())
-        local temporary_name = assert(os.tmpname())
-        local suffix = assert(temporary_name:match("([^/]+)$"))
-        assert(os.remove(temporary_name))
-        local relative_root = ".driver-relative-" .. suffix
-        assert(lfs.mkdir(relative_root))
-        assert(lfs.mkdir(relative_root .. "/a"))
-        assert(lfs.mkdir(relative_root .. "/b"))
-        write_file(relative_root .. "/a/provider.h",
-            "typedef int provider_int;\n")
-        write_file(relative_root .. "/a/provider.titan", [[
-            local c = foreign import "provider.h"
-            foreign function identity(input: c.provider_int): c.provider_int
-                return input
-            end
-        ]])
-        write_file(relative_root .. "/b/consumer.titan", [[
-            local provider = import "a.provider.titan"
-            function read(): integer return 1 end
-        ]])
-
-        local loader
-        local parsed_generated_headers = {}
-        local ran, failure = pcall(function()
-            driver.TITAN_SOURCE_PATH = relative_root
-            loader = driver.defaultloader({}, {
-                source_roots = { ["b.consumer"] = true },
-                source_process_trace = function() end,
-                c_header_process_trace = function(
-                        requested, resolved, phase, outcome, cpu_ms, identity)
-                    if phase == "process_total" and
-                       requested:find(".titan.h.check.tmp.", 1, true) then
-                        parsed_generated_headers[#parsed_generated_headers + 1] = {
-                            requested = requested,
-                            resolved = resolved,
-                            outcome = outcome,
-                            cpu_ms = cpu_ms,
-                            identity = identity,
-                        }
-                    end
-                end,
-            })
-            local ok, _, errors = loader("b.consumer")
-            assert.truthy(ok)
-            assert.equal(0, #errors, table.concat(errors, "\n"))
-            local provider = assert(driver.imported["a.provider"])
-            local physical = assert(provider.checking_foreign_header)
-            assert.equal("/", physical:sub(1, 1))
-            assert.equal("file", lfs.attributes(physical, "mode"))
-            local import = driver.imported["b.consumer"].ast[1]
-            assert.equal(physical, import._foreign_header)
-            assert.equal(cwd .. "/" .. relative_root ..
-                "/a/provider.titan.h",
-                import._foreign_header_probe_identity)
-            assert.equal(0, #parsed_generated_headers)
-            assert.is_true(driver.close_loader(loader))
-            loader = nil
-            assert.is_nil(lfs.symlinkattributes(physical))
-        end)
-        if loader then driver.close_loader(loader) end
-        remove_tree(relative_root)
-        assert.truthy(ran, failure)
     end)
 
     it("uses binaries for dependencies and source for explicit roots", function()
@@ -3930,110 +3880,174 @@ end
         assert.is_true(driver.close_resolver_context(context))
     end)
 
-    it("rehydrates cached project foreign headers per resolver", function()
-        local provider_filename = root .. "/ffi-provider-generated.titan"
-        local provider_loader = driver.defaultloader({}, {
-            source_roots = { ffi_provider = true },
-            source_overrides = {
-                ffi_provider = {
-                    kind = "generated",
-                    main = provider_filename,
-                    files = { provider_filename },
-                    contents = {
-                        [provider_filename] = [[
-                            local c = foreign import "stdint.h"
-                            foreign function identity(
-                                    input: c.int32_t): c.int32_t
-                                return input
-                            end
-                        ]],
-                    },
-                },
-            },
-        })
-        local provider_ok, _, provider_errors =
-            provider_loader("ffi_provider")
-        assert.truthy(provider_ok)
-        assert.equal(0, #provider_errors,
-            table.concat(provider_errors, "\n"))
-        local retained = driver.imported.ffi_provider
-        local retained_ast = retained.ast
-        local old_header = assert(retained.checking_foreign_header)
-        assert.equal("file", lfs.attributes(old_header, "mode"))
-        assert.is_true(driver.close_loader(provider_loader))
-        assert.is_nil(lfs.symlinkattributes(old_header))
-
-        driver.imported = {}
-        types.registry = {}
-        local consumer_filename = root .. "/ffi-consumer-generated.titan"
-        local profiles = {}
-        local context = driver.new_resolver_context({
-            source_process_trace = function(
-                    module_name, filename, outcome,
-                    self_cpu_ms, total_cpu_ms,
-                    parse_cpu_ms, check_cpu_ms)
-                profiles[#profiles + 1] = {
-                    module_name = module_name,
-                    filename = filename,
+    it("rehydrates relative cross-directory foreign headers per resolver",
+    function()
+        local cwd = assert(lfs.currentdir())
+        local temporary_name = assert(os.tmpname())
+        local suffix = assert(temporary_name:match("([^/]+)$"))
+        assert(os.remove(temporary_name))
+        local relative_root = ".driver-relative-" .. suffix
+        local provider_source_filename =
+            relative_root .. "/a/provider.titan"
+        local consumer_source_filename =
+            relative_root .. "/b/consumer.titan"
+        local provider_filename =
+            cwd .. "/" .. provider_source_filename
+        local relative_public_header = provider_source_filename .. ".h"
+        local public_header = provider_filename .. ".h"
+        local previous_source_path = driver.TITAN_SOURCE_PATH
+        local provider_loader
+        local consumer_loader
+        local context
+        local parsed_generated_headers = {}
+        local function trace_generated_header(
+                requested, resolved, phase, outcome, cpu_ms, identity)
+            if phase == "process_total" and
+               requested:find(".titan.h.check.tmp.", 1, true) then
+                parsed_generated_headers[#parsed_generated_headers + 1] = {
+                    requested = requested,
+                    resolved = resolved,
                     outcome = outcome,
-                    self_cpu_ms = self_cpu_ms,
-                    total_cpu_ms = total_cpu_ms,
-                    parse_cpu_ms = parse_cpu_ms,
-                    check_cpu_ms = check_cpu_ms,
+                    cpu_ms = cpu_ms,
+                    identity = identity,
                 }
-            end,
-        })
-        local consumer_loader = driver.defaultloader({}, {
-            context = context,
-            source_roots = { ffi_consumer = true },
-            source_overrides = {
-                ffi_consumer = {
-                    kind = "generated",
-                    main = consumer_filename,
-                    files = { consumer_filename },
-                    contents = {
-                        [consumer_filename] = [[
-                            local provider =
-                                import "ffi_provider.titan"
-                            function answer(): integer return 42 end
-                        ]],
-                    },
-                },
-            },
-            cached_source_entries = { ffi_provider = retained },
-        })
+            end
+        end
 
-        local consumer_ok, _, consumer_errors =
-            consumer_loader("ffi_consumer")
-        assert.truthy(consumer_ok)
-        assert.equal(0, #consumer_errors,
-            table.concat(consumer_errors, "\n"))
-        local fresh_header =
-            driver.imported.ffi_provider.checking_foreign_header
-        assert.not_equal(old_header, fresh_header)
-        assert.equal("file", lfs.attributes(fresh_header, "mode"))
-        assert.equal(retained_ast, driver.imported.ffi_provider.ast)
-        assert.same({ "ffi_consumer" }, context.checked_source_modules)
-        assert.equal(fresh_header,
-            driver.imported.ffi_consumer.ast[1]._foreign_header)
-        assert.equal(2, #profiles)
-        assert.equal("ffi_provider", profiles[1].module_name)
-        assert.equal(provider_filename, profiles[1].filename)
-        assert.equal("complete", profiles[1].outcome)
-        assert.is_true(
-            profiles[1].self_cpu_ms <= profiles[1].total_cpu_ms)
-        assert.equal(0, profiles[1].parse_cpu_ms)
-        assert.equal(0, profiles[1].check_cpu_ms)
-        assert.equal("ffi_consumer", profiles[2].module_name)
-        assert.equal(consumer_filename, profiles[2].filename)
-        assert.equal("complete", profiles[2].outcome)
-        assert.is_true(
-            profiles[2].self_cpu_ms <= profiles[2].total_cpu_ms)
-        assert.is_true(profiles[2].parse_cpu_ms >= 0)
-        assert.is_true(profiles[2].check_cpu_ms >= 0)
-        assert.is_true(driver.close_loader(consumer_loader))
-        assert.is_true(driver.close_resolver_context(context))
-        assert.is_nil(lfs.symlinkattributes(fresh_header))
+        local completed, failure = xpcall(function()
+            assert(lfs.mkdir(relative_root))
+            assert(lfs.mkdir(relative_root .. "/a"))
+            assert(lfs.mkdir(relative_root .. "/b"))
+            write_file(relative_root .. "/a/provider.h",
+                "typedef int provider_int;\n")
+            write_file(relative_root .. "/a/provider.titan", [[
+                local c = foreign import "provider.h"
+                foreign function identity(
+                        input: c.provider_int): c.provider_int
+                    return input
+                end
+            ]])
+            write_file(relative_root .. "/b/consumer.titan", [[
+                local provider = import "a.provider.titan"
+                function answer(): integer return 42 end
+            ]])
+            driver.TITAN_SOURCE_PATH = relative_root
+
+            provider_loader = driver.defaultloader({}, {
+                source_roots = { ["a.provider"] = true },
+                c_header_process_trace = trace_generated_header,
+            })
+            local provider_ok, _, provider_errors, provider_info =
+                provider_loader("a.provider")
+            assert.truthy(provider_ok)
+            assert.equal(0, #provider_errors,
+                table.concat(provider_errors, "\n"))
+            local retained = driver.imported["a.provider"]
+            local retained_ast = retained.ast
+            local old_header = assert(retained.checking_foreign_header)
+
+            -- A normal source check remains the publication seam: the exact
+            -- ordered dependency array recorded on the annotated AST is the
+            -- one exposed on the imported project-module entry.
+            assert.is_true(#retained.ast._c_header_dependencies > 0)
+            assert.equal(retained.ast._c_header_dependencies,
+                retained.c_header_dependencies)
+            assert.equal(provider_source_filename, retained.filename)
+            assert.equal(public_header,
+                provider_info.foreign_header_probe_identity)
+            assert.equal("/", old_header:sub(1, 1))
+            assert.not_equal(public_header, old_header)
+            assert.matches(
+                "provider[.]titan[.]h[.]check[.]tmp[.]", old_header)
+            assert.equal("file", lfs.attributes(old_header, "mode"))
+
+            local cached_ok, _, cached_errors, cached_info =
+                provider_loader("a.provider")
+            assert.truthy(cached_ok)
+            assert.equal(0, #cached_errors,
+                table.concat(cached_errors, "\n"))
+            assert.equal(old_header, cached_info.foreign_header)
+            assert.equal(public_header,
+                cached_info.foreign_header_probe_identity)
+            assert.is_true(driver.close_loader(provider_loader))
+            provider_loader = nil
+            assert.is_nil(lfs.symlinkattributes(old_header))
+
+            driver.imported = {}
+            types.registry = {}
+            local profiles = {}
+            context = driver.new_resolver_context({
+                c_header_process_trace = trace_generated_header,
+                source_process_trace = function(
+                        module_name, filename, outcome,
+                        self_cpu_ms, total_cpu_ms,
+                        parse_cpu_ms, check_cpu_ms)
+                    profiles[#profiles + 1] = {
+                        module_name = module_name,
+                        filename = filename,
+                        outcome = outcome,
+                        self_cpu_ms = self_cpu_ms,
+                        total_cpu_ms = total_cpu_ms,
+                        parse_cpu_ms = parse_cpu_ms,
+                        check_cpu_ms = check_cpu_ms,
+                    }
+                end,
+            })
+            consumer_loader = driver.defaultloader({}, {
+                context = context,
+                source_roots = { ["b.consumer"] = true },
+                cached_source_entries = { ["a.provider"] = retained },
+            })
+
+            local consumer_ok, _, consumer_errors =
+                consumer_loader("b.consumer")
+            assert.truthy(consumer_ok)
+            assert.equal(0, #consumer_errors,
+                table.concat(consumer_errors, "\n"))
+            local fresh_header =
+                driver.imported["a.provider"].checking_foreign_header
+            assert.equal("/", fresh_header:sub(1, 1))
+            assert.not_equal(old_header, fresh_header)
+            assert.equal(relative_public_header,
+                driver.imported["a.provider"].foreign_header)
+            assert.equal("file", lfs.attributes(fresh_header, "mode"))
+            assert.equal(retained_ast, driver.imported["a.provider"].ast)
+            assert.same({ "b.consumer" }, context.checked_source_modules)
+            local import = driver.imported["b.consumer"].ast[1]
+            assert.equal(fresh_header, import._foreign_header)
+            assert.equal(public_header,
+                import._foreign_header_probe_identity)
+            assert.equal(0, #parsed_generated_headers)
+
+            assert.equal(2, #profiles)
+            assert.equal("a.provider", profiles[1].module_name)
+            assert.equal(provider_source_filename, profiles[1].filename)
+            assert.equal("complete", profiles[1].outcome)
+            assert.is_true(
+                profiles[1].self_cpu_ms <= profiles[1].total_cpu_ms)
+            assert.equal(0, profiles[1].parse_cpu_ms)
+            assert.equal(0, profiles[1].check_cpu_ms)
+            assert.equal("b.consumer", profiles[2].module_name)
+            assert.equal(consumer_source_filename, profiles[2].filename)
+            assert.equal("complete", profiles[2].outcome)
+            assert.is_true(
+                profiles[2].self_cpu_ms <= profiles[2].total_cpu_ms)
+            assert.is_true(profiles[2].parse_cpu_ms >= 0)
+            assert.is_true(profiles[2].check_cpu_ms >= 0)
+
+            assert.is_true(driver.close_loader(consumer_loader))
+            consumer_loader = nil
+            assert.is_true(driver.close_resolver_context(context))
+            context = nil
+            assert.is_nil(lfs.symlinkattributes(fresh_header))
+        end, debug.traceback)
+
+        if consumer_loader then pcall(driver.close_loader, consumer_loader) end
+        if provider_loader then pcall(driver.close_loader, provider_loader) end
+        if context then pcall(driver.close_resolver_context, context) end
+        driver.TITAN_SOURCE_PATH = previous_source_path
+        remove_tree(relative_root)
+        assert.truthy(completed, failure)
     end)
 
     it("publishes each source module before the cooperative I/O checkpoint",
@@ -4160,49 +4174,51 @@ end
        function()
         local include_root = root .. "/project-include"
         assert(lfs.mkdir(include_root))
-        write_file(include_root .. "/vscode_titan_project_only.h", [[
-            typedef int vscode_titan_project_only_int;
-        ]])
-        local filename = root .. "/foreign-generated.titan"
-        local descriptor = {
-            kind = "generated",
-            main = filename,
-            files = { filename },
-            contents = {
-                [filename] = [[
-                    local c = foreign import "vscode_titan_project_only.h"
-                    function answer(): integer return 42 end
-                ]],
-            },
-        }
         local global_includes = driver.foreign_include_dirs()
+        local original_descriptor = driver.toolchain_descriptor
+        local original_new_service = cprobe.new_service
+        local captured = {}
+        local contexts = {}
+        local completed, failure = xpcall(function()
+            driver.toolchain_descriptor = function(resolver)
+                return {
+                    io = resolver.io,
+                    compiler_argv = { "cc" },
+                    compile_flags = {},
+                    language_mode = "c99",
+                    language_flag = false,
+                    cppflags = {},
+                    cflags = {},
+                    include_dirs = { "/compiler/include" },
+                }
+            end
+            cprobe.new_service = function(options)
+                captured[#captured + 1] = options.toolchain.include_dirs
+                return { close = function() return true end }
+            end
 
-        local missing_loader = driver.defaultloader({}, {
-            source_roots = { foreign_generated = true },
-            source_overrides = { foreign_generated = descriptor },
-        })
-        local missing_ok, _, missing_errors =
-            missing_loader("foreign_generated")
-        assert.truthy(missing_ok)
-        assert.equal(1, #missing_errors)
-        assert.match("failed preprocessing 'vscode_titan_project_only.h'",
-            missing_errors[1], 1, true)
-        assert.is_true(driver.close_loader(missing_loader))
+            contexts[1] = driver.new_resolver_context()
+            contexts[2] = driver.new_resolver_context({
+                extra_ffi_include_dirs = { include_root },
+            })
+            for _, context in ipairs(contexts) do
+                context.foreign_c_configuration_id =
+                    driver.FOREIGN_C_CONFIGURATION_ID
+                assert.is_table(driver.get_probe_service(context))
+            end
 
-        driver.imported = {}
-        types.registry = {}
-        local configured_loader = driver.defaultloader({}, {
-            source_roots = { foreign_generated = true },
-            source_overrides = { foreign_generated = descriptor },
-            extra_ffi_include_dirs = { include_root },
-        })
-        local configured_ok, _, configured_errors =
-            configured_loader("foreign_generated")
-        assert.truthy(configured_ok)
-        assert.equal(0, #configured_errors,
-            table.concat(configured_errors, "\n"))
-        assert.same(global_includes, driver.foreign_include_dirs())
-        assert.is_true(driver.close_loader(configured_loader))
+            assert.same({ "/compiler/include" }, captured[1])
+            assert.same({ "/compiler/include", include_root }, captured[2])
+            assert.same(global_includes, driver.foreign_include_dirs())
+        end, debug.traceback)
+        driver.toolchain_descriptor = original_descriptor
+        cprobe.new_service = original_new_service
+        for _, context in ipairs(contexts) do
+            local closed, close_error =
+                driver.close_resolver_context(context)
+            assert.truthy(closed, close_error)
+        end
+        assert.truthy(completed, failure)
     end)
 
     it("publishes and restats resolved transitive C header inputs", function()
@@ -4217,42 +4233,21 @@ end
             "typedef int titan_driver_selected_header;\n"
         write_file(outer, "#include <ffi-selected.h>\n")
         write_file(late_selected, late_contents)
-        local filename = root .. "/ffi-metadata.titan"
-        local loader = driver.defaultloader({}, {
-            source_roots = { ffi_metadata = true },
-            source_overrides = {
-                ffi_metadata = {
-                    kind = "generated",
-                    main = filename,
-                    files = { filename },
-                    contents = {
-                        [filename] = [[
-                            local c = foreign import "ffi-outer.h"
-                            function answer(): integer return 42 end
-                        ]],
-                    },
-                },
-            },
-            extra_ffi_include_dirs = { early, late },
+        local observed = process_header_inputs("ffi-outer.h", {
+            source_dir = root,
+            compiler_include_dirs = {},
+            cppflags = { "-I", early, "-I", late },
         })
-        local ok, _, errors = loader("ffi_metadata")
-        assert.truthy(ok)
-        assert.equal(0, #errors, table.concat(errors, "\n"))
-        local observed = driver.imported.ffi_metadata.c_header_dependencies
-        local function identity(inputs, kind, path)
-            for _, input in ipairs(inputs) do
-                if input.kind == kind and input.path == path then
-                    return input.identity
-                end
-            end
-        end
-        assert.is_string(identity(observed, "file", outer))
-        assert.is_string(identity(observed, "file", late_selected))
-        assert.is_string(identity(observed, "search", outer))
+        assert.is_string(header_input_identity(observed, "file", outer))
+        assert.is_string(
+            header_input_identity(observed, "file", late_selected))
+        assert.is_string(header_input_identity(observed, "search", outer))
         assert.matches("stat=missing",
-            identity(observed, "search", early_selected), 1, true)
+            header_input_identity(observed, "search", early_selected),
+            1, true)
         assert.matches("stat=file",
-            identity(observed, "search", late_selected), 1, true)
+            header_input_identity(observed, "search", late_selected),
+            1, true)
         local restat_io = compiler_io.new_sync()
         local read_paths = {}
         local original_read = restat_io.read_file
@@ -4274,8 +4269,8 @@ end
             assert(driver.restat_c_header_dependencies(
                 observed, restat_context))
         assert.not_equal(
-            identity(observed, "file", late_selected),
-            identity(nested_changed, "file", late_selected))
+            header_input_identity(observed, "file", late_selected),
+            header_input_identity(nested_changed, "file", late_selected))
 
         write_file(late_selected, late_contents)
         write_file(early_selected,
@@ -4284,10 +4279,9 @@ end
             driver.restat_c_header_dependencies(
                 observed, { context = restat_context }))
         assert.not_equal(
-            identity(observed, "search", early_selected),
-            identity(shadowed, "search", early_selected))
+            header_input_identity(observed, "search", early_selected),
+            header_input_identity(shadowed, "search", early_selected))
         assert.is_true(driver.close_resolver_context(restat_context))
-        assert.is_true(driver.close_loader(loader))
     end)
 
     it("restats exact symlinked include spellings after retargeting",
@@ -4303,7 +4297,6 @@ end
 typedef int titan_driver_symlink_value;
 ]]
 
-        local loader
         local completed, failure = pcall(function()
             assert(lfs.mkdir(first))
             assert(lfs.mkdir(first .. "/nested"))
@@ -4321,45 +4314,15 @@ typedef int titan_driver_symlink_value;
 typedef double titan_driver_symlink_value;
 ]])
 
-            local filename = root .. "/ffi-link-metadata.titan"
-            loader = driver.defaultloader({}, {
-                source_roots = { ffi_link_metadata = true },
-                source_overrides = {
-                    ffi_link_metadata = {
-                        kind = "generated",
-                        main = filename,
-                        files = { filename },
-                        contents = {
-                            [filename] = [[
-                                local c = foreign import "ffi-link-outer.h"
-                                function answer(): integer
-                                    return c.TITAN_LINK_VALUE
-                                end
-                            ]],
-                        },
-                    },
-                },
-                extra_ffi_include_dirs = {
-                    link .. "/../include",
-                },
+            local observed = process_header_inputs("ffi-link-outer.h", {
+                source_dir = root,
+                compiler_include_dirs = {},
+                cppflags = { "-I", link .. "/../include" },
             })
-            local ok, _, errors = loader("ffi_link_metadata")
-            assert.truthy(ok)
-            assert.equal(0, #errors, table.concat(errors, "\n"))
-
-            local observed =
-                driver.imported.ffi_link_metadata.c_header_dependencies
-            local function identity(inputs, kind, path)
-                for _, input in ipairs(inputs) do
-                    if input.kind == kind and input.path == path then
-                        return input.identity
-                    end
-                end
-            end
             local first_file =
-                identity(observed, "file", selected_lookup)
+                header_input_identity(observed, "file", selected_lookup)
             local first_search =
-                identity(observed, "search", selected_lookup)
+                header_input_identity(observed, "search", selected_lookup)
             assert.is_string(first_file)
             assert.is_string(first_search)
 
@@ -4368,11 +4331,10 @@ typedef double titan_driver_symlink_value;
             local restatted = assert(
                 driver.restat_c_header_dependencies(observed))
             assert.not_equal(first_file,
-                identity(restatted, "file", selected_lookup))
+                header_input_identity(restatted, "file", selected_lookup))
             assert.not_equal(first_search,
-                identity(restatted, "search", selected_lookup))
+                header_input_identity(restatted, "search", selected_lookup))
         end)
-        if loader then pcall(driver.close_loader, loader) end
         local removed, remove_error = true
         if lfs.symlinkattributes(link) then
             removed, remove_error = os.remove(link)

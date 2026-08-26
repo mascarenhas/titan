@@ -1,6 +1,7 @@
 local h = require "spec.support.helpers"
 local types = require "titan-compiler.types"
 local checker = require "titan-compiler.checker"
+local checker_core = require "titan-compiler.checker.core"
 local driver = require "titan-compiler.driver"
 local cdriver = require "c-parser.cdriver"
 local cprobe = require "titan-compiler.cprobe"
@@ -510,8 +511,8 @@ describe("foreign functions (checker)", function()
             ]],
             root = [[
                 local middle = import "middle.titan"
-                local function ready(): boolean
-                    return true
+                foreign function ready(): ()
+                    return
                 end
             ]],
         }
@@ -555,6 +556,8 @@ describe("foreign functions (checker)", function()
                     physical = import._foreign_header,
                     identity = generated.identity,
                     header_key = module_context.header_key,
+                    diagnostic_aliases =
+                        module_context.probe_diagnostic_aliases,
                 }
             end, debug.traceback)
             local loader_closed, loader_close_error =
@@ -574,11 +577,68 @@ describe("foreign functions (checker)", function()
             first.identity)
         assert.equal(first.identity, second.identity)
         assert.equal(first.header_key, second.header_key)
+        assert.equal(2, #first.diagnostic_aliases)
+        assert.equal(2, #second.diagnostic_aliases)
+        for index = 1, 2 do
+            assert.is_string(first.diagnostic_aliases[index].physical_path)
+            assert.is_string(first.diagnostic_aliases[index].public_path)
+            assert.not_equal(
+                first.diagnostic_aliases[index].physical_path,
+                second.diagnostic_aliases[index].physical_path)
+            assert.equal(
+                first.diagnostic_aliases[index].public_path,
+                second.diagnostic_aliases[index].public_path)
+        end
+    end)
+
+    it("ignores malformed transitive generated-header aliases", function()
+        local modast = {
+            {
+                _tag = "Ast.TopLevelForeignFunc",
+                name = "published",
+                _type = types.Function({}, {}, false, false, false),
+                _paramnames = {},
+            },
+            {
+                _tag = "Ast.TopLevelImport",
+                _source_import = true,
+                _foreign_header_probe_identity = "dependency.titan.h",
+                _source_foreign_generated_identity =
+                    "c-header-generated-v1:sha256:dependency",
+                _foreign_header = false,
+                _source_c_context = {
+                    diagnostic_aliases = {
+                        {
+                            physical_path = "/private/dependency.titan.h",
+                            public_path = "dependency.titan.h",
+                        },
+                        {
+                            physical_path = "/private/malformed.titan.h",
+                            public_path = false,
+                        },
+                    },
+                },
+            },
+        }
+        modast._c_header_dependencies = {}
+        local st = {
+            foreign_macro_changes = {},
+            foreign_macro_environment = function() return {} end,
+        }
+
+        local modtype = checker_core.makemoduletype(
+            "test", modast, st)
+        assert.same({
+            {
+                physical_path = "/private/dependency.titan.h",
+                public_path = "dependency.titan.h",
+            },
+        }, modtype._source_c_context.diagnostic_aliases)
     end)
 
     it("keeps source foreign members direct-only and out of compiled interfaces",
     function()
-        with_header(declarations, function(header)
+        with_header("typedef int ffi_int;\n", function(header)
             local quoted = string.format("%q", header)
             local modules = {
                 provider = 'local c = foreign import ' .. quoted .. [[
@@ -643,33 +703,15 @@ describe("foreign functions (checker)", function()
             ]]
             modules.consumer = 'local c = foreign import ' .. quoted .. [[
                 local bridge = import "bridge.titan"
-                foreign function bad(
+                local provider = import "provider.titan"
+
+                foreign function transitive_view(
                     input: c.ffi_int
                 ): c.ffi_int
                     return bridge.increment(input)
                 end
-            ]]
-            ok, err = h.run_checker_modules(
-                modules, "consumer", { interface = "source" })
-            assert.falsy(ok)
-            assert.match("member 'increment' not found inside module 'bridge'", err)
 
-            modules.consumer = 'local c = foreign import ' .. quoted .. [[
-                local bridge = import "bridge.titan"
-                local provider = import "provider.titan"
-                foreign function direct(
-                    input: c.ffi_int
-                ): c.ffi_int
-                    return bridge.through(input) + provider.increment(input)
-                end
-            ]]
-            ok, err = h.run_checker_modules(
-                modules, "consumer", { interface = "source" })
-            assert.truthy(ok, err)
-
-            modules.consumer = 'local c = foreign import ' .. quoted .. [[
-                local provider = import "provider.titan"
-                foreign function bad(
+                foreign function ordinary_member(
                     input: c.ffi_int
                 ): c.ffi_int
                     return provider.ordinary(input as integer)
@@ -679,7 +721,11 @@ describe("foreign functions (checker)", function()
             ok, err = h.run_checker_modules(
                 modules, "consumer", { interface = "source" })
             assert.falsy(ok)
-            assert.match("ordinary Titan member 'provider%.ordinary' is not visible", err)
+            assert.match(
+                "member 'increment' not found inside module 'bridge'", err)
+            assert.match(
+                "ordinary Titan member 'provider%.ordinary' is not visible",
+                err)
         end)
     end)
 

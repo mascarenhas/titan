@@ -10,6 +10,19 @@ local h = require 'spec.support.helpers'
 
 local run_coder = h.run_coder
 
+local function with_header(contents, fn)
+    local header = os.tmpname() .. ".h"
+    local file = assert(io.open(header, "w"))
+    assert(file:write(contents))
+    assert(file:close())
+
+    local results = { pcall(fn, header) }
+    os.remove(header)
+    if not results[1] then error(results[2], 0) end
+    table.remove(results, 1)
+    return table.unpack(results)
+end
+
 local function captured_lambda_source(count)
     -- Keep each capture use shallow: this is a closure-capacity test, not a
     -- stress test for a C compiler's recursive handling of one huge expression.
@@ -1064,7 +1077,38 @@ describe("closures over foreign-typed boxes (end-to-end)", function()
         if not h.verbose then os.execute("rm -f *.c") end
     end)
 
-    it("captures and reassigns a foreign pointer (raw Udata0 box)", function()
+    it("covers one captured and reassigned foreign-pointer raw box",
+    function()
+        with_header([[
+            typedef int ffi_file;
+            static ffi_file ffi_open_file;
+            static ffi_file *ffi_open(int present) {
+                return present ? &ffi_open_file : (ffi_file *)0;
+            }
+        ]], function(header)
+            run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function make(present: integer): (integer) -> boolean
+                    local file = c.ffi_open(present)
+                    return function(next: integer): boolean
+                        local was_open = false
+                        if file then was_open = true end
+                        file = c.ffi_open(next)
+                        return was_open
+                    end
+                end
+            ]], [[
+                local file = test.make(1)
+                assert(file(0))
+                assert(not file(1))
+                assert(file(1))
+            ]])
+        end)
+    end)
+
+    it("captures and reassigns a foreign pointer (raw Udata0 box) #stress",
+    function()
         -- A `FILE*` foreign-pointer local, captured by the lambda and reassigned
         -- inside it, is boxed; the box stores the raw `FILE*` inline (no barrier).
         -- The closure observes whether the box currently holds an open file (a
@@ -1109,7 +1153,40 @@ describe("closures over foreign-typed boxes (end-to-end)", function()
         assert.truthy(rok, out)
     end)
 
-    it("captures and reassigns a scalar foreign typedef (raw Udata0 box)", function()
+    it("covers one captured and reassigned foreign-scalar raw box",
+    function()
+        with_header([[
+            typedef unsigned long ffi_size;
+            static ffi_size ffi_numbers[5] = { 4, 2, 2, 0, 0 };
+            static int ffi_number_index = 0;
+            static ffi_size ffi_next_number(void) {
+                return ffi_numbers[ffi_number_index++];
+            }
+        ]], function(header)
+            run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function make(): () -> boolean
+                    local number = c.ffi_next_number()
+                    return function(): boolean
+                        local next_number = c.ffi_next_number()
+                        local same = number == next_number
+                        number = next_number
+                        return same
+                    end
+                end
+            ]], [[
+                local number = test.make()
+                assert(not number())
+                assert(number())
+                assert(not number())
+                assert(number())
+            ]])
+        end)
+    end)
+
+    it("captures and reassigns a scalar foreign typedef (raw Udata0 box) #stress",
+    function()
         -- `strlen` returns `size_t`, which stays a `Type.Typedef` on the local `n`
         -- (it resolves to ctype lua_Integer only at the storage layer). Captured
         -- and reassigned in the lambda, `n` is boxed raw. The closure compares the

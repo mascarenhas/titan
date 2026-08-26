@@ -270,15 +270,27 @@ function Sync:readable(path)
     return true
 end
 
-function Sync:read_file(path)
+function Sync:read_file(path, max_bytes)
     local valid, path_err = checked_path(path)
     if not valid then return nil, path_err end
+    if max_bytes ~= nil and
+       (type(max_bytes) ~= "number" or max_bytes < 0 or
+        max_bytes % 1 ~= 0 or max_bytes >= math.maxinteger) then
+        return nil, "read limit must be a nonnegative integer"
+    end
     local file, open_err = open_file(path, "rb")
     if not file then return nil, open_err end
 
-    local read_ok, contents, read_err = pcall(file.read, file, "a")
+    -- Read one byte beyond the caller's bound so it can distinguish a file at
+    -- the limit from a file which grew after stat, without ever materializing
+    -- an unbounded replacement.
+    local amount = max_bytes ~= nil and max_bytes + 1 or "a"
+    local read_ok, contents, read_err = pcall(file.read, file, amount)
     local close_ok, closed, close_err = pcall(file.close, file)
     if not read_ok then return nil, tostring(contents) end
+    if contents == nil and read_err == nil and max_bytes ~= nil then
+        contents = ""
+    end
     if not contents then return nil, operation_error("read", read_err) end
     if not close_ok then return nil, tostring(closed) end
     if not closed then return nil, operation_error("close", close_err) end
@@ -477,7 +489,11 @@ function Sync:run(argv, options)
     if not read_ok then
         pcall(pipe.close, pipe)
         return {
-            started = false,
+            -- io.popen returned a live pipe, so a child transport existed
+            -- even though output capture failed. Keep that launch fact for
+            -- telemetry; without a completed status this remains strictly
+            -- nonsemantic infrastructure evidence.
+            started = true,
             ok = false,
             command = command,
             diagnostic = "could not capture command output: " ..
@@ -488,7 +504,8 @@ function Sync:run(argv, options)
     local close_ok, succeeded, why, status = pcall(pipe.close, pipe)
     if not close_ok then
         return {
-            started = false,
+            -- As above, failure to wait does not undo the successful popen.
+            started = true,
             ok = false,
             command = command,
             diagnostic = output .. "\nfailed waiting for command: " ..

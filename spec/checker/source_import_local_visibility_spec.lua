@@ -488,6 +488,120 @@ describe("source-import local visibility (checker)", function()
             "full range fits in lua_Integer", 1, true), err)
     end)
 
+    it("retains supplemental C probe inputs on the consumer AST", function()
+        local header = os.tmpname() .. "-source-probe-inputs.h"
+        local file = assert(io.open(header, "wb"))
+        assert(file:write([[
+            struct SourceProbeInputLeft { int value; };
+            struct SourceProbeInputRight { int value; };
+            extern struct SourceProbeInputLeft *source_probe_input_left(void);
+        ]]))
+        assert(file:close())
+
+        -- Exercise a real retained forced-header observation. The normal
+        -- configuration deliberately has no such inputs after probe-key
+        -- construction stopped rescanning Titan's fixed C preamble.
+        local forced_header = os.tmpname() .. "-source-probe-forced.h"
+        local forced_file = assert(io.open(forced_header, "wb"))
+        assert(forced_file:write(
+            "#define SOURCE_PROBE_FORCED_INPUT 1\n"))
+        assert(forced_file:close())
+        local previous_cppflags = driver.EXTRA_CPPFLAGS
+        local configured_cppflags = {}
+        for _, flag in ipairs(previous_cppflags or {}) do
+            configured_cppflags[#configured_cppflags + 1] = flag
+        end
+        configured_cppflags[#configured_cppflags + 1] = "-include"
+        configured_cppflags[#configured_cppflags + 1] = forced_header
+        driver.EXTRA_CPPFLAGS = configured_cppflags
+
+        local context = driver.new_resolver_context()
+        local configured, configuration_error =
+            driver.configure_foreign_c(context)
+        local exercised, result = xpcall(function()
+            assert.truthy(configured, configuration_error)
+            local ok, err, imported = h.run_checker_modules({
+                source_probe_input_provider = string.format([[
+                    local c = foreign import %q
+                    local type Left = c.SourceProbeInputLeft
+                    local type Right = c.SourceProbeInputRight
+
+                    local function left(): *Left
+                        return c.source_probe_input_left()
+                    end
+                ]], header),
+                source_probe_input_consumer = [[
+                    local provider =
+                        import "source_probe_input_provider.titan"
+
+                    function inspect(): integer
+                        local right = provider.left() as *provider.Right
+                        if right == nil then return -1 end
+                        return 1
+                    end
+                ]],
+            }, "source_probe_input_consumer", {
+                interface = "source",
+                context = context,
+            })
+            assert.truthy(ok, err)
+
+            local service = assert(driver.get_probe_service(context))
+            local consumer_ast =
+                imported.source_probe_input_consumer.ast
+            local provider_ast =
+                imported.source_probe_input_provider.ast
+            assert.is_nil(consumer_ast[1]._source_foreign_include)
+            local consumer_inputs = {}
+            for _, input in ipairs(
+                    consumer_ast._c_header_dependencies or {}) do
+                consumer_inputs[input.kind .. "\0" .. input.path] =
+                    input.identity
+            end
+
+            local provider_inputs = {}
+            for _, input in ipairs(
+                    provider_ast._c_header_dependencies or {}) do
+                provider_inputs[input.kind .. "\0" .. input.path] =
+                    input.identity
+            end
+            local header_key = "file\0" .. header
+            assert.is_string(provider_inputs[header_key])
+            assert.equal(provider_inputs[header_key],
+                consumer_inputs[header_key])
+
+            local saw_forced_file = false
+            local saw_forced_search = false
+            for _, input in ipairs(service.forced_header_inputs) do
+                if input.restat ~= false then
+                    assert.equal(input.identity,
+                        consumer_inputs[input.kind .. "\0" .. input.path])
+                    saw_forced_file = saw_forced_file or input.kind == "file"
+                    saw_forced_search =
+                        saw_forced_search or input.kind == "search"
+                end
+            end
+            assert.is_true(saw_forced_file)
+            assert.is_true(saw_forced_search)
+            return true
+        end, debug.traceback)
+
+        local closed, close_error =
+            driver.close_resolver_context(context)
+        driver.EXTRA_CPPFLAGS = previous_cppflags
+        local restore_context = driver.new_resolver_context()
+        local restored, restore_error =
+            driver.configure_foreign_c(restore_context)
+        local restore_closed, restore_close_error =
+            driver.close_resolver_context(restore_context)
+        os.remove(header)
+        os.remove(forced_header)
+        assert.truthy(closed, close_error)
+        assert.truthy(restored, restore_error)
+        assert.truthy(restore_closed, restore_close_error)
+        assert.truthy(exercised, result)
+    end)
+
     it("keeps compiled projections public-only", function()
         local modules = {
             source_visibility_binary = [[

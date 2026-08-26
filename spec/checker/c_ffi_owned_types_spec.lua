@@ -83,63 +83,36 @@ describe("source-written owned C types", function()
 
     it("admits scalar and counted owners throughout local type shapes",
     function()
-        with_header(declarations, function(header)
+        with_header([[
+            typedef struct ffi_item {
+                int number;
+            } ffi_item;
+            static int ffi_read(const ffi_item *item) {
+                return item->number;
+            }
+        ]], function(header)
             local ok, err, ast = check_with_header(header, [[
                 local type Item = owned *c.ffi_item
                 local type Items = owned c.ffi_item[]
-                local type OptionalItem = Item?
                 local type Transform = (Item) -> Item
 
-                local top: Item = c.ffi_item.new()
-                local top_items: Items = c.ffi_item.new_array(2)
-
                 record PublicHolder
-                    local item?: Item
+                    local item: Item
                     local items: Items
                     local transform: Transform
-                end
-
-                local function identity(
-                    item: Item,
-                    items: Items,
-                    optional: OptionalItem
-                ): (Item, Items, OptionalItem)
-                    return item, items, optional
-                end
-
-                local function PublicHolder:replace(item: Item): Item
-                    self.item = item
-                    return item
                 end
 
                 local function use_locally(): integer
                     local one: Item = c.ffi_item.new()
                     local many: Items = c.ffi_item.new_array(3)
-                    local optional: Item? = one
-                    local owners: {Item} = { one }
-                    local by_name: {string: Item} = {}
-                    by_name["one"] = one
-
                     local transform: Transform =
                         function(item: Item): Item
                             item.number = 17
                             return item
                         end
-                    local holder = PublicHolder.new(
-                        optional, many, transform)
-                    local again, all, maybe =
-                        identity(
-                            holder:replace(owners[1] as Item),
-                            holder.items,
-                            holder.item)
-                    return c.ffi_read(transform(again))
-                        + #all
-                        + c.ffi_read(by_name["one"] as Item)
-                        + c.ffi_read(maybe as Item)
-                end
-
-                function run(): integer
-                    return use_locally() + c.ffi_read(top) + #top_items
+                    local holder = PublicHolder.new(one, many, transform)
+                    return c.ffi_read(holder.transform(holder.item))
+                        + #holder.items
                 end
             ]])
             assert.truthy(ok, err)

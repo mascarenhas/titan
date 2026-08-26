@@ -1,5 +1,4 @@
 local h = require "spec.support.helpers"
-local installed_prefix = require "spec.support.installed_prefix"
 
 local function with_header(contents, fn)
     local header = os.tmpname() .. ".h"
@@ -353,53 +352,76 @@ describe("unsafe C object-pointer conversion code generation", function()
         end)
     end)
 
-    it("emits pinned libuv prefix casts for direct uv calls",
+    it("emits representative nominal-prefix casts for direct C calls",
     function()
-        installed_prefix.active()
-        h.with_libuv_feature_flags(function()
-            with_header("#include <uv.h>\n", function(header)
-                local csrc = h.compile_and_read_c([[
-                    local c = foreign import "]] .. header .. [["
+        with_header([[
+            typedef struct ffi_handle { void *data; } ffi_handle;
+            typedef struct ffi_tcp {
+                void *data;
+                int tcp_state;
+            } ffi_tcp;
+            typedef struct ffi_stream { void *data; } ffi_stream;
+            typedef struct ffi_pipe {
+                void *data;
+                int pipe_state;
+            } ffi_pipe;
+            typedef struct ffi_request { void *data; } ffi_request;
+            typedef struct ffi_fs {
+                void *data;
+                int fs_state;
+            } ffi_fs;
 
-                    local function handle(
-                        tcp: *c.uv_tcp_t
-                    ): *c.uv_handle_t
-                        return tcp
-                    end
+            typedef void (*ffi_close_cb)(ffi_handle *);
+            static void ffi_close(ffi_handle *handle, ffi_close_cb callback) {
+                (void)handle;
+                (void)callback;
+            }
+            static int ffi_cancel(ffi_request *request) {
+                (void)request;
+                return 0;
+            }
+        ]], function(header)
+            local csrc = h.compile_and_read_c([[
+                local c = foreign import "]] .. header .. [["
 
-                    local function stream(
-                        pipe: *c.uv_pipe_t
-                    ): *c.uv_stream_t
-                        return pipe
-                    end
+                local function handle(
+                    tcp: *c.ffi_tcp
+                ): *c.ffi_handle
+                    return tcp
+                end
 
-                    local function request(
-                        fs: *c.uv_fs_t
-                    ): *c.uv_req_t
-                        return fs
-                    end
+                local function stream(
+                    pipe: *c.ffi_pipe
+                ): *c.ffi_stream
+                    return pipe
+                end
 
-                    local function direct(): integer
-                        local tcp = c.uv_tcp_t.new()
-                        local fs = c.uv_fs_t.new()
-                        c.uv_close(tcp, nil)
-                        return c.uv_cancel(fs) as integer
-                    end
-                ]])
+                local function request(
+                    fs: *c.ffi_fs
+                ): *c.ffi_request
+                    return fs
+                end
 
-                assert.matches(
-                    "((uv_handle_t *)(_param_tcp))", csrc, 1, true)
-                assert.matches(
-                    "((uv_stream_t *)(_param_pipe))", csrc, 1, true)
-                assert.matches(
-                    "((uv_req_t *)(_param_fs))", csrc, 1, true)
-                assert.matches(
-                    "uv_close(((uv_handle_t *)((&(_local_tcp_1))))",
-                    csrc, 1, true)
-                assert.matches(
-                    "uv_cancel%(%(%(uv_req_t %*%).-_local_fs_%d+",
-                    csrc)
-            end)
+                local function direct(): integer
+                    local tcp = c.ffi_tcp.new()
+                    local fs = c.ffi_fs.new()
+                    c.ffi_close(tcp, nil)
+                    return c.ffi_cancel(fs) as integer
+                end
+            ]])
+
+            assert.matches(
+                "((ffi_handle *)(_param_tcp))", csrc, 1, true)
+            assert.matches(
+                "((ffi_stream *)(_param_pipe))", csrc, 1, true)
+            assert.matches(
+                "((ffi_request *)(_param_fs))", csrc, 1, true)
+            assert.matches(
+                "ffi_close(((ffi_handle *)((&(_local_tcp_1))))",
+                csrc, 1, true)
+            assert.matches(
+                "ffi_cancel%(%(%(ffi_request %*%).-_local_fs_%d+",
+                csrc)
         end)
     end)
 end)

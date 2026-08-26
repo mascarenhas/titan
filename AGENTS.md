@@ -115,8 +115,12 @@ not add epicycles around what may be a misunderstood simpler design.
   Each group runs in a private extraction of the prepared checkout, because
   compiler specs share checkout-root artifact names; tagged Busted output
   streams to the job log. In Linux coverage CI each group owns one LuaCov stats
-  file, and the job merges all four only after every worker passes; local shards
-  do not collect LuaCov. The installed prefix is shared read-only. The
+  file, and the job merges all four only after every worker passes. Each Linux
+  shard excludes explicit `#stress` cases from its covered invocation, then
+  runs its listed stress oracles in a separate ordinary Busted invocation
+  without LuaCov. Every stress oracle retains a small covered companion over
+  the same compiler paths; local shards do not collect LuaCov. The installed
+  prefix is shared read-only. The
   aggregate native Titan suite also remains one fast executable.
 
   1. `test-linux-stdlib` is the prepared-tree producer. It prepares a clean
@@ -160,7 +164,7 @@ not add epicycles around what may be a misunderstood simpler design.
      targets as one two-slot jobserver DAG to validate/repair the restored tree,
      then saves a miss at that clean boundary; the cached prefix must contain
      neither LuaRocks/Titan state
-     nor C-probe markers. It builds the same aggregate native test executable once
+     nor C-probe result records. It builds the same aggregate native test executable once
      and uses `TITAN_FILTER` with repeated `make titan-stdlib-test-run`
      invocations when a fresh process is useful. Filters select focused lifetime
      cases; they are not group names and never trigger recompilation. Keep the retained
@@ -181,16 +185,16 @@ not add epicycles around what may be a misunderstood simpler design.
   independently in the regular producer, sanitizer, and macOS jobs with
   `ubicloud/cache@v4`. The regular producer uses explicit restore/save actions
   and saves after the bundled tests and smoke but before the system-libuv/OpenSSL
-  canary can add markers from another provider configuration. The other lanes
+  canary can add records from another provider configuration. The other lanes
   save at job end. Those producing lanes have distinct OS/architecture keys
   whose immutable primary ends in the commit SHA and whose stable restore
   prefix omits it. Each selects its lane namespace with
   `TITAN_PROBE_CACHE_IDENTITY` before its first Titan build. The prepared-tree
   compiler consumer remains cache-free, and compiler specs explicitly disable
-  persistent markers because independent fixtures reuse header pathnames;
-  production builds and native aggregate compilation still benefit. A marker's
-  presence is trusted success evidence, so never restore cache entries from a
-  less-trusted writer.
+  persistent records because independent fixtures reuse header pathnames;
+  production builds and native aggregate compilation still benefit. A valid
+  key-bound record is trusted success or deterministic-rejection evidence, so
+  never restore cache entries from a less-trusted writer.
 
   The regular producer's cache key includes the active ABI. After restore it
   reruns `make lua` and `make luarocks`, replaces only known active `0.6`
@@ -439,9 +443,10 @@ the aggregate native suite without coverage; the independent sanitizer selects
 only focused native-memory cases and does not publish coverage. This includes
 both async-I/O and coroutine behavior, which must still run in full in the
 regular uncovered job. The repository `.luacov` limits debug-hook collection to
-the same compiler, root-spec, and `titanc` paths emitted by the one report
-command; keep those filters aligned. If a library suite exposes a compiler
-coverage gap, add a small focused compiler/checker test for that code path
+the same compiler and `titanc` paths emitted by the one report command; test
+source itself is not coverage. Keep those filters aligned. If a library suite
+exposes a compiler coverage gap, add a small focused compiler/checker test for
+that code path
 instead of covering the library integration suite.
 
 **Spec layout.** Pure, layer-level specs live at `spec/` root (`abi_spec`,
@@ -1412,7 +1417,7 @@ substitution, recursive; error on missing keys). Key facts:
 
 ### C FFI (`c-parser/`, `foreigntypes.lua`)
 
-`foreign import "header.h"` invokes a pure-Lua C toolchain: `cpp.lua` (full hand-written preprocessor; asks the configured `CC -std=c99` plus parsed `TITAN_EXTRA_CPPFLAGS` for system include paths and predefined macros), `c99.lua` (relabel C99 grammar; module-global typedef table, not reentrant), `ctypes.lua`/`cdefines.lua` (build a TypeList), and `cdriver.lua` (include resolution plus C type extraction). The checker passes the importing Titan source directory and the shared toolchain configuration to `cdriver`, which emits quoted `#include "..."` syntax only when the header is found by the quoted-include rules relative to that source; otherwise generated C uses angle brackets. `cdriver` also exposes `titan-runtime/titan/ffi.h`, which defines selected `titan_ffi_*` aliases for portable C primitive types. Contextual conversions and C operators use one resolver-owned `cprobe.Service`: its compile-only probes share the generated objects' exact parsed `CC`, C99/CPP/target flags, include ordering, and target arithmetic profile. Rich answers remain session-scoped and never enter the pure gradual-consistency/coercion relations or serialized module types. Production services persist only successful probes as empty `<sha256(exact probe C)>.success` markers under the ABI-owned prefix cache; marker presence is the whole verdict and rejection is never persisted. This intentionally keys no compiler, flag, environment, or header state. Stable local rebuilds and CI reuse their selected trusted cache folder; change `TITAN_PROBE_CACHE_IDENTITY`, use another prefix, or clear the markers when build-policy isolation is required. An explicit source import keeps its unique randomized physical checking header, but probes include a stable private-workspace wrapper keyed by logical module/absolute eventual public-header identity; that wrapper includes the physical file by absolute quoted spelling, preserving nested quoted origin. Keep every header-context descriptor field stable, perform marker lookup before creating the workspace/wrapper, reject conflicting bindings, and treat wrapper failures as infrastructure. Do not add dependency manifests, preprocessing, verdict payloads, or negative-result records.
+`foreign import "header.h"` invokes a pure-Lua C toolchain: `cpp.lua` (full hand-written preprocessor; asks the configured `CC -std=c99` plus parsed `TITAN_EXTRA_CPPFLAGS` for system include paths and predefined macros), `c99.lua` (relabel C99 grammar; module-global typedef table, not reentrant), `ctypes.lua`/`cdefines.lua` (build a TypeList), and `cdriver.lua` (include resolution plus C type extraction). The checker passes the importing Titan source directory and the shared toolchain configuration to `cdriver`, which emits quoted `#include "..."` syntax only when the header is found by the quoted-include rules relative to that source; otherwise generated C uses angle brackets. `cdriver` also exposes `titan-runtime/titan/ffi.h`, which defines selected `titan_ffi_*` aliases for portable C primitive types. Contextual conversions and C operators use one resolver-owned `cprobe.Service`: its compile-only probes share the generated objects' exact parsed `CC`, C99/CPP/target flags, include ordering, and target arithmetic profile. Completed successes and deterministic compiler rejections may be shared through service-local and analysis-local tables; infrastructure failures remain retryable. Preserve the original persistent identity exactly: the toolchain key contains parsed compiler/flag/include/profile/mode state plus the forced-header manifest; the version-2 header key contains `source_dir`, that forced-header manifest, and every ordered raw/rendered descriptor and file/search input; and the version-3 digest covers the full probe source, semantic key, toolchain key, and forced-header manifest. Successful probes keep their empty `<digest>.success` markers. Only deterministic compiler rejections add bounded checksummed `<digest>.negative` siblings under that same digest. Do not add speculative partitions beyond this established identity; final generated-C compilation remains authoritative. `TITAN_PROBE_CACHE_IDENTITY` remains the explicit optional namespace. Outside a `process_analysis`, validate/hash forced inputs at most once per service and ordinary inputs at most once per module context; repeated probes and persistent hits reuse that snapshot. Inside a `process_analysis`, perform no probe-local restats because the compiler client owns snapshot validation. Do not add a post-invocation restat for changes which race one compiler call. An explicit source import keeps its unique randomized physical checking header, but probes include a stable private-workspace wrapper keyed by logical module/absolute eventual public-header identity; that wrapper includes the physical file by absolute quoted spelling, preserving nested quoted origin. Keep every header-context descriptor field stable, perform the in-memory raw-key lookup before hashing or reading persistent state, reject conflicting wrapper bindings, and treat wrapper failures as infrastructure. Cache a rejected declaration batch under its exact existing batch key, then bisect it because the aggregate proves only that some member failed; only a rejected singleton supplies an individual leaf verdict. Within one analysis the first completed result wins across yielding Tasks; negative publication uses complete-file replacement and readers fail open on invalid records.
 
 Recognized existing object-like integer/accessor expressions and fully expanded
 outer casts to C integer, floating, object-pointer, or function-pointer types
@@ -1432,7 +1437,7 @@ The preprocessor's final object-like definition set is an unordered map:
 `cdefines` projects its supported members into the TypeList in
 `util.bytewise_less` order. Do not use process-random `pairs` order or
 locale-sensitive ordinary string sorting there, because that makes otherwise
-identical declaration-batch probe C miss exact-source success markers.
+identical declaration-batch probe C miss the existing exact-source cache keys.
 Declaration extraction still preprocesses each foreign header independently,
 while probes and generated C see the cumulative ordered header block, so
 conditional macro coupling and later changes to scalar macros typed by an

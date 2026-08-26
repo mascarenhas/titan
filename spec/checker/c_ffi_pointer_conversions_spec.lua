@@ -3,7 +3,6 @@ local cprobe = require "titan-compiler.cprobe"
 local csemantics = require "titan-compiler.csemantics"
 local cdriver = require "c-parser.cdriver"
 local h = require "spec.support.helpers"
-local installed_prefix = require "spec.support.installed_prefix"
 
 local profile
 local function test_profile()
@@ -628,36 +627,53 @@ describe("contextual unsafe C object-pointer conversions", function()
         end)
     end)
 
-    it("proves pinned libuv nominal-prefix relations and direct calls",
+    it("proves synthetic nominal-prefix relations and direct calls",
     function()
-        local prefix = installed_prefix.active()
-        local include_dirs = {prefix .. "/include"}
-        for _, directory in ipairs(
-                assert(cdriver.resolve_compiler_include_dirs())) do
-            table.insert(include_dirs, directory)
-        end
-        with_header(
-            '#include <uv.h>\n',
-            function(header)
+        with_header([[
+            typedef struct ffi_handle {
+                void *data;
+            } ffi_handle;
+            typedef struct ffi_tcp {
+                void *data;
+                int tcp_state;
+            } ffi_tcp;
+            typedef struct ffi_stream {
+                void *data;
+            } ffi_stream;
+            typedef struct ffi_pipe {
+                void *data;
+                int pipe_state;
+            } ffi_pipe;
+            typedef struct ffi_request {
+                void *data;
+            } ffi_request;
+            typedef struct ffi_fs {
+                void *data;
+                int fs_state;
+            } ffi_fs;
+            typedef void (*ffi_close_cb)(ffi_handle *handle);
+            extern void ffi_close(ffi_handle *handle, ffi_close_cb callback);
+            extern int ffi_cancel(ffi_request *request);
+        ]], function(header)
                 local ok, err, _, calls = fake_check(header, [[
                     local function prefixes(
-                        tcp: *c.uv_tcp_t,
-                        pipe: *c.uv_pipe_t,
-                        fs: *c.uv_fs_t
+                        tcp: *c.ffi_tcp,
+                        pipe: *c.ffi_pipe,
+                        fs: *c.ffi_fs
                     ): integer
-                        local handle: *c.uv_handle_t = tcp
-                        local stream: *c.uv_stream_t = pipe
-                        local request: *c.uv_req_t = fs
+                        local handle: *c.ffi_handle = tcp
+                        local stream: *c.ffi_stream = pipe
+                        local request: *c.ffi_request = fs
                         return 0
                     end
 
                     local function direct()
-                        local tcp = c.uv_tcp_t.new()
-                        local request = c.uv_fs_t.new()
-                        c.uv_close(tcp, nil)
-                        c.uv_cancel(request)
+                        local tcp = c.ffi_tcp.new()
+                        local request = c.ffi_fs.new()
+                        c.ffi_close(tcp, nil)
+                        c.ffi_cancel(request)
                     end
-                ]], nil, {include_dirs = include_dirs})
+                ]])
                 assert.truthy(ok, err)
                 assert.equal(4, #calls)
                 local joined = {}
@@ -666,21 +682,67 @@ describe("contextual unsafe C object-pointer conversions", function()
                 end
                 joined = table.concat(joined, "\n")
                 assert.match(
-                    "extern uv_tcp_t %*titan_probe_s_%x+;",
+                    "extern ffi_tcp %*titan_probe_s_%x+;",
                     joined)
                 assert.match(
-                    "uv_handle_t %*titan_probe_t_%x+", joined)
+                    "ffi_handle %*titan_probe_t_%x+", joined)
                 assert.match(
-                    "extern uv_pipe_t %*titan_probe_s_%x+;",
+                    "extern ffi_pipe %*titan_probe_s_%x+;",
                     joined)
                 assert.match(
-                    "uv_stream_t %*titan_probe_t_%x+", joined)
+                    "ffi_stream %*titan_probe_t_%x+", joined)
                 assert.match(
-                    "extern uv_fs_t %*titan_probe_s_%x+;",
+                    "extern ffi_fs %*titan_probe_s_%x+;",
                     joined)
                 assert.match(
-                    "uv_req_t %*titan_probe_t_%x+", joined)
-            end)
+                    "ffi_request %*titan_probe_t_%x+", joined)
+        end)
+    end)
+
+    it("rejects conflicting identities for one retained probe input",
+    function()
+        with_header(declarations, function(header)
+            local context_calls = 0
+            local service = {
+                profile = test_profile(),
+                cdriver_process_options = test_process_options,
+                module_context = function()
+                    context_calls = context_calls + 1
+                    return {
+                        header_inputs = {
+                            {
+                                kind = "file",
+                                path = "/stable/probe-input.h",
+                                identity = "first identity",
+                            },
+                            {
+                                kind = "file",
+                                path = "/stable/probe-input.h",
+                                identity = "second identity",
+                            },
+                        },
+                    }
+                end,
+            }
+            local code = 'local c = foreign import "' .. header .. [["
+                local function convert(
+                    p: *c.ffi_source
+                ): *c.ffi_target
+                    return p
+                end
+            ]]
+            local ast = assert(h.parse(code))
+            local _, errors = checker.check(
+                "test", ast, code, "test.titan", nil, {
+                    probe_service_provider = function() return service end,
+                })
+
+            assert.equal(1, context_calls)
+            assert.match(
+                "conflicting C header input identity for " ..
+                    "'/stable/probe-input.h'",
+                table.concat(errors, "\n"), 1, true)
+        end)
     end)
 
     it("closes an owned probe service when checker internals throw",

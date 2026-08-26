@@ -4,6 +4,18 @@ local h = require "spec.support.helpers"
 local run_checker = h.run_checker
 local run_checker_modules = h.run_checker_modules
 
+local function with_header(contents, fn)
+    local header = os.tmpname() .. ".h"
+    local file = assert(io.open(header, "w"))
+    assert(file:write(contents))
+    assert(file:close())
+
+    local results = table.pack(pcall(fn, header))
+    os.remove(header)
+    if not results[1] then error(results[2], 0) end
+    return table.unpack(results, 2, results.n)
+end
+
 local function find_alias(ast, name)
     for _, node in ipairs(ast) do
         if node._tag == "Ast.TopLevelTypeAlias" and node.name == name then
@@ -377,22 +389,19 @@ describe("Titan type aliases", function()
     end)
 
     it("rejects exported aliases to C FFI types but permits local aliases", function()
-        local ok, err = run_checker([[
-            local ffi = foreign import "titan/ffi.h"
-            type Public = ffi.titan_ffi_int
-        ]])
-        assert.falsy(ok)
-        assert.match("cannot export C FFI type 'titan_ffi_int'", err)
+        with_header("typedef int ffi_int;\n", function(header)
+            local errors = h.check_errs([[
+                local c = foreign import "]] .. header .. [["
+                type Public = c.ffi_int
+                local type Private = c.ffi_int
 
-        ok, err = run_checker([[
-            local ffi = foreign import "titan/ffi.h"
-            local type Private = ffi.titan_ffi_int
-
-            local function keep(x: Private): Private
-                return x
-            end
-        ]])
-        assert.truthy(ok, err)
+                local function keep(x: Private): Private
+                    return x
+                end
+            ]])
+            assert.same(1, #errors)
+            assert.match("cannot export C FFI type 'ffi_int'", errors[1])
+        end)
     end)
 
     it("recognizes an aliased standalone main signature semantically", function()

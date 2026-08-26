@@ -1,7 +1,5 @@
 require "titan-compiler.coder.core"
 local h = require "spec.support.helpers"
-local installed_prefix = require "spec.support.installed_prefix"
-local coder = require "titan-compiler.coder"
 local coder_names = require "titan-compiler.coder.names"
 
 local function with_header(contents, fn)
@@ -129,78 +127,140 @@ describe("named C tag code generation", function()
         end)
     end)
 
-    it("renders the production libuv DNS tags and callback types", function()
-        installed_prefix.active()
-        h.with_libuv_feature_flags(function()
+    it("renders DNS-shaped tags and callback types from a minimal header",
+    function()
+        with_header([[
+            typedef int ffi_int;
+            typedef char ffi_char;
+
+            typedef struct ffi_loop { int state; } ffi_loop;
+            typedef struct ffi_dns_request { int state; } ffi_dns_request;
+            typedef struct ffi_connect_request {
+                int state;
+            } ffi_connect_request;
+            typedef struct ffi_tcp { int state; } ffi_tcp;
+
+            struct ffi_addrinfo {
+                int family;
+                int socket_type;
+                int protocol;
+                int flags;
+            };
+            struct ffi_sockaddr { int family; };
+            struct ffi_sockaddr_storage { long alignment; char bytes[32]; };
+
+            #define FFI_AF_UNSPEC 0
+            #define FFI_AF_INET 2
+            #define FFI_AF_INET6 10
+            #define FFI_SOCK_STREAM 1
+            #define FFI_IPPROTO_TCP 6
+            #define FFI_AI_NUMERICSERV 1024
+
+            typedef void (*ffi_dns_callback)(
+                ffi_dns_request *, int, struct ffi_addrinfo *);
+            typedef void (*ffi_connect_callback)(
+                ffi_connect_request *, int);
+
+            static int ffi_getaddrinfo(
+                ffi_loop *loop,
+                ffi_dns_request *request,
+                ffi_dns_callback callback,
+                const char *node,
+                const char *service,
+                const struct ffi_addrinfo *hints
+            ) {
+                (void)loop;
+                (void)request;
+                (void)callback;
+                (void)node;
+                (void)service;
+                (void)hints;
+                return 0;
+            }
+
+            static int ffi_tcp_connect(
+                ffi_connect_request *request,
+                ffi_tcp *tcp,
+                const struct ffi_sockaddr *address,
+                ffi_connect_callback callback
+            ) {
+                (void)request;
+                (void)tcp;
+                (void)address;
+                (void)callback;
+                return 0;
+            }
+        ]], function(header)
             local csrc, ast = h.compile_and_read_c([[
-                local libuv = foreign import "uv.h"
-                local ffi = foreign import "titan/ffi.h"
+                local c = foreign import "]] .. header .. [["
 
                 foreign function dns_callback(
-                    request: *libuv.uv_getaddrinfo_t,
-                    status: ffi.titan_ffi_int,
-                    result: *libuv.addrinfo): ()
+                    request: *c.ffi_dns_request,
+                    status: c.ffi_int,
+                    result: *c.ffi_addrinfo): ()
                 end
 
                 foreign function connect_callback(
-                    request: *libuv.uv_connect_t,
-                    status: ffi.titan_ffi_int): ()
+                    request: *c.ffi_connect_request,
+                    status: c.ffi_int): ()
                 end
 
                 local function dns_shape(
-                    loop: *libuv.uv_loop_t,
-                    dns: *libuv.uv_getaddrinfo_t,
-                    connect: *libuv.uv_connect_t,
-                    tcp: *libuv.uv_tcp_t,
-                    node: const *ffi.titan_ffi_char):
-                    (ffi.titan_ffi_int, ffi.titan_ffi_int)
-                    local service: ffi.titan_ffi_char[6] =
-                        ffi.titan_ffi_char.new_array(6)
-                    local hints = libuv.addrinfo.new()
-                    local address = libuv.sockaddr.new()
-                    local storage = libuv.sockaddr_storage.new()
-                    hints.ai_family = libuv.AF_UNSPEC
-                    hints.ai_socktype = libuv.SOCK_STREAM
-                    hints.ai_protocol = libuv.IPPROTO_TCP
-                    hints.ai_flags = libuv.AI_NUMERICSERV
-                    if libuv.AF_INET == libuv.AF_INET6 then
-                        address.sa_family = 0
+                    loop: *c.ffi_loop,
+                    dns: *c.ffi_dns_request,
+                    connect: *c.ffi_connect_request,
+                    tcp: *c.ffi_tcp,
+                    node: const *c.ffi_char):
+                    (c.ffi_int, c.ffi_int)
+                    local service: c.ffi_char[6] =
+                        c.ffi_char.new_array(6)
+                    local hints = c.ffi_addrinfo.new()
+                    local address = c.ffi_sockaddr.new()
+                    local storage = c.ffi_sockaddr_storage.new()
+                    hints.family = c.FFI_AF_UNSPEC
+                    hints.socket_type = c.FFI_SOCK_STREAM
+                    hints.protocol = c.FFI_IPPROTO_TCP
+                    hints.flags = c.FFI_AI_NUMERICSERV
+                    if c.FFI_AF_INET == c.FFI_AF_INET6 then
+                        address.family = 0
                     end
-                    local dns_status = libuv.uv_getaddrinfo(
+                    local dns_status = c.ffi_getaddrinfo(
                         loop, dns, dns_callback, node, service, hints)
                     local generic =
-                        storage as const *libuv.sockaddr
-                    local connect_status = libuv.uv_tcp_connect(
+                        storage as const *c.ffi_sockaddr
+                    local connect_status = c.ffi_tcp_connect(
                         connect, tcp, generic, connect_callback)
                     return dns_status, connect_status
                 end
             ]])
             assert.match(
-                "struct addrinfo _local_hints_%d+ = %{0%};", csrc)
+                "struct ffi_addrinfo _local_hints_%d+ = %{0%};", csrc)
             assert.match(
-                "struct sockaddr _local_address_%d+ = %{0%};", csrc)
+                "struct ffi_sockaddr _local_address_%d+ = %{0%};", csrc)
             assert.match(
-                "struct sockaddr_storage _local_storage_%d+ = %{0%};",
+                "struct ffi_sockaddr_storage _local_storage_%d+ = %{0%};",
                 csrc)
             local aliases = ast[1]._type.type_members
             for _, name in ipairs({
-                "addrinfo", "sockaddr", "sockaddr_storage",
+                "ffi_addrinfo", "ffi_sockaddr", "ffi_sockaddr_storage",
             }) do
                 assert.truthy(aliases[name], name)
                 assert.is_true(aliases[name].complete, name)
             end
             for _, name in ipairs({
-                "AF_UNSPEC", "AF_INET", "AF_INET6", "SOCK_STREAM",
-                "IPPROTO_TCP", "AI_NUMERICSERV",
+                "FFI_AF_UNSPEC", "FFI_AF_INET", "FFI_AF_INET6",
+                "FFI_SOCK_STREAM", "FFI_IPPROTO_TCP",
+                "FFI_AI_NUMERICSERV",
             }) do
                 assert.truthy(ast[1]._type.members[name], name)
             end
             for _, spelling in ipairs({
-                "AF_UNSPEC", "AF_INET", "AF_INET6", "SOCK_STREAM",
-                "IPPROTO_TCP", "AI_NUMERICSERV",
+                "FFI_AF_UNSPEC", "FFI_AF_INET", "FFI_AF_INET6",
+                "FFI_SOCK_STREAM", "FFI_IPPROTO_TCP",
+                "FFI_AI_NUMERICSERV",
                 coder_names._foreign_func_name("test", "dns_callback"),
                 coder_names._foreign_func_name("test", "connect_callback"),
-                "uv_getaddrinfo(", "uv_tcp_connect(",
+                "ffi_getaddrinfo(", "ffi_tcp_connect(",
             }) do
                 assert.matches(spelling, csrc, 1, true)
             end

@@ -1463,75 +1463,405 @@ local parse_expression = typed("{string} -> Exp?", function(tokens)
     return exp
 end)
 
+-- C99 6.10.1 evaluates preprocessing integer expressions in the widest
+-- signed/unsigned integer types (intmax_t/uintmax_t).  A Lua integer has the
+-- right 64-bit representation for both, but needs an explicit signedness bit:
+-- values in the upper half of uintmax_t otherwise become negative and break
+-- comparisons, division, and right shifts.  Keep that distinction local to
+-- the conditional-expression evaluator.
+local function pp_integer(bits, unsigned)
+    assert(math.type(bits) == "integer")
+    return { bits = bits, unsigned = unsigned == true }
+end
+
+local function digit_value(byte)
+    if byte >= 48 and byte <= 57 then return byte - 48 end
+    if byte >= 65 and byte <= 70 then return byte - 65 + 10 end
+    if byte >= 97 and byte <= 102 then return byte - 97 + 10 end
+    return nil
+end
+
+-- Parse without routing through a Lua float.  Lua's integer arithmetic wraps
+-- modulo 2^64, which gives us the exact uintmax_t bit pattern even for
+-- UINT64_MAX.  Unsuffixed hexadecimal/octal constants whose high bit is set
+-- select uintmax_t after the preprocessing integer-type mapping.
+local function parse_integer_constant(spelling)
+    local suffix = spelling:match("([uUlL]+)$") or ""
+    local digits = spelling:sub(1, #spelling - #suffix)
+    local base = 10
+    local first = 1
+    if digits:match("^0[xX]") then
+        base = 16
+        first = 3
+    elseif #digits > 1 and digits:sub(1, 1) == "0" then
+        base = 8
+        first = 2
+    end
+    if first > #digits and digits ~= "0" then return nil end
+
+    local bits = 0
+    for index = first, #digits do
+        local digit = digit_value(digits:byte(index))
+        if digit == nil or digit >= base then return nil end
+        bits = bits * base + digit
+    end
+    local unsigned = suffix:find("[uU]") ~= nil
+    if not unsigned and bits < 0 then
+        -- This is the uintmax_t candidate for a non-decimal constant.  Treat a
+        -- too-large decimal constant the same way as the host compilers we
+        -- support do as an extension, instead of losing precision in a float.
+        unsigned = true
+    end
+    return pp_integer(bits, unsigned)
+end
+
+local simple_character_escapes = {
+    a = 7, b = 8, f = 12, n = 10, r = 13, t = 9, v = 11,
+    ["\\"] = 92, ["'"] = 39, ['"'] = 34, ["?"] = 63,
+}
+
+-- Character constants are permitted in #if expressions.  Their exact value
+-- is implementation-defined for wide and multi-character spellings; use the
+-- conventional execution-character-set/GCC packing used by Titan's supported
+-- hosts, while handling the standard escapes exactly for ordinary ASCII.
+local function parse_character_constant(spelling)
+    local quote = spelling:find("'", 1, true)
+    if not quote or spelling:sub(-1) ~= "'" then return nil end
+    local body = spelling:sub(quote + 1, -2)
+    local values = {}
+    local index = 1
+    while index <= #body do
+        local byte = body:byte(index)
+        if byte ~= 92 then
+            values[#values + 1] = byte
+            index = index + 1
+        else
+            index = index + 1
+            local escape = body:sub(index, index)
+            if escape == "" then return nil end
+            local simple = simple_character_escapes[escape]
+            if simple then
+                values[#values + 1] = simple
+                index = index + 1
+            elseif escape == "x" then
+                local value = 0
+                local start = index + 1
+                index = start
+                while index <= #body do
+                    local digit = digit_value(body:byte(index))
+                    if digit == nil then break end
+                    value = value * 16 + digit
+                    index = index + 1
+                end
+                if index == start then return nil end
+                values[#values + 1] = value
+            elseif escape:match("[0-7]") then
+                local value = 0
+                local count = 0
+                while index <= #body and count < 3 do
+                    local digit = digit_value(body:byte(index))
+                    if digit == nil or digit >= 8 then break end
+                    value = value * 8 + digit
+                    index = index + 1
+                    count = count + 1
+                end
+                values[#values + 1] = value
+            elseif escape == "u" or escape == "U" then
+                local count = escape == "u" and 4 or 8
+                local value = 0
+                index = index + 1
+                for _ = 1, count do
+                    local digit = index <= #body and
+                        digit_value(body:byte(index)) or nil
+                    if digit == nil then return nil end
+                    value = value * 16 + digit
+                    index = index + 1
+                end
+                values[#values + 1] = value
+            else
+                -- C accepts implementation-defined escaped characters with a
+                -- diagnostic.  Preserve their ordinary character value.
+                values[#values + 1] = escape:byte()
+                index = index + 1
+            end
+        end
+    end
+    if #values == 0 then return nil end
+
+    local bits = 0
+    for _, value in ipairs(values) do
+        bits = (bits << 8) | value
+    end
+    return pp_integer(bits, false)
+end
+
+local function unsigned_less(left, right)
+    return math.ult(left, right)
+end
+
+local function unsigned_less_equal(left, right)
+    return left == right or unsigned_less(left, right)
+end
+
+-- Divide uintmax_t bit patterns exactly, without converting either operand to
+-- double.  Each subtraction chooses the largest non-overflowing shifted
+-- divisor no greater than the remaining dividend, so this is bounded by 64
+-- outer and 64 inner iterations.
+local function unsigned_divmod(numerator, denominator)
+    if denominator == 0 then
+        error("division by zero in preprocessor expression", 0)
+    end
+    local quotient = 0
+    local remainder = numerator
+    while not unsigned_less(remainder, denominator) do
+        local divisor = denominator
+        local quotient_bit = 1
+        while unsigned_less_equal(divisor, remainder >> 1) do
+            divisor = divisor << 1
+            quotient_bit = quotient_bit << 1
+        end
+        remainder = remainder - divisor
+        quotient = quotient | quotient_bit
+    end
+    return quotient, remainder
+end
+
+-- Lua's // rounds toward minus infinity; C integer division truncates toward
+-- zero, and the remainder has the sign of the dividend.
+local function signed_divmod(numerator, denominator)
+    if denominator == 0 then
+        error("division by zero in preprocessor expression", 0)
+    end
+    local quotient = numerator // denominator
+    local remainder = numerator % denominator
+    if remainder ~= 0 and ((numerator < 0) ~= (denominator < 0)) then
+        quotient = quotient + 1
+        remainder = numerator - quotient * denominator
+    end
+    return quotient, remainder
+end
+
+local function common_unsigned(left, right)
+    return left.unsigned or right.unsigned
+end
+
+local function compare_less(left, right)
+    if common_unsigned(left, right) then
+        return unsigned_less(left.bits, right.bits)
+    end
+    return left.bits < right.bits
+end
+
+local function shift_count(value)
+    if value.bits < 0 or value.bits >= 64 then
+        error("invalid shift count in preprocessor expression", 0)
+    end
+    return value.bits
+end
+
+local function signed_right_shift(bits, count)
+    if bits >= 0 or count == 0 then return bits >> count end
+    -- Lua's >> is logical.  Complementing before and after it supplies the
+    -- sign bits and matches the arithmetic right shift of supported hosts.
+    return ~((~bits) >> count)
+end
+
+-- Determine only the intmax_t/uintmax_t result type of an expression.  This is
+-- separate from evaluation because ?: applies the usual arithmetic conversion
+-- to both operands while evaluating only the selected one; walking the type of
+-- an unselected `1 / 0` must not perform that division.
+local expression_is_unsigned
+expression_is_unsigned = function(exp)
+    if not exp.op then
+        local spelling = exp[1]
+        if spelling:match("^L?'") then return false end
+        local integer = parse_integer_constant(spelling)
+        return integer and integer.unsigned or false
+    elseif exp.op == "+" or exp.op == "-" then
+        if exp[2] then
+            for _, operand in ipairs(exp) do
+                if expression_is_unsigned(operand) then return true end
+            end
+            return false
+        end
+        return expression_is_unsigned(exp[1])
+    elseif exp.op == "*" or exp.op == "/" or exp.op == "%" or
+           exp.op == "&" or exp.op == "|" or exp.op == "^" then
+        for _, operand in ipairs(exp) do
+            if expression_is_unsigned(operand) then return true end
+        end
+        return false
+    elseif exp.op == "<<" or exp.op == ">>" or exp.op == "~" then
+        return expression_is_unsigned(exp[1])
+    elseif exp.op == "?" then
+        return expression_is_unsigned(exp[2]) or
+            expression_is_unsigned(exp[3])
+    end
+    -- Relational, equality, logical, !, and defined all produce signed int.
+    return false
+end
+
 local eval_exp
-eval_exp = typed("Ctx, Exp -> number", function(ctx, exp)
+eval_exp = typed("Ctx, Exp -> table", function(ctx, exp)
     debug(exp)
 
     if not exp.op then
         local val = exp[1]
         typed.check(val, "string")
-        local defined = ctx.defines[val]
-        if defined then
-            assert(type(defined) == "table")
-            local subexp = parse_expression(defined)
-            if not subexp then
-                error("syntax error in preprocessor expression")
+        if val:match("^L?'") then
+            local character = parse_character_constant(val)
+            if not character then
+                error("invalid character constant in preprocessor expression", 0)
             end
-            return eval_exp(ctx, subexp)
+            return character
         end
-        val = val:gsub("U*L*$", "")
-        if val:match("^0[xX]") then
-            return tonumber(val) or 0
-        elseif val:sub(1,1) == "0" then
-            return tonumber(val, 8) or 0
-        else
-            return tonumber(val) or 0
+        local integer = parse_integer_constant(val)
+        if integer then return integer end
+        if val:match("^[A-Za-z_][_A-Za-z0-9]*$") then
+            -- Macro replacement has already run.  C99 6.10.1p4 replaces every
+            -- remaining identifier (including a self-recursive macro name)
+            -- with the pp-number 0.
+            return pp_integer(0, false)
         end
+        error("non-integer constant in preprocessor expression", 0)
     elseif exp.op == "+"  then
         if exp[2] then
-            return eval_exp(ctx, exp[1]) + eval_exp(ctx, exp[2])
+            local result = eval_exp(ctx, exp[1])
+            for index = 2, #exp do
+                local right = eval_exp(ctx, exp[index])
+                result = pp_integer(result.bits + right.bits,
+                    common_unsigned(result, right))
+            end
+            return result
         else
             return eval_exp(ctx, exp[1])
         end
     elseif exp.op == "-"  then
         if exp[2] then
-            return eval_exp(ctx, exp[1]) - eval_exp(ctx, exp[2])
+            local result = eval_exp(ctx, exp[1])
+            for index = 2, #exp do
+                local right = eval_exp(ctx, exp[index])
+                result = pp_integer(result.bits - right.bits,
+                    common_unsigned(result, right))
+            end
+            return result
         else
-            return -(eval_exp(ctx, exp[1]))
+            local value = eval_exp(ctx, exp[1])
+            return pp_integer(-value.bits, value.unsigned)
         end
-    elseif exp.op == "*"  then return eval_exp(ctx, exp[1]) * eval_exp(ctx, exp[2])
-    elseif exp.op == "/"  then return eval_exp(ctx, exp[1]) / eval_exp(ctx, exp[2])
-    elseif exp.op == ">>" then return eval_exp(ctx, exp[1]) // (1 << eval_exp(ctx, exp[2]))
-    elseif exp.op == "<<" then return eval_exp(ctx, exp[1]) << eval_exp(ctx, exp[2])
-    elseif exp.op == "==" then return (eval_exp(ctx, exp[1]) == eval_exp(ctx, exp[2])) and 1 or 0
-    elseif exp.op == "!=" then return (eval_exp(ctx, exp[1]) ~= eval_exp(ctx, exp[2])) and 1 or 0
-    elseif exp.op == ">=" then return (eval_exp(ctx, exp[1]) >= eval_exp(ctx, exp[2])) and 1 or 0
-    elseif exp.op == "<=" then return (eval_exp(ctx, exp[1]) <= eval_exp(ctx, exp[2])) and 1 or 0
-    elseif exp.op == ">"  then return (eval_exp(ctx, exp[1]) > eval_exp(ctx, exp[2])) and 1 or 0
-    elseif exp.op == "<"  then return (eval_exp(ctx, exp[1]) < eval_exp(ctx, exp[2])) and 1 or 0
-    elseif exp.op == "!"  then return (eval_exp(ctx, exp[1]) ~= 0) and 0 or 1
+    elseif exp.op == "*" then
+        local result = eval_exp(ctx, exp[1])
+        for index = 2, #exp do
+            local right = eval_exp(ctx, exp[index])
+            result = pp_integer(result.bits * right.bits,
+                common_unsigned(result, right))
+        end
+        return result
+    elseif exp.op == "/" or exp.op == "%" then
+        local result = eval_exp(ctx, exp[1])
+        for index = 2, #exp do
+            local right = eval_exp(ctx, exp[index])
+            local quotient, remainder, unsigned
+            if common_unsigned(result, right) then
+                quotient, remainder =
+                    unsigned_divmod(result.bits, right.bits)
+                unsigned = true
+            else
+                quotient, remainder = signed_divmod(result.bits, right.bits)
+                unsigned = false
+            end
+            result = pp_integer(
+                exp.op == "/" and quotient or remainder, unsigned)
+        end
+        return result
+    elseif exp.op == ">>" or exp.op == "<<" then
+        local result = eval_exp(ctx, exp[1])
+        for index = 2, #exp do
+            local count = shift_count(eval_exp(ctx, exp[index]))
+            local bits
+            if exp.op == "<<" then
+                bits = result.bits << count
+            elseif result.unsigned then
+                bits = result.bits >> count
+            else
+                bits = signed_right_shift(result.bits, count)
+            end
+            result = pp_integer(bits, result.unsigned)
+        end
+        return result
+    elseif exp.op == "&" or exp.op == "|" or exp.op == "^" then
+        local result = eval_exp(ctx, exp[1])
+        for index = 2, #exp do
+            local right = eval_exp(ctx, exp[index])
+            local bits
+            if exp.op == "&" then
+                bits = result.bits & right.bits
+            elseif exp.op == "|" then
+                bits = result.bits | right.bits
+            else
+                bits = result.bits ~ right.bits
+            end
+            result = pp_integer(bits, common_unsigned(result, right))
+        end
+        return result
+    elseif exp.op == "~" then
+        local value = eval_exp(ctx, exp[1])
+        return pp_integer(~value.bits, value.unsigned)
+    elseif exp.op == "==" or exp.op == "!=" then
+        local result = eval_exp(ctx, exp[1])
+        for index = 2, #exp do
+            local right = eval_exp(ctx, exp[index])
+            local equal = result.bits == right.bits
+            if exp.op == "!=" then equal = not equal end
+            result = pp_integer(equal and 1 or 0, false)
+        end
+        return result
+    elseif exp.op == ">=" or exp.op == "<=" or
+           exp.op == ">" or exp.op == "<" then
+        local result = eval_exp(ctx, exp[1])
+        for index = 2, #exp do
+            local right = eval_exp(ctx, exp[index])
+            local comparison
+            if exp.op == "<" then
+                comparison = compare_less(result, right)
+            elseif exp.op == ">" then
+                comparison = compare_less(right, result)
+            elseif exp.op == "<=" then
+                comparison = not compare_less(right, result)
+            else
+                comparison = not compare_less(result, right)
+            end
+            result = pp_integer(comparison and 1 or 0, false)
+        end
+        return result
+    elseif exp.op == "!" then
+        return pp_integer(eval_exp(ctx, exp[1]).bits ~= 0 and 0 or 1, false)
     elseif exp.op == "&&" then
         for _, e in ipairs(exp) do
-            if eval_exp(ctx, e) == 0 then
-                return 0
+            if eval_exp(ctx, e).bits == 0 then
+                return pp_integer(0, false)
             end
         end
-        return 1
+        return pp_integer(1, false)
     elseif exp.op == "||" then
         for _, e in ipairs(exp) do
-            if eval_exp(ctx, e) ~= 0 then
-                return 1
+            if eval_exp(ctx, e).bits ~= 0 then
+                return pp_integer(1, false)
             end
         end
-        return 0
+        return pp_integer(0, false)
     elseif exp.op == "?" then
-        if eval_exp(ctx, exp[1]) ~= 0 then
-            return eval_exp(ctx, exp[2])
+        local selected
+        if eval_exp(ctx, exp[1]).bits ~= 0 then
+            selected = eval_exp(ctx, exp[2])
         else
-            return eval_exp(ctx, exp[3])
+            selected = eval_exp(ctx, exp[3])
         end
+        return pp_integer(selected.bits,
+            expression_is_unsigned(exp[2]) or
+                expression_is_unsigned(exp[3]))
     elseif exp.op == "defined" then
-        return (ctx.defines[exp[1][1]] ~= nil) and 1 or 0
+        return pp_integer((ctx.defines[exp[1][1]] ~= nil) and 1 or 0, false)
     else
         error("unimplemented operator " .. tostring(exp.op))
     end
@@ -1931,7 +2261,7 @@ local run_expression = typed("Ctx, {string} -> boolean", function(ctx, tks)
     if not exp then
         error("syntax error in preprocessor expression", 0)
     end
-    return eval_exp(ctx, exp) ~= 0
+    return eval_exp(ctx, exp).bits ~= 0
 end)
 
 local function parse_contents(filename, contents, ctx)

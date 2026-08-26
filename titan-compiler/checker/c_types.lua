@@ -34,6 +34,7 @@ function new_direct_probe_service()
             toolchain.language_flag = false
         end
     end
+    local io_strategy = foreign_c_options.io or toolchain.io
     if not toolchain.profile then
         local configured = {}
         for key, value in pairs(toolchain) do configured[key] = value end
@@ -51,6 +52,7 @@ function new_direct_probe_service()
                 language_flag = toolchain.language_flag,
                 cppflags = toolchain.cppflags,
                 compiler_include_dirs = toolchain.include_dirs,
+                io = io_strategy,
             })
         if not inputs then return nil, input_error end
         local profile, profile_error =
@@ -60,14 +62,19 @@ function new_direct_probe_service()
         configured.profile_identity = profile.identity
         toolchain = configured
     end
-    return cprobe.new_service({
+    local service_options = {
+        io = io_strategy,
         toolchain = toolchain,
-        runner = foreign_c_options.probe_runner or
-            cdriver.capture_command,
         verbose = foreign_c_options.verbose == true,
         cache_directory = foreign_c_options.probe_cache_directory,
         cache_identity = foreign_c_options.probe_cache_identity,
-    })
+    }
+    -- Ordinary compiler/checker use must retain the compiler I/O strategy as
+    -- the runner authority so asynchronous ownership remains with the caller.
+    if foreign_c_options.probe_runner ~= nil then
+        service_options.runner = foreign_c_options.probe_runner
+    end
+    return cprobe.new_service(service_options)
 end
 
 function ensure_probe_service(st)
@@ -103,6 +110,36 @@ function ensure_probe_service(st)
     return service
 end
 
+local function remember_probe_header_inputs(st, probe)
+    if type(probe.header_inputs) ~= "table" then return true end
+
+    -- A source-only C type can add an origin include solely to this probe
+    -- context, without adding anything to st.foreign_includes. Retain the
+    -- context's complete fixed-plus-supplemental closure for the compiler
+    -- manifest and the language server's final pre-publication restat.
+    st.probe_header_inputs = st.probe_header_inputs or {}
+    st.probe_header_input_identities =
+        st.probe_header_input_identities or {}
+    for _, input in ipairs(probe.header_inputs) do
+        if input.restat ~= false then
+            local key = input.kind .. "\0" .. input.path
+            local previous = st.probe_header_input_identities[key]
+            if previous and previous ~= input.identity then
+                return nil, "conflicting C header input identity for '" ..
+                    input.path .. "'"
+            elseif not previous then
+                st.probe_header_input_identities[key] = input.identity
+                st.probe_header_inputs[#st.probe_header_inputs + 1] = {
+                    kind = input.kind,
+                    path = input.path,
+                    identity = input.identity,
+                }
+            end
+        end
+    end
+    return true
+end
+
 function ensure_module_probe(st)
     local includes_version = st.foreign_includes_version or 0
     if st.module_probe
@@ -129,12 +166,20 @@ function ensure_module_probe(st)
 
     local module_probe
     module_probe, err = service:module_context({
+        module = st.modname,
         source_dir = st.source_dir or ".",
         includes = st.foreign_includes or {},
     })
     if not module_probe then
         st.module_probe_error = err or
             "could not create the module C probe context"
+        st.module_probe_error_includes_version = includes_version
+        return nil, st.module_probe_error
+    end
+    local remembered
+    remembered, err = remember_probe_header_inputs(st, module_probe)
+    if not remembered then
+        st.module_probe_error = err
         st.module_probe_error_includes_version = includes_version
         return nil, st.module_probe_error
     end
@@ -194,10 +239,14 @@ function checker._probe_for_c_types(st, probed_types)
     end
     local probe
     probe, err = service:module_context({
+        module = st.modname,
         source_dir = st.source_dir or ".",
         includes = includes,
     })
     if not probe then return nil, err end
+    local remembered
+    remembered, err = remember_probe_header_inputs(st, probe)
+    if not remembered then return nil, err end
     st.c_type_probes[cache_key] = probe
     return probe
 end

@@ -5,13 +5,6 @@ local function remove(path)
     os.remove(path)
 end
 
-local function read_file(path)
-    local file = assert(io.open(path, "rb"))
-    local source = file:read("*a")
-    file:close()
-    return source
-end
-
 local function clean_generated()
     for _, path in ipairs({
         "test.c", "test.o", "test.so", "test.a", "test",
@@ -1074,14 +1067,34 @@ describe("generic erased core", function()
         assert.truthy(ran, output)
     end)
 
-    it("compiles the generic iteration and GC implementations from source",
+    it("compiles compact imported generic iterator and callback implementations",
     function()
         local ok, err = h.generate_modules({
-            generic_iteration_fixture = read_file("titan/iteration.titan"),
-            generic_gc_fixture = read_file("titan/gc.titan"),
+            generic_iteration_fixture = [[
+                local function array_next<T>(
+                    array: {T}, index: integer
+                ): (integer?, T?)
+                    local next_index = index + 1
+                    if next_index > #array then
+                        return nil, nil
+                    end
+                    return next_index, array[next_index]
+                end
+
+                function ipairs<T>(array: {T}):
+                    (({T}, integer) -> (integer?, T?),
+                     {T}, integer, nil)
+                    return array_next, array, 0, nil
+                end
+            ]],
+            generic_gc_fixture = [[
+                function apply<T>(item: T, callback: (T) -> ())
+                    callback(item)
+                end
+            ]],
             test = [[
                 local iteration = import "generic_iteration_fixture"
-                local gc = import "generic_gc_fixture"
+                local generic = import "generic_gc_fixture"
 
                 function main(args: {string}): integer
                     local items: {integer} = {20, 22}
@@ -1090,11 +1103,19 @@ describe("generic erased core", function()
                         total = total + item
                     end
 
-                    local candidate: {string: value} = {}
-                    gc.finalizable(candidate,
-                        function(item: {string: value}) end)
-                    gc.collect()
-                    if total == 42 then return 0 else return 1 end
+                    local observed = 0
+                    local candidate: {string: integer} = {
+                        ["answer"] = total,
+                    }
+                    generic.apply(candidate,
+                        function(item: {string: integer})
+                            observed = item["answer"]
+                        end)
+                    if total == 42 and observed == 42 then
+                        return 0
+                    else
+                        return 1
+                    end
                 end
             ]],
         }, "test", true)

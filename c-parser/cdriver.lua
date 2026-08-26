@@ -1,3 +1,5 @@
+local _, module_loader_path = ...
+
 local cdriver = {}
 
 local cpp = require("c-parser.cpp")
@@ -9,6 +11,47 @@ local sha256 = require("titan-compiler.sha256")
 
 local SEP = package.config:sub(1, 1)
 local default_io = compiler_io.new_sync()
+
+-- Capture the compiler module's physical lookup root once, before an ordinary
+-- titanc caller can change cwd. Lua's file searcher passes the selected path as
+-- the chunk's second argument; prefer an absolute debug or loader path because
+-- that is the normal language-server configuration and needs no cwd I/O.
+--
+-- A checkout-relative package.path has no recoverable load-time anchor after a
+-- later chdir. In that fallback only, ask the synchronous standalone provider
+-- for cwd now. Keep a failed capture as a deferred discovery error so requiring
+-- cdriver still works for callers which always pass explicit include roots.
+local module_source = debug.getinfo(1, "S").source
+local debug_module_path = module_source:sub(1, 1) == "@"
+    and module_source:sub(2) or nil
+local function absolute_module_path(path)
+    return type(path) == "string" and path:match("^/") ~= nil
+end
+local module_path
+if absolute_module_path(debug_module_path) then
+    module_path = debug_module_path
+elseif absolute_module_path(module_loader_path) then
+    module_path = module_loader_path
+else
+    module_path = debug_module_path or
+        (type(module_loader_path) == "string" and module_loader_path or nil)
+end
+local module_dir_error
+if module_path and not absolute_module_path(module_path) then
+    local called, load_root, cwd_error = pcall(default_io.cwd, default_io)
+    if called and load_root then
+        module_path = load_root .. SEP .. module_path
+    else
+        module_dir_error =
+            "failed capturing compiler module cwd while loading cdriver: " ..
+            tostring(called and cwd_error or load_root)
+        module_path = nil
+    end
+elseif not module_path then
+    module_dir_error = "cdriver module loader did not provide a file path"
+end
+local module_dir = module_path and
+    (module_path:match("^(.*)[/\\][^/\\]+$") or ".") or nil
 
 local compiler_include_dirs = setmetatable({}, { __mode = "k" })
 
@@ -34,29 +77,69 @@ local configured_process_cache_tracks_weight = false
 local process_caches = setmetatable({}, { __mode = "k" })
 local process_analysis_mt = {}
 
--- An analysis is an explicit narrow reuse authority. Long-lived compiler
--- clients create one for a coherent analysis that has its own final
--- publication-time header validation. Ordinary cdriver callers omit it and
--- retain clone-per-call isolation.
+-- An analysis is an explicit narrow C reuse authority. Long-lived compiler
+-- clients create one for a coherent analysis with final publication-time
+-- header validation; it owns completed header graphs and semantic C-probe
+-- verdict tables. Ordinary cdriver callers omit it and retain clone-per-call
+-- isolation.
 function cdriver.new_process_analysis()
     return setmetatable({
         providers = setmetatable({}, { __mode = "k" }),
     }, process_analysis_mt)
 end
 
-local function process_analysis_entries(options, strategy)
-    local analysis = options and options.process_analysis
-    if analysis == nil then return nil end
+local function process_analysis_provider(analysis, strategy)
     if type(analysis) ~= "table"
        or getmetatable(analysis) ~= process_analysis_mt then
         return false, "process_analysis is not a cdriver analysis"
     end
-    local entries = analysis.providers[strategy]
-    if not entries then
-        entries = {}
-        analysis.providers[strategy] = entries
+    local provider = analysis.providers[strategy]
+    if not provider then
+        provider = {
+            process_entries = {},
+            probe_toolchains = {},
+        }
+        analysis.providers[strategy] = provider
     end
-    return entries
+    return provider
+end
+
+local function process_analysis_entries(options, strategy)
+    local analysis = options and options.process_analysis
+    if analysis == nil then return nil end
+    local provider, err = process_analysis_provider(analysis, strategy)
+    if provider == false then return false, err end
+    return provider.process_entries
+end
+
+-- Return the analysis-owned semantic probe caches for one exact compiler I/O
+-- provider and toolchain identity. cdriver owns only the branded authority and
+-- its partitions: cprobe remains responsible for publishing exclusively
+-- completed baseline successes and completed semantic success/rejection
+-- results, never infrastructure failures.
+function cdriver.process_analysis_probe_caches(
+        analysis, strategy, toolchain_key)
+    local valid, validation_error = pcall(
+        compiler_io.validate, strategy, 3)
+    if not valid then
+        return nil, "invalid compiler I/O strategy: " ..
+            tostring(validation_error)
+    end
+    if type(toolchain_key) ~= "string" or toolchain_key == "" then
+        return nil, "C probe toolchain key must be a nonempty string"
+    end
+
+    local provider, err = process_analysis_provider(analysis, strategy)
+    if provider == false then return nil, err end
+    local caches = provider.probe_toolchains[toolchain_key]
+    if not caches then
+        caches = {
+            baseline_cache = {},
+            result_cache = {},
+        }
+        provider.probe_toolchains[toolchain_key] = caches
+    end
+    return caches.baseline_cache, caches.result_cache
 end
 
 local function process_cache_for(strategy)
@@ -304,24 +387,13 @@ local function default_compiler_include_dirs(strategy)
         return compiler_include_dirs[strategy]
     end
 
-    local source = debug.getinfo(1, "S").source
-    local this_dir = source:sub(1, 1) == "@"
-        and source:sub(2):match("^(.*)[/\\][^/\\]+$")
-        or "."
-    if not is_absolute_path(this_dir) then
-        local cwd, cwd_error = strategy:cwd()
-        if not cwd then
-            return nil, "failed determining cwd for compiler headers: " ..
-                tostring(cwd_error)
-        end
-        this_dir = join_path(cwd, this_dir)
-    end
+    if not module_dir then return nil, module_dir_error end
     local resolved = {
-        find_runtime_dir(this_dir, strategy) or
-            find_sdk_include_dir(this_dir, strategy)
+        find_runtime_dir(module_dir, strategy) or
+            find_sdk_include_dir(module_dir, strategy)
             or "titan-runtime",
     }
-    local lua_source = find_lua_source_dir(this_dir, strategy)
+    local lua_source = find_lua_source_dir(module_dir, strategy)
     if lua_source then
         table.insert(resolved, lua_source)
     end
@@ -557,7 +629,7 @@ local clone_graph = cpp.clone_graph
 local graph_weight = cpp.graph_weight
 
 -- The fourth process_file result exists for target-profile acquisition. Its
--- only semantic payload is the exact macro context which cdefines has already
+-- semantic payload is the exact macro context which cdefines has already
 -- attached to ffi_types. Reconstruct the I/O and observed-input conveniences
 -- per caller instead of retaining flattened preprocessor output, origins,
 -- include roots, current-directory stacks, or observer bookkeeping.

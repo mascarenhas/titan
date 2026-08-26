@@ -4,7 +4,6 @@ return {
     -- dependencies, and nested spec bodies that the report discards anyway.
     include = {
         "titan%-compiler/",
-        "spec/[^/]+$",
         "titanc$",
     },
 }

@@ -44,7 +44,7 @@ printf '%s\n' 1 2 3 4 | xargs -r -n1 -P2 bash -c '
     worker=$worker_root/work-$shard
     log=$worker_root/shard-$shard.log
     started=$SECONDS
-    printf "===== starting compiler coverage shard %s =====\n" "$shard"
+    printf "===== starting compiler covered+stress shard %s =====\n" "$shard"
     (
         cd "$worker" || exit 1
         rm -f luacov.stats.out luacov.report.out || exit 1
@@ -59,7 +59,7 @@ printf '%s\n' 1 2 3 4 | xargs -r -n1 -P2 bash -c '
     if (( pipeline_status[1] != 0 || pipeline_status[2] != 0 )); then
         status=1
     fi
-    printf "===== finished compiler coverage shard %s: status=%s, %ss =====\n" \
+    printf "===== finished compiler covered+stress shard %s: status=%s, %ss =====\n" \
         "$shard" "$status" "$((SECONDS - started))"
     printf "%s\n" "$status" > "$worker_root/shard-$shard.status"
     exit "$status"
@@ -68,7 +68,7 @@ printf '%s\n' 1 2 3 4 | xargs -r -n1 -P2 bash -c '
 status=$xargs_status
 for shard in 1 2 3 4; do
     if [[ ! -s $worker_root/shard-$shard.log ]]; then
-        echo "compiler coverage shard $shard produced no readable log" >&2
+        echo "compiler shard $shard produced no readable log" >&2
         status=1
     fi
     shard_status=
@@ -76,7 +76,7 @@ for shard in 1 2 3 4; do
         read -r shard_status < "$worker_root/shard-$shard.status"
     fi
     if [[ ! $shard_status =~ ^[0-9]+$ || $shard_status != 0 ]]; then
-        echo "compiler coverage shard $shard failed: " \
+        echo "compiler shard $shard failed: " \
             "${shard_status:-missing status}" >&2
         status=1
     fi
@@ -87,7 +87,7 @@ stats=()
 for shard in 1 2 3 4; do
     file=$worker_root/work-$shard/luacov.stats.out
     if [[ ! -f $file ]]; then
-        echo "compiler coverage shard $shard produced no LuaCov stats" >&2
+        echo "compiler shard $shard produced no LuaCov stats" >&2
         exit 1
     fi
     stats+=("$file")

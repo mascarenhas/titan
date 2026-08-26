@@ -272,7 +272,9 @@ describe("standalone-prefix source installation", function()
             "/share/lua/5.5/titan-compiler/pretty.lua")
         for _, module in ipairs({
             "cdeclarator.lua", "cpreamble.lua", "cprobe.lua",
+            "cprobe_cache.lua",
             "csemantics.lua", "io.lua", "sha256.lua", "test_runner.lua",
+            "version.lua",
         }) do
             assert_file(PREFIX ..
                 "/share/lua/5.5/titan-compiler/" .. module)
@@ -413,7 +415,9 @@ describe("standalone-prefix source installation", function()
             '["staticmetadata.lua"]', 1, true), manifest)
         for _, module in ipairs({
             "cdeclarator.lua", "cpreamble.lua", "cprobe.lua",
+            "cprobe_cache.lua",
             "csemantics.lua", "io.lua", "sha256.lua", "test_runner.lua",
+            "version.lua",
         }) do
             assert.truthy(manifest:find(
                 '["' .. module .. '"]', 1, true), manifest)
@@ -636,7 +640,6 @@ describe("standalone-prefix source installation", function()
             "spec/fixtures/test_runner/nested/tests/tests.titan",
             "spec/fixtures/test_runner/test_runner_dependency.titan",
             "spec/fixtures/test_runner/test_runner_edge.titan",
-            "spec/fixtures/test_runner/test_runner_empty.titan",
             "spec/fixtures/test_runner/test_runner_fixture.titan",
             "spec/fixtures/test_runner/test_runner_folder/contributor.titan",
             "spec/fixtures/test_runner/test_runner_folder/test_runner_folder.titan",

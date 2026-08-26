@@ -1,6 +1,5 @@
 local h = require "spec.support.helpers"
 local driver = require "titan-compiler.driver"
-local installed_prefix = require "spec.support.installed_prefix"
 
 local MODULE = "ffi_stack_objects"
 
@@ -483,60 +482,76 @@ describe("automatic C object code generation", function()
         end)
     end)
 
-    it("builds the process-options, stdio-array, and addrinfo shape",
+    it("builds a nested process-options, stdio-array, and tagged address shape",
     function()
-        installed_prefix.active()
-        h.with_libuv_feature_flags(function()
-            with_header(
-                '#include <netdb.h>\n#include <uv.h>\n'
-                .. 'static uv_pipe_t *ffi_pipe_pointer;\n'
-                .. 'static int ffi_stream_matches_pipe(\n'
-                .. '    uv_stdio_container_t *stdio, uv_pipe_t *pipe\n'
-                .. ') {\n'
-                .. '    return stdio[0].data.stream == (uv_stream_t *)pipe;\n'
-                .. '}\n',
-                function(header)
-                    -- One translation-unit header is intentional: uv.h carries
-                    -- an addrinfo forward reference while netdb.h owns its
-                    -- complete definition. Their shared file-scope tag must
-                    -- complete in place before this object is admitted.
-                    local source = [[
-                        local libuv = foreign import "]] .. header .. [["
+        with_header([[
+            typedef struct ffi_stream { int state; } ffi_stream;
+            typedef struct ffi_pipe { int state; } ffi_pipe;
 
-                        function shape(): integer
-                            local options = libuv.uv_process_options_t.new()
-                            local stdio: libuv.uv_stdio_container_t[3] =
-                                libuv.uv_stdio_container_t.new_array(3)
-                            local address = libuv.addrinfo.new()
+            typedef union ffi_stdio_data {
+                ffi_stream *stream;
+                int descriptor;
+            } ffi_stdio_data;
 
-                            options.stdio = stdio
-                            options.stdio_count = #stdio
-                            stdio[0].data.stream =
-                                libuv.ffi_pipe_pointer as *libuv.uv_stream_t
-                            address.ai_flags = 0
-                            return options.stdio_count as integer
-                                + address.ai_flags as integer
-                                + libuv.ffi_stream_matches_pipe(
-                                    stdio, libuv.ffi_pipe_pointer
-                                  ) as integer
-                        end
-                    ]]
-                    local csrc = h.compile_and_read_c(source, MODULE)
-                    assert.match(
-                        "uv_process_options_t _local_options_%d+ = %{0%};",
-                        csrc)
-                    assert.match(
-                        "uv_stdio_container_t _local_stdio_%d+%[3%] = %{0%};",
-                        csrc)
-                    assert.match(
-                        "struct addrinfo _local_address_%d+ = %{0%};", csrc)
+            typedef struct ffi_stdio_container {
+                unsigned int flags;
+                ffi_stdio_data data;
+            } ffi_stdio_container;
 
-                    local ok, out = h.call(MODULE, [[
-                        assert(ffi_stack_objects.shape() == 4)
-                    ]])
-                    assert.truthy(ok, out)
-                    assert.equal("", out)
-            end)
+            typedef struct ffi_process_options {
+                ffi_stdio_container *stdio;
+                int stdio_count;
+            } ffi_process_options;
+
+            struct ffi_address {
+                int flags;
+                struct ffi_address *next;
+            };
+
+            static ffi_pipe *ffi_pipe_pointer;
+            static int ffi_stream_matches_pipe(
+                ffi_stdio_container *stdio,
+                ffi_pipe *pipe
+            ) {
+                return stdio[0].data.stream == (ffi_stream *)pipe;
+            }
+        ]], function(header)
+            local source = [[
+                local c = foreign import "]] .. header .. [["
+
+                function shape(): integer
+                    local options = c.ffi_process_options.new()
+                    local stdio: c.ffi_stdio_container[3] =
+                        c.ffi_stdio_container.new_array(3)
+                    local address = c.ffi_address.new()
+
+                    options.stdio = stdio
+                    options.stdio_count = #stdio
+                    stdio[0].data.stream =
+                        c.ffi_pipe_pointer as *c.ffi_stream
+                    address.flags = 0
+                    return options.stdio_count as integer
+                        + address.flags as integer
+                        + c.ffi_stream_matches_pipe(
+                            stdio, c.ffi_pipe_pointer
+                          ) as integer
+                end
+            ]]
+            local csrc = h.compile_and_read_c(source, MODULE)
+            assert.match(
+                "ffi_process_options _local_options_%d+ = %{0%};",
+                csrc)
+            assert.match(
+                "ffi_stdio_container _local_stdio_%d+%[3%] = %{0%};",
+                csrc)
+            assert.match(
+                "struct ffi_address _local_address_%d+ = %{0%};", csrc)
+
+            local ok, out = h.call(MODULE, [[
+                assert(ffi_stack_objects.shape() == 4)
+            ]])
+            assert.truthy(ok, out)
+            assert.equal("", out)
         end)
     end)
 end)

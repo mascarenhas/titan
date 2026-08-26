@@ -29,6 +29,8 @@ function checker.check(modname, ast, subject, filename, loader, options)
     st.c_profile = nil
     st.foreign_includes = {}
     st.foreign_includes_version = 0
+    st.probe_header_inputs = {}
+    st.probe_header_input_identities = {}
     st.pending_foreign_redeclarations = {}
     st.probe_service_provider = options.probe_service_provider
     if filename then
@@ -44,7 +46,8 @@ function checker.check(modname, ast, subject, filename, loader, options)
         checktoplevel(ast, st, errors, loader)
         checkbodies(ast, st, errors)
         local header_inputs, header_error =
-            cprobe.collect_header_inputs(st.foreign_includes)
+            cprobe.collect_header_inputs(
+                st.foreign_includes, st.probe_header_inputs)
         if header_inputs then
             -- Language-server clients retain this small immutable closure on
             -- both project and metadata-only external source entries. It has
