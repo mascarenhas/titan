@@ -299,10 +299,26 @@ with the discarded analysis.
 with the scalar signature `(module_name, stage, hit, key, path)`. `module_name`
 is the source module whose checker requested the probe, or the empty string for
 a lookup outside a source check; `stage` is the C-probe stage; `hit` is a
-boolean; `key` is the persistent marker digest; and `path` is its absolute
+boolean; `key` is the persistent result digest; and `path` is its absolute
 pathname. The driver and C-probe service protect the callback, so a tracing
 failure cannot change analysis. This callback is separate from verbose probe
 evidence and never writes to stdout.
+
+`options.c_probe_semantic_trace` is an optional best-effort callback receiving
+one bounded event table for every logical probe request. Its scalar fields are
+`event = "semantic_result"`, `module`, `key`, `probe_kind`,
+`header_identity`, `outcome`, `cache_tier`, `repeated`, and `publication`.
+Cache tiers are `service`, `analysis`, `persistent`, or `compiler`; outcomes
+are `success`, `compiler_rejection`, or `infrastructure_failure`. The event
+contains no source, command, argv, diagnostic, or filesystem path.
+
+`options.c_probe_execution_trace` similarly receives one event per physical C
+compiler launch. Its fields are `event = "compiler_execution"`, `module`,
+`key`, `probe_kind`, `batch_kind`, `header_identity`, `outcome`,
+`persistent_lookup`, `publication`, and optional `wall_ms`. The I/O strategy
+may supply finite nonnegative child wall milliseconds in its normalized
+`run` result; process CPU is never substituted. Both structured callbacks are
+protected and may not change compilation when they fail.
 
 The following is the complete normative strategy contract for language-server
 API 3. Signatures use Lua multiple-return notation. Every table that crosses
@@ -316,7 +332,7 @@ backend-specific records, arrays, error objects, or task handles.
 | `stat(path)` | `metadata, nil`, `nil, nil` for a clean missing path, or `nil, message`. Follows the final symbolic link. |
 | `lstat(path)` | The same result convention as `stat`, but describes the final symbolic link itself. |
 | `readable(path)` | One boolean. `true` means the path can be opened for binary reading; absence, invalid input, and ordinary open failures are `false`. |
-| `read_file(path)` | `bytes, nil` or `nil, message`. Reads the complete file as a binary-safe Lua string. |
+| `read_file(path, max_bytes?)` | `bytes, nil` or `nil, message`. Without a bound, reads the complete file as a binary-safe Lua string. A bound must be a nonnegative integer; the method returns the complete file when its size is at most that bound, or exactly the first `max_bytes + 1` bytes when it is larger. This optional form lets bounded decoders detect overflow without materializing an unbounded replacement. |
 | `write_file(path, bytes)` | `true, nil` or `nil, message`. Publishes only complete contents: an observer may see the previous file or the complete replacement, never a partially written destination. Failure and cancellation must not leak the strategy's sibling temporary. If cancellation races the final rename, the destination may contain either complete version. |
 | `list(path)` | A dense one-based array of entry basenames, or `nil, message`. `.` and `..` are excluded and order is unspecified. |
 | `mkdir(path, remove_if_cancelled?)` | `true, nil` or `nil, message`. Creates one directory; its parent must already exist. The optional ownership rule is described below. |
@@ -334,7 +350,7 @@ pair: clients compare the pair only for equality and must not interpret either
 component. `kind` is `file`,
 `directory`, `symlink`, or `other`; `size` and the timestamps are integers,
 nanoseconds are in `[0, 1000000000)`, and `mode` carries the POSIX file-type
-and permission bits used by compiler identity code.
+and permission bits used by filesystem/header identity code.
 
 `run` always supplies boolean `started` and `ok` plus a string `diagnostic`.
 A completed process also supplies integer `status`, string `why` (`exit` or
@@ -745,9 +761,23 @@ the compiler (`-include=file` requests the literal name `=file`). Relative
 operands consult the process cwd and then the complete ordered quote/system
 search. Their exact bytes, transitive closure, and all winning and earlier
 candidate states partition the preprocessor macro cache, the compiler-probe
-toolchain and persistent-success keys, and the module header inputs. Probe
-inputs are restatted before cache reuse and after compilation, so a concurrent
-change cannot publish a success marker.
+toolchain key, version-2 module header context, and version-3 persistent digest.
+The probe identity retains the parsed compiler and raw ordered flag/include
+configuration, target profile, compile mode, forced-header manifest, source
+directory, ordered raw/rendered header descriptors and file/search inputs,
+semantic key, and complete probe source. Successful probes use the existing
+empty `.success` marker; deterministic compiler rejections use a bounded,
+checksummed `.negative` sibling under the same digest.
+
+The in-memory raw semantic key is consulted before rendering or hashing the
+complete probe source. Outside an explicit `process_analysis`, forced inputs
+are validated and hashed once per service and ordinary inputs once per module
+context; repeated probes and persistent hits reuse that snapshot without a
+post-compiler restat. Inside one coherent analysis the probe service performs
+zero local header restats because the semantic client owns snapshot validation
+and the publication boundary. A header change which races one physical compiler
+invocation is deliberately approximate; compilation of the final generated C
+remains authoritative.
 
 Response-file arguments (`@file`) and opaque preprocessor forwarding through
 `-Wp,` or `-Xpreprocessor` are rejected in this path: Titan cannot safely
@@ -1428,7 +1458,9 @@ the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 | `options.source_process_trace` | semantic clients / `driver.new_resolver_context` | `nil` | Best-effort scalar `(module_name, filename, outcome, self_cpu_ms, total_cpu_ms, parse_cpu_ms, check_cpu_ms)` observer for exclusive source-module process CPU. Parse time sums folder constituents; check and self time exclude nested source work, post-child checkpoints, complete C-header processing, and downstream FFI conversion. Cached rehydration reports zero parse/check CPU; five-argument Lua callbacks remain valid. |
 | `context.checked_source_modules` | `driver.defaultloader` | `{}` | Ordered dense list of source modules checked during this resolver run. A module is appended after its complete result is published and before `context.io:yield()`; retained cached modules are excluded. |
 | `options.extra_ffi_include_dirs` | semantic clients / `driver.new_resolver_context` | `{}` | Analysis-local include roots appended to a fresh foreign-C probe descriptor without process-global reconfiguration. |
-| `options.c_probe_cache_trace` | semantic clients / `driver.new_resolver_context` | `nil` | Best-effort scalar `(module_name, stage, hit, key, path)` observer for persistent successful-probe marker lookups; it neither enables verbose evidence nor writes to stdout. |
+| `options.c_probe_cache_trace` | semantic clients / `driver.new_resolver_context` | `nil` | Best-effort scalar `(module_name, stage, hit, key, path)` observer for persistent semantic-result lookups; it neither enables verbose evidence nor writes to stdout. |
+| `options.c_probe_semantic_trace` | semantic clients / `driver.new_resolver_context` | `nil` | Best-effort bounded event-table observer for one logical terminal result per probe request, including outcome, cache tier, repeat, and publication state. |
+| `options.c_probe_execution_trace` | semantic clients / `driver.new_resolver_context` | `nil` | Best-effort bounded event-table observer for physical compiler launches, including batch kind, outcome, cache/publication state, and optional child wall milliseconds. |
 | `titan._loadlib` | `ltitanlib.c` / `driver.lua` | internal `RTLD_LAZY` + `RTLD_LOCAL` loader | Maps DSO candidates lazily for callable ABI/type interface recovery without initializing them or globalizing their symbols; archive candidates are parsed in-process instead. |
 | `titan._loadlibglobal` | `ltitanlib.c` / generated shims | internal canonical-path `RTLD_LAZY` + `RTLD_GLOBAL` loader | Maps or promotes a Lua-selected provider in a separate per-state cache and returns the requested logical `luaopen_*` entry. |
 | `Type.Module.file` | `types.lua`, `driver.lua`, `coder.lua` | exact logical `.so` path for a DSO claim, overwritten after dynamic lookup | Transient selected relative DSO used by generated handle imports; deliberately omitted from serialized interfaces and never populated with an archive path. |

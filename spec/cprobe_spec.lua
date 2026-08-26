@@ -1,4 +1,5 @@
 local cprobe = require "titan-compiler.cprobe"
+local cprobe_cache = require "titan-compiler.cprobe_cache"
 local cpreamble = require "titan-compiler.cpreamble"
 local csemantics = require "titan-compiler.csemantics"
 local sha256 = require "titan-compiler.sha256"
@@ -6,6 +7,20 @@ local types = require "titan-compiler.types"
 local cdriver = require "c-parser.cdriver"
 local compiler_io = require "titan-compiler.io"
 local lfs = require "lfs"
+
+local function keyed_fields(fields)
+    local flattened = { "titan-cprobe-key-v1" }
+    for _, field in ipairs(fields) do
+        flattened[#flattened + 1] = field[1]
+        flattened[#flattened + 1] = field[2] or ""
+    end
+    local encoded = {}
+    for index, value in ipairs(flattened) do
+        value = tostring(value)
+        encoded[index] = #value .. ":" .. value
+    end
+    return table.concat(encoded)
+end
 
 local function cstruct(name)
     return types.CStruct(nil, name, nil, {}, true, false)
@@ -239,6 +254,39 @@ describe("session-scoped C probe service", function()
         assert.is_nil(service)
         assert.matches("invalid compiler I/O strategy", strategy_error,
             1, true)
+    end)
+
+    it("requires complete include identity for reusable probe contexts",
+    function()
+        local cache = temporary_directory()
+        local service = new_fake_service({
+            process_analysis = cdriver.new_process_analysis(),
+            cache_directory = cache,
+        })
+        for _, include in ipairs({
+            "api.h",
+            {
+                include_kind = "angle",
+                include_name = "api.h",
+                c_header_dependencies = {},
+            },
+        }) do
+            local context, err = service:module_context({
+                includes = { include },
+            })
+            assert.is_nil(context)
+            assert.matches("requires explicit c_header_dependencies and " ..
+                "c_header_search_inputs", err, 1, true)
+        end
+        local complete, err = service:module_context({ includes = {{
+            include_kind = "angle",
+            include_name = "api.h",
+            c_header_dependencies = {},
+            c_header_search_inputs = {},
+        }} })
+        assert(complete, err)
+        assert.is_true(service:close())
+        assert(lfs.rmdir(cache))
     end)
 
     it("transfers tmpname and mkdir cancellation ownership to the strategy",
@@ -624,7 +672,7 @@ describe("session-scoped C probe service", function()
         assert.is_true(service:close())
     end)
 
-    it("keeps baseline infrastructure failure distinct and separately cached",
+    it("keeps baseline infrastructure failure distinct and retryable",
     function()
         local service, state = new_fake_service({}, function(_, _, metadata)
             assert.equal("baseline", metadata.stage)
@@ -650,9 +698,9 @@ describe("session-scoped C probe service", function()
         assert.matches("foreign header baseline failed", first.message)
         assert.matches("broken%.h:3", first.message)
         assert.equal("infrastructure_failure", second.status)
-        assert.is_true(second.baseline_cached)
+        assert.is_false(second.baseline_cached == true)
         assert.not_equal(first.key, second.key)
-        assert.equal(1, #state.calls)
+        assert.equal(2, #state.calls)
         assert.is_true(service:close())
 
         local rejection_service = new_fake_service({},
@@ -715,8 +763,8 @@ describe("session-scoped C probe service", function()
         assert.matches(
             "rejected the final ordered foreign header context",
             rejection.message, 1, true)
-        assert.is_true(rejection_cached.cached)
-        assert.equal(1, #rejection_state.calls)
+        assert.is_false(rejection_cached.cached == true)
+        assert.equal(2, #rejection_state.calls)
         assert.is_true(rejection_service:close())
 
         local infrastructure_service, infrastructure_state =
@@ -1451,6 +1499,31 @@ exit 0
         assert.is_nil(closed)
         assert.matches("cleanup also failed", close_error)
         assert.equal(1, cleanup_called)
+
+        for _, invalid_root in ipairs({ "relative/workspace", "/bad\0root" }) do
+            local invalid_service = assert(cprobe.new_service({
+                runner = function()
+                    error("runner must not be reached")
+                end,
+                temp_provider = function()
+                    return {
+                        root = invalid_root,
+                        write = function() return true end,
+                        remove = function() return true end,
+                        cleanup = function() return true end,
+                    }
+                end,
+            }))
+            local invalid_workspace, invalid_error =
+                invalid_service:_ensure_workspace()
+            assert.is_nil(invalid_workspace)
+            if invalid_root:sub(1, 1) ~= "/" then
+                assert.matches("must be absolute", invalid_error, 1, true)
+            else
+                assert.matches("contains a NUL byte", invalid_error, 1, true)
+            end
+            assert.is_true(invalid_service:close())
+        end
         local closed_again, repeated_error = write_failure_service:close()
         assert.is_nil(closed_again)
         assert.equal(close_error, repeated_error)
@@ -1780,7 +1853,7 @@ struct titan_probe_target_s { int value; };
     end)
 end)
 
-describe("persistent successful C probe markers", function()
+describe("persistent semantic C probe results", function()
     local function entries(path)
         local out = {}
         local iterator, state = lfs.dir(path)
@@ -1821,6 +1894,7 @@ describe("persistent successful C probe markers", function()
             key = first_run.cache_path:match("([^/.]+)[.]success$"),
             path = first_run.cache_path,
         }, first_events[1])
+        assert.equal(0, assert(lfs.attributes(first_run.cache_path)).size)
         assert.is_true(first:close())
 
         local second_events = {}
@@ -1855,6 +1929,789 @@ describe("persistent successful C probe markers", function()
         assert(lfs.rmdir(cache))
     end)
 
+    it("serves a service-memory hit without hashing or persistent I/O",
+    function()
+        local cache = temporary_directory()
+        local strategy = compiler_io.new_sync()
+        local service, state = new_fake_service({
+            io = strategy,
+            cache_directory = cache,
+        })
+        local source = "int titan_service_memory_hit;\n"
+        local first = service:_run_source(
+            "candidate", source, "service-memory-key")
+        assert.is_true(first.ok)
+        assert.equal(1, #state.calls)
+
+        local original_sha = sha256.hex
+        local originals = {
+            stat = strategy.stat,
+            read_file = strategy.read_file,
+            write_file = strategy.write_file,
+            run = strategy.run,
+        }
+        local function unexpected(operation)
+            return function()
+                error("service-memory hit unexpectedly called " .. operation)
+            end
+        end
+        sha256.hex = unexpected("SHA-256")
+        strategy.stat = unexpected("stat")
+        strategy.read_file = unexpected("read_file")
+        strategy.write_file = unexpected("write_file")
+        strategy.run = unexpected("run")
+
+        local completed, repeated = pcall(
+            service._run_source, service,
+            "candidate", source, "service-memory-key")
+        sha256.hex = original_sha
+        for name, implementation in pairs(originals) do
+            strategy[name] = implementation
+        end
+
+        assert.is_true(completed, repeated)
+        assert.is_true(repeated.ok)
+        assert.equal("service", repeated.cache_tier)
+        assert.equal(1, #state.calls)
+        assert.is_true(service:close())
+        assert(os.remove(first.cache_path))
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("serves pointer and operator service hits before full source rendering",
+    function()
+        local cache = temporary_directory()
+        local strategy = compiler_io.new_sync()
+        local profile = target_profile()
+        local service, state = new_fake_service({
+            io = strategy,
+            profile = profile,
+            cache_directory = cache,
+        })
+        local module = assert(service:module_context())
+        local pointer_source = cpointer("hot_service_source")
+        local pointer_target = cpointer("hot_service_target")
+        local trait = assert(csemantics.decide_binary_operator(
+            profile, "+", profile.integers.int.type, types.Integer()))
+        local first_pointer = module:probe_unsafe_object_pointer(
+            pointer_source, pointer_target)
+        local first_operator = module:probe_operator(trait)
+        assert.equal("success", first_pointer.status, first_pointer.message)
+        assert.equal("success", first_operator.status, first_operator.message)
+        assert.equal(3, #state.calls)
+
+        local original_preamble = module.header_preamble
+        local original_sha = sha256.hex
+        local originals = {
+            stat = strategy.stat,
+            read_file = strategy.read_file,
+            write_file = strategy.write_file,
+            run = strategy.run,
+        }
+        local function unexpected(operation)
+            return function()
+                error("semantic memory hit unexpectedly called " .. operation)
+            end
+        end
+        -- The normalized metadata and raw semantic key do not need the full
+        -- preamble. If either hit renders a translation unit, table.concat
+        -- rejects this sentinel before the assertion below can succeed.
+        module.header_preamble = {}
+        sha256.hex = unexpected("SHA-256")
+        strategy.stat = unexpected("stat")
+        strategy.read_file = unexpected("read_file")
+        strategy.write_file = unexpected("write_file")
+        strategy.run = unexpected("run")
+
+        local completed, repeated_pointer, repeated_operator = pcall(function()
+            return module:probe_unsafe_object_pointer(
+                    pointer_source, pointer_target),
+                module:probe_operator(trait)
+        end)
+        module.header_preamble = original_preamble
+        sha256.hex = original_sha
+        for name, implementation in pairs(originals) do
+            strategy[name] = implementation
+        end
+
+        assert.is_true(completed, repeated_pointer)
+        assert.equal("success", repeated_pointer.status)
+        assert.equal("service", repeated_pointer.cache_tier)
+        assert.equal(first_pointer.source, repeated_pointer.source)
+        assert.equal("success", repeated_operator.status)
+        assert.equal("service", repeated_operator.cache_tier)
+        assert.equal(first_operator.source, repeated_operator.source)
+        assert.equal(3, #state.calls)
+        assert.is_true(service:close())
+        for _, name in ipairs(entries(cache)) do
+            assert(os.remove(cache .. "/" .. name))
+        end
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("serves pointer and operator analysis hits before full source rendering",
+    function()
+        local cache = temporary_directory()
+        local strategy = compiler_io.new_sync()
+        local analysis = cdriver.new_process_analysis()
+        local profile = target_profile()
+        local pointer_source = cpointer("hot_analysis_source")
+        local pointer_target = cpointer("hot_analysis_target")
+        local trait = assert(csemantics.decide_binary_operator(
+            profile, "+", profile.integers.int.type, types.Integer()))
+        local publisher, publisher_state = new_fake_service({
+            io = strategy,
+            process_analysis = analysis,
+            profile = profile,
+            cache_directory = cache,
+        })
+        local publisher_module = assert(publisher:module_context())
+        local first_pointer = publisher_module:probe_unsafe_object_pointer(
+            pointer_source, pointer_target)
+        local first_operator = publisher_module:probe_operator(trait)
+        assert.equal("success", first_pointer.status, first_pointer.message)
+        assert.equal("success", first_operator.status, first_operator.message)
+        assert.equal(3, #publisher_state.calls)
+        assert.is_true(publisher:close())
+
+        local consumer, consumer_state = new_fake_service({
+            io = strategy,
+            process_analysis = analysis,
+            profile = profile,
+            cache_directory = cache,
+        }, function()
+            error("analysis hits must not invoke the compiler")
+        end)
+        local consumer_module = assert(consumer:module_context())
+        local original_preamble = consumer_module.header_preamble
+        local original_sha = sha256.hex
+        local originals = {
+            stat = strategy.stat,
+            read_file = strategy.read_file,
+            write_file = strategy.write_file,
+            run = strategy.run,
+        }
+        local function unexpected(operation)
+            return function()
+                error("analysis memory hit unexpectedly called " .. operation)
+            end
+        end
+        consumer_module.header_preamble = {}
+        sha256.hex = unexpected("SHA-256")
+        strategy.stat = unexpected("stat")
+        strategy.read_file = unexpected("read_file")
+        strategy.write_file = unexpected("write_file")
+        strategy.run = unexpected("run")
+
+        local completed, repeated_pointer, repeated_operator = pcall(function()
+            return consumer_module:probe_unsafe_object_pointer(
+                    pointer_source, pointer_target),
+                consumer_module:probe_operator(trait)
+        end)
+        consumer_module.header_preamble = original_preamble
+        sha256.hex = original_sha
+        for name, implementation in pairs(originals) do
+            strategy[name] = implementation
+        end
+
+        assert.is_true(completed, repeated_pointer)
+        assert.equal("success", repeated_pointer.status)
+        assert.equal("analysis", repeated_pointer.cache_tier)
+        assert.equal(first_pointer.source, repeated_pointer.source)
+        assert.equal("success", repeated_operator.status)
+        assert.equal("analysis", repeated_operator.cache_tier)
+        assert.equal(first_operator.source, repeated_operator.source)
+        assert.equal(0, #consumer_state.calls)
+        assert.is_true(consumer:close())
+        for _, name in ipairs(entries(cache)) do
+            assert(os.remove(cache .. "/" .. name))
+        end
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("normalizes private paths before returning and persisting diagnostics",
+    function()
+        local cache = temporary_directory()
+        local expected = table.concat({
+            "<titan-cprobe-source>: In function ‘probe’:",
+            "<titan-cprobe-source>: At top level:",
+            "<titan-cprobe-source>:7: error: rejected",
+            "In file included from <titan-cprobe-source>:9,",
+            "                 from <titan-cprobe-object>:11:",
+            "<titan-cprobe-object>",
+            "after\0tail",
+        }, "\n")
+        local first, first_state = new_fake_service({
+            cache_directory = cache,
+        }, function(_, _, metadata)
+            return {
+                started = true,
+                ok = false,
+                status = 1,
+                diagnostic = table.concat({
+                    metadata.source_path .. ": In function ‘probe’:",
+                    metadata.source_path .. ": At top level:",
+                    metadata.source_path .. ":7: error: rejected",
+                    "In file included from " .. metadata.source_path ..
+                        ":9,",
+                    "                 from " .. metadata.object_path ..
+                        ":11:",
+                    metadata.object_path,
+                    "after\0tail",
+                }, "\n"),
+            }
+        end)
+        local source = "int titan_private_diagnostic_path;\n"
+        local first_run = first:_run_source(
+            "candidate", source, "private-diagnostic-key", "private-path")
+        assert.equal("compiler_rejection", first_run.classification)
+        assert.equal(expected, first_run.diagnostic)
+        assert.equal(1, #first_state.calls)
+
+        local encoded = assert(compiler_io.new_sync():read_file(
+            first_run.cache_path))
+        assert.is_nil(encoded:find("/fake/titan probe", 1, true))
+        assert.is_true(first:close())
+
+        local second, second_state = new_fake_service({
+            cache_directory = cache,
+        }, function()
+            error("normalized persistent result must not invoke the compiler")
+        end)
+        local second_run = second:_run_source(
+            "candidate", source, "private-diagnostic-key", "private-path")
+        assert.is_true(second_run.persistent_cached)
+        assert.equal(expected, second_run.diagnostic)
+        assert.equal(0, #second_state.calls)
+        assert.is_true(second:close())
+
+        assert(os.remove(first_run.cache_path))
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("keeps a bare private workspace root in service memory only",
+    function()
+        local cache = temporary_directory()
+        local publications = {}
+        local raw_diagnostics = {}
+        local function create(sequence)
+            local service, state = new_fake_service({
+                cache_directory = cache,
+                semantic_trace = function(event)
+                    publications[#publications + 1] = event.publication
+                end,
+            }, function(_, _, metadata)
+                local root = assert(
+                    metadata.source_path:match("^(.*)/[^/]+$"))
+                local diagnostic = "unstructured workspace " .. root ..
+                    " invocation " .. sequence
+                raw_diagnostics[#raw_diagnostics + 1] = diagnostic
+                return {
+                    started = true,
+                    ok = false,
+                    status = 1,
+                    diagnostic = diagnostic,
+                }
+            end)
+            service.sequence = sequence
+            return service, state
+        end
+
+        local source = "int titan_bare_workspace_diagnostic;\n"
+        local first, first_state = create(4)
+        local first_run = first:_run_source(
+            "candidate", source, "bare-workspace-key", "bare-root")
+        assert.equal("compiler_rejection", first_run.classification)
+        assert.equal(raw_diagnostics[1], first_run.diagnostic)
+        assert.equal("unstable_diagnostic", publications[#publications])
+        assert.is_nil(lfs.attributes(first_run.cache_path))
+        local memory = first:_run_source(
+            "candidate", source, "bare-workspace-key", "bare-root")
+        assert.equal("service", memory.cache_tier)
+        assert.equal(first_run.diagnostic, memory.diagnostic)
+        assert.equal(1, #first_state.calls)
+        assert.is_true(first:close())
+
+        local fresh, fresh_state = create(8)
+        local fresh_run = fresh:_run_source(
+            "candidate", source, "bare-workspace-key", "bare-root")
+        assert.equal("compiler_rejection", fresh_run.classification)
+        assert.not_equal(first_run.diagnostic, fresh_run.diagnostic)
+        assert.equal(1, #fresh_state.calls)
+        assert.is_nil(lfs.attributes(fresh_run.cache_path))
+        assert.is_true(fresh:close())
+        assert.same({}, entries(cache))
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("keeps ambiguous private path diagnostics only in memory", function()
+        local cache = temporary_directory()
+        local publications = {}
+        local raw_diagnostics = {}
+        local function service(sequence)
+            local created, state = new_fake_service({
+                cache_directory = cache,
+                semantic_trace = function(event)
+                    publications[#publications + 1] = event.publication
+                end,
+            }, function(_, _, metadata)
+                local diagnostic = table.concat({
+                    metadata.source_path .. "~backup",
+                    metadata.source_path .. " backup",
+                    metadata.source_path .. ")backup",
+                    metadata.source_path .. ": arbitrary context:",
+                    "archive " .. metadata.source_path .. ":17: error",
+                    "archive(" .. metadata.source_path .. ":19: error",
+                }, "\n")
+                raw_diagnostics[#raw_diagnostics + 1] = diagnostic
+                return {
+                    started = true,
+                    ok = false,
+                    status = 1,
+                    diagnostic = diagnostic,
+                }
+            end)
+            created.sequence = sequence
+            return created, state
+        end
+
+        local source = "int titan_ambiguous_private_diagnostic;\n"
+        local first, first_state = service(8)
+        local first_run = first:_run_source(
+            "candidate", source, "ambiguous-private-key", "ambiguous")
+        assert.equal("compiler_rejection", first_run.classification)
+        assert.equal(raw_diagnostics[1], first_run.diagnostic)
+        assert.matches("000009%-ambiguous[.]c", first_run.diagnostic)
+        assert.matches("~backup", first_run.diagnostic, 1, true)
+        assert.matches(" backup", first_run.diagnostic, 1, true)
+        assert.matches("%)backup", first_run.diagnostic)
+        assert.matches("archive /fake/titan probe %d+/",
+            first_run.diagnostic)
+        assert.matches("archive%(/fake/titan probe %d+/",
+            first_run.diagnostic)
+        assert.is_nil(lfs.attributes(first_run.cache_path))
+        assert.equal("unstable_diagnostic", publications[#publications])
+        local memory_run = first:_run_source(
+            "candidate", source, "ambiguous-private-key", "ambiguous")
+        assert.equal(first_run.diagnostic, memory_run.diagnostic)
+        assert.equal("service", memory_run.cache_tier)
+        assert.equal(1, #first_state.calls)
+        assert.is_true(first:close())
+
+        local second, second_state = service(0)
+        local second_run = second:_run_source(
+            "candidate", source, "ambiguous-private-key", "ambiguous")
+        assert.equal(raw_diagnostics[2], second_run.diagnostic)
+        assert.matches("000001%-ambiguous[.]c", second_run.diagnostic)
+        assert.not_equal(first_run.diagnostic, second_run.diagnostic)
+        assert.equal(1, #second_state.calls)
+        assert.is_nil(lfs.attributes(second_run.cache_path))
+        assert.is_true(second:close())
+        assert.same({}, entries(cache))
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("normalizes private aliases once and rejects overlapping spans",
+    function()
+        local function module_context(service, specifications)
+            local includes = {}
+            for index, specification in ipairs(specifications) do
+                local normalized = assert(cprobe.normalize_include_descriptor({
+                    original = specification.physical,
+                    resolved = specification.physical,
+                    include_kind = "quote",
+                    include_name = specification.physical,
+                    c_header_dependencies = { {
+                        kind = "file",
+                        path = specification.physical,
+                        identity = "diagnostic-fixture:" ..
+                            specification.physical,
+                    } },
+                    c_header_search_inputs = {},
+                }, { source_dir = "/tmp" }))
+                includes[index] = assert(cprobe.source_foreign_include_alias(
+                    normalized, "diagnostic_alias_" .. index,
+                    specification.public))
+            end
+            return assert(service:module_context({
+                module = "diagnostic_alias_consumer",
+                source_dir = "/tmp",
+                includes = includes,
+            }))
+        end
+
+        local function remove_cache(cache)
+            for _, name in ipairs(entries(cache)) do
+                assert(os.remove(cache .. "/" .. name))
+            end
+            assert(lfs.rmdir(cache))
+        end
+
+        local function assert_persistent_alias_case(
+                name, specifications, diagnostic, expected)
+            local cache = temporary_directory()
+            local first, first_state = new_fake_service({
+                cache_directory = cache,
+            }, function(_, _, metadata)
+                if metadata.stage == "baseline" then
+                    return { started = true, ok = true, status = 0 }
+                end
+                return {
+                    started = true,
+                    ok = false,
+                    status = 1,
+                    diagnostic = diagnostic,
+                }
+            end)
+            local source = cpointer(name .. "_source")
+            local target = cpointer(name .. "_target")
+            local first_result = module_context(first, specifications):
+                probe_unsafe_object_pointer(source, target)
+            assert.equal("rejected", first_result.status)
+            assert.equal(expected, first_result.diagnostic)
+            assert.equal(2, #first_state.calls)
+            assert.is_true(first:close())
+
+            local repeated, repeated_state = new_fake_service({
+                cache_directory = cache,
+            }, function()
+                error("stable normalized alias must reuse its result")
+            end)
+            local repeated_result = module_context(repeated, specifications):
+                probe_unsafe_object_pointer(source, target)
+            assert.equal("rejected", repeated_result.status)
+            assert.equal(expected, repeated_result.diagnostic)
+            assert.is_true(repeated_result.persistent_cached)
+            assert.equal(0, #repeated_state.calls)
+            assert.is_true(repeated:close())
+            remove_cache(cache)
+        end
+
+        -- The first public spelling is the second alias's physical spelling.
+        -- One-pass normalization must not cascade into the second public path.
+        assert_persistent_alias_case("cascade", {
+            {
+                physical = "/tmp/cascade-first.h",
+                public = "/tmp/cascade-second.h",
+            },
+            {
+                physical = "/tmp/cascade-second.h",
+                public = "/project/cascade-final.h",
+            },
+        }, "/tmp/cascade-first.h:7: error: cascade",
+           "/tmp/cascade-second.h:7: error: cascade")
+
+        -- A stable public path may legitimately retain the private basename.
+        assert_persistent_alias_case("shared_name", { {
+            physical = "/tmp/shared-name.h",
+            public = "/project/shared-name.h",
+        } }, "/tmp/shared-name.h:8: error: shared",
+             "/project/shared-name.h:8: error: shared")
+
+        local cache = temporary_directory()
+        local publications = {}
+        local overlap_diagnostic = "/tmp/overlap.h:2:7: error: overlap"
+        local overlap_specifications = {
+            {
+                physical = "/tmp/overlap.h",
+                public = "/project/short.h",
+            },
+            {
+                physical = "/tmp/overlap.h:2",
+                public = "/project/long.h",
+            },
+        }
+        local function overlap_service()
+            return new_fake_service({
+                cache_directory = cache,
+                semantic_trace = function(event)
+                    publications[#publications + 1] = event.publication
+                end,
+            }, function(_, _, metadata)
+                if metadata.stage == "baseline" then
+                    return { started = true, ok = true, status = 0 }
+                end
+                return {
+                    started = true,
+                    ok = false,
+                    status = 1,
+                    diagnostic = overlap_diagnostic,
+                }
+            end)
+        end
+        local source = cpointer("overlap_source")
+        local target = cpointer("overlap_target")
+        local first, first_state = overlap_service()
+        local first_result = module_context(first, overlap_specifications):
+            probe_unsafe_object_pointer(source, target)
+        assert.equal("rejected", first_result.status)
+        assert.equal(overlap_diagnostic, first_result.diagnostic)
+        assert.is_false(first_result.persistent_cached)
+        assert.equal("unstable_diagnostic", publications[#publications])
+        assert.equal(2, #first_state.calls)
+        assert.is_true(first:close())
+
+        local repeated, repeated_state = overlap_service()
+        local repeated_result = module_context(
+            repeated, overlap_specifications):
+            probe_unsafe_object_pointer(source, target)
+        assert.equal("rejected", repeated_result.status)
+        assert.equal(overlap_diagnostic, repeated_result.diagnostic)
+        -- The baseline is persistent, but the ambiguous candidate reruns.
+        assert.equal(1, #repeated_state.calls)
+        assert.is_true(repeated:close())
+        remove_cache(cache)
+
+        cache = temporary_directory()
+        publications = {}
+        local conflict_diagnostic =
+            "/tmp/conflicted.h:5: error: conflicting aliases"
+        local conflict_specifications = {
+            {
+                physical = "/tmp/conflicted.h",
+                public = "/project/conflicted-first.h",
+            },
+            {
+                physical = "/tmp/conflicted.h",
+                public = "/project/conflicted-second.h",
+            },
+        }
+        local function conflict_service()
+            return new_fake_service({
+                cache_directory = cache,
+                semantic_trace = function(event)
+                    publications[#publications + 1] = event.publication
+                end,
+            }, function(_, _, metadata)
+                if metadata.stage == "baseline" then
+                    return { started = true, ok = true, status = 0 }
+                end
+                return {
+                    started = true,
+                    ok = false,
+                    status = 1,
+                    diagnostic = conflict_diagnostic,
+                }
+            end)
+        end
+        source = cpointer("conflict_source")
+        target = cpointer("conflict_target")
+        first, first_state = conflict_service()
+        first_result = module_context(first, conflict_specifications):
+            probe_unsafe_object_pointer(source, target)
+        assert.equal(conflict_diagnostic, first_result.diagnostic)
+        assert.equal("unstable_diagnostic", publications[#publications])
+        assert.equal(2, #first_state.calls)
+        assert.is_true(first:close())
+
+        repeated, repeated_state = conflict_service()
+        repeated_result = module_context(repeated, conflict_specifications):
+            probe_unsafe_object_pointer(source, target)
+        assert.equal(conflict_diagnostic, repeated_result.diagnostic)
+        assert.equal(1, #repeated_state.calls)
+        assert.is_true(repeated:close())
+        remove_cache(cache)
+    end)
+
+    it("keeps oversized diagnostics in memory without writing a record",
+    function()
+        local cache = temporary_directory()
+        local diagnostic = string.rep("oversized diagnostic bytes\n", 42000)
+        assert.is_true(#diagnostic > 1024 * 1024)
+        local publications = {}
+        local function create()
+            return new_fake_service({
+                cache_directory = cache,
+                semantic_trace = function(event)
+                    publications[#publications + 1] = event.publication
+                end,
+            }, function()
+                return {
+                    started = true,
+                    ok = false,
+                    status = 1,
+                    diagnostic = diagnostic,
+                }
+            end)
+        end
+
+        local source = "int titan_oversized_diagnostic;\n"
+        local first, first_state = create()
+        local first_run = first:_run_source(
+            "candidate", source, "oversized-diagnostic-key", "oversized")
+        assert.equal(diagnostic, first_run.diagnostic)
+        assert.equal("too_large", publications[#publications])
+        assert.is_nil(lfs.attributes(first_run.cache_path))
+        local memory_run = first:_run_source(
+            "candidate", source, "oversized-diagnostic-key", "oversized")
+        assert.equal(diagnostic, memory_run.diagnostic)
+        assert.equal("service", memory_run.cache_tier)
+        assert.equal(1, #first_state.calls)
+        assert.is_true(first:close())
+
+        local fresh, fresh_state = create()
+        local fresh_run = fresh:_run_source(
+            "candidate", source, "oversized-diagnostic-key", "oversized")
+        assert.equal(diagnostic, fresh_run.diagnostic)
+        assert.equal(1, #fresh_state.calls)
+        assert.is_nil(lfs.attributes(fresh_run.cache_path))
+        assert.is_true(fresh:close())
+        assert.same({}, entries(cache))
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("distinguishes persistent stat failures from ordinary misses", function()
+        local strategy = compiler_io.new_sync()
+        local events = {}
+        local service = new_fake_service({
+            io = strategy,
+            cache_directory = "/cache",
+            persistent_cache_trace = function(stage, hit, key, path)
+                events[#events + 1] = {
+                    stage = stage, hit = hit, key = key, path = path,
+                }
+            end,
+        })
+        strategy.stat = function(_, path)
+            assert.matches("^/cache/[0-9a-f]+[.]", path)
+            assert.is_true(path:match("[.]success$") ~= nil or
+                path:match("[.]negative$") ~= nil)
+            return nil, "injected persistent stat failure"
+        end
+        strategy.read_file = function()
+            error("a failed stat must not read the persistent record")
+        end
+
+        local cached, path, digest, lookup = service:_read_persistent_result(
+            "candidate", "raw_source", "int stat_failure;\n", "key")
+        assert.is_nil(cached)
+        assert.equal("io_error", lookup)
+        assert.equal("/cache/" .. digest .. ".success", path)
+        assert.same({ {
+            stage = "candidate",
+            hit = false,
+            key = digest,
+            path = path,
+        } }, events)
+        assert.is_true(service:close())
+    end)
+
+    it("never falls through a success stat error to a negative sibling",
+    function()
+        local cache = temporary_directory()
+        local strategy = compiler_io.new_sync()
+        local source = "int titan_positive_authority_stat_error;\n"
+        local key = "positive-authority-stat-error"
+        local seed = assert(cprobe.new_service({
+            io = strategy,
+            include_dirs = {},
+            profile = target_profile(),
+            cache_directory = cache,
+        }))
+        local publication, _, negative_path =
+            seed:_publish_semantic_result(
+                "result", "raw_source", source, key, {
+                    outcome = "compiler_rejection",
+                    exit_status = 1,
+                    diagnostic = "stale negative sibling",
+                })
+        assert.equal("published", publication)
+        assert.matches("[.]negative$", negative_path)
+        assert.is_true(seed:close())
+
+        local lookup = assert(cprobe.new_service({
+            io = strategy,
+            include_dirs = {},
+            profile = target_profile(),
+            cache_directory = cache,
+        }))
+        local success_path = negative_path:gsub(
+            "[.]negative$", ".success")
+        local ordinary_stat = strategy.stat
+        local ordinary_read_file = strategy.read_file
+        strategy.stat = function(self, path)
+            if path == success_path then
+                return nil, "injected positive-marker stat failure"
+            elseif path == negative_path then
+                error("a positive-marker stat error must stop lookup")
+            end
+            return ordinary_stat(self, path)
+        end
+        strategy.read_file = function(_, path)
+            error("stat failure unexpectedly read " .. tostring(path))
+        end
+
+        local semantic, path, _, state = lookup:_read_persistent_result(
+            "candidate", "raw_source", source, key)
+        strategy.stat = ordinary_stat
+        strategy.read_file = ordinary_read_file
+        assert.is_nil(semantic)
+        assert.equal(success_path, path)
+        assert.equal("io_error", state)
+        assert.is_true(lookup:close())
+
+        assert(os.remove(negative_path))
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("never falls through a non-file success slot to a negative sibling",
+    function()
+        local cache = temporary_directory()
+        local strategy = compiler_io.new_sync()
+        local source = "int titan_corrupt_positive_slot;\n"
+        local key = "corrupt-positive-slot"
+        local seed = assert(cprobe.new_service({
+            io = strategy,
+            include_dirs = {},
+            profile = target_profile(),
+            cache_directory = cache,
+        }))
+        local publication, _, negative_path =
+            seed:_publish_semantic_result(
+                "result", "raw_source", source, key, {
+                    outcome = "compiler_rejection",
+                    exit_status = 1,
+                    diagnostic = "stale negative sibling",
+                })
+        assert.equal("published", publication)
+        assert.matches("[.]negative$", negative_path)
+        assert.is_true(seed:close())
+
+        local lookup = assert(cprobe.new_service({
+            io = strategy,
+            include_dirs = {},
+            profile = target_profile(),
+            cache_directory = cache,
+        }))
+        local success_path = negative_path:gsub(
+            "[.]negative$", ".success")
+        local ordinary_stat = strategy.stat
+        local ordinary_read_file = strategy.read_file
+        strategy.stat = function(self, path)
+            if path == success_path then
+                return { kind = "directory", size = 0 }
+            elseif path == negative_path then
+                error("a non-file positive slot must stop sibling lookup")
+            end
+            return ordinary_stat(self, path)
+        end
+        strategy.read_file = function(_, path)
+            error("non-file positive slot unexpectedly read " .. tostring(path))
+        end
+
+        local semantic, path, _, state = lookup:_read_persistent_result(
+            "candidate", "raw_source", source, key)
+        strategy.stat = ordinary_stat
+        strategy.read_file = ordinary_read_file
+        assert.is_nil(semantic)
+        assert.equal(success_path, path)
+        assert.equal("invalid", state)
+        assert.is_true(lookup:close())
+
+        assert(os.remove(negative_path))
+        assert(lfs.rmdir(cache))
+    end)
+
     it("isolates persistent cache trace sink failures", function()
         local cache = temporary_directory()
         local source = "int titan_failing_cache_trace_sink;\n"
@@ -1885,6 +2742,25 @@ describe("persistent successful C probe markers", function()
         assert.is_true(second:close())
 
         assert(os.remove(first_run.cache_path))
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("builds one semantic location across lookup and publication", function()
+        local cache = temporary_directory()
+        local service = new_fake_service({ cache_directory = cache })
+        local original_location = service._persistent_success_location
+        local location_calls = 0
+        service._persistent_success_location = function(self, ...)
+            location_calls = location_calls + 1
+            return original_location(self, ...)
+        end
+
+        local run = service:_run_source(
+            "candidate", "int titan_single_location;\n", "same-key")
+        assert.is_true(run.ok, run.diagnostic)
+        assert.equal(1, location_calls)
+        assert.is_true(service:close())
+        assert(os.remove(run.cache_path))
         assert(lfs.rmdir(cache))
     end)
 
@@ -1932,6 +2808,7 @@ describe("persistent successful C probe markers", function()
                     path = ("/headers/dependency-%04d.h"):format(index),
                     identity = ("c-header-file-v1:sha256:%064d"):format(
                         changed_last and index == count and 1 or 0),
+                    restat = false,
                 }
             end
             return result
@@ -2031,7 +2908,9 @@ describe("persistent successful C probe markers", function()
                     kind = "file",
                     path = "/headers/public.h",
                     identity = identity,
+                    restat = false,
                 }},
+                c_header_search_inputs = {},
             }} }
         end
         local first, first_state = new_fake_service({
@@ -2069,12 +2948,13 @@ describe("persistent successful C probe markers", function()
         local compiler = lfs.attributes("/usr/bin/cc", "mode")
             and { "/usr/bin/cc" } or { os.getenv("CC") or "cc" }
         local function service()
-            return assert(cprobe.new_service({
+            local options = {
                 compiler_argv = compiler,
                 cppflags = { "-include", forced },
                 profile = target_profile(),
                 cache_directory = cache,
-            }))
+            }
+            return assert(cprobe.new_service(options))
         end
 
         local source = "int titan_forced_probe;\n"
@@ -2085,14 +2965,12 @@ describe("persistent successful C probe markers", function()
         assert.is_false(first_result.persistent_cached == true)
         assert.is_true(first:close())
 
-        write_file(forced, "#error forced header changed\n")
+        write_file(forced, "#define TITAN_FORCED_PROBE 2\n")
         local changed = service()
         local changed_result = changed:_run_source(
             "candidate", source, "same-semantic-key")
-        assert.is_false(changed_result.ok)
+        assert.is_true(changed_result.ok, changed_result.diagnostic)
         assert.is_false(changed_result.persistent_cached == true)
-        assert.matches("forced header changed", changed_result.diagnostic,
-            1, true)
         assert.is_true(changed:close())
 
         for _, name in ipairs(entries(cache)) do
@@ -2156,15 +3034,144 @@ describe("persistent successful C probe markers", function()
         assert(lfs.rmdir(root))
     end)
 
-    it("does not publish success when a forced header changes during a probe",
+
+    it("validates each non-analysis service and context snapshot once",
+    function()
+        local root = temporary_directory()
+        local forced = root .. "/forced.h"
+        local ordinary = root .. "/ordinary.h"
+        write_file(forced, "#define TITAN_FORCED_SNAPSHOT 1\n")
+        write_file(ordinary, "#define TITAN_ORDINARY_SNAPSHOT 1\n")
+        local strategy = compiler_io.new_sync()
+        local ordinary_identity = assert(cdriver.header_input_identity(
+            "file", ordinary, strategy))
+        local service, state = new_fake_service({
+            io = strategy,
+            compiler_argv = { "/usr/bin/cc" },
+            cppflags = { "-include", forced },
+            include_dirs = {},
+            profile = target_profile(),
+        })
+
+        local original_identity = cdriver.header_input_identity
+        local counts = {}
+        cdriver.header_input_identity = function(kind, path, io_strategy)
+            local input = kind .. "\0" .. path
+            counts[input] = (counts[input] or 0) + 1
+            return original_identity(kind, path, io_strategy)
+        end
+        local completed, failure = xpcall(function()
+            local module = assert(service:module_context({ includes = {{
+                original = "ordinary.h",
+                resolved = ordinary,
+                include_kind = "quote",
+                include_name = "ordinary.h",
+                c_header_dependencies = {{
+                    kind = "file",
+                    path = ordinary,
+                    identity = ordinary_identity,
+                }},
+                c_header_search_inputs = {},
+            }} }))
+            assert.equal("success", module:validate_baseline().status)
+            assert.equal("success", module:probe_unsafe_object_pointer(
+                cpointer("snapshot_source_one"),
+                cpointer("snapshot_target_one")).status)
+            assert.equal("success", module:probe_unsafe_object_pointer(
+                cpointer("snapshot_source_two"),
+                cpointer("snapshot_target_two")).status)
+            assert.equal(1, counts["search\0" .. forced])
+            assert.equal(1, counts["file\0" .. forced])
+            assert.equal(1, counts["file\0" .. ordinary])
+            assert.equal(3, #state.calls)
+
+            local repeated_context = assert(service:module_context({
+                includes = {{
+                    original = "ordinary.h",
+                    resolved = ordinary,
+                    include_kind = "quote",
+                    include_name = "ordinary.h",
+                    c_header_dependencies = {{
+                        kind = "file",
+                        path = ordinary,
+                        identity = ordinary_identity,
+                    }},
+                    c_header_search_inputs = {},
+                }},
+            }))
+            assert.equal("success",
+                repeated_context:validate_baseline().status)
+            assert.equal("success",
+                repeated_context:probe_unsafe_object_pointer(
+                    cpointer("snapshot_source_three"),
+                    cpointer("snapshot_target_three")).status)
+            assert.equal(1, counts["search\0" .. forced])
+            assert.equal(1, counts["file\0" .. forced])
+            assert.equal(1, counts["file\0" .. ordinary])
+            assert.equal(4, #state.calls)
+        end, debug.traceback)
+        cdriver.header_input_identity = original_identity
+
+        assert.is_true(service:close())
+        assert(os.remove(ordinary))
+        assert(os.remove(forced))
+        assert(lfs.rmdir(root))
+        assert.truthy(completed, failure)
+    end)
+
+    it("performs no probe-local restats inside a process analysis", function()
+        local root = temporary_directory()
+        local header = root .. "/analysis.h"
+        write_file(header, "#define TITAN_ANALYSIS_SNAPSHOT 1\n")
+        local strategy = compiler_io.new_sync()
+        local identity = assert(cdriver.header_input_identity(
+            "file", header, strategy))
+        local service, state = new_fake_service({
+            io = strategy,
+            process_analysis = cdriver.new_process_analysis(),
+        })
+
+        local original_identity = cdriver.header_input_identity
+        local identity_calls = 0
+        cdriver.header_input_identity = function(...)
+            identity_calls = identity_calls + 1
+            return original_identity(...)
+        end
+        local completed, failure = xpcall(function()
+            local module = assert(service:module_context({ includes = {{
+                original = "analysis.h",
+                resolved = header,
+                include_kind = "quote",
+                include_name = "analysis.h",
+                c_header_dependencies = {{
+                    kind = "file", path = header, identity = identity,
+                }},
+                c_header_search_inputs = {},
+            }} }))
+            assert.equal("success", module:validate_baseline().status)
+            assert.equal("success", module:probe_unsafe_object_pointer(
+                cpointer("analysis_source"),
+                cpointer("analysis_target")).status)
+            assert.equal(0, identity_calls)
+            assert.equal(2, #state.calls)
+        end, debug.traceback)
+        cdriver.header_input_identity = original_identity
+
+        assert.is_true(service:close())
+        assert(os.remove(header))
+        assert(lfs.rmdir(root))
+        assert.truthy(completed, failure)
+    end)
+
+    it("treats header validation as an approximate invocation snapshot",
     function()
         local root = temporary_directory()
         local cache = root .. "/cache"
         assert(lfs.mkdir(cache))
         local forced = root .. "/forced.h"
-        write_file(forced, "#define TITAN_FORCED_RACE 1\n")
+        write_file(forced, "#define TITAN_FORCED_SNAPSHOT 1\n")
         local state, runner, temp_provider = fake_environment(function()
-            write_file(forced, "#define TITAN_FORCED_RACE 2\n")
+            write_file(forced, "#define TITAN_FORCED_SNAPSHOT 2\n")
             return { started = true, ok = true, status = 0, diagnostic = "" }
         end)
         local service = assert(cprobe.new_service({
@@ -2175,152 +3182,26 @@ describe("persistent successful C probe markers", function()
             runner = runner,
             temp_provider = temp_provider,
         }))
-        local result = service:module_context():validate_baseline()
-        assert.equal("infrastructure_failure", result.status)
-        assert.matches("forced C header input changed", result.diagnostic,
-            1, true)
-        assert.equal(1, #state.calls)
-        assert.same({}, entries(cache))
-        assert.is_true(service:close())
-
-        assert(os.remove(forced))
-        assert(lfs.rmdir(cache))
-        assert(lfs.rmdir(root))
-    end)
-
-    it("restats again after locating a persistent forced-header hit",
-    function()
-        local root = temporary_directory()
-        local cache = root .. "/cache"
-        assert(lfs.mkdir(cache))
-        local forced = root .. "/forced.h"
-        local source = "int titan_forced_lookup_race;\n"
-        write_file(forced, "#define TITAN_FORCED_LOOKUP_RACE 1\n")
-        local function options()
-            return {
-                compiler_argv = { "/usr/bin/cc" },
-                cppflags = { "-include", forced },
-                profile = target_profile(),
-                cache_directory = cache,
-            }
-        end
-        local first = assert(cprobe.new_service(options()))
-        assert.is_true(first:_run_source(
-            "candidate", source, "same-key").ok)
-        assert.is_true(first:close())
-
-        local second = assert(cprobe.new_service(options()))
-        local ordinary_lookup = second._persistent_success
-        second._persistent_success = function(self, probe_source, key)
-            local hit, path, digest =
-                ordinary_lookup(self, probe_source, key)
-            write_file(forced,
-                "#define TITAN_FORCED_LOOKUP_RACE 2\n")
-            return hit, path, digest
-        end
-        local raced = second:_run_source(
-            "candidate", source, "same-key")
-        assert.is_false(raced.ok)
-        assert.equal("header_inputs", raced.reason)
-        assert.is_false(raced.persistent_cached == true)
-        assert.is_true(second:close())
-
-        for _, name in ipairs(entries(cache)) do
-            assert(os.remove(cache .. "/" .. name))
-        end
-        assert(os.remove(forced))
-        assert(lfs.rmdir(cache))
-        assert(lfs.rmdir(root))
-    end)
-
-    it("does not reuse an in-memory candidate after a forced header changes",
-    function()
-        local root = temporary_directory()
-        local forced = root .. "/forced.h"
-        write_file(forced, "#define TITAN_FORCED_MEMORY 1\n")
-        local service, state = new_fake_service({
-            compiler_argv = { "/usr/bin/cc" },
-            cppflags = { "-include", forced },
-            profile = target_profile(),
-        })
         local module = assert(service:module_context())
-        local first = module:probe_unsafe_object_pointer(
-            cpointer("forced_source"), cpointer("forced_target"))
-        assert.equal("success", first.status, first.message)
-        assert.equal(2, #state.calls)
-
-        write_file(forced, "#define TITAN_FORCED_MEMORY 2\n")
-        local changed = module:probe_unsafe_object_pointer(
-            cpointer("forced_source"), cpointer("forced_target"))
-        assert.equal("infrastructure_failure", changed.status)
-        assert.equal("header_inputs", changed.reason)
-        assert.is_false(changed.cached == true)
-        assert.equal(2, #state.calls)
+        local result = module:validate_baseline()
+        assert.equal("success", result.status, result.message)
+        assert.equal(1, #state.calls)
+        local cache_path = assert(service:_persistent_success_location(
+            result.source, result.key))
+        assert.equal("file", lfs.attributes(cache_path, "mode"))
+        assert.equal(0, assert(lfs.attributes(cache_path)).size)
+        local repeated = module:validate_baseline()
+        assert.equal("success", repeated.status)
+        assert.is_true(repeated.cached)
+        assert.equal(1, #state.calls)
         assert.is_true(service:close())
 
+        -- This cache is deliberately an invocation snapshot. The later
+        -- generated-C compilation/publication boundary remains final authority.
+        assert(os.remove(cache_path))
         assert(os.remove(forced))
+        assert(lfs.rmdir(cache))
         assert(lfs.rmdir(root))
-    end)
-
-    it("reports invalidated forced-header metadata before every probe path",
-    function()
-        local root = temporary_directory()
-        local forced = root .. "/forced.h"
-        local service
-        local completed, failure = pcall(function()
-            write_file(forced, "#define TITAN_FORCED_DISAPPEARANCE 1\n")
-            local compiler = lfs.attributes("/usr/bin/cc", "mode")
-                and { "/usr/bin/cc" } or { os.getenv("CC") or "cc" }
-            local state
-            service, state = new_fake_service({
-                compiler_argv = compiler,
-                cppflags = { "-include", forced },
-                include_dirs = {},
-                profile = target_profile(),
-            })
-            local module = assert(service:module_context())
-            assert.equal("file", service.forced_header_inputs[1].kind)
-            service.forced_header_inputs[1].kind = "invalid"
-
-            local run = service:_run_source(
-                "candidate", "int titan_forced_disappearance;\n", "same-key")
-            assert.is_false(run.started)
-            assert.is_false(run.ok)
-            assert.equal("header_inputs", run.reason)
-            assert.matches("could not restat forced C header input",
-                run.diagnostic, 1, true)
-
-            local baseline = module:validate_baseline()
-            assert.equal("infrastructure_failure", baseline.status)
-            assert.equal("header_inputs", baseline.reason)
-            assert.matches("could not restat forced C header input",
-                baseline.diagnostic, 1, true)
-
-            local compatibilities =
-                module:validate_declaration_compatibilities({ { } })
-            assert.equal(1, #compatibilities)
-            assert.equal("infrastructure_failure", compatibilities[1].status)
-            assert.equal("header_inputs", compatibilities[1].reason)
-            assert.matches("could not restat forced C header input",
-                compatibilities[1].diagnostic, 1, true)
-
-            local operator = module:probe_operator({})
-            assert.equal("infrastructure_failure", operator.status)
-            assert.equal("header_inputs", operator.reason)
-            assert.matches("could not restat forced C header input",
-                operator.diagnostic, 1, true)
-
-            assert.equal(0, #state.calls)
-            assert.is_true(service:close())
-            service = nil
-        end)
-        if service then pcall(service.close, service) end
-        local cleaned, cleanup_failure = pcall(function()
-            if lfs.symlinkattributes(forced) then assert(os.remove(forced)) end
-            if lfs.attributes(root) then assert(lfs.rmdir(root)) end
-        end)
-        assert.truthy(completed, failure)
-        assert.truthy(cleaned, cleanup_failure)
     end)
 
     it("rejects missing forced headers without a success marker", function()
@@ -2423,6 +3304,12 @@ describe("persistent successful C probe markers", function()
         assert.matches("persistent_cache_trace must be a function",
             err, 1, true)
 
+        rejected, err = cprobe.new_service({ semantic_trace = false })
+        assert.is_nil(rejected)
+        assert.matches("semantic_trace must be a function", err, 1, true)
+        rejected, err = cprobe.new_service({ execution_trace = false })
+        assert.is_nil(rejected)
+        assert.matches("execution_trace must be a function", err, 1, true)
         rejected, err = cprobe.new_service({
             cache_directory = false,
         })
@@ -2450,11 +3337,15 @@ describe("persistent successful C probe markers", function()
         assert.matches("cache_identity must be a string", err, 1, true)
     end)
 
-    it("fails open when marker close or rename fails", function()
+    it("fails open when result close or rename fails", function()
         local cache = temporary_directory()
         local service = new_fake_service({ cache_directory = cache })
-        local source = "int titan_marker_publication_failure;\n"
-        local path = service:_persistent_success_location(source)
+        local source = "int titan_result_publication_failure;\n"
+        local semantic = {
+            outcome = "success",
+            exit_status = 0,
+            diagnostic = "",
+        }
 
         local previous_open = io.open
         io.open = function(name, mode)
@@ -2466,35 +3357,333 @@ describe("persistent successful C probe markers", function()
             end
             return previous_open(name, mode)
         end
-        local close_ok, close_result = pcall(
-            service._publish_persistent_success,
-            service, path)
+        local close_ok, close_result = pcall(function()
+            return service:_publish_semantic_result(
+                "result", "raw_source", source, "close-key", semantic)
+        end)
         io.open = previous_open
         assert.is_true(close_ok)
-        assert.is_nil(close_result)
+        assert.equal("failed", close_result)
         assert.same({}, entries(cache))
 
         local previous_rename = os.rename
         os.rename = function()
             return nil, "injected rename failure"
         end
-        local rename_ok, rename_result = pcall(
-            service._publish_persistent_success,
-            service, path)
+        local rename_ok, rename_result = pcall(function()
+            return service:_publish_semantic_result(
+                "result", "raw_source", source, "rename-key", semantic)
+        end)
         assert.is_true(rename_ok)
-        assert.is_nil(rename_result)
+        assert.equal("failed", rename_result)
         assert.same({}, entries(cache))
-
-        write_file(path, "")
-        local race_ok, race_result = pcall(
-            service._publish_persistent_success,
-            service, path)
         os.rename = previous_rename
-        assert.is_true(race_ok)
-        assert.is_true(race_result)
-        assert.same({ path:match("([^/]+)$") }, entries(cache))
 
         assert.is_true(service:close())
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("keeps the first completed result across analysis publications",
+    function()
+        local analysis = cdriver.new_process_analysis()
+        local first = new_fake_service({ process_analysis = analysis })
+        local second = new_fake_service({ process_analysis = analysis })
+        local third = new_fake_service({ process_analysis = analysis })
+        local source = "int titan_analysis_publication_race;\n"
+        local key = "shared-publication-key"
+        local success = {
+            outcome = "success",
+            exit_status = 0,
+            diagnostic = "",
+        }
+        local rejection = {
+            outcome = "compiler_rejection",
+            exit_status = 1,
+            diagnostic = "conflicting rejection",
+        }
+
+        assert.equal("disabled", first:_publish_semantic_result(
+            "result", "raw_source", source, key, success))
+        assert.equal("conflict", second:_publish_semantic_result(
+            "result", "raw_source", source, key, rejection))
+
+        local observed, tier = third:_lookup_semantic_result(
+            "result", "candidate", "raw_source", source, key)
+        assert.same(success, observed)
+        assert.equal("analysis", tier)
+        assert.equal("disabled", third:_publish_semantic_result(
+            "result", "raw_source", source, key, success))
+
+        assert.is_true(first:close())
+        assert.is_true(second:close())
+        assert.is_true(third:close())
+    end)
+
+    it("derives distinct trace keys for untraced analysis hits", function()
+        local analysis = cdriver.new_process_analysis()
+        local profile = target_profile()
+        local publisher, publisher_state = new_fake_service({
+            process_analysis = analysis,
+            profile = profile,
+        })
+        local publisher_module = assert(publisher:module_context())
+        local source = cpointer("analysis_trace_source")
+        local target = cpointer("analysis_trace_target")
+        local trait = assert(csemantics.decide_binary_operator(
+            profile, "+", profile.integers.int.type, types.Integer()))
+
+        local baseline = publisher_module:validate_baseline()
+        local pointer = publisher_module:probe_unsafe_object_pointer(
+            source, target)
+        local operator = publisher_module:probe_operator(trait)
+        assert.equal("success", baseline.status)
+        assert.equal("success", pointer.status)
+        assert.equal("success", operator.status)
+        assert.equal(3, #publisher_state.calls)
+        assert.is_nil(
+            publisher.analysis_baseline_cache[baseline.key].key_digest)
+        assert.is_nil(
+            publisher.analysis_result_cache[pointer.key].key_digest)
+        assert.is_nil(
+            publisher.analysis_result_cache[operator.key].key_digest)
+
+        local events = {}
+        local consumer, consumer_state = new_fake_service({
+            process_analysis = analysis,
+            profile = profile,
+            semantic_trace = function(event)
+                events[#events + 1] = event
+            end,
+        }, function()
+            error("analysis hits must not invoke the compiler")
+        end)
+        local consumer_module = assert(consumer:module_context())
+        assert.equal("success", consumer_module:validate_baseline().status)
+        assert.equal("success", consumer_module:probe_unsafe_object_pointer(
+            source, target).status)
+        assert.equal("success", consumer_module:probe_operator(trait).status)
+
+        assert.equal(0, #consumer_state.calls)
+        assert.equal(3, #events)
+        local keys = {}
+        for _, event in ipairs(events) do
+            assert.matches("^[0-9a-f]+$", event.key)
+            assert.equal(64, #event.key)
+            assert.is_nil(keys[event.key])
+            keys[event.key] = event.probe_kind
+            assert.equal("analysis", event.cache_tier)
+        end
+        assert.equal("header_baseline",
+            keys[consumer.semantic_trace_keys[baseline.key]])
+        assert.equal("unsafe_object_pointer",
+            keys[consumer.semantic_trace_keys[pointer.key]])
+        assert.equal("c_operator",
+            keys[consumer.semantic_trace_keys[operator.key]])
+        assert.is_true(publisher:close())
+        assert.is_true(consumer:close())
+    end)
+
+    it("returns the first winner to an interleaved semantic caller", function()
+        local analysis = cdriver.new_process_analysis()
+        local first_semantic_events = {}
+        local first_execution_events = {}
+        local first, first_state = new_fake_service({
+            process_analysis = analysis,
+            semantic_trace = function(event)
+                first_semantic_events[#first_semantic_events + 1] = event
+            end,
+            execution_trace = function(event)
+                first_execution_events[#first_execution_events + 1] = event
+            end,
+        }, function(_, _, metadata)
+            if metadata.stage == "baseline" then
+                return { started = true, ok = true, status = 0 }
+            end
+            coroutine.yield("first semantic compiler")
+            return { started = true, ok = true, status = 0 }
+        end)
+        local second, second_state = new_fake_service({
+            process_analysis = analysis,
+        }, function(_, _, metadata)
+            assert.equal("candidate", metadata.stage)
+            return {
+                started = true,
+                ok = false,
+                status = 1,
+                diagnostic = "first completed semantic rejection",
+            }
+        end)
+        local first_module = assert(first:module_context())
+        local second_module = assert(second:module_context())
+        assert.equal("success", first_module:validate_baseline().status)
+
+        local source = cpointer("publication_race_source")
+        local target = cpointer("publication_race_target")
+        local losing_result
+        local task = coroutine.create(function()
+            losing_result = first_module:probe_unsafe_object_pointer(
+                source, target)
+        end)
+        local resumed, checkpoint = coroutine.resume(task)
+        assert.is_true(resumed)
+        assert.equal("first semantic compiler", checkpoint)
+
+        local winner = second_module:probe_unsafe_object_pointer(
+            source, target)
+        assert.equal("rejected", winner.status)
+        assert.equal("first completed semantic rejection", winner.diagnostic)
+        local completed, completion_error = coroutine.resume(task)
+        assert.is_true(completed, completion_error)
+        assert.equal("dead", coroutine.status(task))
+
+        -- The resumed physical compiler succeeded, but the earlier semantic
+        -- rejection is authoritative inside this process analysis.
+        assert.equal("rejected", losing_result.status)
+        assert.is_false(losing_result.accepted)
+        assert.is_true(losing_result.cached)
+        assert.equal("analysis", losing_result.cache_tier)
+        assert.equal("first completed semantic rejection",
+            losing_result.diagnostic)
+        assert.equal(2, #first_state.calls)
+        assert.equal(1, #second_state.calls)
+        assert.equal(2, #first_execution_events)
+        assert.equal("success", first_execution_events[2].outcome)
+        assert.equal("conflict", first_execution_events[2].publication)
+        assert.is_true(first_execution_events[2].started)
+        local semantic = first_semantic_events[#first_semantic_events]
+        assert.equal("compiler_rejection", semantic.outcome)
+        assert.equal("analysis", semantic.cache_tier)
+        assert.equal("conflict", semantic.publication)
+
+        local repeated = first_module:probe_unsafe_object_pointer(
+            source, target)
+        assert.equal("rejected", repeated.status)
+        assert.is_true(repeated.cached)
+        assert.equal("analysis", repeated.cache_tier)
+        assert.equal(2, #first_state.calls)
+        assert.is_true(first:close())
+        assert.is_true(second:close())
+    end)
+
+    it("observes an in-analysis publication made during a persistent miss",
+    function()
+        local cache = temporary_directory()
+        local strategy = compiler_io.new_sync()
+        local analysis = cdriver.new_process_analysis()
+        local source = "int titan_lookup_miss_publication_race;\n"
+        local key = "lookup-miss-publication-race-key"
+        local success = {
+            outcome = "success",
+            exit_status = 0,
+            diagnostic = "",
+        }
+        local lookup = new_fake_service({
+            io = strategy,
+            process_analysis = analysis,
+            cache_directory = cache,
+        })
+        local publisher = new_fake_service({
+            io = strategy,
+            process_analysis = analysis,
+        })
+        local path = assert(lookup:_persistent_success_location(source, key))
+        local ordinary_stat = strategy.stat
+        local yielded = false
+        strategy.stat = function(self, candidate)
+            if candidate == path and not yielded then
+                yielded = true
+                coroutine.yield("persistent miss stat")
+                return nil, nil
+            end
+            return ordinary_stat(self, candidate)
+        end
+
+        local observed
+        local tier
+        local lookup_task = coroutine.create(function()
+            observed, tier = lookup:_lookup_semantic_result(
+                "result", "candidate", "raw_source", source, key)
+        end)
+        local resumed, checkpoint = coroutine.resume(lookup_task)
+        assert.is_true(resumed)
+        assert.equal("persistent miss stat", checkpoint)
+        assert.equal("disabled", publisher:_publish_semantic_result(
+            "result", "raw_source", source, key, success))
+        local completed, completion_error = coroutine.resume(lookup_task)
+        strategy.stat = ordinary_stat
+        assert.is_true(completed, completion_error)
+        assert.same(success, observed)
+        assert.equal("analysis", tier)
+
+        assert.is_true(lookup:close())
+        assert.is_true(publisher:close())
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("lets an equal publisher commit while the first write is suspended",
+    function()
+        local cache = temporary_directory()
+        local strategy = compiler_io.new_sync()
+        local analysis = cdriver.new_process_analysis()
+        local source = "int titan_equal_publication_race;\n"
+        local key = "equal-publication-race-key"
+        local success = {
+            outcome = "success",
+            exit_status = 0,
+            diagnostic = "",
+        }
+        local first = new_fake_service({
+            io = strategy,
+            process_analysis = analysis,
+            cache_directory = cache,
+        })
+        local second = new_fake_service({
+            io = strategy,
+            process_analysis = analysis,
+            cache_directory = cache,
+        })
+        local path = assert(first:_persistent_success_location(source, key))
+        local ordinary_write_file = strategy.write_file
+        local writes = 0
+        strategy.write_file = function(self, candidate, contents)
+            assert.equal(path, candidate)
+            writes = writes + 1
+            if writes == 1 then
+                coroutine.yield("first persistent write")
+                return nil, "injected first-writer failure"
+            end
+            return ordinary_write_file(self, candidate, contents)
+        end
+
+        local first_publication
+        local first_task = coroutine.create(function()
+            first_publication = first:_publish_semantic_result(
+                "result", "raw_source", source, key, success)
+        end)
+        local resumed, checkpoint = coroutine.resume(first_task)
+        assert.is_true(resumed)
+        assert.equal("first persistent write", checkpoint)
+        assert.equal("published", second:_publish_semantic_result(
+            "result", "raw_source", source, key, success))
+        local completed, completion_error = coroutine.resume(first_task)
+        strategy.write_file = ordinary_write_file
+        assert.is_true(completed, completion_error)
+        assert.equal("existing", first_publication)
+        assert.equal(2, writes)
+
+        local fresh = new_fake_service({
+            io = strategy,
+            process_analysis = cdriver.new_process_analysis(),
+            cache_directory = cache,
+        })
+        local observed, tier = fresh:_lookup_semantic_result(
+            "result", "candidate", "raw_source", source, key)
+        assert.same(success, observed)
+        assert.equal("persistent", tier)
+
+        assert.is_true(first:close())
+        assert.is_true(second:close())
+        assert.is_true(fresh:close())
         assert(os.remove(path))
         assert(lfs.rmdir(cache))
     end)
@@ -2520,18 +3709,23 @@ describe("persistent successful C probe markers", function()
             return nil, "already created concurrently"
         end
         strategy.write_file = function(_, path, contents)
-            assert.equal("/cache/key.success", path)
-            assert.equal("", contents)
+            assert.matches("^/cache/[0-9a-f]+[.]negative$", path)
+            assert.is_true(#contents > 32)
             return true
         end
 
-        assert.is_true(service:_publish_persistent_success(
-            "/cache/key.success"))
+        local publication = service:_publish_semantic_result(
+            "result", "raw_source", "int value;\n", "key", {
+                outcome = "compiler_rejection",
+                exit_status = 1,
+                diagnostic = "rejected",
+            })
+        assert.equal("published", publication)
         assert.equal(2, cache_stats)
         assert.is_true(service:close())
     end)
 
-    it("retains only the committed marker when publication is cancelled",
+    it("retains only the committed negative when publication is cancelled",
     function()
         local cache = temporary_directory()
         local strategy = compiler_io.new_sync()
@@ -2540,26 +3734,34 @@ describe("persistent successful C probe markers", function()
         local publication_path
         strategy.write_file = function(self, path, contents)
             local written, err = ordinary_write(self, path, contents)
-            if written and path:match("%.success$") then
+            if written and path:match("%.negative$") then
                 publication_path = path
                 error(cancellation)
             end
             return written, err
         end
 
-        local source = "int titan_cancelled_marker_publication;\n"
+        local source = "int titan_cancelled_result_publication;\n"
         local first, first_state = new_fake_service({
             cache_directory = cache,
             io = strategy,
-        })
+        }, function()
+            return {
+                started = true,
+                ok = false,
+                status = 1,
+                diagnostic = "cancelled publication rejection",
+            }
+        end)
         local completed, reason = pcall(
             first._run_source, first, "candidate", source, "same-key")
         assert.is_false(completed)
         assert.equal(cancellation, reason)
         assert.equal(1, #first_state.calls)
 
-        local expected_path = first:_persistent_success_location(
+        local success_path = first:_persistent_success_location(
             source, "same-key")
+        local expected_path = success_path:gsub("[.]success$", ".negative")
         assert.equal(expected_path, publication_path)
         assert.same({ expected_path:match("([^/]+)$") }, entries(cache))
         assert.is_true(first:close())
@@ -2567,10 +3769,11 @@ describe("persistent successful C probe markers", function()
         local second, second_state = new_fake_service({
             cache_directory = cache,
         }, function()
-            error("a committed marker must not invoke the compiler")
+            error("a committed result must not invoke the compiler")
         end)
         local hit = second:_run_source("candidate", source, "same-key")
-        assert.is_true(hit.ok)
+        assert.is_false(hit.ok)
+        assert.equal("compiler_rejection", hit.classification)
         assert.is_true(hit.persistent_cached)
         assert.equal(expected_path, hit.cache_path)
         assert.equal(0, #second_state.calls)
@@ -2580,55 +3783,157 @@ describe("persistent successful C probe markers", function()
         assert(lfs.rmdir(cache))
     end)
 
-    it("keys empty success markers by probe text and semantic context",
+    it("bounds the bytes read after a persistent-record stat race", function()
+        local cache = temporary_directory()
+        local strategy = compiler_io.new_sync()
+        local service = assert(cprobe.new_service({
+            io = strategy,
+            cache_directory = cache,
+        }))
+        local source = "int titan_oversized_result;\n"
+        local success_path = assert(service:_persistent_success_location(
+            source, "oversized-key"))
+        local path = success_path:gsub("[.]success$", ".negative")
+        write_file(path, string.rep("x", 1024 * 1024 + 1024))
+        local ordinary_stat = strategy.stat
+        local ordinary_read_file = strategy.read_file
+        strategy.stat = function(_, candidate)
+            if candidate == path then
+                return { kind = "file", size = 1 }
+            end
+            return ordinary_stat(strategy, candidate)
+        end
+        strategy.read_file = function(_, candidate, max_bytes)
+            local contents, err = ordinary_read_file(
+                strategy, candidate, max_bytes)
+            if candidate == path then
+                assert.equal(1024 * 1024 + 256, max_bytes)
+                assert.equal(max_bytes + 1, #contents)
+            end
+            return contents, err
+        end
+
+        local result, _, _, lookup = service:_read_persistent_result(
+            "candidate", "raw_source", source, "oversized-key")
+        strategy.stat = ordinary_stat
+        strategy.read_file = ordinary_read_file
+        assert.is_nil(result)
+        assert.equal("invalid", lookup)
+        assert.is_true(service:close())
+        assert(os.remove(path))
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("keeps an in-analysis publication made during a persistent read",
     function()
         local cache = temporary_directory()
-        local source = "int titan_persistent_success;\n"
-        local legacy = cache .. "/" .. sha256.hex(source) .. ".success"
-        write_file(legacy, "legacy source-only marker")
+        local strategy = compiler_io.new_sync()
+        local source = "int titan_lookup_publication_race;\n"
+        local key = "lookup-publication-race-key"
+        local rejection = {
+            outcome = "compiler_rejection",
+            exit_status = 1,
+            diagnostic = "stale persistent rejection",
+        }
+        local success = {
+            outcome = "success",
+            exit_status = 0,
+            diagnostic = "",
+        }
+        local seed = new_fake_service({
+            io = strategy,
+            cache_directory = cache,
+        })
+        local publication, _, path = seed:_publish_semantic_result(
+            "result", "raw_source", source, key, rejection)
+        assert.equal("published", publication)
+        assert.is_true(seed:close())
+
+        local analysis = cdriver.new_process_analysis()
+        local lookup = new_fake_service({
+            io = strategy,
+            process_analysis = analysis,
+            cache_directory = cache,
+        })
+        local publisher = new_fake_service({
+            io = strategy,
+            process_analysis = analysis,
+        })
+        local ordinary_read_file = strategy.read_file
+        local yielded = false
+        strategy.read_file = function(self, candidate, max_bytes)
+            local contents, err = ordinary_read_file(
+                self, candidate, max_bytes)
+            if candidate == path and not yielded then
+                yielded = true
+                coroutine.yield("persistent record read")
+            end
+            return contents, err
+        end
+
+        local observed
+        local tier
+        local lookup_task = coroutine.create(function()
+            observed, tier = lookup:_lookup_semantic_result(
+                "result", "candidate", "raw_source", source, key)
+        end)
+        local resumed, checkpoint = coroutine.resume(lookup_task)
+        assert.is_true(resumed)
+        assert.equal("persistent record read", checkpoint)
+        assert.equal("disabled", publisher:_publish_semantic_result(
+            "result", "raw_source", source, key, success))
+        assert.is_true(coroutine.resume(lookup_task))
+        strategy.read_file = ordinary_read_file
+        assert.equal("dead", coroutine.status(lookup_task))
+        assert.same(success, observed)
+        assert.equal("analysis", tier)
+
+        local third = new_fake_service({
+            io = strategy,
+            process_analysis = analysis,
+        })
+        local third_result, third_tier = third:_lookup_semantic_result(
+            "result", "candidate", "raw_source", source, key)
+        assert.same(success, third_result)
+        assert.equal("analysis", third_tier)
+
+        assert.is_true(lookup:close())
+        assert.is_true(publisher:close())
+        assert.is_true(third:close())
+        assert(os.remove(path))
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("never promotes a valid cached baseline rejection to success", function()
+        local cache = temporary_directory()
         local first, first_state = new_fake_service({
             cache_directory = cache,
         })
-        local run = first:_run_source("candidate", source, "first-key")
-        assert.is_true(run.ok)
+        local first_result = assert(first:module_context()):validate_baseline()
+        assert.equal("success", first_result.status)
         assert.equal(1, #first_state.calls)
+        local success_path, digest = first:_persistent_success_location(
+            first_result.source, first_result.key)
+        assert(os.remove(success_path))
+        local path = success_path:gsub("[.]success$", ".negative")
+        local forged = assert(cprobe_cache.encode({
+            key_digest = digest,
+            outcome = "compiler_rejection",
+            exit_status = 1,
+            diagnostic = "forged baseline rejection",
+        }))
+        write_file(path, forged)
         assert.is_true(first:close())
 
-        local names = entries(cache)
-        assert.equal(2, #names)
-        assert.is_true(entries(cache)[1] == legacy:match("([^/]+)$") or
-            entries(cache)[2] == legacy:match("([^/]+)$"))
-        local marker_name = run.cache_path:match("([^/]+)$")
-        assert.not_equal(sha256.hex(source) .. ".success", marker_name)
-        local marker = assert(io.open(cache .. "/" .. marker_name, "rb"))
-        assert.equal("", assert(marker:read("a")))
-        assert.is_true(marker:close())
-        -- Presence is the complete contract; readers never decode payload.
-        write_file(cache .. "/" .. marker_name, "ignored marker payload")
-
-        local second, second_state = new_fake_service({
-            cache_directory = cache,
-        }, function()
-            error("a persistent success must not invoke the compiler")
-        end)
-        local hit = second:_run_source(
-            "baseline", source, "first-key")
-        assert.is_true(hit.ok)
-        assert.is_true(hit.persistent_cached)
-        assert.equal(0, #second_state.calls)
-        assert.equal(0, second_state.created)
-        assert.is_true(second:close())
-
-        local changed, changed_state = new_fake_service({
+        local retried, retried_state = new_fake_service({
             cache_directory = cache,
         })
-        local changed_run = changed:_run_source(
-            "baseline", source, "a-different-semantic-key")
-        assert.is_true(changed_run.ok)
-        assert.is_nil(changed_run.persistent_cached)
-        assert.equal(1, #changed_state.calls)
-        assert.not_equal(run.cache_path, changed_run.cache_path)
-        assert.is_true(changed:close())
+        local retried_result =
+            assert(retried:module_context()):validate_baseline()
+        assert.equal("success", retried_result.status)
+        assert.is_false(retried_result.cached)
+        assert.equal(1, #retried_state.calls)
+        assert.is_true(retried:close())
 
         for _, name in ipairs(entries(cache)) do
             assert(os.remove(cache .. "/" .. name))
@@ -2636,7 +3941,80 @@ describe("persistent successful C probe markers", function()
         assert(lfs.rmdir(cache))
     end)
 
-    it("never stores compiler rejection or infrastructure failure", function()
+    it("preserves the exact v3 digest for success and negative files",
+    function()
+        local cache = temporary_directory()
+        local function options()
+            return {
+                compiler_argv = { "cc" },
+                compile_flags = {},
+                language_mode = "c99",
+                language_flag = false,
+                cppflags = {},
+                cflags = {},
+                include_dirs = {},
+                profile_identity = "",
+                cache_directory = cache,
+            }
+        end
+
+        local first, first_state = new_fake_service(options())
+        local module = assert(first:module_context({
+            cwd = "/project",
+            source_dir = "/project",
+        }))
+        local source = cprobe.render_baseline_source(module)
+        local key = module.baseline_key
+        local success_path, digest = first:_persistent_success_location(
+            source, key)
+        assert.equal(
+            "9dd4b19f0ac7bafbaace8b4e7f95dd4dce5bfdbb7cab552e57ff800fde8c44de",
+            digest)
+        assert.equal(cache .. "/" .. digest .. ".success", success_path)
+
+        local success = first:_run_source("baseline", source, key)
+        assert.is_true(success.ok)
+        assert.equal(success_path, success.cache_path)
+        assert.equal(0, assert(lfs.attributes(success_path)).size)
+        assert.equal(1, #first_state.calls)
+        assert.is_true(first:close())
+        assert(os.remove(success_path))
+
+        local rejecting, rejecting_state = new_fake_service(
+            options(), function()
+                return {
+                    started = true,
+                    ok = false,
+                    status = 1,
+                    diagnostic = "golden rejection",
+                }
+            end)
+        local rejection = rejecting:_run_source("baseline", source, key)
+        assert.is_false(rejection.ok)
+        assert.equal("compiler_rejection", rejection.classification)
+        local negative_path = cache .. "/" .. digest .. ".negative"
+        assert.equal(negative_path, rejection.cache_path)
+        assert.is_true(assert(lfs.attributes(negative_path)).size > 32)
+        assert.equal(1, #rejecting_state.calls)
+        assert.is_true(rejecting:close())
+
+        local repeated, repeated_state = new_fake_service(
+            options(), function()
+                error("the golden negative must not invoke the compiler")
+            end)
+        local hit = repeated:_run_source("baseline", source, key)
+        assert.is_false(hit.ok)
+        assert.equal("compiler_rejection", hit.classification)
+        assert.is_true(hit.persistent_cached)
+        assert.equal(negative_path, hit.cache_path)
+        assert.equal(0, #repeated_state.calls)
+        assert.is_true(repeated:close())
+
+        assert(os.remove(negative_path))
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("stores compiler rejection but never infrastructure failure", function()
         local cache = temporary_directory()
         local outcomes = {
             { started = true, ok = false, status = 1,
@@ -2656,7 +4034,23 @@ describe("persistent successful C probe markers", function()
             assert.is_false(run.ok)
             assert.is_true(service:close())
         end
-        assert.same({}, entries(cache))
+        local cached_files = entries(cache)
+        assert.equal(1, #cached_files)
+        assert.matches("[.]negative$", cached_files[1])
+
+        local repeated, repeated_state = new_fake_service({
+            cache_directory = cache,
+        }, function()
+            error("a deterministic rejection must not invoke the compiler")
+        end)
+        local hit = repeated:_run_source(
+            "candidate", "int titan_failure_1;\n", "failure-key")
+        assert.is_false(hit.ok)
+        assert.equal("compiler_rejection", hit.classification)
+        assert.is_true(hit.persistent_cached)
+        assert.equal(0, #repeated_state.calls)
+        assert.is_true(repeated:close())
+        assert(os.remove(cache .. "/" .. cached_files[1]))
         assert(lfs.rmdir(cache))
     end)
 
@@ -2725,18 +4119,27 @@ describe("persistent successful C probe markers", function()
             end
             return workspace
         end
+        local execution_events = {}
         local service = assert(cprobe.new_service({
             cache_directory = cache,
             runner = runner,
             temp_provider = provider,
+            execution_trace = function(event)
+                execution_events[#execution_events + 1] = event
+            end,
         }))
         local run = service:_run_source(
             "candidate", "int titan_cleanup_failure;\n", "cleanup-key")
         assert.is_false(run.ok)
+        assert.is_true(run.started)
         assert.is_true(run.cleanup_error)
+        assert.equal("infrastructure_failure", run.classification)
+        assert.equal(1, #execution_events)
+        assert.is_true(execution_events[1].started)
+        assert.equal("infrastructure_failure", execution_events[1].outcome)
         assert.same({}, entries(cache))
         -- The injected provider cannot close cleanly; the semantic assertion is
-        -- that it still did not publish a success marker.
+        -- that it still did not publish a semantic result.
         service:close()
         assert(lfs.rmdir(cache))
     end)
@@ -2814,6 +4217,100 @@ describe("persistent successful C probe markers", function()
         for _, name in ipairs(entries(cache)) do
             assert(os.remove(cache .. "/" .. name))
         end
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("keeps successful diagnostics in service memory only",
+    function()
+        local cache = temporary_directory()
+        local public = "/project/provider.titan.h"
+        local nested_public = "/project/nested.titan.h"
+        local digest = string.rep("b", 64)
+        local function alias_for(physical, nested_physical)
+            local include = assert(cprobe.normalize_include_descriptor({
+                include_kind = "quote",
+                include_name = physical,
+                c_header_dependencies = {{
+                    kind = "file",
+                    path = physical,
+                    identity = "c-header-file-v1:sha256:" .. digest ..
+                        ";stat=file:33188:1:2",
+                }},
+            }, { source_dir = "." }))
+            return assert(cprobe.source_foreign_include_alias(
+                include, "provider.module", public, {{
+                    physical_path = nested_physical,
+                    public_path = nested_public,
+                }}))
+        end
+
+        local function warning_runner(physical, nested)
+            return function(_, _, metadata, state)
+                local wrapper_name
+                for name in pairs(state.files) do
+                    if name:match("^titan%-source%-foreign%-.*[.]h$") then
+                        wrapper_name = name
+                    end
+                end
+                assert.is_string(wrapper_name)
+                local root = assert(
+                    metadata.source_path:match("^(.*)/[^/]+$"))
+                return {
+                    started = true,
+                    ok = true,
+                    status = 0,
+                    diagnostic = table.concat({
+                        "In file included from " .. root .. "/" ..
+                            wrapper_name .. ":1:",
+                        physical .. ":2: warning: generated",
+                        nested .. ":3: warning: nested",
+                        metadata.source_path .. ":4: note: probe",
+                    }, "\n"),
+                }
+            end
+        end
+
+        local first_physical = "/tmp/provider-check-one.h"
+        local first_nested = "/tmp/nested-check-one.h"
+        local first, first_state = new_fake_service({
+            cache_directory = cache,
+        }, warning_runner(first_physical, first_nested))
+        local first_module = assert(first:module_context({
+            includes = { alias_for(first_physical, first_nested) },
+        }))
+        local first_result = first_module:validate_baseline()
+        assert.equal("success", first_result.status)
+        assert.matches(public, first_result.diagnostic, 1, true)
+        assert.matches(nested_public, first_result.diagnostic, 1, true)
+        assert.matches("<titan-cprobe-source>:4", first_result.diagnostic,
+            1, true)
+        assert.is_nil(first_result.diagnostic:find(
+            "/fake/titan probe", 1, true))
+        assert.is_nil(first_result.diagnostic:find(first_physical, 1, true))
+        assert.is_nil(first_result.diagnostic:find(first_nested, 1, true))
+        assert.equal(1, #first_state.calls)
+        local memory_result = first_module:validate_baseline()
+        assert.is_true(memory_result.cached)
+        assert.equal("service", memory_result.cache_tier)
+        assert.equal(first_result.diagnostic, memory_result.diagnostic)
+        assert.equal(1, #first_state.calls)
+        assert.is_true(first:close())
+        assert.same({}, entries(cache))
+
+        local second_physical = "/tmp/provider-check-two.h"
+        local second_nested = "/tmp/nested-check-two.h"
+        local second, second_state = new_fake_service({
+            cache_directory = cache,
+        }, warning_runner(second_physical, second_nested))
+        local second_module = assert(second:module_context({
+            includes = { alias_for(second_physical, second_nested) },
+        }))
+        local second_result = second_module:validate_baseline()
+        assert.is_false(second_result.persistent_cached == true)
+        assert.equal(first_result.diagnostic, second_result.diagnostic)
+        assert.equal(1, #second_state.calls)
+        assert.is_true(second:close())
+        assert.same({}, entries(cache))
         assert(lfs.rmdir(cache))
     end)
 
@@ -2945,5 +4442,1059 @@ describe("persistent successful C probe markers", function()
         assert(os.remove(nested))
         assert(lfs.rmdir(origin))
         assert(lfs.rmdir(root))
+    end)
+
+    it("reuses deterministic pointer rejections across an analysis and process",
+    function()
+        local cache = temporary_directory()
+        local analysis = cdriver.new_process_analysis()
+        local diagnostic = "probe.c:11: error: incompatible pointer types\0tail"
+        local function rejecting_service(extra)
+            extra = extra or {}
+            extra.cache_directory = cache
+            return new_fake_service(extra, function(_, _, metadata)
+                if metadata.stage == "baseline" then
+                    return { started = true, ok = true, status = 0 }
+                end
+                return {
+                    started = true,
+                    ok = false,
+                    status = 1,
+                    diagnostic = diagnostic,
+                }
+            end)
+        end
+        local source = cpointer("negative_source")
+        local target = cpointer("negative_target")
+
+        local first, first_state = rejecting_service({
+            process_analysis = analysis,
+        })
+        local first_result = assert(first:module_context()):
+            probe_unsafe_object_pointer(source, target)
+        assert.equal("rejected", first_result.status)
+        assert.equal(diagnostic, first_result.diagnostic)
+        assert.equal(2, #first_state.calls)
+        assert.is_true(first:close())
+
+        local same_analysis, analysis_state = rejecting_service({
+            process_analysis = analysis,
+        })
+        local analysis_result = assert(same_analysis:module_context()):
+            probe_unsafe_object_pointer(source, target)
+        assert.equal("rejected", analysis_result.status)
+        assert.equal("analysis", analysis_result.cache_tier)
+        assert.equal(diagnostic, analysis_result.diagnostic)
+        assert.equal(0, #analysis_state.calls)
+        assert.is_true(same_analysis:close())
+
+        local other_process, process_state = rejecting_service({
+            process_analysis = cdriver.new_process_analysis(),
+        })
+        local process_result = assert(other_process:module_context()):
+            probe_unsafe_object_pointer(source, target)
+        assert.equal("rejected", process_result.status)
+        assert.equal("persistent", process_result.cache_tier)
+        assert.is_true(process_result.persistent_cached)
+        assert.equal(diagnostic, process_result.diagnostic)
+        assert.equal(0, #process_state.calls)
+        assert.is_true(other_process:close())
+
+        for _, name in ipairs(entries(cache)) do
+            assert(os.remove(cache .. "/" .. name))
+        end
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("persists exact rejected declaration batches and their refinements",
+    function()
+        local cache = temporary_directory()
+        local first, first_state = new_fake_service({
+            cache_directory = cache,
+        }, function(_, _, metadata)
+            if metadata.stage == "baseline" or
+               not metadata.source:find("rejected_bad", 1, true) then
+                return { started = true, ok = true, status = 0 }
+            end
+            return {
+                started = true,
+                ok = false,
+                status = 1,
+                diagnostic = "declaration candidate rejected",
+            }
+        end)
+        local accepted_first = {
+            left_type = cpointer("accepted_first_left"),
+            right_type = cpointer("accepted_first_right"),
+        }
+        local accepted_second = {
+            left_type = cpointer("accepted_second_left"),
+            right_type = cpointer("accepted_second_right"),
+        }
+        local rejected = {
+            left_type = cpointer("rejected_bad_left"),
+            right_type = cpointer("rejected_bad_right"),
+        }
+        local accepted_fourth = {
+            left_type = cpointer("accepted_fourth_left"),
+            right_type = cpointer("accepted_fourth_right"),
+        }
+        local candidates = {
+            accepted_first,
+            accepted_second,
+            rejected,
+            accepted_fourth,
+        }
+        local first_results = assert(first:module_context()):
+            validate_declaration_compatibilities(candidates)
+        assert.equal("success", first_results[1].status)
+        assert.equal("success", first_results[2].status)
+        assert.equal("rejected", first_results[3].status)
+        assert.equal("success", first_results[4].status)
+        -- Baseline; rejected four-pair batch; accepted left half; rejected
+        -- right half; then its rejected and accepted singleton leaves.
+        assert.equal(6, #first_state.calls)
+
+        -- Every compiler result in that bisection tree has its own exact
+        -- historical source/key evidence on disk. The rejected aggregate,
+        -- rejected sub-batch, and rejected singleton use negative records;
+        -- the accepted sub-batch and singleton retain empty success markers.
+        for index = 2, 6 do
+            local metadata = first_state.calls[index].metadata
+            local success_path = assert(first:_persistent_success_location(
+                metadata.source, metadata.key))
+            local expected_path = metadata.source:find(
+                "rejected_bad", 1, true) and success_path:gsub(
+                    "[.]success$", ".negative") or success_path
+            assert.equal("file", lfs.attributes(expected_path, "mode"))
+        end
+        assert.equal(6, #entries(cache))
+        assert.is_true(first:close())
+
+        local identical, identical_state = new_fake_service({
+            cache_directory = cache,
+        }, function()
+            error("the identical rejected batch tree must be fully cached")
+        end)
+        local identical_results = assert(identical:module_context()):
+            validate_declaration_compatibilities(candidates)
+        assert.same({ "success", "success", "rejected", "success" }, {
+            identical_results[1].status,
+            identical_results[2].status,
+            identical_results[3].status,
+            identical_results[4].status,
+        })
+        for index = 1, 4 do
+            assert.is_true(identical_results[index].persistent_cached)
+        end
+        assert.equal(0, #identical_state.calls)
+        assert.is_true(identical:close())
+
+        local repeated, repeated_state = new_fake_service({
+            cache_directory = cache,
+        }, function(_, _, metadata)
+            assert.equal("candidate", metadata.stage)
+            assert.matches("rejected_bad_left", metadata.source, 1, true)
+            assert.matches("accepted_first_left", metadata.source, 1, true)
+            return {
+                started = true,
+                ok = false,
+                status = 1,
+                diagnostic = "regrouped batch rejected",
+            }
+        end)
+        local repeated_results = assert(repeated:module_context()):
+            validate_declaration_compatibilities({
+                rejected,
+                accepted_fourth,
+                accepted_first,
+                accepted_second,
+            })
+        assert.equal("rejected", repeated_results[1].status)
+        assert.equal("success", repeated_results[2].status)
+        assert.equal("success", repeated_results[3].status)
+        assert.equal("success", repeated_results[4].status)
+        for index = 1, 4 do
+            assert.equal("persistent", repeated_results[index].cache_tier)
+        end
+        -- The reordered aggregate has a distinct historical batch key and
+        -- must run once. Its exact rejected/accepted half batches and the
+        -- rejected half's singleton children then reuse the first tree.
+        assert.equal(1, #repeated_state.calls)
+        local regrouped = repeated_state.calls[1].metadata
+        local regrouped_success_path =
+            assert(repeated:_persistent_success_location(
+                regrouped.source, regrouped.key))
+        local regrouped_negative_path = regrouped_success_path:gsub(
+            "[.]success$", ".negative")
+        assert.equal("file",
+            lfs.attributes(regrouped_negative_path, "mode"))
+        assert.is_true(repeated:close())
+
+        for _, name in ipairs(entries(cache)) do
+            assert(os.remove(cache .. "/" .. name))
+        end
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("never persists declaration-batch infrastructure failures", function()
+        local cache = temporary_directory()
+        local candidates = {
+            {
+                left_type = cpointer("infrastructure_first_left"),
+                right_type = cpointer("infrastructure_first_right"),
+            },
+            {
+                left_type = cpointer("infrastructure_second_left"),
+                right_type = cpointer("infrastructure_second_right"),
+            },
+        }
+        local function service_with_failure()
+            return new_fake_service({
+                cache_directory = cache,
+            }, function(_, _, metadata)
+                if metadata.stage == "baseline" then
+                    return { started = true, ok = true, status = 0 }
+                end
+                return nil, "configured compiler could not be started"
+            end)
+        end
+
+        local first, first_state = service_with_failure()
+        local first_results = assert(first:module_context()):
+            validate_declaration_compatibilities(candidates)
+        for index = 1, 2 do
+            assert.equal("infrastructure_failure",
+                first_results[index].status)
+        end
+        assert.equal(2, #first_state.calls)
+        -- Only the successful baseline is durable.
+        assert.equal(1, #entries(cache))
+        assert.is_true(first:close())
+
+        local repeated, repeated_state = service_with_failure()
+        local repeated_results = assert(repeated:module_context()):
+            validate_declaration_compatibilities(candidates)
+        for index = 1, 2 do
+            assert.equal("infrastructure_failure",
+                repeated_results[index].status)
+        end
+        -- The baseline hits, but the failed aggregate must be launched again.
+        assert.equal(1, #repeated_state.calls)
+        assert.equal(1, #entries(cache))
+        assert.is_true(repeated:close())
+
+        for _, name in ipairs(entries(cache)) do
+            assert(os.remove(cache .. "/" .. name))
+        end
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("uses historical batch sources and keys for durable declarations",
+    function()
+        local cache = temporary_directory()
+        local candidate = {
+            left_type = cpointer("durable_singleton_left"),
+            right_type = cpointer("durable_singleton_right"),
+        }
+        local first, first_state = new_fake_service({
+            cache_directory = cache,
+        })
+        local module = assert(first:module_context())
+        local result = module:validate_declaration_compatibilities({
+            candidate,
+        })[1]
+        assert.equal("success", result.status)
+        assert.equal(2, #first_state.calls)
+
+        local expected_source = table.concat({
+            module.header_preamble,
+            "",
+            "#if defined(__clang__)",
+            "# pragma clang diagnostic push",
+            '# pragma clang diagnostic ignored "-Wunused-variable"',
+            "#elif defined(__GNUC__)",
+            "# pragma GCC diagnostic push",
+            '# pragma GCC diagnostic ignored "-Wunused-variable"',
+            "# if __GNUC__ >= 13",
+            '#  pragma GCC diagnostic ignored "-Wenum-int-mismatch"',
+            "# endif",
+            "#endif",
+            "extern " .. result.left_declaration .. ";",
+            "extern " .. result.right_declaration .. ";",
+            "#if defined(__clang__)",
+            "# pragma clang diagnostic pop",
+            "#elif defined(__GNUC__)",
+            "# pragma GCC diagnostic pop",
+            "#endif",
+            "",
+        }, "\n")
+        assert.equal(expected_source, result.source)
+
+        local singleton_batch_key = keyed_fields({
+            { "toolchain", first.toolchain_key },
+            { "headers", module.header_key },
+            { "probe_kind", "declaration_compatibility_batch" },
+            { "candidate_1", result.key },
+        })
+        local singleton_path, singleton_digest =
+            first:_persistent_success_location(
+                expected_source, singleton_batch_key)
+        assert.equal(cache .. "/" .. singleton_digest .. ".success",
+            singleton_path)
+        assert.equal("file", lfs.attributes(singleton_path, "mode"))
+        assert.equal(0, assert(lfs.attributes(singleton_path)).size)
+        local leaf_path = first:_persistent_success_location(
+            expected_source, result.key)
+        assert.not_equal(singleton_path, leaf_path)
+        assert.is_nil(lfs.attributes(leaf_path))
+        assert.is_true(first:close())
+
+        local singleton_hit, singleton_hit_state = new_fake_service({
+            cache_directory = cache,
+        }, function()
+            error("the exact singleton batch marker must be reused")
+        end)
+        local singleton_result = assert(singleton_hit:module_context()):
+            validate_declaration_compatibilities({ candidate })[1]
+        assert.equal("success", singleton_result.status)
+        assert.is_true(singleton_result.persistent_cached)
+        assert.equal(0, #singleton_hit_state.calls)
+        assert.is_true(singleton_hit:close())
+
+        local candidates = {
+            {
+                left_type = cpointer("durable_batch_left_one"),
+                right_type = cpointer("durable_batch_right_one"),
+            },
+            {
+                left_type = cpointer("durable_batch_left_two"),
+                right_type = cpointer("durable_batch_right_two"),
+            },
+        }
+        local batch, batch_state = new_fake_service({
+            cache_directory = cache,
+        })
+        local batch_module = assert(batch:module_context())
+        local batch_results =
+            batch_module:validate_declaration_compatibilities(candidates)
+        assert.equal(1, #batch_state.calls)
+        local batch_key = keyed_fields({
+            { "toolchain", batch.toolchain_key },
+            { "headers", batch_module.header_key },
+            { "probe_kind", "declaration_compatibility_batch" },
+            { "candidate_1", batch_results[1].key },
+            { "candidate_2", batch_results[2].key },
+        })
+        local batch_path = batch:_persistent_success_location(
+            batch_results[1].source, batch_key)
+        assert.equal("file", lfs.attributes(batch_path, "mode"))
+        assert.equal(0, assert(lfs.attributes(batch_path)).size)
+        assert.is_true(batch:close())
+
+        local batch_hit, batch_hit_state = new_fake_service({
+            cache_directory = cache,
+        }, function()
+            error("the exact historical batch marker must be reused")
+        end)
+        local repeated = assert(batch_hit:module_context()):
+            validate_declaration_compatibilities(candidates)
+        for index = 1, 2 do
+            assert.equal("success", repeated[index].status)
+            assert.is_true(repeated[index].persistent_cached)
+        end
+        assert.equal(0, #batch_hit_state.calls)
+        assert.is_true(batch_hit:close())
+
+        for _, name in ipairs(entries(cache)) do
+            assert(os.remove(cache .. "/" .. name))
+        end
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("refines successful declaration batch warnings into exact leaves",
+    function()
+        local cache = temporary_directory()
+        local function warning_runner(_, _, metadata)
+            if metadata.stage == "baseline" then
+                return { started = true, ok = true, status = 0 }
+            end
+            local has_first = metadata.source:find(
+                "warning_first", 1, true) ~= nil
+            local has_second = metadata.source:find(
+                "warning_second", 1, true) ~= nil
+            local diagnostic = has_first and has_second and
+                "probe.c:1: warning: batch diagnostic" or
+                has_first and "probe.c:2: warning: first leaf" or
+                "probe.c:3: warning: second leaf"
+            return {
+                started = true,
+                ok = true,
+                status = 0,
+                diagnostic = diagnostic,
+            }
+        end
+        local first, first_state = new_fake_service({
+            cache_directory = cache,
+        }, warning_runner)
+        local candidates = {
+            {
+                left_type = cpointer("warning_first_left"),
+                right_type = cpointer("warning_first_right"),
+            },
+            {
+                left_type = cpointer("warning_second_left"),
+                right_type = cpointer("warning_second_right"),
+            },
+        }
+        local first_results = assert(first:module_context()):
+            validate_declaration_compatibilities(candidates)
+        assert.equal("success", first_results[1].status)
+        assert.equal("success", first_results[2].status)
+        assert.equal("probe.c:2: warning: first leaf",
+            first_results[1].diagnostic)
+        assert.equal("probe.c:3: warning: second leaf",
+            first_results[2].diagnostic)
+        -- Baseline, successful warning batch, then two singleton refinements.
+        assert.equal(4, #first_state.calls)
+        assert.is_true(first:close())
+
+        local repeated, repeated_state = new_fake_service({
+            cache_directory = cache,
+        }, warning_runner)
+        local repeated_results = assert(repeated:module_context()):
+            validate_declaration_compatibilities(candidates)
+        assert.equal("probe.c:2: warning: first leaf",
+            repeated_results[1].diagnostic)
+        assert.equal("probe.c:3: warning: second leaf",
+            repeated_results[2].diagnostic)
+        for index = 1, 2 do
+            assert.equal("success", repeated_results[index].status)
+            assert.equal("compiler", repeated_results[index].cache_tier)
+            assert.is_false(
+                repeated_results[index].persistent_cached == true)
+        end
+        -- The empty baseline marker is reused, while the warning-bearing
+        -- batch and two exact singleton diagnostics remain memory-only.
+        assert.equal(3, #repeated_state.calls)
+        assert.is_true(repeated:close())
+
+        for _, name in ipairs(entries(cache)) do
+            assert(os.remove(cache .. "/" .. name))
+        end
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("keeps a post-spawn missing baseline status retryable", function()
+        local cache = temporary_directory()
+        local execution_events = {}
+        local service, state = new_fake_service({
+            cache_directory = cache,
+            execution_trace = function(event)
+                execution_events[#execution_events + 1] = event
+            end,
+        }, function()
+            return {
+                started = true,
+                ok = false,
+                diagnostic = "capture failed after baseline spawn",
+            }
+        end)
+        local module = assert(service:module_context())
+
+        for _ = 1, 2 do
+            local result = module:validate_baseline()
+            assert.equal("infrastructure_failure", result.status)
+            assert.is_nil(result.accepted)
+            assert.equal("malformed_runner_result", result.reason)
+        end
+        assert.equal(2, #state.calls)
+        assert.equal(2, #execution_events)
+        for _, event in ipairs(execution_events) do
+            assert.equal("header_baseline", event.probe_kind)
+            assert.equal("infrastructure_failure", event.outcome)
+            assert.is_true(event.started)
+            assert.equal("not_applicable", event.publication)
+        end
+        assert.same({}, entries(cache))
+        assert.is_true(service:close())
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("keeps a post-spawn invalid pointer status out of semantic caches",
+    function()
+        local cache = temporary_directory()
+        local execution_events = {}
+        local service, state = new_fake_service({
+            cache_directory = cache,
+            execution_trace = function(event)
+                execution_events[#execution_events + 1] = event
+            end,
+        }, function(_, _, metadata)
+            if metadata.stage == "baseline" then
+                return { started = true, ok = true, status = 0 }
+            end
+            return {
+                started = true,
+                ok = false,
+                status = "missing wait status",
+                diagnostic = "capture failed after pointer spawn",
+            }
+        end)
+        local module = assert(service:module_context())
+        for _ = 1, 2 do
+            local result = module:probe_unsafe_object_pointer(
+                cpointer("post_spawn_pointer_source"),
+                cpointer("post_spawn_pointer_target"))
+            assert.equal("infrastructure_failure", result.status)
+            assert.is_nil(result.accepted)
+            assert.equal("malformed_runner_result", result.reason)
+        end
+        assert.equal(3, #state.calls)
+        assert.equal(3, #execution_events)
+        for index = 2, 3 do
+            local event = execution_events[index]
+            assert.equal("unsafe_object_pointer", event.probe_kind)
+            assert.equal("infrastructure_failure", event.outcome)
+            assert.is_true(event.started)
+            assert.equal("not_applicable", event.publication)
+        end
+        assert.equal(1, #entries(cache))
+        assert.is_true(service:close())
+        for _, name in ipairs(entries(cache)) do
+            assert(os.remove(cache .. "/" .. name))
+        end
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("keeps a post-spawn missing operator status retryable", function()
+        local cache = temporary_directory()
+        local execution_events = {}
+        local profile = target_profile()
+        local trait = assert(csemantics.decide_binary_operator(
+            profile, "+", profile.integers.int.type, types.Integer()))
+        local service, state = new_fake_service({
+            cache_directory = cache,
+            profile = profile,
+            execution_trace = function(event)
+                execution_events[#execution_events + 1] = event
+            end,
+        }, function(_, _, metadata)
+            if metadata.stage == "baseline" then
+                return { started = true, ok = true, status = 0 }
+            end
+            return {
+                started = true,
+                ok = false,
+                diagnostic = "capture failed after operator spawn",
+            }
+        end)
+        local module = assert(service:module_context())
+        for _ = 1, 2 do
+            local result = module:probe_operator(trait)
+            assert.equal("infrastructure_failure", result.status)
+            assert.is_nil(result.accepted)
+            assert.equal("malformed_runner_result", result.reason)
+        end
+        assert.equal(3, #state.calls)
+        assert.equal(3, #execution_events)
+        for index = 2, 3 do
+            local event = execution_events[index]
+            assert.equal("c_operator", event.probe_kind)
+            assert.equal("infrastructure_failure", event.outcome)
+            assert.is_true(event.started)
+            assert.equal("not_applicable", event.publication)
+        end
+        assert.equal(1, #entries(cache))
+        assert.is_true(service:close())
+        for _, name in ipairs(entries(cache)) do
+            assert(os.remove(cache .. "/" .. name))
+        end
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("keeps a post-spawn missing declaration status retryable", function()
+        local cache = temporary_directory()
+        local execution_events = {}
+        local profile = target_profile()
+        local service, state = new_fake_service({
+            cache_directory = cache,
+            profile = profile,
+            execution_trace = function(event)
+                execution_events[#execution_events + 1] = event
+            end,
+        }, function(_, _, metadata)
+            if metadata.stage == "baseline" then
+                return { started = true, ok = true, status = 0 }
+            end
+            return {
+                started = true,
+                ok = false,
+                diagnostic = "capture failed after declaration spawn",
+            }
+        end)
+        local int = profile.integers.int.type
+        local candidate = {
+            left_type = types.CTypedef("post_spawn_left", int),
+            right_type = types.CTypedef("post_spawn_right", int),
+        }
+        local module = assert(service:module_context())
+        for _ = 1, 2 do
+            local result = module:validate_declaration_compatibility(
+                candidate.left_type, candidate.right_type)
+            assert.equal("infrastructure_failure", result.status)
+            assert.is_nil(result.accepted)
+            assert.equal("malformed_runner_result", result.reason)
+        end
+        assert.equal(3, #state.calls)
+        assert.equal(3, #execution_events)
+        for index = 2, 3 do
+            local event = execution_events[index]
+            assert.equal("declaration_compatibility", event.probe_kind)
+            assert.equal("infrastructure_failure", event.outcome)
+            assert.is_true(event.started)
+            assert.equal("not_applicable", event.publication)
+        end
+        assert.equal(1, #entries(cache))
+        assert.is_true(service:close())
+        for _, name in ipairs(entries(cache)) do
+            assert(os.remove(cache .. "/" .. name))
+        end
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("traces distinct no-cache semantics and declaration leaves",
+    function()
+        local events = {}
+        local service, state = new_fake_service({
+            semantic_trace = function(event)
+                events[#events + 1] = event
+            end,
+        })
+        local module = assert(service:module_context())
+        local first_source = cpointer("no_cache_trace_source_one")
+        local first_target = cpointer("no_cache_trace_target_one")
+        assert.equal("success", module:probe_unsafe_object_pointer(
+            first_source, first_target).status)
+        assert.equal("success", module:probe_unsafe_object_pointer(
+            first_source, first_target).status)
+        assert.equal("success", module:probe_unsafe_object_pointer(
+            cpointer("no_cache_trace_source_two"),
+            cpointer("no_cache_trace_target_two")).status)
+
+        local pointer_events = {}
+        for _, event in ipairs(events) do
+            if event.probe_kind == "unsafe_object_pointer" then
+                pointer_events[#pointer_events + 1] = event
+            end
+        end
+        assert.equal(3, #pointer_events)
+        assert.matches("^[0-9a-f]+$", pointer_events[1].key)
+        assert.equal(64, #pointer_events[1].key)
+        assert.equal(pointer_events[1].key, pointer_events[2].key)
+        assert.not_equal(pointer_events[1].key, pointer_events[3].key)
+        assert.is_false(pointer_events[1].repeated)
+        assert.is_true(pointer_events[2].repeated)
+        assert.is_false(pointer_events[3].repeated)
+
+        local declaration_start = #events
+        local declarations = module:validate_declaration_compatibilities({
+            {
+                left_type = cpointer("no_cache_leaf_left_one"),
+                right_type = cpointer("no_cache_leaf_right_one"),
+            },
+            {
+                left_type = cpointer("no_cache_leaf_left_two"),
+                right_type = cpointer("no_cache_leaf_right_two"),
+            },
+        })
+        assert.equal("success", declarations[1].status)
+        assert.equal("success", declarations[2].status)
+        local declaration_events = {}
+        for index = declaration_start + 1, #events do
+            local event = events[index]
+            if event.probe_kind == "declaration_compatibility" then
+                declaration_events[#declaration_events + 1] = event
+            end
+        end
+        assert.equal(2, #declaration_events)
+        assert.matches("^[0-9a-f]+$", declaration_events[1].key)
+        assert.matches("^[0-9a-f]+$", declaration_events[2].key)
+        assert.equal(64, #declaration_events[1].key)
+        assert.equal(64, #declaration_events[2].key)
+        assert.not_equal(declaration_events[1].key,
+            declaration_events[2].key)
+        assert.is_false(declaration_events[1].repeated)
+        assert.is_false(declaration_events[2].repeated)
+        assert.equal(4, #state.calls)
+        assert.is_true(service:close())
+    end)
+
+    it("classifies runners strictly and emits nonoverlapping lifecycle traces",
+    function()
+        local untraced = new_fake_service()
+        local untraced_run = untraced:_run_source(
+            "candidate", "int titan_untraced_execution;\n", "untraced")
+        assert.is_nil(untraced_run.execution_digest)
+        assert.is_true(untraced:close())
+
+        local semantic_events = {}
+        local execution_events = {}
+        local service, state = new_fake_service({
+            semantic_trace = function(event)
+                semantic_events[#semantic_events + 1] = event
+            end,
+            execution_trace = function(event)
+                execution_events[#execution_events + 1] = event
+            end,
+        }, function(_, _, metadata)
+            if metadata.stage == "baseline" then
+                return {
+                    started = true, ok = true, status = 0, wall_ms = 2.25,
+                }
+            end
+            return {
+                started = true, ok = false, status = 1,
+                wall_ms = 7.5, diagnostic = "expected rejection",
+            }
+        end)
+        local module = assert(service:module_context({
+            includes = { "trace-first.h", "trace-second.h" },
+        }))
+        local source = cpointer("traced_source")
+        local target = cpointer("traced_target")
+        assert.equal("rejected",
+            module:probe_unsafe_object_pointer(source, target).status)
+        assert.equal("rejected",
+            module:probe_unsafe_object_pointer(source, target).status)
+        assert.equal(2, #state.calls)
+        assert.equal(2, #execution_events)
+        assert.equal(2.25, execution_events[1].wall_ms)
+        assert.equal(7.5, execution_events[2].wall_ms)
+        assert.equal("success", execution_events[1].outcome)
+        assert.equal("compiler_rejection", execution_events[2].outcome)
+        assert.is_true(execution_events[1].started)
+        assert.is_true(execution_events[2].started)
+        assert.equal("<trace-first.h>, <trace-second.h>",
+            execution_events[1].header_label)
+        assert.equal(execution_events[1].header_label,
+            execution_events[2].header_label)
+        assert.equal(3, #semantic_events)
+        assert.equal("header_baseline", semantic_events[1].probe_kind)
+        assert.equal("compiler", semantic_events[2].cache_tier)
+        assert.equal("compiler_rejection", semantic_events[2].outcome)
+        assert.equal("service", semantic_events[3].cache_tier)
+        assert.is_true(semantic_events[3].repeated)
+        for _, event in ipairs(semantic_events) do
+            assert.equal("<trace-first.h>, <trace-second.h>",
+                event.header_label)
+        end
+        assert.is_true(service:close())
+
+        local infrastructure_events = {}
+        local infrastructure, infrastructure_state = new_fake_service({
+            execution_trace = function(event)
+                infrastructure_events[#infrastructure_events + 1] = event
+            end,
+        }, function(call)
+            if call == 1 then
+                return {
+                    started = true,
+                    ok = false,
+                    diagnostic = "capture failed after spawn",
+                }
+            end
+            return nil, "injected pre-spawn failure"
+        end)
+        local post_spawn = infrastructure:_run_source(
+            "candidate", "int post_spawn_failure;\n", "post-spawn")
+        assert.equal("infrastructure_failure", post_spawn.classification)
+        assert.is_true(post_spawn.started)
+        assert.equal("malformed_runner_result", post_spawn.reason)
+        assert.is_nil(post_spawn.cache_path)
+        local pre_spawn = infrastructure:_run_source(
+            "candidate", "int pre_spawn_failure;\n", "pre-spawn")
+        assert.equal("infrastructure_failure", pre_spawn.classification)
+        assert.is_false(pre_spawn.started)
+        assert.equal("spawn", pre_spawn.reason)
+        assert.equal(2, #infrastructure_state.calls)
+        assert.equal(2, #infrastructure_events)
+        assert.is_true(infrastructure_events[1].started)
+        assert.is_false(infrastructure_events[2].started)
+        assert.equal("", infrastructure_events[1].header_label)
+        assert.equal("", infrastructure_events[2].header_label)
+        assert.is_true(infrastructure:close())
+
+        local malformed = {
+            { started = true, ok = true, status = 1 },
+            { started = true, ok = false },
+            { started = false, ok = true, status = 0 },
+            { started = true, ok = false, status = 126 },
+            { started = true, ok = false, status = 127 },
+            { started = true, ok = true, status = 0, wall_ms = -1 },
+            { started = true, ok = true, status = 0,
+              wall_ms = 0 / 0 },
+            { started = true, spawned = false, ok = true, status = 0 },
+            { started = true, ok = true, success = false, status = 0 },
+            { started = true, ok = true, status = 0, code = 1 },
+            { started = true, ok = false, status = 1, why = "signal",
+              signal = 9 },
+        }
+        for index, runner_result in ipairs(malformed) do
+            local candidate = new_fake_service({}, function()
+                return runner_result
+            end)
+            local run = candidate:_run_source(
+                "candidate", "int malformed_" .. index .. ";\n", "key")
+            assert.equal("infrastructure_failure", run.classification)
+            assert.is_true(candidate:close())
+        end
+
+        local long_headers = {}
+        for index = 1, 8 do
+            long_headers[index] = string.rep("long-header-", 20) ..
+                tostring(index) .. ".h"
+        end
+        local bounded_events = {}
+        local bounded = new_fake_service({
+            semantic_trace = function(event)
+                bounded_events[#bounded_events + 1] = event
+            end,
+        })
+        local bounded_module = assert(bounded:module_context({
+            includes = long_headers,
+        }))
+        assert.equal("infrastructure_failure",
+            bounded_module:probe_operator({}).status)
+        assert.equal(1, #bounded_events)
+        assert.is_true(#bounded_events[1].header_label <= 192)
+        assert.matches("long%-header%-", bounded_events[1].header_label)
+        assert.matches("%+5 more", bounded_events[1].header_label)
+        assert.is_true(bounded:close())
+
+        local hostile_results = {
+            setmetatable({}, {
+                __index = function()
+                    error("injected runner result access failure")
+                end,
+            }),
+            {
+                started = true,
+                ok = false,
+                status = 1,
+                diagnostic = setmetatable({}, {
+                    __tostring = function()
+                        error("injected runner diagnostic tostring failure")
+                    end,
+                }),
+            },
+        }
+        for index, runner_result in ipairs(hostile_results) do
+            local candidate = new_fake_service({}, function()
+                return runner_result
+            end)
+            local run = candidate:_run_source(
+                "candidate", "int hostile_" .. index .. ";\n", "key")
+            assert.equal("infrastructure_failure", run.classification)
+            assert.equal("malformed_runner_result", run.reason)
+            assert.matches("result normalization raised an error",
+                run.diagnostic, 1, true)
+            assert.is_true(candidate:close())
+        end
+
+        local unprintable_error = setmetatable({}, {
+            __tostring = function()
+                error("injected runner error tostring failure")
+            end,
+        })
+        local raising = new_fake_service({}, function()
+            error(unprintable_error)
+        end)
+        local raised = raising:_run_source(
+            "candidate", "int hostile_error;\n", "key")
+        assert.equal("infrastructure_failure", raised.classification)
+        assert.matches("unprintable command runner error",
+            raised.diagnostic, 1, true)
+        assert.is_true(raising:close())
+
+        local terminal_events = {}
+        local early, early_state = new_fake_service({
+            semantic_trace = function(event)
+                terminal_events[#terminal_events + 1] = event
+            end,
+        })
+        local early_module = assert(early:module_context())
+        assert.equal("infrastructure_failure",
+            early_module:probe_operator({}).status)
+        assert.equal(0, #early_state.calls)
+        assert.equal(1, #terminal_events)
+        assert.equal("c_operator", terminal_events[1].probe_kind)
+        assert.equal("infrastructure_failure", terminal_events[1].outcome)
+        assert.matches("^[0-9a-f]+$", terminal_events[1].key)
+        assert.is_true(early:close())
+        assert.equal("infrastructure_failure",
+            early_module:probe_unsafe_object_pointer(nil, nil).status)
+        assert.equal(2, #terminal_events)
+        assert.equal("unsafe_object_pointer",
+            terminal_events[2].probe_kind)
+        assert.equal("infrastructure_failure", terminal_events[2].outcome)
+        assert.is_false(terminal_events[2].repeated)
+        assert.equal("infrastructure_failure",
+            early_module:probe_unsafe_object_pointer(nil, nil).status)
+        assert.equal(3, #terminal_events)
+        assert.equal("unsafe_object_pointer",
+            terminal_events[3].probe_kind)
+        assert.equal("infrastructure_failure", terminal_events[3].outcome)
+        assert.is_false(terminal_events[3].repeated)
+        assert.not_equal(terminal_events[2].key, terminal_events[3].key)
+
+        local isolated = new_fake_service({
+            semantic_trace = function() error("semantic trace failed") end,
+            execution_trace = function() error("execution trace failed") end,
+        })
+        assert.equal("success", assert(isolated:module_context()):
+            validate_baseline().status)
+        assert.is_true(isolated:close())
+    end)
+
+    it("keeps telemetry on its module while probe Tasks interleave",
+    function()
+        local cache = temporary_directory()
+        local persistent_events = {}
+        local semantic_events = {}
+        local execution_events = {}
+        local service, state = new_fake_service({
+            cache_directory = cache,
+            persistent_cache_trace = function(
+                    stage, hit, key, path, module_name)
+                persistent_events[#persistent_events + 1] = {
+                    stage = stage,
+                    hit = hit,
+                    key = key,
+                    path = path,
+                    module = module_name,
+                }
+            end,
+            semantic_trace = function(event)
+                semantic_events[#semantic_events + 1] = event
+            end,
+            execution_trace = function(event)
+                execution_events[#execution_events + 1] = event
+            end,
+        }, function(call, _, metadata)
+            if call == 1 then coroutine.yield("module-a-compiler") end
+            if metadata.stage == "baseline" then
+                return { started = true, ok = true, status = 0 }
+            end
+            return {
+                started = true,
+                ok = false,
+                status = 1,
+                diagnostic = "expected rejection",
+            }
+        end)
+        local module_a = assert(service:module_context({ module = "module.a" }))
+        local module_b = assert(service:module_context({ module = "module.b" }))
+
+        local task_a = coroutine.create(function()
+            return module_a:probe_unsafe_object_pointer(
+                cpointer("interleaved_a_source"),
+                cpointer("interleaved_a_target"))
+        end)
+        local resumed, marker = coroutine.resume(task_a)
+        assert.is_true(resumed)
+        assert.equal("module-a-compiler", marker)
+
+        local result_b = module_b:probe_unsafe_object_pointer(
+            cpointer("interleaved_b_source"),
+            cpointer("interleaved_b_target"))
+        assert.equal("rejected", result_b.status)
+
+        local result_a
+        resumed, result_a = coroutine.resume(task_a)
+        assert.is_true(resumed)
+        assert.equal("rejected", result_a.status)
+        assert.equal("dead", coroutine.status(task_a))
+        assert.is_true(#state.calls >= 3)
+
+        local seen = { ["module.a"] = false, ["module.b"] = false }
+        for _, events in ipairs({
+            persistent_events, semantic_events, execution_events,
+        }) do
+            assert.is_true(#events > 0)
+            for _, event in ipairs(events) do
+                assert.is_not_nil(seen[event.module])
+                seen[event.module] = true
+            end
+        end
+        assert.is_true(seen["module.a"])
+        assert.is_true(seen["module.b"])
+        assert.is_true(service:close())
+        for _, name in ipairs(entries(cache)) do
+            assert(os.remove(cache .. "/" .. name))
+        end
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("keeps retryable failures out of semantic cache trace tiers", function()
+        local declaration_events = {}
+        local declaration_service, declaration_state = new_fake_service({
+            semantic_trace = function(event)
+                declaration_events[#declaration_events + 1] = event
+            end,
+        }, function(_, _, metadata)
+            if metadata.stage == "baseline" then
+                return { started = true, ok = true, status = 0 }
+            end
+            return nil, "injected declaration infrastructure failure"
+        end)
+        local int = target_profile().integers.int.type
+        local duplicate = {
+            left_type = types.CTypedef("trace_duplicate_left", int),
+            right_type = types.CTypedef("trace_duplicate_right", int),
+        }
+        local duplicate_results = assert(declaration_service:module_context()):
+            validate_declaration_compatibilities({ duplicate, duplicate })
+        assert.equal(2, #declaration_state.calls)
+        assert.equal("infrastructure_failure", duplicate_results[1].status)
+        assert.equal("infrastructure_failure", duplicate_results[2].status)
+        assert.is_false(duplicate_results[1].cached)
+        assert.is_false(duplicate_results[2].cached)
+        assert.equal(3, #declaration_events)
+        assert.equal("compiler", declaration_events[2].cache_tier)
+        assert.equal("compiler", declaration_events[3].cache_tier)
+        assert.is_true(declaration_events[3].repeated)
+        assert.is_true(declaration_service:close())
+
+        local semantic_events = {}
+        local execution_events = {}
+        local baseline_service = new_fake_service({
+            semantic_trace = function(event)
+                semantic_events[#semantic_events + 1] = event
+            end,
+            execution_trace = function(event)
+                execution_events[#execution_events + 1] = event
+            end,
+        }, function()
+            return {
+                started = true,
+                ok = false,
+                status = 1,
+                diagnostic = "injected rejected baseline",
+            }
+        end)
+        local failed = assert(baseline_service:module_context()):
+            probe_unsafe_object_pointer(
+                cpointer("baseline_trace_source"),
+                cpointer("baseline_trace_target"))
+        assert.equal("infrastructure_failure", failed.status)
+        assert.equal(1, #execution_events)
+        assert.equal("compiler_rejection", execution_events[1].outcome)
+        assert.equal(2, #semantic_events)
+        assert.equal("header_baseline", semantic_events[1].probe_kind)
+        assert.equal("infrastructure_failure", semantic_events[1].outcome)
+        assert.equal("unsafe_object_pointer", semantic_events[2].probe_kind)
+        assert.equal("infrastructure_failure", semantic_events[2].outcome)
+        assert.is_true(baseline_service:close())
     end)
 end)

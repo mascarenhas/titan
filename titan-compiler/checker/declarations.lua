@@ -1545,6 +1545,7 @@ function apply_source_foreign_headers(ast, st, errors)
                     if type(source_context) ~= "table"
                        or type(source_context.header_inputs) ~= "table"
                        or type(source_context.generated_header_aliases) ~= "table"
+                       or type(source_context.diagnostic_aliases) ~= "table"
                        or type(source_context.macro_changes) ~= "table"
                        or type(source_context.macro_definitions) ~= "table" then
                         err = "source module did not provide its C header context"
@@ -1603,7 +1604,8 @@ function apply_source_foreign_headers(ast, st, errors)
                 if normalized and node._foreign_header_probe_identity then
                     normalized, err = cprobe.source_foreign_include_alias(
                         normalized, node.modname,
-                        node._foreign_header_probe_identity)
+                        node._foreign_header_probe_identity,
+                        node._source_c_context.diagnostic_aliases)
                 end
                 include = normalized
             end

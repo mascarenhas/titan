@@ -442,6 +442,7 @@ describe("C FFI cdriver", function()
         end)
     end)
 
+
     describe("completed header cache", function()
         after_each(function()
             cdriver._set_process_cache_limits_for_test()
@@ -529,6 +530,95 @@ describe("C FFI cdriver", function()
             assert.equal("process_analysis is not a cdriver analysis", err)
             assert.equal(0, cdriver.process_cache_stats().lookups)
             os.remove(header)
+        end)
+
+        describe("analysis-owned probe caches", function()
+            it("shares exact toolchain caches across callers", function()
+                local compiler_io = require "titan-compiler.io"
+                local strategy = compiler_io.new_sync()
+                local analysis = cdriver.new_process_analysis()
+
+                local baseline_cache, result_cache =
+                    cdriver.process_analysis_probe_caches(
+                        analysis, strategy, "toolchain-one")
+                assert.is_table(baseline_cache)
+                assert.is_table(result_cache)
+                assert.not_equal(baseline_cache, result_cache)
+                baseline_cache.baseline = { status = "success" }
+                result_cache.candidate = {
+                    status = "compiler_rejection",
+                }
+
+                local repeated_baselines, repeated_results =
+                    cdriver.process_analysis_probe_caches(
+                        analysis, strategy, "toolchain-one")
+                assert.equal(baseline_cache, repeated_baselines)
+                assert.equal(result_cache, repeated_results)
+                assert.equal("success",
+                    repeated_baselines.baseline.status)
+                assert.equal("compiler_rejection",
+                    repeated_results.candidate.status)
+            end)
+
+            it("isolates providers, toolchains, and analyses", function()
+                local compiler_io = require "titan-compiler.io"
+                local first_strategy = compiler_io.new_sync()
+                local second_strategy = compiler_io.new_sync()
+                local first_analysis = cdriver.new_process_analysis()
+                local second_analysis = cdriver.new_process_analysis()
+
+                local baseline_cache, result_cache =
+                    cdriver.process_analysis_probe_caches(
+                        first_analysis, first_strategy, "toolchain-one")
+                local other_toolchain_baselines, other_toolchain_results =
+                    cdriver.process_analysis_probe_caches(
+                        first_analysis, first_strategy, "toolchain-two")
+                local other_provider_baselines, other_provider_results =
+                    cdriver.process_analysis_probe_caches(
+                        first_analysis, second_strategy, "toolchain-one")
+                local other_analysis_baselines, other_analysis_results =
+                    cdriver.process_analysis_probe_caches(
+                        second_analysis, first_strategy, "toolchain-one")
+
+                assert.not_equal(baseline_cache, other_toolchain_baselines)
+                assert.not_equal(result_cache, other_toolchain_results)
+                assert.not_equal(baseline_cache, other_provider_baselines)
+                assert.not_equal(result_cache, other_provider_results)
+                assert.not_equal(baseline_cache, other_analysis_baselines)
+                assert.not_equal(result_cache, other_analysis_results)
+            end)
+
+            it("validates the authority, provider, and exact key", function()
+                local compiler_io = require "titan-compiler.io"
+                local strategy = compiler_io.new_sync()
+                local analysis = cdriver.new_process_analysis()
+
+                local missing, err =
+                    cdriver.process_analysis_probe_caches(
+                        {}, strategy, "toolchain")
+                assert.is_nil(missing)
+                assert.equal(
+                    "process_analysis is not a cdriver analysis", err)
+
+                missing, err = cdriver.process_analysis_probe_caches(
+                    analysis, {}, "toolchain")
+                assert.is_nil(missing)
+                assert.matches("invalid compiler I/O strategy", err, 1, true)
+
+                for _, key in ipairs({ false, 17, {} }) do
+                    missing, err = cdriver.process_analysis_probe_caches(
+                        analysis, strategy, key)
+                    assert.is_nil(missing)
+                    assert.equal(
+                        "C probe toolchain key must be a nonempty string",
+                        err)
+                end
+                missing, err = cdriver.process_analysis_probe_caches(
+                    analysis, strategy, "")
+                assert.is_nil(missing)
+                assert.equal(
+                    "C probe toolchain key must be a nonempty string", err)
+            end)
         end)
 
         it("returns isolated graphs without reparsing an unchanged header",
@@ -2127,7 +2217,6 @@ typedef double lua_Number;
             }, inputs.fixed_include_dirs)
             assert.equal("lua.h", inputs.lua_header.original)
             assert.matches("/lua%.h$", inputs.lua_header.resolved)
-
             local profile = assert(
                 require("titan-compiler.csemantics").build_profile(inputs))
             assert.is_false(

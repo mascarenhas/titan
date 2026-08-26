@@ -761,6 +761,21 @@ function makemoduletype(modname, modast, st)
         end
         local generated_header_aliases = {}
         local seen_generated_headers = {}
+        local diagnostic_aliases = {}
+        local seen_diagnostic_aliases = {}
+        local function add_diagnostic_alias(physical_path, public_path)
+            if type(physical_path) ~= "string" or
+               type(public_path) ~= "string" then
+                return
+            end
+            local key = physical_path .. "\0" .. public_path
+            if seen_diagnostic_aliases[key] then return end
+            seen_diagnostic_aliases[key] = true
+            diagnostic_aliases[#diagnostic_aliases + 1] = {
+                physical_path = physical_path,
+                public_path = public_path,
+            }
+        end
         for _, node in ipairs(modast) do
             local public_header = node._tag == "Ast.TopLevelImport"
                 and node._source_import
@@ -774,6 +789,13 @@ function makemoduletype(modname, modast, st)
                     public_header = public_header,
                     identity = identity,
                 }
+                add_diagnostic_alias(node._foreign_header, public_header)
+                local nested = node._source_c_context and
+                    node._source_c_context.diagnostic_aliases or {}
+                for _, alias in ipairs(nested) do
+                    add_diagnostic_alias(
+                        alias.physical_path, alias.public_path)
+                end
             end
         end
         -- Source-only compiler metadata.  The callable descriptors already
@@ -784,6 +806,7 @@ function makemoduletype(modname, modast, st)
         modtype._source_c_context = {
             header_inputs = header_inputs,
             generated_header_aliases = generated_header_aliases,
+            diagnostic_aliases = diagnostic_aliases,
             macro_changes = macro_changes,
             macro_definitions = macro_definitions,
         }

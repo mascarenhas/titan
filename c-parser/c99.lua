@@ -153,6 +153,27 @@ defs["nest_exp"] = typed("string, number, {Exp} -> boolean, Exp", function(_, _,
     return true, exp
 end)
 
+-- Every ordinary binary precedence level is a repetition and associates from
+-- left to right.  Capture each operator positionally with its following
+-- operand, then fold the complete chain.  A named `op` capture inside `*`
+-- retained only the final operator and flattened all operands, so mixed chains
+-- such as `a * b / c` could not be interpreted correctly by any consumer.
+defs["fold_binary"] = function(_, _, items)
+    if #items == 1 then return true, items[1] end
+
+    local lhs = items[1]
+    for index = 2, #items - 1, 2 do
+        local exp = {
+            lhs,
+            items[index + 1],
+            op = items[index],
+        }
+        typed.set_type(exp, "Exp")
+        lhs = exp
+    end
+    return true, lhs
+end
+
 -- Assignment operators associate from right to left. Capture the whole chain
 -- once and fold it after the match instead of recursively retrying the complete
 -- unary-expression prefix before falling back to a conditional expression.
@@ -362,16 +383,16 @@ local common_expression_rules = [[--lpeg.re
 --------------------------------------------------------------------------------
 -- Common Expression Rules
 
-multiplicativeExpression <- {| castExpression           ({:op: [*/%]                     :} _ castExpression                        )* |} => nest_exp
-additiveExpression       <- {| multiplicativeExpression ({:op: [-+]                      :} _ multiplicativeExpression              )* |} => nest_exp
-shiftExpression          <- {| additiveExpression       ({:op: ("<<" / ">>")             :} _ additiveExpression                    )* |} => nest_exp
-relationalExpression     <- {| shiftExpression          ({:op: (">=" / "<=" / "<" / ">") :} _ shiftExpression                       )* |} => nest_exp
-equalityExpression       <- {| relationalExpression     ({:op: ("==" / "!=")             :} _ relationalExpression                  )* |} => nest_exp
-bandExpression           <- {| equalityExpression       ({:op: "&"                       :} _ equalityExpression                    )* |} => nest_exp
-bxorExpression           <- {| bandExpression           ({:op: "^"                       :} _ bandExpression                        )* |} => nest_exp
-borExpression            <- {| bxorExpression           ({:op: "|"                       :} _ bxorExpression                        )* |} => nest_exp
-andExpression            <- {| borExpression            ({:op: "&&"                      :} _ borExpression                         )* |} => nest_exp
-orExpression             <- {| andExpression            ({:op: "||"                      :} _ andExpression                         )* |} => nest_exp
+multiplicativeExpression <- {| castExpression           ({ [*/%]                     } _ castExpression                        )* |} => fold_binary
+additiveExpression       <- {| multiplicativeExpression ({ [-+]                      } _ multiplicativeExpression              )* |} => fold_binary
+shiftExpression          <- {| additiveExpression       ({ "<<" / ">>"             } _ additiveExpression                    )* |} => fold_binary
+relationalExpression     <- {| shiftExpression          ({ ">=" / "<=" / "<" / ">" } _ shiftExpression                       )* |} => fold_binary
+equalityExpression       <- {| relationalExpression     ({ "==" / "!="             } _ relationalExpression                  )* |} => fold_binary
+bandExpression           <- {| equalityExpression       ({ "&"                       } _ equalityExpression                    )* |} => fold_binary
+bxorExpression           <- {| bandExpression           ({ "^"                       } _ bandExpression                        )* |} => fold_binary
+borExpression            <- {| bxorExpression           ({ "|"                       } _ bxorExpression                        )* |} => fold_binary
+andExpression            <- {| borExpression            ({ "&&"                      } _ borExpression                         )* |} => fold_binary
+orExpression             <- {| andExpression            ({ "||"                      } _ andExpression                         )* |} => fold_binary
 conditionalExpression    <- {| orExpression             ({:op: "?"                       :} _ expression ":" _ conditionalExpression)? |} => nest_exp
 
 constantExpression <- conditionalExpression

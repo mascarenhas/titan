@@ -118,18 +118,8 @@ describe("compiler installation discovery", function()
             assert.equal(trace, target_trace)
             assert.is_nil(captured.process_analysis)
             assert.is_nil(captured.process_trace)
-
-            local saw_strategy = false
-            local upvalue = 1
-            while true do
-                local name, value =
-                    debug.getupvalue(captured.probe_runner, upvalue)
-                if name == nil then break end
-                assert.not_equal(context, value)
-                if value == context.io then saw_strategy = true end
-                upvalue = upvalue + 1
-            end
-            assert.is_true(saw_strategy)
+            assert.equal(context.io, captured.io)
+            assert.is_nil(captured.probe_runner)
         end, debug.traceback)
 
         driver.initialize_platform = originals.initialize_platform
@@ -298,6 +288,16 @@ describe("compiler installation discovery", function()
                 c_probe_cache_trace = true,
             })
         end, "c_probe_cache_trace must be a function")
+        assert.has_error(function()
+            driver.new_resolver_context({
+                c_probe_semantic_trace = true,
+            })
+        end, "c_probe_semantic_trace must be a function")
+        assert.has_error(function()
+            driver.new_resolver_context({
+                c_probe_execution_trace = true,
+            })
+        end, "c_probe_execution_trace must be a function")
         assert.has_error(function()
             driver.new_resolver_context({
                 extra_ffi_include_dirs = "invalid",
@@ -2886,6 +2886,8 @@ end
         local cache = root .. "/probe-cache"
         assert(lfs.mkdir(cache))
         local events = {}
+        local semantic_events = {}
+        local execution_events = {}
         local context = driver.new_resolver_context({
             c_probe_cache_trace = function(
                     module_name, stage, hit, key, path)
@@ -2896,6 +2898,12 @@ end
                     key = key,
                     path = path,
                 }
+            end,
+            c_probe_semantic_trace = function(event)
+                semantic_events[#semantic_events + 1] = event
+            end,
+            c_probe_execution_trace = function(event)
+                execution_events[#execution_events + 1] = event
             end,
         })
         local previous_cache = driver.PROBE_CACHE_DIRECTORY
@@ -2922,6 +2930,25 @@ end
             assert.is_boolean(event.hit)
             assert.matches("^[0-9a-f]+$", event.key)
             assert.matches(cache, event.path, 1, true)
+        end
+        assert.is_true(#semantic_events > 0)
+        assert.is_true(#execution_events > 0)
+        for _, event in ipairs(semantic_events) do
+            assert.equal("provider", event.module)
+            assert.equal("semantic_result", event.event)
+            assert.matches("^[0-9a-f]+$", event.key)
+            assert.is_string(event.probe_kind)
+            assert.is_string(event.header_identity)
+            assert.is_string(event.outcome)
+            assert.is_string(event.cache_tier)
+            assert.is_boolean(event.repeated)
+        end
+        for _, event in ipairs(execution_events) do
+            assert.equal("provider", event.module)
+            assert.equal("compiler_execution", event.event)
+            assert.matches("^[0-9a-f]+$", event.key)
+            assert.is_string(event.probe_kind)
+            assert.is_string(event.outcome)
         end
     end)
 

@@ -99,6 +99,7 @@
 2 spec/compiler_module_structure_spec.lua 0.074
 3 spec/compiler_io_spec.lua 0.100
 4 spec/cpp_spec.lua 0.121
+4 spec/cprobe_cache_spec.lua 0.010
 2 spec/cprobe_spec.lua 0.958
 4 spec/csemantics_spec.lua 0.081
 3 spec/ctypes_spec.lua 0.721

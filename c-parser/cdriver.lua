@@ -34,29 +34,69 @@ local configured_process_cache_tracks_weight = false
 local process_caches = setmetatable({}, { __mode = "k" })
 local process_analysis_mt = {}
 
--- An analysis is an explicit narrow reuse authority. Long-lived compiler
--- clients create one for a coherent analysis that has its own final
--- publication-time header validation. Ordinary cdriver callers omit it and
--- retain clone-per-call isolation.
+-- An analysis is an explicit narrow C reuse authority. Long-lived compiler
+-- clients create one for a coherent analysis with final publication-time
+-- header validation; it owns completed header graphs and semantic C-probe
+-- verdict tables. Ordinary cdriver callers omit it and retain clone-per-call
+-- isolation.
 function cdriver.new_process_analysis()
     return setmetatable({
         providers = setmetatable({}, { __mode = "k" }),
     }, process_analysis_mt)
 end
 
-local function process_analysis_entries(options, strategy)
-    local analysis = options and options.process_analysis
-    if analysis == nil then return nil end
+local function process_analysis_provider(analysis, strategy)
     if type(analysis) ~= "table"
        or getmetatable(analysis) ~= process_analysis_mt then
         return false, "process_analysis is not a cdriver analysis"
     end
-    local entries = analysis.providers[strategy]
-    if not entries then
-        entries = {}
-        analysis.providers[strategy] = entries
+    local provider = analysis.providers[strategy]
+    if not provider then
+        provider = {
+            process_entries = {},
+            probe_toolchains = {},
+        }
+        analysis.providers[strategy] = provider
     end
-    return entries
+    return provider
+end
+
+local function process_analysis_entries(options, strategy)
+    local analysis = options and options.process_analysis
+    if analysis == nil then return nil end
+    local provider, err = process_analysis_provider(analysis, strategy)
+    if provider == false then return false, err end
+    return provider.process_entries
+end
+
+-- Return the analysis-owned semantic probe caches for one exact compiler I/O
+-- provider and toolchain identity. cdriver owns only the branded authority and
+-- its partitions: cprobe remains responsible for publishing exclusively
+-- completed baseline successes and completed semantic success/rejection
+-- results, never infrastructure failures.
+function cdriver.process_analysis_probe_caches(
+        analysis, strategy, toolchain_key)
+    local valid, validation_error = pcall(
+        compiler_io.validate, strategy, 3)
+    if not valid then
+        return nil, "invalid compiler I/O strategy: " ..
+            tostring(validation_error)
+    end
+    if type(toolchain_key) ~= "string" or toolchain_key == "" then
+        return nil, "C probe toolchain key must be a nonempty string"
+    end
+
+    local provider, err = process_analysis_provider(analysis, strategy)
+    if provider == false then return nil, err end
+    local caches = provider.probe_toolchains[toolchain_key]
+    if not caches then
+        caches = {
+            baseline_cache = {},
+            result_cache = {},
+        }
+        provider.probe_toolchains[toolchain_key] = caches
+    end
+    return caches.baseline_cache, caches.result_cache
 end
 
 local function process_cache_for(strategy)
@@ -557,7 +597,7 @@ local clone_graph = cpp.clone_graph
 local graph_weight = cpp.graph_weight
 
 -- The fourth process_file result exists for target-profile acquisition. Its
--- only semantic payload is the exact macro context which cdefines has already
+-- semantic payload is the exact macro context which cdefines has already
 -- attached to ffi_types. Reconstruct the I/O and observed-input conveniences
 -- per caller instead of retaining flattened preprocessor output, origins,
 -- include roots, current-directory stacks, or observer bookkeeping.

@@ -683,6 +683,52 @@ describe("contextual unsafe C object-pointer conversions", function()
             end)
     end)
 
+    it("rejects conflicting identities for one retained probe input",
+    function()
+        with_header(declarations, function(header)
+            local context_calls = 0
+            local service = {
+                profile = test_profile(),
+                cdriver_process_options = test_process_options,
+                module_context = function()
+                    context_calls = context_calls + 1
+                    return {
+                        header_inputs = {
+                            {
+                                kind = "file",
+                                path = "/stable/probe-input.h",
+                                identity = "first identity",
+                            },
+                            {
+                                kind = "file",
+                                path = "/stable/probe-input.h",
+                                identity = "second identity",
+                            },
+                        },
+                    }
+                end,
+            }
+            local code = 'local c = foreign import "' .. header .. [["
+                local function convert(
+                    p: *c.ffi_source
+                ): *c.ffi_target
+                    return p
+                end
+            ]]
+            local ast = assert(h.parse(code))
+            local _, errors = checker.check(
+                "test", ast, code, "test.titan", nil, {
+                    probe_service_provider = function() return service end,
+                })
+
+            assert.equal(1, context_calls)
+            assert.match(
+                "conflicting C header input identity for " ..
+                    "'/stable/probe-input.h'",
+                table.concat(errors, "\n"), 1, true)
+        end)
+    end)
+
     it("closes an owned probe service when checker internals throw",
     function()
         with_header(declarations, function(header)

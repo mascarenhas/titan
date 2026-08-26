@@ -93,10 +93,20 @@ The C-pipeline stages are:
 compile probes; `csemantics.lua` owns target categories, constants, promotions,
 and result types; and one resolver-scoped `cprobe.lua` service owns the active
 toolchain profile, header-context baselines, candidate compilation, in-memory
-caches, temporary files, and cleanup. Production services may also reuse the
-presence of an empty marker named by the exact probe text's SHA-256; only
-successful probes create markers. The checker decides which candidates are
-semantically eligible before asking that service to compile or recover them.
+caches, temporary files, and cleanup. Completed successes and deterministic
+compiler rejections may also be reused from analysis-local tables. Persistent
+reuse preserves the pre-#108 identity exactly: its toolchain key contains the
+parsed compiler/flag/include/profile/mode inputs and forced-header manifest; its
+version-2 header context contains the source directory, forced-header manifest,
+and ordered raw/rendered header descriptors and file/search inputs; and its
+version-3 digest covers the
+toolchain key, forced-header manifest, semantic key, and full probe source.
+Successful probes keep their empty `.success` markers, while only deterministic
+compiler rejections add bounded, checksummed `.negative` siblings under the same
+digest. Infrastructure failures remain retryable. The checker decides which candidates are semantically
+eligible before asking that service to compile or recover them. See
+[C FFI declarations and expressions](c-ffi-expressions.md#analysis-local-and-persistent-semantic-results)
+for the key, record, and concurrency contracts.
 
 The checker iterates the TypeList array part in declaration order. Each
 successful `foreigntypes.convert(st, ftype)` result is either a value member or
@@ -594,9 +604,11 @@ and compiles all uncached pairs together in the same foreign-header context.
 The block scopes isolate C tags as well as ordinary identifier lookup; generated
 GCC/Clang diagnostic guards suppress only the artificial `-Wnested-externs`
 warning. A successful batch accepts and caches every pair. A rejected batch is
-recursively bisected until each rejected singleton has the same pair-specific
-compiler verdict and diagnostic that an independent probe would have produced;
-accepted sub-batches are cached without further splitting. A spawn,
+cached under its exact batch source/key and recursively bisected until each
+rejected singleton has the same pair-specific compiler verdict and diagnostic
+that an independent probe would have produced; accepted sub-batches are cached
+without further splitting. Reusing an aggregate rejection only repeats that
+bisection and never assigns the aggregate outcome to its leaves. A spawn,
 interruption, workspace, or cleanup failure applies to the batch as
 infrastructure evidence, is not bisected, and is not cached. Acceptance proves
 that two independently extracted declaration types can form compatible

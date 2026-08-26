@@ -3430,7 +3430,7 @@ done
             assert.equal(1, count_literal(stdlib_job,
                 "runs-on: ubicloud-standard-2"), stdlib_job)
             assert.equal(1, count_literal(stdlib_job,
-                "timeout-minutes: 30"), stdlib_job)
+                "timeout-minutes: 60"), stdlib_job)
             assert.equal(1, count_literal(stdlib_job,
                 "contents: read"), stdlib_job)
             assert.falsy(stdlib_job:find("id-token: write", 1, true),
@@ -3635,7 +3635,7 @@ done
             assert.equal(1, count_literal(compiler_job,
                 "runs-on: ubicloud-standard-2"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
-                "timeout-minutes: 30"), compiler_job)
+                "timeout-minutes: 60"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
                 "actions/download-artifact@v8"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
@@ -3887,8 +3887,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 29, 26, 28, 29 }, shard_counts)
-            assert.equal(112, assigned_count)
+            assert.same({ 29, 26, 28, 30 }, shard_counts)
+            assert.equal(113, assigned_count)
 
             assert.equal(1, count_literal(sanitizer_job,
                     "name: sanitizer (ubuntu-24.04, ASan+UBSan)"),
@@ -3896,7 +3896,7 @@ done
             assert.equal(1, count_literal(sanitizer_job,
                 "runs-on: ubicloud-standard-2"), sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
-                "timeout-minutes: 35"), sanitizer_job)
+                "timeout-minutes: 90"), sanitizer_job)
             assert.falsy(sanitizer_job:find("id-token: write", 1, true),
                 sanitizer_job)
             assert.falsy(sanitizer_job:find(

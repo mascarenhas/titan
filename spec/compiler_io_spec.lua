@@ -94,6 +94,17 @@ describe("compiler I/O strategy", function()
         assert.is_true(strategy:write_file(source, bytes))
         assert.is_true(strategy:readable(source))
         assert.equal(bytes, assert(strategy:read_file(source)))
+        assert.equal(bytes, assert(strategy:read_file(source, #bytes)))
+        assert.equal(bytes:sub(1, 6),
+            assert(strategy:read_file(source, 5)))
+        local invalid_read, invalid_read_error =
+            strategy:read_file(source, -1)
+        assert.is_nil(invalid_read)
+        assert.matches("nonnegative integer", invalid_read_error, 1, true)
+        local empty = directory .. "/empty.bin"
+        assert.is_true(strategy:write_file(empty, ""))
+        assert.equal("", assert(strategy:read_file(empty, 0)))
+        assert.is_true(strategy:unlink(empty))
 
         local original_rename = os.rename
         os.rename = function()
@@ -465,7 +476,7 @@ describe("compiler I/O strategy", function()
             end,
         }, function()
             local result = strategy:run({ "tool" })
-            assert.is_false(result.started)
+            assert.is_true(result.started)
             assert.is_false(result.ok)
             assert.matches("injected read failure", result.diagnostic,
                 1, true)
@@ -481,7 +492,7 @@ describe("compiler I/O strategy", function()
             end,
         }, function()
             local result = strategy:run({ "tool" })
-            assert.is_false(result.started)
+            assert.is_true(result.started)
             assert.is_false(result.ok)
             assert.matches("partial output", result.diagnostic, 1, true)
             assert.matches("injected wait failure", result.diagnostic,

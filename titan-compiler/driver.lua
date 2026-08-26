@@ -10,6 +10,7 @@ local cprobe = require "titan-compiler.cprobe"
 local csemantics = require "titan-compiler.csemantics"
 local compiler_io = require "titan-compiler.io"
 local sourceinterface = require "titan-compiler.sourceinterface"
+local version = require "titan-compiler.version"
 
 local lfs = require "lfs"
 
@@ -20,13 +21,11 @@ driver.imported = {}
 -- Compiled-module metadata encodes the monotonic ABI integer as its canonical
 -- decimal string. The semantic release and its major/minor library namespace
 -- are deliberately independent from that compatibility marker.
-driver.TITAN_ABI_VERSION = "2"
-driver.TITAN_VERSION = "0.6.0"
-driver.TITAN_LIBRARY_VERSION =
-    assert(driver.TITAN_VERSION:match("^(%d+%.%d+)%.[0-9]+$"))
-driver.TITAN_LIBRARY_VERSION_SUFFIX =
-    "_" .. driver.TITAN_LIBRARY_VERSION:gsub("%.", "_")
-driver.LUA_VERSION = "5.5"
+driver.TITAN_ABI_VERSION = version.TITAN_ABI_VERSION
+driver.TITAN_VERSION = version.TITAN_VERSION
+driver.TITAN_LIBRARY_VERSION = version.TITAN_LIBRARY_VERSION
+driver.TITAN_LIBRARY_VERSION_SUFFIX = version.TITAN_LIBRARY_VERSION_SUFFIX
+driver.LUA_VERSION = version.LUA_VERSION
 
 -- Version of the additive compiler contract consumed by the Titan language
 -- server. This is intentionally independent from TITAN_ABI_VERSION: matching the
@@ -504,9 +503,6 @@ function driver.configure_foreign_c(context)
         compile_flags = toolchain and toolchain.compile_flags or {},
         compiler_include_dirs = driver.foreign_include_dirs(),
         toolchain = toolchain,
-        probe_runner = function(argv, run_options)
-            return io_strategy:run(argv, run_options)
-        end,
         probe_cache_directory = driver.PROBE_CACHE_DIRECTORY,
         probe_cache_identity = driver.PROBE_CACHE_IDENTITY,
     }
@@ -547,9 +543,10 @@ end
 local CIRCULAR_MARK = {}
 local loader_contexts = setmetatable({}, { __mode = "k" })
 
--- Long-lived compiler clients use one explicit analysis object across their
--- short-lived resolver contexts. It is intentionally separate from the I/O
--- provider, whose completed-header cache outlives any one analysis.
+-- Long-lived compiler clients use one explicit C-analysis authority across
+-- their short-lived resolver contexts. It owns completed header graphs plus
+-- semantic baseline/probe verdicts; it remains intentionally separate from
+-- the I/O provider and never admits infrastructure failures.
 function driver.new_c_header_analysis()
     return cdriver.new_process_analysis()
 end
@@ -571,6 +568,16 @@ function driver.new_resolver_context(options)
     if c_probe_cache_trace ~= nil and
        type(c_probe_cache_trace) ~= "function" then
         error("c_probe_cache_trace must be a function", 2)
+    end
+    local c_probe_semantic_trace = options.c_probe_semantic_trace
+    if c_probe_semantic_trace ~= nil and
+       type(c_probe_semantic_trace) ~= "function" then
+        error("c_probe_semantic_trace must be a function", 2)
+    end
+    local c_probe_execution_trace = options.c_probe_execution_trace
+    if c_probe_execution_trace ~= nil and
+       type(c_probe_execution_trace) ~= "function" then
+        error("c_probe_execution_trace must be a function", 2)
     end
     local source_profile_stack = {}
     local client_header_trace = options.c_header_process_trace
@@ -623,6 +630,8 @@ function driver.new_resolver_context(options)
         c_header_analysis = options.c_header_analysis,
         source_process_trace = source_process_trace,
         c_probe_cache_trace = c_probe_cache_trace,
+        c_probe_semantic_trace = c_probe_semantic_trace,
+        c_probe_execution_trace = c_probe_execution_trace,
         _source_profile_stack = source_profile_stack,
         extra_ffi_include_dirs = extra_ffi_include_dirs,
     }
@@ -930,11 +939,22 @@ function driver.get_probe_service(context)
     toolchain.include_dirs = include_dirs
     local service
     local persistent_cache_trace
+    local semantic_trace
+    local execution_trace
     if context.c_probe_cache_trace ~= nil then
-        persistent_cache_trace = function(stage, hit, key, path)
+        persistent_cache_trace = function(stage, hit, key, path, module_name)
             return context.c_probe_cache_trace(
-                context._c_probe_source_module or "",
-                stage, hit, key, path)
+                module_name or "", stage, hit, key, path)
+        end
+    end
+    if context.c_probe_semantic_trace ~= nil then
+        semantic_trace = function(event)
+            return context.c_probe_semantic_trace(event)
+        end
+    end
+    if context.c_probe_execution_trace ~= nil then
+        execution_trace = function(event)
+            return context.c_probe_execution_trace(event)
         end
     end
     service, err = cprobe.new_service({
@@ -942,6 +962,8 @@ function driver.get_probe_service(context)
         process_trace = context.c_header_process_trace,
         process_analysis = context.c_header_analysis,
         persistent_cache_trace = persistent_cache_trace,
+        semantic_trace = semantic_trace,
+        execution_trace = execution_trace,
         toolchain = toolchain,
         verbose = context.probe_verbose,
         cache_directory = driver.PROBE_CACHE_DIRECTORY,
@@ -2857,6 +2879,17 @@ function driver.find_dependency_interface(paths, modname, context)
     return nil
 end
 
+local function check_source_module(
+        context, modname, ast, input, filename, loader)
+    local check_options = {
+        probe_service_provider = function()
+            return driver.get_probe_service(context)
+        end,
+    }
+    return checker.check(
+        modname, ast, input, filename, loader, check_options)
+end
+
 function driver.defaultloader(static_deps, options)
     static_deps = static_deps or {}
     options = options or {}
@@ -3385,20 +3418,11 @@ function driver.defaultloader(static_deps, options)
         driver.imported[modname] = CIRCULAR_MARK
         local direct_deps = {}
         table.insert(dependency_stack, direct_deps)
-        local previous_probe_source_module
-        if context.c_probe_cache_trace ~= nil then
-            previous_probe_source_module = context._c_probe_source_module
-            context._c_probe_source_module = modname
-        end
         local check_started = profile_frame and os.clock() or nil
         local check_child_started = profile_frame
             and profile_frame.child_cpu_ms or 0
-        local modt, errors = checker.check(
-            modname, ast, main_input, source.main, loader, {
-                probe_service_provider = function()
-                    return driver.get_probe_service(context)
-                end,
-            })
+        local modt, errors = check_source_module(
+            context, modname, ast, main_input, source.main, loader)
         if profile_frame then
             local inclusive_check_cpu_ms =
                 (os.clock() - check_started) * 1000
@@ -3408,9 +3432,6 @@ function driver.defaultloader(static_deps, options)
                 inclusive_check_cpu_ms - child_check_cpu_ms
             if check_cpu_ms < 0 then check_cpu_ms = 0 end
             profile_frame.check_cpu_ms = check_cpu_ms
-        end
-        if context.c_probe_cache_trace ~= nil then
-            context._c_probe_source_module = previous_probe_source_module
         end
         table.remove(dependency_stack)
         check_used_compiled_interface(context, modname, modt, errors)
@@ -4214,12 +4235,8 @@ function driver.tableloader(modtable, imported, deps, options)
         local ast, err = parser.parse(modf, input)
         if not ast then return false, parser.error_to_string(err, modf) end
         imported[modname] = CIRCULAR_MARK
-        local source_type, errors = checker.check(
-            modname, ast, input, modf, loader, {
-                probe_service_provider = function()
-                    return driver.get_probe_service(context)
-                end,
-            })
+        local source_type, errors = check_source_module(
+            context, modname, ast, input, modf, loader)
         check_used_compiled_interface(
             context, modname, source_type, errors)
         if #errors ~= 0 then

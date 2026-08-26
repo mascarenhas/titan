@@ -1649,14 +1649,14 @@ describe("compatible C declarations across foreign imports", function()
             assert.equal(2, #calls)
             assert.equal("baseline", calls[1].stage)
             assert.equal("candidate", calls[2].stage)
-            for index, name in ipairs({
+            for _, name in ipairs({
                 "ffi_batch_integer", "ffi_batch_long", "ffi_batch_double",
             }) do
                 assert.equal(
                     ast[1]._type.members[name].type,
                     ast[2]._type.members[name].type)
                 assert.matches(
-                    "titan_probe_d" .. tostring(index) .. "_%x+",
+                    "titan_probe_d%d+_%x+",
                     calls[2].source)
             end
             close_context_configured_probe_service(context, service)
