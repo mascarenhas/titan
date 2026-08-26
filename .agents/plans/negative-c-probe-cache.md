@@ -6,6 +6,12 @@ isolated stdlib A/B profile plus the complete Titan test gate are green. The
 language-server consumer, actual-repository benchmark, and responsiveness
 checks are complete; PR and CI delivery remain active.
 
+The branch also retains the C99 binary-expression left fold and exact
+preprocessing-integer evaluator corrections found while auditing the FFI probe
+path. Those fixes preserve mixed-operator chains, signed/unsigned `intmax_t`
+behavior, character constants, conditional conversion, and invalid-operation
+diagnostics; they do not change the C-probe cache identity.
+
 Scope authority: [Titan issue #108](https://github.com/mascarenhas/titan/issues/108)
 
 Branch: `codex/negative-c-probe-cache`, initially stacked on the compiler

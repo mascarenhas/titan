@@ -22,7 +22,7 @@ jobs:
     name: stdlib (ubuntu-24.04, build+all-no-coverage)
     if: github.event_name == 'push'
     runs-on: ubicloud-standard-2
-    timeout-minutes: 60
+    timeout-minutes: 30
     permissions:
       contents: read
     env:
@@ -334,7 +334,7 @@ jobs:
     needs: test-linux-stdlib
     if: github.event_name == 'push'
     runs-on: ubicloud-standard-2
-    timeout-minutes: 60
+    timeout-minutes: 30
     permissions:
       contents: read
       id-token: write
@@ -590,7 +590,7 @@ jobs:
     name: sanitizer (ubuntu-24.04, ASan+UBSan)
     if: github.event_name == 'push'
     runs-on: ubicloud-standard-2
-    timeout-minutes: 90
+    timeout-minutes: 35
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
