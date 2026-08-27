@@ -143,6 +143,10 @@ exists after their fixed prefix:
 * the expanding final expression of a positional Array or exact
   integer-keyed Map constructor.
 
+The final producer can also be an Array, integer-Map, or variadic
+[spread expression](spread-expressions.md). In that case the selected range,
+rather than a callable's result tail, supplies the run-time-sized sequence.
+
 ```lua
 function names(): (...: string)
     return "Ada", "Grace", "Edsger"

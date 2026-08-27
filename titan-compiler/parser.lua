@@ -62,6 +62,9 @@ end
 -- statement candidate in a named capture, then classify it through a back
 -- capture without traversing the expression again.
 defs.STATEMENT_CANDIDATE = lpeg.Cb("statement_candidate")
+defs.EXPLIST_ITEM = lpeg.Cb("explist_item")
+defs.EXPLIST_ITEMS = lpeg.Cb("explist_items")
+defs.FIELD_ITEM = lpeg.Cb("field_item")
 
 defs.GENERIC_CALL_START = #lexer.LT * lpeg.Cmt(lpeg.Cp(),
     function(_, position, start)
@@ -309,11 +312,15 @@ function defs.name_exp(pos, name)
 end
 
 function defs.adjust_exp(pos, exp)
-    if exp._tag == "Ast.ExpCall" then
+    if exp._tag == "Ast.ExpCall" or exp._tag == "Ast.ExpDots" then
         return ast.ExpAdjust(pos, exp)
     else
         return exp
     end
+end
+
+function defs.dots_len_exp(pos)
+    return ast.ExpDotsLen(pos)
 end
 
 -- A `block` with optional `(catch …)?` trailer. When not present the block is
@@ -759,6 +766,65 @@ function defs.suffix_bracket(pos, index)
     end
 end
 
+-- Parse every bracket suffix body exactly once, then decide from the token
+-- after its first expression whether it is an index (`[exp]`) or a subset
+-- (`[exp, ...]`).  Keeping this parser-only descriptor separate from the AST
+-- avoids the exponential retry that results from ordered
+-- `subsetsuffix / indexsuffix` alternatives on nested indexes.
+function defs.bracket_subset_tail(last)
+    return { last = last }
+end
+
+function defs.bracket_subset_to_desc(pos, last)
+    return {
+        kind = "subset",
+        loc = pos,
+        first = false,
+        last = last,
+    }
+end
+
+function defs.bracket_from_first_desc(pos, first, tail)
+    if tail == false then
+        return {
+            kind = "index",
+            loc = pos,
+            first = first,
+            last = false,
+        }
+    end
+    return {
+        kind = "subset",
+        loc = pos,
+        first = first,
+        last = tail.last,
+    }
+end
+
+function defs.suffix_bracket_desc(desc)
+    if desc.kind == "index" then
+        return defs.suffix_bracket(desc.loc, desc.first)
+    end
+    return defs.suffix_subset_from(
+        desc.loc, desc.first, desc.last)
+end
+
+-- Comma-bearing brackets are slice/subset suffixes rather than ordinary
+-- indexing. Keep them in the general suffix grammar so the checker can reject
+-- an ExpSubset that is not the subject of a tail spread. Missing bounds use
+-- false, matching the parser's other optional AST fields.
+function defs.suffix_subset_to(pos, last)
+    return function(exp)
+        return ast.ExpSubset(pos, exp, false, last)
+    end
+end
+
+function defs.suffix_subset_from(pos, first, last)
+    return function(exp)
+        return ast.ExpSubset(pos, exp, first, last)
+    end
+end
+
 function defs.contextual_c_name(name)
     return { name = name }
 end
@@ -791,6 +857,123 @@ function defs.fold_suffixes(exp, suffixes)
         exp = suf(exp)
     end
     return exp
+end
+
+function defs.spread_exp(pos, exp)
+    return ast.ExpSpread(pos, exp, false, false)
+end
+
+local function dots_bracket_exp(pos, desc)
+    if desc.kind == "index" then
+        return ast.ExpDotsIndex(pos, desc.first)
+    end
+    return ast.ExpSubset(
+        desc.loc, ast.ExpDots(pos), desc.first, desc.last)
+end
+
+function defs.dots_bracket_exp(pos, desc)
+    return dots_bracket_exp(pos, desc)
+end
+
+-- A direct `...[...]` item is classified only after it has been parsed and
+-- the following list delimiter is known.  In a tail position a subset becomes
+-- a spread; in a non-tail position it remains an explicit subset expression
+-- for the checker to diagnose.  An ordinary `...[index]` is scalar in either
+-- position.  Parentheses go through `exp`, not this parser-only carrier, so
+-- `(...[first, last])` remains explicitly scalar.
+local function dots_bracket_item(pos, exp)
+    return {
+        _tag = "Parser.DotsBracketItem",
+        loc = pos,
+        exp = exp,
+        is_subset = true,
+    }
+end
+
+local function direct_dots_subset(exp)
+    return exp._tag == "Ast.ExpSubset" and
+        exp.exp._tag == "Ast.ExpDots"
+end
+
+-- DOTS-started scalar expressions must retain their complete binary, power,
+-- cast, and suffix continuations. Parse that expression once and retain a
+-- parser-only carrier only when the complete expression is the direct subset
+-- spelling that a tail position promotes to a spread.
+function defs.claim_dots_started_item(_, position, pos, exp)
+    if direct_dots_subset(exp) then
+        return position, dots_bracket_item(pos, exp)
+    end
+    return position, exp
+end
+
+function defs.claim_dots_started_field(_, position, pos, exp)
+    if direct_dots_subset(exp) then
+        return position, dots_bracket_item(pos, exp)
+    end
+    return position, ast.Field(pos, false, exp)
+end
+
+local function materialize_dots_bracket_item(item, is_tail)
+    if item._tag ~= "Parser.DotsBracketItem" then
+        return item
+    end
+    if is_tail and item.is_subset then
+        return ast.ExpSpread(item.loc, item.exp, false, false)
+    end
+    return item.exp
+end
+
+local function is_open_explist_item(item)
+    return item._tag == "Ast.ExpDots" or item._tag == "Ast.ExpSpread"
+end
+
+function defs.fixed_explist_item(_, position, item)
+    item = materialize_dots_bracket_item(item, false)
+    if item._tag == "Ast.ExpDots" then
+        return false
+    end
+    return position, item
+end
+
+function defs.tail_explist_item(_, position, item)
+    return position, {
+        _tag = "Parser.TailExplistItem",
+        exp = materialize_dots_bracket_item(item, true),
+    }
+end
+
+function defs.check_explist_limit(_, _, list)
+    local tail = list[#list]
+    local is_tail = tail and tail._tag == "Parser.TailExplistItem"
+    local final = is_tail and tail.exp or tail
+    if #list <= LIST_LIMIT or
+        (#list == LIST_LIMIT + 1 and is_tail
+            and is_open_explist_item(final))
+    then
+        list[#list] = final
+        return true, list
+    end
+    return false
+end
+
+local function materialize_field_item(item, is_tail)
+    if item._tag == "Parser.DotsBracketItem" then
+        return ast.Field(item.loc, false,
+            materialize_dots_bracket_item(item, is_tail))
+    end
+    return item
+end
+
+function defs.fixed_field_item(_, position, item)
+    item = materialize_field_item(item, false)
+    if item.exp._tag == "Ast.ExpDots" then
+        return false
+    end
+    return position, item
+end
+
+function defs.tail_field_item(_, position, item)
+    return position, materialize_field_item(item, true)
 end
 
 function defs.statement_name_prefix(pos, name)
@@ -1152,6 +1335,10 @@ end
 -- key-less Field whose expression is a bare `ExpDots`.
 function defs.dots_field(pos)
     return ast.Field(pos, false, ast.ExpDots(pos))
+end
+
+function defs.spread_field(pos, exp)
+    return ast.Field(pos, false, exp)
 end
 
 -- Vararg element type for a function-type annotation `(t, ...: u) -> r`. Returns
@@ -1710,7 +1897,7 @@ local grammar = re.compile([[
 
     statementcandidate
                     <- (((P NAME) -> statement_name_prefix
-                         / (P LPAREN exp^ExpSimpleExp
+                         / (P LPAREN parenexp
                                RPAREN^RParSimpleExp)
                                              -> statement_parenthesized_prefix)
                         {| expsuffix* |}) -> fold_statement_candidate
@@ -1775,7 +1962,12 @@ local grammar = re.compile([[
     op8             <- CONCAT
     op9             <- ( ADD -> '+' / SUB -> '-' )
     op10            <- ( MUL -> '*' / MOD -> '%%' / DIV -> '/' / IDIV -> '//' )
-    unop            <- ( NOT -> 'not' / LEN -> '#' / NEG -> '-' / BNEG -> '~' )
+    -- `#...` is an explicit variadic expression, not a generic unary operator
+    -- applied to a generally available bare `...` expression. Leave the final
+    -- `#` for the dedicated simple-expression branch below; outer unary
+    -- operators (for example `-#...` or `##...`) still fold normally.
+    unop            <- ( NOT -> 'not' / (LEN !(DOTS !LBRACKET)) -> '#'
+                         / NEG -> '-' / BNEG -> '~' )
     op12            <- ( POW -> '^' )
 
     -- A captured call is not yet a complete statement when a syntactically
@@ -1871,15 +2063,33 @@ local grammar = re.compile([[
     methodtail      <- ((genericcalltypeargs? -> listopt) callargs)
                      / ('' -> method_reference_tail)
 
+    -- Factor the common bracket body before choosing index versus subset.
+    -- In particular, `[exp]` must not first parse `exp` speculatively as the
+    -- prefix of `[exp, ...]`: nested indexes would otherwise double the work
+    -- at every level.
+    bracketbody     <- (P  LBRACKET COMMA
+                                exp^ExpExpSuf
+                                RBRACKET^RBracketExpSuf)         -> bracket_subset_to_desc
+                     / (P  LBRACKET exp^ExpExpSuf
+                                ((COMMA (exp? -> opt)
+                                  RBRACKET^RBracketExpSuf)       -> bracket_subset_tail
+                                 / (RBRACKET^RBracketExpSuf
+                                    ('' -> tofalse))))          -> bracket_from_first_desc
+
     expsuffix       <- (P  callexpsuffix)                        -> suffix_anyfunccall
                      / (P  COLON P NAME^NameColonExpSuf
                                  methodtail)                     -> suffix_anymethod
-                     / (P  LBRACKET exp^ExpExpSuf
-                                RBRACKET^RBracketExpSuf)         -> suffix_bracket
+                     / bracketbody                              -> suffix_bracket_desc
                      / (P  DOT P membername^NameDotExpSuf)       -> suffix_dot
 
+    -- Bare `...` is not a general expression. Parentheses are one of the
+    -- explicit scalar forms, so recognize exactly `(...)` here; the lookahead
+    -- keeps `(...[index])` on the ordinary-expression branch.
+    parenexp        <- (((P DOTS) -> ExpDots) &RPAREN)
+                     / exp^ExpSimpleExp
+
     prefixexp       <- (P  NAME)                                 -> name_exp
-                     / (P  LPAREN exp^ExpSimpleExp
+                     / (P  LPAREN parenexp
                                RPAREN^RParSimpleExp)             -> adjust_exp
 
 
@@ -1892,12 +2102,11 @@ local grammar = re.compile([[
                      / (P  TRUE -> totrue)                       -> ExpBool
                      / (P  NUMBER)                               -> number_exp
                      / (P  STRINGLIT)                            -> ExpString
-                     / (P  DOTS LBRACKET exp^ExpExpSuf
-                                RBRACKET^RBracketExpSuf)         -> ExpDotsIndex
-                     / (P  DOTS)                                 -> ExpDots
                      / initlist                                  -- produces Exp
                      / funcexp                                   -- produces Exp
                      / prefixorsuffixedexp                       -- produces Exp
+                     / (P  LEN DOTS !LBRACKET)                   -> dots_len_exp
+                     / (P  DOTS bracketbody)                     -> dots_bracket_exp
 
     var             <- (suffixedexp => exp_is_var)               -> exp2var
                      / (P  NAME !expsuffix)                      -> name_exp -> exp2var
@@ -1922,34 +2131,75 @@ local grammar = re.compile([[
                            ASSIGN^AssignNamedArg
                            exp^ExpNamedArg)                     -> makefield
 
-    -- A trailing `...` spread is allowed as the last item of an explist (call
-    -- args, return, assignment/decl RHS). A bare `...` is a one-element list;
-    -- the `!LBRACKET` guards against `...[e]`, which is an ordinary expression
-    -- (an ExpDotsIndex) handled by the general alternative below.
+    -- A collection spread begins with `...` followed by a subject expression.
+    -- A leading bracket belongs to the explicitly delimited vararg index/slice
+    -- grammar. This production is reached only after a DOTS-started ordinary
+    -- expression has failed, so it never probes a valid scalar expression
+    -- twice. The subject may itself be an explicit DOTS-started scalar such as
+    -- `...[index]`; a second bare `...` still cannot satisfy `exp`.
+    spreadexp       <- (P  DOTS !LBRACKET exp)                  -> spread_exp
+
+    -- Parse each written item once, then classify it from the following comma.
+    -- A fixed-position classifier rejects only bare `...`; explicit collection
+    -- spreads and direct `...[subset]` forms remain in the AST so the checker
+    -- can diagnose their non-tail placement. A direct `...[subset]` is
+    -- promoted to a spread only by the tail classifier. `...[index]` remains
+    -- scalar in either position.
     --
-    -- The fixed-exp repetition is bounded to LIST_LIMIT elements (1 +
-    -- LIST_LIMIT-1 trailing); a LIST_LIMIT+1-th expression makes the trailing
-    -- `&(COMMA exp)` succeed and throw `%{ListTooLong}`. Bounding the
-    -- repetition (rather than guarding the whole list with `&exp`) keeps a
-    -- labeled failure thrown inside an expression — e.g. a malformed lambda
-    -- parameter — propagating, since a positive lookahead would convert it to
-    -- an ordinary failure and mask the real label.
-    explist         <- {| ((P  DOTS !LBRACKET) -> ExpDots) |}
-                     / {| exp (COMMA exp^ExpExpList)^-99
-                           (COMMA ((P  DOTS) -> ExpDots))? |}
-                       (&(COMMA exp) %{ListTooLong})?         -- produces {Exp}
+    -- The bounded repetition captures at most LIST_LIMIT+1 items. The
+    -- post-capture check accepts LIST_LIMIT ordinary written expressions, or
+    -- one additional item only when it is the final-role open producer. This
+    -- preserves the historical extra trailing open marker without reparsing
+    -- any item and lets labeled failures inside expressions propagate.
+    rawexplistitem  <- ((P &DOTS exp) => claim_dots_started_item)
+                     / spreadexp
+                     / ((P  DOTS !LBRACKET) -> ExpDots)
+                     / exp
+
+    explistitemrole <- ((&COMMA
+                          (%EXPLIST_ITEM => fixed_explist_item))
+                        / (!COMMA
+                          (%EXPLIST_ITEM => tail_explist_item)))
+
+    explistitem     <- {:explist_item: rawexplistitem :}
+                       explistitemrole
+
+    -- Once a comma has been consumed, failure to parse the next raw item owns
+    -- the established ExpExpList diagnostic. A successfully parsed but
+    -- role-invalid bare `...` still fails through the surrounding delimiter,
+    -- rather than being relabeled as a missing expression.
+    explistnextitem <- {:explist_item:
+                           rawexplistitem^ExpExpList
+                       :}
+                       explistitemrole
+
+    explist         <- {:explist_items:
+                           {| explistitem
+                                (COMMA explistnextitem)^-100 |}
+                       :}
+                       ((%EXPLIST_ITEMS => check_explist_limit)
+                        / %{ListTooLong})                       -- produces {Exp}
 
     initlist        <- (P  LCURLY {| fieldlist? |}
                                   RCURLY^RCurlyInitList)         -> ExpInitList
 
-    fieldlist       <- (field
+    fieldlist       <- (fielditem
                         (fieldsep
-                         (field /
+                         (fielditem /
                           !RCURLY %{ExpFieldList}))*
                         fieldsep?)                          -- produces Field...
 
-    field           <- (P  DOTS !LBRACKET)                 -> dots_field
-                     / (P  (key ASSIGN)? -> opt exp)       -> makefield
+    rawfield        <- ((P &DOTS exp) => claim_dots_started_field)
+                     / ((P spreadexp) -> spread_field)
+                     / ((P  DOTS !LBRACKET) -> dots_field)
+                     / (P  !DOTS
+                           (key ASSIGN)? -> opt exp)             -> makefield
+
+    fielditem       <- {:field_item: rawfield :}
+                       ((&(fieldsep !RCURLY)
+                          (%FIELD_ITEM => fixed_field_item))
+                        / (!(fieldsep !RCURLY)
+                          (%FIELD_ITEM => tail_field_item)))
 
     key             <- NAME
                      / LBRACKET exp^ExpExpSuf

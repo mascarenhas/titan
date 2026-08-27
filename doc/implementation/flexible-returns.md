@@ -427,9 +427,12 @@ descriptor, first element/start, element type, finite or open extent, ownership,
 stack restore/cleanup point, and an optional parallel Lua root range. Borrowed
 input and non-GC runs need no range; every live open GC-bearing native call
 result uses one until its sink consumes it, including identity source runs in
-adapters. A destination range exists only for newly allocated conversions.
-An open expression list is an ordered scalar prefix followed by at most one such
-dynamic run.
+adapters. A non-contiguous reader sets `retain_read_results` when each raw VM
+result needs its own indexed ordinary slot, independently of whether the sink
+adjustment allocates. A newly allocating cast may select that same indexed slot
+as its sole final anchor; a nonallocating adjustment receives no destination
+root and leaves read retention as the reader's concern. An open expression list
+is an ordered scalar prefix followed by at most one such dynamic run.
 
 The same abstraction feeds four paths:
 
@@ -438,6 +441,11 @@ The same abstraction feeds four paths:
 * forwarding a flexible return; and
 * appending a final producer to a positional Array or exact integer-Map
   constructor.
+
+[Spread expressions](spread-expressions.md) add a non-contiguous producer to
+these same paths. Its compiler-side `read` operation replaces
+`args[start + i]`; sink adjustment, destination ownership, and flexible-budget
+rules stay here.
 
 Fixed results stay in their existing C temporaries and out-parameters. The
 dynamic run starts only after the declared fixed result prefix. Sink

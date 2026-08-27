@@ -265,8 +265,11 @@ to use it as an expression.
 | `ExpConcat` | `exps` | `..` is flattened to one n-ary node at parse time; all-literal operands are constant-folded into an `ExpString` |
 | `ExpCast` | `exp`, `target` | written `as` casts **and** every checker-materialized implicit coercion |
 | `ExpIs` | `exp`, `target` | written `is` type test; the checker resolves `target` and gives the expression type `boolean` |
-| `ExpAdjust` | `exp` | synthesized by the parser only: a parenthesized *call*, truncated to its first value |
+| `ExpAdjust` | `exp` | parser-built parenthesized call or exact `(...)`; checker truncates a call or rewrites input dots to optional index 1 |
 | `ExpExtra` | `exp`, `index`, `_type` | synthesized by the checker only: the index-th (> 1) value of a multi-return call |
+| `ExpSubset` | `exp`, `first`, `last` | parser-built comma-bearing bracket suffix; either bound may be `false`, and checking accepts it only as spread range syntax |
+| `ExpSpread` | `exp`, `first`, `last` | unique parser/checker carrier for one collection or ranged-vararg spread; owns subject/bound evaluation |
+| `ExpSpreadIndex` | `spread`, `index`, `_type` | checker-synthesized finite projection; every projection points to the same `ExpSpread` carrier |
 | `ExpFunction` | `params`, `rettypes`, `flexrettype`, `block` | anonymous function; the raw AST keeps an omitted result annotation as `rettypes = false`, distinct from explicit `: ()`; a matching expected Function may supply missing fixed/bare-variadic inputs and the complete result shape |
 | `ExpUnionInit` | `owner`, `variant`, `value` | parser-synthesized variant-constructor result; `value` is `false` for an empty variant |
 
@@ -276,14 +279,15 @@ resolves that owner application before selecting the member, and erased-core
 lowering removes both fields before coder entry. `ExpCall.typeargs` remains the
 callable-local list after a function or method name.
 
-Two of these never come from the programmer directly:
+Three elaborated expression forms merit special attention:
 
-* **`ExpAdjust`** is created by `defs.adjust_exp` in the parser when a
-  call is parenthesized: `(f())` adjusts the call to exactly one value,
-  mirroring Lua, and the checker's handler implements the truncation by
-  propagating `exp._type` but deliberately not `_types`. Parentheses
-  around anything other than a call vanish from the AST entirely
-  (`((1))` is just `ExpInteger 1`).
+* **`ExpAdjust`** is created by `defs.adjust_exp` when a call is parenthesized
+  or by the exact input-vararg form `(...)`. `(f())` adjusts the call to exactly
+  one value, mirroring Lua; the checker propagates its scalar type but not its
+  multiple-result `_types`. For `(...)`, the checker replaces the child with a
+  nil-filling `ExpDotsIndex(1)` whose type is the optional vararg element.
+  Parentheses around other expressions vanish from the AST (`((1))` is just
+  `ExpInteger 1`).
 * **`ExpExtra`** is created by the checker wherever a trailing call is
   consumed under a finite demand with more than one visible slot:
   `StatDecl`/`StatAssign` right-hand sides, `StatReturn` lists, call
@@ -294,11 +298,16 @@ Two of these never come from the programmer directly:
   argument is always one value. For
   `local a, b = f()` the
   checker appends `ExpExtra(loc, <the ExpCall>, 2, <type of value 2>)`
-  to `node.exps`. Its `_type` is a *positional constructor field* — the
-  only underscore-prefixed decoration declared in `ast.lua` itself —
-  and its `exp` points at a node occurring earlier in the same list:
-  the tree is a DAG here, and codegen relies on the call being
-  generated first (see `_extras` below).
+  to `node.exps`. Its `_type` is an underscore-prefixed constructor field
+  declared in `ast.lua`, as is `ExpSpreadIndex._type`. Its `exp` points at a
+  node occurring earlier in the same list: the tree is a DAG here, and codegen
+  relies on the call being generated first (see `_extras` below).
+* **`ExpSpreadIndex`** is created by finite expression-list demand. Its
+  `spread` backreference points at the one `ExpSpread` carrier already present
+  in lexical order, and every sibling projection shares that object identity.
+  Generic lowering memoizes the carrier before descending and redirects every
+  lowered projection to the same lowered carrier, preserving once-only subject
+  and bound evaluation.
 
 `ExpCast` likewise leads a double life: it is the AST for a written
 `x as T`, and the checker's `trycoerce`/`tryforce`/`trytostr` synthesize
@@ -345,8 +354,10 @@ affect equality, callable adjustment, or native tags.
 
 ## Decorations: who writes what, who reads it
 
-Passes communicate by adding underscore-prefixed fields to nodes. None
-of these are declared anywhere; this table is the inventory.
+Passes communicate by adding underscore-prefixed fields to nodes. Most are
+decorations assigned after construction; `_type` is also a declared constructor
+field on `ExpExtra` and `ExpSpreadIndex`. This table inventories the durable
+cross-pass fields (short-lived state used wholly inside one pass is omitted).
 
 | Field | On | Written by | Read by | Meaning |
 | --- | --- | --- | --- | --- |
@@ -355,6 +366,11 @@ of these are declared anywhere; this table is the inventory.
 | `_visible_types`, `_result_sources` | `ExpCall` | checker | checker, coder | finite results exposed to this consumer and whether each came from a fixed position or a possibly absent flexible projection |
 | `_finite_flex_prefix`, `_flex_result_demand`, `_open_results` | `ExpCall` | checker | coder | finite projected tail count, finite/open demand marker, and the dynamic source/target/start description for an open sink |
 | `_result_adjustment`, `_arg_adjustment`, `_positional_adjustment`, `_tuple_adjustment` | expression-list consumers | checker | coder | shared finite/open elaboration: delivered fixed/tail scalars, retained effect-only expressions, and at most one dynamic final source; `_positional_adjustment` serves both Arrays and exact integer-keyed Maps |
+| `_spread_checked`, `_spread_kind`, `_spread_elem`, `_spread_optional_type`, `_spread_optional_guard`, `_spread_open_guard`, `_spread_subject_force` | `ExpSpread` (the subject-force marker also reaches its checker-built cast) | checker | checker generic finalization/lowering, coder | once-only subject classification, finalized finite/open element views and guards, and deferred rebuilding of an ordinary Option-container force |
+| `_open_spread` | `ExpSpread` | checker | checker generic lowering, coder | raw-element open-run descriptor: source/target types and first projection not consumed by the finite prefix |
+| `_nilfill` | `ExpSpreadIndex` | checker | coder | finite spread projection is absence-aware; its declared `spread` field retains the shared-carrier origin through target adjustment |
+| `_coder_spread` | `ExpSpread` | coder | coder | prepared subject/range/count/result-run state shared by every generated projection and open sink |
+| `_allocation_result_root` | coder-synthesized `ExpCast` used by an open adjustment | coder adjustment dispatcher | coder cast lowering | optional sink-selected indexed slot into which the allocating cast publishes its final GC object exactly once |
 | `_discard_results`, `_voidok` | expressions/calls | checker | checker, coder | evaluate under zero-result demand; calls may legally expose no result |
 | `_npassed_args`, `_open_args` | `ExpCall` | checker | coder | statically passed argument count and a final dynamic run feeding an input-vararg tail |
 | `_contextual_value_call`, `_contextual_function_type` | `ExpCall` | checker | coder, specs | the callee began as `value` and was checked against a function shape synthesized from argument/result demand |

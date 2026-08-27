@@ -201,6 +201,8 @@ function generic_open_descriptor(source)
         return source._open_results
     elseif source._tag == "Ast.ExpDots" then
         return source._open_dots
+    elseif source._tag == "Ast.ExpSpread" then
+        return source._open_spread
     end
     return nil
 end
@@ -374,9 +376,7 @@ function generic_lower_call_arguments(
                     node, exp, lowered)
             end
             if adjusted.open_source then
-                local open = adjusted.open_source._tag == "Ast.ExpDots"
-                    and adjusted.open_source._open_dots
-                    or adjusted.open_source._open_results
+                local open = generic_open_descriptor(adjusted.open_source)
                 local source = open and open.source_type
                     or types.erase(adjusted.open_type)
                 local target = signature.varargtype
@@ -416,7 +416,7 @@ function generic_lower_call_arguments(
         end
         if signature.varargtype then
             for index = #signature.params + 1, #values do
-                if values[index]._tag ~= "Ast.ExpDots" then
+                if not is_open_expression_marker(values[index]) then
                     values[index] = generic_erased_boundary_expression(
                         values[index], signature.varargtype, state,
                         "variadic argument of erased generic call")
@@ -854,10 +854,87 @@ function generic_reclassify_comparison(node, state)
     node._comparison = comparison
 end
 
+function generic_lower_spread_in_place(node, state)
+    local prior = state.spreads[node]
+    if prior then return prior end
+    -- ExpSpreadIndex nodes share this carrier by identity. Install the memo
+    -- before descending so the shared DAG is lowered exactly once.
+    state.spreads[node] = node
+    node.exp = generic_lower_expression(node.exp, state)
+    if node.first then
+        node.first = generic_lower_expression(
+            node.first, state)
+    end
+    if node.last then
+        node.last = generic_lower_expression(
+            node.last, state)
+    end
+
+    node._spread_elem = generic_erased_descriptor(
+        node._spread_elem, state)
+    node._spread_optional_type = optionize(node._spread_elem)
+    node._spread_optional_guard = types.gradual_guard(
+        generic_runtime_carrier(node._spread_optional_type)) or false
+    node._spread_open_guard = types.gradual_guard(
+        generic_runtime_carrier(node._spread_elem)) or false
+    node._type = types.Nil()
+    if node._open_spread then
+        node._open_spread.source_type = node._spread_elem
+        node._open_spread.target_type = generic_erased_descriptor(
+            node._open_spread.target_type, state)
+    end
+    return node
+end
+
+-- A checked spread force around a structural generic result needs two erased
+-- operations: force the erased Option container, then apply the ordinary
+-- same-kind element view selected by the precise surface type. Lowering the
+-- child call through its usual surface projection first would instead ask for
+-- one unsupported Option(structural-view)-plus-force edge.
+function generic_lower_spread_subject_force(node, state)
+    if not node._spread_subject_force then return nil end
+    local written = node.exp
+    local adjusted = false
+    local call = written
+    if written._tag == "Ast.ExpAdjust" then
+        adjusted = written
+        call = written.exp
+    end
+    if not call or call._tag ~= "Ast.ExpCall" then return nil end
+
+    local surface_target = types.erase(node._type)
+    local target_kind = spread_subject_container(surface_target)
+    if not target_kind then return nil end
+    local info = generic_lower_call_in_place(call, state)
+    if not info.generic then return nil end
+
+    local source = call
+    if adjusted then
+        adjusted.exp = call
+        adjusted._type = call._type
+        adjusted._assignment_adjustment = nil
+        source = adjusted
+    end
+    local source_type = types.normalize(source._type)
+    if not source_type or source_type._tag ~= "Type.Option" then return nil end
+    local source_kind = spread_subject_container(source_type.base)
+    if source_kind ~= target_kind then return nil end
+
+    local forced = tryforce(source)
+    return generic_erased_boundary_expression(
+        forced, surface_target, state,
+        "forced spread subject from erased generic call")
+end
+
 function generic_lower_expression(node, state)
     if type(node) ~= "table" or type(node._tag) ~= "string" then return node end
     local tag = node._tag
-    if tag == "Ast.ExpCall" then
+    if tag == "Ast.ExpSpread" then
+        return generic_lower_spread_in_place(node, state)
+    elseif tag == "Ast.ExpSpreadIndex" then
+        node.spread = generic_lower_spread_in_place(node.spread, state)
+        node._type = node.spread._spread_optional_type
+    elseif tag == "Ast.ExpCall" then
         local info = generic_lower_call_in_place(node, state)
         if not info.generic or not info.surface_visible[1] then return node end
         if not info.primary then
@@ -907,6 +984,8 @@ function generic_lower_expression(node, state)
             and types.contains_generic(node._adjustment)
         local generic_written = node._written_cast
             and types.contains_generic(node._written_cast)
+        local spread_force = generic_lower_spread_subject_force(node, state)
+        if spread_force then return spread_force end
         local lowered = generic_lower_expression(node.exp, state)
         local carrier = state.reverse_wrappers[lowered]
         if carrier and types.equals(
@@ -1314,6 +1393,7 @@ function generic_lower_erased_core(modname, tree, st, errors)
         erased_registry = erased_registry,
         erased_descriptors = {},
         calls = {},
+        spreads = {},
         reverse_wrappers = {},
         hidden_case = 0,
         import_descriptors = {},

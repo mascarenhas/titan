@@ -34,6 +34,7 @@ function result_demand(fixed, tail, opts)
         return_arity = opts.return_arity,
         open_coerce = opts.open_coerce,
         check_expression = opts.check_expression,
+        check_spread = opts.check_spread,
         dots_limit = opts.dots_limit,
         dots_nilfill = opts.dots_nilfill,
         defer_open_check = opts.defer_open_check,
@@ -127,6 +128,7 @@ function remaining_demand(demand, first)
         return_arity = demand.return_arity,
         open_coerce = demand.open_coerce,
         check_expression = demand.check_expression,
+        check_spread = demand.check_spread,
         dots_limit = demand.dots_limit,
         dots_nilfill = demand.dots_nilfill,
         defer_open_check = demand.defer_open_check,
@@ -164,6 +166,148 @@ function finite_result_expressions(exp)
         table.insert(out, value)
     end
     return out
+end
+
+function open_source_descriptor(source)
+    while source and source._tag == "Ast.ExpCast" do source = source.exp end
+    if not source then return nil end
+    if source._tag == "Ast.ExpDots" then
+        return source._open_dots
+    elseif source._tag == "Ast.ExpSpread" then
+        return source._open_spread
+    elseif source._tag == "Ast.ExpCall" then
+        return source._open_results
+    end
+    return nil
+end
+
+function is_open_expression_marker(exp)
+    return exp and (exp._tag == "Ast.ExpDots"
+        or exp._tag == "Ast.ExpSpread")
+end
+
+-- Refresh every annotation derived solely from a checked spread element. This
+-- is also used when a nested generic producer closes after the carrier was
+-- first checked; the subject remains context-free, while its now-final element
+-- descriptor replaces the provisional inference parameter everywhere shared
+-- projections and open lowering observe it.
+function refresh_spread_element_annotations(node, elem)
+    node._spread_elem = elem
+    node._spread_optional_type = elem._tag == "Type.Invalid"
+        and elem or optionize(elem)
+    local optional_carrier = generic_runtime_carrier(
+        node._spread_optional_type)
+    local open_carrier = generic_runtime_carrier(elem)
+    node._spread_optional_guard =
+        types.gradual_guard(optional_carrier) or false
+    node._spread_open_guard = types.gradual_guard(open_carrier) or false
+    if node._open_spread then
+        node._open_spread.source_type = elem
+    end
+end
+
+function spread_subject_container(typ)
+    if typ._tag == "Type.Array" then
+        return "array", typ.elem
+    elseif typ._tag == "Type.Map"
+       and types.equals(typ.keys, types.Integer()) then
+        return "map", typ.values
+    end
+    return false, false
+end
+
+-- A spread subject is checked without a container context, but a valid
+-- Option(Array/Map) subject receives Titan's ordinary use-site force. A nested
+-- generic producer can close its element only after a later sibling contributes
+-- evidence, so rebuild that one checker-owned cast from the finalized source
+-- descriptor instead of retaining its provisional adjustment graph.
+function refresh_spread_subject_force(node, context)
+    if not node._spread_subject_force then return false end
+    local force = node.exp
+    local written = force._tag == "Ast.ExpCast"
+        and force._implicit_coercion and force.exp or force
+    local source = context and generic_substitute_inference(
+        context, written._type, true) or written._type
+    if not source or source._tag ~= "Type.Option" then return false end
+    local kind, elem = spread_subject_container(source.base)
+    if not kind then return false end
+
+    written._type = source
+    force = tryforce(written)
+    force._spread_subject_force = true
+    node.exp = force
+    node._spread_kind = kind
+    return elem
+end
+
+-- Check and normalize the source of a tail spread exactly once.  The parser
+-- keeps comma-bearing suffixes as ExpSubset nodes so an ordinary scalar use can
+-- receive a dedicated diagnostic.  A valid spread consumes that wrapper and
+-- publishes its checked subject/bounds directly on the carrier for codegen.
+function check_spread_marker(node, st, errors)
+    if node._spread_checked then return node._spread_elem end
+    local subject = node.exp
+    local first, last = false, false
+    if subject._tag == "Ast.ExpSubset" then
+        first, last = subject.first, subject.last
+        subject = subject.exp
+    end
+
+    local kind, elem
+    if subject._tag == "Ast.ExpDots" then
+        check_dots_marker(subject, st, errors)
+        kind = "dots"
+        elem = subject._vararg_elem
+    else
+        -- A spread subject has no target-directed contextual conversion: its
+        -- checked type decides between Array and integer-keyed Map semantics.
+        -- Preserve Titan's ordinary bare-value rule, however: an Option is
+        -- forced before an operation dispatches on its underlying type (as
+        -- for `#`, nested indexing, field access, and callable use).
+        checkexp(subject, st, errors)
+        local typ = subject._type
+        local candidate = typ._tag == "Type.Option" and typ.base or typ
+        kind, elem = spread_subject_container(candidate)
+        if kind and typ._tag == "Type.Option" then
+            subject = tryforce(subject)
+            subject._spread_subject_force = true
+            node._spread_subject_force = true
+            typ = subject._type
+        elseif not kind then
+            kind, elem = "invalid", types.Invalid()
+            if typ._tag ~= "Type.Invalid" then
+                checker.typeerror(errors, subject.loc,
+                    "spread subject must be an Array or integer-keyed Map, but found '%s'",
+                    types.tostring(typ))
+            end
+        end
+    end
+
+    local function check_bound(bound, name)
+        if not bound then return false end
+        checkexp(bound, st, errors)
+        return coerce_and_check(bound, types.Integer(),
+            "spread " .. name .. " bound", errors, bound.loc)
+    end
+
+    node.exp = subject
+    node.first = check_bound(first, "lower")
+    node.last = check_bound(last, "upper")
+    node._spread_kind = kind
+    refresh_spread_element_annotations(node, elem)
+    if elem._tag ~= "Type.Invalid"
+       and (not node._spread_optional_guard
+            or not node._spread_open_guard) then
+        checker.typeerror(errors, subject.loc,
+            "cannot spread elements of type '%s' because the type has no sound runtime guard",
+            types.tostring(elem))
+    end
+    -- The carrier is effect/setup-only in adjusted.exps. Finite values are
+    -- represented by shared ExpSpreadIndex projections; an open sink consumes
+    -- _open_spread below.
+    node._type = types.Nil()
+    node._spread_checked = true
+    return elem
 end
 
 -- Check and elaborate one expression list under a finite/open demand.  The
@@ -222,6 +366,7 @@ function adjust_explist(exps, demand, st, errors)
     local n = #exps
     local last = exps[n]
     local has_dots = last and last._tag == "Ast.ExpDots"
+    local has_spread = last and last._tag == "Ast.ExpSpread"
 
     local function check_expression(exp, context, subdemand, sink_index)
         if demand.check_expression then
@@ -305,6 +450,45 @@ function adjust_explist(exps, demand, st, errors)
             table.insert(adjusted.exps, last)
         elseif projection == 1 then
             discard(last, true)
+        end
+    elseif has_spread then
+        local elem = check_spread_marker(last, st, errors)
+        if demand.check_spread then
+            elem = demand.check_spread(
+                last, st, errors, next_fixed, demand) or elem
+        end
+        local projection = 1
+
+        -- Keep the written carrier in lexical order even when the consumer
+        -- requests no values: its subject and explicit/default bounds still
+        -- evaluate exactly once. Generated projections follow it and share the
+        -- carrier by identity, just as ExpExtra shares a call producer.
+        table.insert(adjusted.exps, last)
+        while next_fixed <= #demand.fixed do
+            local target = demand.fixed[next_fixed]
+            local exp = ast.ExpSpreadIndex(
+                last.loc, last, projection, last._spread_optional_type)
+            exp._nilfill = true
+            exp = accept(exp, target, false)
+            table.insert(adjusted.exps, exp)
+            projection = projection + 1
+        end
+        if demand.tail then
+            last._open_spread = {
+                source_type = elem,
+                target_type = expected_type(demand.tail) or elem,
+                start = projection,
+            }
+            adjusted.open_source = last
+            adjusted.open_type = elem
+            adjusted.open_target = expected_type(demand.tail) or elem
+            adjusted.open_start = projection
+        else
+            -- The carrier is effect-only after its finite projections, but it
+            -- is not itself a scalar argument. In particular, strict foreign
+            -- calls must judge their ABI arity from those projections rather
+            -- than count the shared carrier as an explicit surplus value.
+            discard(last, false)
         end
     elseif last then
         local target = current_target()
@@ -404,9 +588,7 @@ function adjust_explist(exps, demand, st, errors)
     adjusted.open_interface_conversion =
         open_interface_conversion or false
     if adjusted.open_source and not demand.defer_open_check then
-        local open = adjusted.open_source._tag == "Ast.ExpDots"
-            and adjusted.open_source._open_dots
-            or adjusted.open_source._open_results
+        local open = open_source_descriptor(adjusted.open_source)
         if open then
             open.adjustment = adjusted.open_adjustment
             open.callable_adapter = adjusted.open_callable_adapter
@@ -427,6 +609,11 @@ function adjust_explist(exps, demand, st, errors)
                 types.tostring(adjusted.open_type),
                 types.tostring(adjusted.open_target),
                 demand.open_term or demand.term)
+        elseif adjusted.open_source._tag == "Ast.ExpSpread" then
+            checker.typeerror(errors, adjusted.open_source.loc,
+                "spread element type %s is not compatible with %s element type %s",
+                types.tostring(adjusted.open_type), demand.term,
+                types.tostring(adjusted.open_target))
         else
             checker.typeerror(errors, adjusted.open_source.loc,
                 "open result element type %s is not compatible with %s element type %s",
@@ -468,12 +655,12 @@ end
 -- Classify an initializer before checking any of its expressions. This keeps a
 -- positional field away from the computed-Map key path (where a nil key used to
 -- reach checkexp), and makes every mixed ordering fail in the same deliberate
--- way. A bare `...` is positional, but it must be the sole trailing open
--- producer.
+-- way. A bare `...` or general spread is positional, but it must be the sole
+-- trailing open producer.
 function classify_constructor_fields(node, errors)
     local seen, kinds = {}, {}
-    local dots_field
-    local invalid_dots = false
+    local open_field
+    local invalid_open = false
 
     for i, field in ipairs(node.fields) do
         local kind = constructor_field_kind(field)
@@ -481,28 +668,38 @@ function classify_constructor_fields(node, errors)
             seen[kind] = true
             table.insert(kinds, kind)
         end
-        if kind == "positional" and field.exp._tag == "Ast.ExpDots" then
-            if dots_field then
-                checker.typeerror(errors, field.loc,
-                    "'...' can appear only once in a positional constructor")
-                invalid_dots = true
+        if kind == "positional" and is_open_expression_marker(field.exp) then
+            if open_field then
+                if field.exp._tag == "Ast.ExpDots" then
+                    checker.typeerror(errors, field.loc,
+                        "'...' can appear only once in a positional constructor")
+                else
+                    checker.typeerror(errors, field.loc,
+                        "a spread can appear only once in a positional constructor")
+                end
+                invalid_open = true
             else
-                dots_field = field
+                open_field = field
             end
             if i ~= #node.fields then
-                checker.typeerror(errors, field.loc,
-                    "'...' must be the last field in a positional constructor")
-                invalid_dots = true
+                if field.exp._tag == "Ast.ExpDots" then
+                    checker.typeerror(errors, field.loc,
+                        "'...' must be the last field in a positional constructor")
+                else
+                    checker.typeerror(errors, field.loc,
+                        "a spread must be the last field in a positional constructor")
+                end
+                invalid_open = true
             end
         end
     end
 
     if #kinds == 0 then
-        return "empty", kinds, dots_field, invalid_dots
+        return "empty", kinds, open_field, invalid_open
     elseif #kinds == 1 then
-        return kinds[1], kinds, dots_field, invalid_dots
+        return kinds[1], kinds, open_field, invalid_open
     else
-        return "mixed", kinds, dots_field, invalid_dots
+        return "mixed", kinds, open_field, invalid_open
     end
 end
 
@@ -523,6 +720,9 @@ function check_rejected_constructor_fields(node, st, errors, context)
         local kind = constructor_field_kind(field)
         if kind == "positional" and field.exp._tag == "Ast.ExpDots" then
             check_dots_marker(field.exp, st, errors)
+        elseif kind == "positional"
+           and field.exp._tag == "Ast.ExpSpread" then
+            check_spread_marker(field.exp, st, errors)
         else
             if kind == "computed" then
                 checkexp(field.name, st, errors, key_context)
@@ -677,7 +877,7 @@ function generic_constructor_expression_needs_context(
         -- transfers any completed receiver/variable descent to its eventual
         -- one real check.
         for _, field in ipairs(exp.fields) do
-            if field.exp._tag == "Ast.ExpDots"
+            if is_open_expression_marker(field.exp)
                or not generic_constructor_expression_needs_context(
                     field.exp, st, errors) then
                 return false
@@ -783,7 +983,8 @@ function generic_finish_positional_constructor(node, st, errors, container_tag,
                                                operation, array_isconst)
     generic_close_contextual_constructor_components(adjusted)
     if operation then
-        generic_refresh_finalized_argument_projections(adjusted)
+        generic_refresh_finalized_argument_projections(
+            adjusted, operation.context)
     end
     local etype = generic_positional_constructor_element_type(
         adjusted, elem_context, operation, true)
@@ -832,6 +1033,11 @@ function generic_finish_positional_constructor(node, st, errors, container_tag,
                     "'...' element type %s is not coerceable to %s element type %s",
                     types.tostring(source), container_name,
                     types.tostring(etype))
+            elseif adjusted.open_source._tag == "Ast.ExpSpread" then
+                checker.typeerror(errors, adjusted.open_source.loc,
+                    "spread element type %s is not coerceable to %s element type %s",
+                    types.tostring(source), container_name,
+                    types.tostring(etype))
             else
                 checker.typeerror(errors, adjusted.open_source.loc,
                     "open result element type %s is not coerceable to %s element type %s",
@@ -849,20 +1055,11 @@ function generic_finish_positional_constructor(node, st, errors, container_tag,
             or false
         adjusted.open_interface_conversion =
             open_interface_conversion or false
-        if adjusted.open_source._tag == "Ast.ExpCall"
-           and adjusted.open_source._open_results then
-            adjusted.open_source._open_results.target_type = etype
-            adjusted.open_source._open_results.adjustment =
-                adjusted.open_adjustment
-            adjusted.open_source._open_results.callable_adapter =
-                adjusted.open_callable_adapter
-        elseif adjusted.open_source._tag == "Ast.ExpDots"
-               and adjusted.open_source._open_dots then
-            adjusted.open_source._open_dots.target_type = etype
-            adjusted.open_source._open_dots.adjustment =
-                adjusted.open_adjustment
-            adjusted.open_source._open_dots.callable_adapter =
-                adjusted.open_callable_adapter
+        local open = open_source_descriptor(adjusted.open_source)
+        if open then
+            open.target_type = etype
+            open.adjustment = adjusted.open_adjustment
+            open.callable_adapter = adjusted.open_callable_adapter
         end
     end
 

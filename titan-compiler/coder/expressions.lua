@@ -456,7 +456,15 @@ function codearray(ctx, node, target)
         })
         table.insert(stats, render([[
             {
-                int _vacount = $RUNCOUNT;
+                lua_Unsigned _vacount = (lua_Unsigned)($RUNCOUNT);
+                if (TITAN_LIKELY(
+                        _vacount <= (lua_Unsigned)TITAN_ARRAY_MAX_CAPACITY
+                            - (lua_Unsigned)$NPREFIX)) {
+                    /* capacity is safe to add and allocate */
+                } else {
+                    luaL_error(L, "%s:%d:%d: array spread is too large",
+                        $FILE, $LINE, $COL);
+                }
                 $INITARRAY
                 $PREFIX_STORES
                 /* zero-init: a boolean store sets only the tag (booleans carry
@@ -464,7 +472,7 @@ function codearray(ctx, node, target)
                  * undefined would warn under -Wmaybe-uninitialized / break
                  * -Werror. */
                 TValue $VSLOT = {0};
-                for (int _vj = 0; _vj < _vacount; _vj++) {
+                for (lua_Unsigned _vj = 0; _vj < _vacount; _vj++) {
                     $SETWRAPPED
                     obj2arr($TMPNAME, $NPREFIX + 1 + _vj, &$VSLOT);
                     $BARRIER
@@ -482,6 +490,9 @@ function codearray(ctx, node, target)
             RUNCOUNT = openrun.count,
             TMPNAME = tmpname,
             NPREFIX = c_integer_literal(nstored),
+            FILE = c_string_literal(node.loc.filename),
+            LINE = c_integer_literal(node.loc.line),
+            COL = c_integer_literal(node.loc.col),
             INITARRAY = initarray(render([[
                 ((lua_Unsigned)$NPREFIX + (lua_Unsigned)_vacount)
             ]], {
@@ -606,14 +617,26 @@ function coder._codepositionalmap(ctx, node, target)
             ctx, openrun, valuetype, "_mi", node.loc)
         table.insert(stats, render([[
             {
-                int _map_open_count = $RUNCOUNT;
+                lua_Unsigned _map_open_count =
+                    (lua_Unsigned)($RUNCOUNT);
+                if (TITAN_LIKELY(
+                        _map_open_count <=
+                            (lua_Unsigned)TITAN_ARRAY_MAX_CAPACITY
+                                - (lua_Unsigned)$NPREFIX)) {
+                    /* capacity is safe to add and allocate */
+                } else {
+                    luaL_error(L,
+                        "%s:%d:%d: positional map spread is too large",
+                        $FILE, $LINE, $COL);
+                }
                 lua_Unsigned _map_count =
                     (lua_Unsigned)$NPREFIX +
                     (lua_Unsigned)_map_open_count;
                 $INITMAP
                 $FIXEDSTORES
                 TValue _map_value = {0};
-                for (int _mi = 0; _mi < _map_open_count; _mi++) {
+                for (lua_Unsigned _mi = 0;
+                     _mi < _map_open_count; _mi++) {
                     $CONVSTATS
                     $BOX
                     obj2arr($TMPNAME, $NPREFIX + _mi, &_map_value);
@@ -624,6 +647,9 @@ function coder._codepositionalmap(ctx, node, target)
         ]], {
             RUNCOUNT = openrun.count,
             NPREFIX = c_integer_literal(#slots),
+            FILE = c_string_literal(node.loc.filename),
+            LINE = c_integer_literal(node.loc.line),
+            COL = c_integer_literal(node.loc.col),
             INITMAP = initmap("_map_count"),
             FIXEDSTORES = fixedstores(),
             CONVSTATS = convstats,
@@ -926,9 +952,7 @@ end
 -- an attached __len follows Lua's ordinary table length semantics. The VM
 -- helper writes an unconstrained TValue, so preserve Titan's static integer
 -- result with the same exact-tag discipline as other strict observations.
-local function code_map_length(ctx, node, operand_stats, operand)
-    local mapstats, map = materialize_code(
-        ctx, node.exp._type, operand_stats, operand)
+local function code_map_length_value(ctx, loc, mapstats, map)
     local resultdecl, result = newtmp(ctx, types.Integer())
     local value_depth = reserveslot(ctx)
     local value = slotat(value_depth)
@@ -958,14 +982,20 @@ local function code_map_length(ctx, node, operand_stats, operand)
         MAP = map,
         VALUE = value,
         VALUESTACK = value_stack,
-        FILE = c_string_literal(node.loc.filename),
-        LINE = c_integer_literal(node.loc.line),
-        COL = c_integer_literal(node.loc.col),
-        THROW = codethrow(node.loc,
+        FILE = c_string_literal(loc.filename),
+        LINE = c_integer_literal(loc.line),
+        COL = c_integer_literal(loc.col),
+        THROW = codethrow(loc,
             "%s:%d:%d: type error, expected integer tag but found %s",
             { "$FILE", "$LINE", "$COL",
               "lua_typename(L, ttype($VALUE))" }),
     }), result
+end
+
+local function code_map_length(ctx, node, operand_stats, operand)
+    local mapstats, map = materialize_code(
+        ctx, node.exp._type, operand_stats, operand)
+    return code_map_length_value(ctx, node.loc, mapstats, map)
 end
 
 function codeunaryop(ctx, node, iscondition)
@@ -1805,9 +1835,14 @@ function codecpseudonew(ctx, node)
     local countstats, countdecl, countassign
 
     if plan.array or plan.fam then
-        local arg = node.args.args[1]
-        local countname
-        countstats, countname = codeexp(ctx, arg)
+        local adjusted = assert(node._arg_adjustment,
+            "C allocation constructor lacks its checked argument adjustment")
+        local astats, anames = coder._codeadjustedfixed(ctx, {
+            _result_adjustment = adjusted,
+            exps = node.args.args,
+        }, coder._freeze_code)
+        local countname = assert(anames[1])
+        countstats = table.concat(astats, "\n")
         countdecl = ""
         countassign = render([[
             $COUNTSTATS
@@ -1985,6 +2020,498 @@ function codedotsindex(ctx, node)
             TMPNAME = tmpname,
             SETSLOT = setslot(elem, "&" .. tmpname, elemexp),
         }), tmpname
+    end
+end
+
+local function spread_projection_ordinal(node)
+    if type(node.index) == "number" then return node.index end
+    assert(node.index and node.index._tag == "Ast.ExpInteger",
+        "spread projection lacks a constant ordinal")
+    return node.index.value
+end
+
+local function spread_subject_index(state, zero_based_offset)
+    return render("intop(+, $FIRST, l_castU2S($OFFSET))", {
+        FIRST = state.first,
+        OFFSET = zero_based_offset,
+    })
+end
+
+local function spread_projection_range_error(loc, ordinal, count)
+    return codethrow(loc,
+        "%s:%d:%d: spread index %I out of range [1, %I]", {
+            c_string_literal(loc.filename),
+            c_integer_literal(loc.line),
+            c_integer_literal(loc.col),
+            "(l_uacInt)(" .. ordinal .. ")",
+            "(l_uacInt)(" .. count .. ")",
+        })
+end
+
+-- Read one element from an already-frozen Array spread subject. Raw elements
+-- remain owned by the subject. A delayed gradual Interface view is different:
+-- its strict guard may allocate a fresh wrapper, so retain that final value in
+-- either the buffered sink's distinct result slot or one reusable ordinary
+-- result slot, matching codeindexarray's publication discipline.
+local function code_spread_array_read(
+        ctx, state, zero_based_offset, typ, guard, loc,
+        available, nilfill, ordinal, result_root, result_stack)
+    if result_root or result_stack then
+        assert(result_root and result_stack,
+            "Array spread reader received a partial result slot")
+    end
+    local may_discover = coder._may_discover_interface(typ)
+    local decl, result, local_root =
+        newtmp(ctx, typ, may_discover and not result_root)
+    local anchor_root = may_discover and (result_root or local_root) or nil
+    local key = spread_subject_index(state, zero_based_offset)
+    local check = coder._strictcheckandgetmixed(
+        ctx, guard, typ, result, "_s", loc, "typed Array spread read")
+    local rebase = coder._rebase_after_interface_discovery(ctx, typ)
+    local body = render([[
+        {
+            Table *_spread_table = $SUBJECT;
+            lua_Integer _spread_key = $KEY;
+            TValue _spread_value = {0};
+            if (_spread_key < 1) {
+                setnilvalue(&_spread_value);
+            } else {
+                lua_Unsigned _spread_actual = l_castS2U(_spread_key);
+                if (_spread_actual < _spread_table->asize) {
+                    arr2obj(_spread_table, cast_uint(_spread_actual),
+                            &_spread_value);
+                    if (tagisempty(ttypetag(&_spread_value)))
+                        setnilvalue(&_spread_value);
+                } else {
+                    setnilvalue(&_spread_value);
+                }
+            }
+            const TValue *_s = &_spread_value;
+            $CHECK
+            $REBASE
+        }
+    ]], {
+        SUBJECT = state.subject,
+        KEY = key,
+        CHECK = check,
+        REBASE = rebase,
+    })
+
+    if available then
+        if nilfill then
+            body = render([[
+                if ($AVAILABLE) {
+                    $BODY
+                } else {
+                    setnilvalue(&$RESULT);
+                }
+            ]], {
+                AVAILABLE = available,
+                BODY = body,
+                RESULT = result,
+            })
+        else
+            body = render([[
+                if (TITAN_UNLIKELY(!($AVAILABLE))) {
+                    $THROW
+                }
+                $BODY
+            ]], {
+                AVAILABLE = available,
+                THROW = spread_projection_range_error(
+                    loc, assert(ordinal), state.count),
+                BODY = body,
+            })
+        end
+    end
+    local anchor = anchor_root and setslot(typ, anchor_root, result) or ""
+    return decl .. "\n" .. body .. "\n" .. anchor, result
+end
+
+-- A finite Map projection retains exactly the ordinary lookup's key/result VM
+-- slot. luaV_finishget may allocate and writes its result into that slot.  A
+-- strict guard can itself normalize a GC-bearing value (notably by discovering
+-- an Interface wrapper), so publish that final typed value back into the same
+-- slot rather than acquiring codeindexmap's second typed-result root.
+-- Open Map runs require a separate lifetime decision because later lookups can
+-- overwrite this slot before a native sink consumes earlier C-buffer entries.
+local function code_spread_map_projection(ctx, node, state, ordinal)
+    local typ = node._type
+    local decl, result = newtmp(ctx, typ, false)
+    local keydecl, keyname, keyslot, keystack =
+        newtmp(ctx, types.Integer(), true)
+    local offset = c_integer_literal(ordinal - 1)
+    local key = spread_subject_index(state, offset)
+    local available = render("((lua_Unsigned)$ORDINAL <= $COUNT)", {
+        ORDINAL = c_integer_literal(ordinal),
+        COUNT = state.count,
+    })
+    local check = coder._strictcheckandgetmixed(
+        ctx, state.optional_guard, typ, result, "_s", node.loc,
+        "typed Map spread read")
+    local rebase = coder._rebase_after_interface_discovery(ctx, typ)
+    local retain = types.is_gc(typ)
+        and setslot(typ, keyslot, result) or ""
+    local lookup = render([[
+        {
+            Table *_spread_table = $SUBJECT;
+            $KEYDECL
+            $KEYNAME = $KEY;
+            $BOXKEY
+            const TValue *_s;
+            $GETKEY
+            $CHECK
+            $REBASE
+            $RETAIN
+        }
+    ]], {
+        SUBJECT = state.subject,
+        KEYDECL = keydecl,
+        KEYNAME = keyname,
+        KEY = key,
+        BOXKEY = setboxed(ctx, types.Integer(), keyslot, keyname),
+        GETKEY = get_table_key(ctx, types.Integer(), "_spread_table",
+            keyslot, keystack, "_s"),
+        CHECK = check,
+        REBASE = rebase,
+        RETAIN = retain,
+    })
+    local body
+    if node._nilfill then
+        body = render([[
+            if ($AVAILABLE) {
+                $LOOKUP
+            } else {
+                setnilvalue(&$RESULT);
+            }
+        ]], {
+            AVAILABLE = available,
+            LOOKUP = lookup,
+            RESULT = result,
+        })
+    else
+        body = render([[
+            if (TITAN_UNLIKELY(!($AVAILABLE))) {
+                $THROW
+            }
+            $LOOKUP
+        ]], {
+            AVAILABLE = available,
+            THROW = spread_projection_range_error(node.loc,
+                c_integer_literal(ordinal), state.count),
+            LOOKUP = lookup,
+        })
+    end
+    return decl .. "\n" .. body, result
+end
+
+local function code_spread_dots_projection(ctx, node, state, ordinal)
+    local va = assert(ctx.varargs, "vararg spread outside a variadic function")
+    local typ = node._type
+    local decl, result = newtmp(ctx, typ, false)
+    local selected = render("((lua_Unsigned)$ORDINAL <= $COUNT)", {
+        ORDINAL = c_integer_literal(ordinal),
+        COUNT = state.count,
+    })
+    local logical = spread_subject_index(
+        state, c_integer_literal(ordinal - 1))
+    local length = render("((lua_Integer)$ARGS->n_args - $START)", {
+        ARGS = va.cname,
+        START = va.start,
+    })
+    local inbounds = render("($SELECTED && $INDEX >= 1 && $INDEX <= $LENGTH)", {
+        SELECTED = selected,
+        INDEX = logical,
+        LENGTH = length,
+    })
+    local raw = render("$ARGS->args[$START + $INDEX - 1]", {
+        ARGS = va.cname,
+        START = va.start,
+        INDEX = logical,
+    })
+    local body
+    if node._nilfill then
+        body = render([[
+            if ($INBOUNDS) {
+                $STORE
+            } else {
+                setnilvalue(&$RESULT);
+            }
+        ]], {
+            INBOUNDS = inbounds,
+            STORE = setslot(va.elem, "&" .. result, raw),
+            RESULT = result,
+        })
+    else
+        body = render([[
+            if (TITAN_UNLIKELY(!($INBOUNDS))) {
+                $THROW
+            }
+            $RESULT = $RAW;
+        ]], {
+            INBOUNDS = inbounds,
+            THROW = spread_projection_range_error(node.loc,
+                c_integer_literal(ordinal), state.count),
+            RESULT = result,
+            RAW = raw,
+        })
+    end
+    return decl .. "\n" .. body, result
+end
+
+local function code_spread_dots_open_read(ctx, state, zero_based_offset, loc)
+    local va = assert(ctx.varargs, "vararg spread outside a variadic function")
+    local indexdecl, index = newtmp(ctx, types.Integer())
+    local logical = spread_subject_index(state, zero_based_offset)
+    local length = render("((lua_Integer)$ARGS->n_args - $START)", {
+        ARGS = va.cname,
+        START = va.start,
+    })
+    local stats = render([[
+        $INDEXDECL
+        $INDEX = $LOGICAL;
+        if (TITAN_UNLIKELY($INDEX < 1 || $INDEX > $LENGTH)) {
+            $THROW
+        }
+    ]], {
+        INDEXDECL = indexdecl,
+        INDEX = index,
+        LOGICAL = logical,
+        LENGTH = length,
+        THROW = codethrow(loc,
+            "%s:%d:%d: variadic index %I out of range [1, %d]", {
+                c_string_literal(loc.filename),
+                c_integer_literal(loc.line),
+                c_integer_literal(loc.col),
+                "(l_uacInt)" .. index,
+                "(int)(" .. length .. ")",
+            }),
+    })
+    return stats, render("$ARGS->args[$START + $INDEX - 1]", {
+        ARGS = va.cname,
+        START = va.start,
+        INDEX = index,
+    })
+end
+
+-- Read one open Map element with the ordinary Map lookup path. When a native
+-- sink buffers several GC-bearing values, it supplies a distinct result slot
+-- for this index; otherwise one compiler-reserved slot can be reused after the
+-- enclosing sink has immediately published the value. luaV_finishget writes
+-- directly into this slot, so there is no second spread root or copied TValue
+-- buffer.
+local function code_spread_map_open_read(
+        ctx, state, zero_based_offset, loc, result_root, result_stack)
+    if result_root or result_stack then
+        assert(result_root and result_stack,
+            "Map spread reader received a partial result slot")
+    else
+        local depth = reserveslot(ctx)
+        result_stack = stackslotat(depth)
+        result_root = slotat(depth)
+    end
+
+    local decl, result = newtmp(ctx, state.elem, false)
+    local key = spread_subject_index(state, zero_based_offset)
+    local check = coder._strictcheckandgetmixed(
+        ctx, state.open_guard, state.elem, result, "_s", loc,
+        "typed Map spread read")
+    local rebase = coder._rebase_after_interface_discovery(ctx, state.elem)
+    local retain = types.is_gc(state.elem)
+        and setslot(state.elem, result_root, result) or ""
+    return decl .. "\n" .. render([[
+        {
+            Table *_spread_table = $SUBJECT;
+            lua_Integer _spread_key = $KEY;
+            $BOXKEY
+            const TValue *_s;
+            $GETKEY
+            $CHECK
+            $REBASE
+            $RETAIN
+        }
+    ]], {
+        SUBJECT = state.subject,
+        KEY = key,
+        BOXKEY = setboxed(
+            ctx, types.Integer(), result_root, "_spread_key"),
+        GETKEY = get_table_key(ctx, types.Integer(), "_spread_table",
+            result_root, result_stack, "_s"),
+        CHECK = check,
+        REBASE = rebase,
+        RETAIN = retain,
+    }), result
+end
+
+local function code_spread_carrier(ctx, node)
+    local kind = assert(node._spread_kind,
+        "spread carrier lacks its checked subject kind")
+    local elem = assert(node._spread_elem,
+        "spread carrier lacks its checked element type")
+    assert(node._spread_optional_type,
+        "spread carrier lacks its checked optional projection type")
+    assert(node._spread_optional_guard ~= nil,
+        "spread carrier lacks its checked optional read guard")
+    assert(node._spread_open_guard ~= nil,
+        "spread carrier lacks its checked open read guard")
+
+    local stats = {}
+    local subject
+    if kind == "dots" then
+        assert(ctx.varargs, "vararg spread outside a variadic function")
+    else
+        local subjectstats, subjectexp = codeexp(ctx, node.exp)
+        local frozen
+        frozen, subject = coder._freeze_code(
+            ctx, node.exp._type, subjectstats, subjectexp)
+        table.insert(stats, frozen)
+    end
+
+    local first
+    if node.first then
+        local firststats, firstexp = codeexp(ctx, node.first)
+        local frozen
+        frozen, first = coder._freeze_code(
+            ctx, types.Integer(), firststats, firstexp)
+        table.insert(stats, frozen)
+    else
+        first = "1"
+    end
+
+    local last
+    if node.last then
+        local laststats, lastexp = codeexp(ctx, node.last)
+        local frozen
+        frozen, last = coder._freeze_code(
+            ctx, types.Integer(), laststats, lastexp)
+        table.insert(stats, frozen)
+    else
+        local lengthstats, lengthexp
+        if kind == "array" then
+            lengthstats = ""
+            lengthexp = "((lua_Integer)titan_array_length(" .. subject .. "))"
+        elseif kind == "map" then
+            lengthstats, lengthexp = code_map_length_value(
+                ctx, node.loc, "", subject)
+        else
+            local va = assert(ctx.varargs)
+            lengthstats = ""
+            lengthexp = render("((lua_Integer)$ARGS->n_args - $START)", {
+                ARGS = va.cname,
+                START = va.start,
+            })
+        end
+        local frozen
+        frozen, last = coder._freeze_code(
+            ctx, types.Integer(), lengthstats, lengthexp)
+        table.insert(stats, frozen)
+    end
+
+    local suffix = tostring(ctx.tmp)
+    ctx.tmp = ctx.tmp + 1
+    local count = "_spread_count_" .. suffix
+    table.insert(stats, render([[
+        lua_Unsigned $COUNT = 0;
+        if ($FIRST <= $LAST) {
+            lua_Unsigned _spread_delta =
+                l_castS2U($LAST) - l_castS2U($FIRST);
+            $COUNT = (_spread_delta == LUA_MAXUNSIGNED)
+                ? LUA_MAXUNSIGNED : _spread_delta + 1u;
+        }
+    ]], {
+        COUNT = count,
+        FIRST = first,
+        LAST = last,
+    }))
+
+    local state = {
+        kind = kind,
+        elem = elem,
+        subject = subject,
+        first = first,
+        last = last,
+        count = count,
+        optional_type = node._spread_optional_type,
+        optional_guard = node._spread_optional_guard,
+        open_guard = node._spread_open_guard,
+    }
+    node._coder_spread = state
+
+    if node._open_spread then
+        local start = assert(node._open_spread.start)
+        local skip = start - 1
+        local run = {
+            elem = elem,
+            count = render("(($COUNT > $SKIP) ? ($COUNT - $SKIP) : 0u)", {
+                COUNT = count,
+                SKIP = c_integer_literal(skip),
+            }),
+            start = c_integer_literal(skip),
+            capacity = false,
+            isopen = true,
+            ownership = "borrowed",
+            count_unsigned = true,
+        }
+        if kind == "array" then
+            run.retain_read_results = coder._may_discover_interface(elem)
+            run.read = function(
+                    readctx, index, loc, result_root, result_stack)
+                local offset = render("($SKIP + (lua_Unsigned)($INDEX))", {
+                    SKIP = c_integer_literal(skip),
+                    INDEX = index,
+                })
+                return code_spread_array_read(readctx, state, offset,
+                    elem, state.open_guard, loc, nil, false, nil,
+                    result_root, result_stack)
+            end
+        elseif kind == "dots" then
+            run.read = function(readctx, index, loc)
+                local offset = render("($SKIP + (lua_Unsigned)($INDEX))", {
+                    SKIP = c_integer_literal(skip),
+                    INDEX = index,
+                })
+                return code_spread_dots_open_read(
+                    readctx, state, offset, loc)
+            end
+        else
+            assert(kind == "map")
+            run.retain_read_results = types.is_gc(elem)
+            run.read = function(
+                    readctx, index, loc, result_root, result_stack)
+                local offset = render("($SKIP + (lua_Unsigned)($INDEX))", {
+                    SKIP = c_integer_literal(skip),
+                    INDEX = index,
+                })
+                return code_spread_map_open_read(readctx, state, offset, loc,
+                    result_root, result_stack)
+            end
+        end
+        state.run = run
+    end
+    return table.concat(stats, "\n"), "((void)0)"
+end
+
+local function code_spread_index(ctx, node)
+    local spread = assert(node.spread,
+        "spread projection lacks its shared carrier")
+    local state = assert(spread._coder_spread,
+        "spread projection emitted before its carrier")
+    local ordinal = spread_projection_ordinal(node)
+    assert(ordinal >= 1, "spread projection ordinal must be positive")
+    if state.kind == "array" then
+        local available = render("((lua_Unsigned)$ORDINAL <= $COUNT)", {
+            ORDINAL = c_integer_literal(ordinal),
+            COUNT = state.count,
+        })
+        return code_spread_array_read(ctx, state,
+            c_integer_literal(ordinal - 1), node._type,
+            state.optional_guard, node.loc, available,
+            node._nilfill, c_integer_literal(ordinal))
+    elseif state.kind == "map" then
+        return code_spread_map_projection(ctx, node, state, ordinal)
+    else
+        assert(state.kind == "dots")
+        return code_spread_dots_projection(ctx, node, state, ordinal)
     end
 end
 
@@ -2208,6 +2735,10 @@ function codeexp_dispatch(ctx, node, iscondition, target)
         return codecall(ctx, node, target)
     elseif tag == "Ast.ExpExtra" then
         return "", node.exp._extras[node.index]
+    elseif tag == "Ast.ExpSpread" then
+        return code_spread_carrier(ctx, node)
+    elseif tag == "Ast.ExpSpreadIndex" then
+        return code_spread_index(ctx, node)
     elseif tag == "Ast.ExpIs" then
         return coder._codeis(ctx, node)
     elseif tag == "Ast.ExpCast" and node._interface_conversion then
@@ -2400,17 +2931,27 @@ function codeexp_dispatch(ctx, node, iscondition, target)
         return cstats, cexp
     elseif tag == "Ast.ExpCast" and node.exp._type._tag == "Type.Value" then
         -- An implicit projection is a strict gradual observation; a written
-        -- `value as T` consumes the broader Lua-boundary conversion plan.
+        -- `value as T` consumes the broader Lua-boundary conversion plan. The
+        -- cast normally owns one traced temporary when Interface discovery can
+        -- allocate. A runtime-sized sink may select an indexed root instead;
+        -- this cast still performs the one and only publication.
         local cstats, cexp = codeexp(ctx, node.exp, iscondition)
         local ctmps, tmpnames = newtmp(ctx, node.exp._type)
         local may_discover =
             coder._may_discover_interface(node.target)
+        local result_root = node._allocation_result_root
+        if result_root then
+            assert(may_discover,
+                "nonallocating value projection received a result root")
+        end
         local ctmpt, tmpnamet, tmpslott =
-            newtmp(ctx, node.target, may_discover)
+            newtmp(ctx, node.target, may_discover and not result_root)
+        local anchor_root = may_discover
+            and (result_root or tmpslott) or nil
         local cget = coder._planned_value_projection_get(
             ctx, node, tmpnamet, "&" .. tmpnames)
-        local cset = tmpslott
-            and setslot(node.target, tmpslott, tmpnamet) or ""
+        local cset = anchor_root
+            and setslot(node.target, anchor_root, tmpnamet) or ""
         local crebase =
             coder._rebase_after_interface_discovery(ctx, node.target)
         return render([[

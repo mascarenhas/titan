@@ -804,11 +804,7 @@ function annotate_c_call_mutations(node, cfunc)
     assert(cfunc and cfunc._tag == "Type.CFunction",
         "C call mutation analysis requires a C function declaration")
     local mutated, seen = {}, {}
-    for i, arg in ipairs(node.args.args) do
-        local target = (cfunc.params or {})[i]
-        if not target and cfunc.vararg then
-            target = c_variadic_mutation_target(arg)
-        end
+    local function observe(arg, target)
         if target then
             local decl, source =
                 mutable_c_call_argument_decl(arg, target)
@@ -817,6 +813,33 @@ function annotate_c_call_mutations(node, cfunc)
                 mark_mutable_c_address_source(source)
                 table.insert(mutated, decl)
             end
+        end
+    end
+
+    local adjusted = node._arg_adjustment
+    if adjusted then
+        -- The lexical list can contain an effect-only spread carrier before its
+        -- synthesized projections. Mutation authority follows ABI/formal
+        -- positions, so pair the fixed projections (and explicit C-vararg tail)
+        -- with their actual targets rather than walking adjusted.exps.
+        for i, target in ipairs(cfunc.params or {}) do
+            local arg = adjusted.fixed[i]
+            if arg then observe(arg, target) end
+        end
+        if cfunc.vararg then
+            for _, arg in ipairs(adjusted.tail_scalars) do
+                observe(arg, c_variadic_mutation_target(arg))
+            end
+        end
+    else
+        -- Named FFI calls are already stored densely in formal order and do not
+        -- carry the positional expression-list adjustment descriptor.
+        for i, arg in ipairs(node.args.args) do
+            local target = (cfunc.params or {})[i]
+            if not target and cfunc.vararg then
+                target = c_variadic_mutation_target(arg)
+            end
+            observe(arg, target)
         end
     end
     node._c_mutated_decls = #mutated > 0 and mutated or false

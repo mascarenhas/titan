@@ -327,17 +327,6 @@ checkexp = util.make_visitor({
 
     ["Ast.ExpUnop"] = function(node, st, errors, _)
         local op = node.op
-        -- `#...` parses as `ExpUnop("#", ExpDots)` because the unop cascade takes
-        -- `#` greedily. Rewrite it in place to an `ExpDotsLen` (which yields an
-        -- integer) before the operand is checked, bypassing the array/string `#`
-        -- path that cannot handle a bare `...` operand.
-        if op == "#" and node.exp._tag == "Ast.ExpDots" then
-            local lennode = ast.ExpDotsLen(node.loc)
-            checkexp(lennode, st, errors)
-            for k in pairs(node) do node[k] = nil end
-            for k, v in pairs(lennode) do node[k] = v end
-            return
-        end
         checkexp(node.exp, st, errors)
         if check_c_unary_operator(node, st, errors) then
             return
@@ -853,8 +842,11 @@ checkexp = util.make_visitor({
                         end)
                 if not dependent_call then
                     generic_close_generic_adjusted_arguments(
-                        node, contextual_args, node.args.args, synthesized,
-                        st, errors, "function '" .. fname .. "'")
+                        inference_operation
+                            and inference_operation.context or false,
+                        node, contextual_args, node.args.args,
+                        synthesized, st, errors,
+                        "function '" .. fname .. "'")
                     generic_finalize_contextual_value_callee(
                         node, original, synthesized, errors)
                 end
@@ -1115,6 +1107,20 @@ checkexp = util.make_visitor({
     end,
 
     ["Ast.ExpAdjust"] = function(node, st, errors, context, demand)
+        -- Bare input varargs are not a general source expression. The parser
+        -- admits them here only through the explicit `(...)` scalar form,
+        -- which selects the first value and adjusts an absent value upward to
+        -- nil just like a parenthesized multiple-result call.
+        if node.exp._tag == "Ast.ExpDots" then
+            local index = ast.ExpInteger(node.exp.loc, 1)
+            local projection = ast.ExpDotsIndex(node.exp.loc, index)
+            projection._nilfill = true
+            checkexp(projection, st, errors)
+            node.exp = projection
+            node._type = projection._type
+            return
+        end
+
         return generic_with_inference_operation(node, st,
         function(operation)
             node.exp._voidok = true
@@ -1412,14 +1418,59 @@ checkexp = util.make_visitor({
         end, "bound method projection")
     end,
 
-    -- Bare `...` in a value position. `...` is only legal as the sole, trailing
-    -- entry of an explist (a call argument, `return`, assignment/decl RHS) or an
-    -- positional Array/integer-Map constructor, where the consuming loop
-    -- intercepts it as a marker or rewrites it into `ExpDotsIndex` reads BEFORE
-    -- reaching this arm.
-    -- Reaching this arm therefore means `...` appeared where a single value is
-    -- required (e.g. `1 + ...`, a non-trailing list position), which is an error.
-    -- We still resolve `$vararg` so the scope / not-variadic diagnostics fire.
+    -- A comma-bearing bracket suffix is deliberately a general parser node so
+    -- future suffix syntax stays unambiguous. Only a tail spread may consume
+    -- it; every ordinary scalar/indexing use is rejected here after checking
+    -- its children for their own diagnostics.
+    ["Ast.ExpSubset"] = function(node, st, errors, _)
+        if node.exp._tag == "Ast.ExpDots" then
+            -- `...[first, last]` is an explicit syntactic form even outside a
+            -- list tail. Resolve its vararg scope without routing the wrapped
+            -- marker through the defensive bare-`...` scalar diagnostic.
+            check_dots_marker(node.exp, st, errors)
+        else
+            checkexp(node.exp, st, errors)
+        end
+        local function check_bound(bound, name)
+            if not bound then return end
+            checkexp(bound, st, errors)
+            if bound._type._tag ~= "Type.Invalid" then
+                coerce_and_check(bound, types.Integer(),
+                    "subset " .. name .. " bound", errors, bound.loc)
+            end
+        end
+        check_bound(node.first, "lower")
+        check_bound(node.last, "upper")
+        node._type = invalid(errors, node.loc,
+            "a subset index can only be used in a spread expression")
+    end,
+
+    -- A valid ExpSpread is intercepted by expression-list adjustment before
+    -- ordinary scalar checking. Reaching this arm means a hand-built/recovered
+    -- AST placed it in a scalar position.
+    ["Ast.ExpSpread"] = function(node, st, errors, _)
+        check_spread_marker(node, st, errors)
+        if node._spread_elem._tag ~= "Type.Invalid" then
+            checker.typeerror(errors, node.loc,
+                "a spread can only be used as the last item of an argument list, "
+                .. "a return, an assignment, a generic for iterator tuple, "
+                .. "or a positional array/integer-keyed map constructor")
+        end
+    end,
+
+    -- Checker-synthesized finite projections are always optional. Their
+    -- shared carrier was checked before they were inserted into adjusted.exps.
+    ["Ast.ExpSpreadIndex"] = function(node, _, _, _)
+        node._nilfill = true
+        node._type = node._type
+            or node.spread._spread_optional_type
+            or optionize(node.spread._spread_elem)
+    end,
+
+    -- Parser-built bare `...` nodes occur only as tail markers, inside the
+    -- explicit `(...)` form, or underneath an explicit subset wrapper. Those
+    -- consumers intercept them before this arm. Keep a defensive diagnostic
+    -- for synthesized or manually-built ASTs that violate that invariant.
     ["Ast.ExpDots"] = function(node, st, errors, _)
         node._vararg_elem = resolve_vararg(st, node.loc, errors)
         node._type = node._vararg_elem
@@ -1446,7 +1497,9 @@ checkexp = util.make_visitor({
         node.exp = coerce_and_check(node.exp, types.Integer(),
             "variadic index", errors, node.exp.loc)
         if node._nilfill == nil then node._nilfill = false end
-        node._type = node._type or elem
+        node._type = node._type
+            or (node._nilfill and elem._tag ~= "Type.Invalid"
+                and optionize(elem) or elem)
     end
 })
 

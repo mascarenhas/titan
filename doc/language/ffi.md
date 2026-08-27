@@ -489,21 +489,28 @@ principle. A C field, symbol, or tag named `when`, `type`, `repeat`,
 the foreign namespace or a C receiver. Reserving such a spelling in Titan does
 not remove it from contextual C lookup.
 
-Parenthesized direct C calls retain strict C arity. A trailing Titan call with
-several statically visible results may be truncated to fill exactly the
-remaining C formals, but explicitly written surplus arguments remain an
-arity error. A run-time-open flexible result sequence cannot cross a C call
-boundary. In a named call, every
-omitted fixed parameter is treated as `nil` and accepted only if its
-Titan-visible type accepts or can coerce nil. An omitted pointer can therefore
-become `NULL`, but a required C integer cannot be omitted.
+Parenthesized direct calls to nonvariadic C functions, calls through
+nonvariadic C function pointers, and type-namespace C allocation pseudo-calls
+such as `T.new_array(...)` retain strict finite C arity. A trailing Titan call
+or a spread of an Array, integer-keyed Map, or the current function's input
+varargs may supply the finite projections needed to fill exactly the remaining
+C formals, but explicitly written surplus arguments remain an arity error. The
+projections are ordinary converted scalar arguments; no Titan run descriptor
+enters the C call. In a named call, every omitted fixed parameter is treated as
+`nil` and accepted only if its Titan-visible type accepts or can coerce nil. An
+omitted pointer can therefore become `NULL`, but a required C integer cannot be
+omitted.
 
 Fixed parameters are checked against the C prototype. For C variadic functions,
 the fixed prefix is checked and explicit extra arguments are converted using
 their own static types. This is enough to call functions such as `printf` and
-`snprintf`, but Titan does not validate format strings. Titan variadic `...`
-cannot be forwarded into a C variadic call in v1. Named syntax is rejected for
-every C variadic function, even when all fixed-prefix arguments are present.
+`snprintf`, but Titan does not validate format strings. C `...` is a disjoint
+ABI facility and cannot consume any run-time-open Titan producer: not a
+flexible-result or open contextual-`value` call, bare input varargs, or an
+Array/Map/ranged-vararg spread. Individually written scalar operands and the
+finite, statically visible scalar results of a trailing Titan call retain their
+normal C-vararg conversions and promotions. Named syntax is rejected for every
+C variadic function, even when all fixed-prefix arguments are present.
 
 Foreign functions are not Titan first-class function values. `stdio.printf` can
 be called by name, but it cannot be stored, passed, or returned as a Titan

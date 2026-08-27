@@ -270,14 +270,18 @@ record fields in written order.
 
 A generic `for ... in` use follows the same rule for its four-value iterator
 tuple. After the iterator is selected, written state/control producers are
-consumed in source and delivered-result order; projections synthesized from a
-final `...` and missing nil fills follow without replaying that producer. A
-contextual close callback participates at its written tuple slot. Only after
-those hidden inputs have supplied evidence do annotated loop variables supply
-iterator-result evidence. For example, the nil-fillable projections of `...`
-below select `T = integer` through the iterator's optional state/control inputs
-before the unannotated result is closed; the loop's first control value is then
-ordinarily forced to `integer`:
+consumed in source and delivered-result order. A final
+[spread expression](spread-expressions.md) contributes `T?` projections while
+evaluating its carrier once. A final bare `...` retains its slot-specific rule:
+iterator/state/control projections nil-fill, while a projection that reaches
+the close slot is a direct raising read. Those projections, followed by missing
+nil fills, supply evidence without replaying their producer. A contextual close
+callback participates at its written tuple slot. Only after those hidden inputs
+have supplied evidence do annotated loop variables supply iterator-result
+evidence. For example, the nil-fillable projections of `...` below select
+`T = integer` through the iterator's optional state/control inputs before the
+unannotated result is closed; the loop's first control value is then ordinarily
+forced to `integer`:
 
 ```titan
 function step<T>(state: T?, control: T?): T? return nil end

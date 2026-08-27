@@ -1950,7 +1950,7 @@ function generic_finalize_adjustment_annotation(
         operation, adjustment, true)
 end
 
-function generic_refresh_finalized_argument_projections(adjusted)
+function generic_refresh_finalized_argument_projections(adjusted, context)
     -- A scalar derived expression (field/index/bound method/parentheses) can
     -- retain its original AST identity while postorder finalization replaces
     -- only checker-owned annotations. Keep the owning expression-list aliases
@@ -1983,6 +1983,33 @@ function generic_refresh_finalized_argument_projections(adjusted)
         end
     end
 
+    -- A spread carrier likewise snapshots its nested subject's provisional
+    -- element. Close that descriptor once, then refresh every shared finite
+    -- projection before the parent classifies its final adjustment.
+    local function spread_projection(exp)
+        while exp and exp._tag == "Ast.ExpCast"
+              and exp._implicit_coercion do
+            exp = exp.exp
+        end
+        return exp and exp._tag == "Ast.ExpSpreadIndex" and exp or nil
+    end
+    for _, exp in ipairs(adjusted.exps) do
+        if exp._tag == "Ast.ExpSpread" then
+            local elem = refresh_spread_subject_force(exp, context)
+            if not elem then
+                elem = context and generic_substitute_inference(
+                    context, exp._spread_elem, true) or exp._spread_elem
+            end
+            refresh_spread_element_annotations(exp, elem)
+        end
+    end
+    for _, exp in ipairs(adjusted.exps) do
+        local projection = spread_projection(exp)
+        if projection then
+            projection._type = projection.spread._spread_optional_type
+        end
+    end
+
     -- A trailing child call is checked once while its generic occurrence is
     -- still open. `adjust_explist` consequently snapshots its finite extras and
     -- open element type before postorder finalization closes that child. Refresh
@@ -2006,8 +2033,9 @@ function generic_refresh_finalized_argument_projections(adjusted)
     end
 
     local source = adjusted.open_source
-    if source and source._tag == "Ast.ExpCall" and source._open_results then
-        adjusted.open_type = source._open_results.source_type
+    local open = open_source_descriptor(source)
+    if open then
+        adjusted.open_type = open.source_type
     end
 end
 
@@ -2027,9 +2055,7 @@ function generic_finish_generic_open_arguments(adjusted, target, st, errors,
             adjusted.open_type, target, adjusted.open_source.loc)
         or false
     adjusted.open_interface_conversion = interface_conversion or false
-    local open = adjusted.open_source._tag == "Ast.ExpDots"
-        and adjusted.open_source._open_dots
-        or adjusted.open_source._open_results
+    local open = open_source_descriptor(adjusted.open_source)
     if open then
         open.target_type = target
         open.adjustment = adjusted.open_adjustment
@@ -2049,8 +2075,8 @@ function generic_finish_generic_open_arguments(adjusted, target, st, errors,
 end
 
 function generic_close_generic_adjusted_arguments(
-        node, adjusted, args, signature, st, errors, term)
-    generic_refresh_finalized_argument_projections(adjusted)
+        context, node, adjusted, args, signature, st, errors, term)
+    generic_refresh_finalized_argument_projections(adjusted, context)
     for index = 1, #adjusted.fixed do
         local exp = adjusted.fixed[index]
         local target = signature.params[index]
@@ -2133,6 +2159,7 @@ function generic_infer_positional_call(context, signature, args,
                                                 st, errors, term)
     local deferred, deferred_by_exp = {}, {}
     local consumed_results, consumed_open = {}, {}
+    local consumed_spreads = {}
 
     local fixed = {}
     for index = 1, #signature.params do fixed[index] = UNKNOWN_SLOT end
@@ -2180,7 +2207,37 @@ function generic_infer_positional_call(context, signature, args,
                 consumed_results[exp] = #results
                 if open then consumed_open[exp] = true end
             end,
+            check_spread = function(spread, _, _, first_index)
+                local elem = spread._spread_elem
+                local finite = spread._spread_optional_type
+                for index = first_index, #signature.params do
+                    local pattern = signature.params[index]
+                    generic_unify_inference(context, pattern, finite,
+                        "spread argument " .. index, spread.loc)
+                    generic_infer_constraint_evidence(context)
+                end
+                if signature.varargtype then
+                    generic_unify_inference(context,
+                        signature.varargtype, elem,
+                        "open spread argument", spread.loc)
+                    generic_infer_constraint_evidence(context)
+                end
+                elem = generic_substitute_inference(
+                    context, elem, false)
+                refresh_spread_element_annotations(spread, elem)
+                consumed_spreads[spread] = true
+                return elem
+            end,
         }), st, errors)
+
+    local function consumed_spread_projection(exp)
+        while exp and exp._tag == "Ast.ExpCast"
+              and exp._implicit_coercion do
+            exp = exp.exp
+        end
+        return exp and exp._tag == "Ast.ExpSpreadIndex"
+            and consumed_spreads[exp.spread] or false
+    end
 
     local function already_consumed(exp)
         local source = exp._tag == "Ast.ExpExtra" and exp.exp or exp
@@ -2197,6 +2254,7 @@ function generic_infer_positional_call(context, signature, args,
         local pattern = generic_formal_pattern(
             signature, index)
         if pattern and not deferred_by_exp[exp]
+           and not consumed_spread_projection(exp)
            and not already_consumed(exp) then
             local evidence =
                 generic_contextual_record_constructor_evidence(
@@ -2219,6 +2277,7 @@ function generic_infer_positional_call(context, signature, args,
         end
     end
     if adjusted.open_source and signature.varargtype
+       and not consumed_spreads[adjusted.open_source]
        and not consumed_open[adjusted.open_source] then
         generic_unify_inference(context,
             signature.varargtype, adjusted.open_type,
@@ -2427,7 +2486,8 @@ function generic_infer_call_application(context, use, signature, node,
             generic_close_deferred_generic_arguments(
                 context, deferred, st, errors)
             generic_close_generic_adjusted_arguments(
-                node, adjusted, node.args.args, closed, st, errors, term)
+                context, node, adjusted, node.args.args,
+                closed, st, errors, term)
         end
     end)
 
@@ -2488,7 +2548,8 @@ function generic_infer_dependent_value_call_application(
             operation.context, signature, true)
         operation.closed = closed
         generic_close_generic_adjusted_arguments(
-            node, adjusted, node.args.args, closed, st, errors, term)
+            operation.context, node, adjusted, node.args.args,
+            closed, st, errors, term)
         finalize(closed)
     end)
     return signature, true

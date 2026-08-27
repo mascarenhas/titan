@@ -29,9 +29,17 @@ describe("variadic parameters (typechecker)", function()
             local ok, err, ast = run_checker(in_vararg("local n = #...; return nil"))
             assert.truthy(ok, err)
             local decl = ast[1].block.stats[1]
-            -- `#...` was rewritten to an ExpDotsLen of type integer
+            -- `#...` is an explicit ExpDotsLen of type integer
             assert.same("Ast.ExpDotsLen", decl.exps[1]._tag)
             assert.same(types.Integer(), decl.exps[1]._type)
+        end)
+
+        it("keeps `#...[i]` as length of the indexed vararg value", function()
+            assert_type_check([[
+                function foo(...: {integer}): integer
+                    return #...[1]
+                end
+            ]])
         end)
 
         it("types `...[i]` as the element type t (not t?)", function()
@@ -74,6 +82,40 @@ describe("variadic parameters (typechecker)", function()
             assert.same(types.Option(types.Integer()), node._type)
         end)
 
+        it("adjusts `(...)` to one optional value and forces required uses",
+        function()
+            local ok, err, tree = run_checker([[
+                function foo(...: integer): integer?
+                    local maybe: integer? = (...)
+                    local required: integer = (...)
+                    return maybe
+                end
+            ]])
+            assert.truthy(ok, err)
+
+            local maybe = tree[1].block.stats[1].exps[1]
+            assert.same("Ast.ExpAdjust", maybe._tag)
+            assert.same(types.Option(types.Integer()), maybe._type)
+            assert.same("Ast.ExpDotsIndex", maybe.exp._tag)
+            assert.truthy(maybe.exp._nilfill)
+
+            local required = tree[1].block.stats[2].exps[1]
+            assert.same("Ast.ExpCast", required._tag)
+            assert.same(types.Integer(), required._type)
+            assert.same("Ast.ExpAdjust", required.exp._tag)
+            assert.same(types.Option(types.Integer()), required.exp._type)
+
+            assert_type_check([[
+                function first<T>(...: T): T?
+                    return (...)
+                end
+
+                function use(): integer?
+                    return first(7, 8)
+                end
+            ]])
+        end)
+
         it("coerces a float index of `...[i]` to integer", function()
             assert_type_check([[
                 function foo(...: integer): integer
@@ -108,17 +150,6 @@ describe("variadic parameters (typechecker)", function()
             assert.truthy(ok, err)
             local lst = ast[1].block.stats[1].exps[1]
             assert.same(types.Array(types.Integer(), false), lst._type)
-        end)
-
-        it("rejects `{..., 1}` (`...` must be last)", function()
-            local errs = check_errs([[
-                function foo(...: integer): nil
-                    local x = {..., 1}
-                    return nil
-                end
-            ]])
-            assert.truthy(#errs >= 1)
-            assert.match("'%.%.%.' must be the last field", errs[1])
         end)
 
         it("rejects `...` in a map constructor", function()
@@ -492,14 +523,21 @@ describe("variadic parameters (typechecker)", function()
             assert.match("'%.%.%.' can only be used inside a variadic function", errs[1])
         end)
 
-        it("rejects a bare `...` in operand position", function()
-            local errs = check_errs([[
-                function foo(...: integer): integer
-                    return 1 + ...
-                end
-            ]])
-            assert.truthy(#errs >= 1)
-            assert.match("'%.%.%.' can only be used as the last item", errs[1])
+        it("diagnoses explicit vararg forms in top-level initializers",
+        function()
+            for _, source in ipairs({
+                "x = (...)",
+                "x = ...[1]",
+                "x = #...",
+                "x = {...}",
+                "x = {(...)}",
+            }) do
+                local errs = check_errs(source)
+                assert.truthy(#errs >= 1)
+                assert.match(
+                    "'%.%.%.' can only be used inside a variadic function",
+                    table.concat(errs, "\n"))
+            end
         end)
 
         it("rejects `...` inside an inner lambda", function()

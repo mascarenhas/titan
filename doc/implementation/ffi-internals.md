@@ -518,13 +518,15 @@ The checker has FFI-specific handling in a few narrow places:
   for shared argument/result checking; only the pointer branch records
   `_c_pointer_call`, and neither can fall through to Titan/Lua callable
   adjustment or dispatch.
-* Direct C and C-function-pointer calls keep exact C arity. The shared
-  expression-list demand may project enough finite values from a trailing
-  flexible Titan producer to fill fixed C parameters, but it diagnoses a
-  missing fixed argument or an explicit surplus expression instead of applying
-  Titan's nil-padding/downward-adjustment rules. A runtime-open `...` or
-  flexible-result run is rejected at a C variadic boundary because Titan's
-  typed descriptor has no C default-promotion ABI.
+* Direct nonvariadic C and nonvariadic C-function-pointer calls keep exact C
+  arity. The shared expression-list demand may project enough finite values
+  from a trailing flexible Titan producer or spread carrier to fill fixed C
+  parameters, but it diagnoses a missing fixed argument or an explicit surplus
+  expression instead of applying Titan's nil-padding/downward-adjustment rules.
+  Codegen evaluates the adjusted lexical list but sends only its fixed
+  projections to the C ABI; the spread carrier is never a formal argument. C
+  variadic calls retain their independent explicit-scalar/default-promotion
+  path and do not accept a Titan spread as their variadic operands.
 * A brace-delimited call to a direct C module function uses the member's
   declaration-only `paramnames`. The checker rejects C variadics, unavailable
   name lists, C function pointers, and allocation pseudo-constructors. For an

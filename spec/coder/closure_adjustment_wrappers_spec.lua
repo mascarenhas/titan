@@ -273,7 +273,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
             and root_loop < root and root < projection)
     end)
 
-    it("roots only fresh wrappers in both open native-input builders",
+    it("publishes each open callable result on exactly one adapter branch",
     function()
         local source = [[
             local type Source = (integer) -> integer
@@ -302,29 +302,29 @@ describe("closure adjustment wrappers (end-to-end)", function()
                 first, true))
             return csrc:sub(first, last - 1)
         end
-        local function tracing_payload_copy(body, marker_)
-            for line in body:gmatch("[^\n]+") do
-                if line:find(marker_, 1, true)
-                   and line:find("setobj2t(L", 1, true) then
-                    return line
-                end
-            end
-            return nil
-        end
-        local function assert_conditional_root_only(body, marker_)
+        local function assert_branch_publication(body, marker_)
+            assert.truthy(body:find(marker_, 1, true), body)
             local allocation = assert(body:find(
                 "luaF_newCclosure(L, _ca_nup + 1);", 1, true))
             local root = assert(body:find(
                 "setclCvalue(L, s2v(", allocation, true))
-            assert.truthy(body:find(marker_, 1, true), body)
-            assert.is_nil(tracing_payload_copy(body, marker_), body)
-            assert.is_true(allocation < root)
+            local otherwise = assert(body:find("} else {", root, true))
+            local branch_end = assert(body:find(
+                "\n            }\n        }", otherwise, true))
+            local branch = body:sub(otherwise, branch_end)
+            local relative_fallback = assert(branch:find(
+                "setobj2t(L, s2v(", 1, true))
+            assert.is_nil(branch:find(
+                "setobj2t(L, s2v(", relative_fallback + 1, true), body)
+            local fallback = otherwise + relative_fallback - 1
+            assert.is_true(allocation < root and root < otherwise
+                and otherwise < fallback and fallback < branch_end)
         end
 
         -- The ordinary checked tree uses the shared adjusted-open builder.
         local tree = checked(source)
         local csrc = coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION)
-        assert_conditional_root_only(
+        assert_branch_publication(
             native_body(csrc, "forwarded"), "_open_vargs_")
 
         -- Pin the older case-3 template directly as a separate lowering unit:
@@ -339,7 +339,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
         call._arg_adjustment = nil
         local legacy_csrc = coder.generate(
             "test", legacy_tree, {}, driver.TITAN_ABI_VERSION)
-        assert_conditional_root_only(
+        assert_branch_publication(
             native_body(legacy_csrc, "forwarded_value"), "_varg_")
     end)
 

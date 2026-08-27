@@ -41,7 +41,7 @@ token ([Lexer and parser](lexer-parser.md#one-grammar-no-token-stream)).
 ```lua
 ExpDots         = {"loc"},          -- bare `...`
 ExpDotsIndex    = {"loc", "exp"},   -- `...[e]`  (checker sets _nilfill, _type)
-ExpDotsLen      = {"loc"}           -- `#...`    (checker-normalized, below)
+ExpDotsLen      = {"loc"}           -- explicit `#...`
 ```
 
 There is **no** new parameter node. A variadic parameter is encoded as an
@@ -96,44 +96,60 @@ their own `...: t` carrier, so input and output tails cannot be confused.
 element types land in `Ast.TypeFunction.varargtype` and `.flexrettype`
 respectively.
 
-### Spread and `...[e]`; `#...` as a unop
+### Tail markers and explicit variadic expressions
 
-A trailing `...` spread is admitted as the last item of an explist (call args,
-`return`, assignment/decl RHS) and of a positional container constructor:
+A bare `...` marker is admitted only as the last item of an explist (call
+args, `return`, assignment/decl RHS) or positional container constructor.
+Explicit collection spreads and DOTS subsets parse in fixed positions as well,
+so the checker—not a speculative parser branch—owns their last-only semantic
+diagnostic. Each raw item is captured once and classified from the delimiter:
 
 ```
-explist <- {| ((P  DOTS !LBRACKET) -> ExpDots) |}
-         / {| exp (COMMA exp^ExpExpList)^-99 (COMMA ((P  DOTS) -> ExpDots))? |}
-           (&(COMMA exp) %{ListTooLong})?
-
-field   <- (P  DOTS !LBRACKET)                 -> dots_field   -- `{ a, ... }`
-         / (P  (key ASSIGN)? -> opt exp)       -> Field
+rawexplistitem  <- ((P &DOTS exp) => claim_dots_started_item)
+                 / spreadexp
+                 / ((P DOTS !LBRACKET) -> ExpDots)
+                 / exp
+explistitemrole <- (&COMMA => fixed_explist_item)
+                 / (!COMMA => tail_explist_item)
 ```
 
-`defs.dots_field` builds a key-less `Ast.Field` wrapping an `ExpDots`. Both
-the explist and field forms guard the spread with `!LBRACKET`, because
-`...[e]` is an ordinary expression, not a spread; that index form is a
-`simpleexp` alternative placed **before** the bare-`...` one:
+`defs.dots_field` builds a key-less `Ast.Field` wrapping an `ExpDots`. A fixed
+classifier rejects that bare node; it retains `ExpSpread` and explicit
+`ExpSubset` nodes for checker placement errors. A tail classifier promotes a
+direct `ExpSubset(ExpDots)` to `ExpSpread`. Bare `...` remains deliberately
+absent from `simpleexp`. Its explicit expression forms have dedicated branches:
 
 ```
 simpleexp <- ...
-           / (P  DOTS LBRACKET exp^ExpExpSuf RBRACKET^RBracketExpSuf) -> ExpDotsIndex
-           / (P  DOTS)                                                -> ExpDots
+           / (P LEN DOTS !LBRACKET) -> ExpDotsLen
+           / (P DOTS bracketbody) -> dots_bracket_exp
            / ...
+
+parenexp  <- (((P DOTS) -> ExpDots) &RPAREN)
+           / exp
 ```
 
-`#...` is **not** a `simpleexp` rule. The `unop` cascade takes `#` greedily, so
-`#...` parses as `Ast.ExpUnop("#", Ast.ExpDots)` and is normalized to an
-`ExpDotsLen` later, in the checker (below). The only new syntax-error label is
-`ListTooLong`; the rest reuse `ParamSemicolon`/`TypeDecl`/`ExpExpSuf`/
-`RBracketExpSuf`.
+The exact parenthesized branch becomes `ExpAdjust(ExpDots)`; an indexed form
+inside parentheses falls through to `exp`. A comma-bearing `...[subset]` is an
+explicit syntactic expression, represented as `ExpSubset(ExpDots)`, but only
+direct tail classification promotes it to a spread; other positions reach the
+checker-specific subset error. The unary rule leaves `#` before bare dots for
+the dedicated `ExpDotsLen` branch while retaining ordinary unary length for
+`#...[index]`. In contrast, `... -1` is `spreadexp` with a unary subject and
+reaches the subject type check, while `... ...[1]` is a spread whose subject is
+the explicit `ExpDotsIndex`. A second bare `...` is still not an expression.
+Invalid bare forms use existing enclosing syntax-error labels; `ListTooLong`
+remains the independent written-list cap.
 
 ## Checker: `varargtype`, scope, and shared result demand
 
 The checker carries the vararg element type on a **new `varargtype` slot** on
 the function-like types, resolves `...` uses through a depth-stamped pseudo-
-symbol, and — its central job — turns every spread into either synthesized
-`...[k]` reads (adjust-up) or a kept `ExpDots` marker (whole-tail).
+symbol, and turns a trailing bare input marker into either synthesized
+`ExpDotsIndex` reads (adjust-up) or a kept `ExpDots` marker (whole-tail).
+Collection and ranged spreads instead use a retained `ExpSpread` carrier plus
+shared finite `ExpSpreadIndex` projections or its open-run descriptor; see
+[Spread expressions](spread-expressions.md#checker-planning).
 
 ### `Type.Function.varargtype` vs. `Type.CFunction.vararg`
 
@@ -242,22 +258,14 @@ with no `$vararg` at all is `'...' can only be used inside a variadic function`.
 A variadic lambda installs its own `$vararg` at its own depth, so its own `...`
 resolves.
 
-### The three `checkexp` arms and the `#...` rewrite
+### The variadic expression checker arms
 
-* **`Ast.ExpDots`** resolves `$vararg` (so scope diagnostics fire) and then
-  reports `'...' can only be used as the last item of an argument list, a
-  return, an assignment, or a positional array/integer-keyed map constructor`
-  — a *bare* `...` outside a
-  spread position is an error. In the legal spread positions the consuming loop
-  intercepts the marker before it reaches this arm, calling `check_dots_marker`
-  (which resolves `$vararg` onto `node._vararg_elem` **without** the bare-`...`
-  error).
-* **`Ast.ExpDotsLen`** sets `node._type = Integer` (after resolving `$vararg`).
-  The `#` arm of `Ast.ExpUnop` special-cases `node.exp._tag == "Ast.ExpDots"`:
-  it builds an `ExpDotsLen`, checks it, and **rewrites the node in place**
-  (`for k in pairs(node) do node[k] = nil end` then copies the `ExpDotsLen`
-  fields), bypassing the array/string `#` path that would choke on a bare `...`
-  operand.
+* **`Ast.ExpDots`** is intercepted by a legal tail consumer through
+  `check_dots_marker`, or by `ExpAdjust` for the exact `(...)` form. Its direct
+  visitor is defensive for synthesized/malformed ASTs; source syntax cannot
+  place a bare node in an ordinary scalar expression.
+* **`Ast.ExpDotsLen`** is built directly by the parser for `#...`, resolves
+  `$vararg`, and sets `node._type = Integer`.
 * **`Ast.ExpDotsIndex`** checks the index against `integer` (`trycoerce` +
   `checkmatch`, term `"variadic index"`), defaults `_nilfill = false`, and types
   the node `t` — **not `t?`** [OWNER §2.A]. This is the deliberate divergence
@@ -265,15 +273,19 @@ resolves.
   struct is dense, codegen bounds-checks and **raises** on out-of-range, and
   that raise is what licenses the non-optional element type. Adjust-up synthesis
   (next) flips `_nilfill = true` / `_type = s?` for an optional target slot.
+* **`Ast.ExpAdjust(ExpDots)`** is rewritten to a nil-filling
+  `ExpDotsIndex(1)`. Its intrinsic type is `optionize(t)`, so an empty input run
+  yields nil, an ordinary required context applies the existing Option force,
+  and the adjusted form always contributes exactly one scalar.
 
 ### Shared finite/open expression-list demand
 
 Declarations, assignments, returns, calls, positional Array/integer-Map
 constructors, and the generic-for setup tuple all use `result_demand` plus
-`adjust_explist`; there are no longer four
-independent spread loops. The adjustment record keeps every written expression
-in lexical order, separates fixed deliveries from scalar/open tail deliveries,
-and marks surplus expressions that must still run only for effect.
+`adjust_explist`; there are no longer separate consumer-specific
+expression-list adjustment loops. The adjustment record keeps every written
+expression in lexical order, separates fixed deliveries from scalar/open tail
+deliveries, and marks surplus expressions that must still run only for effect.
 
 For a **finite demand**, a trailing `Ast.ExpDots` is projected into only the
 needed synthesized `Ast.ExpDotsIndex` reads. Each read follows the consuming
@@ -295,6 +307,11 @@ equal-representation input run by
 descriptor/start view, or allocate and convert a fresh run when the static
 prefix or element representation changes.
 
+Array/Map and comma-bearing variadic
+[spread expressions](spread-expressions.md) reuse this demand record with a
+shared carrier and non-contiguous element reader. Bare `ExpDots` and scalar
+`ExpDotsIndex` retain the behavior described in this chapter.
+
 Passing a runtime-open Titan run into a C-FFI variadic remains an error: the
 checker-local call view sees `Type.CFunction.vararg` as `c_vararg`, and the
 typed Titan descriptor has no C default-promotion contract. Finite written
@@ -307,9 +324,10 @@ value).
 ### Positional `{...}`: backward typing
 
 `ExpInitList` recognizes a trailing key-less `ExpDots` field in an
-all-positional Array or exact integer-keyed Map (and rejects `{..., 1}`:
-`'...' must be the last field in a positional constructor`). A `...` field in
-a computed Map or record constructor is an error. The element/value type is
+all-positional Array or exact integer-keyed Map. The parser rejects
+`{..., 1}` before checking; a trailing `...` field in a computed Map or record
+constructor remains a type error because that distinction depends on the
+target shape. The element/value type is
 **seeded from the vararg element first** — `etype = econtext or
 deoptionize(dots_elem) or ...` — so a no-context `{...}` is `Array(t)`, not
 `Array(t?)`, while an exact `{integer: V}` context selects Map. The kept

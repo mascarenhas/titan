@@ -451,7 +451,8 @@ function generic_infer_forin_scheme(
     end)
 
     generic_add_inference_finalizer(use, function()
-        generic_refresh_finalized_argument_projections(tuple_adjustment)
+        generic_refresh_finalized_argument_projections(
+            tuple_adjustment, context)
         use.closed = generic_substitute_inference(
             context, signature, true)
         exp._generic_scheme = scheme

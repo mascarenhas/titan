@@ -39,6 +39,60 @@ describe("scalar variadic parameters (code generator)", function()
         ]])
     end)
 
+    it("parenthesized `(...)` adjusts the first value and nil-fills absence",
+    function()
+        run_coder([[
+            function first(...: integer): integer?
+                return (...)
+            end
+
+            function subtract_one(...: integer): integer
+                return (...) - 1
+            end
+
+            function observe(...: integer?): (integer, integer?)
+                return #..., ...[1]
+            end
+
+            function adjusted_cardinality(
+                ...: integer
+            ): (integer, integer?)
+                return observe((...))
+            end
+
+            function generic_first<T>(...: T): T?
+                return (...)
+            end
+
+            function generic_optional(...: integer): integer?
+                return generic_first<integer>(...)
+            end
+
+            function generic_required(...: integer): integer
+                return generic_first<integer>(...)
+            end
+        ]], [[
+            assert(test.first() == nil)
+            assert(test.first(7) == 7)
+            assert(test.first(7, 8, 9) == 7)
+            assert(test.subtract_one(10, 20) == 9)
+
+            local empty_count, empty_value = test.adjusted_cardinality()
+            assert(empty_count == 1 and empty_value == nil)
+            local full_count, full_value = test.adjusted_cardinality(5, 6)
+            assert(full_count == 1 and full_value == 5)
+
+            assert(test.generic_optional() == nil)
+            assert(test.generic_optional(11, 12) == 11)
+            assert(test.generic_required(13, 14) == 13)
+
+            local ok = pcall(test.subtract_one)
+            assert(not ok)
+            ok = pcall(test.generic_required)
+            assert(not ok)
+        ]])
+    end)
+
     it("float vararg: #... and ...[i] called from Lua", function()
         run_coder([[
             function fsum(...: float): float

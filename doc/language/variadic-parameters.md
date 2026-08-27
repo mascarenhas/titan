@@ -30,10 +30,10 @@ The variadic *parameter* and the `...` *expression* are **not** first-class
 its function — but the function that declares one **is** an ordinary
 [first-class value](functions.md#functions-as-values), with a
 function type that records the variadic element. This chapter covers the
-declaration syntax, the three things you can do with `...`
-(`#...`, `...[e]`, and spreading it), how a trailing `...` adjusts up into a
-fixed-arity context, variadic functions as values, the Lua boundary, and
-the limits and bans.
+declaration syntax, the explicit scalar forms `#...`, `...[e]`, and `(...)`,
+spreading a trailing `...`, how that tail adjusts up into a fixed-arity
+context, variadic functions as values, the Lua boundary, and the limits and
+bans.
 
 An input variadic tail is independent of a
 [flexible result tail](flexible-returns.md). A function may declare both:
@@ -151,10 +151,13 @@ end
 Using `...` in a function that is not variadic at all is the related error
 `'...' can only be used inside a variadic function`.
 
-The three legal uses of `...` are `#...`, `...[e]`, and spreading it in a
-trailing position; a bare `...` anywhere else (`1 + ...`) is the error
-`'...' can only be used as the last item of an argument list, a return, an
-assignment, or a positional array/integer-keyed map constructor`.
+The parser admits `...` only in an explicit form—`#...`, `...[e]`, `(...)`, a
+collection spread `...subject`, or one of the bracketed spread slices—or as
+the final bare marker of a positional expression list. A bare `...` anywhere
+else, such as `1 + ...`, is a syntax error; it does not reach type checking as
+a scalar operand. At the start of a list item, `... -1` instead has the
+unambiguous collection-spread subject `-1` and reaches the checker, which
+rejects that non-container subject.
 
 ## Length: `#...`
 
@@ -206,16 +209,41 @@ option to use it — `...[i]` goes straight into arithmetic, a comparison, a
 field access, or a call. The raise is exactly what licenses the
 non-optional type.
 
+## Explicit one-value adjustment
+
+Parentheses turn the input run into exactly one scalar value, using its first
+element. Its intrinsic type is `t?`: when `t` is already optional or is
+`value`, Titan does not add another option layer. When the caller supplied no
+variadic argument the value is `nil`, and surplus arguments after the first are
+ignored.
+
+```lua
+function first(...: integer): integer?
+    return (...)
+end
+```
+
+As with every other `t?` expression in Titan, a context requiring plain `t`
+automatically forces it. The force succeeds when a first argument exists and
+raises at run time when the input run is empty. Unlike a bare trailing `...`,
+`(...)` always contributes exactly one value to an expression list, including
+one `nil` value when the run is empty.
+
 ## Spreading `...`
 
 A bare trailing `...` **spreads** the whole run of variadic arguments into
 the surrounding list. As with the [expansion of a multi-return call](functions.md#expansion-in-the-last-position),
-`...` is only legal in the **last** position. The three spread contexts:
+`...` is only legal in the **last** position. Positional expression-list
+consumers include:
 
-* **a call argument list** — `f(a, ...)` or `f(...)`;
-* **a `return`** — `return a, ...` or `return ...`;
+* **a fixed or variadic Titan call argument list** — `f(a, ...)` or `f(...)`;
+* **a `return`**, fixed or flexible — `return a, ...` or `return ...`;
+* **a multiple declaration or assignment** — `local a, b = ...` or
+  `a, b = ...`;
 * **a positional Array or exact integer-keyed Map constructor** —
-  `{a, ...}` or `{...}`.
+  `{a, ...}` or `{...}`;
+* **a generic `for ... in` iterator tuple**, where it fills the remaining
+  iterator, state, control, and optional close positions.
 
 ```lua
 function tail_call(...: integer): integer
@@ -226,6 +254,11 @@ function build(...: integer): {integer}
     return {...}               -- collect the run into a fresh array
 end
 ```
+
+The general [spread-expression](spread-expressions.md) feature also accepts
+`...subject` to expand an Array or integer-keyed Map, and comma-bearing forms
+such as `...[first, last]` to select a closed subrange of this input run.
+Scalar `...[e]` above remains a different, raising operation.
 
 Without a Map context, `{...}` (and `{e1, e2, ...}`) builds an Array whose
 element type is the variadic element type `t` — `{...}` from a
@@ -245,9 +278,11 @@ function as_floats(...: integer): {float}
 end
 ```
 
-A `...` that is not last in a constructor (`{..., 1}`) is the error
-`'...' must be the last field in a positional constructor`. A `...` inside a
-computed-key [Map](arrays-maps.md#maps) or [record](records.md) constructor is
+A bare `...` that is not last in a constructor (`{..., 1}`) is a syntax error.
+An explicit collection spread such as `{...items, 1}` parses and is rejected
+by the checker because only the final positional field can expand. A trailing
+`...` inside a computed-key [Map](arrays-maps.md#maps) or
+[record](records.md) constructor is
 `'...' can only appear in an all-positional array or integer-keyed map
 constructor`.
 
@@ -445,23 +480,27 @@ the result is an ordinary Lua table.
   it.)
 * **A foreign C pointer element is rejected.** A `...` whose element type is
   a [C FFI](ffi.md) pointer is a compile-time error `a variadic parameter
-  cannot have a foreign pointer type`, and `...` cannot be passed into a
-  foreign function — the C FFI has its own, disjoint notion of variadic.
-  A source-written owned C type is different: it is GC-managed userdata and
-  is a supported variadic element type.
+  cannot have a foreign pointer type`. A Titan input run or collection spread
+  cannot supply a C function's variadic operands: C `...` has its own ABI and
+  promotion rules. A nonvariadic C call may consume a Titan spread through its
+  finite fixed formals, with one ordinary foreign conversion per projected
+  scalar. A source-written owned C type is different: it is GC-managed
+  userdata and is a supported variadic element type.
 * **At most 200 variadic arguments.** A variadic run is capped at 200
-  elements (`TITAN_VARARG_MAX`). A statically written call can never reach
-  it (the parser caps an argument list well below that), but a long chain of
-  forwarding or a large Lua-side call can: crossing 200 raises the clean
-  run-time error `too many variadic arguments`. The cap is intentional —
+  elements (`TITAN_VARARG_MAX`). A fixed statically written prefix cannot reach
+  it (the parser caps an argument list well below that), but a runtime-sized
+  Array/Map/input-vararg spread, a long forwarding chain, or a large Lua-side
+  call can: crossing 200 raises the clean run-time error `too many variadic
+  arguments`. The cap is intentional —
   it keeps the run small and stack-allocatable; a function that genuinely
   needs an unbounded homogeneous run should take an explicit array
   parameter `{t}` instead. Flexible result tails use the same 200-element
   bound for the same reason.
 * **`...` does not escape its function.** As covered above, `...` cannot be
   captured by an inner lambda, stored in a variable, or referenced as a
-  value. Spread it, index it, or take its length — but to keep the run
-  around, copy it into an array with `{...}` first.
+  value. Spread it, index it, take its length, or adjust its first value with
+  `(...)` — but to keep the run around, copy it into an array with `{...}`
+  first.
 
 *Implementation note:* a variadic run is passed as a small homogeneous C
 struct (one of seven, one per element representation) rather than a Lua

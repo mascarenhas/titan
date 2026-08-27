@@ -275,13 +275,16 @@ discard.
 
 ### Expansion in the last position
 
-Exactly as in Lua, only a call appearing in the **last position** of an
-expression list can expand; in any other position it is scalar. How far the
-last call expands is chosen by the consumer. A finite consumer requests only
-its remaining slots and ignores producer surplus. An open sink — a variadic
-argument tail, a flexible return tail, or the final field of an array
-constructor — consumes the complete visible run. Every delivered position is
-type-checked and coerced individually. Expansion applies to:
+Only the **last position** of an expression list can expand. Its producer may
+be a multiple- or flexible-return call, the current function's bare `...`, or
+a [spread expression](spread-expressions.md). A call in any earlier position
+is scalar, while bare `...` and a spread are restricted to the tail. How far
+the final producer expands is chosen by the consumer. A finite consumer
+requests only its remaining slots and ignores producer surplus. An open sink
+— a variadic argument tail, a flexible return tail, or the final positional
+field of an Array or exact integer-keyed Map constructor — consumes the
+complete visible run. Every delivered position is type-checked and coerced
+individually. Expansion applies to:
 
 * the right-hand side of multiple declarations and assignments (above);
 * `return` expression lists;
@@ -302,19 +305,24 @@ type-checked and coerced individually. Expansion applies to:
   inside the constructor contributes only its first value;
 * generic `for ... in` iterator tuples — a helper returning
   `(next, state, init, close)` can be used directly after `in`, and a
-  trailing `...` in a variadic function can fill the remaining tuple slots.
+  trailing `...` or spread can fill the remaining tuple slots.
 
 Computed Map and record fields, named arguments, conditions, and other scalar
 positions request one value. For example, `[k] = divmod(13, 2)` keeps only the
 first.
 Calls with a flexible tail project `T?` into finite positions and preserve the
 whole run only in an open sink; see [Flexible returns](flexible-returns.md).
+Array, integer-keyed Map, and ranged-vararg producers are detailed under
+[Spread expressions](spread-expressions.md).
 
 ### Adjusting to one value
 
 Wrapping a call in parentheses truncates it to exactly one value, again
 as in Lua. `(divmod(a, b))` is a single `integer` and can go anywhere a
-single value is expected:
+single value is expected. The related exact input-vararg form `(...)` also
+contributes one value—the first argument, with intrinsic type `T?` so absence
+is represented by nil; see
+[Variadic parameters](variadic-parameters.md#explicit-one-value-adjustment).
 
 ```lua
 function just_div(a: integer, b: integer): integer

@@ -129,9 +129,10 @@ C namespace remains usable because its functions, values, fields, types,
 After ordinary checking and elaboration, `_validate_foreign_body_node` performs
 a closed AST walk. It rejects `StatTry` (including parser-lowered `defer`),
 `raise`, generic `for`, `case`, constructors, lambdas, bound methods, variadic
-expressions, concatenation, `is`, Titan boolean operators, and allocation
-pseudo-calls. Every local must have an initializer and a direct non-owner,
-non-function, non-module, non-void C type. A return has zero or one expression.
+expressions, subset/spread expressions, concatenation, `is`, Titan boolean
+operators, and allocation pseudo-calls. Every local must have an initializer
+and a direct non-owner, non-function, non-module, non-void C type. A return has
+zero or one expression.
 This second pass is important: parser desugarings and checker-synthesized nodes
 cannot bypass the raw-C surface merely because their original spelling looked
 innocent.
