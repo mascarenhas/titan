@@ -378,15 +378,20 @@ directly or through its documented Task-owned one-shot timer, dispatches the
 next yielded operation, and returns; no callback or Task may re-enter `uv_run`.
 
 Use Task terminal listeners for bounded Task composition. Inspect initial
-statuses first, register a distinct listener directly on each still-relevant
-named Task, call every returned idempotent remover in `defer`, then call
-`async.suspend()` once. A deciding listener calls `Task:resume()`, which
-synchronously installs a
-coalesced target-owned zero timer and never resumes the target inline. That
-timer starts close from `timer_cb` and resumes only from `close_cb`; external
-cancellation of the suspended Task uses the same wake. Do not collect
-heterogeneously typed combinator operands into a Task Array or add a native
-polling/phase-fence protocol or scheduler join protocol.
+statuses first, create one fresh private `async.ResumeToken` for the composition
+invocation, then register a distinct listener that captures that record directly
+on each still-relevant named Task. Call every returned idempotent remover in
+`defer`, then call `async.suspend(token)` once. A deciding listener calls
+`Task:resume(token)`, which synchronously installs a coalesced
+target-owned zero timer and never resumes the target inline. Repeated calls with
+the correct token coalesce; a different token raises in its caller instead of
+waking the Task. The optional token source is diagnostic only. That timer starts
+close from `timer_cb` and resumes only from `close_cb`; external cancellation of
+the suspended Task uses the stored token and the same wake. Tokens authorize
+only explicit `suspend`/`Task:resume(token)` coordination: native callbacks keep their
+source-private tokenless continuation path. Do not collect heterogeneously typed
+combinator operands into a Task Array or add a native polling/phase-fence
+protocol or scheduler join protocol.
 
 Low-level contributors must classify a new libuv binding as synchronous,
 one-shot, or persistent multi-shot before adding state. Follow

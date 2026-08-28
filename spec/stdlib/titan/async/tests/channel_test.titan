@@ -223,37 +223,50 @@ function test_channel_cancellation_clears_waiters(context: test.Context)
   end)
 end
 
-function test_channel_rechecks_after_direct_wake(context: test.Context)
+function test_channel_rejects_foreign_resume_tokens(context: test.Context)
   runtime_test.run(function ()
+    local wrong_token = async.ResumeToken.new("channel test outsider")
     local send, receive = async.channel<string>()
     send("stored")
     local sender = async.run(function (): nil
       send("released")
     end)
-    task_support.cleanup_task(sender, "direct-wake sender cleanup")
+    task_support.cleanup_task(sender, "token-guarded sender cleanup")
     support.wait_until_waiting(sender)
-    sender:resume()
-    timer.sleep(2)
-    test.assert(sender:status():as_string() == "waiting",
-          "direct resume let a sender overwrite a full channel")
-    test.assert(receive() == "stored", "spurious sender wake changed the buffer")
-    test.assert(receive() == "released", "rechecked sender did not enqueue")
+    local sender_error = ""
+    do
+      sender:resume(wrong_token)
+    catch
+      sender_error = error as string
+    end
+    test.assert(sender_error ==
+          "Task resume token mismatch (expected source: channel)" and
+          sender:status():as_string() == "waiting",
+          "foreign token did not fail in the blocked sender's caller")
+    test.assert(receive() == "stored", "foreign sender wake changed the buffer")
+    test.assert(receive() == "released", "channel progress did not wake sender")
     test.assert(async.join(sender):has_succeeded(),
-          "rechecked sender did not finish")
+          "token-guarded sender did not finish")
 
     local send_empty, receive_empty = async.channel<string>()
     local receiver = async.run(receive_empty)
-    task_support.cleanup_task(receiver, "direct-wake receiver cleanup")
+    task_support.cleanup_task(receiver, "token-guarded receiver cleanup")
     support.wait_until_waiting(receiver)
-    receiver:resume()
-    timer.sleep(2)
-    test.assert(receiver:status():as_string() == "waiting",
-          "direct resume let a receiver consume an empty channel")
+    local receiver_error = ""
+    do
+      receiver:resume(wrong_token)
+    catch
+      receiver_error = error as string
+    end
+    test.assert(receiver_error ==
+          "Task resume token mismatch (expected source: channel)" and
+          receiver:status():as_string() == "waiting",
+          "foreign token did not fail in the blocked receiver's caller")
     send_empty("delivered")
     local receiver_status = async.join(receiver)
     local receiver_succeeded, received = receiver_status:has_succeeded()
     test.assert(receiver_succeeded and received == "delivered",
-          "rechecked receiver did not consume the later item")
+          "channel progress did not wake receiver")
   end)
 end
 

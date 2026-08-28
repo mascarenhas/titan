@@ -428,22 +428,41 @@ operation queue.
 
 The public `async.join*`, `any_*`, `race_*`, and `all_*` functions first scan
 their fixed named operands. If the result is not yet decided, they install a
-separate listener closure directly on each still-relevant operand, suspend the
-current Task once, and let the captured result/counter state decide when to
-call `Task:resume()`. Each registration has a deferred remover call so external
+fresh private `ResumeToken`, capture it in a separate listener closure directly
+on each still-relevant operand, and suspend the current Task once with that
+token. The captured result/counter state decides when to call
+`Task:resume(token)`. Each registration has a deferred remover call so external
 cancellation of the suspended combinator cannot leave a stale listener. Do not
 collect operands into a `{Task}` helper: keeping each named path expanded
 preserves the heterogeneous generic result and cancellation type of every
 position.
 
-`Task:resume()` is synchronous from either terminal notification or another
-running Task. It coalesces requests and installs a target-owned zero-duration
-timer; `timer_cb` initiates close and `close_cb` resumes the target after
-releasing the timer owner. The same wake handles cancellation of an explicitly
-suspended Task. There is no public Waiter, `uv_check_t`, Runtime `uv_idle_t`,
-polling loop, phase fence, or Task Array in this composition. Do not add
-test-only module hooks or source transformers merely to run the same ownership
-proof through another handle type.
+Retain winner or rejection guards and completion counters when they arbitrate
+multiple legitimate terminal listeners before deferred delivery. Do not add a
+nullable waiting-Task guard as an early-resume defense: an outside caller lacks
+this invocation's private token. The existing `join*` per-position
+`has_finished()` checks are redundant local idempotence: each positional
+registration is invoked once. They are unrelated to this protocol.
+
+`Task:resume(token)` first requires nominal identity with the token stored by
+the current explicit suspension. A mismatch raises synchronously in its caller
+as `Task resume token mismatch (expected source: <source>)`; a missing expected
+source is `unknown source`, including every wrong-time call after the stored
+token was cleared. The source is diagnostic only. Correct-token calls are
+synchronous from either terminal notification or another running Task, coalesce
+requests, and install a target-owned zero-duration timer; `timer_cb` initiates
+close and `close_cb` resumes the target after releasing the timer owner.
+Cancellation captures and uses the same stored token after its optional detach
+action.
+
+This token is only the capability for public `Task:resume(token)` to wake the exact
+`async.suspend` that stored it. It is not a general native-wait token. Operation
+and persistent-source callbacks continue through their source-private tokenless
+callback helpers, even when the facade also owns a private token for explicit
+coordination. There is no public Waiter, `uv_check_t`, Runtime `uv_idle_t`,
+polling loop, phase fence, or Task Array in this composition. Do not add test-
+only module hooks or source transformers merely to run the same ownership proof
+through another handle type.
 
 ## Adding a new handle type
 

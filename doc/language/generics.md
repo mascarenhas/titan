@@ -780,11 +780,17 @@ The `async` facade exports constructor-preserving aliases of the owners in
 type CancellationReason = uv.CancellationReason
 type TaskStatus = uv.TaskStatus
 type Task = uv.Task
+type ResumeToken = uv.ResumeToken
+type SuspendCancelAction = () -> ()
 ```
 
 `Task<A,B>` is an opaque generic record. The public generic shapes are:
 
 ```titan
+record ResumeToken
+    const source: string?
+end
+
 union CancellationReason<B>
     simple: string
     complex: B
@@ -810,10 +816,12 @@ function Task:status(): TaskStatus<A, B>
 function Task:add_terminal_listener(
     listener: (TaskStatus<A, B>) -> ()
 ): () -> ()
-function Task:resume()
+function Task:resume(token: ResumeToken)
 
 function run<A, B>(func: () -> A): Task<A, B>
 function running(): Task
+function suspend(token: ResumeToken,
+                 cancel_action: SuspendCancelAction?)
 function channel<T>(size: integer?):
     ((T) -> (), () -> T, () -> ())
 ```
@@ -821,6 +829,13 @@ function channel<T>(size: integer?):
 `A` is the Task's success type and `B` is the payload of a complex
 cancellation reason. `running()` is deliberately
 monomorphic: bare `Task` is exactly `Task<value,value>`.
+
+`ResumeToken` is nominal and non-generic. Every Task application uses the same
+owner, and only the exact record passed to `suspend` can resume that explicit
+suspension. Its optional `source` is diagnostic rather than type or equality
+evidence; it adds no run-time type argument or generic witness.
+A wrong token raises in the caller with the stored expected source, and a
+wrong-time call reports `unknown source`; neither check depends on `A` or `B`.
 
 `B` is result-only in `run<A,B>`. An expected `Task<A,B>` infers it;
 without that evidence it closes to `value`. A complete explicit list remains

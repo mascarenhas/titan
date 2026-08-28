@@ -96,47 +96,90 @@ it is absent. Terminal
 notification consequently runs on the Lua main thread after the terminating
 coroutine is no longer the running Task.
 
-`async.suspend` yields a dedicated `SuspendCall`. Its dispatcher marks the
-current Task explicitly suspended and installs a cancellation action. When the
-caller supplied an optional `SuspendCancelAction`, cancellation runs it
-synchronously first so an exact external waiter can detach while Titan still
-has control; the action must neither yield nor raise. The dispatcher then asks
-the same Task to resume on its ordinary next-turn timer. Suspend submits no native request
-and registers the Task on no persistent handle. The suspension remains inert
-until `Task:resume` or cancellation requests a wake.
+The source-private `uv` provider owns this nominal public record:
 
-This public change is part of compiled-module ABI 2. `SuspendCancelAction` and
-the `TValue` option parameter appear in the exact native entry, changing the
-serialized `titan.async` interface and exact signature. A mismatched provider
-is rejected rather than migrated or adapted.
+```titan
+record ResumeToken
+  const source: string?
+end
+```
 
-`Task:resume` is synchronous, does not yield its caller, and never enters the
-target coroutine inline. If the target is explicitly suspended, nonterminal,
-and has no wake pending, it sets one coalescing bit and creates an ordinary
-target-owned zero-duration timer. `timer_cb` initiates `uv_close`; only
-`close_cb`, after releasing the owner, clears the suspension state and resumes
-the Task. The method therefore
-works identically from the main-thread terminal-notification path or another
-running Task. Repeated requests before close completion coalesce. This
-guarantees callback-deferred delivery without promising one exact libuv
-iteration.
+The `async` facade re-exports that owner and declares the public suspension
+boundary separately:
+
+```titan
+type ResumeToken = uv.ResumeToken
+type SuspendCancelAction = () -> ()
+function suspend(token: ResumeToken,
+                 cancel_action: SuspendCancelAction?)
+function Task:resume(token: ResumeToken)
+```
+
+`async.suspend` yields a dedicated `SuspendCall` containing the exact token and
+optional cancellation action. Its dispatcher marks the current Task explicitly
+suspended, stores that token in the Task's optional `resume_token` field, and
+installs a cancellation closure. Suspend submits no native request and
+registers the Task on no persistent handle.
+
+`Task:resume(token)` first compares the supplied record with the stored record by
+nominal identity. The token's optional `source` does not participate in that
+comparison; it only diagnoses a mismatch. Any mismatch raises synchronously in
+the calling continuation with this exact message:
+`Task resume token mismatch (expected source: <source>)`. The source is
+`unknown source` when the stored token or its source is nil.
+This comparison precedes every state guard. A Task that is not currently in an
+explicit suspension stores no expected token, so a resume attempted before
+suspension, after wake delivery, or after terminal completion also raises
+unconditionally instead of becoming a no-op.
+
+With the correct token, `Task:resume(token)` is synchronous, does not yield its caller,
+and never enters the target coroutine inline. If no wake is pending, it sets one
+coalescing bit and creates an ordinary target-owned zero-duration timer.
+`timer_cb` initiates `uv_close`; only `close_cb`, after releasing the owner,
+delivers the continuation. Before `advance_task` can re-enter user code, the
+private completion clears `suspended`, `resume_token`, and `resume_pending`.
+Repeated correct-token requests before close completion coalesce. The method
+therefore works identically from the main-thread terminal-notification path or
+another running Task, without promising one exact libuv iteration.
+
+On cancellation, the installed closure first runs the optional
+`SuspendCancelAction` synchronously so the exact waiter can detach, then calls
+`resume` with the captured stored token. The action must neither yield nor
+raise. Every user-Task terminal path calls the shared explicit-suspension clear
+before `notify_terminal` stores the final status and invokes its snapshot.
+This includes callback-boundary failure paths that do not pass through ordinary
+resume delivery. Terminal listeners therefore cannot observe or reuse a stale
+stored token; even the formerly exact record mismatches with expected source
+`unknown source`. Retirement repeats the clear idempotently before unrooting the
+Task. Calls outside an explicit suspension continue to mismatch until another
+suspension deliberately stores a token.
+
+`ResumeToken`, `SuspendCancelAction`, both required token parameters, and the
+nil-accepting cancellation-action parameter are part of compiled-module ABI 2.
+They appear in the serialized `titan.async` interface and exact native
+signatures. A mismatched provider is rejected rather than migrated or adapted.
 
 A source-private condition-waiter callback publishes completion through its
-request or queue, then calls `resume_condition_waiter_from_callback`. With no
-public wake pending, the helper retains the ordinary direct operation-callback
-continuation. If the Task's coalescing bit is already set, it leaves the
-Task-owned timer as the sole continuation instead. The callback can therefore
-neither duplicate that wake nor advance the Task into a later suspension that
-the older timer would incorrectly resume. If callback-boundary failure retires
-the Task while such a timer is closing, the timer completion clears the pending
-bit and returns without entering the terminal coroutine.
+request or queue, then calls tokenless
+`resume_condition_waiter_from_callback`. Native callbacks do not call public
+`Task:resume(token)` and do not receive or validate a `ResumeToken`; the token protects
+only explicit suspension ownership. With no public wake pending, the helper
+retains the ordinary direct operation-callback continuation. If a correct-token
+wake is already pending, it leaves the Task-owned timer as the sole
+continuation. The callback can therefore neither duplicate that wake nor
+advance the Task into a later suspension that the older timer would incorrectly
+resume. If callback-boundary failure retires the Task while such a timer is
+closing, the timer completion clears the pending token state and returns
+without entering the terminal coroutine.
 
 ## High-level bounded channels
 
 `async.channel<T>` is implemented entirely in `titan/async.titan` over
-`async.running`, `async.suspend`, and `Task:resume`; it adds no `Call` variant,
-native handle, callback trampoline, or Runtime queue. Its one generic source
-body returns this closure triple over one bounded circular buffer:
+`async.running`, token-bearing `async.suspend`, and `Task:resume(token)`; it adds no
+`Call` variant, native handle, callback trampoline, or Runtime queue. Each
+channel creates one fresh private `ResumeToken` shared by its send, receive,
+close, and cancellation paths. Its one generic source body returns this closure
+triple over one bounded circular buffer:
 
 ```titan
 ((T) -> (), () -> T, () -> ())
@@ -157,37 +200,36 @@ prevents barging: after an opposite operation changes `count` and requests a
 wake, another same-direction Task cannot take the newly available value or slot
 while the original waiter's timer is still pending.
 
-Send otherwise waits while the channel is open and `count == capacity`, then
-writes at `next`, wraps the index, increments `count`, and calls `resume()` on
-an installed receiver. Receive waits while the channel is open and `count ==
-0`, then takes and clears `first`, wraps the index, decrements `count`, and
-resumes an installed sender. After either condition loop, the waiter clears its
-slot and raises `"channel is closed"` if close caused its wake. The payload
-buffer is FIFO and never grows beyond `capacity`. A competing Task cancellation
-remains authoritative over that operation error.
+If send finds the buffer full, it installs itself as the sender and suspends
+once with the channel token. Only a receive that has already decremented `count`
+or a committed close can normally wake it with that token. Empty receive is
+symmetric: only a send that has already incremented `count` or close can
+normally wake it. On normal progress, send writes at `next`, wraps the index,
+increments `count`, and wakes an installed receiver; receive takes and clears
+`first`, wraps the index, decrements `count`, and wakes an installed sender.
+Both wakes use the channel token. The payload buffer is FIFO and never grows
+beyond `capacity`.
 
 There is at most one blocked Task in each direction. A second operation that
 finds an occupied sender or receiver slot raises rather than barging or forming
 a Task queue. Each blocking path installs the current Task and immediately
-wraps that install in deferred conditional removal. Cancellation therefore
-wakes the explicit suspension through its ordinary Task-owned timer and then
-clears the waiter during unwind.
-
-Both blocking paths use a condition loop around `suspend()`. A direct or
-coalesced `Task:resume()` is a wake request, not ownership of a buffer slot: a
-caller holding the waiter may request a wake before full/empty state changes.
-Rechecking the condition safely suspends again after such a spurious wake. The
-opposite channel operation requests the normal wake only after it has changed
-`count`, and the occupied waiter slot then prevents a same-direction caller
-from taking that progress before delivery.
+wraps that install in deferred conditional removal. Because the token is
+private and the occupied waiter slot remains authoritative through delivery, a
+normal return from the single suspension already has the required buffer
+postcondition. An outside caller with a different token raises in its own
+continuation and cannot wake the channel. Cancellation uses the suspension's
+stored token only to inject the reason; it unwinds instead of returning
+normally, and the defer removes the waiter. If close caused the normal wake,
+the operation clears its slot and raises `"channel is closed"` unless
+cancellation wins that unwind.
 
 The close closure is synchronous and idempotent. Its first call sets `closed`,
 replaces `transfer` with an empty Array, resets both indices and `count`, and
-calls `resume()` on each installed waiter. Replacing the Array releases every
-buffered GC reference; close does not expose a drain phase. A later or woken
-send/receive observes `closed` and raises the exact `"channel is closed"`
-error, unless an authoritative Task cancellation wins the same unwind; a
-repeated close returns immediately.
+resumes each installed waiter with the private channel token. Replacing the
+Array releases every buffered GC reference; close does not expose a drain
+phase. A later or woken send/receive observes `closed` and raises the exact
+`"channel is closed"` error, unless an authoritative Task cancellation wins
+the same unwind; a repeated close returns immediately.
 
 Generic lowering recursively erases `{T}` to `{value}` and both payload
 callbacks to their all-value carriers, preserving the former native prototype
@@ -276,11 +318,11 @@ with only that callback's parameters. There is no event-kind tag or generic
 callback payload at this boundary, and the manuals do not make the owners'
 private record layouts part of the design contract.
 
-The Task-resume boundary catches errors raised by a user continuation and
-retires only that Task. Operation callbacks use ordinary `catch`/`finally`
-where a native result must first be released. A user-Task callback failure
-therefore does not become a Runtime-wide failure. The outer loop's final
-`uv_loop_close` remains the native cleanup proof.
+The private callback-to-coroutine resume boundary catches errors raised by a
+user continuation and retires only that Task. Operation callbacks use ordinary
+`catch`/`finally` where a native result must first be released. A user-Task
+callback failure therefore does not become a Runtime-wide failure. The outer
+loop's final `uv_loop_close` remains the native cleanup proof.
 
 The alloc and walk callbacks are direct. An alloc callback fills the supplied
 `uv_buf_t` from storage on the stream owner. It cannot unwind a Titan
@@ -339,12 +381,11 @@ callback protocol:
   accepted client or satisfies one waiter; and
 - a process caches its exit status and satisfies at most one current waiter.
 
-A callback clears its waiter before delivering it. Stream, listener, and
-process callbacks resume directly. A waited repeating-timer callback uses a
-Task-owned one-shot wake for callback-deferred delivery; that timer closes
-before it resumes the waiter. A directly resumed continuation may install the
-next waiter before the callback returns, with no reentrant `uv_run` and no
-unrelated callback interleaving.
+A callback clears its waiter before delivering it. Repeating-timer, stream,
+listener, and process callbacks resume directly through their tokenless private
+callback path. A directly resumed continuation may install the next waiter
+before the callback returns, with no reentrant `uv_run` and no unrelated
+callback interleaving.
 
 Stream allocation is paired directly with the next read result. Positive
 reads copy the reported byte count, zero reads are ignored, `UV_EOF` becomes
@@ -483,16 +524,26 @@ operand, and scans the named operands from left to right. It never collects them
 into a common `{Task}` Array, which would collapse every position to the
 all-value application and discard the public result/status precision.
 
-If the initial statuses do not decide the result, the implementation creates a
+If the initial statuses do not decide the result, the implementation creates
+one fresh, source-labelled private token for that combinator invocation and a
 separate closure for each still-relevant named operand. Those listeners capture
-the result slots, terminal counter, or winner position required by that family.
-The listener that makes the result decidable calls `resume()` on the suspended
-current Task; resume only installs its coalesced zero-timer wake and returns to
-the terminal publisher. The combinator calls `suspend()` once, then returns or
-raises from the captured state after that wake. Every registration returns an
-idempotent remover that is called by a matching `defer`. If another Task
-cancels the suspended combinator, the cancellation wake resumes it through
-the same timer protocol and those defers remove all outstanding registrations before it unwinds.
+the token with the result slots, terminal counter, or winner position required
+by that family. The listener that makes the result decidable resumes the
+suspended current Task with that token; resume only installs its coalesced zero-
+timer wake and returns to the terminal publisher. The combinator suspends once
+with the same token, then returns or raises from the captured state after that
+wake. Every registration returns an idempotent remover that is called by a
+matching `defer`. If another Task cancels the suspended combinator, its stored
+token schedules the same timer wake and those defers remove all outstanding
+registrations before it unwinds.
+
+Winner and rejection guards, together with completion counters, arbitrate
+multiple legitimate terminal listeners that can run before the deferred wake is
+delivered. They prevent a later listener from replacing a selected result or
+deciding it twice; they are not an early-resume defense. The per-position
+`has_finished()` checks retained by `join*` are redundant local idempotence—each
+positional registration is invoked once—and are unrelated to this boundary. The
+private token makes a nullable `waiting` guard for outside callers unnecessary.
 
 Because the loop is non-reentrant, no other Task can terminalize between the
 initial scan, the listener registrations, and suspension. Already-terminal
@@ -529,9 +580,9 @@ completion before a later sensitive boundary reinjects the reason. A waiter
 detached from a shared multi-shot handle cannot close that shared resource; it
 receives its own Task-owned one-shot timer and resumes from that timer's close
 callback. Cancellation of an explicitly suspended Task first runs its optional
-nonyielding, nonraising waiter-detachment action and then calls `resume`, which
-coalesces with any already requested wake. Cancellation never resumes one Task
-synchronously inside another Task.
+nonyielding, nonraising waiter-detachment action and then calls `resume` with
+the stored token, which coalesces with any already requested correct-token wake.
+Cancellation never resumes one Task synchronously inside another Task.
 
 ## Runtime shutdown
 
