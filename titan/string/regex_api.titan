@@ -69,10 +69,3 @@ local function regex_find_from(regex: Regex, subject: string,
   end
   return nil
 end
-
-local function regex_group_values(found: RegexMatch,
-                                  index: integer): (...: string?)
-  if index > #found.groups then return end
-  if index == #found.groups then return found:group(index) end
-  return found:group(index), regex_group_values(found, index + 1)
-end

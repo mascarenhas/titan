@@ -440,10 +440,3 @@ local function unpack_double_bytes(data: string, position: integer,
     ffi.titan_ffi_double.sizeof as cstring.size_t)
   return converted as lua.lua_Number
 end
-
-local function flexible_values(results: {value},
-                               index: integer): (...: value)
-  if index > #results then return end
-  if index == #results then return results[index] end
-  return results[index], flexible_values(results, index + 1)
-end
