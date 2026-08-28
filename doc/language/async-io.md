@@ -14,23 +14,26 @@ handler is preserved.
 
 ## Scheduling and driving Tasks
 
-The facade re-exports `Task`, `TaskStatus`, and `CancellationReason` as
-constructor-preserving aliases of generic owners in the private provider; it
-also re-exports the ordinary `Error` and `OperationError` records. The aliases
-retain the underlying public static/constructor namespace, so applications and
-cancellation reasons are spelled through `async`:
+The facade re-exports `Task`, `TaskStatus`, `CancellationReason`, and
+`ResumeToken` as constructor-preserving aliases of owners in the private
+provider; it also re-exports the ordinary `Error` and `OperationError` records.
+The aliases retain the underlying public static/constructor namespace. The
+public `async` facade surface below includes methods available through those
+aliases:
 
 ```titan
 type CancellationReason = uv.CancellationReason
 type TaskStatus = uv.TaskStatus
 type Task = uv.Task
+type ResumeToken = uv.ResumeToken
 type SuspendCancelAction = () -> ()
 
 function run<A, B>(func: () -> A): Task<A, B>
 function loop()
 function yield()
 function running(): Task -- exactly Task<value, value>
-function suspend(cancel_action: SuspendCancelAction?)
+function suspend(token: ResumeToken,
+                 cancel_action: SuspendCancelAction?)
 function channel<T>(size: integer?):
     ((T) -> (), () -> T, () -> ())
 function reader_writer_channel(size: integer?):
@@ -51,7 +54,22 @@ function Task:cancel(reason: CancellationReason<B>?)
 function Task:status(): TaskStatus<A, B>
 function Task:add_terminal_listener(
     listener: (TaskStatus<A, B>) -> ()): () -> ()
-function Task:resume()
+function Task:resume(token: ResumeToken)
+
+function TaskStatus:as_string(): string
+function TaskStatus:has_finished(): boolean
+function TaskStatus:has_succeeded(): (boolean, A?)
+function TaskStatus:has_failed(): (boolean, Error?)
+function TaskStatus:has_cancelled(): (boolean, CancellationReason<B>?)
+```
+
+The aliased data owners are declared in the source-private `uv` provider, not
+again in the `async` facade:
+
+```titan
+record ResumeToken
+  const source: string?
+end
 
 record Error
   error: value
@@ -78,12 +96,6 @@ union TaskStatus<A, B>
   failed: Error
   cancelled: CancellationReason<B>
 end
-
-function TaskStatus:as_string(): string
-function TaskStatus:has_finished(): boolean
-function TaskStatus:has_succeeded(): (boolean, A?)
-function TaskStatus:has_failed(): (boolean, Error?)
-function TaskStatus:has_cancelled(): (boolean, CancellationReason<B>?)
 ```
 
 `Task<A, B>` uses `A` for a successful return and `B` for the payload of a
@@ -151,32 +163,49 @@ resource. `timer.yield()` is a facade over the same operation. Calling either
 outside a Task raises.
 
 `async.running()` returns the current Task and raises when called outside one.
-`async.suspend(cancel_action)` suspends that Task without registering a native
-operation or an implicit waiter; it likewise raises outside a Task. The
-optional zero-argument action runs synchronously in the Task that requests
-cancellation, before the suspended Task's next-turn wake is scheduled. It is
-for nonyielding, nonraising detachment of an exact waiter or similar ownership
-state; an
-ordinary `Task:resume()` does not call it. When omitted, `suspend()` retains its
-original behavior.
+`async.suspend(token, cancel_action)` suspends that Task without registering a
+native operation or an implicit waiter; it likewise raises outside a Task. The
+Task retains the exact `ResumeToken` record until that suspension ends. A token
+is nominal: only the same record passed to `suspend` can later be passed to
+`Task:resume(token)`. The optional `source` is diagnostic text, not part of the
+comparison. Coordination abstractions should create a fresh token, keep it
+private, and share that record only with the code allowed to wake their waiter.
+Create it through the re-exported constructor, for example
+`local token = async.ResumeToken.new("my gate")`.
+The token authorizes only `Task:resume` of that explicit `suspend`; it is not a
+general wake for a Task waiting on a native operation or persistent source.
 
-The `SuspendCancelAction` alias and nil-accepting parameter are part of the
-public compiled-module contract: both serialized `titan.async` metadata and the
-exact native signature include them. The fixed-call nil-fill rule keeps an
-omitted argument equivalent to explicit nil. A mismatched provider is rejected
-rather than migrated or adapted.
+Passing any other token raises synchronously in the caller of `resume`:
+`Task resume token mismatch (expected source: <source>)`. The message uses the
+stored expected token's source, never the supplied token's; a missing stored
+token or nil expected source is shown as `unknown source`. The check is
+unconditional whenever the Task has no current explicit suspension—including
+before suspension, after wake delivery until another suspension, or after
+terminal completion—so a wrong-time call raises with expected source
+`unknown source`; it is not a no-op.
 
-The Task remains suspended until `Task:resume()` is called or someone cancels
-it. `resume()` does not enter the target Task inline. It synchronously requests
-a callback-deferred wake without yielding its caller, so it is valid from a
-terminal listener's main-thread context or another running Task. Repeated
-requests before the wake coalesce; calling it for a Task that is not explicitly
-suspended or is already terminal is a no-op.
+With the correct token, `resume` does not enter the target Task inline. It
+synchronously requests a callback-deferred wake without yielding its caller,
+so it is valid from a terminal listener's main-thread context or another
+running Task. Repeated correct-token requests before the wake coalesce.
 
-Every accepted wake request uses a zero-duration timer owned by the target
-Task. The timer callback initiates `uv_close`, and the close callback releases
-the timer owner before resuming the Task. This guarantees callback-deferred
-delivery but does not promise one exact libuv iteration.
+The optional zero-argument cancellation action runs synchronously in the
+caller that requests cancellation, before the suspended Task's correct-token
+wake is scheduled. It is for nonyielding, nonraising detachment of an exact
+waiter or similar ownership state; an ordinary correct-token `resume` does not
+call it. Omitting the second argument is equivalent to passing nil.
+
+`ResumeToken`, `SuspendCancelAction`, the required token parameters, and the
+nil-accepting cancellation-action parameter are part of the public compiled-
+module contract. Both serialized `titan.async` metadata and the exact native
+signatures include them. A mismatched ABI-2 provider is rejected rather than
+migrated or adapted.
+
+The first correct-token wake request uses a zero-duration timer owned by the
+target Task; later requests before delivery coalesce. The timer callback
+initiates `uv_close`, and the close callback releases the timer owner before
+resuming the Task. This guarantees callback-deferred delivery but does not
+promise one exact libuv iteration.
 
 ## Bounded channels
 
@@ -213,11 +242,15 @@ Task.
 
 After enqueueing a value, `send` requests a wake for the blocked receiver, if
 any. After dequeueing a value, `receive` does the same for the blocked sender.
-These calls use `Task:resume()`, so repeated wake requests coalesce and never
-enter the other Task inline. A resumed operation rechecks whether the buffer is
-still full or empty before proceeding. Cancelling a blocked Task wakes it
-through the same Task-owned timer, and the operation's deferred cleanup removes
-its waiter registration.
+Each channel owns one private token shared by all of its blocking and wake
+paths. These calls use that token with `Task:resume(token)`, so repeated wake
+requests coalesce and never enter the other Task inline; code holding only the
+Task cannot wake the channel with a different token. A blocking operation
+suspends once. Its authorized normal wake comes only after the opposite
+operation has established buffer progress or `close` has committed terminal
+state, and the occupied waiter slot prevents another same-direction operation
+from stealing that progress before delivery. Cancellation instead injects the
+Task's reason and unwinds; deferred cleanup removes its waiter registration.
 
 `close()` is synchronous and idempotent. Its first call marks the channel
 closed, discards every buffered reference rather than making queued values
@@ -299,6 +332,12 @@ registrations of the same listener remain distinct; removing one never depends
 on original or adjusted closure identity. Adding a listener to an already
 terminal Task returns an idempotent no-op remover.
 
+Before publishing a final status, the Runtime retires any current explicit
+suspension token and pending wake. A terminal listener that calls `resume` on
+the terminating Task therefore receives the unconditional `unknown source`
+mismatch, even when a callback-boundary failure ended the Task without an
+ordinary wake delivery.
+
 Once the final status has been stored, the main-thread continuation driver
 detaches the registration Array as a stable delivery snapshot, installs an
 empty live list, and marks every detached registration no longer live. It
@@ -376,10 +415,11 @@ returns all exact final statuses without raising them.
 Each operation first inspects its named operands from left to right. If its
 condition is not already satisfied, it installs a separate terminal listener
 on each still-relevant operand and suspends exactly once. The listeners capture
-the operation's counters, result slots, or winner; the listener that makes the
-result decidable calls `resume()` on the suspended Task. The combinator calls
-every returned remover with `defer`, including when someone else cancels it
-while it is suspended. It never collects the operand Tasks into an Array.
+the operation's counters, result slots, or winner and one fresh private token
+for that invocation. The listener that makes the result decidable resumes the
+suspended Task with that token. The combinator calls every returned remover
+with `defer`, including when someone else cancels it while it is suspended. It
+never collects the operand Tasks into an Array.
 
 The initial scan supplies the left-to-right tie break when multiple operands
 are already terminal. Later terminal notifications are observed in publication
@@ -442,10 +482,11 @@ An ordinary operation-completion turn has this shape:
 
 One-shot timers have a stricter lifetime path: `timer_cb` submits `uv_close`
 without resuming user code, then `close_cb` releases the owner and resumes the
-suspended Task. Explicit `resume`, cancellation of `async.suspend`, repeating-
-ticker delivery, and other deferred continuations use these Task-owned one-shot
-timers. There is no taskless timer, check/idle phase bridge, or implicit ready
-queue.
+suspended Task. Correct-token explicit resume and cancellation of
+`async.suspend` use these Task-owned one-shot timers. Native operation and
+persistent-source callbacks instead enter their source-private continuation
+path; they do not invent, receive, or validate public resume tokens. There is no
+taskless timer, check/idle phase bridge, or implicit ready queue.
 
 After libuv accepts a one-shot callback-bearing submission, its next progress
 comes from a later loop turn. A negative synchronous submission result is the

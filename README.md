@@ -587,8 +587,11 @@ while the Task remains in its current live status, then publishes terminal
 `cancelled`. The `async.any_*`, `race_*`, `all_*`, and `join*` combinators wait
 for bounded groups through terminal listeners and explicit suspension without
 adding a second scheduler; see the async chapter for their fixed-arity result
-unions. `async.running()` returns the current Task, while `async.suspend()` and
-`Task:resume()` support an explicitly resumed suspension.
+unions. `async.running()` returns the current Task. Explicit suspension creates
+a private nominal `async.ResumeToken`, passes that same record to
+`async.suspend(token)`, and later supplies it to `Task:resume(token)`. Only the
+exact token for the current explicit suspension is accepted; ordinary native
+operation callbacks continue through their private tokenless path.
 
 An ordinary libuv operation callback directly resumes its Titan Task, and
 application code runs in that callback until it finishes or starts another

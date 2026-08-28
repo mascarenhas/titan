@@ -1,5 +1,9 @@
 local type CancelAction = () -> ()
 
+record ResumeToken
+  const source: string?
+end
+
 union CancellationReason<B>
   simple: string
   complex: B
@@ -59,6 +63,7 @@ local record TurnCall
 end
 
 local record SuspendCall
+  local token: ResumeToken
   local cancel_action: CancelAction?
 end
 
@@ -189,6 +194,7 @@ record Task<A, B>
   -- wake is coalesced so cancellation and terminal listeners cannot queue the
   -- same continuation twice.
   local suspended: boolean
+  local resume_token: ResumeToken?
   local resume_pending: boolean
   -- Policy of the accepted Call whose callback currently owns this Task's
   -- continuation. The initial next-turn callback is cancellation-sensitive.
@@ -291,10 +297,17 @@ local function dispatch_call(task: Task, call: Call): Immediate?
   end
 end
 
+local function clear_explicit_suspension(task: Task)
+  task.suspended = false
+  task.resume_token = nil
+  task.resume_pending = false
+end
+
 local function retire_task(task: Task, state: TaskStatus)
   task.state = state
   task.pending = nil
   task.cancel_action = nil
+  clear_explicit_suspension(task)
   unroot_task(task.runtime, task.root_index)
 end
 
@@ -328,6 +341,9 @@ end
 
 local function finish_user_task(task: Task, state: TaskStatus)
   local runtime = task.runtime
+  -- Terminal listeners must observe a retired explicit-suspend capability,
+  -- including when a callback-boundary failure bypasses ordinary resumption.
+  clear_explicit_suspension(task)
   notify_terminal(task, state)
   retire_task(task, state)
 
@@ -463,8 +479,9 @@ local function resume_task_from_callback(task: Task, failed: boolean,
   task.pending_cancellation_affected = true
   task.pending = nil
   task.cancel_action = nil
-  task.suspended = false
-  task.resume_pending = false
+  -- Retire the explicit-suspend capability before user code can install its
+  -- next wait; native callback waits must never inherit it.
+  clear_explicit_suspension(task)
   do
     advance_task(task, failed, payload, cancellation_affected)
   catch
@@ -534,6 +551,7 @@ local function start_timer(task: Task, milliseconds: integer,
   local native: owned *libuv.uv_timer_t = libuv.uv_timer_t.new()
   local completion = function ()
     if terminal(task.state) then
+      task.resume_token = nil
       task.resume_pending = false
       return
     end
@@ -565,7 +583,13 @@ end
 -- terminal listeners run in the main-thread scheduler, so they only install
 -- the target Task's ordinary zero-timer continuation and return. Multiple
 -- requests before that timer fires coalesce.
-function Task:resume()
+function Task:resume(token: ResumeToken)
+  if token ~= self.resume_token then
+    local source = "unknown source"
+    local expected? = self.resume_token
+    if expected then source = expected.source or source end
+    raise "Task resume token mismatch (expected source: " .. source .. ")"
+  end
   if not self.suspended or self.resume_pending or
      self.state:has_finished() then return end
   self.resume_pending = true
@@ -604,13 +628,16 @@ local function TurnCall:dispatch(task: Task): Immediate?
 end
 
 local function SuspendCall:dispatch(task: Task): Immediate?
-  task.suspended = true
-  task.resume_pending = false
+  local token = self.token
   local requested? = self.cancel_action
-  task.cancel_action = function ()
+  local cancel_action: CancelAction = function ()
     if requested then requested() end
-    task:resume()
+    task:resume(token)
   end
+  task.suspended = true
+  task.resume_token = token
+  task.resume_pending = false
+  task.cancel_action = cancel_action
   return nil
 end
 
@@ -698,7 +725,7 @@ local function begin_shutdown(runtime: Runtime)
   end, UV_TAG)
   local task = Task<value, value>.new(
       root, runtime, TaskStatus<value, value>.ready(),
-                        nil, nil, nil, 0, true, {}, false, false, true)
+                        nil, nil, nil, 0, true, {}, false, nil, false, true)
   task.root_index = root_task(runtime, task)
   start_timer(task, 0, false, nil)
 end
@@ -711,7 +738,7 @@ local function run_internal(func: () -> value): Task<value, value>
   end, UV_TAG)
   local task = Task<value, value>.new(
       root, runtime, TaskStatus<value, value>.ready(),
-                        nil, nil, nil, 0, false, {}, false, false, true)
+                        nil, nil, nil, 0, false, {}, false, nil, false, true)
   task.root_index = root_task(runtime, task)
 
   do
@@ -727,8 +754,8 @@ local function yield()
   await(Call.turn(TurnCall.new()))
 end
 
-local function suspend(cancel_action: CancelAction?)
-  await(Call.suspend(SuspendCall.new(cancel_action)))
+local function suspend(token: ResumeToken, cancel_action: CancelAction?)
+  await(Call.suspend(SuspendCall.new(token, cancel_action)))
 end
 
 local function sleep(milliseconds: integer)

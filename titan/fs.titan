@@ -323,6 +323,7 @@ function realpath(path: string): string
   local runtime = task.runtime
   uv.accepting_work(runtime, "resolve a filesystem path")
   local checked = uv.checked_text(path, "fs.realpath")
+  local resume_token = uv.ResumeToken.new("fs.realpath")
   local native: owned *libuv.uv_fs_t = libuv.uv_fs_t.new()
   local callback = function (request: RealpathRequest)
     request:finish()
@@ -344,7 +345,7 @@ function realpath(path: string): string
     if request.waiter == task then request.waiter = nil end
   end
   defer cancel_action()
-  while not request.completed do uv.suspend(cancel_action) end
+  while not request.completed do uv.suspend(resume_token, cancel_action) end
   if request.failed then raise request.payload end
   return request.payload as string
 end
@@ -360,6 +361,7 @@ record Watcher
   local paths: {string: WatchRegistration}
   local notifications: {WatcherNotification}
   local waiter: uv.Task?
+  local resume_token: uv.ResumeToken
   local operation_state: integer
 end
 
@@ -374,7 +376,7 @@ local function Watcher:wake()
   local waiter? = self.waiter
   if not waiter then return end
   self.waiter = nil
-  waiter:resume()
+  waiter:resume(self.resume_token)
 end
 
 local function Watcher:wake_from_callback()
@@ -511,7 +513,8 @@ end
 function watcher(): Watcher
   local task = uv.running_task()
   uv.accepting_work(task.runtime, "create a filesystem watcher")
-  return Watcher.new(task.runtime, {}, {}, {}, nil, WATCHER_IDLE)
+  return Watcher.new(task.runtime, {}, {}, {}, nil,
+                     uv.ResumeToken.new("fs.watcher"), WATCHER_IDLE)
 end
 
 function Watcher:watch(path: string)
@@ -691,7 +694,7 @@ function Watcher:poll(): {WatcherEvent}
   defer cancel_action()
   while #self.notifications == 0 and #self.registrations > 0 do
     self.waiter = task
-    uv.suspend(cancel_action)
+    uv.suspend(self.resume_token, cancel_action)
   end
   if #self.notifications > 0 then
     return self:drain_notifications()

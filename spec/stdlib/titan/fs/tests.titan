@@ -424,7 +424,8 @@ function test_fs_independent_continuations(context: test.Context)
   end)
 end
 
-function test_fs_condition_waiter_resume_coalescing(context: test.Context)
+function test_fs_condition_waiter_tokens_and_callback_progress(
+    context: test.Context)
   runtime_test.run(function ()
     local root = support.new_workspace(context)
     local watcher_path = root .. "/watcher.dat"
@@ -435,34 +436,39 @@ function test_fs_condition_waiter_resume_coalescing(context: test.Context)
     wait_for_watcher_subscription()
 
     local watcher_phase = 0
-    local watcher_gate = false
-    local watcher_gate_seen = false
     local watcher_events: {fs.WatcherEvent}? = nil
+    local gate_token = async.ResumeToken.new("filesystem test gate")
     local watcher_task = async.run<value, value>(function (): value
       watcher_phase = 1
-      async.suspend()
+      async.suspend(gate_token)
       watcher_phase = 2
       watcher_events = watcher:poll()
-      timer.sleep(50)
-      watcher_gate_seen = watcher_gate
       return nil
     end)
     task_support.cleanup_task(
-        watcher_task, "coalesced watcher Task cleanup")
+        watcher_task, "token-guarded watcher Task cleanup")
     while watcher_phase == 0 do timer.yield() end
-    watcher_task:resume()
+    watcher_task:resume(gate_token)
     while watcher_phase < 2 do timer.yield() end
     test.assert(watcher_events == nil,
                 "watcher poll did not remain pending for the race")
 
+    local stale_error = ""
+    do
+      watcher_task:resume(gate_token)
+    catch
+      stale_error = error as string
+    end
+    test.assert(stale_error ==
+                "Task resume token mismatch (expected source: fs.watcher)" and
+                watcher_task:status():as_string() == "waiting",
+                "stale gate token changed the watcher poll")
+
     support.write_file_synchronously(watcher_path, "watcher")
-    watcher_task:resume()
-    timer.sleep(10)
-    watcher_gate = true
     async.join(watcher_task)
     test.assert(watcher_task:status():has_succeeded() and
-                watcher_gate_seen and watcher_events ~= nil,
-                "watcher callback duplicated an explicit resume")
+                watcher_events ~= nil,
+                "watcher callback did not complete token-guarded poll")
 
     local canonical = fs.realpath(watcher_path)
     local found = false
@@ -472,11 +478,7 @@ function test_fs_condition_waiter_resume_coalescing(context: test.Context)
         found = true
       end
     end
-    test.assert(found, "coalesced watcher wake lost its event")
-
-    timer.sleep(60)
-    test.assert(watcher_task:status():has_succeeded(),
-                "a stale wake changed a terminal filesystem Task")
+    test.assert(found, "watcher callback lost its event")
     fs.unlink(watcher_path)
   end)
 end
@@ -658,10 +660,17 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
     while not entered do timer.yield() end
     timer.yield()
 
-    first:resume()
-    timer.sleep(10)
-    test.assert(first_result == nil and watcher:is_watching(root),
-                "an unrelated Task resume completed a blocked poll")
+    local resume_error = ""
+    do
+      first:resume(async.ResumeToken.new("filesystem poll outsider"))
+    catch
+      resume_error = error as string
+    end
+    test.assert(resume_error ==
+                "Task resume token mismatch (expected source: fs.watcher)" and
+                first:status():as_string() == "waiting" and
+                first_result == nil and watcher:is_watching(root),
+                "an unrelated token changed a blocked poll")
 
     expect_failure(function ()
       watcher:poll()

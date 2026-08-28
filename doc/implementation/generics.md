@@ -805,6 +805,10 @@ owners and owns the public `run`, combinator, and `channel<T>` schemes. The
 provider-owned surface owners are:
 
 ```titan
+record ResumeToken
+    const source: string?
+end
+
 union CancellationReason<B>
     simple: string
     complex: B
@@ -830,6 +834,7 @@ record Task<A, B>
     local cleanup: boolean
     local terminal_registrations: {TerminalRegistration<A, B>}
     local suspended: boolean
+    local resume_token: ResumeToken?
     local resume_pending: boolean
     local pending_cancellation_affected: boolean
 end
@@ -841,7 +846,17 @@ end
 ```
 
 Every Task field remains in the canonical owner. The generic registration
-record stores the exact adjusted listener and its live bit.
+record stores the exact adjusted listener and its live bit. `ResumeToken` is a
+separate non-generic nominal owner: all `Task<A,B>` applications store the same
+optional token type, compare it by record identity, and use its optional source
+only to diagnose a public explicit-resume mismatch. It is not an application
+witness and does not participate in erased payload guards.
+
+The facade re-exports that constructor namespace exactly as
+`type ResumeToken = uv.ResumeToken`. Its non-generic boundaries are
+`suspend(token: ResumeToken, cancel_action: SuspendCancelAction?)` and
+`Task:resume(token: ResumeToken)`; closing or erasing `A` and `B` never changes
+either signature.
 
 The Runtime remains concretely all-value:
 
@@ -886,14 +901,20 @@ pre-generic implementation shape. Closed callers receive ordinary traced
 callable wrappers: send boxes its accepted `T`, receive strictly projects its
 `T`, and close is unchanged. The string-only `ChannelReader` and
 `ChannelWriter` records are not generic owners; their factory closes
-`channel<string>` and stores those exact wrappers.
+`channel<string>` and stores those exact wrappers. Each channel closure triple
+also captures one fresh private non-generic `ResumeToken`; its blocking paths
+pass that record to `suspend`, and its send, receive, and close paths pass the
+same record to `Task:resume(token)`.
 
 The public fixed-arity combinators quantify interleaved `(A_i,B_i)` per operand.
 Their named listener-based algorithms remain expanded through arity five; they
 never erase the operands into an Array merely to share implementation. Their
 ordinary erased bodies use all-value Task/status carriers, while closed
 `AnyNResult`, `RaceNResult`, `AllNError`, `join*`, and `all_*` projections receive
-the focused strict guards described above.
+the focused strict guards described above. Each invocation creates one fresh
+non-generic private token, captures it in every deciding listener, and suspends
+with that same record. The token carries no generic evidence; it only binds
+those listeners to that exact explicit suspension.
 
 Terminal listener removal no longer depends on closure identity.
 `add_terminal_listener` allocates one fresh `TerminalRegistration<A,B>`, stores

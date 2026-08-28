@@ -133,9 +133,11 @@ function test_suspend_cancellation_action_is_synchronous_and_specific(
   runtime_test.run(function ()
     local cancel_entered = false
     local cancel_actions = 0
+    local cancel_token =
+      async.ResumeToken.new("suspend cancellation test")
     local cancelled = async.run<value, value>(function (): value
       cancel_entered = true
-      async.suspend(function ()
+      async.suspend(cancel_token, function ()
         cancel_actions = cancel_actions + 1
       end)
       return nil
@@ -154,16 +156,18 @@ function test_suspend_cancellation_action_is_synchronous_and_specific(
 
     local resume_entered = false
     local resume_actions = 0
+    local resume_token =
+      async.ResumeToken.new("ordinary resume cancellation test")
     local resumed = async.run<value, value>(function (): value
       resume_entered = true
-      async.suspend(function ()
+      async.suspend(resume_token, function ()
         resume_actions = resume_actions + 1
       end)
       return nil
     end)
     task_support.cleanup_task(resumed, "suspend resume cleanup")
     while not resume_entered do timer.yield() end
-    resumed:resume()
+    resumed:resume(resume_token)
     async.join(resumed)
     test.assert(resumed:status():has_succeeded() and
                 resume_actions == 0,

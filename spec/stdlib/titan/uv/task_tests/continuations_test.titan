@@ -148,9 +148,11 @@ function test_explicit_resume_runs_after_resumer_returns(
     context: test.Context)
   runtime_test.run(function ()
     local trace = ""
+    local resume_token =
+      async.ResumeToken.new("explicit resume ordering test")
     local target = async.run<value, value>(function (): value
       trace = trace .. "suspend>"
-      async.suspend()
+      async.suspend(resume_token)
       trace = trace .. "target-woke"
       return nil
     end)
@@ -160,7 +162,7 @@ function test_explicit_resume_runs_after_resumer_returns(
     test.assert(target:status():as_string() == "waiting",
                 "target did not explicitly suspend")
     trace = trace .. "resume>"
-    target:resume()
+    target:resume(resume_token)
     test.assert(target:status():as_string() == "waiting",
                 "Task:resume resumed its target synchronously")
     trace = trace .. "caller-returned>"
@@ -194,8 +196,10 @@ function test_explicit_resume_waits_for_zero_timer_close(
     local peer = accepted as net.Connection
     defer peer:close()
 
+    local resume_token =
+      async.ResumeToken.new("zero-timer close ordering test")
     local target = async.run<value, value>(function (): value
-      async.suspend()
+      async.suspend(resume_token)
       trace = trace .. "target"
       return nil
     end)
@@ -213,7 +217,7 @@ function test_explicit_resume_waits_for_zero_timer_close(
     client:write("signal")
     test.assert(peer:read() == "signal", "loopback signal changed")
     peer:write("reply")
-    target:resume()
+    target:resume(resume_token)
     test.assert(client:read() == "reply", "loopback reply changed")
     trace = trace .. "read>"
 

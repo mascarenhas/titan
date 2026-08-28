@@ -125,10 +125,12 @@ function test_task_primitives_and_terminal_listeners(context: test.Context)
 
       local suspended_task: async.Task? = nil
       local resumed_count = 0
+      local resume_token =
+        async.ResumeToken.new("async Task primitive test")
       suspended_task = async.run<value, value>(function (): value
         test.assert(async.running() == (suspended_task as async.Task),
               "async.running changed inside suspended Task")
-        async.suspend()
+        async.suspend(resume_token)
         resumed_count = resumed_count + 1
         return nil
       end)
@@ -136,25 +138,227 @@ function test_task_primitives_and_terminal_listeners(context: test.Context)
         suspended_task as async.Task, "suspended target cleanup")
       local target = suspended_task
       support.wait_until_waiting(target)
-      target:resume()
+      target:resume(resume_token)
       test.assert(target:status():as_string() == "waiting" and
             resumed_count == 0,
             "Task:resume resumed a suspended Task synchronously")
       -- A second request before the timer fires must coalesce.
-      target:resume()
+      target:resume(resume_token)
       test.assert(async.join(target):has_succeeded() and
             resumed_count == 1,
             "suspended Task did not receive exactly one scheduled wake")
-      target:resume()
+      local retired_error = ""
+      do
+        target:resume(resume_token)
+      catch
+        retired_error = error as string
+      end
       timer.yield()
-      test.assert(resumed_count == 1,
-            "Task:resume restarted a terminal Task")
+      test.assert(retired_error ==
+            "Task resume token mismatch (expected source: unknown source)" and
+            resumed_count == 1,
+            "a retired resume token did not fail at its caller")
       return nil
     end)
     task_support.cleanup_task(self_task as async.Task,
                  "Task primitive probe cleanup")
     local status = async.join(self_task as async.Task)
     test.assert(status:has_succeeded(), "Task primitive probe failed")
+  end)
+end
+
+function test_resume_tokens_guard_identity_and_each_suspension(
+    context: test.Context)
+  runtime_test.run(function ()
+    local first = async.ResumeToken.new("first guarded suspension")
+    local same_source =
+      async.ResumeToken.new("first guarded suspension")
+    local second = async.ResumeToken.new("second guarded suspension")
+    local phase = 0
+    local target = async.run<nil, value>(function (): nil
+      phase = 1
+      async.suspend(first)
+      phase = 2
+      async.suspend(second)
+      phase = 3
+      return nil
+    end)
+    task_support.cleanup_task(target, "resume-token target cleanup")
+    support.wait_until_waiting(target)
+
+    local identity_error = ""
+    do
+      target:resume(same_source)
+    catch
+      identity_error = error as string
+    end
+    test.assert(identity_error ==
+          "Task resume token mismatch (expected source: " ..
+          "first guarded suspension)" and
+          target:status():as_string() == "waiting" and phase == 1,
+          "same-source token identity mismatch changed the target")
+
+    target:resume(first)
+    test.assert(target:status():as_string() == "waiting" and phase == 1,
+          "matching token resumed its target inline")
+
+    -- Validation precedes wake coalescing: another record remains invalid
+    -- even after the correct token has already scheduled the one wake.
+    local pending_error = ""
+    do
+      target:resume(same_source)
+    catch
+      pending_error = error as string
+    end
+    test.assert(pending_error == identity_error,
+          "pending wake suppressed a caller-side token mismatch")
+
+    while phase < 2 do timer.yield() end
+    test.assert(target:status():as_string() == "waiting",
+          "second guarded suspension did not wait")
+    local stale_error = ""
+    do
+      target:resume(first)
+    catch
+      stale_error = error as string
+    end
+    test.assert(stale_error ==
+          "Task resume token mismatch (expected source: " ..
+          "second guarded suspension)" and phase == 2 and
+          target:status():as_string() == "waiting",
+          "stale token woke or changed a later suspension")
+
+    target:resume(second)
+    test.assert(async.join(target):has_succeeded() and phase == 3,
+          "current resume token did not finish the guarded Task")
+  end)
+end
+
+function test_resume_token_rejects_ready_task(context: test.Context)
+  runtime_test.run(function ()
+    local started = false
+    local target = async.run<nil, value>(function (): nil
+      started = true
+      return nil
+    end)
+    task_support.cleanup_task(target, "ready Task token target cleanup")
+    test.assert(target:status():as_string() == "ready" and not started,
+          "async.run did not leave its new Task ready")
+
+    local mismatch = ""
+    do
+      target:resume(async.ResumeToken.new("ready Task outsider"))
+    catch
+      mismatch = error as string
+    end
+    test.assert(mismatch ==
+          "Task resume token mismatch (expected source: unknown source)" and
+          target:status():as_string() == "ready" and not started,
+          "Task:resume changed a ready Task after its caller-side mismatch")
+
+    test.assert(async.join(target):has_succeeded() and started,
+          "ready Task did not run normally after token rejection")
+  end)
+end
+
+function test_resume_token_reports_unknown_source(context: test.Context)
+  runtime_test.run(function ()
+    local expected = async.ResumeToken.new(nil)
+    local wrong_token = async.ResumeToken.new(nil)
+    local target = async.run<nil, value>(function (): nil
+      async.suspend(expected)
+      return nil
+    end)
+    task_support.cleanup_task(target, "unknown-source token target cleanup")
+    support.wait_until_waiting(target)
+
+    local mismatch = ""
+    do
+      target:resume(wrong_token)
+    catch
+      mismatch = error as string
+    end
+    test.assert(mismatch ==
+          "Task resume token mismatch (expected source: unknown source)" and
+          target:status():as_string() == "waiting",
+          "nil token source did not report an unknown expected source")
+    target:resume(expected)
+    test.assert(async.join(target):has_succeeded(),
+          "unknown-source matching token did not resume its Task")
+  end)
+end
+
+function test_resume_token_cannot_wake_native_callback_wait(
+    context: test.Context)
+  runtime_test.run(function ()
+    local completed = false
+    local target = async.run<nil, value>(function (): nil
+      timer.sleep(50)
+      completed = true
+      return nil
+    end)
+    task_support.cleanup_task(target, "native-wait token target cleanup")
+    support.wait_until_waiting(target)
+
+    local mismatch = ""
+    do
+      target:resume(async.ResumeToken.new("native wait outsider"))
+    catch
+      mismatch = error as string
+    end
+    test.assert(mismatch ==
+          "Task resume token mismatch (expected source: unknown source)" and
+          target:status():as_string() == "waiting" and not completed,
+          "Task:resume woke or changed a native callback wait")
+
+    test.assert(async.join(target):has_succeeded() and completed,
+          "ordinary native callback did not complete its guarded wait")
+  end)
+end
+
+function test_retired_resume_token_cannot_wake_next_native_wait(
+    context: test.Context)
+  runtime_test.run(function ()
+    local token = async.ResumeToken.new("completed explicit suspension")
+    local resumed_mismatch = ""
+    local phase = 0
+    local target = async.run<nil, value>(function (): nil
+      phase = 1
+      async.suspend(token)
+      do
+        async.running():resume(token)
+      catch
+        resumed_mismatch = error as string
+      end
+      phase = 2
+      timer.sleep(60000)
+      phase = 3
+      return nil
+    end)
+    task_support.cleanup_task(target, "retired-token native wait cleanup")
+    support.wait_until_waiting(target)
+    target:resume(token)
+    while phase < 2 do timer.yield() end
+    test.assert(resumed_mismatch ==
+          "Task resume token mismatch (expected source: unknown source)",
+          "resume token was not cleared before resumed user code ran: " ..
+          resumed_mismatch)
+    test.assert(target:status():as_string() == "waiting",
+          "resumed Task did not enter its native wait")
+
+    local mismatch = ""
+    do
+      target:resume(token)
+    catch
+      mismatch = error as string
+    end
+    test.assert(mismatch ==
+          "Task resume token mismatch (expected source: unknown source)" and
+          target:status():as_string() == "waiting" and phase == 2,
+          "retired token survived into or woke the next native wait")
+    target:cancel()
+    test.assert(async.join(target):has_cancelled() and phase == 2,
+          "native wait did not cancel after retired-token rejection")
   end)
 end
 

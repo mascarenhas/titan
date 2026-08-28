@@ -35,26 +35,33 @@ closure from the owner's second user value, obtains the main Lua state from the
 request loop, invokes the closure's exact native entry, and restores the Lua
 stack top. The ordinary Titan handler copies `uv_fs_get_ptr` to a Titan string
 before `uv_fs_req_cleanup`, removes the Map root, and records the result. While
-the request still has a waiter it calls the source-private
-`resume_condition_waiter_from_callback`. That helper directly advances the
-ordinary callback path, but returns without advancing when the Task already has
-a coalesced public-resume timer; that timer remains the sole continuation and
-the caller reads the published request state. The optional action passed to
-`uv.suspend` detaches that waiter synchronously when cancellation is requested,
-before scheduling the next-turn wake. Titan's cooperative execution means no
-libuv callback can interleave with that state change. The short accepted request
-is not sent through `uv_cancel`; its eventual callback still performs cleanup
-without resuming the Task. A negative submission result cleans and unroots the
-request immediately because libuv will not call it back.
+the request still has a waiter it calls the source-private tokenless
+`resume_condition_waiter_from_callback`; a native callback never calls public
+`Task:resume(token)` and never receives a `ResumeToken`.
+
+The facade creates one fresh private token with diagnostic source
+`"fs.realpath"` and passes it to every `uv.suspend` in the completion loop. The
+optional cancellation action detaches the exact waiter synchronously; the
+Task's suspension closure then uses its captured token for the deferred
+cancellation wake. That token authorizes only public resume of this explicit
+suspension and is not a general capability for the native request. If a
+correct-token public wake is already pending, the callback helper leaves that
+timer as the sole continuation and the resumed caller reads the published
+request state. Titan's cooperative execution means no libuv callback can
+interleave with the detach. The short accepted request is not sent through
+`uv_cancel`; its eventual callback still performs cleanup without resuming the
+Task. A negative submission result cleans and unroots the request immediately
+because libuv will not call it back.
 
 ## Watcher ownership
 
 A public `Watcher` is permanently associated with the active `Runtime` at
 construction. It owns a dense Array of registrations, a canonical-path Map,
-a raw-notification Array, at most one polling Task, and one integer operation
-state covering idle, polling, clearing, and poll-plus-clear overlap. Operations
-first prove that the same Runtime remains active; there is no generation reset
-or cross-Runtime reuse path.
+a raw-notification Array, at most one polling Task, one private `ResumeToken`
+with diagnostic source `"fs.watcher"`, and one integer operation state covering
+idle, polling, clearing, and poll-plus-clear overlap. Operations first prove
+that the same Runtime remains active; there is no generation reset or cross-
+Runtime reuse path.
 
 Each local `WatchRegistration` owns exactly the state needed by one
 `uv_fs_event_t`:
@@ -79,20 +86,26 @@ event that predates native subscription.
 Lua state from the handle's loop. Its Titan handler copies the nullable
 filename while libuv owns it and appends one `WatcherNotification` containing
 the registration, copied filename, event mask, and status. It then clears and
-wakes an installed poller through the same condition-waiter helper. If a public
-resume is already pending, its Task-owned timer remains the sole continuation;
-the callback cannot advance the poller and leave that timer to resume a later
-suspension. The callback does not perform filesystem I/O and does not
-synchronously block the event loop. If copying or queue publication raises, the
-outer handler retires the exact waiter; an already-closing public-resume timer
-observes that terminal state and returns without entering the coroutine again.
-A suspend cancellation action removes only its exact Task waiter before
-requesting the next-turn wake; the scope defer
-repeats that idempotent detach on every other exit. A wake requested through the
-public `Task:resume` API does not end the poll: after every suspension, the poll
-rechecks both the notification queue and registration set and suspends again
-while it still has work to await. Shared registrations and every buffered
-notification remain available to the next polling Task.
+wakes an installed poller through the tokenless condition-waiter callback
+helper. If a correct-token public resume is already pending, its Task-owned
+timer remains the sole continuation; the callback cannot advance the poller
+and leave that timer to resume a later suspension. The callback does not
+perform filesystem I/O and does not synchronously block the event loop. If
+copying or queue publication raises, the outer handler retires the exact
+waiter; an already-closing public-resume timer observes that terminal state and
+returns without entering the coroutine again.
+
+The polling loop passes the Watcher's private token and an exact-waiter detach
+action to every explicit suspension. Facade state changes such as retiring the
+last registration resume the poller with that same token; native events still
+use the callback helper above. Cancellation detaches the waiter before the
+Task's stored-token wake, and scope cleanup repeats that idempotent detach on
+every other exit. A different public token raises in its caller as
+`Task resume token mismatch (expected source: fs.watcher)` and cannot end the
+poll. After every authorized wake, the poll rechecks both the notification queue
+and registration set and suspends again while it still has work to await.
+Shared registrations and every buffered notification remain available to the
+next polling Task.
 
 ## One-to-one drain mapping
 
@@ -152,8 +165,8 @@ clear remains idempotent.
 A waiting close yields the private, cancellation-insensitive
 `HandleCloseCall`. Its dispatcher runs while the Task is already suspended,
 calls `close_handle`, and returns only from `uv_close` completion. This is why
-the high-level method neither treats `Task:resume` as a native completion nor
-adds a second scheduler or close-waiter queue.
+the high-level method neither treats public `Task:resume(token)` as a
+native completion nor adds a second scheduler or close-waiter queue.
 
 `begin_close` first checks `uv_is_closing`. An already-closing handle is not
 submitted to `uv_close` a second time. Otherwise one `CloseOwner` takes the old
@@ -180,12 +193,14 @@ The serialized standard-library fixture pins the appended public
 `titan.fs` interface.
 
 These changes are ABI-visible. In particular, `stat` and `lstat` return
-`Stat?`, changing their exact raw C return carrier
-from `Udata *` to `TValue`, while the cancellation protocol adds an optional
-action parameter to `titan.async.suspend` and its source-private `titan.uv`
-entry. Both serialized public interfaces and native signatures therefore
-require ABI 2. A mismatched provider is rejected before either boundary is
-used rather than migrated or adapted.
+`Stat?`, changing their exact raw C return carrier from `Udata *` to `TValue`.
+The explicit-suspension protocol also exposes `ResumeToken`, requires that token
+in `titan.async.suspend(token, ...)` and `Task:resume(token)`, and retains the optional
+`SuspendCancelAction` as the second suspend parameter; the source-private
+`titan.uv` entry has the same exact parameters. Both serialized public
+interfaces and native signatures therefore require ABI 2. A mismatched
+provider is rejected before either boundary is used rather than migrated or
+adapted.
 
 The current ABI also adds `device` and `inode` to the
 serialized public `Stat` record. Libuv exposes both as unsigned 64-bit values;

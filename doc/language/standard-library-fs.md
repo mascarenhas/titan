@@ -284,9 +284,12 @@ returns an empty Array immediately. Only one Task may poll a given Watcher at a
 time. Tasks that mutate one Watcher concurrently must coordinate those calls
 externally. Cancelling a blocked poll detaches only that Task's waiter. It does
 not discard buffered events or stop registrations that another Task may poll.
-An unrelated call to the blocked Task's public `resume` method merely causes
-`poll` to recheck its state; while registrations remain and no event is
-buffered, it suspends again instead of returning an empty Array.
+The Watcher owns a private resume token whose diagnostic source is
+`fs.watcher`. An unrelated caller's token passed to the blocked Task's public
+`resume(token)` raises `Task resume token mismatch (expected source:
+fs.watcher)` in that caller and neither wakes the poll nor changes its state.
+Only the Watcher's exact private token authorizes its explicit-suspension wake;
+native event callbacks retain their separate tokenless continuation path.
 
 Classification may suspend while more native callbacks are copied. If one of
 those callbacks belongs to a registration retired by the current `poll`, that

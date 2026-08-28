@@ -698,6 +698,7 @@ describe("libuv Makefile configuration", function()
             "Error", "Error.new", "OperationError", "OperationError.new",
         }, public_declarations("titan/uv/uv.titan"))
         assert.same({
+            "ResumeToken", "ResumeToken.new",
             "CancellationReason", "CancellationReason.simple",
             "CancellationReason.complex", "TaskStatus", "TaskStatus.ready",
             "TaskStatus.running", "TaskStatus.waiting",
@@ -719,14 +720,23 @@ describe("libuv Makefile configuration", function()
     it("keeps generic Tasks over an all-value uv Runtime", function()
         local task = read_file("titan/uv/task.titan")
         for _, contract in ipairs({
+            "record ResumeToken",
+            "const source: string?",
             "union CancellationReason<B>",
             "union TaskStatus<A, B>",
             "record Task<A, B>",
             "local record TerminalRegistration<A, B>",
             "listener: (TaskStatus<A, B>) -> ()): () -> ()",
             "local record SuspendCall",
+            "local token: ResumeToken",
             "local cancel_action: CancelAction?",
-            "local function suspend(cancel_action: CancelAction?)",
+            "local resume_token: ResumeToken?",
+            "function Task:resume(token: ResumeToken)",
+            "Task resume token mismatch (expected source: ",
+            "local function resume_task_from_callback(task: Task, " ..
+            "failed: boolean,",
+            "local function suspend(token: ResumeToken, " ..
+            "cancel_action: CancelAction?)",
             "local function run_internal(func: () -> value): " ..
             "Task<value, value>",
             "Task<value, value>.new(",
@@ -739,9 +749,12 @@ describe("libuv Makefile configuration", function()
         for _, contract in ipairs({
             "function run<A, B>(func: () -> A): Task<A, B>",
             "function running(): Task<value, value>",
+            "type ResumeToken = uv.ResumeToken",
             "type SuspendCancelAction = () -> ()",
-            "function suspend(cancel_action: SuspendCancelAction?)",
+            "function suspend(token: ResumeToken,",
+            "cancel_action: SuspendCancelAction?)",
             "function channel<T>(size: integer?):",
+            "ResumeToken.new(\"channel\")",
             "local transfer: {T} = {}",
             "local send: (T) -> ()",
             "local receive: () -> T",
@@ -1280,6 +1293,8 @@ describe("libuv Makefile configuration", function()
         assert.matches(
             "resume_task_from_callback(task, false, nil)",
             condition, 1, true)
+        assert.not_matches("ResumeToken", condition, 1, true)
+        assert.not_matches("task:resume", condition, 1, true)
 
         local timer_start = assert(task_source:find(
             "local function start_timer(", 1, true))
@@ -1296,6 +1311,7 @@ describe("libuv Makefile configuration", function()
         local timer_callback = timer_body:sub(callback_start)
 
         assert.matches("if terminal(task.state) then", completion, 1, true)
+        assert.matches("task.resume_token = nil", completion, 1, true)
         assert.matches("task.resume_pending = false", completion, 1, true)
         assert.matches("resume_task_from_callback", completion, 1, true)
         assert.matches("begin_close", timer_callback, 1, true)
@@ -1322,6 +1338,38 @@ describe("libuv Makefile configuration", function()
         assert.is_true(closing < root)
         assert.is_true(unroot < complete)
         assert.is_true(complete < submit)
+    end)
+
+    it("retires explicit suspension before terminal listeners", function()
+        local task = read_file("titan/uv/task.titan")
+        local clear_start = assert(task:find(
+            "local function clear_explicit_suspension(task: Task)",
+            1, true))
+        local clear_stop = assert(task:find("\nend", clear_start, true))
+        local clear = task:sub(clear_start, clear_stop - 1)
+        for _, assignment in ipairs({
+            "task.suspended = false",
+            "task.resume_token = nil",
+            "task.resume_pending = false",
+        }) do
+            assert.matches(assignment, clear, 1, true)
+        end
+
+        local finish_start = assert(task:find(
+            "local function finish_user_task(task: Task, state: TaskStatus)",
+            1, true))
+        local finish_stop = assert(task:find(
+            "\n-- A cancellation request is authoritative", finish_start,
+            true))
+        local finish = task:sub(finish_start, finish_stop - 1)
+        local retired = assert(finish:find(
+            "clear_explicit_suspension(task)", 1, true))
+        local notified = assert(finish:find(
+            "notify_terminal(task, state)", 1, true))
+        local unrooted = assert(finish:find(
+            "retire_task(task, state)", 1, true))
+        assert.is_true(retired < notified)
+        assert.is_true(notified < unrooted)
     end)
 
     it("keeps SSL path loading high-level and PEM owners private", function()

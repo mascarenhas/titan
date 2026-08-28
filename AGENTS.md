@@ -607,20 +607,31 @@ generation fencing, scheduler-owned joiner lists, Titan-side operation queues,
 or reentrant loop scenarios. Public `async.join*` coverage belongs here: those
 functions are generic over an independent success/cancellation pair for every
 fixed named operand, install per-operand Task terminal registrations, suspend
-once, and call every returned idempotent remover in `defer`; they do not add a
-scheduler join protocol or collect operands into a Task Array. Terminal
+once with a fresh private nominal `ResumeToken`, and call every returned
+idempotent remover in `defer`; they do not add a scheduler join protocol or
+collect operands into a Task Array. Do not restore nullable-waiter or
+"resumed too early" guards around that single authorized suspension. Retain
+winner, rejection, and counter checks that arbitrate results independently of
+waking; the existing `join*` per-position `has_finished` checks are unrelated
+local idempotence, not premature-resume guards. Terminal
 publication stores the final `TaskStatus`, detaches the registration Array as a
 stable snapshot, installs an empty live list, clears snapshot ownership, then
 invokes every snapshot listener sequentially on the main thread with
 per-listener empty catches. A
-deciding listener calls `Task:resume()`, which synchronously installs one
-coalesced target-owned zero timer. Its `timer_cb` submits `uv_close`, and only
-`close_cb` resumes the target. The same wake must handle external cancellation
-of an explicitly suspended Task, and `resume()` must work from either terminal
-notification or another running Task without resuming inline. Coverage must
-prove `async.running`, explicit suspend/resume, listener order/error isolation/
-removal including removal during delivery, cancellation-time defer cleanup,
-coalescing, and close-before-resume.
+deciding listener calls `Task:resume(token)` with that exact token, which
+synchronously installs one coalesced target-owned zero timer. Repeated calls
+with the same installed token coalesce; a different token or any token outside
+that suspension raises in the caller. Its `timer_cb` submits `uv_close`, and
+only `close_cb` clears the suspended/token/pending state before resuming the
+target. The same authorized wake must handle external cancellation of an
+explicitly suspended Task, and `resume(token)` must work from either terminal
+notification or another running Task without resuming inline. Ordinary native
+operation callbacks use the private tokenless continuation helper and cannot
+be completed through public `Task:resume`. Coverage must prove `async.running`,
+explicit token-bearing suspend/resume, token identity and wrong-time rejection,
+listener order/error isolation/removal including removal during delivery,
+cancellation-time defer cleanup, correct-token coalescing, native-wait
+isolation, and close-before-resume.
 HTTP idle-timeout coverage must preserve its ownership asymmetry: reader-win
 paths cancel and detach the timer-only deadline, while deadline-win paths
 cancel and join the reader before parser/connection/TLS-busy teardown.
@@ -1616,17 +1627,19 @@ action without a public `cancelling` state.
 `Task<A,B>`, `TaskStatus<A,B>`, and `CancellationReason<B>` are the public
 owners, while Runtime roots, waiters, callbacks, and `running()` deliberately
 use the bare all-`value` Task application. Task terminal publication first
-stores the final status, detaches the registration Array as a stable snapshot,
-installs an empty live list, and clears every snapshot registration's live
-ownership. It then runs every snapshot listener sequentially in registration
-order on the main thread and ignores each listener error independently; a
-remover called during delivery cannot mutate the snapshot or skip a later
-callback. Fixed-arity async combinators preserve the independent generic type
-pair of every named operand, install a separate listener for each still-relevant
-operand, suspend once, and call every idempotent remover in `defer`. The deciding
-listener calls the suspended Task's synchronous,
-coalescing `resume()`, which installs its target-owned close-before-resume zero
-timer and returns. There is no public Waiter, `uv_check_t`, Runtime `uv_idle_t`,
+clears any explicit-suspension token and pending wake, then stores the final
+status, detaches the registration Array as a stable snapshot, installs an empty
+live list, and clears every snapshot registration's live ownership. It then
+runs every snapshot listener sequentially in registration order on the main
+thread and ignores each listener error independently; a remover called during
+delivery cannot mutate the snapshot or skip a later callback. Fixed-arity async
+combinators preserve the independent generic type pair of every named operand,
+install a separate listener for each still-relevant operand, suspend once with
+one fresh private token per invocation, and call every idempotent remover in
+`defer`. The deciding listener calls the suspended Task's synchronous,
+coalescing `resume(token)` with that same token, which installs its target-owned
+close-before-resume zero timer and returns. There is no public Waiter,
+`uv_check_t`, Runtime `uv_idle_t`,
 polling loop, phase bridge, taskless timer, scheduler queue, join protocol, or
 generation fence. Never collapse the separate typed operands into a `{Task}`
 helper. Only `join`
