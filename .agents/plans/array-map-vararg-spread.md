@@ -569,6 +569,13 @@ suite from a clean, isolated absolute `/tmp` prefix, with ambient
   inclusion of the pre-existing `titan-config.lua` edit. It is included
   unchanged in a separate follow-up commit. The fresh-prefix full suite above
   had already run with that configuration present in the working tree.
+- 2026-08-27: The first two hosted stdlib jobs failed before any Titan build:
+  `curl` received no bytes from `https://ftp.gnu.org` for 135-136 seconds while
+  preparing bundled Readline. The direct endpoint also timed out locally,
+  while GNU's official `ftpmirror.gnu.org/readline/` redirect immediately
+  returned the same checksum-pinned 3,419,642-byte archive from a live mirror.
+  `READLINE_URL` now uses that official mirror redirect; the pinned SHA-256 is
+  unchanged, and the Readline build spec pins the new acquisition endpoint.
 
 ## Validation and review log
 
