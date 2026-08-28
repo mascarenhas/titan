@@ -1691,9 +1691,11 @@ function checker._plan_c_allocation(node, pseudo, demand, st, errors)
         storage = "owned",
         result_type = pseudo.rettypes[1],
     }
+    local count_argument = node._arg_adjustment
+        and node._arg_adjustment.fixed[1] or node.args.args[1]
 
     if pseudo.array then
-        local count = checker._allocation_integer_literal(node.args.args[1])
+        local count = checker._allocation_integer_literal(count_argument)
         plan.array_count_literal = count
         if target and target._tag == "Type.COwned" then
             -- An explicit owner always wins over literal-driven inference.
@@ -1727,7 +1729,7 @@ function checker._plan_c_allocation(node, pseudo, demand, st, errors)
            and (resolved_payload._tag == "Type.CStruct"
                 or resolved_payload._tag == "Type.CUnion") then
         local fam_count = pseudo.fam
-            and checker._allocation_integer_literal(node.args.args[1]) or nil
+            and checker._allocation_integer_literal(count_argument) or nil
         plan.fam_count_literal = fam_count
         local explicit_owner = target and target._tag == "Type.COwned"
         local pointer_target = target

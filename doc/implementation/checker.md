@@ -404,7 +404,8 @@ generic-for tuple. `fixed` is dense
 or `INFER_OPEN`. The result retains every written expression in lexical order,
 records delivered `fixed` and `tail_scalars`, marks effect-only `discards`, and
 identifies at most one runtime-sized final `open_source` with source/target
-types, start index, and the checker-selected element adjustment.
+types, start index, and the checker-selected element adjustment. That source
+may be a flexible `ExpCall`, bare `ExpDots`, or an `ExpSpread` carrier.
 
 The demand options also carry the deliberately narrow `dots_nilfill` policy.
 Generic-for tuple setup sets it so missing state/control positions borrowed
@@ -415,12 +416,15 @@ target-driven raising read unless that destination itself accepts nil.
 Only the last expression may expand. A finite sink truncates producer surplus;
 written surplus expressions remain checked and marked `_discard_results`, and
 a discarded call receives `_voidok`. A fixed-only deficit still reports the
-ordinary arity error. A declared flexible producer projects `T?` into finite
-slots, while an open sink preserves the actual `T` run. The three open sinks
+ordinary arity error. A declared flexible producer and an `ExpSpread` project
+`T?` into finite slots, while an open sink preserves the actual `T` run. A
+spread carrier owns the checked subject/range once and every finite
+`ExpSpreadIndex` projection points back to it; its open descriptor uses raw
+`T`; see [Spread expressions](spread-expressions.md#checker-planning). The three open sinks
 are an input-vararg call tail, a flexible return tail, and the final positional
 field of an Array or exact integer-keyed Map. Such a constructor stores the
-shared result as `_positional_adjustment`; its open call/`...` producer also
-receives the same `.adjustment`. Constructor open-element checking is
+shared result as `_positional_adjustment`; its open call/`...`/spread producer
+also receives the same `.adjustment`. Constructor open-element checking is
 deliberately deferred until inference/context has selected the final element
 type: the checker then classifies that edge once and shares the one plan,
 rather than creating and overwriting a provisional plan. Computed Maps remain
@@ -535,8 +539,8 @@ otherwise; this describes the implementation).
 `checkforin` turns `for decllist in explist do block end` into an
 elaborated `Ast.StatForIn` that codegen can lower without type decisions.
 It checks the written expressions under a finite four-slot demand, adjusts a
-trailing call or `...` through the shared machinery, discards values beyond
-four, and pads missing slots with typed `Ast.ExpNil` nodes.
+trailing call, `...`, or spread through the shared machinery, discards values
+beyond four, and pads missing slots with typed `Ast.ExpNil` nodes.
 The four slots are iterator, state, initial control, and close.
 Consequently, when a sole call through `value` supplies the tuple, it receives
 the contextual result type `(value, value, value, value)` before the individual
@@ -607,10 +611,14 @@ have no type to infer.
 
 ### `ExpAdjust` — truncation to one value
 
-The parser wraps a parenthesized *call* in `Ast.ExpAdjust`. The checker passes a
-one-result demand explicitly to the inner call and exposes only that scalar
-type. This keeps `(f())` finite even inside an open sink; a flex-only producer
-therefore projects its first `T?` rather than forwarding its run.
+The parser wraps a parenthesized *call* or exact input-vararg `(...)` in
+`Ast.ExpAdjust`. For a call, the checker passes a one-result demand explicitly
+to the child and exposes only that scalar type. This keeps `(f())` finite even
+inside an open sink; a flex-only producer therefore projects its first `T?`
+rather than forwarding its run. For `(...)`, the checker replaces the child
+with a nil-filling `ExpDotsIndex(1)` of type `optionize(T)`. It therefore also
+contributes exactly one scalar: the first input argument, or nil when absent;
+an ordinary required `T` context applies the standard Option force.
 
 ## Option-type machinery
 
@@ -841,10 +849,11 @@ nil-accepting result-bearing target through the checker-frozen callable plan.
   cannot rebind a function); taking a *foreign* (C FFI) function as a value or
   binding a foreign method (it can only be called by name — see
   [the FFI chapter](../language/ffi.md)); a method reference on a non-record
-  receiver, or to a non-existent method; using a record type or a module as a
-  value; and a top-level `local x = function … end` (its initializer is not a
-  constant, so `isconst` rejects it as `top level variable initialization must
-  be constant`).
+  receiver, or to a non-existent method; and using a record type or a module as
+  a value. A top-level `local x = function … end` is sound because constructing
+  the closure does not read the body yet, so `isconst` accepts it. Unlike a
+  declared function name, `x` is a module variable holding a first-class
+  function value and can be reassigned at run time.
 * **Conditions are not coerced.** `if`/`while`/`repeat` conditions are
   checked with a Boolean context but never `trycoerce`d or `checkmatch`ed:
   any type is a legal condition, and truthiness is the coder's problem.

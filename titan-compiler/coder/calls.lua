@@ -10,6 +10,13 @@ function expression_contains_call(node)
     local tag = node._tag
     if tag == "Ast.ExpCall" then
         return true
+    elseif tag == "Ast.ExpSpread" then
+        -- Only the carrier evaluates these expressions. ExpSpreadIndex is a
+        -- reference to already-prepared state and therefore contains no call of
+        -- its own.
+        return expression_contains_call(node.exp)
+            or (node.first and expression_contains_call(node.first))
+            or (node.last and expression_contains_call(node.last))
     elseif tag == "Ast.ExpCast" or tag == "Ast.ExpIs"
            or tag == "Ast.ExpUnop"
            or tag == "Ast.ExpAdjust" then
@@ -587,6 +594,61 @@ function coder._append_c_mutation_spills(node, poststats)
     end
 end
 
+-- Lower one finite positional strict-C argument list in lexical order, but
+-- publish only the checker-selected fixed projections to the ABI. A spread
+-- carrier is setup/effect-only and therefore cannot occupy a C formal slot.
+-- C-vararg calls retain their separate explicit-scalar path and never reach
+-- this helper.
+local function code_adjusted_foreign_args(
+        ctx, node, cfunc, castats, caexps, poststats)
+    local adjusted = assert(node._arg_adjustment)
+    assert(not cfunc.vararg and not adjusted.open_source
+        and #adjusted.tail_scalars == 0)
+    local fixed_index, discard_set = {}, {}
+    for i, exp in ipairs(adjusted.fixed) do fixed_index[exp] = i end
+    for _, exp in ipairs(adjusted.discards) do discard_set[exp] = true end
+
+    local anames = {}
+    for _, exp in ipairs(adjusted.exps) do
+        local i = fixed_index[exp]
+        if i then
+            local target = assert(cfunc.params[i])
+            local cstat, cexp = codeforeignexp(ctx, exp, target)
+            local cdecl, cname = newforeigntmp(ctx, target)
+            table.insert(castats, cstat)
+            table.insert(castats, cdecl)
+            table.insert(castats, cname .. " = " .. cexp .. ";")
+            anames[i] = cname
+        else
+            assert(discard_set[exp] or exp._discard_results,
+                "adjusted C argument is neither fixed nor effect-only")
+            local cstat, cexp = codeexp(ctx, exp)
+            table.insert(castats, cstat)
+            table.insert(castats, "(void)(" .. cexp .. ");")
+        end
+    end
+    for i, target in ipairs(cfunc.params) do
+        local arg = assert(adjusted.fixed[i])
+        table.insert(caexps, assert(anames[i]))
+        local anchor = mutable_out_anchor(ctx, arg, target)
+        if anchor then table.insert(poststats, anchor) end
+    end
+end
+
+-- Ordinary strict-C calls already have a one-to-one checker-selected ABI list
+-- and retain their established inline foreign lowering. The stabilized path
+-- above is needed only when a lexical carrier/effect entry is distinct from
+-- the fixed projections actually passed to C (notably an Array/Map spread).
+local function needs_adjusted_foreign_args(node, cfunc)
+    local adjusted = node._arg_adjustment
+    if not adjusted or cfunc.vararg then return false end
+    if #adjusted.exps ~= #cfunc.params then return true end
+    for i = 1, #cfunc.params do
+        if adjusted.exps[i] ~= adjusted.fixed[i] then return true end
+    end
+    return false
+end
+
 function codeforeigncall(ctx, node)
     local cfuncname = coder._foreign_reference_name(
         assert(node._direct_foreign_reference,
@@ -636,6 +698,9 @@ function codeforeigncall(ctx, node)
                 table.insert(poststats, postbyindex[index])
             end
         end
+    elseif needs_adjusted_foreign_args(node, ftype) then
+        code_adjusted_foreign_args(
+            ctx, node, ftype, castats, caexps, poststats)
     else
         for i, arg in ipairs(node.args.args) do
             local cstat, cexp = codeforeignexp(ctx, arg, ftype.params[i])
@@ -682,13 +747,18 @@ function codecfunctionptrcall(ctx, node)
     }
     local caexps = {}
     local poststats = {}
-    for i, arg in ipairs(node.args.args) do
-        local cstat, cexp = codeforeignexp(ctx, arg, cfunc.params[i])
-        table.insert(castats, cstat)
-        table.insert(caexps, cexp)
-        local anchor = mutable_out_anchor(ctx, arg, cfunc.params[i])
-        if anchor then
-            table.insert(poststats, anchor)
+    if needs_adjusted_foreign_args(node, cfunc) then
+        code_adjusted_foreign_args(
+            ctx, node, cfunc, castats, caexps, poststats)
+    else
+        for i, arg in ipairs(node.args.args) do
+            local cstat, cexp = codeforeignexp(ctx, arg, cfunc.params[i])
+            table.insert(castats, cstat)
+            table.insert(caexps, cexp)
+            local anchor = mutable_out_anchor(ctx, arg, cfunc.params[i])
+            if anchor then
+                table.insert(poststats, anchor)
+            end
         end
     end
     coder._append_c_mutation_spills(node, poststats)
@@ -1089,8 +1159,8 @@ end
 -- Construct the target callable view over one already available, already
 -- rooted source value. Eligible exact-Titan sources get a fresh closure whose
 -- upvalues are initialized directly while it is white, then published into one
--- traced result slot. Fallback values retain their original identity and need
--- no duplicate root.
+-- traced result slot. Fallback values retain their original identity and are
+-- published into that same result slot by the mutually exclusive branch.
 function coder._emit_callable_adapter_value(
         ctx, adapter, raw, loc, use, result_root)
     use = use or "callable adapter construction"
@@ -1148,6 +1218,8 @@ function coder._emit_callable_adapter_value(
                 lua_assert(iswhite(_ca_wrapper));
                 setclCvalue(L, $RESULT_ROOT, _ca_wrapper);
                 setclCvalue(L, &$RESULT_NAME, _ca_wrapper);
+            } else {
+                $PUBLISH_FALLBACK
             }
         }
     ]], {
@@ -1164,18 +1236,26 @@ function coder._emit_callable_adapter_value(
         TARGET_STRICT = site.strict,
         LINE = emitline({ loc = location }),
         RESULT_ROOT = result_root,
+        PUBLISH_FALLBACK = setslot(
+            adapter.target, result_root, result_name),
     })
     return code, result_name
 end
 
 -- Report whether a checker-frozen adjustment constructs a fresh GC object.
--- This is an ownership property only; it never rediscovers whether the edge is
--- semantically permitted.
+-- A runtime-sized sink uses this only to choose a distinct slot for each live
+-- dynamic result; the adjustment's cast remains the sole code that publishes
+-- the object into that slot. This is neither a second anchor nor a semantic
+-- permission check.
 function coder._adjustment_allocates_gc(adjustment)
     if adjustment.kind == "callable" then
         return adjustment.exact == false
     end
     if adjustment.interface_conversion then return true end
+    if adjustment.kind == "gradual_view"
+       and coder._may_discover_interface(adjustment.target) then
+        return true
+    end
     local coercion = adjustment.coercion
     local function coercion_allocates(plan)
         if not plan or plan == false or plan.kind == "identity" then
@@ -1240,13 +1320,15 @@ function coder._code_adjustment_value(
                and adjustment.guard.op == "option",
             "structural Option view lacks its strict guard plan")
         -- Most successful guards only borrow the existing payload. A present
-        -- Interface leaf may dynamically construct a wrapper, so give that
-        -- result the ordinary traced temporary used by other GC-producing
-        -- expressions until the enclosing sink publishes it.
+        -- Interface leaf may dynamically construct a wrapper. Ordinarily this
+        -- cast owns one traced temporary; a runtime-sized enclosing sink can
+        -- instead select its indexed result slot, into which this same cast
+        -- publishes once so multiple loop iterations remain live together.
         local csrc, srcname = newtmp(ctx, source_type, false)
         local needs_anchor = coder._may_discover_interface(target)
         local cdst, dstname, dstslot =
-            newtmp(ctx, target, needs_anchor)
+            newtmp(ctx, target, needs_anchor and not result_root)
+        local anchor_root = needs_anchor and (result_root or dstslot) or nil
         return render([[
             $CSRC
             $SRCNAME = $RAW;
@@ -1263,7 +1345,8 @@ function coder._code_adjustment_value(
                 ctx, adjustment.guard, target, dstname, "&" .. srcname,
                 loc, "structural Option view"),
             REBASE = coder._rebase_after_interface_discovery(ctx, target),
-            ANCHOR = dstslot and setslot(target, dstslot, dstname) or "",
+            ANCHOR = anchor_root
+                and setslot(target, anchor_root, dstname) or "",
         }), dstname
     end
     assert(adjustment.kind == "direct_coercion"
@@ -1303,11 +1386,19 @@ function coder._code_adjustment_value(
 end
 
 -- Read one typed run element and consume the open sink's stored adjustment.
--- The source run remains rooted for the whole sink operation, so the temporary
--- need not acquire another slot merely to bridge this copy.
+-- Contiguous runs borrow their source provenance. A non-contiguous reader can
+-- instead use the supplied result slot as its ordinary VM lookup destination;
+-- buffered sinks pass a distinct slot for every still-live result.
 function coder._convert_result_run_element(
-        ctx, run, target, index, loc, result_root)
-    local raw = run.args .. "[" .. run.start .. " + " .. index .. "]"
+        ctx, run, target, index, loc, result_root, result_stack)
+    local readstats, raw
+    if run.read then
+        readstats, raw = run.read(
+            ctx, index, loc, result_root, result_stack)
+    else
+        readstats = ""
+        raw = run.args .. "[" .. run.start .. " + " .. index .. "]"
+    end
     coder._checked_adjustment_plan(
         run.adjustment, run.elem, target, "open result adjustment")
     if types.equals(run.elem, target) then
@@ -1316,11 +1407,17 @@ function coder._convert_result_run_element(
                 .. types.tostring(run.elem) .. " -> "
                 .. types.tostring(target) .. " used "
                 .. tostring(run.adjustment.kind))
-        return "", raw
+        return readstats, raw
     end
-    return coder._code_adjustment_value(
+    -- A non-contiguous reader may need result_root to retain its raw VM result
+    -- even when the following adjustment cannot allocate. Only an allocating
+    -- adjustment may select that same slot as its own final cast anchor.
+    local adjustment_root = coder._adjustment_allocates_gc(run.adjustment)
+        and result_root or nil
+    local convstats, converted = coder._code_adjustment_value(
         ctx, run.adjustment, run.elem, target, raw, loc,
-        run.callable_adapter, result_root)
+        run.callable_adapter, adjustment_root)
+    return readstats .. "\n" .. convstats, converted
 end
 
 -- Lower the sole open producer of an adjusted expression list. Input `...`
@@ -1360,6 +1457,16 @@ function coder._code_open_source(ctx, source, want, effectively_open, carrier)
             effectively_open = effectively_open or "1",
             ownership = "borrowed",
         }
+    end
+    if source._tag == "Ast.ExpSpread" then
+        local stats, exp = codeexp(ctx, carrier or source)
+        local prepared = assert(source._coder_spread,
+            "open spread producer did not publish prepared state")
+        local run = assert(prepared.run,
+            "open spread producer did not publish a result run")
+        run.effectively_open = effectively_open or "1"
+        run.want = want or "LUA_MULTRET"
+        return stats, exp, run
     end
     assert(source._tag == "Ast.ExpCall")
     source._coder_open_want = want or "LUA_MULTRET"
@@ -1422,6 +1529,36 @@ function coder._codeadjustedopen(
     return stats, fixednames, tailnames, run
 end
 
+-- Validate a runtime-sized open argument run before any fixed backing array,
+-- Lua-stack reservation, or element loop observes its count. Spread ranges can
+-- span the full lua_Integer domain, unlike the byte-sized call/dots runs, so
+-- compare before addition and publish the now-small count under one C name.
+function coder._check_open_vararg_count(ctx, node, nprefix, run, stats)
+    if run.vararg_count then return run.vararg_count end
+    assert(nprefix >= 0 and nprefix <= 200)
+    local count = fresh_lowering_name(ctx, "_open_varg_count_")
+    table.insert(stats, render([[
+        lua_Unsigned $COUNT = (lua_Unsigned)($RUNCOUNT);
+        if (TITAN_LIKELY(
+                $COUNT <= (lua_Unsigned)TITAN_VARARG_MAX - $NPREFIX)) {
+            /* count is safe for the bounded descriptor and int loops */
+        } else {
+            luaL_error(L,
+                "%s:%d:%d: too many variadic arguments (max %d)",
+                $FILE, $LINE, $COL, (int)TITAN_VARARG_MAX);
+        }
+    ]], {
+        COUNT = count,
+        RUNCOUNT = run.count,
+        NPREFIX = c_integer_literal(nprefix),
+        FILE = c_string_literal(node.loc.filename),
+        LINE = c_integer_literal(node.loc.line),
+        COL = c_integer_literal(node.loc.col),
+    }))
+    run.vararg_count = count
+    return count
+end
+
 -- Materialize an adjusted scalar-prefix + dynamic run as one input-variadic
 -- descriptor. Native inputs remain C values; each open conversion that actually
 -- allocates a fresh callable/Interface wrapper establishes that allocation's
@@ -1436,16 +1573,21 @@ function coder._emit_open_vararg_struct(ctx, node, callee_ftype, tailnames,
     local argsname = "_open_vargs_" .. suffix
     local descname = "_open_vargdesc_" .. suffix
     local countname = "_open_vargcount_" .. suffix
+    local runcount = coder._check_open_vararg_count(
+        ctx, node, #tailnames, run, stats)
     local root_depth
-    if coder._adjustment_allocates_gc(run.adjustment) then
+    if run.retain_read_results
+       or coder._adjustment_allocates_gc(run.adjustment) then
         root_depth = ctx.depth
         for _ = 1, 200 do reserveslot(ctx) end
     end
     local runindex = c_integer_literal(#tailnames) .. " + _vai"
-    local result_root = root_depth and ("s2v("
+    local result_stack = root_depth and ("("
         .. stackslotat(root_depth) .. " + " .. runindex .. ")") or nil
+    local result_root = result_stack and ("s2v(" .. result_stack .. ")")
+        or nil
     local convstats, convexp = coder._convert_result_run_element(
-        ctx, run, elem, "_vai", node.loc, result_root)
+        ctx, run, elem, "_vai", node.loc, result_root, result_stack)
     local prefixsets = {}
     for i, name in ipairs(tailnames) do
         local index = c_integer_literal(i - 1)
@@ -1458,15 +1600,10 @@ function coder._emit_open_vararg_struct(ctx, node, callee_ftype, tailnames,
         }))
     end
     table.insert(stats, render([[
-        int $COUNT = $NPREFIX + $RUNCOUNT;
-        if (TITAN_UNLIKELY($COUNT > TITAN_VARARG_MAX)) {
-            luaL_error(L,
-                "%s:%d:%d: too many variadic arguments (%d, max %d)",
-                $FILE, $LINE, $COL, $COUNT, (int)TITAN_VARARG_MAX);
-        }
+        int $COUNT = $NPREFIX + (int)$RUNCOUNT;
         $ELEM $ARGS[TITAN_VARARG_MAX] = {0};
         $PREFIXSETS
-        for (int _vai = 0; _vai < $RUNCOUNT; _vai++) {
+        for (int _vai = 0; _vai < (int)$RUNCOUNT; _vai++) {
             $CONVSTATS
             $ARGS[$NPREFIX + _vai] = $VALUE;
         }
@@ -1474,7 +1611,7 @@ function coder._emit_open_vararg_struct(ctx, node, callee_ftype, tailnames,
     ]], {
         COUNT = countname,
         NPREFIX = c_integer_literal(#tailnames),
-        RUNCOUNT = run.count,
+        RUNCOUNT = runcount,
         FILE = c_string_literal(node.loc.filename),
         LINE = c_integer_literal(node.loc.line),
         COL = c_integer_literal(node.loc.col),
@@ -1495,6 +1632,11 @@ function coder._emit_open_vararg_struct(ctx, node, callee_ftype, tailnames,
         count = countname,
         start = "0",
         ownership = "caller",
+        -- This is the call-site materialization range, distinct from any
+        -- roots owned by the upstream producer run. Open values begin after
+        -- the scalar prefix; clearing the complete descriptor count also
+        -- removes stale prefix slots left by a shorter later materialization.
+        root_depth = root_depth,
     }
 end
 
@@ -1573,6 +1715,8 @@ function codevaluecall(ctx, node)
             argtypes[i] = atype
         end
         inputrun, inputtail = run, tailnames
+        coder._check_open_vararg_count(
+            ctx, node, #tailnames, inputrun, stats)
     elseif not callee_vararg and node._arg_adjustment then
         local astats, anames = coder._codeadjustedfixed(ctx, {
             _result_adjustment = node._arg_adjustment,
@@ -1730,18 +1874,19 @@ function codevaluecall(ctx, node)
     end
     local npush_dynamic = ""
     if inputrun then
+        local checked_input_count = assert(inputrun.vararg_count)
         npush_dynamic = " + " .. c_integer_literal(#inputtail)
-            .. " + " .. inputrun.count
+            .. " + (int)" .. checked_input_count
         table.insert(argpushes, render([[
             if (TITAN_UNLIKELY($NPREFIX + $COUNT > TITAN_VARARG_MAX)) {
                 luaL_error(L,
                     "%s:%d:%d: too many variadic arguments (%d, max %d)",
-                    $FILE, $LINE, $COL, $NPREFIX + $COUNT,
+                    $FILE, $LINE, $COL, $NPREFIX + (int)$COUNT,
                     (int)TITAN_VARARG_MAX);
             }
         ]], {
             NPREFIX = c_integer_literal(#inputtail),
-            COUNT = inputrun.count,
+            COUNT = checked_input_count,
             FILE = c_string_literal(node.loc.filename),
             LINE = c_integer_literal(node.loc.line),
             COL = c_integer_literal(node.loc.col),
@@ -1776,7 +1921,7 @@ function codevaluecall(ctx, node)
                 $SETSLOT L->top.p++;
             }
         ]], {
-            COUNT = inputrun.count,
+            COUNT = checked_input_count,
             PUSHSTATS = pushstats,
             SETSLOT = setboxed(ctx,
                 node._arg_adjustment.open_source._tag == "Ast.ExpDots"
@@ -1984,6 +2129,8 @@ function codevaluecall(ctx, node)
             $LINEDIR
             $FASTCALL
             $FASTPROJECTIONS
+            _base = restorestack(L, _base_off);
+            $FASTINPUTCLEANUP
         } else {
             int _vc_is_titan =
                 _vc_callee != NULL
@@ -2032,6 +2179,7 @@ function codevaluecall(ctx, node)
         LINEDIR = emitline(node),
         FASTCALL = fastcall,
         FASTPROJECTIONS = table.concat(fastprojections, "\n"),
+        FASTINPUTCLEANUP = coder._cleanup_result_run(inputvarg),
         NPUSH = c_integer_literal(npushfixed) .. npush_dynamic,
         STRICTPUSHES = table.concat(strict_pushes, "\n"),
         LUAPUSHES = table.concat(lua_pushes, "\n"),
@@ -2042,7 +2190,7 @@ function codevaluecall(ctx, node)
         LUASLOWREADS = lua_slowreads,
         LUASLOWOPEN = lua_slowopen,
         ANCHORS = table.concat(anchors, "\n"),
-        INPUTCLEANUP = inputrun and coder._cleanup_result_run(inputrun) or "",
+        INPUTCLEANUP = coder._cleanup_result_run(inputrun),
     }))
 
     -- 5. expose extra return values for ExpExtra readers
@@ -2243,7 +2391,7 @@ function codecall(ctx, node)
     assert(npassed <= nstatic)
     local nfixed = callee_vararg and #callee_ftype.params or npassed
     local vargexps = {} -- surplus static args destined for the backing struct
-    local inputrun
+    local inputrun, inputvarg
     if node._named_arg_order then
         assert(nstatic == #callee_ftype.params)
         local argstats, argexps = named_ordered_call_args(ctx, args,
@@ -2264,7 +2412,7 @@ function codecall(ctx, node)
             local fixedname = assert(fixednames[i])
             table.insert(caexps, fixedname)
         end
-        coder._emit_open_vararg_struct(ctx, node, callee_ftype,
+        inputvarg = coder._emit_open_vararg_struct(ctx, node, callee_ftype,
             tailnames, run, castats, caexps)
         inputrun = run
     elseif not callee_vararg and node._arg_adjustment then
@@ -2388,6 +2536,7 @@ function codecall(ctx, node)
     for _, stat in ipairs(anchors) do table.insert(castats, stat) end
     if inputrun then
         table.insert(castats, coder._cleanup_result_run(inputrun))
+        table.insert(castats, coder._cleanup_result_run(inputvarg))
     end
     for _, name in ipairs(abinames) do
         table.insert(castats, "(void)" .. name .. ";")

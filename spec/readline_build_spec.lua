@@ -310,6 +310,9 @@ void add_history(const char *line) { (void)line; }
         local makefile = read_file(MAKEFILE)
         local variables = make_variables(makefile)
         local upstream = read_file(READLINE_UPSTREAM)
+        assert.equal(
+            "https://ftpmirror.gnu.org/readline/$(READLINE_TARBALL)",
+            variables.READLINE_URL)
         for name, expected in pairs(EXPECTED_HASHES) do
             assert.equal(expected, variables[name], name)
             assert.truthy(upstream:find(expected, 1, true), name)

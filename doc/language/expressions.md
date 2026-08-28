@@ -128,10 +128,15 @@ power, write `(v ^ 2) as integer` or `(v ^ 2) is integer`. Conversely,
 `v is integer ^ 2` is a syntax error because a completed type cannot be
 followed directly by `^`.
 
-Parentheses group, as usual, with one extra meaning: parentheses around
-a *call* truncate it to its first value (see
-[Calls in expressions](#calls-in-expressions)); around anything else
-they change nothing.
+Parentheses group, as usual, with two adjustment forms: parentheses around a
+*call* truncate it to its first value (see
+[Calls in expressions](#calls-in-expressions)), while the exact variadic form
+`(...)` selects the first input argument or nil when absent (see
+[Variadic parameters](variadic-parameters.md#explicit-one-value-adjustment)).
+Around other valued expressions they change nothing. One syntax-sensitive
+exception is a direct `...[subset]` at an expression-list tail: parentheses
+prevent its promotion to a spread, leaving a subset expression that the
+checker rejects because slices have no standalone value.
 
 ## Arithmetic
 
@@ -595,7 +600,8 @@ exact integer-keyed Map constructor is an open result sink: it contributes all
 statically visible fixed results and, when declared, the complete run-time
 [flexible tail](flexible-returns.md). In any other position a call contributes
 one value, and in a computed Map or record field position surplus results are
-dropped.
+dropped. A final [spread expression](spread-expressions.md) can instead append
+all or a closed range of an Array, integer-keyed Map, or variadic run.
 See
 [arrays and maps](arrays-maps.md) and [records](records.md) for the full
 story on each constructor, including what `nil` elements mean.
@@ -680,7 +686,9 @@ A call used as an operand contributes its **first requested** result. A call in
 the *last* position of an expression list may expand to fill the consumer's
 remaining finite slots. A variadic argument tail, flexible `return` tail, or
 final positional Array/exact integer-Map field is open and consumes the
-complete visible run instead.
+complete visible run instead. A final
+[spread expression](spread-expressions.md) participates in the same finite or
+open adjustment, using its selected subject range as the producer.
 Wrapping the call in parentheses always requests exactly one value, as in Lua:
 
 ```lua

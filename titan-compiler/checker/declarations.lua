@@ -271,6 +271,9 @@ checker._foreign_forbidden_expressions = {
     ["Ast.ExpDots"] = "variadic expressions",
     ["Ast.ExpDotsIndex"] = "variadic expressions",
     ["Ast.ExpDotsLen"] = "variadic expressions",
+    ["Ast.ExpSubset"] = "spread expressions",
+    ["Ast.ExpSpread"] = "spread expressions",
+    ["Ast.ExpSpreadIndex"] = "spread expressions",
     ["Ast.ExpConcat"] = "string concatenation",
     ["Ast.ExpIs"] = "Titan type tests",
 }
@@ -550,6 +553,15 @@ function isconst(node)
         -- capture self, so it is a sound top-level initializer exactly when
         -- reading the receiver is sound.
         return isconst(node.exp)
+
+    elseif tag == "Ast.ExpDots" or tag == "Ast.ExpDotsIndex"
+           or tag == "Ast.ExpDotsLen" or tag == "Ast.ExpSubset"
+           or tag == "Ast.ExpSpread" or tag == "Ast.ExpSpreadIndex" then
+        -- Vararg and spread/subset syntax is expression-list machinery and is
+        -- never a compile-time module initializer, even when its subject is
+        -- constant. The expression checker emits the more specific scope and
+        -- placement diagnostics for these forms.
+        return false
 
     else
         error("impossible")

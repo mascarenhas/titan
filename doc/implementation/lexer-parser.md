@@ -406,10 +406,13 @@ The parser performs several rewrites that later passes rely on:
   an explicit `: ()`, because the former may copy fixed and flexible results
   from an expected function type.
 
-* **Parenthesized calls become `ExpAdjust`.** `defs.adjust_exp` wraps
-  `( f() )` in an `Ast.ExpAdjust` node — "adjust call to just first value" —
-  while parentheses around anything else vanish from the AST entirely
-  (`((1))` is just `ExpInteger 1`). The complementary `Ast.ExpExtra` node for
+* **Parenthesized calls and exact input dots become `ExpAdjust`.**
+  `defs.adjust_exp` wraps `( f() )` and the explicit scalar form `(...)` in an
+  `Ast.ExpAdjust` node. Other parentheses vanish from the AST (`((1))` is just
+  `ExpInteger 1`). Bare input dots are not a general `simpleexp`: a dedicated
+  `parenexp` branch admits them only when the next token is the closing `)`,
+  while `(...[index])` and `(...[subset])` fall through to ordinary expression
+  parsing. The complementary `Ast.ExpExtra` node for
   finite result positions after the first is synthesized only by
   [the checker](checker.md), never the parser; runtime-sized flexible tails
   stay on the call's checker decorations rather than becoming parser nodes.

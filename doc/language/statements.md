@@ -403,10 +403,13 @@ evaluated once before the loop and adjusted to a four-slot iterator tuple:
 
 Missing slots are filled with `nil`; values beyond the four tuple slots are
 evaluated and ignored. A trailing multi-return expression, flexible result
-run, or trailing `...` in a variadic function can fill the tuple, so a helper
-may return `(next, state, init, close)` directly. Finite positions projected
-from a flexible result are optional; the required iterator slot is forced
-before it is resolved as callable.
+run, trailing `...` in a variadic function, or
+[spread expression](spread-expressions.md) can fill the tuple, so a helper may
+return `(next, state, init, close)` directly. A spread carrier is evaluated
+once and all of its finite positions have type `T?`. A trailing bare `...`
+retains its existing tuple-slot rule: projections through the control slot
+nil-fill, while the close-slot projection is a direct raising read. The
+required iterator slot is forced before it is resolved as callable.
 
 The iterator slot may be a function, a `value` accepted through a gradual
 projection to a synthesized function type, or an admissible C function

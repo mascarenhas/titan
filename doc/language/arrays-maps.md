@@ -116,8 +116,10 @@ The final position is an open result consumer:
 - an earlier expression or a parenthesized call contributes one position;
 - a final fixed-multiple-return call contributes its visible results;
 - a final flexible-return call or contextual call through `value` contributes
-  the values actually returned; and
-- a trailing input `...` contributes its complete run.
+  the values actually returned;
+- a trailing input `...` contributes its complete run;
+- and a final [spread expression](spread-expressions.md) contributes all or a
+  closed range of an Array, integer-Map, or variadic subject.
 
 ```titan
 function pair(): (integer, integer)
@@ -357,8 +359,9 @@ Classification is intentionally strict:
 - `name = value` selects record construction; and
 - positional, computed-key, and named fields cannot be mixed.
 
-A trailing input `...` is accepted by an Array or positional integer-Map, but
-not by a keyed Map or record constructor.
+A trailing input `...` or [spread expression](spread-expressions.md) is
+accepted by an Array or positional integer-Map, but not by a keyed Map or
+record constructor.
 
 ### Reads, writes, and deletion
 

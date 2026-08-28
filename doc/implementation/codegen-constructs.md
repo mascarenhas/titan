@@ -272,7 +272,8 @@ collectable element stores barrier the backing Table.
 
 The final logical length is the highest non-nil produced position, so trailing
 nils do not inflate `#array`. A final open producer (`...`, a flexible-return
-call, or a contextual call through `value`) contributes its actual run after
+call, a contextual call through `value`, or a
+[spread expression](spread-expressions.md)) contributes its actual run after
 the fixed prefix. The same adjustment/lowering machinery is shared with a
 positional exact integer-keyed Map, whose destination is instead an ordinary
 Table.

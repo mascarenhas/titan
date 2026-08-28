@@ -95,14 +95,17 @@ return typedecl("Ast", {
         ExpBinop        = {"loc", "lhs", "op", "rhs"},
         ExpCast         = {"loc", "exp", "target"},
         ExpIs           = {"loc", "exp", "target"},
-        ExpAdjust       = {"loc", "exp"},                   -- adjust call to just first value
+        ExpAdjust       = {"loc", "exp"},                   -- adjust call or input varargs to one value
         ExpExtra        = {"loc", "exp", "index", "_type"}, -- index-th (>1) value of call
         ExpFunction     = {"loc", "params", "rettypes", "flexrettype", "block"}, -- anonymous function expression
         ExpMethodRef    = {"loc", "exp", "name"}, -- bound method reference `obj:m` (no call)
         ExpUnionInit    = {"loc", "owner", "variant", "value"}, -- synthesized union constructor body
         ExpDots         = {"loc"},          -- bare `...`
         ExpDotsIndex    = {"loc", "exp"},   -- `...[e]` (checker sets _nilfill, _type)
-        ExpDotsLen      = {"loc"}           -- `#...` (checker-normalized, §3.5)
+        ExpDotsLen      = {"loc"},          -- explicit `#...`
+        ExpSubset       = {"loc", "exp", "first", "last"}, -- `exp[first,last]`; false means omitted
+        ExpSpread       = {"loc", "exp", "first", "last"}, -- bounds populated by checker
+        ExpSpreadIndex  = {"loc", "spread", "index", "_type"} -- checker-synthesized projection
     },
 
     Args = {

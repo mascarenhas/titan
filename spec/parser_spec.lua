@@ -3511,8 +3511,7 @@ function f()]],
             { rhs = { _tag = "Ast.ExpCast", exp = { _tag = "Ast.ExpVar" }, target = { _tag = "Ast.TypeInteger" } }})
         assert_expression_ast([[ #... as value ]],
             { _tag = "Ast.ExpCast",
-                exp = { _tag = "Ast.ExpUnop", op = "#",
-                    exp = { _tag = "Ast.ExpDots" } },
+                exp = { _tag = "Ast.ExpDotsLen" },
                 target = { _tag = "Ast.TypeValue" } })
 
         -- A local two-component variant-looking target remains syntactically a
@@ -4486,6 +4485,332 @@ end]])
             return ast[1].block.stats
         end
 
+        it("parses a subset suffix with an omitted first bound", function()
+            assert_expression_ast("items[, last]", {
+                _tag = "Ast.ExpSubset",
+                exp = { _tag = "Ast.ExpVar" },
+                first = false,
+                last = { _tag = "Ast.ExpVar" },
+            })
+        end)
+
+        it("parses a subset suffix with an omitted last bound", function()
+            assert_expression_ast("items[first,]", {
+                _tag = "Ast.ExpSubset",
+                exp = { _tag = "Ast.ExpVar" },
+                first = { _tag = "Ast.ExpVar" },
+                last = false,
+            })
+        end)
+
+        it("parses a subset suffix with both bounds", function()
+            assert_expression_ast("items[first, last]", {
+                _tag = "Ast.ExpSubset",
+                exp = { _tag = "Ast.ExpVar" },
+                first = { _tag = "Ast.ExpVar" },
+                last = { _tag = "Ast.ExpVar" },
+            })
+        end)
+
+        it("chains ordinary index and subset suffixes distinctly", function()
+            assert_expression_ast("items[index][first, last]", {
+                _tag = "Ast.ExpSubset",
+                exp = {
+                    _tag = "Ast.ExpVar",
+                    var = { _tag = "Ast.VarBracket" },
+                },
+                first = { _tag = "Ast.ExpVar" },
+                last = { _tag = "Ast.ExpVar" },
+            })
+
+            assert_expression_ast("items[first, last][index]", {
+                _tag = "Ast.ExpVar",
+                var = {
+                    _tag = "Ast.VarBracket",
+                    exp1 = { _tag = "Ast.ExpSubset" },
+                    exp2 = { _tag = "Ast.ExpVar" },
+                },
+            })
+        end)
+
+        it("spreads a collection as a sole call argument", function()
+            local stats = vararg_stats("f(...items)")
+            assert_is_subset({
+                { _tag = "Ast.StatCall",
+                    callexp = { args = { args = {
+                        { _tag = "Ast.ExpSpread",
+                          exp = { _tag = "Ast.ExpVar" },
+                          first = false,
+                          last = false },
+                    } } } },
+            }, stats)
+        end)
+
+        it("rejects bare input varargs outside an expression-list tail",
+        function()
+            for _, case in ipairs({
+                { body = "return 1 + ...", label = "OpExp" },
+                { body = "f(..., 1)", label = "RParFuncArgs" },
+                { body = "x = {..., 1}", label = "RCurlyInitList" },
+                { body = "x = {..., ...}", label = "RCurlyInitList" },
+            }) do
+                assert_program_syntax_error(
+                    vararg_program(case.body), case.label)
+            end
+        end)
+
+        it("parses unary-leading collection subjects in explists", function()
+            local stats = vararg_stats([[
+                return ... - 1
+            ]])
+            assert_is_subset({
+                { _tag = "Ast.StatReturn",
+                  exps = {
+                      { _tag = "Ast.ExpSpread",
+                        exp = { _tag = "Ast.ExpUnop", op = "-" } },
+                  } },
+            }, stats)
+
+            stats = vararg_stats("return ... ~1")
+            assert_is_subset({
+                { _tag = "Ast.StatReturn",
+                  exps = {
+                      { _tag = "Ast.ExpSpread",
+                        exp = { _tag = "Ast.ExpUnop", op = "~" } },
+                  } },
+            }, stats)
+        end)
+
+        it("parses `(...)` as an explicit one-value adjustment", function()
+            local stats = vararg_stats("return (...) - 1")
+            assert_is_subset({
+                { _tag = "Ast.StatReturn",
+                  exps = {
+                      { _tag = "Ast.ExpBinop", op = "-",
+                        lhs = { _tag = "Ast.ExpAdjust",
+                            exp = { _tag = "Ast.ExpDots" } },
+                        rhs = { _tag = "Ast.ExpInteger", value = 1 } },
+                  } },
+            }, stats)
+        end)
+
+        it("keeps the exact parenthesized-dots branch suffix-safe", function()
+            local stats = vararg_stats([[
+                x = (...[1])
+                y = (...)[1]
+                z = ((...));
+                (...)()
+            ]])
+            assert_is_subset({
+                { _tag = "Ast.StatAssign",
+                  exps = { { _tag = "Ast.ExpDotsIndex" } } },
+                { _tag = "Ast.StatAssign",
+                  exps = { { _tag = "Ast.ExpVar", var = {
+                      _tag = "Ast.VarBracket",
+                      exp1 = { _tag = "Ast.ExpAdjust" },
+                  } } } },
+                { _tag = "Ast.StatAssign",
+                  exps = { { _tag = "Ast.ExpAdjust" } } },
+                { _tag = "Ast.StatCall", callexp = {
+                    exp = { _tag = "Ast.ExpAdjust" },
+                } },
+            }, stats)
+        end)
+
+        it("requires bare dots to close before scalar continuation", function()
+            for _, body in ipairs({
+                "x = (... - 1)",
+                "x = (... as integer)",
+                "x = (...items)",
+            }) do
+                assert_program_syntax_error(
+                    vararg_program(body), "ExpSimpleExp")
+            end
+
+            local stats = vararg_stats([[
+                x = ((...) - 1)
+                y = ((...) as integer)
+            ]])
+            assert_is_subset({
+                { _tag = "Ast.StatAssign",
+                  exps = { { _tag = "Ast.ExpBinop",
+                      lhs = { _tag = "Ast.ExpAdjust" } } } },
+                { _tag = "Ast.StatAssign",
+                  exps = { { _tag = "Ast.ExpCast",
+                      exp = { _tag = "Ast.ExpAdjust" } } } },
+            }, stats)
+        end)
+
+        it("allows a parenthesized unary-leading spread subject", function()
+            local stats = vararg_stats("f(...(-items))")
+            assert_is_subset({
+                { _tag = "Ast.StatCall",
+                  callexp = { args = { args = {
+                      { _tag = "Ast.ExpSpread",
+                        exp = { _tag = "Ast.ExpUnop", op = "-" } },
+                  } } } },
+            }, stats)
+        end)
+
+        it("spreads a collection subset as a trailing return value", function()
+            local stats = vararg_stats(
+                "return prefix, ...items[first, last]")
+            assert_is_subset({
+                { _tag = "Ast.StatReturn",
+                    exps = {
+                        { _tag = "Ast.ExpVar" },
+                        { _tag = "Ast.ExpSpread",
+                          exp = {
+                              _tag = "Ast.ExpSubset",
+                              exp = { _tag = "Ast.ExpVar" },
+                              first = { _tag = "Ast.ExpVar" },
+                              last = { _tag = "Ast.ExpVar" },
+                          } },
+                    } },
+            }, stats)
+        end)
+
+        it("spreads a collection subset as the final constructor field", function()
+            local stats = vararg_stats("x = {prefix, ...items[, last]}")
+            assert_is_subset({
+                { _tag = "Ast.StatAssign",
+                    exps = { { _tag = "Ast.ExpInitList",
+                        fields = {
+                            { _tag = "Ast.Field",
+                              exp = { _tag = "Ast.ExpVar" } },
+                            { _tag = "Ast.Field", name = false,
+                              exp = { _tag = "Ast.ExpSpread",
+                                  exp = {
+                                      _tag = "Ast.ExpSubset",
+                                      first = false,
+                                      last = { _tag = "Ast.ExpVar" },
+                                  } } },
+                        } } } },
+            }, stats)
+        end)
+
+        it("keeps an ordinary index inside a spread subject", function()
+            local stats = vararg_stats("f(...items[index])")
+            assert_is_subset({
+                { _tag = "Ast.StatCall",
+                    callexp = { args = { args = {
+                        { _tag = "Ast.ExpSpread",
+                          exp = {
+                              _tag = "Ast.ExpVar",
+                              var = { _tag = "Ast.VarBracket" },
+                          } },
+                    } } } },
+            }, stats)
+        end)
+
+        it("allows an indexed vararg value as a spread subject", function()
+            local stats = vararg_stats("f(... ...[1])")
+            assert_is_subset({
+                { _tag = "Ast.StatCall",
+                    callexp = { args = { args = {
+                        { _tag = "Ast.ExpSpread",
+                          exp = { _tag = "Ast.ExpDotsIndex" },
+                        },
+                    } } } },
+            }, stats)
+        end)
+
+        it("parses all three vararg slice forms as spreads", function()
+            local expected_bounds = {
+                { false, { _tag = "Ast.ExpVar" } },
+                { { _tag = "Ast.ExpVar" }, false },
+                { { _tag = "Ast.ExpVar" },
+                  { _tag = "Ast.ExpVar" } },
+            }
+            local spellings = {
+                "f(...[, last])",
+                "f(...[first,])",
+                "f(...[first, last])",
+            }
+
+            for i, spelling in ipairs(spellings) do
+                local stats = vararg_stats(spelling)
+                assert_is_subset({
+                    { _tag = "Ast.StatCall",
+                        callexp = { args = { args = {
+                            { _tag = "Ast.ExpSpread",
+                              exp = {
+                                  _tag = "Ast.ExpSubset",
+                                  exp = { _tag = "Ast.ExpDots" },
+                                  first = expected_bounds[i][1],
+                                  last = expected_bounds[i][2],
+                              } },
+                        } } } },
+                }, stats)
+            end
+        end)
+
+        it("parses a bracketed vararg slice explicitly in scalar grammar",
+        function()
+            local stats = vararg_stats("x = (...[first, last])")
+            assert_is_subset({
+                { _tag = "Ast.StatAssign",
+                  exps = {
+                      { _tag = "Ast.ExpSubset",
+                        exp = { _tag = "Ast.ExpDots" },
+                        first = { _tag = "Ast.ExpVar" },
+                        last = { _tag = "Ast.ExpVar" } },
+                  } },
+            }, stats)
+
+            stats = vararg_stats("x = {(...[first, last]), 3}")
+            assert_is_subset({
+                { _tag = "Ast.StatAssign",
+                  exps = { { _tag = "Ast.ExpInitList", fields = {
+                      { exp = { _tag = "Ast.ExpSubset" } },
+                      { exp = { _tag = "Ast.ExpInteger", value = 3 } },
+                  } } } },
+            }, stats)
+        end)
+
+        it("keeps bare input varargs distinct from collection spreads",
+        function()
+            assert_program_syntax_error(
+                vararg_program("f(......)"), "RParFuncArgs")
+        end)
+
+        it("leaves non-tail explicit spreads for checker diagnostics",
+        function()
+            local stats = vararg_stats([[
+                f(prefix, ...items, suffix)
+                x = {prefix, ...items, suffix}
+                f(...[1, 2], suffix)
+                x = {...[1, 2], suffix}
+            ]])
+            assert_is_subset({
+                { _tag = "Ast.StatCall", callexp = { args = { args = {
+                    { _tag = "Ast.ExpVar" },
+                    { _tag = "Ast.ExpSpread" },
+                    { _tag = "Ast.ExpVar" },
+                } } } },
+                { _tag = "Ast.StatAssign", exps = {
+                    { _tag = "Ast.ExpInitList", fields = {
+                        { exp = { _tag = "Ast.ExpVar" } },
+                        { exp = { _tag = "Ast.ExpSpread" } },
+                        { exp = { _tag = "Ast.ExpVar" } },
+                    } },
+                } },
+                { _tag = "Ast.StatCall", callexp = { args = { args = {
+                    { _tag = "Ast.ExpSubset",
+                      exp = { _tag = "Ast.ExpDots" } },
+                    { _tag = "Ast.ExpVar" },
+                } } } },
+                { _tag = "Ast.StatAssign", exps = {
+                    { _tag = "Ast.ExpInitList", fields = {
+                        { exp = { _tag = "Ast.ExpSubset",
+                          exp = { _tag = "Ast.ExpDots" } },
+                        },
+                        { exp = { _tag = "Ast.ExpVar" } },
+                    } },
+                } },
+            }, stats)
+        end)
+
         it("as a sole call argument: f(...)", function()
             local stats = vararg_stats("f(...)")
             assert_is_subset({
@@ -4598,12 +4923,59 @@ end]])
             }, stats)
         end)
 
-        it("parses `#...` as ExpUnop('#', ExpDots)", function()
+        it("keeps `...[e]` scalar before another list item", function()
+            local stats = vararg_stats("f(...[1], 2)")
+            assert_is_subset({
+                { _tag = "Ast.StatCall",
+                  callexp = { args = { args = {
+                      { _tag = "Ast.ExpDotsIndex" },
+                      { _tag = "Ast.ExpInteger", value = 2 },
+                  } } } },
+            }, stats)
+        end)
+
+        it("parses `#...` through its explicit variadic expression", function()
             local stats = vararg_stats("x = #...")
             assert_is_subset({
                 { _tag = "Ast.StatAssign",
+                    exps = { { _tag = "Ast.ExpDotsLen" } } },
+            }, stats)
+        end)
+
+        it("keeps unary `#` on an explicit `...[e]` value", function()
+            local stats = vararg_stats("x = #...[1]")
+            assert_is_subset({
+                { _tag = "Ast.StatAssign",
                     exps = { { _tag = "Ast.ExpUnop", op = "#",
-                        exp = { _tag = "Ast.ExpDots" } } } },
+                        exp = { _tag = "Ast.ExpDotsIndex" } } } },
+            }, stats)
+        end)
+
+        it("parses complete continuations after DOTS bracket expressions",
+        function()
+            local stats = vararg_stats([[
+                a = ...[1] + 2
+                b = ...[1] as integer
+                c = ...[1] ^ 2
+                d = ...[1, 2] + 3
+            ]])
+            assert_is_subset({
+                { _tag = "Ast.StatAssign", exps = {
+                    { _tag = "Ast.ExpBinop", op = "+",
+                      lhs = { _tag = "Ast.ExpDotsIndex" } },
+                } },
+                { _tag = "Ast.StatAssign", exps = {
+                    { _tag = "Ast.ExpCast",
+                      exp = { _tag = "Ast.ExpDotsIndex" } },
+                } },
+                { _tag = "Ast.StatAssign", exps = {
+                    { _tag = "Ast.ExpBinop", op = "^",
+                      lhs = { _tag = "Ast.ExpDotsIndex" } },
+                } },
+                { _tag = "Ast.StatAssign", exps = {
+                    { _tag = "Ast.ExpBinop", op = "+",
+                      lhs = { _tag = "Ast.ExpSubset" } },
+                } },
             }, stats)
         end)
     end)
@@ -4637,6 +5009,30 @@ end]])
             local src = "function foo(): nil\n  return " ..
                 repeated("%d", 101, ", ") .. "\nend"
             assert_program_syntax_error(src, "ListTooLong")
+        end)
+
+        it("counts explicit scalars but not an open tail marker", function()
+            local fixed = repeated("%d", 100, ", ")
+            assert_parses_successfuly(
+                "function foo(items: {integer}, ...: integer): nil\n" ..
+                "  return " .. fixed .. ", ...\nend")
+            assert_parses_successfuly(
+                "function foo(items: {integer}, ...: integer): nil\n" ..
+                "  return " .. fixed .. ", ...items\nend")
+
+            assert_program_syntax_error(
+                "function foo(...: integer): nil\n  return " ..
+                fixed .. ", ...[1]\nend", "ListTooLong")
+            assert_program_syntax_error(
+                "function foo(...: integer): nil\n  return " ..
+                fixed .. ", (...)\nend", "ListTooLong")
+        end)
+
+        it("does not exempt a non-tail spread from the list cap", function()
+            local fixed = repeated("%d", 100, ", ")
+            assert_program_syntax_error(
+                "function foo(items: {integer}): nil\n  return " ..
+                fixed .. ", ...items, 0\nend", "ListTooLong")
         end)
 
         it("rejects a 101-element lambda parameter list with ListTooLong", function()
@@ -5007,6 +5403,26 @@ end]])
             end
             parse_under_instruction_budget(
                 expression_test_program(expression), budget)
+        end)
+
+        it("parses nested indexes without retrying them as subsets", function()
+            local expression = "x"
+            for _ = 1, 17 do
+                expression = "x[" .. expression .. "]"
+            end
+            parse_under_instruction_budget(
+                expression_test_program(expression), budget)
+        end)
+
+        it("classifies nested vararg indexes once per explist item", function()
+            local expression = "1"
+            for _ = 1, 7 do
+                expression = "f(0, ...[" .. expression .. "], 1)"
+            end
+            parse_under_instruction_budget(
+                "function f(...: integer): nil\n" ..
+                "    x = " .. expression .. "\n" ..
+                "end", 30000)
         end)
 
         it("parses nested parentheses without duplicating each prefix", function()

@@ -154,6 +154,13 @@ collect_reads_exp = function(node, out)
         end
     elseif tag == "Ast.ExpUnionInit" then
         collect_reads_exp(node.value, out)
+    elseif tag == "Ast.ExpSpread" then
+        -- The written carrier owns evaluation of the shared subject and bounds.
+        -- Checker-synthesized ExpSpreadIndex projections deliberately do not
+        -- revisit this subtree.
+        collect_reads_exp(node.exp, out)
+        collect_reads_exp(node.first, out)
+        collect_reads_exp(node.last, out)
     elseif tag == "Ast.ExpUnop" or tag == "Ast.ExpCast"
             or tag == "Ast.ExpIs"
             or tag == "Ast.ExpAdjust" or tag == "Ast.ExpDotsIndex" then
@@ -202,6 +209,10 @@ function coder._collect_writes_exp(node, out)
         end
     elseif tag == "Ast.ExpUnionInit" then
         coder._collect_writes_exp(node.value, out)
+    elseif tag == "Ast.ExpSpread" then
+        coder._collect_writes_exp(node.exp, out)
+        coder._collect_writes_exp(node.first, out)
+        coder._collect_writes_exp(node.last, out)
     elseif tag == "Ast.ExpUnop" or tag == "Ast.ExpCast"
             or tag == "Ast.ExpIs"
             or tag == "Ast.ExpAdjust" or tag == "Ast.ExpDotsIndex"

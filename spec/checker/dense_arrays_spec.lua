@@ -268,25 +268,6 @@ describe("dense Array and positional integer-Map checking", function()
         assert.same(types.String(), adjusted.open_target)
     end)
 
-    it("rejects non-final and duplicate input dots cleanly", function()
-        local nonfinal = check_errs([[
-            function collect(...: string): {integer: string}
-                return { ..., "tail" }
-            end
-        ]])
-        assert.same(1, #nonfinal)
-        assert.match("must be the last field", nonfinal[1])
-
-        local duplicate = check_errs([[
-            function collect(...: string): {integer: string}
-                return { ..., ... }
-            end
-        ]])
-        assert.same(2, #duplicate)
-        assert.match("must be the last field", duplicate[1])
-        assert.match("can appear only once", duplicate[2])
-    end)
-
     it("keeps earlier and parenthesized calls scalar", function()
         local ok, err, tree = run_checker([[
             function pair(): (integer, integer)

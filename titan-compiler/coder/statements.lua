@@ -1742,11 +1742,65 @@ function coder._lower_return_to_destination(ctx, node, destination)
     if openrun then
         openrun.adjustment = assert(adjusted.open_adjustment,
             "open return expression lacks its checker adjustment")
+        -- A direct flexible-output descriptor is untraced. Most open sources
+        -- borrow durable provenance, but function-valued Map __index can
+        -- produce fresh collectables and an element conversion can allocate a
+        -- fresh wrapper. Keep every still-live result in its own ordinary VM
+        -- result slot until the native caller consumes the completed buffer.
+        -- Pending-finally destinations already own an equivalent root range.
+        local read_root_depth = flex.root_depth
+        if not read_root_depth
+           and (openrun.retain_read_results
+                or coder._adjustment_allocates_gc(openrun.adjustment)) then
+            read_root_depth = ctx.depth
+            for _ = 1, 200 do reserveslot(ctx) end
+        end
+        local result_stack = read_root_depth and ("("
+            .. stackslotat(read_root_depth) .. " + " .. flex.count .. ")")
+            or nil
+        local result_root = result_stack
+            and ("s2v(" .. result_stack .. ")") or nil
         local convstats, convexp = coder._convert_result_run_element(
-            ctx, openrun, flex.elem, "_ori", node.loc)
-        local root = coder._flex_root(flex, flex.count)
+            ctx, openrun, flex.elem, "_ori", node.loc,
+            result_root, result_stack)
+        local adjustment_allocates =
+            coder._adjustment_allocates_gc(openrun.adjustment)
+        if adjustment_allocates then
+            assert(result_root,
+                "allocating open return adjustment lacks its selected root")
+        end
+        -- An allocating adjustment already published its final value into the
+        -- sink-selected slot. Otherwise publish the assigned result here: the
+        -- slot may still be required for a retained read or ordinary GC output.
+        local root = adjustment_allocates and ""
+            or (result_root
+                and setslot(flex.elem, result_root,
+                    flex.args .. "[" .. flex.count .. "]")
+                or coder._flex_root(flex, flex.count))
         table.insert(cstats, render([[
-            for (int _ori = 0; _ori < $RUNCOUNT; _ori++) {
+            lua_Unsigned _open_return_count =
+                (lua_Unsigned)($RUNCOUNT);
+            if (_flexwant != LUA_MULTRET) {
+                int _open_return_remaining = _flexwant - $COUNT;
+                if (_open_return_remaining < 0)
+                    _open_return_remaining = 0;
+                if (_open_return_count >
+                        (lua_Unsigned)_open_return_remaining)
+                    _open_return_count =
+                        (lua_Unsigned)_open_return_remaining;
+            }
+            if (TITAN_LIKELY(
+                    _open_return_count <=
+                        (lua_Unsigned)TITAN_VARARG_MAX
+                            - (lua_Unsigned)$COUNT)) {
+                /* the complete consumed run fits before its loop */
+            } else {
+                luaL_error(L,
+                    "too many flexible return values (max %d)",
+                    (int)TITAN_VARARG_MAX);
+            }
+            for (lua_Unsigned _ori = 0;
+                 _ori < _open_return_count; _ori++) {
                 if (_flexwant == LUA_MULTRET || $COUNT < _flexwant) {
                     if (TITAN_UNLIKELY($COUNT >= TITAN_VARARG_MAX)) {
                         luaL_error(L, "too many flexible return values (max %d)",

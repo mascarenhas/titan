@@ -332,8 +332,9 @@ named fields stay record syntax, and mixed shapes produce deliberate
 diagnostics rather than entering the wrong checker arm.
 
 The adjusted final producer can be fixed multiple return, flexible return,
-contextual `value` call, or input `...`. Its element adjustment is retained on
-the open producer and consumed by code generation; unequal element types no
+contextual `value` call, input `...`, or a collection/ranged
+[spread expression](spread-expressions.md). Its element adjustment is retained
+on the open producer and consumed by code generation; unequal element types no
 longer cause the coder to synthesize a scalar cast. Each actual result consumes
 one position even when a `value`-consistent nil becomes an absent table slot.
 

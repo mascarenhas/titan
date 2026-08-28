@@ -329,6 +329,52 @@ describe("flexible returns through finally", function()
         ]])
     end)
 
+    it("publishes Lua callable fallbacks before finally clears the open source run",
+    function()
+        run_coder([[
+            local type Narrow = (integer) -> integer
+            local type Wide = (integer, value) -> value
+
+            function survive_callables(
+                produce: () -> (...: Narrow),
+                force: () -> ()
+            ): (...: Wide)
+                defer force()
+                return produce()
+            end
+        ]], [[
+            for _, mode in ipairs({"incremental", "generational"}) do
+                collectgarbage(mode)
+                local seen = setmetatable({}, { __mode = "v" })
+                local function produce()
+                    local first = function(x) return x + 10 end
+                    local second = function(x) return x + 20 end
+                    local third = function(x) return x + 30 end
+                    seen[1], seen[2], seen[3] = first, second, third
+                    return first, second, third
+                end
+                local function force()
+                    collectgarbage("collect")
+                    collectgarbage("collect")
+
+                    -- The pending return buffer is untraced, and the open
+                    -- producer run has already been released. Each identity
+                    -- fallback therefore needs the adapter result root.
+                    assert(seen[1] and seen[2] and seen[3])
+                end
+
+                local first, second, third =
+                    test.survive_callables(produce, force)
+                assert(rawequal(first, seen[1]))
+                assert(rawequal(second, seen[2]))
+                assert(rawequal(third, seen[3]))
+                assert(first(1, "ignored") == 11)
+                assert(second(2, "ignored") == 22)
+                assert(third(3, "ignored") == 33)
+            end
+        ]])
+    end)
+
     it("lets a raising finally replace populated flexible returns from body and catch", function()
         run_coder([[
             record R

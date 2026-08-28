@@ -393,8 +393,11 @@ statement  ::= ';'
 returnstat ::= return [explist] [';']
 casearm    ::= when Name [':' Name] then block
 varlist    ::= var {',' var}
-explist    ::= exp {',' exp} [',' '...']
+explist    ::= explistitem {',' explistitem} [',' '...']
             |  '...'
+explistitem ::= exp | spreadexp
+spreadexp  ::= '...' exp
+            |  '...' subsetsuffix
 var        ::= Name
             |  prefixexp {suffix} '[' exp ']'
             |  prefixexp {suffix} '.' Name
@@ -405,6 +408,15 @@ A `case` must contain at least one `when` arm. Every arm and its optional
 requires a union scrutinee, rejects duplicate arms and binding an empty
 variant, but does not require exhaustive coverage. See
 [Unions](unions.md#case-statements).
+
+In the first `spreadexp` alternative, `exp` may be any explicit expression,
+including a DOTS-started scalar such as `...[index]`; therefore
+`... ...[index]` spreads the Array or integer-keyed Map stored in that vararg
+slot. A second bare `...` cannot satisfy `exp`, so `......` remains invalid.
+The comma-bearing ranged forms use the second alternative. Bare `...` is
+syntactically final. An explicit `spreadexp` may be parsed as an earlier
+`explistitem`, but the checker requires it to be final; this keeps list parsing
+deterministic while preserving a precise placement diagnostic.
 
 An lvalue (`var`) is a plain name or a suffixed expression whose *last*
 suffix is an index or a field selection — `f()[1] = v`, `m[k][1] = v`,
@@ -461,21 +473,25 @@ unopexp     ::= {unop} e12
 e12         ::= simpleexp ['^' e11]
 unop        ::= not | '#' | '-' | '~'
 simpleexp   ::= nil | false | true | Numeral | LiteralString
-             |  '...'
+             |  '#...'
              |  '...' '[' exp ']'
+             |  '...' subsetsuffix
              |  constructor | funcexp | suffixedexp | prefixexp
 funcexp     ::= function '(' [lambdaparlist] ')' [':' rettype] block end
 lambdaparlist ::= lambdaparam {',' lambdaparam} [',' lambdavarargparam]
                 |  lambdavarargparam
 lambdaparam ::= Name [':' type]
 lambdavarargparam ::= '...' [':' type]
-prefixexp   ::= Name | '(' exp ')'
+prefixexp   ::= Name | '(' exp ')' | '(' '...' ')'
 suffixedexp ::= prefixexp suffix {suffix}
 suffix      ::= [typeargs] callargs
              |  ':' Name
              |  ':' Name [typeargs] callargs
              |  '[' exp ']'
+             |  subsetsuffix
              |  [typeargs] '.' Name
+subsetsuffix ::= '[' ',' exp ']'
+              |  '[' exp ',' [exp] ']'
 functioncall ::= prefixexp {suffix} [typeargs] callargs
               |  prefixexp {suffix} ':' Name [typeargs] callargs
 callargs    ::= funcargs | namedargs
@@ -485,9 +501,11 @@ namedargs   ::= '{' [namedarglist] '}'
 namedarglist ::= namedarg {fieldsep namedarg} [fieldsep]
 namedarg    ::= NamedLabel '=' exp
 constructor ::= '{' [fieldlist] '}'
-fieldlist   ::= field {fieldsep field} [fieldsep]
+fieldlist   ::= fielditem {fieldsep fielditem}
+                [fieldsep '...'] [fieldsep]
+             |  '...' [fieldsep]
+fielditem   ::= field | spreadexp
 field       ::= exp
-             |  '...'
              |  Name '=' exp
              |  '[' exp ']' '=' exp
 fieldsep    ::= ',' | ';'
@@ -512,7 +530,18 @@ instead a [bound method reference](closures.md#bound-method-references), a funct
 value. Constructors cover positional Arrays, Maps (computed `[k] = v` fields
 or, for an exact integer key type, all-positional fields), and records
 (`name = v`). Positional and keyed forms cannot be mixed; `,` and `;` are
-interchangeable and a trailing separator is allowed. A `funcexp` is an
+interchangeable and a trailing separator is allowed. Bare `...` is a
+grammar-level trailer and cannot precede another positional item. An explicit
+`spreadexp` can parse as an earlier list item or constructor field, but the
+checker requires it to be final. Outside a trailer, the dots token is admitted
+only by the explicit `#...`, `...[index]`, `...[subset]`, `(...)`, and
+`...subject` forms. Thus `1 + ...`, `(... + 1)`, and `{..., 1}` are syntax
+errors; close the adjustment first to write `(...) + 1`. In contrast,
+`... -1` is a spread whose subject is the unary expression `-1` and is rejected
+semantically as a non-container subject. A `subsetsuffix` is syntactically an
+expression suffix, but the checker accepts it only as the range suffix consumed
+by a [spread expression](spread-expressions.md); it is not an independently
+valued slice. A `funcexp` is an
 anonymous function: unlike a top-level `tlfunc`, its fixed-parameter and bare
 input-`...` annotations are optional, and an omitted complete result annotation
 may likewise come from a matching expected function type. Explicit `: ()` fixes

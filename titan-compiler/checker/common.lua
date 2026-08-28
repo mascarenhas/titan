@@ -531,10 +531,11 @@ function resolve_vararg(st, loc, errors)
     return vararg.elem
 end
 
--- Resolve `$vararg` for a trailing `Ast.ExpDots` that a consuming explist loop
--- (§4.6) or array constructor (§4.7) is about to expand, stamping its element
--- type on `_vararg_elem`. Unlike the `ExpDots` checkexp arm, this does NOT report
--- the "bare `...`" error — the node IS in a legal trailing position here.
+-- Resolve `$vararg` for an `Ast.ExpDots` whose enclosing syntax owns placement:
+-- a tail explist/constructor marker or an explicit comma-bearing subset
+-- wrapper. Stamp its element type on `_vararg_elem` without firing the direct
+-- visitor's defensive bare-scalar diagnostic; the owning consumer either
+-- expands the marker or reports the subset-placement error.
 function check_dots_marker(node, st, errors)
     node._vararg_elem = resolve_vararg(st, node.loc, errors)
     node._type = node._vararg_elem
