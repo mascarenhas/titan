@@ -28,8 +28,10 @@ tests, or review invalidate an assumption rather than following stale steps.
 - The manual macOS workflow is explicitly waived. Do not dispatch it.
 - Push and open the PR only after local completion. Then monitor every regular
   PR check and Codecov until green.
-- Preserve the pre-existing, unrelated working-tree edit in `titan-config.lua`
-  and exclude it from this branch's commits.
+- The pre-existing `titan-config.lua` edit was initially out of scope. After
+  local validation and PR creation, the maintainer explicitly requested that
+  it be included unchanged in this branch; that later instruction supersedes
+  the original exclusion.
 
 ## Issue contract (source of truth)
 
@@ -90,8 +92,10 @@ lifetime.
   probe results (#110)`).
 - Starting branch: `master`; feature branch now exists as
   `codex/array-map-vararg-spread`.
-- The only pre-existing dirty file is `titan-config.lua`; it adds local include
-  and `source_module_roots` settings and belongs to the user.
+- The only pre-existing dirty file was `titan-config.lua`; it adds the native
+  stdlib fixture include root plus stdlib/project include and
+  `source_module_roots` settings. The maintainer later explicitly brought that
+  exact edit into this PR.
 - `Makefile`, `titan-compiler/version.lua`, and `titan-runtime/titan.h` agree on
   ABI 2 and compiler/runtime version 0.6.0.
 - No issue comments refine the issue body.
@@ -308,9 +312,10 @@ suite from a clean, isolated absolute `/tmp` prefix, with ambient
    group, and run the full mixed suite under an isolated prefix.
 6. Obtain an independent code/semantic review and a separate human-facing
    language-doc review; fix findings and rerun affected gates.
-7. Verify version/ABI files and the unrelated `titan-config.lua` remain outside
-   the diff; commit, push, open the PR, then monitor Linux CI and Codecov to
-   green. Record that macOS was waived and not dispatched.
+7. Verify version/ABI files remain outside the diff; commit, push, open the PR,
+   then monitor Linux CI and Codecov to green. Include the existing
+   `titan-config.lua` edit following the maintainer's later instruction. Record
+   that macOS was waived and not dispatched.
 
 ## Durable progress log
 
@@ -560,6 +565,10 @@ suite from a clean, isolated absolute `/tmp` prefix, with ambient
   runtime/packaging specs, all four isolated compiler/language shards, and
   197/197 aggregate native Titan tests. The prefix was built and installed
   from this branch as Titan 0.6.0-1.
+- 2026-08-27: After PR #114 was opened, the maintainer explicitly requested
+  inclusion of the pre-existing `titan-config.lua` edit. It is included
+  unchanged in a separate follow-up commit. The fresh-prefix full suite above
+  had already run with that configuration present in the working tree.
 
 ## Validation and review log
 
