@@ -1135,6 +1135,68 @@ describe("libuv Makefile configuration", function()
         assert.truthy(makefile:find("titan/fs.titan.h", 1, true))
     end)
 
+    it("keeps filesystem explicit condition waits one-shot and scoped",
+        function()
+            local source = read_file("titan/fs.titan")
+
+            local request_start = assert(source:find(
+                "local record RealpathRequest", 1, true))
+            local request_stop = assert(source:find(
+                "\nend", request_start, true))
+            local request = source:sub(request_start, request_stop - 1)
+            assert.falsy(request:find("completed", 1, true), request)
+
+            local realpath_start = assert(source:find(
+                "function realpath(path: string): string", 1, true))
+            local realpath_stop = assert(source:find(
+                "\nlocal WATCHER_IDLE", realpath_start, true))
+            local realpath = source:sub(realpath_start, realpath_stop - 1)
+            assert_ordered(realpath,
+                'local resume_token = uv.ResumeToken.new("fs.realpath")',
+                "local cancel_action = function ()",
+                "defer cancel_action()",
+                "local status = libuv.uv_fs_realpath(",
+                "uv.suspend(resume_token, cancel_action)")
+            assert.equal(1, count_plain(realpath, "uv.suspend("), realpath)
+            assert.falsy(realpath:find("while ", 1, true), realpath)
+
+            local watcher_start = assert(source:find(
+                "\nrecord Watcher\n", 1, true)) + 1
+            local watcher_stop = assert(source:find(
+                "\nend", watcher_start, true))
+            local watcher = source:sub(watcher_start, watcher_stop - 1)
+            assert.truthy(watcher:find(
+                "local resume_token: uv.ResumeToken?", 1, true), watcher)
+
+            local wake_start = assert(source:find(
+                "local function Watcher:wake()", 1, true))
+            local wake_stop = assert(source:find(
+                "\nend", wake_start, true))
+            local wake = source:sub(wake_start, wake_stop - 1)
+            assert_ordered(wake,
+                "local resume_token = self.resume_token",
+                "self.waiter = nil",
+                "self.resume_token = nil",
+                "waiter:resume(resume_token)")
+
+            local poll_start = assert(source:find(
+                "function Watcher:poll(): {WatcherEvent}", 1, true))
+            local poll = source:sub(poll_start)
+            assert_ordered(poll,
+                'local resume_token = uv.ResumeToken.new("fs.watcher")',
+                "local cancel_action = function ()",
+                "defer cancel_action()",
+                "self.resume_token = resume_token",
+                "self.waiter = task",
+                "uv.suspend(resume_token, cancel_action)")
+            assert.truthy(poll:find(
+                "self.waiter == task and self.resume_token == resume_token",
+                1, true), poll)
+            assert.equal(1, count_plain(poll, "uv.suspend("), poll)
+            assert.falsy(poll:find(
+                "while #self.notifications", 1, true), poll)
+        end)
+
     it("keeps the reviewed standard-library roots, sources, and shims exact",
         function()
             assert.same(STDLIB_MODULES, makefile_words("STDLIB_MODULES"))

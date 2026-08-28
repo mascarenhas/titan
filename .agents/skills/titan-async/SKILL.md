@@ -989,8 +989,10 @@ The current filesystem watcher is the model:
 2. Its Titan handler copies nullable filename bytes and appends exactly one raw
    `WatcherNotification`.
 3. It wakes the poller through the tokenless condition-callback helper and
-   returns. The Watcher's private `"fs.watcher"` token belongs only to its
-   explicit poll suspension and facade-owned wake path.
+   returns. Each blocking poll's fresh private `"fs.watcher"` token belongs
+   only to that one explicit suspension and its facade-owned wake path. The
+   callback-buffered notification or last-registration removal establishes the
+   postcondition before delivery, so the poll does not defensively resuspend.
 4. When the Task drains notifications, it asynchronously calls `lstat`, maps
    each raw notification to exactly one public event, and closes a retired
    registration as needed.
@@ -1008,9 +1010,9 @@ it does not filter, merge, discard, or duplicate notifications. An
 back the batch.
 
 The same split applies to `fs.realpath`: each call creates a fresh private
-`"fs.realpath"` token for its explicit suspension and cancellation wake, while
-the accepted request callback publishes completion through the tokenless
-callback helper.
+`"fs.realpath"` token and suspends exactly once. The suspension's cancellation
+closure retains that token, while the accepted request's sole callback
+publishes completion through the tokenless callback helper.
 
 Evidence: `titan/fs.titan` and `doc/implementation/filesystem-library.md`.
 

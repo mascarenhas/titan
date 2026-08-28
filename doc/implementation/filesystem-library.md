@@ -24,8 +24,8 @@ asynchronous result lets higher-level compiler I/O preserve physical identity
 without falling back to blocking Lua filesystem calls.
 
 `realpath` owns one `owned *uv_fs_t` in a local `RealpathRequest`. The request
-also stores its exact Titan callback, optional Task waiter, completion flag,
-failure flag, and result payload. Accepted requests are keys in the traced
+also stores its exact Titan callback, optional Task waiter, failure flag, and
+result payload. Accepted requests are keys in the traced
 module-local `{RealpathRequest: boolean}` Map until their terminal callback,
 independently of the suspended continuation stack.
 
@@ -40,25 +40,26 @@ the request still has a waiter it calls the source-private tokenless
 `Task:resume(token)` and never receives a `ResumeToken`.
 
 The facade creates one fresh private token with diagnostic source
-`"fs.realpath"` and passes it to every `uv.suspend` in the completion loop. The
-optional cancellation action detaches the exact waiter synchronously; the
+`"fs.realpath"` and suspends exactly once with it. The accepted request has one
+authoritative callback, which publishes the failure/result before its tokenless
+wake, so a normal continuation already has the terminal payload. The optional
+cancellation action and its scope cleanup are established before libuv can
+accept the request. The action detaches the exact waiter synchronously; the
 Task's suspension closure then uses its captured token for the deferred
-cancellation wake. That token authorizes only public resume of this explicit
-suspension and is not a general capability for the native request. If a
-correct-token public wake is already pending, the callback helper leaves that
-timer as the sole continuation and the resumed caller reads the published
-request state. Titan's cooperative execution means no libuv callback can
-interleave with the detach. The short accepted request is not sent through
-`uv_cancel`; its eventual callback still performs cleanup without resuming the
-Task. A negative submission result cleans and unroots the request immediately
-because libuv will not call it back.
+cancellation wake. No request callback or other producer receives that token.
+It authorizes only retirement of this explicit suspension and is not a general
+capability for the native request. Titan's cooperative execution means no
+libuv callback can interleave with the detach. The short accepted request is
+not sent through `uv_cancel`; its eventual callback still performs cleanup
+without resuming the Task. A negative submission result cleans and unroots the
+request immediately because libuv will not call it back.
 
 ## Watcher ownership
 
 A public `Watcher` is permanently associated with the active `Runtime` at
 construction. It owns a dense Array of registrations, a canonical-path Map,
-a raw-notification Array, at most one polling Task, one private `ResumeToken`
-with diagnostic source `"fs.watcher"`, and one integer operation state covering
+a raw-notification Array, at most one polling Task, the optional private
+`ResumeToken` for that active poll, and one integer operation state covering
 idle, polling, clearing, and poll-plus-clear overlap. Operations first prove
 that the same Runtime remains active; there is no generation reset or cross-
 Runtime reuse path.
@@ -85,27 +86,31 @@ event that predates native subscription.
 `fs_watcher_event_cb` recovers the registration from handle data and the main
 Lua state from the handle's loop. Its Titan handler copies the nullable
 filename while libuv owns it and appends one `WatcherNotification` containing
-the registration, copied filename, event mask, and status. It then clears and
-wakes an installed poller through the tokenless condition-waiter callback
-helper. If a correct-token public resume is already pending, its Task-owned
-timer remains the sole continuation; the callback cannot advance the poller
-and leave that timer to resume a later suspension. The callback does not
-perform filesystem I/O and does not synchronously block the event loop. If
-copying or queue publication raises, the outer handler retires the exact
-waiter; an already-closing public-resume timer observes that terminal state and
-returns without entering the coroutine again.
+the registration, copied filename, event mask, and status. It then clears the
+installed poller and its current token before waking through the tokenless
+condition-waiter callback helper. The callback does not perform filesystem I/O
+and does not synchronously block the event loop. If copying or queue
+publication raises, the outer handler clears the same waiter/token pair before
+failing that exact Task at the callback boundary.
 
-The polling loop passes the Watcher's private token and an exact-waiter detach
-action to every explicit suspension. Facade state changes such as retiring the
-last registration resume the poller with that same token; native events still
-use the callback helper above. Cancellation detaches the waiter before the
-Task's stored-token wake, and scope cleanup repeats that idempotent detach on
-every other exit. A different public token raises in its caller as
-`Task resume token mismatch (expected source: fs.watcher)` and cannot end the
-poll. After every authorized wake, the poll rechecks both the notification queue
-and registration set and suspends again while it still has work to await.
-Shared registrations and every buffered notification remain available to the
-next polling Task.
+Each blocking `poll` creates a fresh token with source `"fs.watcher"`, stores it
+beside the exact waiter, and passes it with an exact-waiter detach action to one
+explicit suspension. Facade state changes such as retiring the last
+registration clear the waiter/token pair and resume the poller with that token;
+native events still use the callback helper above. Cancellation clears the
+pair before the Task's stored-token wake, and scope cleanup repeats that
+idempotent detach on every other exit. A different public token raises in its
+caller as `Task resume token mismatch (expected source: fs.watcher)` and cannot
+end the poll.
+
+A native callback has already appended a notification before its tokenless
+wake. A facade wake happens only after the last registration is removed. These
+are monotonic postconditions under the public requirement that Tasks externally
+coordinate concurrent Watcher mutations, so a normal continuation does not
+defensively resuspend. In particular, a caller that removes the last
+registration waits for the awakened poll before re-registering a path.
+Cancellation unwinds instead. Shared registrations and every buffered
+notification remain available to the next polling Task.
 
 ## One-to-one drain mapping
 

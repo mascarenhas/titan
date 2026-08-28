@@ -409,6 +409,19 @@ function test_fs_independent_continuations(context: test.Context)
     task_support.cleanup_task(cancelled,
                               "cancelled realpath Task cleanup")
     while not cancellation_started do timer.yield() end
+
+    local realpath_resume_error = ""
+    do
+      cancelled:resume(async.ResumeToken.new("realpath outsider"))
+    catch
+      realpath_resume_error = error as string
+    end
+    test.assert(realpath_resume_error ==
+                "Task resume token mismatch (expected source: fs.realpath)" and
+                cancelled:status():as_string() == "waiting" and
+                cancelled_realpath == nil,
+                "an unrelated token changed the one-shot realpath wait")
+
     cancelled:cancel(async.CancellationReason.simple(
         "cancel pending realpath"))
     async.join(cancelled)
@@ -685,8 +698,26 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
                 "poll cancellation changed watcher ownership")
 
     wait_for_watcher_event(watcher, "created", canonical, nil)
-    watcher:clear()
-    watcher:poll()
+
+    local stop_poll_entered = false
+    local stopped_result: {fs.WatcherEvent}? = nil
+    local stopped = async.run<value, value>(function (): value
+      stop_poll_entered = true
+      stopped_result = watcher:poll()
+      return nil
+    end)
+    task_support.cleanup_task(stopped,
+                              "filesystem watcher stop poll cleanup")
+    while not stop_poll_entered do timer.yield() end
+    timer.yield()
+    watcher:stop(root)
+    async.join(stopped)
+    test.assert(stopped:status():has_succeeded() and
+                stopped_result ~= nil and #stopped_result == 0 and
+                not watcher:is_watching(root),
+                "stop did not wake an empty blocked poll")
+    test.assert(#watcher:poll() == 0,
+                "poll after stopping the final registration was not empty")
 
     watcher:watch(root)
     local clear_poll_entered = false
@@ -699,6 +730,19 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
     task_support.cleanup_task(cleared,
                               "filesystem watcher clear poll cleanup")
     while not clear_poll_entered do timer.yield() end
+
+    local repeated_resume_error = ""
+    do
+      cleared:resume(async.ResumeToken.new("repeated poll outsider"))
+    catch
+      repeated_resume_error = error as string
+    end
+    test.assert(repeated_resume_error ==
+                "Task resume token mismatch (expected source: fs.watcher)" and
+                cleared:status():as_string() == "waiting" and
+                cleared_result == nil,
+                "a repeated blocked poll did not establish its token guard")
+
     watcher:clear()
     async.join(cleared)
     test.assert(cleared:status():has_succeeded() and

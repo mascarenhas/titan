@@ -52,6 +52,13 @@
   counters that arbitrate legitimate multiple terminal-listener deliveries.
   The retained `join*` per-position `has_finished()` checks are unrelated local
   idempotence, not premature-resume guards.
+- Apply the same refactor to the filesystem clients. An accepted `realpath`
+  request has one authoritative callback and therefore suspends once without a
+  completion flag. Each blocking `Watcher:poll` creates and stores a fresh
+  private token, then suspends once: a native callback has already buffered a
+  notification, while the facade wake has already removed the last
+  registration. The documented external-coordination requirement excludes a
+  concurrent mutator from invalidating that postcondition before delivery.
 
 ## Production changes
 
@@ -71,10 +78,12 @@
      winner/rejection/counter arbitration, while leaving `join*` slot
      idempotence outside this refactor.
 3. `titan/fs.titan`
-   - Give each `realpath` wait a fresh token.
-   - Give each Watcher a private token used by its poll suspensions and
-     ordinary Task wake; keep native callback delivery on the existing private
-     callback helper.
+   - Give each `realpath` wait a fresh token and suspend exactly once; remove
+     the obsolete request completion flag and loop.
+   - Give each blocking Watcher poll a fresh token stored only for that active
+     waiter and ordinary Task wake, clear both together before delivery, and
+     suspend exactly once. Keep native callback delivery on the existing
+     private callback helper.
 4. Update source-contract assertions and pinned standard-library metadata
    fixtures for the changed public nominal/signatures.
 
@@ -97,8 +106,9 @@
 - Update channel tests so an unrelated holder cannot directly wake a blocked
   sender or receiver with its own token, while legitimate channel progress and
   close still wake waiters.
-- Update filesystem condition-waiter tests for token-protected explicit and
-  Watcher suspensions, preserving callback/direct-wake ownership coverage.
+- Update filesystem condition-waiter tests for token-protected one-shot
+  explicit and Watcher suspensions, preserving callback/direct-wake,
+  cancellation, repeated-poll, and clear-wake coverage.
 - Update the retained `spec/libuv_build_spec.lua` structural contracts and
   metadata fixtures, then run its focused cases.
 
@@ -172,3 +182,19 @@
   runtime/packaging specs, all four complete compiler/language shards, and the
   202-test native aggregate. `TITAN_VERSION=0.6.0` and
   `TITAN_ABI_VERSION=2` remain unchanged; macOS was not dispatched.
+- 2026-08-28: maintainer follow-up identified the remaining defensive
+  resuspension loops in `fs.realpath` and `Watcher:poll`. Revalidated their
+  one-shot callback/facade postconditions and expanded this plan to remove the
+  loops, make the active Watcher token fresh per blocking poll, and clear that
+  token with its exact waiter.
+- 2026-08-28: completed both filesystem follow-ups. `fs.realpath` now installs
+  its cancellation action before native acceptance and suspends exactly once;
+  every blocking `Watcher:poll` owns a fresh token, clears the exact waiter/token
+  pair before delivery, and suspends exactly once. Added wrong-token, stop-wake,
+  reuse, and structural regressions; updated both filesystem manuals and the
+  async cartridge. The focused structural spec, complete 52-case libuv build
+  spec, focused and full filesystem filters, standalone 202-test aggregate, and
+  canonical fresh-policy `make -j2 test` all pass (127 retained specs, all four
+  compiler/language shards, and 202 native tests). Three independent reviews
+  are clean; the async cartridge has no separate `EVALUATION.md`; macOS remains
+  undispatched.

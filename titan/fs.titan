@@ -32,7 +32,6 @@ local record RealpathRequest
   local handle: owned *libuv.uv_fs_t
   local callback: (RealpathRequest) -> ()
   local waiter: uv.Task?
-  local completed: boolean
   local failed: boolean
   local payload: value
 end
@@ -313,7 +312,6 @@ local function RealpathRequest:finish()
 
   self.failed = failed
   self.payload = payload
-  self.completed = true
   self:unroot()
   if waiter then uv.resume_condition_waiter_from_callback(waiter) end
 end
@@ -329,7 +327,11 @@ function realpath(path: string): string
     request:finish()
   end
   local request = RealpathRequest.new(
-      native, callback, task, false, false, nil)
+      native, callback, task, false, nil)
+  local cancel_action = function ()
+    if request.waiter == task then request.waiter = nil end
+  end
+  defer cancel_action()
   request:root()
   libuv.uv_req_set_data((native as *libuv.uv_fs_t) as *libuv.uv_req_t,
                         request as ffi.titan_ffi_void_ptr)
@@ -341,11 +343,7 @@ function realpath(path: string): string
     raise uv.make_error(status, "fs.realpath")
   end
 
-  local cancel_action = function ()
-    if request.waiter == task then request.waiter = nil end
-  end
-  defer cancel_action()
-  while not request.completed do uv.suspend(resume_token, cancel_action) end
+  uv.suspend(resume_token, cancel_action)
   if request.failed then raise request.payload end
   return request.payload as string
 end
@@ -361,7 +359,7 @@ record Watcher
   local paths: {string: WatchRegistration}
   local notifications: {WatcherNotification}
   local waiter: uv.Task?
-  local resume_token: uv.ResumeToken
+  local resume_token: uv.ResumeToken?
   local operation_state: integer
 end
 
@@ -375,14 +373,17 @@ end
 local function Watcher:wake()
   local waiter? = self.waiter
   if not waiter then return end
+  local resume_token = self.resume_token
   self.waiter = nil
-  waiter:resume(self.resume_token)
+  self.resume_token = nil
+  waiter:resume(resume_token)
 end
 
 local function Watcher:wake_from_callback()
   local waiter? = self.waiter
   if not waiter then return end
   self.waiter = nil
+  self.resume_token = nil
   uv.resume_condition_waiter_from_callback(waiter)
 end
 
@@ -391,6 +392,7 @@ local function Watcher:fail_from_callback(failure: value,
   local waiter? = self.waiter
   if waiter then
     self.waiter = nil
+    self.resume_token = nil
     uv.fail_task_at_callback_boundary(waiter, failure, trace)
   else
     uv.report_task_error(failure, trace)
@@ -513,8 +515,7 @@ end
 function watcher(): Watcher
   local task = uv.running_task()
   uv.accepting_work(task.runtime, "create a filesystem watcher")
-  return Watcher.new(task.runtime, {}, {}, {}, nil,
-                     uv.ResumeToken.new("fs.watcher"), WATCHER_IDLE)
+  return Watcher.new(task.runtime, {}, {}, {}, nil, nil, WATCHER_IDLE)
 end
 
 function Watcher:watch(path: string)
@@ -688,14 +689,17 @@ function Watcher:poll(): {WatcherEvent}
   end
   if #self.registrations == 0 then return {} end
 
+  local resume_token = uv.ResumeToken.new("fs.watcher")
   local cancel_action = function ()
-    if self.waiter == task then self.waiter = nil end
+    if self.waiter == task and self.resume_token == resume_token then
+      self.waiter = nil
+      self.resume_token = nil
+    end
   end
   defer cancel_action()
-  while #self.notifications == 0 and #self.registrations > 0 do
-    self.waiter = task
-    uv.suspend(self.resume_token, cancel_action)
-  end
+  self.resume_token = resume_token
+  self.waiter = task
+  uv.suspend(resume_token, cancel_action)
   if #self.notifications > 0 then
     return self:drain_notifications()
   end
