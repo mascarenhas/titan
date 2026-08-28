@@ -145,16 +145,14 @@ function Pattern:match(subject: string, init: integer?,
     self, subject, _normalized_init(subject, init), ...)
   if attempt.matched then
     if attempt.capture_count == 0 then return attempt.after end
-    return _unpack_results(
-      attempt.captures, 2, attempt.capture_count + 1)
+    return ...attempt.captures[2, attempt.capture_count + 1]
   end
   return nil, attempt.failure_label, attempt.failure_position
 end
 
 function Match:values(): (...: value)
   if self.capture_count == 0 then return end
-  return _unpack_results(
-    self.captures, 2, self.capture_count + 1)
+  return ...self.captures[2, self.capture_count + 1]
 end
 
 function rule(name: string, pattern: Pattern): Rule

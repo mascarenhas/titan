@@ -165,7 +165,12 @@ function byte(subject: string, first: integer?,
   if normalized_last - normalized_first + 1 > 200 then
     raise "too many flexible return values (max 200)"
   end
-  return byte_results(subject, normalized_first, normalized_last)
+  local source = subject as const *ffi.titan_ffi_unsigned_char
+  local bytes: { integer } = {}
+  for i = normalized_first, normalized_last do
+    bytes[i - normalized_first + 1] = source[i - 1] as integer
+  end
+  return ...bytes
 end
 
 function char(...: integer): string
@@ -531,7 +536,7 @@ function unpack(format_string: string, data: string,
   end
 
   results[#results + 1] = position + 1
-  return flexible_values(results, 1)
+  return ...results
 end
 
 function compile_regex(expression: string): Regex
@@ -706,7 +711,11 @@ end
 
 function RegexMatch:values(): (string?, ...: string?)
   if #self.groups == 0 then return self:whole() end
-  return regex_group_values(self, 1)
+  local results: { string? } = {}
+  for i = 1, #self.groups do
+    results[i] = self:group(i)
+  end
+  return ...results
 end
 
 function match(subject: string, expression: string,

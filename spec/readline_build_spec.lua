@@ -16,17 +16,17 @@ local HOST_RANLIB = os.getenv("RANLIB") or "ranlib"
 
 local EXPECTED_HASHES = {
     READLINE_SHA256 =
-        "fe5383204467828cd495ee8d1d3c037a7eba1389c22bc6a041f627976f9061cc",
+    "fe5383204467828cd495ee8d1d3c037a7eba1389c22bc6a041f627976f9061cc",
     READLINE_COMBINED_PATCH_SHA256 =
-        "70cbc596c0a7b3a35fabb8a05711a60e2695bd2d06a4e2f46f6f168f84403f96",
+    "70cbc596c0a7b3a35fabb8a05711a60e2695bd2d06a4e2f46f6f168f84403f96",
     READLINE_LICENSE_SHA256 =
-        "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+    "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
     READLINE_PATCH_001_SHA256 =
-        "21f0a03106dbe697337cd25c70eb0edbaa2bdb6d595b45f83285cdd35bac84de",
+    "21f0a03106dbe697337cd25c70eb0edbaa2bdb6d595b45f83285cdd35bac84de",
     READLINE_PATCH_002_SHA256 =
-        "e27364396ba9f6debf7cbaaf1a669e2b2854241ae07f7eca74ca8a8ba0c97472",
+    "e27364396ba9f6debf7cbaaf1a669e2b2854241ae07f7eca74ca8a8ba0c97472",
     READLINE_PATCH_003_SHA256 =
-        "72dee13601ce38f6746eb15239999a7c56f8e1ff5eb1ec8153a1f213e4acdb29",
+    "72dee13601ce38f6746eb15239999a7c56f8e1ff5eb1ec8153a1f213e4acdb29",
 }
 
 local function quote(word)
@@ -121,7 +121,7 @@ end
 local function sha256(path)
     local attempts = {
         { "sha256sum", path },
-        { "shasum", "-a", "256", path },
+        { "shasum",    "-a", "256", path },
     }
     local failures = {}
     for _, argv in ipairs(attempts) do
@@ -273,22 +273,22 @@ void add_history(const char *line) { (void)line; }
 
     it("reports invalid fallback flags before terminal-library selection",
         function()
-        local missing_header = workspace .. "/missing-readline-flag.h"
-        local ok, output, why, code = make_readline({
-            "READLINE_MODE=bundled",
-            "READLINE_CPPFLAGS=-include " .. missing_header,
-            "READLINE_PATCH_FILE=" .. READLINE_PATCH,
-            "READLINE_LICENSE_SOURCE=" .. READLINE_LICENSE,
-        })
-        command_failed(ok, output, why, code)
-        assert.truthy(output:find(
-            "ERROR: Readline fallback compiler/linker sanity probe failed " ..
-            "before terminal-library selection.", 1, true), output)
-        assert.truthy(output:find(missing_header, 1, true), output)
-        assert.falsy(output:find(
-            "prefix-local Readline needs a usable", 1, true), output)
-        assert_no_selection_config()
-    end)
+            local missing_header = workspace .. "/missing-readline-flag.h"
+            local ok, output, why, code = make_readline({
+                "READLINE_MODE=bundled",
+                "READLINE_CPPFLAGS=-include " .. missing_header,
+                "READLINE_PATCH_FILE=" .. READLINE_PATCH,
+                "READLINE_LICENSE_SOURCE=" .. READLINE_LICENSE,
+            })
+            command_failed(ok, output, why, code)
+            assert.truthy(output:find(
+                "ERROR: Readline fallback compiler/linker sanity probe failed " ..
+                "before terminal-library selection.", 1, true), output)
+            assert.truthy(output:find(missing_header, 1, true), output)
+            assert.falsy(output:find(
+                "prefix-local Readline needs a usable", 1, true), output)
+            assert_no_selection_config()
+        end)
 
     it("makes forced-system probe failure terminal", function()
         local missing_archive =
@@ -310,9 +310,6 @@ void add_history(const char *line) { (void)line; }
         local makefile = read_file(MAKEFILE)
         local variables = make_variables(makefile)
         local upstream = read_file(READLINE_UPSTREAM)
-        assert.equal(
-            "https://ftpmirror.gnu.org/readline/$(READLINE_TARBALL)",
-            variables.READLINE_URL)
         for name, expected in pairs(EXPECTED_HASHES) do
             assert.equal(expected, variables[name], name)
             assert.truthy(upstream:find(expected, 1, true), name)

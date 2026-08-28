@@ -89,10 +89,3 @@ local function _normalized_init(subject: string,
     return length + init + 1
   end
 end
-
-local function _unpack_results(items: {value}, index: integer,
-                               limit: integer): (...: value)
-  if index > limit then return end
-  return items[index],
-    _unpack_results(items, index + 1, limit)
-end

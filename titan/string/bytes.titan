@@ -56,12 +56,3 @@ local function copy_interval(subject: string, first: integer,
                  count as cstring.size_t)
   return storage as string
 end
-
-local function byte_results(subject: string, current: integer,
-                            last: integer): (...: integer)
-  if current > last then return end
-  local source = subject as const *ffi.titan_ffi_unsigned_char
-  local octet = source[current - 1] as integer
-  if current == last then return octet end
-  return octet, byte_results(subject, current + 1, last)
-end

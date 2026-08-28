@@ -131,8 +131,7 @@ end
 
 function channel<T>(size: integer?):
     ((T) -> (), () -> T, () -> ())
-  local capacity = 1
-  if size ~= nil then capacity = size end
+  local capacity = size or 1
   if capacity < 1 then raise "channel size must be at least 1" end
 
   -- Count is authoritative because a channel may carry nil. The array slots
