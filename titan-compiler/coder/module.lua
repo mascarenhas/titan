@@ -32,6 +32,15 @@ int $ABINAME(lua_State* L) {
 ]]
 
 init = [[
+int $LUAOPEN_NAME(lua_State *L);
+
+static void $PRELOADNAME(lua_State *L) {
+    luaL_getsubtable(L, LUA_REGISTRYINDEX, LUA_PRELOAD_TABLE);
+    lua_pushcfunction(L, $LUAOPEN_NAME);
+    lua_setfield(L, -2, $PRELOADMODNAME);
+    lua_pop(L, 1);
+}
+
 static int _initialized = 0; /* tags and external functions are set up */
 
 Udata *$INITNAME(lua_State *L) {
@@ -57,6 +66,7 @@ Udata *$INITNAME(lua_State *L) {
         $INITVARS
         $CREATEMETA
         $MODULEINIT
+        $PRELOADNAME(L);
         return _mod;
     } else {
         Udata *_mod = uvalue(s2v(L->top.p - 1));
@@ -69,6 +79,7 @@ Udata *$INITNAME(lua_State *L) {
             $INITFUNCTAGS
             $INITPAIRS
             $INITNAMES
+            $PRELOADNAME(L);
         }
         return _mod;
     }

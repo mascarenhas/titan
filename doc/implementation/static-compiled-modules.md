@@ -318,6 +318,15 @@ members out of an archive. Selecting the shallow standard `titan.a` also makes
 the probe validate `luaopen_titan` and its `_loadlib`/`_loadlibglobal` support
 table.
 
+The generated entrypoint installs only the main module's loader. During the
+unchanged initialization recursion, every generated module whose `_init`
+succeeds stores its own `luaopen_*` function under its logical name in
+`registry[LUA_PRELOAD_TABLE]`. A private archive dependency therefore becomes
+available through `package.preload` when its importer initializes it, even
+though the public interface metadata does not expose that private edge. An
+unused archive sibling is neither extracted nor initialized and publishes no
+loader.
+
 For Interfaces, the use-site set includes the owner-exported native,
 coercive-Lua, and strict bound-method symbols. Concrete/Interface pair arrays
 and adjustment entries remain private to the source object that needs the

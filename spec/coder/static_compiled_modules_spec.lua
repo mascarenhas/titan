@@ -325,11 +325,88 @@ describe("static compiled-module native containers", function()
         assert.match(
             "TITAN_META_SECTION TITAN_META_NO_ADDRESS_SANITIZE",
             generated, 1, true)
+        assert.match(
+            "luaL_getsubtable(L, LUA_REGISTRYINDEX, LUA_PRELOAD_TABLE);",
+            generated, 1, true)
+        assert.match(
+            "lua_pushcfunction(L, luaopen_fixture_target);",
+            generated, 1, true)
+        assert.match(
+            'lua_setfield(L, -2, "fixture.target");',
+            generated, 1, true)
 
         local wrong, err = driver.derive_target_fingerprint(
             plain_object, "fixture.target")
         assert.falsy(wrong)
         assert.match("has no Titan metadata section", err, 1, true)
+    end)
+
+    it("publishes preload state before the package library opens", function()
+        local harness = workspace .. "/preload-before-package.c"
+        local executable = workspace .. "/preload-before-package"
+        write_file(harness, [[
+#include <assert.h>
+
+#include "lua.h"
+#include "lauxlib.h"
+#include "lualib.h"
+
+extern int luaopen_fixture_target(lua_State *L);
+
+int main(void) {
+    lua_State *L = luaL_newstate();
+    int base;
+    assert(L != NULL);
+
+    base = lua_gettop(L);
+    assert(luaopen_fixture_target(L) == 1);
+    assert(lua_gettop(L) == base + 1);
+    lua_pop(L, 1);
+
+    lua_getfield(L, LUA_REGISTRYINDEX, LUA_PRELOAD_TABLE);
+    assert(lua_istable(L, -1));
+    lua_getfield(L, -1, "fixture.target");
+    assert(lua_iscfunction(L, -1));
+    assert(lua_tocfunction(L, -1) == luaopen_fixture_target);
+    lua_pop(L, 2);
+    assert(lua_gettop(L) == base);
+
+    luaL_requiref(L, LUA_LOADLIBNAME, luaopen_package, 1);
+    lua_pop(L, 1);
+    lua_getglobal(L, "package");
+    lua_getfield(L, -1, "preload");
+    lua_getfield(L, LUA_REGISTRYINDEX, LUA_PRELOAD_TABLE);
+    assert(lua_rawequal(L, -1, -2));
+    lua_pop(L, 3);
+
+    lua_getglobal(L, "require");
+    lua_pushliteral(L, "fixture.target");
+    lua_call(L, 1, 1);
+    lua_getfield(L, LUA_REGISTRYINDEX, "Titan module fixture.target");
+    assert(lua_rawequal(L, -1, -2));
+    lua_pop(L, 2);
+
+    lua_close(L);
+    return 0;
+}
+]])
+        local compiler = configured_words(driver.CC)
+        for _, argument in ipairs({
+            "--std=c99", "-O0", "-g", "-Wall", "-Wextra",
+            "-Ititan-runtime", "-Ilua-5.5.1/src",
+            harness, target_object,
+            "titan-runtime/libtitan.a",
+            "libbacktrace/.libs/libbacktrace.a",
+            "lua-5.5.1/src/liblua.a",
+            "-o", executable, "-lm", "-pthread",
+        }) do
+            compiler[#compiler + 1] = argument
+        end
+        if not driver.IS_DARWIN then compiler[#compiler + 1] = "-ldl" end
+        local linked, output = run(compiler)
+        assert.truthy(linked, output)
+        local ran, run_output = run({ executable })
+        assert.truthy(ran, run_output)
     end)
 
     it("classifies ordered metadata-free -X objects and archives", function()
@@ -640,6 +717,9 @@ exec %s "$@"
             LUA, "-e", string.format([[
 local open = assert(package.loadlib(%q, "luaopen_fixture_target"))
 local target = open()
+assert(package.loaded["fixture.target"] == nil)
+assert(type(package.preload["fixture.target"]) == "function")
+assert(require("fixture.target") == target)
 assert(target.answer() == 42)
 assert(target.frozen_answer == 42)
 assert(not pcall(function() target.frozen_answer = 0 end))

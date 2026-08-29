@@ -146,6 +146,20 @@ Selecting one logical key makes that archive a native link input. It does not
 make every other key in the archive an ordinary lookup result. A later import
 of another name still follows the normal `.so`/`.a`/source priority.
 
+For a standalone executable, the entrypoint initially preloads only the main
+module. As main's ordinary import recursion initializes a generated module, the
+module publishes its own `luaopen_*` function under its logical name in
+`registry[LUA_PRELOAD_TABLE]`, which `package.preload` aliases. A private archive
+dependency therefore becomes available to Lua after its importing module
+initializes it, even though that dependency edge is absent from public
+metadata. A later `require` returns the canonical initialized module value and
+fills `package.loaded`; publishing the loader does not initialize it again.
+
+Merely sharing an archive with a selected key remains insufficient. An unused
+physical sibling is not extracted or initialized and publishes no preload
+entry. Any linked module outside the main module's initialized import closure
+likewise publishes no entry.
+
 The archive's complete physical membership does matter for native composition.
 When a selected archive is repackaged into a new provider, all of its object
 members are carried into both new native forms. A carried module is freshly

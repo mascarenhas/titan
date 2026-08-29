@@ -48,6 +48,20 @@ Because the module value is a userdata, `type(require "m")` is
 `"userdata"`, not `"table"`; functions and nominal namespaces are
 read-only (assigning to them errors).
 
+After a generated Titan module initializes successfully, it publishes its own
+`luaopen_*` function under its logical name in the registry preload table;
+`package.preload` aliases that table. Publishing does not initialize the module
+or fill `package.loaded`. A later Lua `require` calls the loader, receives the
+canonical module userdata already held in Titan's registry, and then applies
+Lua's ordinary `package.loaded` policy.
+
+In a standalone application, the generated entrypoint initially preloads only
+the main module. Requiring main performs the normal transitive Titan import
+initialization before `main` runs, and every successfully initialized module
+self-publishes along the way. This includes private dependencies pulled from a
+static archive. A linked module outside that initialized closure, or an unused
+archive sibling, remains absent from `package.preload`.
+
 ```lua
 -- counter.titan          -- Titan
 count: integer = 0

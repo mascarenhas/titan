@@ -69,6 +69,17 @@ searcher 1 ---> async package.path pass ---> searchers 3..first nil
                   loader result / package.loaded / true
 ```
 
+In a standalone executable, searcher 1 initially sees only the main loader that
+the entrypoint installed. The bootstrap require of that module performs the
+existing transitive `_init` recursion before `main`. After each generated
+module finishes `_init` successfully, it publishes its own `luaopen_*` function
+in `registry[LUA_PRELOAD_TABLE]`, which `package.preload` aliases. Searcher 1
+therefore sees every initialized import—including private static imports—by the
+time `main` runs. An unused or otherwise uninitialized linked module remains
+absent. A later asynchronous require invokes the published loader, recovers the
+canonical module value, and then follows the same registry cache rules shown
+above without initializing the module again.
+
 The cache is fetched from
 `LUA_REGISTRYINDEX[LUA_LOADED_TABLE]`, just as Lua's own `require` does; a
 reassigned public `package.loaded` field does not redirect it. `package`,

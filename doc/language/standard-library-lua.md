@@ -107,6 +107,19 @@ then performs its normal exact-provider lookup, so `titan.lua.require` does
 not need a special Titan-loader branch. C modules continue through Lua's
 installed C searchers.
 
+A standalone Titan entrypoint initially publishes only the main module through
+the first, preload searcher. Its bootstrap require performs the normal
+transitive Titan initialization before `main`. After each generated module
+finishes `_init` successfully, it publishes its own `luaopen_*` function in
+`registry[LUA_PRELOAD_TABLE]`; `package.preload` aliases that registry table.
+This makes every initialized import, including a private static archive
+dependency, visible to the preload searcher without a generated shim or
+separate provider DSO. Registration itself performs no initialization and does
+not fill `package.loaded`. A later `titan.lua.require` calls the published
+loader, receives the canonical initialized userdata, and installs it in the
+loaded table. An unused or otherwise uninitialized linked module has no preload
+entry.
+
 The second searcher slot is reserved for the asynchronous source pass and is
 never called. Replacing `package.searchers[2]` therefore does not replace that
 pass. Moving or copying Lua's built-in source searcher to another slot is not
