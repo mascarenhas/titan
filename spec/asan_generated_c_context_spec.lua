@@ -140,6 +140,10 @@ local function asan_log(provider, offset, id, additional_frames)
     return table.concat(lines, "\n")
 end
 
+local platform_ok, platform_or_error, is_darwin =
+    driver.initialize_platform()
+assert.truthy(platform_ok, platform_or_error)
+
 describe("ASan generated-C context diagnostics", function()
     it("parses only numbered relocation-safe frames and takes the final module pair",
     function()
@@ -187,7 +191,7 @@ describe("ASan generated-C context diagnostics", function()
         }, "\n"), assert(mapper.source_context(source, 3, 20)))
     end)
 
-    if not driver.IS_DARWIN then
+    if not is_darwin then
         local workspace
 
         before_each(function()

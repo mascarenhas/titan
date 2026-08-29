@@ -4,7 +4,17 @@
 # behavior. LuaCov's debug hook makes repeated checks of large Titan library
 # sources expensive, and it does not measure Titan's C runtime implementation.
 
-set -u
+# Bash before 4.4 treats a declared empty array as unset while nounset is
+# active. macOS still ships Bash 3.2, and the partition arrays below are
+# intentionally empty before their first validated row. Retain nounset on
+# shells with the corrected array behavior; every scalar expansion used on the
+# older-shell path is initialized here or guarded with a default/error form.
+if (( BASH_VERSINFO[0] > 4 ||
+      (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )); then
+    set -u
+else
+    set +u
+fi
 
 if [[ -z ${BUSTED:-} ]]; then
     if [[ -n ${PREFIX:-} && -x $PREFIX/bin/busted ]]; then

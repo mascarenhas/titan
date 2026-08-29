@@ -988,11 +988,14 @@ describe("closure adjustment wrappers (end-to-end)", function()
 
     it("preserves non-Titan, mistagged, deferred, and max-upvalue fallbacks",
     function()
-        local locals, terms = {}, {}
+        -- Keep each capture use shallow: this is a MAXUPVAL fallback test, not
+        -- a stress test for a C compiler's handling of one huge expression.
+        local locals, additions = {}, {}
         for index = 1, 250 do
             locals[#locals + 1] = string.format(
                 "local capture_%d = %d", index, index)
-            terms[#terms + 1] = "capture_" .. tostring(index)
+            additions[#additions + 1] =
+                "total = total + capture_" .. tostring(index)
         end
         local source = string.format([[
             local function text(value_: string): string
@@ -1029,7 +1032,9 @@ describe("closure adjustment wrappers (end-to-end)", function()
             local function saturated(): () -> integer
                 %s
                 return function(): integer
-                    return %s
+                    local total: integer = 0
+                    %s
+                    return total
                 end
             end
 
@@ -1040,7 +1045,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
                     and (adjusted(nil) as integer) == 31375
             end
         ]], table.concat(locals, "\n                "),
-            table.concat(terms, " + "))
+            table.concat(additions, "\n                    "))
         h.run_coder(source, [[
             local lua = function(x) return x end
             local cfunction = math.abs

@@ -608,23 +608,25 @@ local function Watcher:map_notification(
     local path = registration:event_path(notification.filename)
     local renamed =
       (notification.events & (libuv.UV_RENAME as integer)) ~= 0
-    if renamed or not registration.directory then
-      local exists = true
-      if registration.directory and not lstat(registration.path) then
+    local exists = true
+    if registration.directory then
+      if not lstat(registration.path) then
         path = registration.path
         exists = false
-      else
+      elseif renamed then
         exists = lstat(path) ~= nil
       end
-      if not exists and path == registration.path and
-         registration.index > 0 then
-        registration:stop()
-        self:remove_registration(registration)
-        registration:close(true)
-      end
-      if not exists then return WatcherEvent.deleted(path) end
-      if renamed then return WatcherEvent.created(path) end
+    else
+      exists = lstat(path) ~= nil
     end
+    if not exists and path == registration.path and
+       registration.index > 0 then
+      registration:stop()
+      self:remove_registration(registration)
+      registration:close(true)
+    end
+    if not exists then return WatcherEvent.deleted(path) end
+    if renamed then return WatcherEvent.created(path) end
     return WatcherEvent.modified(path)
   catch
     if error is uv.OperationError then
