@@ -443,9 +443,14 @@ function test_fs_condition_waiter_tokens_and_callback_progress(
     local root = support.new_workspace(context)
     local watcher_path = root .. "/watcher.dat"
     support.cleanup_path(context, watcher_path)
+    -- Use a direct-file watch for this suspension protocol oracle. Darwin
+    -- routes it through kqueue, avoiding FSEvents startup notifications that
+    -- can otherwise wake the poll before the stale-token assertion.
+    support.write_file_synchronously(watcher_path, "")
+    local canonical = fs.realpath(watcher_path)
     local watcher = fs.watcher()
     cleanup_watcher(watcher)
-    watcher:watch(root)
+    watcher:watch(watcher_path)
     wait_for_watcher_subscription()
 
     local watcher_phase = 0
@@ -483,11 +488,10 @@ function test_fs_condition_waiter_tokens_and_callback_progress(
                 watcher_events ~= nil,
                 "watcher callback did not complete token-guarded poll")
 
-    local canonical = fs.realpath(watcher_path)
     local found = false
     local events = watcher_events as {fs.WatcherEvent}
     for index = 1, #events do
-      if watcher_event_matches(events[index], "created", canonical, nil) then
+      if watcher_event_matches(events[index], "modified", canonical, nil) then
         found = true
       end
     end
@@ -546,6 +550,10 @@ function test_fs_watcher_directory_events_and_canonical_paths(context: test.Cont
         watcher, "deleted", canonical_delete, canonical_nested)
 
     fs.write_file(nested_path, "nested-after")
+    -- Darwin's FSEvents can coalesce back-to-back mutations. Match libuv's
+    -- portable test boundary so the out-of-scope nested event and the
+    -- in-scope sentinel event are delivered in separate batches.
+    timer.sleep(100)
     fs.write_file(sentinel_path, "sentinel")
     local canonical_sentinel = fs.realpath(sentinel_path)
     wait_for_watcher_event(
