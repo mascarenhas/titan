@@ -3849,7 +3849,7 @@ done
             assert.falsy(sanitizer_job:find("linux-regular-v1", 1, true))
             assert.truthy(sanitizer_job:find(
                 "linux-asan-ubsan-v1", 1, true))
-            assert.truthy(macos_job:find("macos-full-v1", 1, true))
+            assert.truthy(macos_job:find("macos-15-full-v1", 1, true))
             assert.equal(3, count_literal(workflow,
                 "-${{ github.sha }}"), workflow)
             assert.equal(3, count_literal(workflow,
