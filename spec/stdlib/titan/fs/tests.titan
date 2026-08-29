@@ -27,19 +27,23 @@ end
 local function watcher_event_matches(event: fs.WatcherEvent,
                                       kind: string,
                                       path: string,
-                                      forbidden: string?): boolean
+                                      forbidden: string?,
+                                      alternative_kind: string?): boolean
   local actual = ""
   local matches = false
   case event
   when created: found then
     actual = found
-    matches = kind == "created" and found == path
+    matches = (kind == "created" or alternative_kind == "created") and
+              found == path
   when deleted: found then
     actual = found
-    matches = kind == "deleted" and found == path
+    matches = (kind == "deleted" or alternative_kind == "deleted") and
+              found == path
   when modified: found then
     actual = found
-    matches = kind == "modified" and found == path
+    matches = (kind == "modified" or alternative_kind == "modified") and
+              found == path
   when error: failure then raise failure
   end
   test.assert(forbidden == nil or actual ~= forbidden,
@@ -50,11 +54,13 @@ end
 local function wait_for_watcher_event(watcher: fs.Watcher,
                                       kind: string,
                                       path: string,
-                                      forbidden: string?)
+                                      forbidden: string?,
+                                      alternative_kind: string?)
   while true do
     local events = watcher:poll()
     for index = 1, #events do
-      if watcher_event_matches(events[index], kind, path, forbidden) then
+      if watcher_event_matches(
+          events[index], kind, path, forbidden, alternative_kind) then
         return
       end
     end
@@ -540,14 +546,17 @@ function test_fs_watcher_directory_events_and_canonical_paths(context: test.Cont
     wait_for_watcher_event(
         watcher, "modified", canonical_modify, canonical_nested)
 
+    -- Libuv permits UV_CHANGE or UV_RENAME for directory-entry create/delete
+    -- hints. Titan exposes the former as modified, so these path/scope checks
+    -- accept that portable alternative without weakening root deletion below.
     fs.write_file(create_path, "created")
     local canonical_create = fs.realpath(create_path)
     wait_for_watcher_event(
-        watcher, "created", canonical_create, canonical_nested)
+        watcher, "created", canonical_create, canonical_nested, "modified")
 
     fs.unlink(delete_path)
     wait_for_watcher_event(
-        watcher, "deleted", canonical_delete, canonical_nested)
+        watcher, "deleted", canonical_delete, canonical_nested, "modified")
 
     fs.write_file(nested_path, "nested-after")
     -- Darwin's FSEvents can coalesce back-to-back mutations. Match libuv's
@@ -557,7 +566,7 @@ function test_fs_watcher_directory_events_and_canonical_paths(context: test.Cont
     fs.write_file(sentinel_path, "sentinel")
     local canonical_sentinel = fs.realpath(sentinel_path)
     wait_for_watcher_event(
-        watcher, "created", canonical_sentinel, canonical_nested)
+        watcher, "created", canonical_sentinel, canonical_nested, "modified")
 
     watcher:stop(root .. "/.")
     test.assert(not watcher:is_watching(root),
