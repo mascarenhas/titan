@@ -1,13 +1,12 @@
 local test = import "test"
 local pattern = import "peg"
-local ffi = foreign import "titan/ffi.h"
 local clocale = foreign import "locale.h"
 
 local function bytes_contain(subject: string, needle: string): boolean
   if #needle == 0 then return true end
   if #needle > #subject then return false end
-  local haystack = subject as const *ffi.titan_ffi_unsigned_char
-  local wanted = needle as const *ffi.titan_ffi_unsigned_char
+  local haystack = subject as const *unsigned char
+  local wanted = needle as const *unsigned char
   local first = 0
   while first <= #subject - #needle do
     local equal = true

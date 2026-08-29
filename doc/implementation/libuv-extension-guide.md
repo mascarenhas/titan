@@ -6,8 +6,11 @@ folder module. Read the [continuation runtime](libuv-runtime.md) first; the
 persistent stream handle.
 
 The goal is not a one-for-one public wrapper around libuv. Add only the native
-surface needed by a high-level standard module, keep every FFI type inside
-`titan.uv`, and preserve the central equivalence:
+surface needed by a high-level standard module and normally keep FFI types
+inside `titan.uv`. A deliberately portable public native boundary such as
+`async.run_foreign(f: foreign (*void) -> (), arg: *void)` is the narrow
+exception; it must use only contextual C primitives and their exportable
+structural closure. Preserve the central equivalence:
 
 ```text
 submit operation(callback)
@@ -70,6 +73,7 @@ FFI rule against C retaining an otherwise unanchored string pointer.
 | Synchronous function without a callback | No | No persistent owner; automatic storage unless the documented call retains a pointer | No |
 | Synchronous function that calls back into Titan before returning | One boundary variant when the callback must not enter a running Task coroutine | One callback owner for the call | Reuse or define the exact protocol |
 | One-shot request whose result suspends a Task | One submission variant | One request owner, normally rooted by `Task.pending` | Reuse or define the exact protocol |
+| Worker-pool request | One submission variant | One request owner rooted by `Task.pending`; a raw carrier is frozen before submission | Separate worker and after-work entries with disjoint thread authority |
 | One-shot callback on a newly initialized handle | Usually one submission variant | One rooted handle owner, followed by `uv_close` | Reuse or define the exact protocol |
 | Persistent multi-shot callback source | Wait/consume and close variants; start need not be a variant | One rooted handle owner with natural buffered state and one waiter | One exact entry per callback protocol |
 | New `uv_handle_t` subtype | As required by its logical operations | One rooted wrapper for the initialized handle | As required by its callbacks |
@@ -155,6 +159,31 @@ The compiler-generated `titan/uv/uv.titan.h` includes `uv.h`, the narrow typed
 intermediate; do not install or hand-edit it. `titan-runtime/libtitan.a` has no
 libuv callback object.
 
+### Worker callbacks are a separate authority
+
+The callback sequence above applies only to callbacks that libuv invokes on
+the event-loop thread. A `uv_work_cb` runs in the process-wide worker pool and
+must not perform any step in that sequence: it cannot recover a Titan owner,
+closure, Task, runtime, module, or `lua_State`, and it cannot inspect
+`TValue`/`Udata` or call a Titan/Lua helper.
+
+`async.run_foreign` is the model. `WorkOwner` roots an owned `uv_work_t`, an
+owned three-slot raw pointer carrier, and the loop-thread completion callback.
+Before submission the carrier receives the after-work owner pointer, erased
+foreign function pointer, and argument. `uv_work_cb` reads only the latter two
+slots and performs exactly `f(arg)`. `uv_after_work_cb` runs on the loop thread,
+recovers the owner from the first slot, and enters the ordinary protected Titan
+completion path.
+
+After `uv_queue_work` succeeds, the after-work callback is authoritative even
+when the Task is cancelled; do not call `uv_cancel` or release the carrier
+early. For this API, only submission status zero is accepted; every nonzero
+status is the no-callback case and must clear `Task.pending` synchronously.
+The pool is also shared with filesystem and DNS
+operations, so a public API that uses it must document starvation and
+synchronization responsibilities rather than claiming isolated background
+execution.
+
 ## Adding a single-shot callback operation
 
 Use filesystem requests in `file.titan` as the general template,
@@ -198,7 +227,7 @@ The current DNS owner is:
 local record uv_getaddrinfo_t
   local native: owned *libuv.uv_getaddrinfo_t
   local callback: (uv_getaddrinfo_t, integer,
-                   ffi.titan_ffi_void_ptr) -> ()
+                   *void) -> ()
 end
 ```
 
@@ -472,11 +501,12 @@ example. `new_tcp` plus `TcpRole` is the persistent multi-shot example.
 
 ### 1. Keep the FFI handle private
 
-An FFI type cannot appear in an exported module interface. Define one ordinary
-Titan wrapper that owns `*libuv.uv_X_t` locally, plus only its callbacks,
-Runtime identity, root index, and inherent persistent state. Public facades
-hold the wrapper as an opaque `uv` record and expose ordinary Titan records,
-unions, Interfaces, strings, numbers, and options.
+An imported libuv handle type cannot appear in an exported module interface;
+its graph depends on `uv.h`, not only contextual portable primitives. Define
+one ordinary Titan wrapper that owns `*libuv.uv_X_t` locally, plus only its
+callbacks, Runtime identity, root index, and inherent persistent state. Public
+facades hold the wrapper as an opaque `uv` record and expose ordinary Titan
+records, unions, Interfaces, strings, numbers, and options.
 
 For a stream subtype, add small local conversions to `*libuv.uv_stream_t` and
 `*libuv.uv_handle_t`. For another handle, add only the handle conversion.
@@ -669,7 +699,8 @@ for a quicker check that leaves the prefix unchanged.
 Before committing an extension, verify all of these claims from the pinned
 header, docs, implementation, and tests:
 
-- the public facade needs the operation and does not expose an FFI type;
+- the public facade needs the operation and either hides its FFI types or uses
+  only the deliberately portable contextual C closure;
 - the function exists at the system-version floor or that floor is deliberately
   raised;
 - the operation is correctly classified as synchronous, one-shot, or
@@ -679,6 +710,8 @@ header, docs, implementation, and tests:
 - request cleanup and native-result release happen exactly once;
 - every callback enters Titan only on the loop thread and catches before
   returning through libuv;
+- a worker callback accesses only frozen raw C carrier fields and never enters
+  Titan or Lua, while its paired after-work callback owns loop-thread recovery;
 - callback closure fields agree between the Titan owner and source foreign body;
 - initialized handles remain rooted until `close_cb` and need no registry;
 - cancellation does not release accepted native work early or synchronously
@@ -703,7 +736,7 @@ Against bundled libuv 1.52.1:
 | Metric | Covered | Total | Coverage |
 | --- | ---: | ---: | ---: |
 | Concrete handle types | 6 | 14 | 42.9% |
-| Public `UV_EXTERN uv_*` functions | 75 | 318 | 23.6% |
+| Public `UV_EXTERN uv_*` functions | 76 | 318 | 23.9% |
 
 The concrete handle denominator is `UV_HANDLE_TYPE_MAP`'s 16 entries minus
 the abstract `uv_handle_t` and `uv_stream_t`. Titan owns wrappers for named
@@ -722,7 +755,7 @@ declarations in `include/uv.h`, before host preprocessing. No platform header
 adds another `UV_EXTERN` function, so this is stable across Linux and macOS.
 It deliberately includes the deprecated `uv_loop_new` and `uv_loop_delete`;
 libuv's documentation contains 316 nondeprecated functions, against which the
-same numerator is 75 of 316, or 23.7%.
+same numerator is 76 of 316, or 24.1%.
 
 This is name-level breadth. Calling `uv_spawn` does not claim every process
 flag or stdio combination, and a zero in the following table does not imply a
@@ -758,8 +791,8 @@ give an unsupported subtype artificial nonzero coverage.
 
 The concrete-handle chapters contain 94 functions in total, of which Titan
 uses 13 (13.8%). Together with seven abstract-handle and eight abstract-stream
-functions, 28 of Titan's 75 referenced functions are in handle-related
-chapters. The other 47 cover the loop, requests, filesystem, DNS, errors,
+functions, 28 of Titan's 76 referenced functions are in handle-related
+chapters. The other 48 cover the loop, requests, filesystem, DNS, errors,
 version, and OS/miscellaneous helpers.
 
 ### Reproducing the snapshot
@@ -875,7 +908,7 @@ done
 The expected headline is:
 
 ```text
-version=1.52.1 public=318 documented=316 used=75 concrete=14 wrapped=6
+version=1.52.1 public=318 documented=316 used=76 concrete=14 wrapped=6
 header-only: uv_loop_delete,uv_loop_new
 wrapped: pipe,process,signal,tcp,timer,tty
 ```
@@ -885,7 +918,7 @@ pointer-type candidate list. Inspect changed names before updating the table:
 exclude a function mentioned only in a comment, and count a handle only when
 Titan really owns its persistent wrapper rather than merely using owned
 storage for a transient request or value. The source extractor deliberately
-uses `UV_TITAN_SOURCES`, not every file in the directory. The current 75
+uses `UV_TITAN_SOURCES`, not every file in the directory. The current 76
 function references and six wrappers have been checked manually.
 
 Refresh this section whenever `LIBUV_VERSION` changes or production

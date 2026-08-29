@@ -26,25 +26,6 @@
 #define TITAN_NOINLINE
 #endif
 
-typedef void titan_ffi_void;
-typedef void *titan_ffi_void_ptr;
-typedef char *titan_ffi_char_ptr;
-typedef _Bool titan_ffi_bool;
-typedef char titan_ffi_char;
-typedef signed char titan_ffi_signed_char;
-typedef unsigned char titan_ffi_unsigned_char;
-typedef short titan_ffi_short;
-typedef unsigned short titan_ffi_unsigned_short;
-typedef int titan_ffi_int;
-typedef unsigned int titan_ffi_unsigned_int;
-typedef long titan_ffi_long;
-typedef unsigned long titan_ffi_unsigned_long;
-typedef long long titan_ffi_long_long;
-typedef unsigned long long titan_ffi_unsigned_long_long;
-typedef float titan_ffi_float;
-typedef double titan_ffi_double;
-typedef long double titan_ffi_long_double;
-
 int errorhandler(lua_State *L);
 
 static inline TValue lua_totvalue(lua_State *L, int idx) {

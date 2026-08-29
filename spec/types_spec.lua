@@ -614,7 +614,7 @@ describe("Titan types", function()
                 tostring(err))
         end)
 
-        it("traverses Interface method signatures for C FFI types",
+        it("allows portable C types in Interface method signatures",
         function()
             local owner = "api.Foreign"
             local cint =
@@ -625,12 +625,10 @@ describe("Titan types", function()
 
             assert.is_true(
                 types.first_c_type(interface) == cint)
-            assert.is_true(
-                types.first_c_ffi_type(interface) == cint)
-            local ok, err = pcall(types.serialize, interface)
-            assert.is_false(ok)
-            assert.match("cannot serialize C FFI type int",
-                tostring(err))
+            assert.is_true(types.contains_c_ffi_type(interface))
+            assert.is_nil(types.first_non_exportable_type(interface))
+            assert.match('CInteger%("int",true,3,32%)',
+                types.serialize(interface))
         end)
 
         it("projects methods without self or parameter-name identity",
@@ -2216,6 +2214,10 @@ describe("Titan types", function()
             assert.same("Type.CInteger", int._tag)
             assert.same("int", types.tostring(int))
             assert.same("void", types.tostring(types.CVoid()))
+            assert.same("bool", types.tostring(
+                types.CInteger("_Bool", false, 0, 8)))
+            assert.same("foreign float",
+                types.tostring(types.CFloat("float")))
             assert.same("double", types.tostring(types.CFloat("double")))
             assert.same("const int *", types.tostring(types.CPointer(int, {"const"})))
             assert.same("int[4]", types.tostring(types.CArray(int, 4)))
@@ -2510,7 +2512,8 @@ describe("Titan types", function()
             assert.truthy(types.is_c(owners))
             assert.truthy(types.is_c(by_name))
             assert.falsy(types.is_c(callback))
-            assert.truthy(types.first_c_ffi_type(callback))
+            assert.truthy(types.contains_c_ffi_type(callback))
+            assert.is_nil(types.first_non_exportable_type(callback))
             assert.falsy(types.is_direct_c(owners))
             assert.falsy(types.is_direct_c(by_name))
             assert.falsy(types.is_direct_c(callback))
@@ -2777,22 +2780,98 @@ describe("Titan types", function()
                 {types.Integer()}, {types.String()}, false, false, false)))
             assert.falsy(types.is_c(types.Function(
                 {types.CPointer(cint(), {})}, {}, false, false, false)))
-            assert.truthy(types.first_c_ffi_type(
+            assert.truthy(types.contains_c_ffi_type(
                 types.Function({types.CPointer(cint(), {})}, {}, false, false,
                     false)))
-            assert.truthy(types.first_c_ffi_type(types.Function(
+            assert.truthy(types.contains_c_ffi_type(types.Function(
                 {}, {}, false, false, types.CPointer(cint(), {}))))
         end)
 
-        it("rejects serializing C FFI types", function()
-            local ok, err = pcall(types.serialize, types.CPointer(cint(), {}))
-            assert.falsy(ok)
-            assert.matches("cannot serialize C FFI type", err)
+        it("serializes the portable C surface recursively", function()
+            local callback = types.CPointer(types.CFunction(
+                {cint(), types.CPointer(types.CVoid(), {"const"})},
+                types.CFloat("double"), false, false), {})
+            local owner = types.COwned(callback, true)
+            local serialized = types.serialize(owner)
+            local rebuilt = assert(load(
+                "return " .. serialized, "portable-c", "t", types))()
 
-            ok, err = pcall(types.serialize,
-                types.Array(types.CPointer(cint(), {}), false))
-            assert.falsy(ok)
-            assert.matches("cannot serialize C FFI type", err)
+            assert.truthy(types.equals(owner, rebuilt))
+            assert.is_nil(types.first_non_exportable_type(rebuilt))
+            assert.truthy(types.contains_c_ffi_type(rebuilt))
+        end)
+
+        it("finds the first non-exportable C descriptor", function()
+            local portable = types.CPointer(cint(), {"const"})
+            assert.is_nil(types.first_non_exportable_type(portable))
+
+            local alias = types.CTypedef("ffi_int", cint())
+            assert.equal(alias, types.first_non_exportable_type(alias))
+            assert.equal(alias, types.first_non_exportable_type(
+                types.Array(alias, false)))
+
+            local oldstyle = types.CFunction(
+                {}, types.CVoid(), false, false)
+            oldstyle._paramstyle = "oldstyle"
+            local cyclic = types.CPointer(types.CVoid(), {})
+            cyclic.pointee = cyclic
+
+            for _, malformed in ipairs({
+                types.CPointer(cint(), {"volatile"}),
+                types.CArray(cint(), 2),
+                types.CFunction({types.CVoid()}, types.CVoid(), false, false),
+                types.CFunction({types.COwned(cint(), false)},
+                    types.CVoid(), false, false),
+                types.CFunction({cint()}, types.CVoid(), true, false),
+                types.COwned(types.CVoid(), false),
+                types.CPointer(types.Integer(), {}),
+                types.CPointer(types.COwned(cint(), false), {}),
+                types.COwned(types.Integer(), false),
+                types.CPointer(types.CFunction(
+                    {types.Integer()}, types.CVoid(), false, false), {}),
+                types.CFunction({cint()}, types.Integer(), false, false),
+                oldstyle,
+                cyclic,
+                types.CModule("ffi", {}, {}),
+            }) do
+                assert.truthy(types.first_non_exportable_type(malformed))
+                local ok, err = pcall(types.serialize, malformed)
+                assert.falsy(ok)
+                assert.matches("cannot serialize C FFI type", err)
+            end
+        end)
+
+        it("reattaches target numeric traits to recovered portable scalars",
+        function()
+            local integer_traits = { kind = "integer" }
+            local float_traits = { kind = "float" }
+            local carriers = { identity = "test-profile" }
+            local canonical_int = cint()
+            canonical_int._c_numeric = integer_traits
+            canonical_int._c_numeric_carriers = carriers
+            local canonical_float = types.CFloat("double")
+            canonical_float._c_numeric = float_traits
+            canonical_float._c_numeric_carriers = carriers
+            local profile = {
+                integers = { int = { type = canonical_int } },
+                floats = { double = { type = canonical_float } },
+            }
+            local recovered_int = cint()
+            local recovered_float = types.CFloat("double")
+            local graph = types.Function(
+                {recovered_int}, {recovered_float}, false, false, false)
+
+            assert.truthy(types.normalize_portable_c_numeric_types(
+                graph, profile))
+            assert.equal(integer_traits, recovered_int._c_numeric)
+            assert.equal(float_traits, recovered_float._c_numeric)
+            assert.equal(carriers, recovered_int._c_numeric_carriers)
+
+            local mismatched = types.CInteger("int", true, 3, 64)
+            local ok, err = types.normalize_portable_c_numeric_types(
+                mismatched, profile)
+            assert.is_nil(ok)
+            assert.match("disagrees with the selected target profile", err)
         end)
 
         it("pretty-prints legacy C struct and union placeholders", function()

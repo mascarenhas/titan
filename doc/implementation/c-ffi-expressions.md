@@ -131,8 +131,11 @@ The checker records the target profile's authoritative `size_t` type on each
 and uses the shared checked numeric conversion before producing Titan
 `integer`; it never emits an unchecked `size_t`-to-`lua_Integer` cast.
 
-None of these C type aliases are serialized into compiled Titan module
-interfaces.
+Contextual primitive type namespaces are self-contained. They and transparent
+Titan aliases whose complete C graph is built from contextual primitives may
+be serialized into compiled module interfaces. Namespaces derived from a
+foreign import remain source-local even when an imported typedef resolves to a
+portable primitive.
 
 ## Exact C declarators
 

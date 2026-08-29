@@ -8,8 +8,9 @@ local openssl_x509v3 = foreign import "openssl/x509v3.h"
 local openssl_pem = foreign import "openssl/pem.h"
 local openssl = foreign import "openssl/ssl.h"
 local cstddef = foreign import "stddef.h"
-local ffi = foreign import "titan/ffi.h"
 local cstring = foreign import "string.h"
+
+local type VoidPointer = *void
 
 local TLS_RECORD_BYTES = 16 * 1024
 local MAX_PEM_BYTES = 2147483647
@@ -82,9 +83,9 @@ record Server
 end
 
 local record PemBlock
-  local name_buffer: ffi.titan_ffi_void_ptr
-  local header_buffer: ffi.titan_ffi_void_ptr
-  local data_buffer: ffi.titan_ffi_void_ptr
+  local name_buffer: *void
+  local header_buffer: *void
+  local data_buffer: *void
   local name: string
   local header: string
   local length: integer
@@ -202,17 +203,17 @@ end
 local function verify_error(code: integer): Error
   local message = "certificate verification failed"
   local reason = openssl_x509v3.X509_verify_cert_error_string(
-      code as ffi.titan_ffi_long)
+      code as long)
   if reason then message = reason as string end
   return Error.new(code, "CERTIFICATE_VERIFY_FAILED", message,
                    "ssl.handshake.verify")
 end
 
-local function bytes_string(bytes: const *ffi.titan_ffi_char,
+local function bytes_string(bytes: const *char,
                             length: integer): string
   if length == 0 then return "" end
-  local storage: owned ffi.titan_ffi_char[] =
-    ffi.titan_ffi_char.new_array(length)
+  local storage: owned char[] =
+    char.new_array(length)
   cstring.memcpy(storage, bytes, length as cstring.size_t)
   return storage as string
 end
@@ -269,7 +270,7 @@ local function drain_output(connection: Connection): integer
   while pending > 0 do
     local requested = pending
     if requested > TLS_RECORD_BYTES then requested = TLS_RECORD_BYTES end
-    local buffer = ffi.titan_ffi_char.new_array(requested)
+    local buffer = char.new_array(requested)
     local lengths = cstddef.size_t.new_array(1)
     lengths[0] = 0 as cstddef.size_t
     openssl_err.ERR_clear_error()
@@ -294,7 +295,7 @@ end
 local function set_memory_bio_eof_return(bio: *openssl.BIO,
                                          result: integer)
   openssl.BIO_ctrl(bio, openssl.BIO_C_SET_BUF_MEM_EOF_RETURN,
-                   result as ffi.titan_ffi_long, nil)
+                   result as long, nil)
 end
 
 local function mark_transport_eof(connection: Connection)
@@ -328,7 +329,7 @@ local function feed_input(connection: Connection, operation: string)
   end
 
   local input = encrypted as string
-  local bytes = input as const *ffi.titan_ffi_char
+  local bytes = input as const *char
   local offset = 0
   while offset < #input do
     local lengths = cstddef.size_t.new_array(1)
@@ -454,7 +455,7 @@ local function read_locked(connection: Connection): string?
      connection.state == STATE_SHUTDOWN then return nil end
   handshake_locked(connection)
 
-  local buffer = ffi.titan_ffi_char.new_array(TLS_RECORD_BYTES)
+  local buffer = char.new_array(TLS_RECORD_BYTES)
   while true do
     local lengths = cstddef.size_t.new_array(1)
     lengths[0] = 0 as cstddef.size_t
@@ -503,7 +504,7 @@ local function read_locked(connection: Connection): string?
 end
 
 local function write_piece_locked(connection: Connection, piece: string)
-  local bytes = piece as const *ffi.titan_ffi_char
+  local bytes = piece as const *char
   while true do
     local lengths = cstddef.size_t.new_array(1)
     lengths[0] = 0 as cstddef.size_t
@@ -596,7 +597,7 @@ local function configure_context(context: *openssl.SSL_CTX,
   openssl_err.ERR_clear_error()
   if openssl.SSL_CTX_ctrl(context,
       openssl.SSL_CTRL_SET_MIN_PROTO_VERSION,
-      openssl.TLS1_2_VERSION as ffi.titan_ffi_long, nil) ~= 1 then
+      openssl.TLS1_2_VERSION as long, nil) ~= 1 then
     raise openssl_error(operation,
                         "failed to require TLS 1.2 or newer")
   end
@@ -627,11 +628,11 @@ local function pem_memory_bio(data: string,
                     "PEM data is too large for OpenSSL", operation)
   end
 
-  local source = data as const *ffi.titan_ffi_char
+  local source = data as const *char
   openssl_err.ERR_clear_error()
   local bio = openssl_pem.BIO_new_mem_buf(
-      source as const *ffi.titan_ffi_void,
-      #data as ffi.titan_ffi_int)
+      source as const *void,
+      #data as int)
   if not bio then
     raise openssl_error(operation,
                         "failed to allocate a PEM memory BIO")
@@ -642,15 +643,15 @@ end
 -- OPENSSL_free is a public function-like macro unavailable to Titan's FFI.
 -- CRYPTO_free is its exported primitive; nil and zero are valid source
 -- attribution because Titan is not using OpenSSL's allocation diagnostics.
-local function openssl_free(pointer: ffi.titan_ffi_void_ptr)
+local function openssl_free(pointer: *void)
   if pointer then
     openssl_pem.CRYPTO_free(pointer, nil, 0)
   end
 end
 
-local function free_pem_buffers(name: ffi.titan_ffi_void_ptr,
-                                header: ffi.titan_ffi_void_ptr,
-                                data: ffi.titan_ffi_void_ptr)
+local function free_pem_buffers(name: *void,
+                                header: *void,
+                                data: *void)
   openssl_free(name)
   openssl_free(header)
   openssl_free(data)
@@ -675,21 +676,21 @@ end
 
 local function read_pem_block(bio: *openssl_pem.BIO,
                               operation: string): PemBlock?
-  local names = ffi.titan_ffi_void_ptr.new_array(1)
-  local headers = ffi.titan_ffi_void_ptr.new_array(1)
-  local data = ffi.titan_ffi_void_ptr.new_array(1)
-  local lengths = ffi.titan_ffi_long.new_array(1)
+  local names = VoidPointer.new_array(1)
+  local headers = VoidPointer.new_array(1)
+  local data = VoidPointer.new_array(1)
+  local lengths = long.new_array(1)
   names[0] = nil
   headers[0] = nil
   data[0] = nil
-  lengths[0] = 0 as ffi.titan_ffi_long
+  lengths[0] = 0 as long
 
   openssl_err.ERR_clear_error()
   local result = openssl_pem.PEM_read_bio(
       bio,
-      names as **ffi.titan_ffi_char,
-      headers as **ffi.titan_ffi_char,
-      data as **ffi.titan_ffi_unsigned_char,
+      names as **char,
+      headers as **char,
+      data as **unsigned char,
       lengths)
   if result ~= 1 then
     local packed = openssl_err.ERR_peek_last_error() as integer
@@ -707,8 +708,8 @@ local function read_pem_block(bio: *openssl_pem.BIO,
                     operation)
   end
   do
-    local name = (names[0] as *ffi.titan_ffi_char) as string
-    local header = (headers[0] as *ffi.titan_ffi_char) as string
+    local name = (names[0] as *char) as string
+    local header = (headers[0] as *char) as string
     return PemBlock.new(names[0], headers[0], data[0], name, header,
                         lengths[0] as integer)
   catch
@@ -730,25 +731,25 @@ end
 
 local function decode_certificate(block: PemBlock,
                                   operation: string): *openssl_pem.X509
-  local cursors = ffi.titan_ffi_void_ptr.new_array(1)
+  local cursors = VoidPointer.new_array(1)
   cursors[0] = block.data_buffer
   openssl_err.ERR_clear_error()
   local certificate: *openssl_pem.X509 = nil
   if block.name == "TRUSTED CERTIFICATE" then
     certificate = openssl_pem.d2i_X509_AUX(
-        nil, cursors as *const *ffi.titan_ffi_unsigned_char,
-        block.length as ffi.titan_ffi_long)
+        nil, cursors as *const *unsigned char,
+        block.length as long)
   else
     certificate = openssl_pem.d2i_X509(
-        nil, cursors as *const *ffi.titan_ffi_unsigned_char,
-        block.length as ffi.titan_ffi_long)
+        nil, cursors as *const *unsigned char,
+        block.length as long)
   end
   if not certificate then
     raise openssl_error(operation, "failed to decode a PEM certificate")
   end
   local expected =
-    (block.data_buffer as const *ffi.titan_ffi_unsigned_char) + block.length
-  if (cursors[0] as const *ffi.titan_ffi_unsigned_char) ~= expected then
+    (block.data_buffer as const *unsigned char) + block.length
+  if (cursors[0] as const *unsigned char) ~= expected then
     openssl_pem.X509_free(certificate)
     raise Error.new(0, "OPENSSL",
                     "certificate PEM block has trailing DER data", operation)
@@ -762,19 +763,19 @@ local function decode_private_key(block: PemBlock): *openssl_pem.EVP_PKEY
                     "encrypted private keys are not supported",
                     "ssl.server.private-key")
   end
-  local cursors = ffi.titan_ffi_void_ptr.new_array(1)
+  local cursors = VoidPointer.new_array(1)
   cursors[0] = block.data_buffer
   openssl_err.ERR_clear_error()
   local private_key = openssl_pem.d2i_AutoPrivateKey(
-      nil, cursors as *const *ffi.titan_ffi_unsigned_char,
-      block.length as ffi.titan_ffi_long)
+      nil, cursors as *const *unsigned char,
+      block.length as long)
   if not private_key then
     raise openssl_error("ssl.server.private-key",
                         "failed to decode a PEM private key")
   end
   local expected =
-    (block.data_buffer as const *ffi.titan_ffi_unsigned_char) + block.length
-  if (cursors[0] as const *ffi.titan_ffi_unsigned_char) ~= expected then
+    (block.data_buffer as const *unsigned char) + block.length
+  if (cursors[0] as const *unsigned char) ~= expected then
     openssl_pem.EVP_PKEY_free(private_key)
     raise Error.new(0, "OPENSSL",
                     "private-key PEM block has trailing DER data",
@@ -914,7 +915,7 @@ local function load_certificate_chain(context: *openssl.SSL_CTX,
         end
       elseif openssl.SSL_CTX_ctrl(
           context, openssl.SSL_CTRL_CHAIN_CERT, 1,
-          certificate as ffi.titan_ffi_void_ptr) ~= 1 then
+          certificate as *void) ~= 1 then
         raise openssl_error("ssl.server.certificate",
                             "failed to load the certificate chain")
       end
@@ -996,16 +997,16 @@ end
 -- FFI. SSL_ctrl with SSL_CTRL_SET_TLSEXT_HOSTNAME is its documented primitive
 -- expansion. OpenSSL consumes the mutable NUL-terminated copy during the call.
 local function configure_server_name(handle: *openssl.SSL, host: string)
-  local server_name = ffi.titan_ffi_char.new_array(#host + 1)
+  local server_name = char.new_array(#host + 1)
   cstring.memcpy(server_name,
-                 host as const *ffi.titan_ffi_char,
+                 host as const *char,
                  #host as cstddef.size_t)
-  server_name[#host] = 0 as ffi.titan_ffi_char
+  server_name[#host] = 0 as char
   openssl_err.ERR_clear_error()
   if openssl.SSL_ctrl(
       handle, openssl.SSL_CTRL_SET_TLSEXT_HOSTNAME,
-      openssl.TLSEXT_NAMETYPE_host_name as ffi.titan_ffi_long,
-      server_name as ffi.titan_ffi_void_ptr) ~= 1 then
+      openssl.TLSEXT_NAMETYPE_host_name as long,
+      server_name as *void) ~= 1 then
     raise openssl_error("ssl.connect.sni",
                         "failed to configure TLS server name indication")
   end
@@ -1051,7 +1052,7 @@ function connect(host: string, port: integer,
     openssl.SSL_set_hostflags(
         exact.handle,
         openssl_x509v3.X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS as
-          ffi.titan_ffi_unsigned_int)
+          unsigned int)
     if not ip_identity then
       configure_server_name(exact.handle, host)
     end

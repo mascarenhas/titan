@@ -26,6 +26,32 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
         assert(type(strict_plans) == "table",
             "strict Titan function entry lacks checker guard plans")
     end
+    local storage = options.storage or "static"
+    local unavailable_result
+    for index, result in ipairs(typ.rettypes) do
+        if not types.has_tvalue_representation(result) then
+            unavailable_result = "return " .. tostring(index)
+                .. " has type '" .. types.tostring(result) .. "'"
+            break
+        end
+    end
+    if not unavailable_result and typ.flexrettype
+       and not types.has_tvalue_representation(typ.flexrettype) then
+        unavailable_result = "flexible return has type '"
+            .. types.tostring(typ.flexrettype) .. "'"
+    end
+    if unavailable_result then
+        return render([[
+    $STORAGE int $LUANAME(lua_State *L) {
+        return luaL_error(L, "%s", $ERROR);
+    }]], {
+            STORAGE = storage,
+            LUANAME = lua_name,
+            ERROR = c_string_literal("Titan function '" .. titan_name
+                .. "' " .. unavailable_result
+                .. ", which has no Lua/TValue representation"),
+        })
+    end
     local function readfixed(param, cvar, slot, index)
         if strict then
             assert(strict_plans[index] ~= nil,
@@ -40,7 +66,6 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
             tlcontext, dynamic_plans[index], param, cvar, slot, loc,
             "genuine Lua function parameter", true)
     end
-    local storage = options.storage or "static"
     local stats = {}
     local pnames = { "L", "_mod", "_fn" }
     local params

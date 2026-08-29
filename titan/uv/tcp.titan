@@ -40,7 +40,7 @@ end
 local record uv_getaddrinfo_t
   local native: owned *libuv.uv_getaddrinfo_t
   local callback: (uv_getaddrinfo_t, integer,
-                   ffi.titan_ffi_void_ptr) -> ()
+                   *void) -> ()
 end
 
 local record uv_connect_t
@@ -54,7 +54,7 @@ local record uv_shutdown_t
 end
 
 foreign function uv_getaddrinfo_cb(req: *libuv.uv_getaddrinfo_t,
-                                   status: ffi.titan_ffi_int,
+                                   status: int,
                                    result: *libuv.addrinfo)
   local owner = libuv.uv_req_get_data(
       req as *libuv.uv_req_t) as *ffi.Udata
@@ -65,12 +65,12 @@ foreign function uv_getaddrinfo_cb(req: *libuv.uv_getaddrinfo_t,
       callback.upvalue[2]) as UvIntegerPointerCallbackEntry
   local top = lua.lua_gettop(L)
   entry(L, module, callback, owner, status as lua.lua_Integer,
-        result as ffi.titan_ffi_void_ptr)
+        result as *void)
   lua.lua_settop(L, top)
 end
 
 foreign function uv_connect_cb(req: *libuv.uv_connect_t,
-                               status: ffi.titan_ffi_int)
+                               status: int)
   local owner = libuv.uv_req_get_data(
       req as *libuv.uv_req_t) as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
@@ -86,7 +86,7 @@ foreign function uv_connect_cb(req: *libuv.uv_connect_t,
 end
 
 foreign function uv_shutdown_cb(req: *libuv.uv_shutdown_t,
-                                status: ffi.titan_ffi_int)
+                                status: int)
   local owner = libuv.uv_req_get_data(
       req as *libuv.uv_req_t) as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
@@ -102,7 +102,7 @@ foreign function uv_shutdown_cb(req: *libuv.uv_shutdown_t,
 end
 
 foreign function uv_connection_cb(server: *libuv.uv_stream_t,
-                                   status: ffi.titan_ffi_int)
+                                   status: int)
   local handle = server as *libuv.uv_handle_t
   local owner = libuv.uv_handle_get_data(handle) as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[3].uv)
@@ -144,7 +144,7 @@ end
 local record uv_tcp_t
   local native: owned *libuv.uv_tcp_t
   local alloc_callback: (uv_tcp_t, libuv.size_t,
-                         ffi.titan_ffi_void_ptr) -> ()
+                         *void) -> ()
   local read_callback: (uv_tcp_t, integer) -> ()
   local connection_callback: (uv_tcp_t, integer) -> ()
   local runtime: Runtime
@@ -193,9 +193,9 @@ local function require_server(tcp: uv_tcp_t,
 end
 
 local function service_text(port: integer): string
-  local storage = ffi.titan_ffi_char.new_array(5)
-  local bytes = storage as *ffi.titan_ffi_char
-  local digits = "0123456789" as const *ffi.titan_ffi_char
+  local storage = char.new_array(5)
+  local bytes = storage as *char
+  local digits = "0123456789" as const *char
   local divisor = 1
   while port // divisor >= 10 do divisor = divisor * 10 end
 
@@ -343,7 +343,7 @@ local function new_tcp(runtime: Runtime, role: TcpRole): uv_tcp_t
     raise make_error(status, "net.tcp.init")
   end
   libuv.uv_handle_set_data(exact_native as *libuv.uv_handle_t,
-                           tcp as ffi.titan_ffi_void_ptr)
+                           tcp as *void)
   return tcp
 end
 
@@ -393,7 +393,7 @@ local function fail_server(server: uv_tcp_t, failure: value)
 end
 
 local function complete_getaddrinfo(task: Task, status: integer,
-                                    pointer: ffi.titan_ffi_void_ptr)
+                                    pointer: *void)
   local result = pointer as *libuv.addrinfo
   local addresses: AddressList? = nil
   local failure: value = nil
@@ -422,11 +422,11 @@ catch
 end
 
 local function tcp_alloc_dispatch(tcp: uv_tcp_t, size: libuv.size_t,
-                                  pointer: ffi.titan_ffi_void_ptr)
+                                  pointer: *void)
   local state = connection_state(tcp)
   local descriptor = pointer as *libuv.uv_buf_t
   do
-    local bytes = ffi.titan_ffi_char.new_array(size as integer)
+    local bytes = char.new_array(size as integer)
     state.buffer = bytes
     descriptor.base = bytes
     descriptor.len = size
@@ -520,15 +520,15 @@ local function GetaddrinfoCall:dispatch(task: Task): Immediate?
   hints.ai_protocol = libuv.IPPROTO_TCP
   hints.ai_flags = libuv.AI_NUMERICSERV
   local callback = function (_owner: uv_getaddrinfo_t, status: integer,
-                             pointer: ffi.titan_ffi_void_ptr)
+                             pointer: *void)
     complete_getaddrinfo(task, status, pointer)
   end
   local owner = uv_getaddrinfo_t.new(native, callback)
   task.pending = owner
   libuv.uv_req_set_data(request as *libuv.uv_req_t,
-                        owner as ffi.titan_ffi_void_ptr)
-  local node = self.node as const *ffi.titan_ffi_char
-  local service = self.service as const *ffi.titan_ffi_char
+                        owner as *void)
+  local node = self.node as const *char
+  local service = self.service as const *char
   local status = libuv.uv_getaddrinfo {
     loop = task.runtime.loop,
     req = request,
@@ -549,7 +549,7 @@ local function TcpConnectCall:dispatch(task: Task): Immediate?
   local owner = uv_connect_t.new(native, callback)
   task.pending = owner
   libuv.uv_req_set_data(request as *libuv.uv_req_t,
-                        owner as ffi.titan_ffi_void_ptr)
+                        owner as *void)
   local handle: *libuv.uv_tcp_t = self.tcp.native
   local status = libuv.uv_tcp_connect {
     req = request,
@@ -603,7 +603,7 @@ local function TcpShutdownCall:dispatch(task: Task): Immediate?
   local owner = uv_shutdown_t.new(native, callback)
   task.pending = owner
   libuv.uv_req_set_data(request as *libuv.uv_req_t,
-                        owner as ffi.titan_ffi_void_ptr)
+                        owner as *void)
   local status = libuv.uv_shutdown(
       request, tcp_stream(self.tcp), uv_shutdown_cb)
   return submitted(task, status, "net.shutdown")
@@ -693,8 +693,8 @@ local function net_listen(host: string, port: integer,
   local task = running_task()
   accepting_work(task.runtime, "listen on TCP")
   local addresses = resolve_addresses(host, port)
-  local last_status: ffi.titan_ffi_int =
-      libuv.UV_EADDRNOTAVAIL as ffi.titan_ffi_int
+  local last_status: int =
+      libuv.UV_EADDRNOTAVAIL as int
 
   local address_index = 1
   while address_index <= #addresses do
@@ -704,7 +704,7 @@ local function net_listen(host: string, port: integer,
         native, address_at(addresses, address_index), 0)
     if status >= 0 then
       status = libuv.uv_listen(
-          tcp_stream(tcp), backlog as ffi.titan_ffi_int,
+          tcp_stream(tcp), backlog as int,
           uv_connection_cb)
     end
     if status >= 0 then return tcp end

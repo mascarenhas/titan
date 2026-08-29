@@ -102,8 +102,8 @@ never uses NUL termination for an ordinary string. A generated result is a
 counted owned C array:
 
 ```titan
-local owned = ffi.titan_ffi_char.new_array(length)
-local output = owned as *ffi.titan_ffi_char
+local owned = char.new_array(length)
+local output = owned as *char
 ```
 
 `new_array` creates the Lua full userdata, records its element count, and

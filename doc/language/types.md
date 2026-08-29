@@ -172,13 +172,19 @@ bound method reference `obj:m`. See
 
 ### Foreign types
 
-`foreign import` introduces additional types derived from C headers —
-C integer and float types, pointers, arrays, struct/union types, and C
-typedefs. They can be written in local annotations through the foreign module
-namespace (`c.size_t`, `c.FILE`, `c.ffi_point`) and they participate in the
-relations below through explicit FFI conversion rules. They cannot appear in
-exported compiled-module interfaces; the details live in
-[The C FFI](ffi.md).
+Titan has contextual spellings for portable C primitives such as `int`,
+`unsigned long`, `foreign float`, and `double`. They are distinct from Titan's
+`integer`, `boolean`, and `float`. Public compiled interfaces may use those
+self-contained primitives and pointer, foreign-function-pointer, and owned
+graphs built entirely from them.
+
+`foreign import` additionally introduces header-derived arrays, structs,
+unions, typedefs, enum identities, and other C types through a namespace such
+as `c.size_t`, `c.FILE`, or `c.ffi_point`. Those types participate in the
+relations below through explicit FFI conversion rules but remain local to the
+module importing their header. In particular, an imported typedef remains
+nonexportable even when its target is a portable primitive. The full boundary
+is specified in [The C FFI](ffi.md).
 
 ## Type equality
 

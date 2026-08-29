@@ -58,6 +58,29 @@ for tag, cons in pairs(ast) do
     defs[tag] = cons
 end
 
+-- C99 primitive names are contextual type words rather than reserved Titan
+-- keywords. Keep exact-word patterns beside the grammar instead of adding
+-- them to the lexer's keyword table: ordinary value declarations named
+-- `char`, `long`, and so on must continue to lex as NAME.
+local contextual_identifier_rest =
+    lpeg.P("_") + lpeg.R("AZ", "az", "09")
+local function contextual_type_word(word)
+    return lpeg.C(lpeg.P(word)) * -contextual_identifier_rest
+end
+for token, word in pairs({
+    CBOOL = "bool",
+    CCHAR = "char",
+    CDOUBLE = "double",
+    CINT = "int",
+    CLONG = "long",
+    CSHORT = "short",
+    CSIGNED = "signed",
+    CUNSIGNED = "unsigned",
+    CVOID = "void",
+}) do
+    defs[token] = contextual_type_word(word)
+end
+
 -- Relabel definitions may include ordinary LPegLabel patterns. Keep one parsed
 -- statement candidate in a named capture, then classify it through a back
 -- capture without traversing the expression again.
@@ -1100,6 +1123,21 @@ function defs.typename(pos, name, typeargs)
     return with_name_loc(ast.TypeName(pos, name, typeargs), pos)
 end
 
+function defs.surface_c_type(pos, ...)
+    return with_name_loc(
+        ast.TypeName(pos, table.concat({...}, " "), {}), pos)
+end
+
+function defs.surface_c_float_type(pos)
+    return with_name_loc(ast.TypeName(pos, "foreign float", {}), pos)
+end
+
+function defs.surface_c_type_exp(typenode)
+    local exp = defs.name_exp(typenode.loc, typenode.name)
+    exp.var._surface_c_namespace = true
+    return exp
+end
+
 function defs.typeparamdecl(pos, name, constraint)
     return with_name_loc(ast.TypeParam(pos, name, constraint), pos)
 end
@@ -1520,7 +1558,7 @@ local grammar = re.compile([[
                            LPAREN^LParPList paramlist RPAREN^RParPList
                            rettypeopt block P END^EndFunc)       -> toplevelfuncdecl
 
-    foreignfunc     <- (P  FOREIGN FUNCTION P NAME^NameFunc
+    foreignfunc     <- (P  &(FOREIGN FUNCTION) FOREIGN FUNCTION P NAME^NameFunc
                            (LT %{GenericForeignFunc})?
                            LPAREN^LParPList paramlist RPAREN^RParPList
                            rettypeopt block P END^EndFunc)       -> foreignfuncdecl
@@ -1535,7 +1573,7 @@ local grammar = re.compile([[
                            ((ASSIGN exp^ExpVarDec)? -> opt))    -> toplevelconstvardecl
 
     toplevelvar     <- (P localopt decl ASSIGN^AssignVar
-                           !(IMPORT / FOREIGN)
+                           !(IMPORT / (FOREIGN IMPORT))
                            exp^ExpVarDec)                        -> toplevelvardecl
 
     toplevelrecord  <- (P  localopt RECORD P NAME^NameRecord
@@ -1604,7 +1642,7 @@ local grammar = re.compile([[
                           STRINGLIT^StringImport))               -> importdecl
 
     foreign         <- (P  LOCAL P NAME^NameImport ASSIGN^AssignImport
-                           FOREIGN IMPORT^ImportImport
+                           &(FOREIGN IMPORT) FOREIGN IMPORT^ImportImport
                           (LPAREN STRINGLIT^StringLParImport RPAREN^RParImport /
                            STRINGLIT^StringImport))              -> foreignimportdecl
 
@@ -1667,7 +1705,8 @@ local grammar = re.compile([[
                      <- (((P  SUB NUMBER) => negativecarraylength)
                         / ((P  NUMBER) => carraylength))
 
-    localcarraytype <- (P  qualifiedtype LBRACKET
+    localcarraytype <- (P  (surfacecompoundtype / surfacesingletype /
+                            qualifiedtype) LBRACKET
                             ((localcarrayextent)? -> opt)
                             RBRACKET^RBracketCArray)              -> TypeCArray
 
@@ -1700,6 +1739,26 @@ local grammar = re.compile([[
     qualifiedtype   <- (P  NAME DOT P membername^QualName
                            typeargsopt)                           -> qualifiedtype
 
+    -- Only compound C99 primitive spellings need a dedicated contextual
+    -- production. Single-word spellings remain ordinary NAME/namedtype nodes
+    -- and are recognized by the checker after ordinary value/type lookup.
+    -- Factor the compounds by their leading word so probing a normal NAME in
+    -- a long expression remains constant bounded work.
+    surfacecompoundtype
+                    <- (P  (CUNSIGNED (CLONG CLONG / CCHAR / CSHORT /
+                                      CINT / CLONG)
+                            / CSIGNED CCHAR
+                            / CLONG (CLONG / CDOUBLE)))          -> surface_c_type
+                     / (P  FOREIGN FLOAT)                        -> surface_c_float_type
+
+    -- A local fixed/unknown C array is the one type context that deliberately
+    -- does not accept an arbitrary named type. Recognize the exact single-word
+    -- surface primitives here without putting this alternative on the hot
+    -- general-expression path.
+    surfacesingletype
+                    <- (P  (CVOID / CBOOL / CCHAR / CSHORT /
+                            CINT / CLONG / CDOUBLE))              -> surface_c_type
+
     -- An owned payload is deliberately optionless: the sole trailing `?` in
     -- `simpletype` wraps the complete owner. `ownedtail` parses its recursive
     -- payload once. Its first `*` is the scalar ownership marker unless an
@@ -1715,6 +1774,7 @@ local grammar = re.compile([[
                            cownedpayload^OwnedPayload)           -> constcptrtype
                      / (P  MUL
                            cownedpayload^OwnedPayload)           -> cptrtype
+                     / surfacecompoundtype
                      / namedtype
                      / ownedtype
 
@@ -1726,7 +1786,8 @@ local grammar = re.compile([[
     -- recursive payload rule turns the historical shape error into an
     -- OwnedPayload error. This bounded probe never traverses the payload.
     cownedbasehead  <- NIL / BOOLEAN / INTEGER / FLOAT / STRING / VALUE
-                     / NAME / OWNED
+                     / CVOID / CBOOL / CCHAR / CSHORT / CINT / CLONG
+                     / CDOUBLE / CSIGNED / CUNSIGNED / FOREIGN / NAME / OWNED
 
     badconstownedpayload
                     <- &(CONST MUL (CONST MUL / MUL)* !cownedbasehead)
@@ -1760,6 +1821,7 @@ local grammar = re.compile([[
                      / constarray
                      / (P  CONST MUL simpletype^TypeType)        -> constcptrtype
                      / (P  MUL simpletype^TypeType)              -> cptrtype
+                     / surfacecompoundtype
                      / namedtype
                      / (P  LCURLY type^TypeType
                            ((COLON type^TypeType
@@ -2088,7 +2150,8 @@ local grammar = re.compile([[
     parenexp        <- (((P DOTS) -> ExpDots) &RPAREN)
                      / exp^ExpSimpleExp
 
-    prefixexp       <- (P  NAME)                                 -> name_exp
+    prefixexp       <- (surfacecompoundtype)                    -> surface_c_type_exp
+                     / (P  NAME)                                 -> name_exp
                      / (P  LPAREN parenexp
                                RPAREN^RParSimpleExp)             -> adjust_exp
 
@@ -2222,6 +2285,15 @@ local grammar = re.compile([[
     AND             <- %AND SKIP*
     BREAK           <- %BREAK SKIP*
     CASE            <- %CASE SKIP*
+    CBOOL           <- %CBOOL SKIP*
+    CCHAR           <- %CCHAR SKIP*
+    CDOUBLE         <- %CDOUBLE SKIP*
+    CINT            <- %CINT SKIP*
+    CLONG           <- %CLONG SKIP*
+    CSHORT          <- %CSHORT SKIP*
+    CSIGNED         <- %CSIGNED SKIP*
+    CUNSIGNED       <- %CUNSIGNED SKIP*
+    CVOID           <- %CVOID SKIP*
     DEFER           <- %DEFER SKIP*
     DO              <- %DO SKIP*
     ELSE            <- %ELSE SKIP*

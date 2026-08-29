@@ -283,10 +283,11 @@ and serialized shapes; binding or selecting either produces a
 declaration metadata and do not participate in structural function equality.
 
 `types.tostring` renders every flexible result in a parenthesized list, even
-when it is the only result. This gives function-type tags a collision-free
-canonical key: `() -> T`, `() -> (T, ...: U)`, and `() -> (...: U)` are all
-distinct. `function_type_tag` uses that exact key, so two merely consistent
-types never share a native-entry cast by accident.
+when it is the only result, so `() -> T`, `() -> (T, ...: U)`, and
+`() -> (...: U)` remain distinct in C-free function-tag keys. Exportable
+C-bearing tags use the canonical serialized descriptor instead; it carries the
+same flexible-result distinction without relying on diagnostic rendering. Two
+merely consistent types therefore never share a native-entry cast by accident.
 
 `types.callable_adjustment(source_actual, target_expected)` is the directional
 operation used
@@ -714,8 +715,9 @@ StaticMethod(fqtn, name, params, rettypes,
 The reserved Function position and an absent tail serialize explicitly as
 `false`; the decoder rejects a non-false reserved value. The flexible field precedes
 declaration-only `paramnames` on methods and statics. Interface recovery and
-all recursive nominal walkers consume the same position, while
-`types.tostring` includes a present tail in the canonical function tag.
+all recursive nominal walkers consume the same position, while both
+`types.tostring` and the serialized structural tag identity include a present
+tail.
 
 Two independent incompatibilities make these shapes ABI-visible:
 

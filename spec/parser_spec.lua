@@ -593,6 +593,8 @@ end
             local zero: ffi.Item[0] = ffi.Item.new_array(0)
             local negative: ffi.Item[-2] = ffi.Item.new_array(2)
             local first: ffi.Item[1], second: ffi.Other[] = a, b
+            local ints: int[4] = int.new_array(4)
+            local words: unsigned long[2] = unsigned long.new_array(2)
         ]], {
             { _tag = "Ast.StatDecl", decls = {
                 { _tag = "Ast.Decl", name = "storage", type = {
@@ -632,6 +634,23 @@ end
             }, exps = {
                 { _tag = "Ast.ExpVar" }, { _tag = "Ast.ExpVar" },
             } },
+            { _tag = "Ast.StatDecl", decls = {
+                { name = "ints", type = {
+                    _tag = "Ast.TypeCArray",
+                    base = { _tag = "Ast.TypeName", name = "int" },
+                    length = { _tag = "Ast.ExpInteger", value = 4 },
+                } },
+            }, exps = { { _tag = "Ast.ExpCall" } } },
+            { _tag = "Ast.StatDecl", decls = {
+                { name = "words", type = {
+                    _tag = "Ast.TypeCArray",
+                    base = {
+                        _tag = "Ast.TypeName",
+                        name = "unsigned long",
+                    },
+                    length = { _tag = "Ast.ExpInteger", value = 2 },
+                } },
+            }, exps = { { _tag = "Ast.ExpCall" } } },
         })
 
         -- Zero and negative integer tokens reach the checker so it can issue
@@ -1095,6 +1114,118 @@ end
     it("can parse primitive types", function()
         assert_type_ast("nil", { _tag = "Ast.TypeNil" } )
         assert_type_ast("int", { _tag = "Ast.TypeName", name = "int" } )
+    end)
+
+    it("parses the exact contextual C99 primitive surface", function()
+        for _, spelling in ipairs({
+            "void",
+            "bool",
+            "char",
+            "signed char",
+            "unsigned char",
+            "short",
+            "unsigned short",
+            "int",
+            "unsigned int",
+            "long",
+            "unsigned long",
+            "long long",
+            "unsigned long long",
+            "foreign float",
+            "double",
+            "long double",
+        }) do
+            assert_type_ast(spelling, {
+                _tag = "Ast.TypeName",
+                name = spelling,
+                typeargs = {},
+            })
+        end
+
+        for _, spelling in ipairs({
+            "signed short",
+            "signed int",
+            "signed long",
+            "signed long long",
+        }) do
+            assert_type_syntax_error(spelling, "AssignVar")
+        end
+    end)
+
+    it("parses contextual primitive allocation and layout namespaces",
+    function()
+        assert_expression_ast("foreign float.new_array(2)", {
+            _tag = "Ast.ExpCall",
+            exp = {
+                _tag = "Ast.ExpVar",
+                var = {
+                    _tag = "Ast.VarDot",
+                    name = "new_array",
+                    exp = {
+                        _tag = "Ast.ExpVar",
+                        var = {
+                            _tag = "Ast.VarName",
+                            name = "foreign float",
+                            _surface_c_namespace = true,
+                        },
+                    },
+                },
+            },
+        })
+        assert_expression_ast("unsigned long.sizeof", {
+            _tag = "Ast.ExpVar",
+            var = {
+                _tag = "Ast.VarDot",
+                name = "sizeof",
+                exp = {
+                    _tag = "Ast.ExpVar",
+                    var = {
+                        _tag = "Ast.VarName",
+                        name = "unsigned long",
+                        _surface_c_namespace = true,
+                    },
+                },
+            },
+        })
+
+        -- A single contextual word is still an ordinary name node. Value
+        -- symbol precedence is decided later by the checker.
+        assert_expression_ast("char.new_array(2)", {
+            _tag = "Ast.ExpCall",
+            exp = {
+                _tag = "Ast.ExpVar",
+                var = {
+                    _tag = "Ast.VarDot",
+                    exp = {
+                        _tag = "Ast.ExpVar",
+                        var = { _tag = "Ast.VarName", name = "char" },
+                    },
+                },
+            },
+        })
+    end)
+
+    it("composes contextual primitives with pointers and owners", function()
+        assert_type_ast("const *unsigned long long", {
+            _tag = "Ast.TypeCPointer",
+            const = true,
+            subtype = {
+                _tag = "Ast.TypeName",
+                name = "unsigned long long",
+            },
+        })
+        assert_type_ast("owned const *foreign float[]", {
+            _tag = "Ast.TypeCOwned",
+            count = true,
+            subtype = {
+                _tag = "Ast.TypeCPointer",
+                const = true,
+                subtype = {
+                    _tag = "Ast.TypeName",
+                    name = "foreign float",
+                },
+            },
+        })
     end)
 
     it("can parse qualified types", function()

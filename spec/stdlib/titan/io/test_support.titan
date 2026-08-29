@@ -24,9 +24,9 @@ local function begin_stdout_capture(): (integer, integer)
     end
   end
 
-  local descriptors = ffi.titan_ffi_int.new_array(2)
+  local descriptors = int.new_array(2)
   local status: integer = native.titan_spec_capture_pipe(
-      descriptors as *ffi.titan_ffi_int)
+      descriptors as *int)
   test.assert(status == 0, "could not create stdout capture pipe")
   read_descriptor = descriptors[0]
   write_descriptor = descriptors[1]
@@ -58,16 +58,16 @@ end
 
 local function captured_bytes(read_descriptor: integer,
                               capacity: integer): string
-  local storage = ffi.titan_ffi_char.new_array(capacity)
+  local storage = char.new_array(capacity)
   local count: integer = native.titan_spec_capture_read(
-      read_descriptor, storage as *ffi.titan_ffi_char,
+      read_descriptor, storage as *char,
       capacity as native.titan_spec_size)
   test.assert(count >= 0, "stdout capture had no completed write")
   local top = lua.lua_gettop(L)
   defer lua.lua_settop(L, top)
   test.assert(lua.lua_checkstack(L, 1) ~= 0,
               "cannot reserve Lua stack for captured stdout")
-  lua.lua_pushlstring(L, storage as *ffi.titan_ffi_char,
+  lua.lua_pushlstring(L, storage as *char,
                       count as native.titan_spec_size)
   local result: value = ffi.lua_totvalue(L, -1)
   return result as string

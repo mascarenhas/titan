@@ -1026,9 +1026,11 @@ Two real loaders exist in `driver.lua`:
   strings of nested constructor calls produced by `types.serialize` and are
   evaluated with
   `load("return " .. s, modname, "t", types)`, the `types` module itself
-  serving as the environment. C FFI types are *not* serializable
-  (`types.serialize` raises on any type tree containing one), so imported C
-  types cannot cross a compiled-interface boundary. Local nominal declarations
+  serving as the environment. `types.serialize` admits only contextual C
+  primitives and recursively portable pointer, nonvariadic C-function, and
+  owned graphs. The closed metadata validator reconstructs and validates those
+  descriptors without source state; imported typedefs and header-dependent C
+  graphs cannot cross a compiled-interface boundary. Local nominal declarations
   and members are omitted from the serialized interface; exported records
   still serialize their total `nfields` count and each public
   `Field.index`, so public fields keep their real `Udata` slot even when local
@@ -1094,9 +1096,11 @@ headers imported from a contributor use the same directory without a
 per-file checker invocation.
 
 After the module interface is built, export validation rejects any public type
-tree, including an exported alias target, that mentions a local nominal type
-or a C FFI type. For records and unions, the walkers skip private
-fields/variants, methods, and functions before applying the C-type check, so
+tree, including an exported alias target, that mentions a local nominal type or
+a nonexportable C descriptor. Contextual primitives and portable
+pointer/function/owned closure are accepted; imported typedefs and
+header-dependent graphs are not. For records and unions, the walkers skip
+private fields/variants, methods, and functions before applying the check, so
 an exported owner may keep a private C-typed member that never enters its
 interface.
 

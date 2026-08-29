@@ -73,7 +73,6 @@ end
 
 local RUNNER_IMPORTS = [=[local test = import "titan.test.titan"
 local stdio = foreign import "stdio.h"
-local ffi = foreign import "titan/ffi.h"
 local cstring = foreign import "string.h"
 ]=]
 
@@ -99,17 +98,17 @@ end
 local function copy_interval(subject: string, first: integer,
                              count: integer): string
   if count == 0 then return "" end
-  local storage = ffi.titan_ffi_char.new_array(count)
-  local output = storage as *ffi.titan_ffi_char
-  local source = subject as const *ffi.titan_ffi_char
+  local storage = char.new_array(count)
+  local output = storage as *char
+  local source = subject as const *char
   cstring.memcpy(output, source + first - 1, count as cstring.size_t)
   return storage as string
 end
 
 local function has_prefix(subject: string, prefix: string): boolean
   if #subject < #prefix then return false end
-  local left = subject as const *ffi.titan_ffi_unsigned_char
-  local right = prefix as const *ffi.titan_ffi_unsigned_char
+  local left = subject as const *unsigned char
+  local right = prefix as const *unsigned char
   for index = 0, #prefix - 1 do
     if left[index] ~= right[index] then return false end
   end
@@ -117,9 +116,9 @@ local function has_prefix(subject: string, prefix: string): boolean
 end
 
 local function write(output: string)
-  local bytes = output as const *ffi.titan_ffi_unsigned_char
+  local bytes = output as const *unsigned char
   for index = 0, #output - 1 do
-    stdio.putchar(bytes[index] as ffi.titan_ffi_int)
+    stdio.putchar(bytes[index] as int)
   end
 end
 
@@ -152,7 +151,7 @@ end
 
 local function print_trace(trace: string)
   writeln("stack traceback:")
-  local bytes = trace as const *ffi.titan_ffi_unsigned_char
+  local bytes = trace as const *unsigned char
   local position = 1
   while position <= #trace do
     local ending = position

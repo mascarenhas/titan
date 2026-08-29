@@ -110,6 +110,10 @@ function run<A, B>(func: () -> A): Task<A, B>
   return uv.run_internal(erased)
 end
 
+function run_foreign(f: foreign (*void) -> (), arg: *void)
+  uv.run_foreign(f, arg)
+end
+
 function loop()
   uv.loop()
 end

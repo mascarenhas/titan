@@ -15,6 +15,7 @@
 1 spec/checker/c_ffi_pointer_conversions_spec.lua 11.777
 2 spec/checker/c_ffi_spec.lua 69.693
 3 spec/checker/c_ffi_stack_objects_spec.lua 7.540
+1 spec/checker/c_ffi_surface_types_spec.lua 0.800
 4 spec/checker/c_ffi_tag_names_spec.lua 14.262
 4 spec/checker/c_ffi_target_profile_spec.lua 6.262
 1 spec/checker/checker_spec.lua 31.779
@@ -54,6 +55,7 @@
 1 spec/coder/c_ffi_pointer_conversions_spec.lua 10.176
 4 spec/coder/c_ffi_spec.lua 49.740
 4 spec/coder/c_ffi_stack_objects_spec.lua 10.873
+3 spec/coder/c_ffi_surface_types_spec.lua 1.708
 4 spec/coder/c_ffi_tag_names_spec.lua 7.655
 4 spec/coder/closure_adjustment_wrappers_spec.lua 9.104
 1 spec/coder/closures_spec.lua 13.046

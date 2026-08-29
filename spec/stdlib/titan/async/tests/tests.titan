@@ -1,4 +1,4 @@
--- Native channel, combinator, and Task behavior tests for titan.async.
+-- Native channel, combinator, Task, and foreign-work behavior for titan.async.
 local test = import "test"
 local runtime_test = import "support.runtime.titan"
 local async = import "async"

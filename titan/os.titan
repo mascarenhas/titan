@@ -3,7 +3,6 @@ local str = import "string"
 local ctime = foreign import "time.h"
 local clocale = foreign import "locale.h"
 local cstring = foreign import "string.h"
-local ffi = foreign import "titan/ffi.h"
 
 -- Time/date behavior is translated and adapted from src/loslib.c in the
 -- immutable Lua 5.5.1 release:
@@ -67,7 +66,7 @@ stdout: OutputStream = OutputStream.new(nil, 1)
 stderr: OutputStream = OutputStream.new(nil, 2)
 
 local function byte_at(text: string, index: integer): integer
-  local bytes = text as const *ffi.titan_ffi_unsigned_char
+  local bytes = text as const *unsigned char
   return bytes[index - 1] as integer
 end
 
@@ -146,15 +145,15 @@ local function formatted_date(format: string,
   if maximum < capacity then maximum = capacity end
 
   while true do
-    local buffer = ffi.titan_ffi_char.new_array(capacity)
+    local buffer = char.new_array(capacity)
     local written = ctime.strftime(
       buffer, capacity as cstring.size_t, format, calendar)
     if written ~= 0 then
       local length = written as integer
-      local result = ffi.titan_ffi_char.new_array(length)
+      local result = char.new_array(length)
       cstring.memcpy(
-        result as *ffi.titan_ffi_char,
-        buffer as const *ffi.titan_ffi_char,
+        result as *char,
+        buffer as const *char,
         written as cstring.size_t)
       return result as string
     end
@@ -169,7 +168,7 @@ local function formatted_date(format: string,
 end
 
 local function checked_time_field(number: integer, delta: integer,
-                                  name: string): ffi.titan_ffi_int
+                                  name: string): int
   if number >= 0 then
     if number > 2147483647 + delta then
       raise "time field '" .. name .. "' is out of range"
@@ -177,10 +176,10 @@ local function checked_time_field(number: integer, delta: integer,
   elseif number < -2147483648 + delta then
     raise "time field '" .. name .. "' is out of range"
   end
-  return (number - delta) as ffi.titan_ffi_int
+  return (number - delta) as int
 end
 
-local function locale_category(name: string): ffi.titan_ffi_int
+local function locale_category(name: string): int
   if name == "all" then return clocale.LC_ALL end
   if name == "collate" then return clocale.LC_COLLATE end
   if name == "ctype" then return clocale.LC_CTYPE end
@@ -386,11 +385,11 @@ function time(year: integer?, month: integer?, day: integer?,
   calendar.tm_hour = checked_time_field(actual_hour, 0, "hour")
   calendar.tm_min = checked_time_field(actual_minute, 0, "min")
   calendar.tm_sec = checked_time_field(actual_second, 0, "sec")
-  calendar.tm_isdst = -1 as ffi.titan_ffi_int
+  calendar.tm_isdst = -1 as int
   if isdst == false then
-    calendar.tm_isdst = 0 as ffi.titan_ffi_int
+    calendar.tm_isdst = 0 as int
   elseif isdst == true then
-    calendar.tm_isdst = 1 as ffi.titan_ffi_int
+    calendar.tm_isdst = 1 as int
   end
 
   local instant = ctime.mktime(calendar)

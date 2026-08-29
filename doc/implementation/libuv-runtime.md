@@ -15,9 +15,11 @@ result = yield operation parameters
 -- callback resumes here with callback parameters
 ```
 
-The public `async`, `timer`, `fs`, `net`, `io`, and `os` modules expose
-ordinary Titan records and Interfaces. Native pointers, callback records, the
-yield union, and libuv controls stay private to `titan.uv`.
+The public `async`, `timer`, `fs`, `net`, `io`, and `os` modules normally
+expose ordinary Titan records and Interfaces. `async.run_foreign` is the narrow
+exception: its self-contained `foreign (*void) -> ()` and `*void` signature is
+portable compiled metadata. Request owners, callback records, the yield union,
+and libuv controls stay private to `titan.uv`.
 The `ssl` and `http` standard modules are higher-level consumers of those
 public facades; they do not add variants, callbacks, or handles here. The
 standalone `url` module is synchronous and has no libuv dependency.
@@ -39,9 +41,9 @@ callback. Titan uses that rule as the central invariant of the implementation:
   libuv callback interrupting it; and
 - accepted work progresses only after the current callback returns to libuv.
 
-Filesystem and DNS work may execute in libuv's worker pool, but their
-completion callbacks still return on the loop thread. Titan records are never
-accessed from those workers.
+Filesystem, DNS, and explicit `async.run_foreign` work may execute in libuv's
+process-wide worker pool, but their completion callbacks still return on the
+loop thread. Titan records are never accessed from those workers.
 
 ## Coroutine protocol
 
@@ -86,6 +88,37 @@ close-before-resume timer protocol for an explicit later turn. Every one-shot ti
 
 There is no ready queue, scheduler pass, operation generation, or implicit
 fairness turn. Application code is the body of the current libuv callback.
+
+## Foreign worker requests
+
+`async.run_foreign(f, arg)` yields `Call.run_foreign(WorkCall)`. Its dispatcher
+allocates one `WorkOwner`, stores that owner in `Task.pending`, and submits the
+owner's `uv_work_t` through `uv_queue_work` exactly once. `WorkOwner` retains
+the request, a three-slot raw `WorkPointer` carrier, and the loop-thread Titan
+completion callback. Only submission status zero is accepted; any nonzero
+status is the no-callback case, so dispatch clears the pending owner and
+returns an immediate `OperationError` whose operation is
+`async.run_foreign`.
+
+`uv_work_cb` is fundamentally different from every ordinary callback in this
+module: it runs on a worker thread. The carrier's first slot is reserved for
+the after-work owner lookup; the worker does not read it. It reads only the
+erased `WorkFunction` and argument in slots one and two, calls `f(arg)`, and
+returns. It does not recover a Task, closure, module, runtime, owner record, or
+Lua state; access `TValue`/`Udata`; or call any Titan/Lua helper.
+
+`uv_after_work_cb` runs on the event-loop thread and may recover the rooted
+`WorkOwner`. Its `complete_work` callback translates status zero to ordinary
+completion and a nonzero status to `OperationError`, then uses the normal Task
+resumption path. That path clears `Task.pending`; the suspended native frame
+keeps an adjusted owned argument alive until this terminal callback. Once
+submission succeeds, cancellation neither invokes `uv_cancel` nor releases the
+carrier early. The after-work callback remains authoritative and pending
+cancellation is injected only when it resumes the Task.
+
+The pool is shared with libuv filesystem and name-resolution requests. The
+runtime adds no private queue, worker count, fairness policy, or concurrent
+access protection around it.
 
 ## Explicit Task suspension and wake
 

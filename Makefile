@@ -332,7 +332,8 @@ UV_TITAN_SOURCES := \
 	titan/uv/process.titan \
 	titan/uv/runtime.titan \
 	titan/uv/task.titan \
-	titan/uv/tcp.titan
+	titan/uv/tcp.titan \
+	titan/uv/work.titan
 STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.titan \
 	titan/http/headers.titan titan/http/native.titan \
 	titan/http/server.titan
@@ -2197,6 +2198,13 @@ titan-stdlib-test-build: ## Build every native Titan stdlib test into one execut
 	@mkdir -p $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR))
 	@set +e; \
 	( cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); \
+	  cp $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/async_foreign_work.h)) \
+	    async_foreign_work.h && \
+	  $(CC) -std=c99 -Wall -Wextra -Werror -fPIC \
+	    $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
+	    -I$(call make_shell_quote,$(abspath spec/fixtures/stdlib/native)) \
+	    -c $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/async_foreign_work.c)) \
+	    -o async_foreign_work.o && \
 	  cp $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/uv_stdio_probe.h)) \
 	    uv_stdio_probe.h && \
 	  $(CC) -std=c99 -Wall -Wextra -Werror -fPIC \
@@ -2213,7 +2221,8 @@ titan-stdlib-test-build: ## Build every native Titan stdlib test into one execut
 	  TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_LDFLAGS))) \
 	    $(TEST_TITANC) --test --no-uv-bootstrap --tree \
 	      $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
-	      $(TITAN_STDLIB_TEST_ROOTS) -X uv_stdio_probe.o ); \
+	      $(TITAN_STDLIB_TEST_ROOTS) \
+	      -X async_foreign_work.o uv_stdio_probe.o ); \
 	status=$$?; \
 	bash spec/support/clean_generated_test_artifacts.sh --keep-output; \
 	if test $$status -ne 0; then rm -rf -- $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); fi; \

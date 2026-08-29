@@ -84,10 +84,10 @@ function sub(subject: string, first: integer,
   local ending = ending_position(actual_last, #subject)
   if initial > ending then return "" end
   local count = ending - initial + 1
-  local storage = ffi.titan_ffi_char.new_array(count)
+  local storage = char.new_array(count)
   cstring.memcpy(
-    storage as *ffi.titan_ffi_char,
-    (subject as const *ffi.titan_ffi_char) + initial - 1,
+    storage as *char,
+    (subject as const *char) + initial - 1,
     count as cstring.size_t)
   return storage as string
 end
@@ -102,8 +102,8 @@ function find(subject: string, needle: string,
   if first > #subject or #needle > #subject - first + 1 then
     return nil, nil
   end
-  local subject_bytes = subject as const *ffi.titan_ffi_char
-  local needle_bytes = needle as const *ffi.titan_ffi_char
+  local subject_bytes = subject as const *char
+  local needle_bytes = needle as const *char
   local offset = first - 1
   local limit = #subject - #needle
   while offset <= limit do

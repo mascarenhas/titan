@@ -1,6 +1,8 @@
 local process_fcntl = foreign import "fcntl.h"
 local process_unistd = foreign import "unistd.h"
 
+local type CharPointer = *char
+
 -- Stream reads are the one multi-shot operation in this contributor. A
 -- stream therefore buffers callback chunks and has at most one suspended
 -- reader. Every write independently owns one uv_write_t; libuv supplies the
@@ -13,7 +15,7 @@ end
 local record uv_stdio_t
   local native: StdioNative
   local alloc_callback: (uv_stdio_t, libuv.size_t,
-                         ffi.titan_ffi_void_ptr) -> ()
+                         *void) -> ()
   local read_callback: (uv_stdio_t, integer) -> ()
   local buffer: Bytes?
   local runtime: Runtime
@@ -40,7 +42,7 @@ end
 
 foreign function uv_process_exit_cb(process: *libuv.uv_process_t,
                                     exit_status: libuv.int64_t,
-                                    term_signal: ffi.titan_ffi_int)
+                                    term_signal: int)
   local handle = process as *libuv.uv_handle_t
   local owner = libuv.uv_handle_get_data(handle) as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
@@ -186,10 +188,10 @@ local function close_stream_from_callback(stdio: uv_stdio_t)
 end
 
 local function stream_alloc(stdio: uv_stdio_t, size: libuv.size_t,
-                            pointer: ffi.titan_ffi_void_ptr)
+                            pointer: *void)
   local descriptor = pointer as *libuv.uv_buf_t
   do
-    local bytes = ffi.titan_ffi_char.new_array(size as integer)
+    local bytes = char.new_array(size as integer)
     stdio.buffer = bytes
     descriptor.base = bytes
     descriptor.len = size
@@ -414,7 +416,7 @@ local function new_pipe_stdio(runtime: Runtime): (integer, uv_stdio_t?)
   end
   local native_pointer: *libuv.uv_pipe_t = native
   libuv.uv_handle_set_data(native_pointer as *libuv.uv_handle_t,
-                           stdio as ffi.titan_ffi_void_ptr)
+                           stdio as *void)
   return 0, stdio
 end
 
@@ -503,7 +505,7 @@ local function initialize_parent_stdio(runtime: Runtime,
     end
     local native_pointer: *libuv.uv_tty_t = native
     libuv.uv_handle_set_data(native_pointer as *libuv.uv_handle_t,
-                             owner as ffi.titan_ffi_void_ptr)
+                             owner as *void)
     stdio = owner
 
     local actual = libuv.uv_os_fd_t.new_array(1)
@@ -637,7 +639,7 @@ local function config_merged_output(state: uv_spawn_config):
     close_descriptor(descriptors[1])
   end
   status = libuv.uv_pipe(
-      descriptors, libuv.UV_NONBLOCK_PIPE as ffi.titan_ffi_int, 0)
+      descriptors, libuv.UV_NONBLOCK_PIPE as int, 0)
   if status < 0 then return status, nil end
   status = libuv.uv_pipe_open(
       stream_native(parent_stream) as *libuv.uv_pipe_t, descriptors[0])
@@ -662,7 +664,7 @@ local function os_spawn_config_new(): uv_spawn_config
   local stdio: owned libuv.uv_stdio_container_t[] =
       libuv.uv_stdio_container_t.new_array(3)
   options.exit_cb = uv_process_exit_cb
-  options.stdio_count = 3 as ffi.titan_ffi_int
+  options.stdio_count = 3 as int
   options.stdio = stdio
   return uv_spawn_config.new {
     runtime = task.runtime,
@@ -780,7 +782,7 @@ local function os_process_spawn_with_config(file: string, args: {string},
   local process = new_process(state.runtime)
   local process_handle: *libuv.uv_process_t = process.handle
   local argument_count = #args + 1
-  local argv = ffi.titan_ffi_char_ptr.new_array(argument_count + 1)
+  local argv = CharPointer.new_array(argument_count + 1)
   argv[0] = file
   index = 1
   while index <= #args do
@@ -805,7 +807,7 @@ local function os_process_spawn_with_config(file: string, args: {string},
   -- uv_spawn has now initialized the handle and the non-reentrant loop cannot
   -- deliver exit_callback until control returns to uv_run.
   libuv.uv_handle_set_data(process_handle as *libuv.uv_handle_t,
-                           process as ffi.titan_ffi_void_ptr)
+                           process as *void)
 
   state.slots = {}
   discard_unpublished_stdio(stdout_merged_child)

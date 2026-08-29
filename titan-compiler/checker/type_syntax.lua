@@ -27,6 +27,24 @@ local function local_owner_declaration(st, name)
         and st.interface_declarations[name] or nil
 end
 
+function resolve_surface_c_type(name, st, errors, loc)
+    if not foreigntypes.is_surface_primitive_name(name) then return nil end
+    if name == "void" then return types.CVoid() end
+
+    local service, service_error = ensure_probe_service(st)
+    if not service then
+        return invalid(errors, loc,
+            "cannot resolve C99 type '%s': %s", name,
+            tostring(service_error))
+    end
+    local typ = foreigntypes.surface_primitive(st.c_profile, name)
+    if not typ then
+        return invalid(errors, loc,
+            "C99 type '%s' is unavailable in the target C profile", name)
+    end
+    return typ
+end
+
 -- Converts an AST type declaration into a typechecker type
 --   node: AST node
 --   errors: list of compile-time errors
@@ -88,6 +106,17 @@ typefromnode = util.make_visitor({
                 return typ
             end
             return types.Invalid()
+        end
+
+
+        if foreigntypes.is_surface_primitive_name(node.name) then
+            if #(node.typeargs or {}) > 0 then
+                return invalid(errors, node.loc,
+                    "C99 type '%s' cannot be applied to type arguments",
+                    node.name)
+            end
+            node._surface_c_type = true
+            return resolve_surface_c_type(node.name, st, errors, node.loc)
         end
 
         local owner = generic_resolve_local_owner(node.name, st)

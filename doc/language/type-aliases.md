@@ -141,8 +141,17 @@ is preserved through static providers and chains of aliases.
 A `local type` alias is visible only inside its defining module and is omitted
 from the compiled interface. As with other exported declarations, the target
 of a public alias must itself be exportable: it cannot contain a local record
-or union
-or a C-FFI type. A local alias may name either.
+or union or a header-dependent C-FFI type. Contextual C primitives and pointer,
+foreign-function-pointer, or owned graphs built entirely from them are
+exportable alias targets. An imported C typedef remains nonexportable even when
+it resolves to a contextual primitive. A local alias may name any of these
+types and is also the way to give a compound pointer type a namespace for
+allocation or layout pseudo-members:
+
+```titan
+local type VoidPointer = *void
+local pointers = VoidPointer.new_array(4)
+```
 
 Aliases and their targets are order-independent within a module. In
 particular, a qualified alias target may use an import declared later:

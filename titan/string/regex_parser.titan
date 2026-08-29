@@ -201,7 +201,7 @@ end
 local function regex_byte(source: string,
                           position: integer): integer
   local bytes =
-    source as const *ffi.titan_ffi_unsigned_char
+    source as const *unsigned char
   return bytes[position - 1] as integer
 end
 

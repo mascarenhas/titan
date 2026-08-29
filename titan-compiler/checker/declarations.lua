@@ -885,6 +885,10 @@ toplevel_visitor = util.make_visitor({
             node._type = node.value._type
         end
         node.decl._type = node._type
+        check_user_value_slot_type(
+            "module", st.modname, "variable", node.decl.name,
+            node._type, node.decl.type and node.decl.type.loc or node.loc,
+            errors)
         -- The public module `__newindex` path is a genuine Lua boundary.  Keep
         -- an explicit unavailable marker for non-reifiable targets so its
         -- generated setter rejects every attempted Lua write.
@@ -1327,9 +1331,15 @@ function collect_type_aliases(ast, st, errors)
     for _, node in ipairs(ast) do
         if not node._ignore
            and (node._tag == "Ast.TopLevelRecord"
-                or node._tag == "Ast.TopLevelUnion")
-           and not nominals[node.name] then
-            nominals[node.name] = node
+                or node._tag == "Ast.TopLevelUnion") then
+            if foreigntypes.is_surface_primitive_component(node.name) then
+                checker.typeerror(errors, node.loc,
+                    "cannot define Titan nominal type '%s'; the name is a contextual C99 type",
+                    node.name)
+                node._ignore = true
+            elseif not nominals[node.name] then
+                nominals[node.name] = node
+            end
         end
     end
 
@@ -1339,6 +1349,14 @@ function collect_type_aliases(ast, st, errors)
         if not node._ignore
            and (node._tag == "Ast.TopLevelTypeAlias"
                 or node._tag == "Ast.TopLevelInterface") then
+            if node._tag == "Ast.TopLevelInterface"
+               and foreigntypes.is_surface_primitive_component(node.name) then
+                checker.typeerror(errors, node.loc,
+                    "cannot define Titan nominal type '%s'; the name is a contextual C99 type",
+                    node.name)
+                node._ignore = true
+                goto continue_type_only
+            end
             local nominal = nominals[node.name]
             local previous = type_only[node.name]
             if nominal then
@@ -1382,6 +1400,7 @@ function collect_type_aliases(ast, st, errors)
                 end
             end
         end
+        ::continue_type_only::
     end
 end
 

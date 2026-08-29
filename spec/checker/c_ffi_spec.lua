@@ -1118,8 +1118,8 @@ describe("C FFI type checking", function()
             local ffi = foreign import "titan/ffi.h"
 
             function f(): integer
-                local one = ffi.titan_ffi_int.new()
-                local many = ffi.titan_ffi_int.new_array(8)
+                local one = int.new()
+                local many = int.new_array(8)
                 return #many
             end
         ]])
@@ -1130,10 +1130,10 @@ describe("C FFI type checking", function()
         local ok, err = run_checker([[
             local ffi = foreign import "titan/ffi.h"
 
-            local one = ffi.titan_ffi_int.new()
-            local many = ffi.titan_ffi_int.new_array(8)
-            local parenthesized_one = (ffi.titan_ffi_int.new())
-            local parenthesized_many = (ffi.titan_ffi_int.new_array(4))
+            local one = int.new()
+            local many = int.new_array(8)
+            local parenthesized_one = (int.new())
+            local parenthesized_many = (int.new_array(4))
 
             function count(): integer
                 return #many + #parenthesized_many
@@ -1147,7 +1147,7 @@ describe("C FFI type checking", function()
             local ffi = foreign import "titan/ffi.h"
 
             count = 8
-            local many = ffi.titan_ffi_int.new_array(count)
+            local many = int.new_array(count)
         ]])
         assert.falsy(ok)
         assert.match("top level variable initialization must be constant", err)
@@ -1614,7 +1614,7 @@ describe("C FFI type checking", function()
             local ffi = foreign import "titan/ffi.h"
 
             function run(): value
-                return ffi.titan_ffi_int.new_array
+                return int.new_array
             end
         ]])
         assert.falsy(ok)
