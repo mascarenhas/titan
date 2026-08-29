@@ -542,38 +542,19 @@ function test_fs_watcher_directory_events_and_canonical_paths(context: test.Cont
                 watcher:is_watching(root .. "/."),
                 "watcher did not recognize an equivalent canonical path")
 
-    fs.write_file(modify_path, "after")
-    context:log("watcher diagnostic: waiting for modified child")
-    local found_modified = false
-    while not found_modified do
-      local events = watcher:poll()
-      for index = 1, #events do
-        local event = events[index]
-        case event
-        when created: found then
-          context:log("watcher diagnostic event: created " .. found)
-        when deleted: found then
-          context:log("watcher diagnostic event: deleted " .. found)
-        when modified: found then
-          context:log("watcher diagnostic event: modified " .. found)
-        when error: failure then
-          context:log("watcher diagnostic event: error")
-        end
-        if watcher_event_matches(
-            event, "modified", canonical_modify, canonical_nested) then
-          found_modified = true
-        end
-      end
-    end
-    context:log("watcher diagnostic: observed modified child")
-
-    -- Libuv permits UV_CHANGE or UV_RENAME for directory-entry create/delete
-    -- hints. Titan exposes the former as modified, so these path/scope checks
-    -- accept that portable alternative without weakening root deletion below.
+    -- Darwin may report or coalesce events collected immediately before
+    -- uv_fs_event_start. Observe a child created after registration to drain
+    -- those hints before checking fixtures that existed before the watch.
     fs.write_file(create_path, "created")
     local canonical_create = fs.realpath(create_path)
     wait_for_watcher_event(
         watcher, "created", canonical_create, canonical_nested, "modified")
+
+    fs.write_file(modify_path, "after")
+    -- Libuv permits UV_CHANGE or UV_RENAME hints for directory entries. A
+    -- truncate/write can therefore map to created when the path still exists.
+    wait_for_watcher_event(
+        watcher, "modified", canonical_modify, canonical_nested, "created")
 
     fs.unlink(delete_path)
     wait_for_watcher_event(
