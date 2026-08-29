@@ -664,10 +664,15 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
   runtime_test.run(function ()
     local root = support.new_workspace(context)
     local path = root .. "/wake.dat"
+    local clear_path = root .. "/clear.dat"
     support.cleanup_path(context, path)
+    support.cleanup_path(context, clear_path)
+    support.write_file_synchronously(path, "")
+    support.write_file_synchronously(clear_path, "")
+    local canonical = fs.realpath(path)
     local watcher = fs.watcher()
     cleanup_watcher(watcher)
-    watcher:watch(root)
+    watcher:watch(path)
     wait_for_watcher_subscription()
 
     local entered = false
@@ -690,7 +695,7 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
     test.assert(resume_error ==
                 "Task resume token mismatch (expected source: fs.watcher)" and
                 first:status():as_string() == "waiting" and
-                first_result == nil and watcher:is_watching(root),
+                first_result == nil and watcher:is_watching(path),
                 "an unrelated token changed a blocked poll")
 
     expect_failure(function ()
@@ -699,13 +704,12 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
 
     first:cancel(async.CancellationReason.simple("cancel blocked poll"))
     fs.write_file(path, "wake")
-    local canonical = fs.realpath(path)
     async.join(first)
     test.assert(first:status():as_string() == "cancelled" and
-                first_result == nil and watcher:is_watching(root),
+                first_result == nil and watcher:is_watching(path),
                 "poll cancellation changed watcher ownership")
 
-    wait_for_watcher_event(watcher, "created", canonical, nil)
+    wait_for_watcher_event(watcher, "modified", canonical, nil)
 
     local stop_poll_entered = false
     local stopped_result: {fs.WatcherEvent}? = nil
@@ -718,16 +722,16 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
                               "filesystem watcher stop poll cleanup")
     while not stop_poll_entered do timer.yield() end
     timer.yield()
-    watcher:stop(root)
+    watcher:stop(path)
     async.join(stopped)
     test.assert(stopped:status():has_succeeded() and
                 stopped_result ~= nil and #stopped_result == 0 and
-                not watcher:is_watching(root),
+                not watcher:is_watching(path),
                 "stop did not wake an empty blocked poll")
     test.assert(#watcher:poll() == 0,
                 "poll after stopping the final registration was not empty")
 
-    watcher:watch(root)
+    watcher:watch(path)
     local clear_poll_entered = false
     local cleared_result: {fs.WatcherEvent}? = nil
     local cleared = async.run<value, value>(function (): value
@@ -758,8 +762,8 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
                 #cleared_result == 0,
                 "clear did not wake an empty blocked poll")
 
-    watcher:watch(root)
     watcher:watch(path)
+    watcher:watch(clear_path)
     local clear_entered = false
     local concurrent_clear = async.run<value, value>(function (): value
       clear_entered = true
@@ -781,6 +785,7 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
                 "watcher did not leave clear state after completion")
 
     fs.unlink(path)
+    fs.unlink(clear_path)
   end)
 end
 
