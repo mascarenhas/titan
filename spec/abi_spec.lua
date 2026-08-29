@@ -16,6 +16,18 @@ local function configured_command(command, ...)
     return shell_command(argv)
 end
 
+local function shared_fixture_command(output, source)
+    local argv = assert(cdriver.split_shell_words(driver.CC))
+    argv[#argv + 1] = "-fPIC"
+    for _, flag in ipairs(assert(driver.shared_library_flags())) do
+        argv[#argv + 1] = flag
+    end
+    argv[#argv + 1] = "-o"
+    argv[#argv + 1] = output
+    argv[#argv + 1] = source
+    return shell_command(argv)
+end
+
 local function count_plain(haystack, needle)
     local count = 0
     local offset = 1
@@ -187,11 +199,7 @@ describe("compiled-module ABI version", function()
             }
         ]])
         f:close()
-        local shared = driver.IS_DARWIN and "-shared -undefined dynamic_lookup"
-            or "-shared"
-        local ok = os.execute(table.concat({
-            driver.CC, "-fPIC", shared, "-o", "legacy.so", "legacy.c"
-        }, " "))
+        local ok = os.execute(shared_fixture_command("legacy.so", "legacy.c"))
         assert.truthy(ok, "could not build fake legacy module")
 
         local loader = driver.defaultloader({})
@@ -222,12 +230,8 @@ describe("compiled-module ABI version", function()
             }
         ]])
         f:close()
-        local shared = driver.IS_DARWIN and "-shared -undefined dynamic_lookup"
-            or "-shared"
-        local ok = os.execute(table.concat({
-            driver.CC, "-fPIC", shared, "-o", "incompatible.so",
-            "incompatible.c"
-        }, " "))
+        local ok = os.execute(shared_fixture_command(
+            "incompatible.so", "incompatible.c"))
         assert.truthy(ok, "could not build incompatible module")
 
         local loader = driver.defaultloader({})
