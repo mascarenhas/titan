@@ -538,25 +538,32 @@ function test_fs_watcher_directory_events_and_canonical_paths(context: test.Cont
     watcher:watch(root)
     watcher:watch(root .. "/.")
     wait_for_watcher_subscription()
+    context:log("watcher phase: root subscription ready")
     test.assert(watcher:is_watching(root) and
                 watcher:is_watching(root .. "/."),
                 "watcher did not recognize an equivalent canonical path")
 
     fs.write_file(modify_path, "after")
+    context:log("watcher phase: waiting for modified child")
     wait_for_watcher_event(
         watcher, "modified", canonical_modify, canonical_nested)
+    context:log("watcher phase: observed modified child")
 
     -- Libuv permits UV_CHANGE or UV_RENAME for directory-entry create/delete
     -- hints. Titan exposes the former as modified, so these path/scope checks
     -- accept that portable alternative without weakening root deletion below.
     fs.write_file(create_path, "created")
     local canonical_create = fs.realpath(create_path)
+    context:log("watcher phase: waiting for created child")
     wait_for_watcher_event(
         watcher, "created", canonical_create, canonical_nested, "modified")
+    context:log("watcher phase: observed created child")
 
     fs.unlink(delete_path)
+    context:log("watcher phase: waiting for deleted child")
     wait_for_watcher_event(
         watcher, "deleted", canonical_delete, canonical_nested, "modified")
+    context:log("watcher phase: observed deleted child")
 
     fs.write_file(nested_path, "nested-after")
     -- Darwin's FSEvents can coalesce back-to-back mutations. Match libuv's
@@ -565,8 +572,10 @@ function test_fs_watcher_directory_events_and_canonical_paths(context: test.Cont
     timer.sleep(100)
     fs.write_file(sentinel_path, "sentinel")
     local canonical_sentinel = fs.realpath(sentinel_path)
+    context:log("watcher phase: waiting for sentinel child")
     wait_for_watcher_event(
         watcher, "created", canonical_sentinel, canonical_nested, "modified")
+    context:log("watcher phase: observed sentinel child")
 
     watcher:stop(root .. "/.")
     test.assert(not watcher:is_watching(root),
@@ -589,9 +598,12 @@ function test_fs_watcher_directory_events_and_canonical_paths(context: test.Cont
     local canonical_removed = fs.realpath(removed_directory)
     watcher:watch(removed_directory)
     wait_for_watcher_subscription()
+    context:log("watcher phase: removed-directory subscription ready")
     fs.rmdir(removed_directory)
+    context:log("watcher phase: waiting for watched-root deletion")
     wait_for_watcher_event(
         watcher, "deleted", canonical_removed, canonical_nested)
+    context:log("watcher phase: observed watched-root deletion")
     test.assert(not watcher:is_watching(removed_directory) and
                 #watcher:poll() == 0,
                 "deleted directory watch did not retire its registration")
