@@ -5,6 +5,8 @@ local lfs = require "lfs"
 local REPO = lfs.currentdir()
 local PREFIX = require("spec.support.installed_prefix").active()
 local LUA = PREFIX .. "/bin/lua"
+local USE_CHECKOUT_COMPILER =
+    os.getenv("TITAN_TEST_USE_CHECKOUT_COMPILER") == "1"
 
 local function exists(path)
     return lfs.attributes(path, "mode") ~= nil
@@ -80,7 +82,8 @@ local function collect_files(path, suffix, files)
 end
 
 local function compiler_argv(workspace, source_root, ...)
-    local installed = PREFIX and exists(PREFIX .. "/bin/titanc")
+    local installed = not USE_CHECKOUT_COMPILER and
+        PREFIX and exists(PREFIX .. "/bin/titanc")
     local argv = {
         "env",
         "-u", "LUA_PATH", "-u", "LUA_PATH_5_5",
@@ -124,6 +127,28 @@ end
 
 local function compile(workspace, source_root, ...)
     return run(compiler_argv(workspace, source_root, ...), workspace)
+end
+
+local function compile_with_environment(
+        workspace, source_root, environment, ...)
+    local argv = compiler_argv(workspace, source_root, ...)
+    local command_index
+    for index, argument in ipairs(argv) do
+        if argument == PREFIX .. "/bin/titanc" or argument == LUA then
+            command_index = index
+            break
+        end
+    end
+    assert.truthy(command_index, "cannot locate compiler command")
+
+    local names = {}
+    for name in pairs(environment) do names[#names + 1] = name end
+    table.sort(names)
+    for offset, name in ipairs(names) do
+        table.insert(argv, command_index + offset - 1,
+            name .. "=" .. environment[name])
+    end
+    return run(argv, workspace)
 end
 
 local function run_lua(workspace, code)
@@ -295,23 +320,102 @@ assert(unit.answer() == 42)
         assert.truthy(ok, output)
     end)
 
-    it("bundles unrelated roots when exactly one root defines main",
+    it("preloads initialized source imports in a standalone",
        function()
-        write_file(source_root .. "/library.titan", [[
-function exit_code(): integer
-    return 27
+        write_file(source_root .. "/library/leaf.titan", [[
+local initialized = 0
+
+function answer(): integer
+    return 15
+end
+
+function initializations(): integer
+    return initialized
+end
+
+do
+    initialized = initialized + 1
 end
 ]])
-        write_file(source_root .. "/application.titan", [[
+        write_file(source_root .. "/library.titan", [[
+local leaf = import "library.leaf"
+
+local initialized = 0
+
+function answer(): integer
+    return leaf.answer() + 12
+end
+
+function initializations(): integer
+    return initialized
+end
+
+function leaf_initializations(): integer
+    return leaf.initializations()
+end
+
+do
+    initialized = initialized + 1
+end
+]])
+        write_file(source_root .. "/application.titan", [=[
 local library = import "library"
+local tlua = import "lua"
 
 function main(args: {string}): integer
-    return library.exit_code()
-end
-]])
+    if library.initializations() ~= 1 or
+       library.leaf_initializations() ~= 1 then
+        return 1
+    end
 
-        local ok, output, why, code = compile(
-            workspace, source_root, "--pretty-print", "library", "application")
+    local preload_state = tlua.load([[
+return type(package.preload["application"]),
+       type(package.preload["library"]),
+       type(package.preload["library.leaf"]),
+       package.loaded["library"],
+       package.loaded["library.leaf"]
+]], "=standalone-preload-state", nil)
+    local application_preload: value, library_preload: value,
+          leaf_preload: value, library_cached: value, leaf_cached: value =
+        preload_state()
+    if application_preload as string ~= "function" or
+       library_preload as string ~= "function" or
+       leaf_preload as string ~= "function" or
+       library_cached ~= nil or leaf_cached ~= nil then
+        return 2
+    end
+
+    local inspect = tlua.load([[
+local module = ...
+return module.answer(), module.initializations()
+]], "=standalone-preload-inspect", nil)
+    local loaded_library = tlua.require("library")
+    local library_value: value, library_inits: value = inspect(loaded_library)
+    if library_value as integer ~= 27 or library_inits as integer ~= 1 or
+       tlua.require("library") ~= loaded_library then
+        return 3
+    end
+
+    local loaded_leaf = tlua.require("library.leaf")
+    local leaf_value: value, leaf_inits: value = inspect(loaded_leaf)
+    if leaf_value as integer ~= 15 or leaf_inits as integer ~= 1 or
+       tlua.require("library.leaf") ~= loaded_leaf then
+        return 4
+    end
+
+    if library.initializations() ~= 1 or
+       library.leaf_initializations() ~= 1 then
+        return 5
+    end
+    return library.answer()
+end
+]=])
+
+        local ok, output, why, code = compile_with_environment(
+            workspace, source_root, {
+                TITAN_PATH_0_6 = workspace .. ";;",
+            }, "--pretty-print",
+            "library", "application")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
 

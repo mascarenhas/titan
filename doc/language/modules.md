@@ -710,6 +710,18 @@ requested modules and dependencies selected from source or static providers
 are linked directly into the binary. Dependencies selected from DSOs remain
 dynamic. Qualified standard-library dependencies therefore use the installed
 `titan.so` by default, while `--static` prefers `titan.a`.
+
+The entrypoint places only the main module's `luaopen_*` function in
+`package.preload`. Requiring main still performs the existing Titan
+initialization recursion before `main` runs. After each generated module's
+`_init` succeeds, that module publishes its own `luaopen_*` under its logical
+name in the registry preload table, which `package.preload` aliases. Lua code
+can then use ordinary `require`, or Titan code can use `titan.lua.require`, to
+obtain the already initialized canonical module value; `require` also fills
+`package.loaded`. This includes private static archive dependencies reached by
+the initialization recursion. Any compiled-in module outside that closure and
+an unused archive sibling remain absent from the preload table.
+
 After `luaL_openlibs`, the executable parses the
 inherited `package.cpath` for its `/lib/lua/5.5/?.so` entry, adds
 `<root>/lib/titan/0.6/?.so` if it is absent, and initializes the Titan module

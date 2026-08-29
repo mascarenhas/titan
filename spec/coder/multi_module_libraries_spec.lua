@@ -1538,24 +1538,72 @@ end
         copy_file(provider_a .. "/base.so", provider_b .. "/base.so")
         copy_file(provider_a .. "/base.a", provider_b .. "/base.a")
 
-        write_file(source_b .. "/bundle/api.titan", [[
+        write_file(source_b .. "/bundle/impl.titan", [[
 local facade = import "base.facade"
 type Box = facade.Box
+
+local initialized = 0
 
 function get(): integer
     return facade.get() + 2
 end
+
+function make(n: integer): Box
+    return facade.Box.new(n)
+end
+
+function initializations(): integer
+    return initialized
+end
+
+do
+    initialized = initialized + 1
+end
+]])
+        write_file(source_b .. "/bundle/api.titan", [[
+local impl = import "bundle.impl"
+type Box = impl.Box
+
+local initialized = 0
+
+function get(): integer
+    return impl.get()
+end
+
+function make(n: integer): Box
+    return impl.make(n)
+end
+
+function initializations(): integer
+    return initialized
+end
+
+function impl_initializations(): integer
+    return impl.initializations()
+end
+
+do
+    initialized = initialized + 1
+end
+]])
+        write_file(source_b .. "/bundle/unused.titan", [[
+function get(): integer
+    return 99
+end
 ]])
         ok, output, why, code = compile(
-            provider_b, source_b, "--static", "bundle.api")
+            provider_b, source_b, "--static",
+            "bundle.api", "bundle.impl", "bundle.unused")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         local bundle = assert_provider_pair(
-            provider_b, "bundle/api", {
-                "base.facade", "base.owner", "bundle.api",
+            provider_b, "bundle", {
+                "base.facade", "base.owner", "bundle.api", "bundle.impl",
+                "bundle.unused",
             }, true)
         assert.same({
-            "base.facade", "base.owner", "bundle.api",
+            "base.facade", "base.owner", "bundle.api", "bundle.impl",
+            "bundle.unused",
         }, bundle.key_order)
         assert.equal("file", lfs.attributes(
             provider_b .. "/base/facade.lua", "mode"))
@@ -1566,30 +1614,70 @@ end
         -- before compiling and running the static consumer.
         assert.truthy(os.remove(provider_b .. "/base.so"))
         assert.truthy(os.remove(provider_b .. "/base.a"))
-        write_file(source_b .. "/app.titan", [[
+        write_file(source_b .. "/app.titan", [=[
 local api = import "bundle.api"
+local tlua = import "lua"
 
 function main(args: {string}): integer
-    local make: (integer) -> api.Box = api.Box.new
-    if api.get() == 42 and make(42).n == 42 then
-        return 0
-    else
+    if api.initializations() ~= 1 or api.impl_initializations() ~= 1 then
         return 1
     end
+
+    local preload_state = tlua.load([[
+return type(package.preload["bundle.api"]),
+       type(package.preload["bundle.impl"]),
+       package.preload["bundle.unused"],
+       package.loaded["bundle.api"],
+       package.loaded["bundle.impl"]
+]], "=static-standalone-preload-state", nil)
+    local api_preload: value, impl_preload: value, unused_preload: value,
+          cached_api: value, cached_impl: value = preload_state()
+    if api_preload as string ~= "function" or
+       impl_preload as string ~= "function" or unused_preload ~= nil or
+       cached_api ~= nil or cached_impl ~= nil then
+        return 2
+    end
+
+    local loaded_api = tlua.require("bundle.api")
+    if tlua.require("bundle.api") ~= loaded_api then return 3 end
+    local loaded_impl = tlua.require("bundle.impl")
+    if tlua.require("bundle.impl") ~= loaded_impl then return 4 end
+    local inspect = tlua.load([[
+local module = ...
+local box = module.make(42)
+return module.get(), module.initializations(), box.n
+]], "=static-standalone-preload", nil)
+    local api_answer: value, api_initialized: value, api_box: value =
+        inspect(loaded_api)
+    local impl_answer: value, impl_initialized: value, impl_box: value =
+        inspect(loaded_impl)
+    local make: (integer) -> api.Box = api.Box.new
+    if api_answer as integer ~= 42 or api_initialized as integer ~= 1 or
+       api_box as integer ~= 42 or impl_answer as integer ~= 42 or
+       impl_initialized as integer ~= 1 or impl_box as integer ~= 42 or
+       api.initializations() ~= 1 or api.impl_initializations() ~= 1 or
+       make(42).n ~= 42 then
+        return 5
+    end
+    return 0
 end
-]])
+]=])
         ok, output, why, code =
-            compile(provider_b, source_b, "--static", "app")
+            compile_with_environment(provider_b, source_b, {
+                TITAN_PATH_0_6 = provider_b .. ";;",
+            }, "--static", "app")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        assert.truthy(os.remove(provider_b .. "/bundle/api.so"))
-        os.remove(provider_b .. "/bundle/api.lua")
+        assert.truthy(os.remove(provider_b .. "/bundle.so"))
+        assert.truthy(os.remove(provider_b .. "/bundle/api.lua"))
+        assert.truthy(os.remove(provider_b .. "/bundle/impl.lua"))
+        assert.truthy(os.remove(provider_b .. "/bundle/unused.lua"))
         ok, output, why, code = run_program(provider_b, "app")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
 
         -- Carried physical membership remains unavailable through an
-        -- unrelated ordinary lookup: bundle/api.a is not a candidate for
+        -- unrelated ordinary lookup: bundle.a is not a candidate for
         -- base.owner.
         write_file(source_b .. "/negative.titan", [[
 local owner = import "base.owner"

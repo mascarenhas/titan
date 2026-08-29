@@ -941,6 +941,15 @@ error alerts):
   lua_setfield(L, -2, "$MODNAME");
   ```
 
+  The entrypoint registers no dependency itself. Generated module code takes
+  over during initialization: after a module's `_init` completes successfully,
+  it stores its own `luaopen_<mangled>` function under its logical name in
+  `registry[LUA_PRELOAD_TABLE]`, the table exposed as `package.preload`.
+  Requiring the main module recursively initializes its imports, so that
+  successfully initialized closure publishes itself. A private static import
+  follows the same path. An unused or otherwise uninitialized linked module
+  publishes nothing.
+
   It then pushes Titan's runtime `errorhandler` and runs `pmain` under
   `lua_pcall(L, 2, 1, -4)` with `argc` and `argv` as arguments; a
   failed pcall formats the still-available original error object and the
@@ -980,10 +989,13 @@ error alerts):
   only the converted error message. Either way the process exits
   non-zero; see [the runtime library](#titanc-the-dynamic-loader).
 
-Mechanically, then, a standalone Titan program is an embedded Lua
-interpreter whose only preloaded module is the compiled main module;
-the other modules linked into the binary are reached through the
-normal module-init protocol.
+Mechanically, then, a standalone Titan program is an embedded Lua interpreter
+whose entrypoint preloads only the compiled main module. `pmain`'s require of
+that module performs the unchanged Titan initialization recursion; each module
+publishes its loader only after its own successful `_init`. A later Lua require
+of one of those initialized logical names calls its `luaopen_*` entry, recovers
+the canonical registry module value, and applies the normal `package.loaded`
+policy.
 
 ## The `titanc` command line
 

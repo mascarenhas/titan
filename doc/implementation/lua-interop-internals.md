@@ -580,7 +580,15 @@ read, but it is not a sandbox boundary against privileged Lua/C code.
 
 `require` of a Titan module returns the module `Udata` itself —
 `luaopen_<mangled>` calls `_init` and pushes it; there is **no separate
-module table**. Every member access — exported functions, exported
+module table**. After `_init` completes successfully, generated module code
+stores that same `luaopen_<mangled>` function under the logical module name in
+`registry[LUA_PRELOAD_TABLE]`. `package.preload` aliases this registry table.
+This self-publication does not write `package.loaded`; a later Lua `require`
+calls the loader, receives the canonical registry `Udata`, and performs the
+ordinary loaded-table update. A failed initialization does not publish its
+module loader.
+
+Every member access — exported functions, exported
 variables, and per-nominal static-namespace tables — flows through a
 metatable installed on the `Udata`, driven by a single **member map**
 (name→slot) shared by `__index`/`__newindex`. Functions and nominal
@@ -874,10 +882,8 @@ bundled-mode extension DSOs leave their `uv_*` calls unresolved:
   Titan module-path default from that root, and ensures
   `<root>/lib/titan/0.6/?.so` is present in `package.cpath`. The
   prefix-configured Titan-owned Lua already places that template before its
-  `lib/lua` entries. It then
-  registers the module's `luaopen_` function in
-  `package.preload["<modname>"]`; the module initializes only when the script
-  `require`s it.
+  `lib/lua` entries. It then registers only the main module's `luaopen_`
+  function in `package.preload`; this registration initializes nothing.
 * **`pmain`** publishes the original `argc` and `argv` under
   `TITAN_MAIN_ARGC_KEY` and `TITAN_MAIN_ARGV_KEY`, then calls
   `require("<modname>")` and retrieves and retains its `main` callable. A
@@ -888,12 +894,18 @@ bundled-mode extension DSOs leave their `uv_*` calls unresolved:
   writer and capacity `argc - 1` and stores `argv[i]` at logical index `i` for
   `i = 1 .. argc-1`. The program name is not inserted, so `args[0]` is nil,
   `args[1]` is the first user argument, and `#args == argc - 1`.
-  Requiring first initializes
-  transitive imports, which may install an async hook under
+  Requiring first initializes transitive imports, which may install an async
+  hook under
   `TITAN_MAIN_BOOTSTRAP_KEY`. After retaining the exact `main`, `pmain` calls
   `main(arg)` when the key is nil or `hook(main, arg)` when it is present. Both
   paths remain inside the one outer protected call, and the hook cannot replace
-  the program's entry callable.
+  the program's entry callable. As each transitive import finishes `_init`, its
+  generated code self-registers its `luaopen_` entry in
+  `registry[LUA_PRELOAD_TABLE]`. A later Lua require calls that entry, which
+  returns the canonical initialized module value and lets ordinary
+  `package.loaded` cache it. This includes private static imports reached by the
+  initialization recursion. A linked module outside the initialized closure
+  has no preload entry.
 * **Top-level error handler.** The standalone bootstrap installs Titan's
   own `errorhandler` as the message handler for the `lua_pcall` of
   `pmain`. On failure, `errorhandler` captures the raw unified trace into

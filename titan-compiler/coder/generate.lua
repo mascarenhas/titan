@@ -801,6 +801,9 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
             :format(modname, tlcontext.upvalue, 0xFFFF))
     table.insert(code, render(init, {
         INITNAME = tlcontext.prefix .. 'init',
+        LUAOPEN_NAME = 'luaopen_' .. mangle_qn(modname),
+        PRELOADNAME = tlcontext.prefix .. 'register_preload',
+        PRELOADMODNAME = c_string_literal(modname),
         INITMODULES = table.concat(initmods, "\n"),
         LOADMODULES1 = table.concat(loadmods, "\n"),
         LOADMODULES2 = #loadmods > 1 and table.concat(loadmods, "\n") or "",
