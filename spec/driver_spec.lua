@@ -39,7 +39,7 @@ describe("compiler installation discovery", function()
         assert.equal("0.6.0", driver.TITAN_VERSION)
         assert.equal("0.6", driver.TITAN_LIBRARY_VERSION)
         assert.equal("_0_6", driver.TITAN_LIBRARY_VERSION_SUFFIX)
-        assert.equal(3, driver.LANGUAGE_SERVER_API_VERSION)
+        assert.equal(4, driver.LANGUAGE_SERVER_API_VERSION)
         assert.is_function(driver.serialize_source_interface)
         assert.is_function(driver.restat_c_header_dependencies)
     end)
@@ -1781,6 +1781,28 @@ describe("compiler module loader", function()
         end
     end
 
+    local function embedded_provider(filename, module_types)
+        local provider = {
+            provider_file = filename,
+            entries = {},
+        }
+        for name, modtype in pairs(module_types) do
+            provider.entries[name] = {
+                abi = driver.TITAN_ABI_VERSION,
+                types = types.serialize(modtype),
+            }
+        end
+        return provider
+    end
+
+    local function result_module(name, result_type)
+        return types.Module(name, {
+            types.ModuleMember(name, "answer",
+                types.Function({}, { result_type }, false, false, false),
+                {}),
+        })
+    end
+
     local function source_module(name, members, type_members,
             source_members, source_type_members)
         source_members = source_members or {}
@@ -1935,6 +1957,784 @@ describe("compiler module loader", function()
         types.registry = previous.registry
         titan._loadlib = previous.loadlib
         remove_tree(root)
+    end)
+
+    it("validates a closed embedded-interface provider at context creation",
+    function()
+        local provider_file = root .. "/language-server"
+        local function valid_provider()
+            return embedded_provider(provider_file, {
+                embedded_valid = types.Module("embedded_valid", {}),
+            })
+        end
+        local function reject(candidate, expected)
+            local ok, message = pcall(driver.new_resolver_context, {
+                embedded_interface_provider = candidate,
+            })
+            assert.is_false(ok)
+            assert.matches("invalid embedded_interface_provider", message,
+                1, true)
+            assert.matches(expected, message, 1, true)
+        end
+
+        reject("invalid", "must be a plain table")
+        local candidate = valid_provider()
+        candidate.unexpected = true
+        reject(candidate, "contains unexpected field \"unexpected\"")
+        candidate = valid_provider()
+        candidate.provider_file = "relative/server"
+        reject(candidate,
+            "provider_file must be an absolute NUL-free pathname")
+        candidate = valid_provider()
+        candidate.provider_file = "/server\0hidden"
+        reject(candidate,
+            "provider_file must be an absolute NUL-free pathname")
+        candidate = valid_provider()
+        candidate.entries = setmetatable({}, {})
+        reject(candidate, "entries must be a plain module-keyed table")
+
+        candidate = valid_provider()
+        candidate.entries["invalid module"] = {
+            abi = driver.TITAN_ABI_VERSION,
+            types = "Module('invalid module',{})",
+        }
+        reject(candidate, "invalid logical module name \"invalid module\"")
+        candidate = valid_provider()
+        candidate.entries.embedded_valid.unexpected = true
+        reject(candidate,
+            "entry for module 'embedded_valid' contains unexpected field")
+        candidate = valid_provider()
+        candidate.entries.embedded_valid.abi = 2
+        reject(candidate, "ABI must be a string")
+        candidate = valid_provider()
+        candidate.entries.embedded_valid.abi = "different"
+        reject(candidate, "ABI mismatch: expected " ..
+            driver.TITAN_ABI_VERSION .. " but found different")
+        candidate = valid_provider()
+        candidate.entries.embedded_valid.types = true
+        reject(candidate, "types must be a serialized module string")
+        candidate = valid_provider()
+        candidate.entries.embedded_valid.types = "Module('other',{})"
+        reject(candidate, "has invalid types")
+
+        candidate = embedded_provider(provider_file, {
+            ["collision.name"] = types.Module("collision.name", {}),
+            collision_name = types.Module("collision_name", {}),
+        })
+        reject(candidate, "duplicate native symbol prefix 'collision_name'")
+
+        candidate = valid_provider()
+        setmetatable(candidate.entries.embedded_valid, {})
+        reject(candidate,
+            "entry for module 'embedded_valid' must be a plain table")
+
+        local original = valid_provider()
+        local context = driver.new_resolver_context({
+            embedded_interface_provider = original,
+        })
+        local copied = context.embedded_interface_provider
+        assert.not_equal(original, copied)
+        assert.not_equal(original.entries, copied.entries)
+        assert.equal(provider_file, copied.provider_file)
+        assert.same({ "embedded_valid" }, copied.key_order)
+        assert.equal("embedded_valid", copied.entries.embedded_valid.type.name)
+        assert.is_true(copied.analysis_only)
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
+    it("reuses immutable validated provider snapshots with isolated contexts",
+    function()
+        local name = "embedded.snapshot"
+        local provider_file = root .. "/language-server"
+        local raw = embedded_provider(provider_file, {
+            [name] = result_module(name, types.Integer()),
+        })
+        local original_types = raw.entries[name].types
+        local original_decode = driver.decode_module_interface
+        local decode_calls = 0
+        local contexts = {}
+        local loaders = {}
+        driver.decode_module_interface = function(...)
+            decode_calls = decode_calls + 1
+            return original_decode(...)
+        end
+
+        local ran, failure = pcall(function()
+            local first = driver.new_resolver_context({
+                embedded_interface_provider = raw,
+            })
+            contexts[#contexts + 1] = first
+            assert.equal(1, decode_calls)
+            local first_provider = first.embedded_interface_provider
+            local original_file = first_provider.entries[name].type.file
+            local first_loader = driver.defaultloader({}, {
+                context = first,
+            })
+            loaders[#loaders + 1] = first_loader
+            local ok, loaded, errors = first_loader(name)
+            assert.truthy(ok, tostring(loaded))
+            assert.equal(0, #errors)
+            assert.equal(first_provider,
+                driver.imported[name].embedded_provider)
+            first_provider.entries[name].type.file = "context-one.so"
+            first_provider.entries[name].types = "context-one"
+
+            -- Reusing a successfully validated raw table means reusing that
+            -- immutable snapshot. Later caller mutation is deliberately not
+            -- observed, while each resolver still receives private graphs.
+            raw.provider_file = "/mutated/provider"
+            raw.entries[name].abi = "mutated"
+            raw.entries[name].types = "not serialized metadata"
+            raw.unexpected = true
+            local second = driver.new_resolver_context({
+                embedded_interface_provider = raw,
+            })
+            contexts[#contexts + 1] = second
+            local second_provider = second.embedded_interface_provider
+            assert.equal(1, decode_calls)
+            assert.not_equal(first_provider, second_provider)
+            assert.not_equal(first_provider.entries,
+                second_provider.entries)
+            assert.not_equal(first_provider.entries[name].type,
+                second_provider.entries[name].type)
+            assert.equal(provider_file, second_provider.provider_file)
+            assert.equal(driver.TITAN_ABI_VERSION,
+                second_provider.entries[name].abi)
+            assert.equal(original_types,
+                second_provider.entries[name].types)
+            assert.equal(original_file,
+                second_provider.entries[name].type.file)
+            local second_loader = driver.defaultloader({}, {
+                context = second,
+            })
+            loaders[#loaders + 1] = second_loader
+            assert.is_nil(driver.imported[name])
+            ok, loaded, errors = second_loader(name)
+            assert.truthy(ok, tostring(loaded))
+            assert.equal(0, #errors)
+            assert.equal(original_file, loaded.file)
+            assert.equal(second_provider,
+                driver.imported[name].embedded_provider)
+
+            local distinct_raw = embedded_provider(provider_file, {
+                [name] = result_module(name, types.Integer()),
+            })
+            local third = driver.new_resolver_context({
+                embedded_interface_provider = distinct_raw,
+            })
+            contexts[#contexts + 1] = third
+            assert.equal(2, decode_calls)
+        end)
+        driver.decode_module_interface = original_decode
+        for _, loader in ipairs(loaders) do
+            assert.is_true(driver.close_loader(loader))
+        end
+        for _, context in ipairs(contexts) do
+            assert.is_true(driver.close_resolver_context(context))
+        end
+        assert.truthy(ran, failure)
+    end)
+
+    it("selects embedded interfaces before disk without native link inputs",
+    function()
+        local name = "embedded.primary"
+        local provider_file = root .. "/language-server"
+        local dynamic = binary .. "/embedded.so"
+        write_file(dynamic, "must not be inspected\n")
+        titan._loadlib = function()
+            error("disk provider was inspected before embedded metadata")
+        end
+        local context = driver.new_resolver_context({
+            embedded_interface_provider = embedded_provider(provider_file, {
+                [name] = types.Module(name, {}),
+            }),
+        })
+        local static_deps = {}
+        local loader = driver.defaultloader(static_deps, { context = context })
+        local ok, modtype, errors = loader(name)
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.equal(name, modtype.name)
+        assert.equal("embedded", driver.imported[name].kind)
+        assert.equal(provider_file, driver.imported[name].filename)
+        assert.same({}, static_deps)
+
+        context.used_compiled_interfaces = {}
+        ok, modtype, errors = loader(name)
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.is_table(context.used_compiled_interfaces[name])
+
+        local external = driver.resolve_external_modules({
+            [name] = false,
+        }, {}, context)
+        assert.same({
+            kind = "embedded",
+            provider_file = provider_file,
+        }, external[name])
+
+        assert.is_true(driver.close_loader(loader))
+        local finalized, finalize_errors =
+            driver.finalize_resolver_context(context)
+        assert.truthy(finalized,
+            finalize_errors and table.concat(finalize_errors, "\n"))
+        assert.equal(0, #context.selected_static_providers)
+        assert.equal(1, #context.selected_embedded_providers)
+        assert.equal(provider_file,
+            context.selected_embedded_providers[1].provider_file)
+        assert.is_nil(context.native_static_names[name])
+        assert.is_nil(context.native_bindings[name])
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
+    it("does not reuse an embedded selection without its provider context",
+    function()
+        local name = "sequence.none"
+        local embedded_type = result_module(name, types.Integer())
+        local disk_type = result_module(name, types.String())
+        cache_dynamic_provider(binary .. "/sequence.so", {
+            [name] = disk_type,
+        })
+
+        local context_a = driver.new_resolver_context({
+            embedded_interface_provider = embedded_provider(
+                root .. "/language-server-a", {
+                    [name] = embedded_type,
+                }),
+        })
+        local static_a = {}
+        local loader_a = driver.defaultloader(static_a, {
+            context = context_a,
+        })
+        local ok, modtype, errors = loader_a(name)
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.equal(types.serialize(embedded_type), types.serialize(modtype))
+        assert.equal("embedded", driver.imported[name].kind)
+        assert.same({}, static_a)
+        assert.is_true(driver.close_loader(loader_a))
+        assert.is_true(driver.close_resolver_context(context_a))
+
+        local context_none = driver.new_resolver_context()
+        local static_none = {}
+        local loader_none = driver.defaultloader(static_none, {
+            context = context_none,
+        })
+        assert.is_nil(driver.imported[name])
+        ok, modtype, errors = loader_none(name)
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.equal(types.serialize(disk_type), types.serialize(modtype))
+        assert.equal("dynamic", driver.imported[name].kind)
+        assert.same({}, static_none)
+        assert.is_true(driver.close_loader(loader_none))
+        local finalized, finalize_errors =
+            driver.finalize_resolver_context(context_none)
+        assert.truthy(finalized,
+            finalize_errors and table.concat(finalize_errors, "\n"))
+        assert.equal(0, #context_none.selected_embedded_providers)
+        assert.is_nil(context_none.native_static_names[name])
+        assert.equal("handle", context_none.native_bindings[name])
+        assert.is_true(driver.close_resolver_context(context_none))
+    end)
+
+    it("reconciles cached disk siblings as one embedded inventory",
+    function()
+        local name = "sequence.disk"
+        local unrequested = "sequence.unrequested"
+        local disk_type = result_module(name, types.Integer())
+        local embedded_type = result_module(name, types.String())
+        local unrequested_disk = result_module(unrequested, types.Integer())
+        local unrequested_embedded = result_module(
+            unrequested, types.String())
+        cache_dynamic_provider(binary .. "/sequence.so", {
+            [name] = disk_type,
+            [unrequested] = unrequested_disk,
+        })
+
+        local context_disk = driver.new_resolver_context()
+        local loader_disk = driver.defaultloader({}, {
+            context = context_disk,
+        })
+        local ok, modtype, errors = loader_disk(name)
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.equal(types.serialize(disk_type), types.serialize(modtype))
+        assert.equal("dynamic", driver.imported[name].kind)
+        ok, modtype, errors = loader_disk(unrequested)
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.equal(types.serialize(unrequested_disk),
+            types.serialize(modtype))
+        assert.equal("dynamic", driver.imported[unrequested].kind)
+        assert.is_true(driver.close_loader(loader_disk))
+        assert.is_true(driver.close_resolver_context(context_disk))
+
+        local provider_file = root .. "/language-server-b"
+        local context_b = driver.new_resolver_context({
+            embedded_interface_provider = embedded_provider(provider_file, {
+                [name] = embedded_type,
+                [unrequested] = unrequested_embedded,
+            }),
+        })
+        local static_b = {}
+        local loader_b = driver.defaultloader(static_b, {
+            context = context_b,
+        })
+        assert.is_nil(driver.imported[name])
+        assert.is_nil(driver.imported[unrequested])
+        ok, modtype, errors = loader_b(name)
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.equal(types.serialize(embedded_type), types.serialize(modtype))
+        assert.equal("embedded", driver.imported[name].kind)
+        assert.equal(provider_file, driver.imported[name].filename)
+        assert.is_nil(driver.imported[unrequested])
+        assert.same({}, static_b)
+        assert.is_true(driver.close_loader(loader_b))
+        local finalized, finalize_errors =
+            driver.finalize_resolver_context(context_b)
+        assert.truthy(finalized,
+            finalize_errors and table.concat(finalize_errors, "\n"))
+        assert.equal(1, #context_b.selected_embedded_providers)
+        assert.equal(provider_file,
+            context_b.selected_embedded_providers[1].provider_file)
+        assert.is_nil(context_b.native_static_names[name])
+        assert.is_nil(context_b.native_bindings[name])
+        assert.is_nil(context_b.native_static_names[unrequested])
+        assert.is_nil(context_b.native_bindings[unrequested])
+        assert.is_true(driver.close_resolver_context(context_b))
+    end)
+
+    it("clears a reused static dependency when embedded metadata replaces it",
+    function()
+        local name = "sequence.static"
+        local pruned = "sequence.pruned"
+        local static_type = result_module(name, types.Integer())
+        local embedded_type = result_module(name, types.String())
+        local shared_static_deps = {
+            ["closure.keep"] = true,
+            [pruned] = true,
+        }
+
+        local context_static = driver.new_resolver_context({
+            prefer_static = true,
+        })
+        cache_static_provider(context_static, binary .. "/sequence.a", {
+            [name] = static_type,
+        })
+        local loader_static = driver.defaultloader(shared_static_deps, {
+            context = context_static,
+        })
+        local ok, modtype, errors = loader_static(name)
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.equal(types.serialize(static_type), types.serialize(modtype))
+        assert.equal("static", driver.imported[name].kind)
+        assert.is_true(shared_static_deps[name])
+        assert.is_true(shared_static_deps["closure.keep"])
+        assert.is_true(driver.close_loader(loader_static))
+        assert.is_true(driver.close_resolver_context(context_static))
+
+        local provider_file = root .. "/language-server-static"
+        local context_embedded = driver.new_resolver_context({
+            embedded_interface_provider = embedded_provider(provider_file, {
+                [name] = embedded_type,
+                [pruned] = types.Module(pruned, {}),
+            }),
+        })
+        local loader_embedded = driver.defaultloader(shared_static_deps, {
+            context = context_embedded,
+        })
+        assert.is_nil(driver.imported[name])
+        assert.is_nil(shared_static_deps[name])
+        assert.is_nil(shared_static_deps[pruned])
+        assert.is_true(shared_static_deps["closure.keep"])
+        ok, modtype, errors = loader_embedded(name)
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.equal(types.serialize(embedded_type), types.serialize(modtype))
+        assert.equal("embedded", driver.imported[name].kind)
+        assert.is_nil(shared_static_deps[name])
+        assert.is_true(shared_static_deps["closure.keep"])
+        assert.is_true(driver.close_loader(loader_embedded))
+        local finalized, finalize_errors =
+            driver.finalize_resolver_context(context_embedded)
+        assert.truthy(finalized,
+            finalize_errors and table.concat(finalize_errors, "\n"))
+        assert.equal(0, #context_embedded.selected_static_providers)
+        assert.equal(1, #context_embedded.selected_embedded_providers)
+        assert.is_nil(context_embedded.native_static_names[name])
+        assert.is_nil(context_embedded.native_bindings[name])
+        assert.is_true(driver.close_resolver_context(context_embedded))
+    end)
+
+    it("does not revive embedded names from a cached source dependency closure",
+    function()
+        local root_name = "sequence.root"
+        local dependency = "sequence.transitive"
+        local dependency_type = result_module(dependency, types.Integer())
+        assert(lfs.mkdir(source .. "/sequence"))
+        write_file(source .. "/sequence/root.titan", [[
+            local dependency = import "sequence.transitive"
+            function answer(): integer
+                return dependency.answer()
+            end
+        ]])
+
+        local shared_static_deps = {}
+        local static_context = driver.new_resolver_context({
+            prefer_static = true,
+        })
+        cache_static_provider(static_context, binary .. "/sequence.a", {
+            [dependency] = dependency_type,
+        })
+        local static_loader = driver.defaultloader(shared_static_deps, {
+            context = static_context,
+            source_roots = { [root_name] = true },
+        })
+        local ok, modtype, errors = static_loader(root_name)
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.equal("source", driver.imported[root_name].kind)
+        assert.equal("static", driver.imported[dependency].kind)
+        assert.is_true(driver.imported[root_name].deps[dependency])
+        assert.is_true(shared_static_deps[root_name])
+        assert.is_true(shared_static_deps[dependency])
+        assert.is_true(driver.close_loader(static_loader))
+        assert.is_true(driver.close_resolver_context(static_context))
+
+        local embedded_context = driver.new_resolver_context({
+            embedded_interface_provider = embedded_provider(
+                root .. "/language-server", {
+                    [dependency] = dependency_type,
+                }),
+        })
+        local embedded_loader = driver.defaultloader(shared_static_deps, {
+            context = embedded_context,
+        })
+        assert.is_nil(driver.imported[dependency])
+        assert.is_nil(shared_static_deps[dependency])
+        assert.is_true(shared_static_deps[root_name])
+
+        ok, modtype, errors = embedded_loader(dependency)
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.equal("embedded", driver.imported[dependency].kind)
+        ok, modtype, errors = embedded_loader(root_name)
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.equal("source", driver.imported[root_name].kind)
+        assert.is_true(driver.imported[root_name].deps[dependency])
+        assert.is_nil(shared_static_deps[dependency])
+        assert.is_true(shared_static_deps[root_name])
+
+        assert.is_true(driver.close_loader(embedded_loader))
+        local finalized, finalize_errors =
+            driver.finalize_resolver_context(embedded_context)
+        assert.truthy(finalized,
+            finalize_errors and table.concat(finalize_errors, "\n"))
+        assert.equal(0, #embedded_context.selected_static_providers)
+        assert.equal(1, #embedded_context.selected_embedded_providers)
+        assert.is_nil(embedded_context.native_static_names[dependency])
+        assert.is_nil(embedded_context.native_bindings[dependency])
+        assert.is_true(driver.close_resolver_context(embedded_context))
+    end)
+
+    it("replaces an embedded selection from a different provider context",
+    function()
+        local name = "sequence.embedded"
+        local type_a = result_module(name, types.Integer())
+        local type_b = result_module(name, types.String())
+        local provider_a = root .. "/language-server-a"
+        local provider_b = root .. "/language-server-b"
+
+        local context_a = driver.new_resolver_context({
+            embedded_interface_provider = embedded_provider(provider_a, {
+                [name] = type_a,
+            }),
+        })
+        local loader_a = driver.defaultloader({}, { context = context_a })
+        local ok, modtype, errors = loader_a(name)
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.equal(types.serialize(type_a), types.serialize(modtype))
+        assert.equal(provider_a, driver.imported[name].filename)
+        assert.is_true(driver.close_loader(loader_a))
+        assert.is_true(driver.close_resolver_context(context_a))
+
+        local context_b = driver.new_resolver_context({
+            embedded_interface_provider = embedded_provider(provider_b, {
+                [name] = type_b,
+            }),
+        })
+        local static_b = {}
+        local loader_b = driver.defaultloader(static_b, {
+            context = context_b,
+        })
+        assert.is_nil(driver.imported[name])
+        ok, modtype, errors = loader_b(name)
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.equal(types.serialize(type_b), types.serialize(modtype))
+        assert.equal("embedded", driver.imported[name].kind)
+        assert.equal(provider_b, driver.imported[name].filename)
+        assert.same({}, static_b)
+        assert.is_true(driver.close_loader(loader_b))
+        local finalized, finalize_errors =
+            driver.finalize_resolver_context(context_b)
+        assert.truthy(finalized,
+            finalize_errors and table.concat(finalize_errors, "\n"))
+        assert.equal(1, #context_b.selected_embedded_providers)
+        assert.equal(provider_b,
+            context_b.selected_embedded_providers[1].provider_file)
+        assert.is_true(driver.close_resolver_context(context_b))
+    end)
+
+    it("rejects a new overlapping provider across stale embedded cache state",
+    function()
+        local other = "sequence.other"
+        local overlap = "sequence.overlap"
+        local other_type = result_module(other, types.Integer())
+        assert(lfs.mkdir(source .. "/sequence"))
+        write_file(source .. "/sequence/overlap.titan",
+            "local marker: integer = 1\n")
+        cache_dynamic_provider(binary .. "/sequence.so", {
+            [other] = other_type,
+        })
+
+        local context_a = driver.new_resolver_context({
+            embedded_interface_provider = embedded_provider(
+                root .. "/language-server-a", {
+                    [other] = other_type,
+                }),
+        })
+        local loader_a = driver.defaultloader({}, { context = context_a })
+        local ok, modtype, errors = loader_a(other)
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.equal("embedded", driver.imported[other].kind)
+        assert.is_true(driver.close_loader(loader_a))
+        assert.is_true(driver.close_resolver_context(context_a))
+
+        local context_b = driver.new_resolver_context({
+            embedded_interface_provider = embedded_provider(
+                root .. "/language-server-b", {
+                    [other] = other_type,
+                    [overlap] = types.Module(overlap, {}),
+                }),
+        })
+        local static_b = {}
+        local loader_b = driver.defaultloader(static_b, {
+            context = context_b,
+            known_source_modules = { [overlap] = true },
+        })
+        assert.is_nil(driver.imported[other])
+        ok, modtype, errors = loader_b(other)
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.equal("dynamic", driver.imported[other].kind)
+        assert.is_true(context_b.embedded_interface_provider_rejected)
+        assert.same({}, static_b)
+
+        ok, modtype, errors = loader_b(overlap, {
+            kind = "source-import",
+        })
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.equal("source", driver.imported[overlap].kind)
+        assert.is_true(driver.close_loader(loader_b))
+        local finalized, finalize_errors =
+            driver.finalize_resolver_context(context_b)
+        assert.truthy(finalized,
+            finalize_errors and table.concat(finalize_errors, "\n"))
+        assert.equal(0, #context_b.selected_embedded_providers)
+        assert.is_nil(context_b.native_static_names[other])
+        assert.equal("handle", context_b.native_bindings[other])
+        assert.is_true(driver.close_resolver_context(context_b))
+    end)
+
+    it("rejects an embedded inventory which overlaps a cached source sibling",
+    function()
+        local cached_source = "sequence.cached_source"
+        local sibling = "sequence.source_sibling"
+        local sibling_type = result_module(sibling, types.Integer())
+        assert(lfs.mkdir(source .. "/sequence"))
+        write_file(source .. "/sequence/cached_source.titan",
+            "local marker: integer = 1\n")
+        cache_dynamic_provider(binary .. "/sequence.so", {
+            [sibling] = sibling_type,
+        })
+
+        local source_context = driver.new_resolver_context()
+        local source_loader = driver.defaultloader({}, {
+            context = source_context,
+            source_roots = { [cached_source] = true },
+        })
+        local ok, modtype, errors = source_loader(cached_source)
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.equal("source", driver.imported[cached_source].kind)
+        assert.is_true(driver.close_loader(source_loader))
+        assert.is_true(driver.close_resolver_context(source_context))
+
+        local context = driver.new_resolver_context({
+            embedded_interface_provider = embedded_provider(
+                root .. "/language-server", {
+                    [cached_source] = types.Module(cached_source, {}),
+                    [sibling] = sibling_type,
+                }),
+        })
+        local static_deps = {}
+        local loader = driver.defaultloader(static_deps, {
+            context = context,
+        })
+        assert.equal("source", driver.imported[cached_source].kind)
+        assert.is_true(context.embedded_interface_provider_rejected)
+        assert.equal(cached_source,
+            context.embedded_interface_provider_overlap)
+        ok, modtype, errors = loader(sibling)
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.equal("dynamic", driver.imported[sibling].kind)
+        assert.same({}, static_deps)
+
+        assert.is_true(driver.close_loader(loader))
+        local finalized, finalize_errors =
+            driver.finalize_resolver_context(context)
+        assert.truthy(finalized,
+            finalize_errors and table.concat(finalize_errors, "\n"))
+        assert.equal(0, #context.selected_embedded_providers)
+        assert.is_true(context.source_names[cached_source])
+        assert.equal("handle", context.native_bindings[sibling])
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
+    it("rejects the whole embedded provider for known or required source",
+    function()
+        local overlap = "embedded.overlap"
+        local other = "embedded.other"
+        assert(lfs.mkdir(source .. "/embedded"))
+        write_file(source .. "/embedded/overlap.titan",
+            "local marker: integer = 1\n")
+        cache_dynamic_provider(binary .. "/embedded.so", {
+            [other] = types.Module(other, {}),
+        })
+        local context = driver.new_resolver_context({
+            embedded_interface_provider = embedded_provider(
+                root .. "/language-server", {
+                    [overlap] = types.Module(overlap, {}),
+                    [other] = types.Module(other, {}),
+                }),
+        })
+        local loader = driver.defaultloader({}, {
+            context = context,
+            known_source_modules = { [overlap] = true },
+        })
+        local ok, modtype, errors = loader(other)
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.equal("dynamic", driver.imported[other].kind)
+        assert.is_true(context.embedded_interface_provider_rejected)
+
+        ok, modtype, errors = loader(overlap, { kind = "source-import" })
+        assert.truthy(ok, tostring(modtype))
+        assert.equal(0, #errors)
+        assert.equal("source", driver.imported[overlap].kind)
+        assert.is_true(driver.close_loader(loader))
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
+    it("rebinds an earlier embedded selection after a later source overlap",
+    function()
+        assert(lfs.mkdir(source .. "/bundle"))
+        write_file(source .. "/root.titan", [[
+            local fallback = import "bundle.fallback"
+            local later = import "bundle.later"
+        ]])
+        write_file(source .. "/bundle/later.titan",
+            "local marker: integer = 1\n")
+        local fallback_type = types.Module("bundle.fallback", {})
+        cache_dynamic_provider(binary .. "/bundle.so", {
+            ["bundle.fallback"] = fallback_type,
+        })
+        local context = driver.new_resolver_context({
+            source_first = true,
+            embedded_interface_provider = embedded_provider(
+                root .. "/language-server", {
+                    ["bundle.fallback"] = fallback_type,
+                    ["bundle.later"] = types.Module("bundle.later", {}),
+                }),
+        })
+        local static_deps = {}
+        local loader = driver.defaultloader(static_deps, {
+            context = context,
+            source_roots = { root = true },
+        })
+        local ok, result, errors = loader("root")
+        assert.truthy(ok, tostring(result))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.equal("dynamic", driver.imported["bundle.fallback"].kind)
+        assert.equal("source", driver.imported["bundle.later"].kind)
+        assert.is_true(context.embedded_interface_provider_rejected)
+        assert.is_nil(static_deps["bundle.fallback"])
+        assert.is_true(driver.close_loader(loader))
+        local finalized, finalize_errors =
+            driver.finalize_resolver_context(context)
+        assert.truthy(finalized,
+            finalize_errors and table.concat(finalize_errors, "\n"))
+        assert.equal(0, #context.selected_embedded_providers)
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
+    it("recovers contextual owners from the same embedded inventory",
+    function()
+        local facade = "embedded.facade"
+        local owner = "embedded.owner"
+        local provider_file = root .. "/language-server"
+        local context = driver.new_resolver_context({
+            embedded_interface_provider = embedded_provider(provider_file, {
+                [facade] = types.Module(facade, {}),
+                [owner] = types.Module(owner, {}),
+            }),
+        })
+        local static_deps = {}
+        local loader = driver.defaultloader(static_deps, { context = context })
+        local ok, facade_type, errors = loader(facade)
+        assert.truthy(ok, tostring(facade_type))
+        assert.equal(0, #errors)
+        ok, facade_type, errors = loader(owner, {
+            kind = "nominal-owner",
+            exposer = facade,
+        })
+        assert.truthy(ok, tostring(facade_type))
+        assert.equal(owner, facade_type.name)
+        assert.same({}, errors)
+        assert.is_nil(driver.imported[owner])
+        assert.same({}, static_deps)
+        assert.same({}, context.native_constraints)
+
+        local _, resolution = next(context.contextual_resolutions)
+        assert.equal(owner, resolution.owner)
+        assert.equal(facade, resolution.exposer)
+        assert.equal("embedded", resolution.kind)
+        assert.equal(provider_file, resolution.provider_file)
+        assert.equal(provider_file, resolution.exposer_file)
+        assert.is_false(resolution.ordinary_lookup)
+
+        assert.is_true(driver.close_loader(loader))
+        local finalized, finalize_errors =
+            driver.finalize_resolver_context(context)
+        assert.truthy(finalized,
+            finalize_errors and table.concat(finalize_errors, "\n"))
+        local retained = false
+        for _, candidate in pairs(context.contextual_resolutions) do
+            if candidate == resolution then retained = true end
+        end
+        assert.is_true(retained)
+        assert.same({}, context.native_constraints)
+        assert.is_nil(context.native_bindings[owner])
+        assert.is_true(driver.close_resolver_context(context))
     end)
 
     it("validates source-interface entries and their exact header inputs",
