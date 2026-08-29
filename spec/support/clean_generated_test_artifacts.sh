@@ -63,7 +63,9 @@ done < <(find . \
         -name '*__test_entrypoint.c' -o -name '*__test_entrypoint.o' \
     \) -print0)
 
-for program in "${test_programs[@]}"; do
+# Bash 3.2 treats a declared empty array as unset under nounset. The + form
+# expands to no arguments when the array is empty while preserving each value.
+for program in "${test_programs[@]+"${test_programs[@]}"}"; do
     rm -f -- "$program"
     rm -rf -- "$program.dSYM"
     parent=${program%/*}
