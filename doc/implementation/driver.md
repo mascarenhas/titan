@@ -254,6 +254,14 @@ strategy stored in the resolver context. It replaces the API-1
 `after_source_check` callback with the context-owned `yield` checkpoint and the
 ordered `checked_source_modules` publication list described below.
 
+Version 4 adds one trusted-host `embedded_interface_provider`. The driver
+validates and decodes its closed ABI/type inventory when that raw provider
+identity is first used, consults it before filesystem compiled providers, and
+reports the host executable as stable binary provenance. The inventory is
+analysis-only: `provider_file` is trusted provenance which the driver does not
+stat, open, or otherwise inspect; the executable never becomes a native link
+input.
+
 ### `driver.new_resolver_context(options)`
 
 Every resolver context owns exactly one validated compiler-I/O strategy in
@@ -263,6 +271,19 @@ Every resolver context owns exactly one validated compiler-I/O strategy in
 Omitting it constructs the canonical synchronous Lua implementation from
 `titan-compiler.io`, so ordinary compiler callers retain blocking behavior.
 Missing or non-callable methods are rejected while the context is created.
+
+`options.embedded_interface_provider`, when present, has the closed schema
+`{ provider_file = <absolute path>, entries = { [module] = { abi, types } } }`.
+The provider and every entry must be plain tables with no extra fields; logical
+names, ABI strings, serialized `Type.Module` graphs, and native symbol-prefix
+uniqueness are validated eagerly. The driver copies the inventory and retains
+no caller-owned entry table. A successfully validated raw provider table is a
+trusted immutable snapshot: reusing the same table identity uses a weak-keyed
+validated cache, so later mutation of that raw table is unsupported and is not
+observed. Every resolver context still receives a distinct provider object and
+cloned decoded type graphs; resolver-local rebinding or annotation therefore
+cannot leak across contexts. A distinct raw table identity is validated and
+decoded independently.
 
 `options.source_process_trace` is an optional best-effort observability
 callback with the scalar signature
@@ -408,12 +429,14 @@ own Task there; the synchronous strategy's method is a no-op.
   source_files, program_output, deps, c_header_dependencies }`; DSO entries
   carry `{ kind = "dynamic", type, filename, relative }`; archive entries
   carry `{ kind = "static", type, filename, static_archive,
-  static_provider }`. Tests and long-lived tools reset this cache together
-  with `types.registry`.
+  static_provider }`; trusted host-inventory entries carry
+  `{ kind = "embedded", type, filename, embedded_provider }`. Tests and
+  long-lived tools reset this cache together with `types.registry`.
 * **`CIRCULAR_MARK`** — a unique sentinel stored before recursively checking a
   source module; encountering it reports `"circular reference to module"`.
 * **the resolver context** — invocation-wide compiled-format preference,
-  archive-scan cache, ordinary provenance, selected static providers,
+  archive-scan cache, the optional copied embedded inventory, ordinary
+  provenance, selected static providers,
   contextual type-only owner recovery and its metadata-only physical
   resolutions, native-binding constraints, and the finalized direct-name
   sets.
@@ -421,8 +444,13 @@ own Task there; the synchronous strategy's method is a no-op.
 The analysis-facing options are narrow and caller-owned:
 
 * `known_source_modules` is a validated `{[modname] = true}` identity set. It
-  tells source/static overlap planning which logical names belong to source
-  without making any module dirty or retaining its AST.
+  tells source/provider overlap planning which logical names belong to source
+  without making any module dirty or retaining its AST. One overlap rejects the
+  complete embedded inventory for that resolver context.
+* `embedded_interface_provider` is accepted by `new_resolver_context`, not as
+  mutable loader state. It is an API-4 semantic-client input with the closed
+  schema above; after its first successful validation, the host must treat that
+  raw table identity as immutable. Ordinary compiler callers omit it.
 * `cached_source_entries` contains caller-certified clean, complete `source`
   entries with an annotated AST, `Type.Module`, filenames, a direct dependency
   map, and the exact `c_header_dependencies` recorded by their successful
@@ -449,28 +477,37 @@ The analysis-facing options are narrow and caller-owned:
   appended to a fresh C-probe toolchain descriptor. It never changes the
   process-global foreign-C configuration used by other compiler clients.
 
+Before API-4 cache reuse, the loader reconciles the process-global cache with
+the resolver's embedded inventory. It removes embedded entries owned by a
+different resolver/provider object; when the current closed inventory remains
+active, it evicts cached DSO/archive entries for every carried logical name and
+clears every carried name from the supplied `static_deps` map, including names
+whose cached import entry was already pruned. Cached source provenance instead
+rejects the complete embedded inventory and remains selected.
+
 The closure proceeds in this order:
 
 1. A contextual nominal-owner request first follows the exposing compiled
-   interface's producer choice. A carried static owner is recovered from that
-   same archive; a DSO-carried owner is probed from that same DSO; otherwise a
-   compiled lookup may recover type information without committing ordinary
-   resolver state or selecting an archive. Each successful recovery also adds
-   one metadata-only `context.contextual_resolutions` entry with logical owner,
-   exposer, compiled kind, physical provider file, and whether ordinary lookup
-   supplied a separate provider. It does not add the owner to `driver.imported`
-   or select it for linking.
+   interface's producer choice. A carried static or embedded owner is recovered
+   from that same inventory; a DSO-carried owner is probed from that same DSO;
+   otherwise a compiled lookup may recover type information without committing
+   ordinary resolver state or selecting an archive. Each successful recovery
+   also adds one metadata-only `context.contextual_resolutions` entry with
+   logical owner, exposer, compiled kind, physical provider file, and whether
+   ordinary lookup supplied a separate provider. It does not add the owner to
+   `driver.imported` or select it for linking.
 2. The loader derives `source_required` for command-line roots and explicit
    `.titan` requests, and `source_preferred` from that requirement, test mode's
    invocation-wide `source_first`, or a source override. A preferred source may
    replace a compiled cache entry; a required-source clean miss is terminal,
    while `source_first` retains the compiled cache/fallback on a clean miss.
 3. A remaining cache hit returns its type and records the dependency. Otherwise
-   a preferred lookup tries folder/flat source first. An ordinary lookup then
-   runs one complete compiled pass per format on `TITAN_BIN_PATH`—`.so` then
-   `.a` by default, reversed by `prefer_static`—before its final source fallback
-   on `TITAN_SOURCE_PATH`. Root-major, shallow-to-exact order and occupied
-   relative-path shadowing are independent within each compiled format.
+   a preferred lookup tries folder/flat source first. An ordinary lookup first
+   consults a non-overlapping embedded inventory, then runs one complete
+   compiled pass per format on `TITAN_BIN_PATH`—`.so` then `.a` by default,
+   reversed by `prefer_static`—before its final source fallback on
+   `TITAN_SOURCE_PATH`. Root-major, shallow-to-exact order and occupied relative-
+   path shadowing are independent within each filesystem format.
 4. A source hit is a tagged flat/folder descriptor. Every listed file is read
    and parsed independently with its real filename. The main initializer is
    saved, contributor roots are appended in descriptor order, contributor
@@ -517,7 +554,9 @@ their regeneration while physical nested headers remain in the array. The C
 probe baseline still includes the generated companion and remains the
 authoritative compilation check.
 
-For a DSO hit, `find_dynamic_interface` uses
+For an embedded hit, the already-decoded entry carries `kind = "embedded"` and
+the trusted absolute `provider_file`; no filesystem or dynamic-loader operation
+occurs. For a DSO hit, `find_dynamic_interface` uses
 `titan._loadlib(path, symbol)` to map each existing candidate with
 `RTLD_LAZY | RTLD_LOCAL`, probe the requested callable pair, and validate a
 claim. For an archive hit, `find_static_interface` parses the complete regular
@@ -533,7 +572,8 @@ nonempty ordered Method projection, parameter-name metadata, and every
 value-facing signature component before the checker registers those
 descriptors. DSO and archive paths therefore recover the same nominal
 Interface graph and reject malformed wrappers before any native symbol is
-trusted. See [Interfaces](interfaces.md#separate-compilation-and-schema-validation).
+trusted. Embedded entries pass that same decoder during context creation. See
+[Interfaces](interfaces.md#separate-compilation-and-schema-validation).
 
 Each source entry's `deps` stores direct dependencies that are already native
 inputs—source or selected static—regardless of which contributor declared
@@ -544,6 +584,13 @@ finalizes the shared resolver context after all roots are checked, deriving
 physically carried by the deduplicated selected archives. It passes that
 complete set to every `coder.generate` call and passes the selected archives
 once to native linking.
+
+Selected embedded entries and their carried contextual owners are replayed at
+finalization like a static provider's interface closure, but remain outside
+`static_deps`, `selected_static_providers`, `native_static_names`, native
+bindings, and linker arguments. A source identity discovered after an embedded
+entry was selected rejects the whole inventory and re-resolves every earlier
+selection through ordinary disk providers before source checking continues.
 
 Finalization also filters `context.contextual_resolutions` against the final
 compiled exposer selection. The exposer's physical file must still match the
@@ -599,8 +646,10 @@ argument has the same direct-context, `{ context = ... }`, `{ io = ... }`, or
 omitted forms as header restatting. A borrowed context remains caller-owned;
 an internally created context is closed on both success and failure. Source
 flat/folder stat and enumeration, compiled-provider occupancy, canonical roots,
-and static archive bytes all use that context's strategy. Existing two-argument
-callers therefore retain the synchronous default.
+and static archive bytes all use that context's strategy. An embedded result
+reports `{ kind = "embedded", provider_file = <host executable> }` without
+opening that path. Existing two-argument callers therefore retain the
+synchronous default.
 
 ### `driver.tableloader(modtable, imported, deps, options)`
 
@@ -1460,12 +1509,13 @@ the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 | `driver.INSTALL_PATHS` | `driver.installed_paths` | paths below `driver.TITAN_ROOT` | Holds `lua_source`, `include`, `lib`, `libtitan`, `libbacktrace`, `liblua`, `titan_bin`, and `lua_cpath`; bundled `libuv.a` is deliberately not an installed SDK path. |
 | `driver.TITAN_BIN_PATH` | `driver.lua` | `TITAN_PATH_0_6`, `TITAN_PATH`, or `.;<root>/lib/titan/0.6` in installed mode | Roots for root-major, shallow-to-exact compiled-provider search; checkout mode retains the legacy `/usr/local` fallback. |
 | `driver.TITAN_SOURCE_PATH` | `driver.lua` | `"."` (overridden by `titanc --tree`) | Semicolon-separated roots searched for folder `P/B.titan` before flat `P.titan`, including contributor privacy checks. |
-| `driver.LANGUAGE_SERVER_API_VERSION` | `driver.lua` | `3` | Exact compiler/semantic-client handshake, independent from generated-code ABI; covers private source metadata, exact C-header dependency metadata/restatting, and the context-owned I/O/checkpoint contract below. |
+| `driver.LANGUAGE_SERVER_API_VERSION` | `driver.lua` | `4` | Exact compiler/semantic-client handshake, independent from generated-code ABI; covers private source metadata, exact C-header dependency metadata/restatting, context-owned I/O/checkpoints, and the analysis-only embedded-interface provider below. |
 | `TITAN_NO_LINE_DIRECTIVES` / `driver.EMIT_LINE_DIRECTIVES` | environment / `driver.lua` | unset / true | Exact environment value `1`, or `titanc --no-line-directives`, disables generated Titan `#line` directives for physical generated-C diagnostics; this can omit ordinary native Titan frames from logical tracebacks. |
 | `options.source_roots` | `titanc` / `driver.defaultloader` | every CLI module name | Requires explicit build roots to come from flat/folder source; other ordinary edges retain the resolver context's binary-first or test-mode source-first policy, while `.titan` edges remain source-required. Selected source descriptors also provide `program_output`. |
-| `options.known_source_modules` | semantic clients / `driver.defaultloader` | `{}` | Validated module-name set used for resolver-wide source identity and source/static overlap planning without marking modules dirty. |
+| `options.known_source_modules` | semantic clients / `driver.defaultloader` | `{}` | Validated module-name set used for resolver-wide source identity and source/provider overlap planning without marking modules dirty. |
 | `options.cached_source_entries` | semantic clients / `driver.defaultloader` | `{}` | Caller-certified complete raw source entries, including exact C-header inputs, eligible for clean project-AST reuse; resolver-owned source foreign headers are regenerated. |
 | `options.cached_interfaces` | semantic clients / `driver.defaultloader` | `{}` | Serialized clean source interfaces plus exact source and C-header provenance; used without AST for ordinary imports and as transient reparse input for explicit `.titan` edges. |
+| `options.embedded_interface_provider` | semantic clients / `driver.new_resolver_context` | `nil` | API-4 closed `{ provider_file, entries }` ABI/type inventory copied from a trusted host; it precedes disk compiled lookup but never becomes a static dependency or link input. |
 | `options.io` / `context.io` | semantic clients / `driver.new_resolver_context` | `compiler_io.new_sync()` | Validated context-owned filesystem, process, and cooperative-yield strategy. The omitted default preserves synchronous compiler and `titanc` behavior. |
 | `options.source_process_trace` | semantic clients / `driver.new_resolver_context` | `nil` | Best-effort scalar `(module_name, filename, outcome, self_cpu_ms, total_cpu_ms, parse_cpu_ms, check_cpu_ms)` observer for exclusive source-module process CPU. Parse time sums folder constituents; check and self time exclude nested source work, post-child checkpoints, complete C-header processing, and downstream FFI conversion. Cached rehydration reports zero parse/check CPU; five-argument Lua callbacks remain valid. |
 | `context.checked_source_modules` | `driver.defaultloader` | `{}` | Ordered dense list of source modules checked during this resolver run. A module is appended after its complete result is published and before `context.io:yield()`; retained cached modules are excluded. |

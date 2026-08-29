@@ -35,7 +35,9 @@ driver.LUA_VERSION = version.LUA_VERSION
 -- dependency metadata and driver.restat_c_header_dependencies. API 3 owns all
 -- analysis I/O and cooperative checkpoints through one resolver strategy and
 -- publishes an opaque source-visible manifest for every clean source entry.
-driver.LANGUAGE_SERVER_API_VERSION = 3
+-- API 4 additionally accepts one validated, analysis-only embedded interface
+-- provider whose entries never become native link inputs.
+driver.LANGUAGE_SERVER_API_VERSION = 4
 
 local LUA_CPATH_SUFFIX = "/lib/lua/" .. driver.LUA_VERSION .. "/?.so"
 
@@ -542,6 +544,146 @@ end
 
 local CIRCULAR_MARK = {}
 local loader_contexts = setmetatable({}, { __mode = "k" })
+local embedded_interface_provider_snapshots =
+    setmetatable({}, { __mode = "k" })
+
+local function unexpected_closed_field(value, allowed)
+    local unexpected = {}
+    for key in pairs(value) do
+        if not allowed[key] then
+            unexpected[#unexpected + 1] = string.format("%q", tostring(key))
+        end
+    end
+    table.sort(unexpected, util.bytewise_less)
+    return unexpected[1]
+end
+
+local function copy_embedded_interface_provider_snapshot(snapshot)
+    local provider = {
+        provider_file = snapshot.provider_file,
+        entries = {},
+        key_order = {},
+        analysis_only = true,
+    }
+    local memo = {}
+    for index, name in ipairs(snapshot.key_order) do
+        local entry = snapshot.entries[name]
+        provider.key_order[index] = name
+        provider.entries[name] = {
+            abi = entry.abi,
+            types = entry.types,
+            type = types.clone_graph(entry.type, memo),
+            origin = entry.origin,
+        }
+    end
+    return provider
+end
+
+-- A trusted semantic host may carry the compiler-facing interfaces for
+-- modules already linked into its own process. Copy and validate that closed
+-- manifest eagerly: resolver code must never retain caller-owned entry tables
+-- or discover native metadata by opening the host executable. A successfully
+-- validated raw table is an immutable host snapshot by contract. Reusing that
+-- same table identity clones a private decoded graph from a weak-keyed cache;
+-- later caller mutation neither changes nor invalidates the accepted snapshot.
+local function validate_embedded_interface_provider(candidate)
+    if candidate == nil then return nil end
+    if type(candidate) ~= "table" then
+        return nil, "must be a plain table"
+    end
+    local snapshot = embedded_interface_provider_snapshots[candidate]
+    if snapshot then
+        return copy_embedded_interface_provider_snapshot(snapshot)
+    end
+    if getmetatable(candidate) ~= nil then
+        return nil, "must be a plain table"
+    end
+    local unexpected = unexpected_closed_field(candidate, {
+        provider_file = true,
+        entries = true,
+    })
+    if unexpected then
+        return nil, "contains unexpected field " .. unexpected
+    end
+
+    local provider_file = rawget(candidate, "provider_file")
+    if type(provider_file) ~= "string" or
+       provider_file:sub(1, 1) ~= "/" or
+       provider_file:find("\0", 1, true) then
+        return nil, "provider_file must be an absolute NUL-free pathname"
+    end
+    local candidate_entries = rawget(candidate, "entries")
+    if type(candidate_entries) ~= "table" or
+       getmetatable(candidate_entries) ~= nil then
+        return nil, "entries must be a plain module-keyed table"
+    end
+
+    local provider = {
+        provider_file = provider_file,
+        entries = {},
+        key_order = {},
+        analysis_only = true,
+    }
+    local symbol_owners = {}
+    for name, candidate_entry in pairs(candidate_entries) do
+        if not staticmetadata.valid_module_name(name) then
+            return nil, "entries contains invalid logical module name " ..
+                string.format("%q", tostring(name))
+        elseif type(candidate_entry) ~= "table" or
+               getmetatable(candidate_entry) ~= nil then
+            return nil, "entry for module '" .. name ..
+                "' must be a plain table"
+        end
+        unexpected = unexpected_closed_field(candidate_entry, {
+            abi = true,
+            types = true,
+        })
+        if unexpected then
+            return nil, "entry for module '" .. name ..
+                "' contains unexpected field " .. unexpected
+        end
+
+        local abi = rawget(candidate_entry, "abi")
+        local serialized = rawget(candidate_entry, "types")
+        if type(abi) ~= "string" then
+            return nil, "entry for module '" .. name ..
+                "' ABI must be a string"
+        elseif abi ~= driver.TITAN_ABI_VERSION then
+            return nil, "entry for module '" .. name ..
+                "' ABI mismatch: expected " .. driver.TITAN_ABI_VERSION ..
+                " but found " .. tostring(abi)
+        elseif type(serialized) ~= "string" then
+            return nil, "entry for module '" .. name ..
+                "' types must be a serialized module string"
+        end
+
+        local prefix = driver.mangle_module_name(name)
+        local previous = symbol_owners[prefix]
+        if previous then
+            return nil, "entries for modules '" .. previous .. "' and '" ..
+                name .. "' duplicate native symbol prefix '" .. prefix .. "'"
+        end
+        symbol_owners[prefix] = name
+
+        local origin = provider_file .. ":" .. name
+        local modtype, decode_error = driver.decode_module_interface(
+            serialized, name, origin)
+        if not modtype then
+            return nil, "entry for module '" .. name ..
+                "' has invalid types: " .. tostring(decode_error)
+        end
+        provider.entries[name] = {
+            abi = abi,
+            types = serialized,
+            type = modtype,
+            origin = origin,
+        }
+        provider.key_order[#provider.key_order + 1] = name
+    end
+    table.sort(provider.key_order, util.bytewise_less)
+    embedded_interface_provider_snapshots[candidate] = provider
+    return copy_embedded_interface_provider_snapshot(provider)
+end
 
 -- Long-lived compiler clients use one explicit C-analysis authority across
 -- their short-lived resolver contexts. It owns completed header graphs plus
@@ -555,6 +697,12 @@ function driver.new_resolver_context(options)
     options = options or {}
     if type(options) ~= "table" then
         error("resolver context options must be a table", 2)
+    end
+    local embedded_interface_provider, embedded_error =
+        validate_embedded_interface_provider(
+            options.embedded_interface_provider)
+    if embedded_error then
+        error("invalid embedded_interface_provider: " .. embedded_error, 2)
     end
     local io_strategy = options.io
     if io_strategy == nil then io_strategy = compiler_io.new_sync() end
@@ -622,6 +770,8 @@ function driver.new_resolver_context(options)
         native_interface_types = {},
         native_constraints = {},
         source_modules = {},
+        embedded_interface_provider = embedded_interface_provider,
+        embedded_interface_provider_rejected = false,
         checked_source_modules = {},
         used_compiled_interfaces = {},
         probe_verbose = options.verbose == true,
@@ -698,7 +848,7 @@ local function remember_contextual_resolution(
     local kind = resolved and resolved.kind
     local provider_file = resolved and
         (resolved.static_archive or resolved.filename)
-    if (kind ~= "dynamic" and kind ~= "static") or
+    if (kind ~= "dynamic" and kind ~= "static" and kind ~= "embedded") or
        type(provider_file) ~= "string" then
         return
     end
@@ -2984,8 +3134,89 @@ function driver.find_static_interface(paths, modname, context)
     return nil
 end
 
+local function available_embedded_interface_provider(context)
+    local provider = context.embedded_interface_provider
+    if not provider or context.embedded_interface_provider_rejected then
+        return nil
+    end
+    for _, name in ipairs(provider.key_order) do
+        local imported = driver.imported[name]
+        local cached_source = imported and imported ~= CIRCULAR_MARK and
+            (imported.ast or imported.kind == "source")
+        if context.source_modules[name] or cached_source then
+            -- One source identity rejects the complete physical inventory. This
+            -- mirrors archive overlap rather than mixing independently selected
+            -- entries from one embedded executable with project source. A
+            -- process-global source cache is still selected source provenance,
+            -- even when this context did not rediscover its project catalog.
+            context.embedded_interface_provider_rejected = true
+            context.embedded_interface_provider_overlap = name
+            return nil
+        end
+    end
+    return provider
+end
+
+-- `driver.imported` intentionally remains a process-global compiler cache,
+-- but an embedded interface inventory belongs to exactly one resolver
+-- context. Reconcile only the entries whose meaning depends on that context:
+-- discard embedded selections owned by another context, and let the current
+-- embedded inventory replace cached disk selections for its complete physical
+-- inventory. Entries carried together are not unrelated: finalization replays
+-- their complete contextual type closure. Source and every other cache entry
+-- retain their existing semantics.
+--
+-- A rejected current provider keeps its own already-selected entries long
+-- enough for the loader's whole-provider overlap rebind to replace them (or
+-- report that no compatible disk fallback exists).
+local function reconcile_embedded_import_cache(context, static_deps)
+    local provider = available_embedded_interface_provider(context)
+    local configured = context.embedded_interface_provider
+    if provider and static_deps then
+        -- The dependency set can outlive or be pruned independently from the
+        -- global import cache. Clear the complete active inventory rather than
+        -- only names which still have a cached static entry.
+        for _, name in ipairs(provider.key_order) do
+            static_deps[name] = nil
+        end
+    end
+    local remove = {}
+    for name, mod in pairs(driver.imported) do
+        if mod ~= CIRCULAR_MARK then
+            if mod.kind == "embedded" then
+                if mod.embedded_provider ~= configured then
+                    remove[#remove + 1] = { name = name }
+                end
+            elseif static_deps and provider and provider.entries[name] and
+                   (mod.kind == "dynamic" or mod.kind == "static") then
+                remove[#remove + 1] = {
+                    name = name,
+                }
+            end
+        end
+    end
+    for _, candidate in ipairs(remove) do
+        driver.imported[candidate.name] = nil
+    end
+    return provider
+end
+
+local function find_embedded_interface(modname, context)
+    local provider = available_embedded_interface_provider(context)
+    local entry = provider and provider.entries[modname]
+    if not entry then return nil end
+    return {
+        kind = "embedded",
+        type = entry.type,
+        filename = provider.provider_file,
+        embedded_provider = provider,
+    }
+end
+
 function driver.find_dependency_interface(paths, modname, context)
     context = context or driver.new_resolver_context()
+    local embedded = find_embedded_interface(modname, context)
+    if embedded then return embedded end
     local formats = context.prefer_static
         and { "static", "dynamic" } or { "dynamic", "static" }
 
@@ -3099,6 +3330,7 @@ function driver.defaultloader(static_deps, options)
         end
         context.source_modules[name] = true
     end
+    reconcile_embedded_import_cache(context, static_deps)
 
     local function cached_string_list(value, label)
         if value == nil then return {} end
@@ -3410,6 +3642,66 @@ function driver.defaultloader(static_deps, options)
         return entry
     end
 
+    -- A source-first traversal can select an embedded entry before reaching a
+    -- source key carried by that same closed inventory. Reject the complete
+    -- analysis-only provider and re-resolve every prior selection through the
+    -- ordinary disk formats before checking continues.
+    local function rebind_overlapping_embedded_provider(source_name)
+        local provider = context.embedded_interface_provider
+        if not provider or not provider.entries[source_name] then return true end
+        context.embedded_interface_provider_rejected = true
+        context.embedded_interface_provider_overlap = source_name
+
+        local selected_names = {}
+        for name, mod in pairs(driver.imported) do
+            if mod ~= CIRCULAR_MARK and mod.kind == "embedded" and
+               mod.embedded_provider == provider then
+                selected_names[#selected_names + 1] = name
+            end
+        end
+        table.sort(selected_names, util.bytewise_less)
+
+        local replacements = {}
+        for _, name in ipairs(selected_names) do
+            local resolved, resolve_error = driver.find_dependency_interface(
+                driver.TITAN_BIN_PATH, name, context)
+            if not resolved then
+                return nil, "embedded interface provider '" ..
+                    provider.provider_file .. "' carries source-selected module '" ..
+                    source_name .. "', and its selected module '" .. name ..
+                    "' has no compatible disk-provider fallback" ..
+                    (resolve_error and (": " .. tostring(resolve_error)) or "")
+            end
+            local old_type = driver.imported[name].type
+            if types.serialize(old_type) ~= types.serialize(resolved.type) then
+                return nil, "disk-provider fallback '" ..
+                    tostring(resolved.static_archive or resolved.filename) ..
+                    "' for module '" .. name ..
+                    "' does not match embedded interface provider '" ..
+                    provider.provider_file .. "'"
+            end
+            replacements[#replacements + 1] = {
+                name = name,
+                old_type = old_type,
+                resolved = resolved,
+                file = resolved.type.file,
+            }
+        end
+
+        for _, replacement in ipairs(replacements) do
+            replacement.old_type.file = replacement.file
+            replacement.resolved.type = replacement.old_type
+            replacement.resolved.compiled = true
+            driver.imported[replacement.name] = replacement.resolved
+            if replacement.resolved.kind == "static" then
+                static_deps[replacement.name] = true
+            else
+                static_deps[replacement.name] = nil
+            end
+        end
+        return true
+    end
+
     -- A source-first traversal may select one key from a static container
     -- before reaching a source key carried by that same container. Once the
     -- source identity is known, move every already-selected key from that
@@ -3493,9 +3785,18 @@ function driver.defaultloader(static_deps, options)
         if not mod or mod == CIRCULAR_MARK then return end
         if mod.ast or mod.kind == "source" or mod.kind == "static" then
             static_deps[modname] = true
+            local embedded_provider =
+                available_embedded_interface_provider(context)
             for depname in pairs(mod.deps or {}) do
-                static_deps[depname] = true
-                remember_dependency_closure(depname, seen)
+                -- A reusable source/static dependency closure can outlive the
+                -- disk selection it described. The current closed embedded
+                -- inventory supplies analysis metadata only, so do not revive
+                -- one of its carried names as a native link input.
+                if not (embedded_provider and
+                        embedded_provider.entries[depname]) then
+                    static_deps[depname] = true
+                    remember_dependency_closure(depname, seen)
+                end
             end
         end
     end
@@ -3680,6 +3981,14 @@ function driver.defaultloader(static_deps, options)
            exposing.kind == "source" then
             return nil
         end
+        if exposing.kind == "embedded" then
+            local provider = available_embedded_interface_provider(context)
+            if not provider or exposing.embedded_provider ~= provider then
+                return false, "embedded interface provider for module '" ..
+                    tostring(exposing_name) ..
+                    "' is not available in this resolver context"
+            end
+        end
         if modname == exposing_name then
             remember_used_compiled_interface(
                 context, modname, exposing.type)
@@ -3709,12 +4018,15 @@ function driver.defaultloader(static_deps, options)
             return true, modtype, {}
         end
 
-        if exposing.kind == "static" then
-            local entry = exposing.static_provider and
-                exposing.static_provider.entries[modname]
+        if exposing.kind == "static" or exposing.kind == "embedded" then
+            local provider = exposing.kind == "static" and
+                exposing.static_provider or exposing.embedded_provider
+            local entry = provider and provider.entries[modname]
             if entry then
-                add_native_constraint(context, modname, "direct-carried",
-                    exposing.static_archive, exposing_name)
+                if exposing.kind == "static" then
+                    add_native_constraint(context, modname, "direct-carried",
+                        exposing.static_archive, exposing_name)
+                end
                 return remember_type(entry.type, exposing, false)
             end
         elseif exposing.kind == "dynamic" then
@@ -3737,8 +4049,10 @@ function driver.defaultloader(static_deps, options)
             -- Reuse the independently known type only to finish checking and
             -- record the edge; finalization will reject that independently
             -- selected source/archive/other-DSO implementation.
-            add_native_constraint(context, modname, "dynamic-global",
-                exposing.static_archive or exposing.filename, exposing_name)
+            if exposing.kind ~= "embedded" then
+                add_native_constraint(context, modname, "dynamic-global",
+                    exposing.static_archive or exposing.filename, exposing_name)
+            end
             return remember_type(ordinary.type, ordinary, true)
         end
 
@@ -3754,8 +4068,10 @@ function driver.defaultloader(static_deps, options)
             context.contextual_types[cache_key] = { error = err }
             return false, err
         end
-        add_native_constraint(context, modname, "dynamic-global",
-            exposing.static_archive or exposing.filename, exposing_name)
+        if exposing.kind ~= "embedded" then
+            add_native_constraint(context, modname, "dynamic-global",
+                exposing.static_archive or exposing.filename, exposing_name)
+        end
         return remember_type(resolved.type, resolved, true)
     end
 
@@ -3763,6 +4079,18 @@ function driver.defaultloader(static_deps, options)
         if not staticmetadata.valid_module_name(modname) then
             return false, "invalid logical Titan module name " ..
                 string.format("%q", modname)
+        end
+        -- A borrowed context may learn a complete known-source catalog after
+        -- an earlier loader selected embedded entries. Reconcile that late
+        -- whole-provider rejection before either cache reuse or contextual
+        -- owner recovery can observe the stale selection.
+        reconcile_embedded_import_cache(context, static_deps)
+        local embedded_overlap =
+            context.embedded_interface_provider_overlap
+        if embedded_overlap then
+            local rebound, rebound_error =
+                rebind_overlapping_embedded_provider(embedded_overlap)
+            if not rebound then return false, rebound_error end
         end
         if request and request.kind == "nominal-owner" then
             local contextual_ok, contextual_type, contextual_errors =
@@ -3810,6 +4138,9 @@ function driver.defaultloader(static_deps, options)
             end
             context.source_modules[modname] = true
             local rebound, rebound_err =
+                rebind_overlapping_embedded_provider(modname)
+            if not rebound then return false, rebound_err end
+            rebound, rebound_err =
                 rebind_overlapping_static_providers(modname)
             if not rebound then return false, rebound_err end
             local ok, modt, errors, info =
@@ -3858,7 +4189,7 @@ function driver.defaultloader(static_deps, options)
             remember_dependency_closure(modname)
             remember_direct_dependency(modname)
             if mod.kind == "dynamic" or mod.kind == "static" or
-               mod.compiled then
+               mod.kind == "embedded" or mod.compiled then
                 remember_used_compiled_interface(
                     context, modname, mod.type)
             end
@@ -4055,9 +4386,12 @@ end
 
 function driver.finalize_resolver_context(context)
     context = context or driver.new_resolver_context()
+    reconcile_embedded_import_cache(context)
     local source_names = {}
     local dynamic_names = {}
+    local selected_embedded_modules = {}
     local selected_static_modules = {}
+    local embedded_providers_by_path = {}
     local providers_by_path = {}
 
     for name, mod in pairs(driver.imported) do
@@ -4065,6 +4399,10 @@ function driver.finalize_resolver_context(context)
             if mod.kind == "static" then
                 selected_static_modules[name] = mod
                 providers_by_path[mod.static_archive] = mod.static_provider
+            elseif mod.kind == "embedded" then
+                selected_embedded_modules[name] = mod
+                embedded_providers_by_path[mod.filename] =
+                    mod.embedded_provider
             elseif mod.ast or mod.kind == "source" then
                 source_names[name] = true
             elseif mod.kind == "dynamic" or mod.compiled then
@@ -4080,6 +4418,27 @@ function driver.finalize_resolver_context(context)
     table.sort(selected_static_providers, function(left, right)
         return util.bytewise_less(left.archive, right.archive)
     end)
+
+    local selected_embedded_providers = {}
+    for _, provider in pairs(embedded_providers_by_path) do
+        selected_embedded_providers[
+            #selected_embedded_providers + 1] = provider
+    end
+    table.sort(selected_embedded_providers, function(left, right)
+        return util.bytewise_less(
+            left.provider_file, right.provider_file)
+    end)
+    if context.embedded_interface_provider_rejected and
+       next(selected_embedded_modules) ~= nil then
+        return nil, {
+            "embedded interface provider '" ..
+            tostring(context.embedded_interface_provider and
+                context.embedded_interface_provider.provider_file) ..
+            "' overlaps source module '" ..
+            tostring(context.embedded_interface_provider_overlap) ..
+            "' after an embedded interface was selected",
+        }
+    end
 
     -- Checker-time contextual reads are provisional: a later explicit source
     -- root can replace a compiled cache entry. Rebuild every native exposure
@@ -4131,6 +4490,28 @@ function driver.finalize_resolver_context(context)
                             filename = provider.archive,
                             static_archive = provider.archive,
                             static_provider = provider,
+                        })
+                if not registered then return nil, {register_error} end
+            end
+        end
+    end
+
+    -- Embedded inventories have the same carried-interface closure as static
+    -- providers for nominal-owner recovery, but they are semantic data only.
+    -- Replay every carried interface without creating native constraints or
+    -- adding the host executable to static-provider bookkeeping.
+    if context.loader then
+        for _, provider in ipairs(selected_embedded_providers) do
+            for _, name in ipairs(provider.key_order) do
+                local entry = provider.entries[name]
+                local registered, register_error =
+                    checker.register_module_interface(
+                        name, entry.type, context.loader, {
+                            name = name,
+                            kind = "embedded",
+                            type = entry.type,
+                            filename = provider.provider_file,
+                            embedded_provider = provider,
                         })
                 if not registered then return nil, {register_error} end
             end
@@ -4256,6 +4637,8 @@ function driver.finalize_resolver_context(context)
 
     context.source_names = source_names
     context.dynamic_names = dynamic_names
+    context.selected_embedded_modules = selected_embedded_modules
+    context.selected_embedded_providers = selected_embedded_providers
     context.selected_static_modules = selected_static_modules
     context.selected_static_providers = selected_static_providers
     context.native_static_names = native_static_names
@@ -4275,7 +4658,8 @@ function driver.finalize_resolver_context(context)
         local exposer_file = exposer and
             (exposer.static_archive or exposer.filename)
         local compiled = exposer and exposer ~= CIRCULAR_MARK and
-            (exposer.kind == "static" or exposer.kind == "dynamic")
+            (exposer.kind == "static" or exposer.kind == "dynamic" or
+             exposer.kind == "embedded")
         local carried_matches = resolution.ordinary_lookup or
             resolution.provider_file == exposer_file
         if compiled and exposer_file == resolution.exposer_file and
