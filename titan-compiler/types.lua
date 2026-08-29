@@ -353,6 +353,141 @@ local legacy_c_tags = {
     Union = true,
 }
 
+local portable_c_integer_specs = {
+    ["_Bool"] = { signed = false, rank = 0 },
+    char = { rank = 1 },
+    ["signed char"] = { signed = true, rank = 1 },
+    ["unsigned char"] = { signed = false, rank = 1 },
+    short = { signed = true, rank = 2 },
+    ["unsigned short"] = { signed = false, rank = 2 },
+    int = { signed = true, rank = 3 },
+    ["unsigned int"] = { signed = false, rank = 3 },
+    long = { signed = true, rank = 4 },
+    ["unsigned long"] = { signed = false, rank = 4 },
+    ["long long"] = { signed = true, rank = 5 },
+    ["unsigned long long"] = { signed = false, rank = 5 },
+}
+
+local portable_c_float_spellings = {
+    float = true,
+    double = true,
+    ["long double"] = true,
+}
+
+local function dense_plain_list_length(list)
+    if type(list) ~= "table" then return nil end
+    local count, maximum = 0, 0
+    for key in pairs(list) do
+        if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
+            return nil
+        end
+        count = count + 1
+        maximum = math.max(maximum, key)
+    end
+    if count ~= maximum then return nil end
+    return maximum
+end
+
+local function dense_const_qualifiers(quals)
+    local count = dense_plain_list_length(quals)
+    if not count or count > 1 then return false end
+    return count == 0 or quals[1] == "const"
+end
+
+function types.is_portable_c_primitive(t)
+    if type(t) ~= "table" then return false end
+    if t._tag == "Type.CVoid" then return true end
+    if t._tag == "Type.CFloat" then
+        return portable_c_float_spellings[t.spelling] == true
+    end
+    if t._tag ~= "Type.CInteger" or t._c_enum_identity ~= nil then
+        return false
+    end
+    local spec = portable_c_integer_specs[t.spelling]
+    if not spec or type(t.signed) ~= "boolean"
+       or type(t.rank) ~= "number" or math.type(t.rank) ~= "integer"
+       or type(t.bits) ~= "number" or math.type(t.bits) ~= "integer"
+       or t.bits <= 0 or t.rank ~= spec.rank then
+        return false
+    end
+    if spec.signed ~= nil and t.signed ~= spec.signed then return false end
+    return true
+end
+
+-- Validate the complete closed portable-C descriptor graph. A wrapper is not
+-- portable merely because its own tag and flags are familiar: every child
+-- must itself be one of the C categories valid in that declarator position.
+-- This prevents hostile or hand-built graphs such as `CPointer(Integer())`
+-- from being serialized into code paths that require a C declarator.
+function types.is_portable_c_type_graph(root)
+    local active = {}
+    local function visit(t, position)
+        if type(t) ~= "table" or active[t] then return false end
+        active[t] = true
+        local tag = t._tag
+        local ok = false
+        if tag == "Type.CVoid" then
+            ok = position == "root" or position == "pointee"
+                or position == "return"
+        elseif tag == "Type.CInteger" then
+            ok = types.is_portable_c_primitive(t)
+                and t._c_enum_owner == nil
+                and t._c_declaration_spelling == nil
+                and t._c_enum_enumerator == nil
+                and t._c_enum_probe_spelling == nil
+                and t._c_enum_unspellable == nil
+        elseif tag == "Type.CFloat" then
+            ok = types.is_portable_c_primitive(t)
+        elseif tag == "Type.CPointer" then
+            local pointee_tag = type(t.pointee) == "table"
+                and t.pointee._tag
+            ok = dense_const_qualifiers(t.quals)
+                and (pointee_tag == "Type.CVoid"
+                     or pointee_tag == "Type.CInteger"
+                     or pointee_tag == "Type.CFloat"
+                     or pointee_tag == "Type.CPointer"
+                     or pointee_tag == "Type.CFunction")
+                and visit(t.pointee, "pointee")
+        elseif tag == "Type.CFunction" then
+            ok = t._paramstyle == nil
+                and dense_plain_list_length(t.params) ~= nil
+                and type(t.ret) == "table"
+                and t.vararg == false and t.abi == false
+            if ok then
+                for _, param in ipairs(t.params) do
+                    local param_tag = type(param) == "table" and param._tag
+                    if param_tag ~= "Type.CInteger"
+                       and param_tag ~= "Type.CFloat"
+                       and param_tag ~= "Type.CPointer"
+                       or not visit(param, "parameter") then
+                        ok = false
+                        break
+                    end
+                end
+            end
+            if ok then
+                local ret_tag = t.ret._tag
+                ok = (ret_tag == "Type.CVoid"
+                      or ret_tag == "Type.CInteger"
+                      or ret_tag == "Type.CFloat"
+                      or ret_tag == "Type.CPointer")
+                    and visit(t.ret, "return")
+            end
+        elseif tag == "Type.COwned" then
+            local pointee_tag = type(t.pointee) == "table"
+                and t.pointee._tag
+            ok = type(t.count) == "boolean"
+                and (pointee_tag == "Type.CInteger"
+                     or pointee_tag == "Type.CFloat"
+                     or pointee_tag == "Type.CPointer")
+                and visit(t.pointee, "owned")
+        end
+        active[t] = nil
+        return ok
+    end
+    return visit(root, "root")
+end
+
 function types.resolve_c_typedef(t)
     local seen = {}
     while t and t._tag == "Type.CTypedef" do
@@ -416,7 +551,8 @@ function types.c_pointer_has_qual(t, wanted)
     return false
 end
 
-local function find_c_type(t, include_legacy, descend_function_values)
+local function find_c_type(
+        t, include_legacy, descend_function_values, skip_portable)
     local function visit_type(typ, seen)
         if type(typ) ~= "table" then
             return nil
@@ -427,9 +563,19 @@ local function find_c_type(t, include_legacy, descend_function_values)
         seen[typ] = true
 
         local tag = typ._tag
-        if is_c_tag(tag) or (include_legacy and legacy_c_tags[tag]) then
+        if skip_portable and tag == "Type.CModule" then
             return typ
-        elseif tag == "Type.TypeParameter" then
+        elseif is_c_tag(tag) then
+            if not skip_portable
+               or not types.is_portable_c_type_graph(typ) then
+                return typ
+            end
+            return nil
+        elseif include_legacy and legacy_c_tags[tag] then
+            return typ
+        end
+
+        if tag == "Type.TypeParameter" then
             return typ.constraint ~= false
                 and visit_type(typ.constraint, seen) or nil
         elseif tag == "Type.Parameter" then
@@ -584,11 +730,11 @@ local function find_c_type(t, include_legacy, descend_function_values)
 end
 
 function types.first_c_type(t)
-    return find_c_type(t, false, false)
+    return find_c_type(t, false, false, false)
 end
 
-function types.first_c_ffi_type(t)
-    return find_c_type(t, true, true)
+function types.first_non_exportable_type(t)
+    return find_c_type(t, true, true, true)
 end
 
 function types.is_c(t)
@@ -597,7 +743,8 @@ end
 
 -- `is_c` follows C provenance through ordinary storage shapes such as
 -- Option/Array/Map, but deliberately stops at boxed callable signatures.
--- Full interface/export validation uses `first_c_ffi_type`; representation and
+-- Full interface/export validation uses `first_non_exportable_type`;
+-- representation and
 -- expression lowering instead need `is_direct_c`, which asks whether the value
 -- itself has a direct C representation. An Option/Array/Map/function
 -- containing an owned C value remains an ordinary boxed Titan value.
@@ -675,7 +822,79 @@ function types.is_c_array(t)
 end
 
 function types.contains_c_ffi_type(t)
-    return types.first_c_ffi_type(t) ~= nil
+    return find_c_type(t, true, true, false) ~= nil
+end
+
+
+function types.contains_c_numeric_type(root)
+    local seen = {}
+    local function visit(value)
+        if type(value) ~= "table" or seen[value] then return false end
+        seen[value] = true
+        if value._tag == "Type.CInteger" or value._tag == "Type.CFloat" then
+            return true
+        end
+        for key, child in pairs(value) do
+            if key ~= "_c_numeric" and key ~= "_c_numeric_carriers"
+               and visit(child) then
+                return true
+            end
+        end
+        return false
+    end
+    return visit(root)
+end
+
+-- Portable C scalar metadata deliberately serializes only its structural
+-- target description. Reattach the selected target profile's lowering traits
+-- after a compiled interface is recovered, rejecting metadata that disagrees
+-- with that profile before it can reach numeric code generation.
+function types.normalize_portable_c_numeric_types(root, profile)
+    if type(profile) ~= "table" then
+        return nil, "target C profile is unavailable"
+    end
+    local seen = {}
+    local function visit(value)
+        if type(value) ~= "table" or seen[value] then return true end
+        seen[value] = true
+        if value._tag == "Type.CInteger"
+           and portable_c_integer_specs[value.spelling]
+           and value._c_enum_identity == nil then
+            local entry = profile.integers and profile.integers[value.spelling]
+            local canonical = entry and entry.type
+            if not canonical
+               or value.signed ~= canonical.signed
+               or value.rank ~= canonical.rank
+               or value.bits ~= canonical.bits then
+                return nil, "serialized C integer type '" ..
+                    tostring(value.spelling) ..
+                    "' disagrees with the selected target profile"
+            end
+            value._c_numeric = canonical._c_numeric
+            value._c_numeric_carriers = canonical._c_numeric_carriers
+            return true
+        elseif value._tag == "Type.CFloat"
+           and portable_c_float_spellings[value.spelling] then
+            local entry = profile.floats and profile.floats[value.spelling]
+            local canonical = entry and entry.type
+            if not canonical then
+                return nil, "serialized C floating type '" ..
+                    tostring(value.spelling) ..
+                    "' is unavailable in the selected target profile"
+            end
+            value._c_numeric = canonical._c_numeric
+            value._c_numeric_carriers = canonical._c_numeric_carriers
+            return true
+        end
+        for key, child in pairs(value) do
+            if key ~= "_c_numeric" and key ~= "_c_numeric_carriers" then
+                local ok, err = visit(child)
+                if not ok then return nil, err end
+            end
+        end
+        return true
+    end
+    return visit(root)
 end
 
 function types.is_basic(t)
@@ -4669,8 +4888,10 @@ function types.tostring(t)
     elseif tag == "Type.CVoid" then
         return "void"
     elseif tag == "Type.CInteger" then
+        if t.spelling == "_Bool" then return "bool" end
         return t.spelling
     elseif tag == "Type.CFloat" then
+        if t.spelling == "float" then return "foreign float" end
         return t.spelling
     elseif tag == "Type.CPointer" then
         local quals = t.quals and #t.quals > 0
@@ -4836,9 +5057,11 @@ end
 
 function types.serialize(t)
     local tag = t._tag
-    local ctyp = types.first_c_ffi_type(t)
+    local ctyp = types.first_non_exportable_type(t)
     if ctyp then
-        error("cannot serialize C FFI type " .. types.tostring(ctyp))
+        local displayed, description = pcall(types.tostring, ctyp)
+        if not displayed then description = tostring(ctyp._tag) end
+        error("cannot serialize C FFI type " .. description)
     end
 
     if tag == "Type.GenericScope" then
@@ -5060,6 +5283,23 @@ function types.serialize(t)
             serialize_generic_tail(t.scope, t.typeparams) .. ")"
     elseif tag == "Type.Option" then
         return "Option(" .. types.serialize(t.base) .. ")"
+    elseif tag == "Type.CVoid" then
+        return "CVoid()"
+    elseif tag == "Type.CInteger" then
+        return "CInteger(" .. string.format("%q", t.spelling) .. "," ..
+            tostring(t.signed) .. "," .. tostring(t.rank) .. "," ..
+            tostring(t.bits) .. ")"
+    elseif tag == "Type.CFloat" then
+        return "CFloat(" .. string.format("%q", t.spelling) .. ")"
+    elseif tag == "Type.CPointer" then
+        return "CPointer(" .. types.serialize(t.pointee) .. "," ..
+            serialize_names(t.quals) .. ")"
+    elseif tag == "Type.CFunction" then
+        return "CFunction(" .. serialize_type_list(t.params) .. "," ..
+            types.serialize(t.ret) .. ",false,false)"
+    elseif tag == "Type.COwned" then
+        return "COwned(" .. types.serialize(t.pointee) .. "," ..
+            tostring(t.count) .. ")"
     elseif tag == "Type.Integer"     then return "Integer()"
     elseif tag == "Type.Boolean"     then return "Boolean()"
     elseif tag == "Type.String"      then return "String()"

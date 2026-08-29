@@ -698,6 +698,62 @@ local function primitive_from_tokens(profile, tokens)
     end
 end
 
+-- Titan exposes exactly the portable C99 arithmetic spellings below. The map
+-- deliberately differs at the two collision points: `bool` names C `_Bool`,
+-- while C `float` is written `foreign float` so Titan's own `float` remains
+-- unambiguous. C typedefs never enter this table, even when their targets do.
+local surface_primitive_spellings = {
+    void = "void",
+    bool = "_Bool",
+    char = "char",
+    ["signed char"] = "signed char",
+    ["unsigned char"] = "unsigned char",
+    short = "short",
+    ["unsigned short"] = "unsigned short",
+    int = "int",
+    ["unsigned int"] = "unsigned int",
+    long = "long",
+    ["unsigned long"] = "unsigned long",
+    ["long long"] = "long long",
+    ["unsigned long long"] = "unsigned long long",
+    ["foreign float"] = "float",
+    double = "double",
+    ["long double"] = "long double",
+}
+
+local surface_primitive_components = {
+    void = true,
+    bool = true,
+    char = true,
+    signed = true,
+    unsigned = true,
+    short = true,
+    int = true,
+    long = true,
+    double = true,
+}
+
+function foreigntypes.surface_primitive(profile, surface)
+    local spelling = surface_primitive_spellings[surface]
+    if not spelling then return nil end
+    if spelling == "void" then return types.CVoid() end
+    local entry = profile and profile.integers
+        and profile.integers[spelling]
+    if not entry then
+        entry = profile and profile.floats
+            and profile.floats[spelling]
+    end
+    return entry and entry.type or nil
+end
+
+function foreigntypes.is_surface_primitive_name(name)
+    return surface_primitive_spellings[name] ~= nil
+end
+
+function foreigntypes.is_surface_primitive_component(name)
+    return surface_primitive_components[name] == true
+end
+
 local function merged_qualifiers(first, second)
     local out = {}
     for _, qual in ipairs(first or {}) do table.insert(out, qual) end

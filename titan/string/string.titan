@@ -6,6 +6,8 @@ local cctype = foreign import "ctype.h"
 local peg = import "peg"
 local gc = import "gc"
 
+local type CChar = char
+
 -- The canonical folder main is the complete public surface. Contributors
 -- contain only module-local records, state, and shared helpers.
 
@@ -64,8 +66,8 @@ end
 function reverse(subject: string): string
   local length = #subject
   if length == 0 then return "" end
-  local storage = ffi.titan_ffi_char.new_array(length)
-  local source = subject as const *ffi.titan_ffi_char
+  local storage = CChar.new_array(length)
+  local source = subject as const *char
   local index = 0
   while index < length do
     storage[index] = source[length - index - 1]
@@ -77,13 +79,13 @@ end
 function lower(subject: string): string
   local length = #subject
   if length == 0 then return "" end
-  local storage = ffi.titan_ffi_char.new_array(length)
-  local source = subject as const *ffi.titan_ffi_char
+  local storage = CChar.new_array(length)
+  local source = subject as const *char
   local index = 0
   while index < length do
-    local octet = source[index] as ffi.titan_ffi_unsigned_char
+    local octet = source[index] as unsigned char
     storage[index] =
-      cctype.tolower(octet as ffi.titan_ffi_int) as ffi.titan_ffi_char
+      cctype.tolower(octet as int) as char
     index = index + 1
   end
   return storage as string
@@ -92,13 +94,13 @@ end
 function upper(subject: string): string
   local length = #subject
   if length == 0 then return "" end
-  local storage = ffi.titan_ffi_char.new_array(length)
-  local source = subject as const *ffi.titan_ffi_char
+  local storage = CChar.new_array(length)
+  local source = subject as const *char
   local index = 0
   while index < length do
-    local octet = source[index] as ffi.titan_ffi_unsigned_char
+    local octet = source[index] as unsigned char
     storage[index] =
-      cctype.toupper(octet as ffi.titan_ffi_int) as ffi.titan_ffi_char
+      cctype.toupper(octet as int) as char
     index = index + 1
   end
   return storage as string
@@ -125,11 +127,11 @@ function rep(subject: string, count: integer,
   local total_length = unit_length * count - separator_length
   if total_length == 0 then return "" end
 
-  local storage = ffi.titan_ffi_char.new_array(total_length)
-  local output = storage as *ffi.titan_ffi_char
-  local subject_bytes = subject as const *ffi.titan_ffi_char
+  local storage = CChar.new_array(total_length)
+  local output = storage as *char
+  local subject_bytes = subject as const *char
   local separator_bytes =
-    actual_separator as const *ffi.titan_ffi_char
+    actual_separator as const *char
   local occurrence = 1
   local offset = 0
   while occurrence < count do
@@ -165,7 +167,7 @@ function byte(subject: string, first: integer?,
   if normalized_last - normalized_first + 1 > 200 then
     raise "too many flexible return values (max 200)"
   end
-  local source = subject as const *ffi.titan_ffi_unsigned_char
+  local source = subject as const *unsigned char
   local bytes: { integer } = {}
   for i = normalized_first, normalized_last do
     bytes[i - normalized_first + 1] = source[i - 1] as integer
@@ -176,15 +178,15 @@ end
 function char(...: integer): string
   local length = #...
   if length == 0 then return "" end
-  local storage = ffi.titan_ffi_char.new_array(length)
+  local storage = CChar.new_array(length)
   local index = 1
   while index <= length do
     local octet = ...[index]
     if octet < 0 or octet > 255 then
       raise "character value out of range"
     end
-    local byte = octet as ffi.titan_ffi_unsigned_char
-    storage[index - 1] = byte as ffi.titan_ffi_char
+    local byte = octet as unsigned char
+    storage[index - 1] = byte as char
     index = index + 1
   end
   return storage as string
@@ -274,9 +276,9 @@ function find(subject: string, needle: string,
   end
 
   local subject_bytes =
-    subject as const *ffi.titan_ffi_char
+    subject as const *char
   local needle_bytes =
-    needle as const *ffi.titan_ffi_char
+    needle as const *char
   local offset = first - 1
   local limit = subject_length - needle_length
   while offset <= limit do
@@ -520,7 +522,7 @@ function unpack(format_string: string, data: string,
         raise "too many flexible return values (max 200)"
       end
       local bytes =
-        data as const *ffi.titan_ffi_unsigned_char
+        data as const *unsigned char
       local ending = position
       while ending < #data and bytes[ending] ~= 0 do
         ending = ending + 1

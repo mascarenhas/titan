@@ -124,11 +124,11 @@ local function c_utc_format(format: string): string
   local instant = 0 as ctime.time_t
   local calendar = ctime.gmtime(instant)
   if not calendar then raise "gmtime could not represent the epoch" end
-  local storage = ffi.titan_ffi_char.new_array(256)
+  local storage = char.new_array(256)
   local written = ctime.strftime(
-    storage as *ffi.titan_ffi_char,
+    storage as *char,
     256 as cstring.size_t, format, calendar)
   if written == 0 then raise "strftime did not fit the test buffer" end
-  local bytes = storage as *ffi.titan_ffi_char
+  local bytes = storage as *char
   return bytes as string
 end

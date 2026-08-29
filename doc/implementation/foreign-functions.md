@@ -153,6 +153,12 @@ compiler-private `source_members` overlay. The member is marked
 modifier. It is absent from `Type.Module.members`, `type_members`, serialized
 `*_types`, and `.titan.meta`.
 
+This declaration boundary is independent of C type exportability. A public
+ordinary Titan signature may serialize a foreign function-pointer type built
+only from contextual C primitives and pointers, but that structural type does
+not publish any source `foreign function` declaration or generated-header
+dependency.
+
 A loader result grants access only when the import AST carries the written
 `source_required` marker and provenance proves both `kind == "source"` and a
 source module type. `TopLevelImport._source_import` then lets

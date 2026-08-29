@@ -33,6 +33,11 @@ checkvar = util.make_visitor({
                 node._ctype_namespace = true
                 node._alias_decl = alias
                 node._type = resolved_alias
+            elseif not alias
+               and foreigntypes.is_surface_primitive_name(node.name) then
+                node._ctype_namespace = true
+                node._type = resolve_surface_c_type(
+                    node.name, st, errors, node.loc)
             elseif interface then
                 node._type = invalid(errors, node.loc,
                     "interface '%s' is a type and has no runtime value",
@@ -188,6 +193,17 @@ checkvar = util.make_visitor({
                         islocal = type_member_islocal,
                     }
                     node._type = namespace
+                elseif types.is_direct_c(type_member) then
+                    node._alias_type = type_member
+                    node._decl = {
+                        _tag = "Checker.TypeMember",
+                        modname = mod.name,
+                        name = node.name,
+                        type = type_member,
+                        islocal = type_member_islocal,
+                    }
+                    node._type = type_member
+                    node._ctype_namespace = true
                 elseif type_member._tag == "Type.Interface" then
                     node._type = invalid(errors, node.loc,
                         "interface '%s' is a type and has no runtime value",

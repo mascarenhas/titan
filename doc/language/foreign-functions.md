@@ -24,6 +24,13 @@ an ordinary Titan function with an automatically generated callback adapter.
 The [C FFI chapter](ffi.md) remains the reference for imported declarations,
 C types, calls, ownership, and allocation.
 
+Portable C primitives such as `int`, `unsigned long`, `foreign float`, and
+`double` are contextual Titan type spellings and need no header import. Public
+Titan signatures may also expose foreign function-pointer types built only
+from those primitives and their pointers. That exports the structural C type,
+not a source `foreign function` declaration; the declaration itself retains
+the source-only visibility described below.
+
 ## Declaration syntax
 
 A foreign function is a top-level declaration:

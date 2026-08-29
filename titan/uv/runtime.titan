@@ -1,4 +1,4 @@
-local type Bytes = owned ffi.titan_ffi_char[]
+local type Bytes = owned char[]
 
 local record StreamWriteOwner
   local handle: owned *libuv.uv_write_t
@@ -38,12 +38,12 @@ local record CloseOwner
 end
 
 local record WalkOwner
-  local handle: ffi.titan_ffi_void_ptr
-  local callback: (WalkOwner, ffi.titan_ffi_void_ptr) -> ()
+  local handle: *void
+  local callback: (WalkOwner, *void) -> ()
 end
 
 foreign function uv_write_cb(req: *libuv.uv_write_t,
-                             status: ffi.titan_ffi_int)
+                             status: int)
   local owner = libuv.uv_req_get_data(
       req as *libuv.uv_req_t) as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
@@ -70,7 +70,7 @@ foreign function uv_alloc_cb(handle: *libuv.uv_handle_t,
       callback.upvalue[2]) as UvSizePointerCallbackEntry
   local top = lua.lua_gettop(L)
   entry(L, module, callback, owner, suggested_size,
-        buf as ffi.titan_ffi_void_ptr)
+        buf as *void)
   lua.lua_settop(L, top)
 end
 
@@ -104,7 +104,7 @@ foreign function uv_close_cb(handle: *libuv.uv_handle_t)
 end
 
 foreign function uv_walk_cb(handle: *libuv.uv_handle_t,
-                            arg: ffi.titan_ffi_void_ptr)
+                            arg: *void)
   local owner = arg as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
   local loop = libuv.uv_handle_get_loop(handle)
@@ -114,7 +114,7 @@ foreign function uv_walk_cb(handle: *libuv.uv_handle_t,
       callback.upvalue[2]) as UvPointerCallbackEntry
   local top = lua.lua_gettop(L)
   entry(L, module, callback, owner,
-        handle as ffi.titan_ffi_void_ptr)
+        handle as *void)
   lua.lua_settop(L, top)
 end
 
@@ -130,7 +130,7 @@ end
 
 local function make_error(code: integer,
                           operation: string): OperationError
-  local status = code as ffi.titan_ffi_int
+  local status = code as int
   return OperationError.new(code, libuv.uv_err_name(status) as string,
                             libuv.uv_strerror(status) as string, operation)
 end
@@ -159,7 +159,7 @@ local function checked_text(source: string, operation: string): string
   return source
 end
 
-local function bytes_string(bytes: const *ffi.titan_ffi_char,
+local function bytes_string(bytes: const *char,
                             length: integer): string
   local top = lua.lua_gettop(L)
   defer lua.lua_settop(L, top)
@@ -204,7 +204,7 @@ local function submit_stream_write(task: Task,
   task.pending = owner
   local request: *libuv.uv_write_t = native
   libuv.uv_req_set_data(request as *libuv.uv_req_t,
-                        owner as ffi.titan_ffi_void_ptr)
+                        owner as *void)
   local status = libuv.uv_write {
     req = request,
     handle = stream,
@@ -241,11 +241,11 @@ local function report_task_error(err: value, trace: string)
   -- stderr is a macro on the supported C libraries and therefore is not a
   -- portable FFI object. Descriptor 2 is the POSIX stderr boundary already
   -- required by the libuv runtime.
-  local bytes = text as const *ffi.titan_ffi_char
+  local bytes = text as const *char
   local offset = 0
   while offset < #text do
     local written = cunistd.write(
-        2 as ffi.titan_ffi_int, bytes + offset,
+        2 as int, bytes + offset,
         (#text - offset) as cunistd.size_t)
     if written < 0 then
       if cerrno.errno == cerrno.EINTR then
@@ -326,7 +326,7 @@ local function new_runtime(): Runtime
   }
   check_status(libuv.uv_loop_init(native), "runtime.loop.init")
   libuv.uv_loop_set_data(native,
-                         main_thread as ffi.titan_ffi_void_ptr)
+                         main_thread as *void)
   return runtime
 end
 
@@ -351,7 +351,7 @@ local function begin_close(runtime: Runtime, handle: *libuv.uv_handle_t,
   local owner = CloseOwner.new(0, callback)
   owner.root_index = root_handle(runtime, owner)
   if old_root_index > 0 then unroot_handle(runtime, old_root_index) end
-  libuv.uv_handle_set_data(handle, owner as ffi.titan_ffi_void_ptr)
+  libuv.uv_handle_set_data(handle, owner as *void)
   libuv.uv_close(handle, uv_close_cb)
   return true
 end
@@ -391,7 +391,7 @@ local function wait_handle_close(runtime: Runtime,
 end
 
 local function walk_callback(owner: WalkOwner,
-                             pointer: ffi.titan_ffi_void_ptr)
+                             pointer: *void)
   local handle = pointer as *libuv.uv_handle_t
   -- Select at most one currently live handle. The cleanup Task submits its
   -- close immediately, then walks again only after close_cb; no raw pointer is
@@ -401,22 +401,22 @@ local function walk_callback(owner: WalkOwner,
   end
 end
 
-local function collect_handle(runtime: Runtime): ffi.titan_ffi_void_ptr
+local function collect_handle(runtime: Runtime): *void
   local owner = WalkOwner.new(nil, walk_callback)
   libuv.uv_walk(runtime.loop, uv_walk_cb,
-                owner as ffi.titan_ffi_void_ptr)
+                owner as *void)
   return owner.handle
 end
 
 local function loop_owns_handle(runtime: Runtime,
                                 target: *libuv.uv_handle_t): boolean
   local callback = function (owner: WalkOwner,
-                             pointer: ffi.titan_ffi_void_ptr)
+                             pointer: *void)
     if pointer == target then owner.handle = pointer end
   end
   local owner = WalkOwner.new(nil, callback)
   libuv.uv_walk(runtime.loop, uv_walk_cb,
-                owner as ffi.titan_ffi_void_ptr)
+                owner as *void)
   return owner.handle ~= nil
 end
 

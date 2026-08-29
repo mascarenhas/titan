@@ -511,9 +511,12 @@ if (TITAN_LIKELY(runtime_tag == <function-type tag>)) {
 ```
 
 Those tags are the `static const void *` identities allocated by
-`function_type_tag`, keyed by `types.tostring(ftype)` and
-publish-or-recovered through the Lua registry so source-linked and
-`.so`-loaded modules agree on the pointer for the same canonical type. Exact
+`function_type_tag` and publish-or-recovered through the Lua registry so
+source-linked and `.so`-loaded modules agree on the pointer for the same exact
+type. C-free shapes use `types.tostring(ftype)`; exportable C-bearing shapes
+use their canonical serialized descriptor so nested declarator qualifiers
+cannot collide; header-dependent C shapes add their defining module scope.
+Exact
 pointer equality is sufficient evidence for the private Titan layout under
 the same trusted-debug/C-API invariant as the closure upvalues themselves; the
 hot branch neither queries the Lua registry nor rechecks the module, native
@@ -918,6 +921,12 @@ member. Keyed type-member, nominal-method, and nominal-static maps are
 serialized in locale-independent numeric-byte name order so equivalent
 interfaces have reproducible text; ordered Interface methods, module members,
 record fields, and union variants retain their established source/slot order.
+Contextual `CVoid`/`CInteger`/`CFloat` descriptors and recursively portable
+`CPointer`, nonvariadic `CFunction`, and `COwned` graphs are also serialized
+structurally. Their encoding omits all source scope and header provenance, and
+the driver validates the closed portable-C schema before code generation.
+Imported typedefs and other header-dependent C descriptors never enter this
+literal.
 Callable declaration descriptors also serialize formal
 `paramnames`, while structural `Type.Function` values do not. Callable shapes
 also carry their optional `flexrettype`; accepting that new constructor shape

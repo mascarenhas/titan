@@ -741,6 +741,174 @@ assert(driver.PROBE_CACHE_DIRECTORY == nil)
     end)
 end)
 
+describe("portable C99 compiled-interface validation", function()
+    local modname = "portable_metadata"
+
+    local function variable_module(typ)
+        return types.Module(modname, {
+            types.ModuleVariable(modname, "item", typ, false),
+        })
+    end
+
+    local function function_module(param, rettype)
+        return types.Module(modname, {
+            types.ModuleMember(modname, "item",
+                types.Function(
+                    param and { param } or {},
+                    rettype and { rettype } or {},
+                    false, false, false),
+                param and { "item" } or {}),
+        })
+    end
+
+    local function reject(modtype, expected)
+        local ok, err = driver.validate_module_interface(modtype, modname)
+        assert.is_nil(ok)
+        assert.match(expected, err, 1, true)
+    end
+
+    it("accepts canonical primitives, pointers, callbacks, and owners",
+    function()
+        local cint = types.CInteger("int", true, 3, 32)
+        local callback = types.CPointer(types.CFunction({
+            types.CPointer(types.CVoid(), { "const" }),
+            cint,
+        }, types.CVoid(), false, false), {})
+        assert.is_true(driver.validate_module_interface(
+            function_module(callback, callback), modname))
+        assert.is_true(driver.validate_module_interface(
+            variable_module(types.CPointer(types.CVoid(), {})), modname))
+        assert.is_true(driver.validate_module_interface(
+            variable_module(types.COwned(cint, true)), modname))
+
+        -- A void alias is a type namespace, not a value-facing use. Consumers
+        -- may use it as a pointer pointee or callback return.
+        assert.is_true(driver.validate_module_interface(
+            types.Module(modname, {}, { Void = types.CVoid() }), modname))
+    end)
+
+    it("rejects C function pointers in TValue-backed slots", function()
+        local cint = types.CInteger("int", true, 3, 32)
+        local callback = types.CPointer(types.CFunction(
+            { cint }, cint, false, false), {})
+
+        reject(variable_module(callback),
+            "module variable 'item' has no TValue representation")
+
+        local record_name = modname .. ".Box"
+        local record_field = types.Field(
+            record_name, "item", callback, 0, false)
+        local record = types.Record(
+            record_name, { record_field }, {}, {}, 2)
+        reject(types.Module(modname, {
+            types.ModuleMember(modname, "Box", record, false),
+        }), "record field 'item' has no TValue representation")
+
+        local union_name = modname .. ".Choice"
+        local variant = types.Variant(
+            union_name, "present", callback, 0)
+        local union = types.Union(union_name, { variant }, {
+            present = types.StaticMethod(
+                union_name, "present", { callback },
+                { types.Nominal(union_name) }, false, false, false),
+        }, {}, 1)
+        reject(types.Module(modname, {
+            types.ModuleMember(modname, "Choice", union, false),
+        }), "union variant 'present' payload has no TValue representation")
+
+        local interface_name = modname .. ".View"
+        local interface = types.Interface(interface_name, {
+            types.Field(interface_name, "item", callback, 0, true),
+        }, {})
+        reject(types.Module(modname, {}, { View = interface }),
+            "interface field 'item' has no TValue representation")
+    end)
+
+    it("rejects direct value-facing void descriptors", function()
+        reject(variable_module(types.CVoid()),
+            "C void is not valid as a value-facing type")
+        reject(function_module(types.CVoid(), nil),
+            "C void is not valid as a value-facing type")
+    end)
+
+    it("rejects impossible callback parameter graphs", function()
+        local cint = types.CInteger("int", true, 3, 32)
+        local function callback(param)
+            return variable_module(types.CPointer(types.CFunction(
+                { param }, cint, false, false), {}))
+        end
+        reject(callback(types.CVoid()),
+            "portable C function parameter has an invalid shape")
+        reject(callback(types.COwned(cint, false)),
+            "portable C function parameter has an invalid shape")
+        reject(callback(types.Integer()),
+            "portable C function parameter has an invalid shape")
+        reject(variable_module(types.CPointer(types.CFunction(
+            { cint }, types.Integer(), false, false), {})),
+            "portable C function return has an invalid shape")
+        reject(variable_module(types.CPointer(types.Integer(), {})),
+            "portable C pointer has a noncanonical shape")
+        reject(variable_module(types.CPointer(
+            types.COwned(cint, false), {})),
+            "portable C pointer has a noncanonical shape")
+        reject(variable_module(types.COwned(types.Integer(), false)),
+            "portable owned C type has a noncanonical shape")
+
+        local cyclic = types.CPointer(types.CVoid(), {})
+        cyclic.pointee = cyclic
+        reject(variable_module(cyclic),
+            "portable C pointer graph is cyclic or noncanonical")
+    end)
+
+    it("rejects noncanonical qualifiers and header identities", function()
+        local cint = types.CInteger("int", true, 3, 32)
+        reject(variable_module(types.CPointer(cint, { "volatile" })),
+            "portable C pointer has a noncanonical shape")
+        reject(variable_module(types.CTypedef("local_int", cint, {})),
+            "Type.CTypedef is not valid in a value-facing type graph")
+
+        local private = types.CInteger("int", true, 3, 32)
+        private._c_numeric = {}
+        reject(variable_module(private),
+            "type graph contains compiler-only source state")
+
+        local oldstyle = types.CFunction({}, types.CVoid(), false, false)
+        oldstyle._paramstyle = "oldstyle"
+        reject(variable_module(types.CPointer(oldstyle, {})),
+            'Type.CFunction contains unexpected field "_paramstyle"')
+        local decoded, decode_error = driver.decode_module_interface([[
+            Module("portable_metadata", {
+                ModuleVariable("portable_metadata", "item", {
+                    _tag = "Type.CPointer",
+                    quals = {},
+                    pointee = {
+                        _tag = "Type.CFunction",
+                        params = {},
+                        ret = CVoid(),
+                        vararg = false,
+                        abi = false,
+                        _paramstyle = "oldstyle",
+                    },
+                }, false),
+            })
+        ]], modname, "hostile-portable-metadata")
+        assert.is_nil(decoded)
+        assert.match(
+            'Type.CFunction contains unexpected field "_paramstyle"',
+            decode_error, 1, true)
+
+        local enum_owner = types.CInteger("int", true, 3, 32)
+        enum_owner._c_enum_owner = enum_owner
+        reject(variable_module(enum_owner),
+            'Type.CInteger contains unexpected field "_c_enum_owner"')
+
+        local arbitrary = types.CFloat("double")
+        arbitrary.unexpected = true
+        reject(variable_module(arbitrary),
+            'Type.CFloat contains unexpected field "unexpected"')
+    end)
+end)
+
 describe("compiled-container path contracts", function()
     it("deduplicates roots and derives a component-wise provider", function()
         local provider, roots = driver.common_module_provider({

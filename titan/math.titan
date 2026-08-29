@@ -11,7 +11,6 @@ local cstdint = foreign import "stdint.h"
 local cstring = foreign import "string.h"
 local clocale = foreign import "locale.h"
 local climits = foreign import "limits.h"
-local ffi = foreign import "titan/ffi.h"
 
 pi: float = 3.141592653589793238462643383279502884
 huge: float = 1e999
@@ -163,14 +162,14 @@ function fmod(numerator: float, denominator: float): float
 end
 
 function frexp(number: float): (float, integer)
-  local exponent: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
+  local exponent: int = 0 as int
   local mantissa = cmath.frexp(number, exponent) as float
   return mantissa, exponent as integer
 end
 
 function ldexp(mantissa: float, exponent: integer): float
   return cmath.ldexp(
-    mantissa, exponent as ffi.titan_ffi_int) as float
+    mantissa, exponent as int) as float
 end
 
 function log(number: float, base: float?): float
@@ -210,8 +209,8 @@ function min(first: float, ...: float): float
 end
 
 function modf(number: float): (float, float)
-  local integral: ffi.titan_ffi_double =
-    0.0 as ffi.titan_ffi_double
+  local integral: double =
+    0.0 as double
   local fractional = cmath.modf(number, integral) as float
   return integral as float, fractional
 end
@@ -339,9 +338,9 @@ local function parsed_float(text: string,
   if not decimal_point or decimal_point[0] == 46 then
     return cstdlib.strtod(text, nil) as float
   end
-  local source = text as const *ffi.titan_ffi_char
-  local storage = ffi.titan_ffi_char.new_array(#text + 1)
-  local normalized = storage as *ffi.titan_ffi_char
+  local source = text as const *char
+  local storage = char.new_array(#text + 1)
+  local normalized = storage as *char
   cstring.memcpy(normalized, source, #text as cstring.size_t)
   normalized[point_position - 1] = decimal_point[0]
   normalized[#text] = 0

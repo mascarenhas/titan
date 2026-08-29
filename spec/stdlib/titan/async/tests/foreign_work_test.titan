@@ -1,0 +1,127 @@
+local foreign_work = foreign import "async_foreign_work.h"
+local type ForeignWorkFixture = foreign_work.titan_async_work_fixture
+
+local record ForeignWorkProbe
+  finalized: boolean
+  resumed_after_cancellation: boolean
+end
+
+-- This source-defined callback remains in the restricted C subset. The
+-- fixture blocks on a pipe; it never enters Titan or Lua from the worker.
+foreign function blocking_foreign_work(arg: *void)
+  foreign_work.titan_async_work_fixture_block(arg)
+end
+
+local function new_foreign_work_fixture(
+    input: integer): owned *ForeignWorkFixture
+  local fixture: owned *ForeignWorkFixture = ForeignWorkFixture.new()
+  local status = foreign_work.titan_async_work_fixture_init(
+      fixture, input as int) as integer
+  test.assert(status == 0, "could not initialize foreign-work fixture")
+  return fixture
+end
+
+local function mark_foreign_work_finalizable(
+    candidate: value, callback: (value) -> ())
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  test.assert(lua.lua_checkstack(L, 3) ~= 0,
+        "cannot reserve Lua stack for foreign-work reachability probe")
+  ffi.lua_pushtvalue(L, candidate)
+  local metatable: {string: value} = {
+    ["__gc"] = callback,
+  }
+  ffi.lua_pushtvalue(L, metatable)
+  lua.lua_setmetatable(L, -2)
+end
+
+local function release_foreign_work(descriptor: integer)
+  local status = foreign_work.titan_async_work_fixture_release(
+      descriptor as int) as integer
+  test.assert(status == 0, "could not release blocked foreign work")
+end
+
+local function run_cancelled_foreign_work_probe(probe: ForeignWorkProbe)
+  local release_descriptor = -1
+  local target = async.run<nil, value>(function (): nil
+    local fixture = new_foreign_work_fixture(63)
+    defer foreign_work.titan_async_work_fixture_destroy(fixture)
+    release_descriptor =
+      foreign_work.titan_async_work_fixture_release_fd(fixture) as integer
+    mark_foreign_work_finalizable(fixture, function (_: value)
+      probe.finalized = true
+    end)
+
+    async.run_foreign(blocking_foreign_work, fixture as *void)
+    probe.resumed_after_cancellation = true
+    return nil
+  end)
+
+  support.wait_until_waiting(target)
+  test.assert(release_descriptor >= 0,
+        "foreign-work Task suspended before publishing its release handle")
+  target:cancel(async.CancellationReason.simple(
+      "cancel accepted foreign work"))
+  support.collect_garbage()
+  support.collect_garbage()
+  test.assert(not probe.finalized,
+        "accepted foreign work released its owned argument before callback")
+
+  release_foreign_work(release_descriptor)
+  local status = async.join(target)
+  test.assert(support.cancelled_with(status, "cancel accepted foreign work"),
+        "foreign-work cancellation did not wait for callback completion")
+  test.assert(not probe.resumed_after_cancellation,
+        "cancelled run_foreign returned normally after callback")
+end
+
+function test_run_foreign_keeps_the_event_loop_live_and_publishes_result(
+    context: test.Context)
+  runtime_test.run(function ()
+    local fixture = new_foreign_work_fixture(41)
+    defer foreign_work.titan_async_work_fixture_destroy(fixture)
+    local release_descriptor =
+      foreign_work.titan_async_work_fixture_release_fd(fixture) as integer
+    local release_status = -1
+    local releaser = async.run<nil, value>(function (): nil
+      timer.yield()
+      release_status = foreign_work.titan_async_work_fixture_release(
+          release_descriptor as int) as integer
+      return nil
+    end)
+    task_support.cleanup_task(releaser, "foreign-work releaser cleanup")
+
+    async.run_foreign(blocking_foreign_work, fixture as *void)
+    test.assert(async.join(releaser):has_succeeded() and release_status == 0,
+          "event-loop Task did not release blocked foreign work")
+    test.assert(foreign_work.titan_async_work_fixture_result(
+          fixture) as integer == 42,
+          "run_foreign returned before the worker result was visible")
+  end)
+end
+
+function test_run_foreign_cancellation_retains_accepted_work_and_argument(
+    context: test.Context)
+  runtime_test.run(function ()
+    local probe = ForeignWorkProbe.new(false, false)
+    run_cancelled_foreign_work_probe(probe)
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(probe.finalized,
+          "completed cancelled work retained its owned argument")
+  end)
+end
+
+function test_run_foreign_rejects_a_null_callback(context: test.Context)
+  runtime_test.run(function ()
+    local callback: foreign (*void) -> () = nil
+    local message = ""
+    do
+      async.run_foreign(callback, nil)
+    catch
+      message = error as string
+    end
+    test.assert(message == "async.run_foreign callback must not be NULL",
+          "run_foreign did not reject its NULL callback synchronously")
+  end)
+end

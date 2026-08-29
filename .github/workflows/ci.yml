@@ -878,6 +878,8 @@ jobs:
             make titan-stdlib-test-run TITAN_FILTER='^uv%.task_tests%.'
           bash spec/support/ci_sanitizer_capture.sh uv-runtime-tests \
             make titan-stdlib-test-run TITAN_FILTER='^uv%.runtime_tests%.'
+          bash spec/support/ci_sanitizer_capture.sh foreign-work-tests \
+            make titan-stdlib-test-run TITAN_FILTER='test_run_foreign_'
 
       - name: Run native TLS/HTTP sanitizer gate
         run: |

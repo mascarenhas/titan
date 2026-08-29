@@ -178,10 +178,10 @@ local function runner_matches(name: string, pattern: string): boolean
 end
 
 local function raw_lua_function(
-    table_index: ffi.titan_ffi_int, name: string): boolean
+    table_index: int, name: string): boolean
   lua.lua_pushstring(L, name)
   local kind = lua.lua_rawget(L, table_index)
-  lua.lua_settop(L, (lua.lua_gettop(L) - 1) as ffi.titan_ffi_int)
+  lua.lua_settop(L, (lua.lua_gettop(L) - 1) as int)
   return kind == lua.LUA_TFUNCTION
 end
 

@@ -256,7 +256,7 @@ identity.
 
 The production `titan.uv` source is the folder ensemble
 `titan/uv/uv.titan`, `file.titan`, `os.titan`, `process.titan`,
-`runtime.titan`, `task.titan`, and `tcp.titan`. The main file owns shared
+`runtime.titan`, `task.titan`, `tcp.titan`, and `work.titan`. The main file owns shared
 imports, shared constants, module state, bootstrap setup, program-argument
 setup, the sole initializer, and the public `Error` and `OperationError`
 records. `task.titan` owns the public `CancellationReason`, `TaskStatus`, and

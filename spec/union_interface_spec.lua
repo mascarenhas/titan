@@ -981,11 +981,12 @@ describe("union module interfaces", function()
                     pattern = "Type%.Module",
                 },
                 {
-                    label = "C FFI descriptor",
+                    label = "header-dependent C FFI descriptor",
                     make = function()
-                        return types.CInteger("int", true, 3, 32)
+                        return types.CTypedef("platform_int",
+                            types.CInteger("int", true, 3, 32), {})
                     end,
-                    pattern = "Type%.CInteger",
+                    pattern = "Type%.CTypedef",
                 },
                 {
                     label = "unknown descriptor",

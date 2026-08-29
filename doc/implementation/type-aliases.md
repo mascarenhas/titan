@@ -49,9 +49,12 @@ and non-nominal aliases do not enter this fallback.
 annotating with `Message.move` is rejected, while `type Event = Message`
 permits `Event.move(...)` to select the original public constructor.
 
-Export validation walks resolved alias targets recursively. Public aliases that
-contain C-FFI types or local nominal types are rejected by the same rules as
-function signatures, variables, and public nominal members.
+Export validation walks resolved alias targets recursively. Public aliases
+containing local nominal types or nonexportable C descriptors are rejected by
+the same rules as function signatures, variables, and public nominal members.
+Contextual C primitives and portable pointer/function/owned graphs are valid
+targets; an imported `CTypedef` remains invalid regardless of its resolved
+target.
 
 ## Module interfaces
 

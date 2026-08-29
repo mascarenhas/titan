@@ -140,7 +140,7 @@ omitted from the field lists for brevity.
 | --- | --- | --- |
 | `TypeNil`, `TypeBoolean`, `TypeInteger`, `TypeFloat`, `TypeString`, `TypeValue` | — | the primitive type keywords |
 | `TypeParam` | `name`, `constraint` | declaration binder syntax; `constraint` is a named Interface type or `false` |
-| `TypeName` | `name`, `typeargs` | a bare or applied name in type position |
+| `TypeName` | `name`, `typeargs` | a bare or applied name in type position; contextual C primitives are canonicalized into this existing node, including multiword names such as `unsigned long` and `foreign float` |
 | `TypeQualName` | `module`, `name`, `typeargs` | `mod.Name` or `mod.Name<...>` |
 | `TypeCPointer` | `subtype`, `const` | `*c.T` or `const *c.T`; `const` records the written pointee qualifier |
 | `TypeCArray` | `base`, `length` | fixed C array annotation `c.T[N]`; `length` is an integer expression node |

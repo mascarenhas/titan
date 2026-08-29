@@ -90,6 +90,7 @@ local union Call
   turn: TurnCall
   suspend: SuspendCall
   sleep: SleepCall
+  run_foreign: WorkCall
   ticker_tick: TickerTickCall
   ticker_close: TickerCloseCall
   handle_close: HandleCloseCall
@@ -260,6 +261,7 @@ local function dispatch_call(task: Task, call: Call): Immediate?
   when turn: operation then return operation:dispatch(task)
   when suspend: operation then return operation:dispatch(task)
   when sleep: operation then return operation:dispatch(task)
+  when run_foreign: operation then return operation:dispatch(task)
   when ticker_tick: operation then return operation:dispatch(task)
   when ticker_close: operation then return operation:dispatch(task)
   when handle_close: operation then return operation:dispatch(task)
@@ -514,7 +516,7 @@ end
 local function activate_timer(runtime: Runtime,
                               native: owned *libuv.uv_timer_t,
                               owner: value,
-                              owner_pointer: ffi.titan_ffi_void_ptr,
+                              owner_pointer: *void,
                               milliseconds: integer,
                               repeat_time: integer): integer
   -- Root the native storage before init links the handle into the loop. If
@@ -574,7 +576,7 @@ local function start_timer(task: Task, milliseconds: integer,
   end
   local owner = TimerOwner.new(native, callback, 0)
   owner.root_index = activate_timer(
-      runtime, native, owner, owner as ffi.titan_ffi_void_ptr,
+      runtime, native, owner, owner as *void,
       milliseconds, 0)
   return owner
 end
@@ -608,7 +610,7 @@ local function start_ticker(task: Task,
   local ticker = uv_timer_t.new(native, ticker_callback, runtime,
                                 nil, false, 0)
   ticker.root_index = activate_timer(
-      runtime, native, ticker, ticker as ffi.titan_ffi_void_ptr,
+      runtime, native, ticker, ticker as *void,
       milliseconds, milliseconds)
   return ticker
 end

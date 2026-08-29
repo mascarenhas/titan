@@ -145,11 +145,10 @@ The installed compiler ships `<root>/include/titan/ffi.h` and passes
 Checkout developer mode instead searches upward from the loaded compiler
 module for `titan-runtime/titan/ffi.h`. Thus `foreign import "titan/ffi.h"`
 works without depending on the process cwd while keeping an installed compiler
-inside one SDK root. The file exposes selected primitive aliases (including
-`void *`, `char *`, every ordinary integer spelling, `float`, `double`, and
-`long double`) and includes the matched Lua internal declarations for
-`lua_State`, `TValue`, `Udata`, and `CClosure`. `TValue` remains a distinct C
-type in Titan's FFI type graph. Private runtime helpers can move values across
+inside one SDK root. Portable primitives are contextual Titan types rather than
+typedefs in this header. The file includes the matched Lua internal declarations
+for `lua_State`, `TValue`, `Udata`, and `CClosure`. `TValue` remains a distinct
+C type in Titan's FFI type graph. Private runtime helpers can move values across
 that boundary through explicit `value` <-> C `TValue` coercions.
 
 Four typed inline bridges—`lmacro_thvalue`, `lmacro_uvalue`,
@@ -271,8 +270,14 @@ three different questions separate:
 * `types.is_c` detects a direct C value or one nested through ordinary
   Array/Map/Option storage, but deliberately excludes `CModule`, since a C
   module is only a namespace;
-* `types.first_c_ffi_type` performs the full recursive interface/export scan,
-  including boxed callable signatures;
+* `types.first_c_type` finds C provenance through ordinary storage shapes but
+  deliberately stops at boxed Titan callable signatures, preserving the
+  representation/lowering question used by `types.is_c`;
+* `types.contains_c_ffi_type` is the broader any-C predicate: it also descends
+  boxed callable signatures and therefore governs C-bearing function-tag
+  identity;
+* `types.first_non_exportable_type` performs the recursive public-interface
+  scan and returns only header-dependent or otherwise nonportable descriptors;
 * `types.is_direct_c` asks whether the value itself has a C representation,
   while `types.has_tvalue_representation` asks whether that representation can
   round-trip through a Lua `TValue`.
@@ -383,16 +388,38 @@ with either type gets the same Lua-stack anchoring used for Titan `value`.
 A by-value `TValue` may itself contain a collectable pointer, while a
 non-NULL `Udata *` denotes the full userdata GC object directly.
 
-Serialization rejects any type tree containing a C FFI type. This is the
-enforcement point for "C types are local to the importing module": exported
-module interfaces cannot contain C types because a consumer module would also
-need the correct header included in its generated C.
+Serialization accepts the closed, header-independent C subset: contextual
+`CVoid`, target-profile `CInteger` and `CFloat` leaves, recursively composed
+`CPointer`, nonvariadic `CFunction`, and `COwned` descriptors. It emits only
+their structural fields and no source scope, header origin, probe, or parser
+state. Imported `CTypedef`s remain nonexportable even when their target is a
+portable primitive; structs, unions, fields, arrays, enum identities, and any
+allowed constructor containing one are rejected recursively.
+
+The compiled-interface decoder independently validates that closed schema as
+hostile input before code generation. Primitive spellings and structural
+numeric fields must be canonical, parameter lists dense, pointer qualifiers
+exact, function ABI/variadic fields the one supported public form, and each C
+descriptor must contain only its serialized keys; source-only fields and
+unknown extras are rejected. Module
+registration then rehydrates each decoded numeric descriptor against the active
+target profile: it compares the serialized signedness/rank/width fields and
+attaches the checker-only lowering traits, rejecting a mismatch before the
+interface is published. These checks, not the availability of a constructor in
+the deserialization environment, are the authority for portable C metadata.
+The decoder also reapplies `types.has_tvalue_representation` to every decoded
+module variable, record field, union payload, and interface field, so a hostile
+interface cannot place a portable function pointer in a runtime `TValue` slot
+that source checking would reject.
 
 ## Converting C Declarations
 
 `foreigntypes.lua` converts parser CTypes into `Type.C*`.
 
-Primitive tokens are canonicalized before conversion, so spellings such as
+Contextual primitive type syntax is lowered through the active target profile
+by `foreigntypes.surface_primitive` to the same `CVoid`, `CInteger`, and
+`CFloat` descriptors used by imported C. It has no `_ffi_scope` or origin
+header. Primitive tokens from headers are canonicalized before conversion, so spellings such as
 `long unsigned int` and `unsigned long` map to the same `CInteger` identity.
 Integer ranks preserve signedness and relative width; known 128-bit compiler
 types carry `bits = 128`. `float`, `double` and `long double` become `CFloat`.
@@ -448,11 +475,15 @@ The checker has FFI-specific handling in a few narrow places:
   `Ast.TypeQualName` nodes with `_contextual_c_name`; the checker admits that
   marker only when the qualifier resolves to a `Type.CModule`, and the coder
   emits the stored C spelling unchanged.
-* `Ast.TypeCPointer` accepts `*c.T` and `const *c.T`, producing `CPointer`
-  values over direct imported C pointees and rejecting non-C pointees and
+* `Ast.TypeName` recognizes an exact contextual primitive spelling through
+  `foreigntypes.is_surface_primitive_name` and resolves it from the active C
+  profile after type-parameter and transparent type-alias lookup, but before
+  the ordinary nominal fallback.
+* `Ast.TypeCPointer` accepts `*T` and `const *T` when `T` resolves to a direct C
+  pointee, producing `CPointer` values and rejecting non-C pointees and
   `COwned` wrappers.
-* `Ast.TypeCOwned` accepts the source `owned *c.T` and `owned c.T[]`
-  forms. It shares `c_allocation_error` with the allocation
+* `Ast.TypeCOwned` accepts both qualified and contextual payloads in the source
+  `owned *T` and `owned T[]` forms. It shares `c_allocation_error` with the allocation
   pseudo-constructors, rejecting non-C and nested owners, `void`, direct C
   functions, incomplete aggregates, and C array typedefs before any generated
   `sizeof` can be formed. A complete FAM struct is an eligible scalar owner;
@@ -564,13 +595,25 @@ The checker has FFI-specific handling in a few narrow places:
   that initializer's frontier and therefore cannot reuse a `lua_State`
   declaration from a later foreign import.
 
-Export checks use `types.contains_c_ffi_type`: any public function signature,
-public variable, or public nominal member that mentions a C type is rejected.
-Local fields/variants, methods, and nominal functions are skipped before this
-check, so a private C-typed record slot or union variant can remain
-module-internal. `CModule` itself is
+Export checks use `types.first_non_exportable_type`: a public function
+signature, variable, alias, or nominal member may contain only contextual C
+primitives and recursively portable pointer, foreign-function-pointer, and
+owned graphs. Header-derived typedefs and aggregate/array/enum identities are
+still rejected. Local fields/variants, methods, and nominal functions are
+skipped before this check, so a private C-typed record slot or union variant
+can remain module-internal. `CModule` itself is
 rejected as a first-class value in the same `ExpVar` path as ordinary Titan
 modules.
+
+Exportability is separate from physical slot representation. Every module
+variable lives in the module userdata's `TValue` upvalue array, so declaration
+checking also requires `types.has_tvalue_representation`; a portable C
+function pointer is consequently legal in an exported callable signature but
+not in a local or public module variable. `genluaentry` applies the same
+predicate to fixed and flexible results. If any result lacks a `TValue`
+representation, both the genuine-Lua and strict stack entry raise before the
+native entry is invoked, while exact compiled calls continue to use the native
+signature directly.
 
 The checker keeps a per-module `symtab.foreign_names` table for the final
 ordinary C identifier environment and a source-ordered history for frontier
@@ -664,9 +707,12 @@ headers' preferred spelling for calls and allocation. Declarators are built
 recursively for locals and temporaries, because `int (*cb)(int)` cannot be
 produced by concatenating a type spelling and a name. `COwned` renders as
 `Udata *`; its payload is reached through `getudatamem`. The Titan diagnostic
-renderer preserves its logical shape as `owned *T` or `owned T[]`. The hidden
-owned-metatable key uses that same canonical renderer, so scalar and counted
-owners cannot acquire inconsistent hand-built spellings.
+renderer preserves its logical shape as `owned *T` or `owned T[]`. For a
+portable owner, the hidden metatable registry key instead uses the canonical
+serialized descriptor: diagnostic rendering is intentionally not an identity
+because nested pointer qualifiers can have the same readable spelling. The
+protected display name remains readable. Header-dependent owners retain their
+module scope.
 
 The general `ctype` function routes C values through `cdeclarator`, applying C
 parameter adjustment where appropriate. `COwned` remains a Lua full-userdata
@@ -968,18 +1014,18 @@ publication rule, not a transaction boundary for the complete module
 initializer.
 
 Making C-bearing Titan function types source-nameable exposes a separate
-registry-identity issue. Canonical C type spellings are meaningful only within
-the module that imported their headers, so two modules may render unrelated
-local owner/function types identically. Function-type registry keys therefore
-remain globally shared for C-free function types, preserving their
-cross-module exact-call fast path, but include the defining Titan module name
-when `types.first_c_ffi_type` finds any C type in the callable shape. A
-separate C-bearing marker in the module-local tag cache prevents a C typedef
-whose diagnostic spelling matches a Titan type from reusing that Titan
-callable's entry before either registry key is emitted. A
-same-spelled C-bearing function crossing through `value` in another module
-then takes the generic checked path, where the owned metatable mismatch is
-reported instead of entering a native function with the wrong payload layout.
+registry-identity issue. `types.contains_c_ffi_type` still separates C ABI
+callables from ordinary Titan function types even when both render similarly.
+A callable built entirely from contextual primitives has one canonical
+serialized structural registry identity shared by compiled modules, so an
+imported public signature retains its exact native fast path. The readable
+`types.tostring` form is display-only and cannot collapse differently placed
+pointer qualifiers into one identity. A callable containing an imported
+typedef or another nonexportable descriptor includes the defining Titan module
+scope because the same diagnostic spelling in another module may denote
+unrelated C identity. The separate C-bearing marker in the local cache
+continues to prevent a C callable from reusing a Titan callable entry before
+either registry key is emitted.
 
 This is deliberately different from adopted/borrowed C pointers. Borrowed
 pointers are raw C pointer values and are not GC-managed; adopted pointers are

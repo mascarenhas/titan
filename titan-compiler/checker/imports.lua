@@ -559,6 +559,21 @@ function checker.register_module_interface(
     end
     local interface_key = exposer_key .. "\0" .. modname
     if interface_seen[interface_key] then return true end
+
+    -- Normalize before publishing either the interface-seen success marker or
+    -- the recovered-module memo. A target-profile mismatch is a real load
+    -- failure and must not make a later edge in the same recovery graph reuse
+    -- the unnormalized candidate as though registration had succeeded.
+    if active_check_state and types.contains_c_numeric_type(type_or_error) then
+        local service, profile_error =
+            ensure_probe_service(active_check_state)
+        if not service then return nil, profile_error end
+        local normalized, normalization_error =
+            types.normalize_portable_c_numeric_types(
+                type_or_error, active_check_state.c_profile)
+        if not normalized then return nil, normalization_error end
+    end
+
     interface_seen[interface_key] = true
 
     local seen = reference_seen or {}
@@ -815,11 +830,11 @@ function makemoduletype(modname, modast, st)
 end
 
 function reject_exported_c_ffi_type(modname, errors, loc, typ)
-    local ctyp = types.first_c_ffi_type(typ)
+    local ctyp = types.first_non_exportable_type(typ)
     if ctyp then
         checker.typeerror(errors, loc,
             "cannot export C FFI type '%s' from Titan module '%s'; "
-            .. "C FFI types are local to modules that import their headers",
+            .. "this non-portable header-defined type remains local to modules that import its header",
             types.tostring(ctyp), modname)
     end
 end

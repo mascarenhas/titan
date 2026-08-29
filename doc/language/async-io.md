@@ -29,6 +29,7 @@ type ResumeToken = uv.ResumeToken
 type SuspendCancelAction = () -> ()
 
 function run<A, B>(func: () -> A): Task<A, B>
+function run_foreign(f: foreign (*void) -> (), arg: *void)
 function loop()
 function yield()
 function running(): Task -- exactly Task<value, value>
@@ -115,6 +116,36 @@ shallow `Task<A, B>` view of the same userdata. The timer callback submits
 Task on a later event-loop turn. Every one-shot timer uses this close-before-
 resume order. Calling `run` from another Task is valid and still does not run
 the new Task inline.
+
+`async.run_foreign(f, arg)` submits the C function pointer and argument to
+libuv's process-wide worker pool and suspends the current Task until the
+after-work callback runs on the event-loop thread. It is intended for blocking
+calls into an external C library. It is not a way to run Lua code or an
+ordinary Titan function or closure on another thread. A restricted source
+`foreign function` is permitted because the compiler emits it as an exact C
+callback; its body must remain entirely within the raw-C restrictions below.
+
+The worker performs exactly `f(arg)`. It must not inspect or mutate Titan or
+Lua objects, call the Lua API, allocate through Titan, raise, resume a Task, or
+touch `TValue`, `Udata`, or other GC-managed state. The argument must identify
+native storage that remains alive until completion. Passing an `owned` C
+allocation keeps that owner alive in the suspended caller, but the caller is
+still responsible for synchronization and must not concurrently access bytes
+that the worker may read or write.
+
+A queue-submission failure raises immediately. After successful submission,
+status zero resumes normally and a nonzero after-work status raises an
+`OperationError`. Cancelling the waiting Task does not stop or detach the C
+call: libuv completion remains authoritative and retains the request/carrier;
+the suspended caller frame continues retaining any owned argument. Only after
+the callback completes does the Task receive its pending cancellation. The
+worker pool is shared with libuv filesystem and name-resolution work, so
+long-running or numerous jobs can delay unrelated operations.
+
+Raw pointers and foreign function pointers have no dynamic Lua coercion. The
+serialized signature lets statically compiled Titan modules call
+`run_foreign`; it does not make the function callable with arbitrary Lua
+values.
 
 `status()` is a snapshot. Its first three variants are nonterminal. Calling
 `cancel` on an unfinished Task privately retains the first reason and starts

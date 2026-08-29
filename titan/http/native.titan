@@ -4,10 +4,10 @@ local lua = foreign import "lua.h"
 
 local type LlhttpDataCallbackEntry =
   foreign (*lua.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
-           const *ffi.titan_ffi_char, llhttp.size_t) -> ffi.titan_ffi_int
+           const *char, llhttp.size_t) -> int
 local type LlhttpCallbackEntry =
   foreign (*lua.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata)
-    -> ffi.titan_ffi_int
+    -> int
 
 local EVENT_URL = 1
 local EVENT_STATUS = 2
@@ -36,19 +36,19 @@ local record Parser
   local native: owned *llhttp.llhttp_t
   local settings: owned *llhttp.llhttp_settings_t
   local callback_state: *lua.lua_State
-  local url_callback: (Parser, const *ffi.titan_ffi_char,
-                       llhttp.size_t) -> ffi.titan_ffi_int
-  local status_callback: (Parser, const *ffi.titan_ffi_char,
-                          llhttp.size_t) -> ffi.titan_ffi_int
-  local header_field_callback: (Parser, const *ffi.titan_ffi_char,
-                                llhttp.size_t) -> ffi.titan_ffi_int
-  local header_value_callback: (Parser, const *ffi.titan_ffi_char,
-                                llhttp.size_t) -> ffi.titan_ffi_int
-  local header_value_complete_callback: (Parser) -> ffi.titan_ffi_int
-  local headers_complete_callback: (Parser) -> ffi.titan_ffi_int
-  local body_callback: (Parser, const *ffi.titan_ffi_char,
-                        llhttp.size_t) -> ffi.titan_ffi_int
-  local message_complete_callback: (Parser) -> ffi.titan_ffi_int
+  local url_callback: (Parser, const *char,
+                       llhttp.size_t) -> int
+  local status_callback: (Parser, const *char,
+                          llhttp.size_t) -> int
+  local header_field_callback: (Parser, const *char,
+                                llhttp.size_t) -> int
+  local header_value_callback: (Parser, const *char,
+                                llhttp.size_t) -> int
+  local header_value_complete_callback: (Parser) -> int
+  local headers_complete_callback: (Parser) -> int
+  local body_callback: (Parser, const *char,
+                        llhttp.size_t) -> int
+  local message_complete_callback: (Parser) -> int
   local connection: io.ReaderWriterCloser
   local response_to_head: boolean
   local events: {Event}
@@ -83,8 +83,8 @@ end
 -- each callback restores the pre-callback Lua stack before returning its exact
 -- C result.
 foreign function llhttp_url_cb(
-    parser: *llhttp.llhttp_t, data: const *ffi.titan_ffi_char,
-    length: llhttp.size_t): ffi.titan_ffi_int
+    parser: *llhttp.llhttp_t, data: const *char,
+    length: llhttp.size_t): int
   local owner = parser.data as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[3].uv)
   local L = ffi.lmacro_pvalue(owner.uv[2].uv) as *lua.lua_State
@@ -98,8 +98,8 @@ foreign function llhttp_url_cb(
 end
 
 foreign function llhttp_status_cb(
-    parser: *llhttp.llhttp_t, data: const *ffi.titan_ffi_char,
-    length: llhttp.size_t): ffi.titan_ffi_int
+    parser: *llhttp.llhttp_t, data: const *char,
+    length: llhttp.size_t): int
   local owner = parser.data as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[4].uv)
   local L = ffi.lmacro_pvalue(owner.uv[2].uv) as *lua.lua_State
@@ -113,8 +113,8 @@ foreign function llhttp_status_cb(
 end
 
 foreign function llhttp_header_field_cb(
-    parser: *llhttp.llhttp_t, data: const *ffi.titan_ffi_char,
-    length: llhttp.size_t): ffi.titan_ffi_int
+    parser: *llhttp.llhttp_t, data: const *char,
+    length: llhttp.size_t): int
   local owner = parser.data as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[5].uv)
   local L = ffi.lmacro_pvalue(owner.uv[2].uv) as *lua.lua_State
@@ -128,8 +128,8 @@ foreign function llhttp_header_field_cb(
 end
 
 foreign function llhttp_header_value_cb(
-    parser: *llhttp.llhttp_t, data: const *ffi.titan_ffi_char,
-    length: llhttp.size_t): ffi.titan_ffi_int
+    parser: *llhttp.llhttp_t, data: const *char,
+    length: llhttp.size_t): int
   local owner = parser.data as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[6].uv)
   local L = ffi.lmacro_pvalue(owner.uv[2].uv) as *lua.lua_State
@@ -143,7 +143,7 @@ foreign function llhttp_header_value_cb(
 end
 
 foreign function llhttp_header_value_complete_cb(
-    parser: *llhttp.llhttp_t): ffi.titan_ffi_int
+    parser: *llhttp.llhttp_t): int
   local owner = parser.data as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[7].uv)
   local L = ffi.lmacro_pvalue(owner.uv[2].uv) as *lua.lua_State
@@ -157,7 +157,7 @@ foreign function llhttp_header_value_complete_cb(
 end
 
 foreign function llhttp_headers_complete_cb(
-    parser: *llhttp.llhttp_t): ffi.titan_ffi_int
+    parser: *llhttp.llhttp_t): int
   local owner = parser.data as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[8].uv)
   local L = ffi.lmacro_pvalue(owner.uv[2].uv) as *lua.lua_State
@@ -171,8 +171,8 @@ foreign function llhttp_headers_complete_cb(
 end
 
 foreign function llhttp_body_cb(
-    parser: *llhttp.llhttp_t, data: const *ffi.titan_ffi_char,
-    length: llhttp.size_t): ffi.titan_ffi_int
+    parser: *llhttp.llhttp_t, data: const *char,
+    length: llhttp.size_t): int
   local owner = parser.data as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[9].uv)
   local L = ffi.lmacro_pvalue(owner.uv[2].uv) as *lua.lua_State
@@ -186,7 +186,7 @@ foreign function llhttp_body_cb(
 end
 
 foreign function llhttp_message_complete_cb(
-    parser: *llhttp.llhttp_t): ffi.titan_ffi_int
+    parser: *llhttp.llhttp_t): int
   local owner = parser.data as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[10].uv)
   local L = ffi.lmacro_pvalue(owner.uv[2].uv) as *lua.lua_State
@@ -199,16 +199,16 @@ foreign function llhttp_message_complete_cb(
   return result
 end
 
-local function native_bytes(pointer: const *ffi.titan_ffi_char,
+local function native_bytes(pointer: const *char,
                             length: integer): string
   if length == 0 then return "" end
-  local storage = ffi.titan_ffi_char.new_array(length)
-  cstring.memcpy(storage as *ffi.titan_ffi_char, pointer,
+  local storage = char.new_array(length)
+  cstring.memcpy(storage as *char, pointer,
                  length as cstring.size_t)
   return storage as string
 end
 
-local function native_string(pointer: const *ffi.titan_ffi_char): string
+local function native_string(pointer: const *char): string
   if pointer == nil then return "" end
   return native_bytes(pointer, cstring.strlen(pointer) as integer)
 end
@@ -218,61 +218,61 @@ local function event(kind: integer, text: string): Event
 end
 
 local function callback_failure(parser: Parser,
-                                failure: value): ffi.titan_ffi_int
+                                failure: value): int
   parser.callback_failed = true
   parser.callback_error = failure
-  return llhttp.HPE_USER as ffi.titan_ffi_int
+  return llhttp.HPE_USER as int
 end
 
 local function append_text_event(parser: Parser, kind: integer,
-                                 pointer: const *ffi.titan_ffi_char,
-                                 length: llhttp.size_t): ffi.titan_ffi_int
+                                 pointer: const *char,
+                                 length: llhttp.size_t): int
   do
     parser.events[#parser.events + 1] =
       event(kind, native_bytes(pointer, length as integer))
-    return llhttp.HPE_OK as ffi.titan_ffi_int
+    return llhttp.HPE_OK as int
   catch
     return callback_failure(parser, error)
   end
 end
 
 local function url_callback(parser: Parser,
-                            pointer: const *ffi.titan_ffi_char,
-                            length: llhttp.size_t): ffi.titan_ffi_int
+                            pointer: const *char,
+                            length: llhttp.size_t): int
   return append_text_event(parser, EVENT_URL, pointer, length)
 end
 
 local function status_callback(parser: Parser,
-                               pointer: const *ffi.titan_ffi_char,
-                               length: llhttp.size_t): ffi.titan_ffi_int
+                               pointer: const *char,
+                               length: llhttp.size_t): int
   return append_text_event(parser, EVENT_STATUS, pointer, length)
 end
 
 local function header_field_callback(
-    parser: Parser, pointer: const *ffi.titan_ffi_char,
-    length: llhttp.size_t): ffi.titan_ffi_int
+    parser: Parser, pointer: const *char,
+    length: llhttp.size_t): int
   return append_text_event(parser, EVENT_HEADER_FIELD, pointer, length)
 end
 
 local function header_value_callback(
-    parser: Parser, pointer: const *ffi.titan_ffi_char,
-    length: llhttp.size_t): ffi.titan_ffi_int
+    parser: Parser, pointer: const *char,
+    length: llhttp.size_t): int
   return append_text_event(parser, EVENT_HEADER_VALUE, pointer, length)
 end
 
 local function header_value_complete_callback(
-    parser: Parser): ffi.titan_ffi_int
+    parser: Parser): int
   do
     parser.events[#parser.events + 1] =
       event(EVENT_HEADER_VALUE_COMPLETE, "")
-    return llhttp.HPE_OK as ffi.titan_ffi_int
+    return llhttp.HPE_OK as int
   catch
     return callback_failure(parser, error)
   end
 end
 
 local function headers_complete_callback(
-    parser: Parser): ffi.titan_ffi_int
+    parser: Parser): int
   do
     parser.events[#parser.events + 1] = Event.new {
       kind = EVENT_HEADERS_COMPLETE,
@@ -286,21 +286,21 @@ local function headers_complete_callback(
     }
     -- llhttp's documented return 1 makes a response to HEAD bodyless. Its
     -- message-complete callback is still the synchronous pause boundary.
-    if parser.response_to_head then return 1 as ffi.titan_ffi_int end
-    return llhttp.HPE_PAUSED as ffi.titan_ffi_int
+    if parser.response_to_head then return 1 as int end
+    return llhttp.HPE_PAUSED as int
   catch
     return callback_failure(parser, error)
   end
 end
 
 local function body_callback(parser: Parser,
-                             pointer: const *ffi.titan_ffi_char,
-                             length: llhttp.size_t): ffi.titan_ffi_int
+                             pointer: const *char,
+                             length: llhttp.size_t): int
   return append_text_event(parser, EVENT_BODY, pointer, length)
 end
 
 local function message_complete_callback(
-    parser: Parser): ffi.titan_ffi_int
+    parser: Parser): int
   do
     parser.events[#parser.events + 1] = Event.new {
       kind = EVENT_MESSAGE_COMPLETE,
@@ -312,7 +312,7 @@ local function message_complete_callback(
       keep_alive = llhttp.llhttp_should_keep_alive(parser.native) ~= 0,
       upgrade = false,
     }
-    return llhttp.HPE_PAUSED as ffi.titan_ffi_int
+    return llhttp.HPE_PAUSED as int
   catch
     return callback_failure(parser, error)
   end
@@ -372,7 +372,7 @@ local function new_parser(connection: io.ReaderWriterCloser,
     closed = false,
   }
   llhttp.llhttp_init(native, parser_type, settings)
-  native.data = parser as ffi.titan_ffi_void_ptr
+  native.data = parser as *void
   return parser
 end
 
@@ -463,7 +463,7 @@ local function execute_input(parser: Parser, input: string)
   -- event construction, and consumed-suffix copying have all finished.
   ffi.lua_pushtvalue(L, input)
   defer lua.lua_settop(L, top)
-  local bytes = input as const *ffi.titan_ffi_char
+  local bytes = input as const *char
   local status = llhttp.llhttp_execute(
     parser.native, bytes, #input as llhttp.size_t)
   parser.last_error = status as integer

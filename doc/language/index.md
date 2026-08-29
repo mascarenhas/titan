@@ -75,7 +75,7 @@ use the chapters below for the normative language reference.
 | [Lua interoperability](lua-interop.md) | Using Titan from Lua and Lua values in Titan: what crosses the boundary, what each type looks like on the other side, and where the run-time checks happen. |
 | [Error handling](error-handling.md) | The run-time error model: what raises errors, error messages, `pcall`, `titan.backtrace()`, and the option-type idiom for recoverable failures. |
 | [Coroutines](coroutines.md) | The `coroutine` standard module (`import "coroutine"` from Titan, `require "titan.coroutine"` from Lua): stackful asymmetric coroutines, tagged nested yield, error injection, status, and Lua interop. |
-| [Asynchronous I/O and tasks](async-io.md) | Nonblocking Tasks, structured terminal statuses and errors, closeable bounded FIFO channels and string Reader/Writer adapters, terminal listeners, token-guarded explicit suspension/resume, fixed-arity any/race/all/join combinators, loop driving, cancellation, and final libuv-handle cleanup. |
+| [Asynchronous I/O and tasks](async-io.md) | Nonblocking Tasks, structured terminal statuses and errors, blocking foreign calls through the libuv worker pool, closeable bounded FIFO channels and string Reader/Writer adapters, terminal listeners, token-guarded explicit suspension/resume, fixed-arity any/race/all/join combinators, loop driving, cancellation, and final libuv-handle cleanup. |
 | [I/O standard library](standard-library-io.md) | The seven `Reader`/`Writer`/`Closer` Interface combinations, standard-output `print`, ownership-safe line iteration, and shell-command `popen` with merged output. |
 | [Timer standard library](standard-library-timer.md) | Task delays, cooperative `yield`, recurring `Ticker` handles, dropped ticks, and explicit close. |
 | [Mathematical standard library](standard-library-math.md) | Typed C99 numeric operations, Lua 5.5-compatible xoshiro256** random sequences, and length-bounded numeric conversion. |
@@ -171,9 +171,10 @@ remains rejected.
 * **The FFI imports real C types, fields, arrays and owned objects**, and
   is the one place Titan's safety guarantees end — a C function can misuse
   memory and crash the process, and a Titan `string` handed to a C
-  function that frees or stores it corrupts the heap. Imported C types are
-  distinct from Titan types, can be used in local annotations, and support
-  regular `as <type>` casts; they cannot be exported from Titan modules.
+  function that frees or stores it corrupts the heap. Contextual C primitives
+  are distinct from Titan scalars and can form portable public pointer,
+  function-pointer, and owned graphs. Header-imported C types support local
+  annotations and regular `as <type>` casts but cannot be exported.
   C arrays are 0-based (`T[N]` bounds-checked, pointers unchecked, counted
   owned arrays dynamically checked), `#` works for static/count-owned arrays,
   and struct/union fields can be read and written. Direct local `.new()` /

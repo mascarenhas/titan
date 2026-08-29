@@ -1489,6 +1489,52 @@ local function dense_plain_list_length(value)
     return dense_array_length(value)
 end
 
+local portable_c_descriptor_fields = {
+    ["Type.CVoid"] = {
+        _tag = true,
+    },
+    ["Type.CInteger"] = {
+        _tag = true,
+        spelling = true,
+        signed = true,
+        rank = true,
+        bits = true,
+    },
+    ["Type.CFloat"] = {
+        _tag = true,
+        spelling = true,
+    },
+    ["Type.CPointer"] = {
+        _tag = true,
+        pointee = true,
+        quals = true,
+    },
+    ["Type.CFunction"] = {
+        _tag = true,
+        params = true,
+        ret = true,
+        vararg = true,
+        abi = true,
+    },
+    ["Type.COwned"] = {
+        _tag = true,
+        pointee = true,
+        count = true,
+    },
+}
+
+local function validate_portable_c_descriptor_fields(typ)
+    local allowed = portable_c_descriptor_fields[typ._tag]
+    if not allowed then return true end
+    for key in pairs(typ) do
+        if not allowed[key] then
+            return nil, typ._tag .. " contains unexpected field " ..
+                string.format("%q", tostring(key))
+        end
+    end
+    return true
+end
+
 local validate_interface_type
 
 local function valid_source_identifier(name)
@@ -1881,6 +1927,10 @@ local function validate_record_interface(record, context, seen)
         local ok, err = validate_interface_type(
             field.type, value_context(owner_context), seen)
         if not ok then return nil, err end
+        if not types.has_tvalue_representation(field.type) then
+            return nil, "record field '" .. field.name ..
+                "' has no TValue representation"
+        end
     end
     local ok, err = validate_nominal_member_maps(
         record, seen, owner_context)
@@ -1982,6 +2032,11 @@ local function validate_union_interface(union, context, seen)
             validation = context.validation,
         }, seen)
         if not ok then return nil, err end
+        if variant.payload ~= false
+           and not types.has_tvalue_representation(variant.payload) then
+            return nil, "union variant '" .. variant.name ..
+                "' payload has no TValue representation"
+        end
     end
     for key, variant in pairs(union.variants) do
         if type(key) == "string" and names[key] ~= variant then
@@ -2056,6 +2111,10 @@ local function validate_declared_interface(interface, context, seen)
         local ok, err = validate_interface_type(
             field.type, value_context(owner_context), seen)
         if not ok then return nil, err end
+        if not types.has_tvalue_representation(field.type) then
+            return nil, "interface field '" .. field.name ..
+                "' has no TValue representation"
+        end
     end
     for _, method in ipairs(interface.methods) do
         if type(method.paramnames) ~= "table" then
@@ -2246,7 +2305,10 @@ validate_interface_type = function(typ, context, seen)
     if type(typ) ~= "table" or type(typ._tag) ~= "string" then
         return nil, "type graph contains an invalid descriptor"
     end
-    if typ._source_complete ~= nil or typ._ffi_scope ~= nil then
+    if typ._source_complete ~= nil or typ._ffi_scope ~= nil
+       or typ._c_numeric ~= nil or typ._c_numeric_carriers ~= nil
+       or typ._c_enum_identity ~= nil or typ._c_origin_header ~= nil
+       or typ._return_declaration_qualifiers ~= nil then
         return nil, "type graph contains compiler-only source state"
     end
     local tag = typ._tag
@@ -2288,11 +2350,88 @@ validate_interface_type = function(typ, context, seen)
         -- descriptor legal in a value-facing position.
         return nil, tag .. " is not valid in a value-facing type graph"
     end
+    local exact_fields, fields_error =
+        validate_portable_c_descriptor_fields(typ)
+    if not exact_fields then return nil, fields_error end
     if mark_validation_seen(seen, typ, context) then return true end
     if tag == "Type.Nil" or tag == "Type.Boolean"
        or tag == "Type.Integer" or tag == "Type.Float"
        or tag == "Type.String" or tag == "Type.Value" then
         return true
+    elseif tag == "Type.CVoid" then
+        if not context or (context.kind ~= "c-pointee"
+                           and context.kind ~= "c-return"
+                           and context.kind ~= "type-member") then
+            return nil, "C void is not valid as a value-facing type"
+        end
+        return true
+    elseif tag == "Type.CInteger" or tag == "Type.CFloat" then
+        if not types.is_portable_c_primitive(typ) then
+            return nil, "C primitive type is outside the portable surface set"
+        end
+        return true
+    elseif tag == "Type.CPointer" then
+        local qualifier_count = dense_plain_list_length(typ.quals)
+        local pointee_tag = type(typ.pointee) == "table"
+            and typ.pointee._tag
+        if not qualifier_count or qualifier_count > 1
+           or (qualifier_count == 1 and typ.quals[1] ~= "const")
+           or (pointee_tag ~= "Type.CVoid"
+               and pointee_tag ~= "Type.CInteger"
+               and pointee_tag ~= "Type.CFloat"
+               and pointee_tag ~= "Type.CPointer"
+               and pointee_tag ~= "Type.CFunction") then
+            return nil, "portable C pointer has a noncanonical shape"
+        end
+        local nested = value_context(context)
+        nested.kind = "c-pointee"
+        local valid, validation_error =
+            validate_interface_type(typ.pointee, nested, seen)
+        if not valid then return nil, validation_error end
+        if not types.is_portable_c_type_graph(typ) then
+            return nil,
+                "portable C pointer graph is cyclic or noncanonical"
+        end
+        return true
+    elseif tag == "Type.CFunction" then
+        if not context or context.kind ~= "c-pointee"
+           or dense_plain_list_length(typ.params) == nil
+           or type(typ.ret) ~= "table"
+           or typ.vararg ~= false or typ.abi ~= false then
+            return nil, "portable C function has a noncanonical shape"
+        end
+        local nested = value_context(context)
+        nested.kind = "c-parameter"
+        for _, param in ipairs(typ.params) do
+            if type(param) ~= "table"
+               or (param._tag ~= "Type.CInteger"
+                   and param._tag ~= "Type.CFloat"
+                   and param._tag ~= "Type.CPointer") then
+                return nil, "portable C function parameter has an invalid shape"
+            end
+            local ok, err = validate_interface_type(param, nested, seen)
+            if not ok then return nil, err end
+        end
+        nested.kind = "c-return"
+        if typ.ret._tag ~= "Type.CVoid"
+           and typ.ret._tag ~= "Type.CInteger"
+           and typ.ret._tag ~= "Type.CFloat"
+           and typ.ret._tag ~= "Type.CPointer" then
+            return nil, "portable C function return has an invalid shape"
+        end
+        return validate_interface_type(typ.ret, nested, seen)
+    elseif tag == "Type.COwned" then
+        local pointee_tag = type(typ.pointee) == "table"
+            and typ.pointee._tag
+        if type(typ.count) ~= "boolean"
+           or (pointee_tag ~= "Type.CInteger"
+               and pointee_tag ~= "Type.CFloat"
+               and pointee_tag ~= "Type.CPointer") then
+            return nil, "portable owned C type has a noncanonical shape"
+        end
+        local nested = value_context(context)
+        nested.kind = "c-owned-payload"
+        return validate_interface_type(typ.pointee, nested, seen)
     elseif tag == "Type.Nominal" then
         local argument_count = dense_plain_list_length(typ.args)
         if not valid_qualified_nominal_name(typ.fqtn) then
@@ -2537,6 +2676,11 @@ function driver.validate_module_interface(modtype, modname)
             return nil, "module member '" .. member.name ..
                 "' has an invalid type graph: " .. type_err
         end
+        if member._tag == "Type.ModuleVariable"
+           and not types.has_tvalue_representation(member.type) then
+            return nil, "module variable '" .. member.name ..
+                "' has no TValue representation"
+        end
         if member._tag == "Type.ModuleMember"
            and member.type._tag ~= "Type.Function"
            and member.type._tag ~= "Type.FunctionScheme"
@@ -2564,7 +2708,7 @@ function driver.validate_module_interface(modtype, modname)
             and "interface-type-member"
             or member._tag == "Type.GenericAlias"
                 and "generic-alias-type-member"
-                or "value"
+                or "type-member"
         local context = {
             kind = kind,
             modname = modname,

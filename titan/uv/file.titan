@@ -145,7 +145,7 @@ local function new_fs_request(task: Task,
   local owner = uv_fs_t.new(native, callback)
   local request: *libuv.uv_fs_t = native
   libuv.uv_req_set_data(request as *libuv.uv_req_t,
-                        owner as ffi.titan_ffi_void_ptr)
+                        owner as *void)
   task.pending = owner
   return owner
 end
@@ -267,15 +267,15 @@ local function FsOpenCall:dispatch(task: Task): Immediate?
     loop = task.runtime.loop,
     req = owner.handle,
     path = self.path,
-    flags = self.flags as ffi.titan_ffi_int,
-    mode = 438 as ffi.titan_ffi_int,
+    flags = self.flags as int,
+    mode = 438 as int,
     cb = uv_fs_cb,
   }
   return submitted_fs_request(task, owner, status, "fs.open")
 end
 
 local function FsReadCall:dispatch(task: Task): Immediate?
-  local bytes = ffi.titan_ffi_char.new_array(self.maximum)
+  local bytes = char.new_array(self.maximum)
   local descriptor = libuv.uv_buf_t.new()
   descriptor.base = bytes
   descriptor.len = self.maximum as libuv.size_t
@@ -295,7 +295,7 @@ end
 
 local function FsWriteCall:dispatch(task: Task): Immediate?
   local descriptor = libuv.uv_buf_t.new()
-  local base: *ffi.titan_ffi_char = self.data
+  local base: *char = self.data
   descriptor.base = base + self.offset
   descriptor.len = (#self.data - self.offset) as libuv.size_t
   local owner = new_fs_request(
@@ -362,7 +362,7 @@ local function FsMkdirCall:dispatch(task: Task): Immediate?
     loop = task.runtime.loop,
     req = owner.handle,
     path = self.path,
-    mode = 511 as ffi.titan_ffi_int,
+    mode = 511 as int,
     cb = uv_fs_cb,
   }
   return submitted_fs_request(task, owner, status, "fs.mkdir")

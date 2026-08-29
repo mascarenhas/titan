@@ -550,9 +550,10 @@ recursively containing a forbidden shape are rejected. A typedef or Titan alias
 is normalized cycle-safely and qualifies only if its target does. A forbidden type hidden in
 an Option, container, callback component, or phantom generic argument is still
 rejected. Generics do not invent a pointer cast, bounds proof, lifetime proof,
-or FFI-to-`value` conversion to make an argument eligible. The ordinary rule
-that C-bearing types cannot be exported from a Titan module also remains in
-force; see [the C FFI](ffi.md).
+or FFI-to-`value` conversion to make an argument eligible. Exportability is a
+separate recursive rule: contextual C primitives and portable
+pointer/function/owned graphs may be public, while imported typedefs and other
+header-dependent descriptors cannot; see [the C FFI](ffi.md).
 
 ## Constraint erasure and run-time safety
 

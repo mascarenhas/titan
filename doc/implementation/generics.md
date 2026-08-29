@@ -698,8 +698,10 @@ The checker runs this predicate for every explicit and inferred binding before
 closing the use. This is intentionally stronger than
 `types.has_tvalue_representation`: lightuserdata alone cannot recover pointee
 type, bounds, or lifetime. No generic path broadens `value -> CPointer` or
-another FFI relation. Foreign functions remain non-generic, and the existing
-ban on C types in exported module surfaces remains independent.
+another FFI relation. Foreign functions remain non-generic. Exportability is a
+separate recursive check: contextual primitives and their portable
+pointer/function/owned closure are accepted, while imported typedefs and other
+header-dependent C descriptors remain forbidden.
 
 Raw C `TValue` needs no special API whitelist. Once a parameter erases to
 `value`, the focused ordinary pass selects the existing whole-slot

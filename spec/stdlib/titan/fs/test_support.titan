@@ -1,6 +1,5 @@
 -- Filesystem fixture ownership for fs.tests.
 local test = import "test"
-local ffi = foreign import "titan/ffi.h"
 local cstdlib = foreign import "stdlib.h"
 local cstring = foreign import "string.h"
 local native = foreign import "fixture_support.h"
@@ -18,12 +17,12 @@ end
 
 local function new_workspace(context: test.Context): string
   local pattern = "/tmp/titan-fs-test-XXXXXX"
-  local storage = ffi.titan_ffi_char.new_array(#pattern + 1)
-  cstring.memcpy(storage as *ffi.titan_ffi_char,
-                 pattern as const *ffi.titan_ffi_char,
+  local storage = char.new_array(#pattern + 1)
+  cstring.memcpy(storage as *char,
+                 pattern as const *char,
                  #pattern as cstring.size_t)
   storage[#pattern] = 0
-  local created = native.mkdtemp(storage as *ffi.titan_ffi_char)
+  local created = native.mkdtemp(storage as *char)
   test.assert(created, "could not create native workspace")
   local root = created as string
   cleanup_path(context, root)
@@ -64,8 +63,8 @@ end
 local function make_boundary_payload(): string
   local prefix_length = 65535
   local length = prefix_length + 6
-  local storage = ffi.titan_ffi_char.new_array(length)
-  cstring.memset(storage as *ffi.titan_ffi_char, 120,
+  local storage = char.new_array(length)
+  cstring.memset(storage as *char, 120,
                  prefix_length as cstring.size_t)
   storage[prefix_length] = 0
   storage[prefix_length + 1] = 89

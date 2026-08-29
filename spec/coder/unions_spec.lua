@@ -823,7 +823,7 @@ describe("unions (end-to-end)", function()
             local ffi = foreign import "titan/ffi.h"
             local lua = foreign import "lua.h"
 
-            local type Owner = owned ffi.titan_ffi_int[]
+            local type Owner = owned int[]
 
             local record Box
                 number: integer
@@ -844,7 +844,7 @@ describe("unions (end-to-end)", function()
                 callback: (integer) -> integer
                 boxed: value
                 maybe_text: string?
-                pointer: *ffi.titan_ffi_int
+                pointer: *int
                 owner: Owner
                 recursive: Payload?
                 raw: ffi.TValue
@@ -934,14 +934,14 @@ describe("unions (end-to-end)", function()
             end
 
             local function make_pointer(owner: Owner): Payload
-                local pointer: *ffi.titan_ffi_int = owner
+                local pointer: *int = owner
                 return Payload.pointer(pointer)
             end
 
             local function make_owner(): Payload
                 local owner: Owner =
-                    ffi.titan_ffi_int.new_array(1)
-                owner[0] = 12 as ffi.titan_ffi_int
+                    int.new_array(1)
+                owner[0] = 12 as int
                 return Payload.owner(owner)
             end
 
@@ -1046,8 +1046,8 @@ describe("unions (end-to-end)", function()
                 local boxed = make_boxed()
                 local maybe_text = make_maybe_text()
                 local pointer_owner: Owner =
-                    ffi.titan_ffi_int.new_array(1)
-                pointer_owner[0] = 11 as ffi.titan_ffi_int
+                    int.new_array(1)
+                pointer_owner[0] = 11 as int
                 local pointer = make_pointer(pointer_owner)
                 local owner = make_owner()
                 local recursive = make_recursive()

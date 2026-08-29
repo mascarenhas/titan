@@ -113,7 +113,7 @@ local UV_FOREIGN_CALLBACKS = {
         source = "titan/uv/runtime.titan",
         slot = 1,
         call = "entry(L, module, callback, owner, suggested_size, " ..
-            "buf as ffi.titan_ffi_void_ptr)"
+            "buf as *void)"
     },
     {
         name = "uv_read_cb",
@@ -132,7 +132,7 @@ local UV_FOREIGN_CALLBACKS = {
         source = "titan/uv/runtime.titan",
         slot = 1,
         call = "entry(L, module, callback, owner, " ..
-            "handle as ffi.titan_ffi_void_ptr)"
+            "handle as *void)"
     },
     {
         name = "uv_timer_cb",
@@ -145,7 +145,7 @@ local UV_FOREIGN_CALLBACKS = {
         source = "titan/uv/tcp.titan",
         slot = 1,
         call = "entry(L, module, callback, owner, status as lua.lua_Integer, " ..
-            "result as ffi.titan_ffi_void_ptr)"
+            "result as *void)"
     },
     {
         name = "uv_connect_cb",
@@ -163,6 +163,17 @@ local UV_FOREIGN_CALLBACKS = {
         name = "uv_connection_cb",
         source = "titan/uv/tcp.titan",
         slot = 3,
+        call = "entry(L, module, callback, owner, status as lua.lua_Integer)"
+    },
+    {
+        name = "uv_work_cb",
+        source = "titan/uv/work.titan",
+        worker = true,
+    },
+    {
+        name = "uv_after_work_cb",
+        source = "titan/uv/work.titan",
+        slot = 2,
         call = "entry(L, module, callback, owner, status as lua.lua_Integer)"
     },
 }
@@ -220,6 +231,7 @@ local DIRECT_LIBUV_CALLS = {
     "uv_is_closing",
     "uv_listen",
     "uv_pipe_init",
+    "uv_queue_work",
     "uv_read_start",
     "uv_read_stop",
     "uv_req_set_data",
@@ -710,7 +722,7 @@ describe("libuv Makefile configuration", function()
             "Task:cancel", "Task:resume",
         }, public_declarations("titan/uv/task.titan"))
         for _, contributor in ipairs({
-            "file", "os", "process", "runtime", "tcp",
+            "file", "os", "process", "runtime", "tcp", "work",
         }) do
             assert.same({}, public_declarations(
                 "titan/uv/" .. contributor .. ".titan"))
@@ -748,6 +760,7 @@ describe("libuv Makefile configuration", function()
         local async = read_file("titan/async.titan")
         for _, contract in ipairs({
             "function run<A, B>(func: () -> A): Task<A, B>",
+            "function run_foreign(f: foreign (*void) -> (), arg: *void)",
             "function running(): Task<value, value>",
             "type ResumeToken = uv.ResumeToken",
             "type SuspendCancelAction = () -> ()",
@@ -782,6 +795,12 @@ describe("libuv Makefile configuration", function()
         }) do
             assert.truthy(async:find(contract, 1, true), contract)
         end
+
+        local work = read_file("titan/uv/work.titan")
+        assert.truthy(work:find(
+            'if status == 0 then return nil end', 1, true))
+        assert.falsy(work:find(
+            'submitted(task, status, "async.run_foreign")', 1, true))
 
         local http = read_file("titan/http/server.titan")
         assert.truthy(http:find(
@@ -977,20 +996,37 @@ describe("libuv Makefile configuration", function()
                 local first = assert(source:find(marker, 1, true), marker)
                 local last = assert(source:find("\nend", first, true), marker)
                 local body = source:sub(first, last):gsub("%s+", " ")
-                assert.truthy(body:find(
-                    "owner.uv[" .. callback.slot .. "].uv", 1, true), body)
-                assert.truthy(body:find(
-                    "callback.upvalue[0]", 1, true), body)
-                assert.truthy(body:find(
-                    "callback.upvalue[2]", 1, true), body)
-                assert.truthy(body:find(
-                    "libuv.uv_loop_get_data", 1, true), body)
-                assert.falsy(body:find(
-                    "titan_ffi_pushudata", 1, true), body)
-                assert.truthy(body:find(
-                    callback.call, 1, true), body)
-                assert.truthy(body:find(
-                    "lua.lua_settop(L, top)", 1, true), body)
+                if callback.worker then
+                    for _, contract in ipairs({
+                        "libuv.uv_req_get_data",
+                        "carrier[1] as WorkFunction",
+                        "local arg = carrier[2]",
+                        "f(arg)",
+                    }) do
+                        assert.truthy(body:find(contract, 1, true), body)
+                    end
+                    for _, forbidden in ipairs({
+                        "carrier[0]", "owner.uv", "callback.upvalue",
+                        "libuv.uv_loop_get_data", "lua.", "ffi.",
+                    }) do
+                        assert.falsy(body:find(forbidden, 1, true), body)
+                    end
+                else
+                    assert.truthy(body:find(
+                        "owner.uv[" .. callback.slot .. "].uv", 1, true), body)
+                    assert.truthy(body:find(
+                        "callback.upvalue[0]", 1, true), body)
+                    assert.truthy(body:find(
+                        "callback.upvalue[2]", 1, true), body)
+                    assert.truthy(body:find(
+                        "libuv.uv_loop_get_data", 1, true), body)
+                    assert.falsy(body:find(
+                        "titan_ffi_pushudata", 1, true), body)
+                    assert.truthy(body:find(
+                        callback.call, 1, true), body)
+                    assert.truthy(body:find(
+                        "lua.lua_settop(L, top)", 1, true), body)
+                end
             end
             local expected = {}
             for _, callback in ipairs(UV_FOREIGN_CALLBACKS) do
@@ -1248,7 +1284,8 @@ describe("libuv Makefile configuration", function()
                 "titan/uv/uv.titan", "titan/uv/file.titan",
                 "titan/uv/os.titan", "titan/uv/process.titan",
                 "titan/uv/runtime.titan", "titan/uv/task.titan",
-                "titan/uv/tcp.titan", "titan/async.titan",
+                "titan/uv/tcp.titan", "titan/uv/work.titan",
+                "titan/async.titan",
                 "titan/timer.titan", "titan/io.titan", "titan/fs.titan",
                 "titan/net.titan", "titan/ssl.titan", "titan/url.titan",
                 "titan/http/http.titan", "titan/http/client.titan",
@@ -3718,10 +3755,12 @@ done
                     cleanup_pattern, 1, true), cleanup_pattern)
             end
             for _, native_build_contract in ipairs({
+                "spec/fixtures/stdlib/native/async_foreign_work.h",
+                "spec/fixtures/stdlib/native/async_foreign_work.c",
                 "spec/fixtures/stdlib/native/uv_stdio_probe.h",
                 "spec/fixtures/stdlib/native/uv_stdio_probe.c",
                 "spec/fixtures/stdlib/native/os_process_host_child.c",
-                "-X uv_stdio_probe.o",
+                "-X async_foreign_work.o uv_stdio_probe.o",
             }) do
                 assert.truthy(makefile:find(
                     native_build_contract, 1, true), native_build_contract)
@@ -4139,8 +4178,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 29, 29, 29, 28 }, shard_counts)
-            assert.equal(115, assigned_count)
+            assert.same({ 30, 29, 30, 28 }, shard_counts)
+            assert.equal(117, assigned_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")
@@ -4308,7 +4347,7 @@ done
 
             assert.equal(1, count_literal(sanitizer_job,
                 "make titan-stdlib-test-build"), sanitizer_job)
-            assert.equal(8, count_literal(sanitizer_job,
+            assert.equal(9, count_literal(sanitizer_job,
                 "make titan-stdlib-test-run"), sanitizer_job)
             for _, filter in ipairs({
                 "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
@@ -4317,6 +4356,7 @@ done
                 "TITAN_FILTER='test_fs_'",
                 "TITAN_FILTER='^uv%.task_tests%.'",
                 "TITAN_FILTER='^uv%.runtime_tests%.'",
+                "TITAN_FILTER='test_run_foreign_'",
                 "TITAN_FILTER='test_ssl_http_fresh_process_sanitizer_composition$'",
                 "TITAN_FILTER='test_peg_roots_and_releases_" ..
                 "titan_callback_patterns$'",

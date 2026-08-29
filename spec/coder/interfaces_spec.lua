@@ -109,8 +109,10 @@ describe("interfaces (end-to-end)", function()
         local ctx = { tlcontext = tlcontext }
         local expr = coder._owned_c_metatable_expr(ctx, owned)
         assert.truthy(expr:find("hvalue(&_mod->uv[", 1, true), expr)
+        local key = coder._owned_c_metatable_key(owned)
+        assert.equal(types.serialize(owned), key)
         assert.is_truthy(
-            tlcontext.owned_c_metatables[types.tostring(owned)])
+            tlcontext.owned_c_metatables[key])
     end)
 
     it("resolves mutable and const Array adapter identities via module upvalue slots",

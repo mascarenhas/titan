@@ -25,7 +25,7 @@ local type FsNoargCallbackEntry =
   foreign (*lua.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata) -> ()
 local type FsEventCallbackEntry =
   foreign (*lua.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
-           const *ffi.titan_ffi_char, lua.lua_Integer,
+           const *char, lua.lua_Integer,
            lua.lua_Integer) -> ()
 
 local record RealpathRequest
@@ -38,7 +38,7 @@ end
 
 local record WatchRegistration
   local handle: owned *libuv.uv_fs_event_t
-  local callback: (WatchRegistration, const *ffi.titan_ffi_char,
+  local callback: (WatchRegistration, const *char,
                    integer, integer) -> ()
   local runtime: uv.Runtime
   local path: string
@@ -71,9 +71,9 @@ foreign function fs_realpath_cb(request: *libuv.uv_fs_t)
 end
 
 foreign function fs_watcher_event_cb(handle: *libuv.uv_fs_event_t,
-                                      filename: const *ffi.titan_ffi_char,
-                                      events: ffi.titan_ffi_int,
-                                      status: ffi.titan_ffi_int)
+                                      filename: const *char,
+                                      events: int,
+                                      status: int)
   local native_handle = handle as *libuv.uv_handle_t
   local owner = libuv.uv_handle_get_data(native_handle) as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
@@ -302,7 +302,7 @@ local function RealpathRequest:finish()
       payload = uv.make_error(result, "fs.realpath")
     else
       local resolved = libuv.uv_fs_get_ptr(
-          self.handle) as const *ffi.titan_ffi_char
+          self.handle) as const *char
       payload = resolved as string
     end
   catch
@@ -334,7 +334,7 @@ function realpath(path: string): string
   defer cancel_action()
   request:root()
   libuv.uv_req_set_data((native as *libuv.uv_fs_t) as *libuv.uv_req_t,
-                        request as ffi.titan_ffi_void_ptr)
+                        request as *void)
   local status = libuv.uv_fs_realpath(
       runtime.loop, native, checked, fs_realpath_cb)
   if status < 0 then
@@ -446,7 +446,7 @@ end
 
 local function Watcher:receive_event(
     registration: WatchRegistration,
-    filename: const *ffi.titan_ffi_char,
+    filename: const *char,
     events: integer, status: integer)
   local copied: string? = nil
   if filename then copied = filename as string end
@@ -460,7 +460,7 @@ local function Watcher:new_registration(
   local runtime = self.runtime
   local native: owned *libuv.uv_fs_event_t = libuv.uv_fs_event_t.new()
   local callback = function (registration: WatchRegistration,
-                             filename: const *ffi.titan_ffi_char,
+                             filename: const *char,
                              events: integer, status: integer)
     do
       self:receive_event(registration, filename, events, status)
@@ -486,7 +486,7 @@ local function Watcher:new_registration(
   end
   local handle = (native as *libuv.uv_fs_event_t) as *libuv.uv_handle_t
   libuv.uv_handle_set_data(
-      handle, registration as ffi.titan_ffi_void_ptr)
+      handle, registration as *void)
   local start_status = libuv.uv_fs_event_start(
       native, fs_watcher_event_cb, path, 0)
   if start_status < 0 then

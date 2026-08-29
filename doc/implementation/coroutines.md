@@ -121,8 +121,8 @@ coerce C locals/formals to mutable pointer parameters. This is enough for
 
 ```lua
 local payload: ffi.TValue = nil
-local ok: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
-mco.mco_pop(source, ok, ffi.titan_ffi_int.sizeof)
+local ok: int = 0 as int
+mco.mco_pop(source, ok, int.sizeof)
 mco.mco_pop(source, payload, ffi.TValue.sizeof)
 ```
 

@@ -737,7 +737,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
             luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$INDEX].uv);
             lua_pop(L, 1);
         ]], {
-            NAME = c_string_literal(entry.name),
+            NAME = c_string_literal(entry.registry_key),
             DISPLAY = c_string_literal(entry.name),
             INDEX = c_integer_literal(entry.slot),
         }))
@@ -746,8 +746,9 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
     -- Function-type tags: a per-library `static const void*` each, declared up
     -- front (in $SIGS, ahead of any function body that references it) and set up
     -- in _init by publish-or-recover through the Lua registry. C-free function
-    -- types share registry keys across modules; C-bearing types are scoped to
-    -- the defining module because imported C type identity is module-local.
+    -- types share registry keys across modules. Portable C-bearing graphs use
+    -- their structural metadata identity; header-defined graphs remain scoped
+    -- to the defining module because imported C type identity is module-local.
     local initfunctags = {}
     for _, entry in ipairs(tlcontext.functag_list) do
         table.insert(sigs, "static const void *" .. entry.id .. ";")

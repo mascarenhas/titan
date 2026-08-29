@@ -83,7 +83,7 @@ Interface:
 3. records fixed parameter names for named calls;
 4. rejects duplicate/cross-kind member names and duplicate parameter names;
 5. checks every field and callable component with the ordinary type validator;
-6. rejects exported C FFI types and local nominal types; and
+6. rejects nonexportable C descriptors and local nominal types; and
 7. registers the completed descriptor under its fully qualified name in
    `types.registry`.
 
@@ -528,10 +528,13 @@ The driver's closed validator requires:
 - recursively valid value-facing parameter, result, input-tail, and
   flexible-result types.
 
-`Type.Interface`, `Type.Field`, and `Type.Method` descriptors are rejected in arbitrary
-value-facing positions in recovered metadata. The value graph is closed:
-error-recovery/no-value markers, nested modules, C FFI descriptors, legacy
-wrappers, and unknown tags are rejected as well. A recovered Titan function
+`Type.Interface`, `Type.Field`, and `Type.Method` descriptors are rejected in
+arbitrary value-facing positions in recovered metadata. The value graph is
+closed: error-recovery/no-value markers, nested modules, legacy wrappers,
+nonportable C FFI descriptors, and unknown tags are rejected. Contextual C
+primitives and recursively valid pointer, C-function, and owned descriptors
+are admitted only after their strict hostile-input schema is validated. A
+recovered Titan function
 type must carry the reserved `vararg=false` sentinel; typed variadics
 use `varargtype`, while C variadicity exists only on unexportable
 `Type.CFunction`. An Option cannot contain another Option or `value`, matching
@@ -541,10 +544,11 @@ record/union declarations; ordinary values, including function-valued
 variables, use `ModuleVariable`. Every nominal reference is a qualified
 `<module>.<type>` name, and recovered record field names remain disjoint from
 their static and method namespaces.
-The source checker prevents C FFI types and local nominals from being
-serialized in the first place; owner recovery applies the corresponding
-nominal-visibility check to imported signatures. The same decoder and
-validator serve DSO callable metadata and embedded archive metadata.
+The source checker prevents nonexportable C descriptors and local nominals
+from being serialized in the first place; owner recovery applies the
+corresponding nominal-visibility and portable-C checks to imported signatures.
+The same decoder and validator serve DSO callable metadata and embedded
+archive metadata.
 
 Recovered Interfaces are registered before their signature graph is walked.
 The loader then follows transitive nominal references through the existing

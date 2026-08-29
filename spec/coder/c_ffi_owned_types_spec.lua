@@ -355,7 +355,7 @@ describe("source-written owned C type code generation", function()
             local lua = foreign import "lua.h"
 
             local function temporary(size: integer): string
-                return ffi.titan_ffi_char.new_array(size) as string
+                return char.new_array(size) as string
             end
 
             function stress(generational: boolean): integer

@@ -4,6 +4,8 @@
 -- Copyright (C) 1994-2026 Lua.org, PUC-Rio. MIT terms are reproduced in
 -- LICENSES/lua-LICENSE.
 
+local type VoidPointer = *void
+
 local PACK_INT = 1
 local PACK_UINT = 2
 local PACK_FLOAT = 3
@@ -31,24 +33,24 @@ local record PackOption
 end
 
 local function host_is_little_endian(): boolean
-  local probe: ffi.titan_ffi_unsigned_int =
-    1 as ffi.titan_ffi_unsigned_int
-  local storage = ffi.titan_ffi_char.new_array(
-    ffi.titan_ffi_unsigned_int.sizeof as integer)
-  local bytes = storage as *ffi.titan_ffi_char
+  local probe: unsigned int =
+    1 as unsigned int
+  local storage = CChar.new_array(
+    unsigned int.sizeof as integer)
+  local bytes = storage as *char
   cstring.memcpy(
     bytes, probe, #storage as cstring.size_t)
-  local octets = bytes as *ffi.titan_ffi_unsigned_char
-  return octets[0] == (1 as ffi.titan_ffi_unsigned_char)
+  local octets = bytes as *unsigned char
+  return octets[0] == (1 as unsigned char)
 end
 
 local function native_maximum_alignment(): integer
-  local alignment = ffi.titan_ffi_long_double.alignof as integer
-  if ffi.titan_ffi_void_ptr.alignof > alignment then
-    alignment = ffi.titan_ffi_void_ptr.alignof as integer
+  local alignment = long double.alignof as integer
+  if VoidPointer.alignof > alignment then
+    alignment = VoidPointer.alignof as integer
   end
-  if ffi.titan_ffi_long_long.alignof > alignment then
-    alignment = ffi.titan_ffi_long_long.alignof as integer
+  if long long.alignof > alignment then
+    alignment = long long.alignof as integer
   end
   return alignment
 end
@@ -108,16 +110,16 @@ local function read_pack_option(state: PackState): PackOption
     return PackOption.new(PACK_UINT, 1, 0)
   elseif option == 104 then
     return PackOption.new(
-      PACK_INT, ffi.titan_ffi_short.sizeof as integer, 0)
+      PACK_INT, short.sizeof as integer, 0)
   elseif option == 72 then
     return PackOption.new(
-      PACK_UINT, ffi.titan_ffi_short.sizeof as integer, 0)
+      PACK_UINT, short.sizeof as integer, 0)
   elseif option == 108 then
     return PackOption.new(
-      PACK_INT, ffi.titan_ffi_long.sizeof as integer, 0)
+      PACK_INT, long.sizeof as integer, 0)
   elseif option == 76 then
     return PackOption.new(
-      PACK_UINT, ffi.titan_ffi_long.sizeof as integer, 0)
+      PACK_UINT, long.sizeof as integer, 0)
   elseif option == 106 then
     return PackOption.new(
       PACK_INT, lua.lua_Integer.sizeof as integer, 0)
@@ -129,26 +131,26 @@ local function read_pack_option(state: PackState): PackOption
       PACK_UINT, cstring.size_t.sizeof as integer, 0)
   elseif option == 102 then
     return PackOption.new(
-      PACK_FLOAT, ffi.titan_ffi_float.sizeof as integer, 0)
+      PACK_FLOAT, foreign float.sizeof as integer, 0)
   elseif option == 110 then
     return PackOption.new(
       PACK_NUMBER, lua.lua_Number.sizeof as integer, 0)
   elseif option == 100 then
     return PackOption.new(
-      PACK_DOUBLE, ffi.titan_ffi_double.sizeof as integer, 0)
+      PACK_DOUBLE, double.sizeof as integer, 0)
   elseif option == 105 then
     return PackOption.new(
       PACK_INT,
       checked_pack_integer_size(
         read_pack_number(
-          state, ffi.titan_ffi_int.sizeof as integer)),
+          state, int.sizeof as integer)),
       0)
   elseif option == 73 then
     return PackOption.new(
       PACK_UINT,
       checked_pack_integer_size(
         read_pack_number(
-          state, ffi.titan_ffi_int.sizeof as integer)),
+          state, int.sizeof as integer)),
       0)
   elseif option == 115 then
     return PackOption.new(
@@ -238,24 +240,24 @@ local function pack_integer_bytes(number: lua.lua_Integer,
                                   size: integer,
                                   little_endian: boolean,
                                   negative: boolean): string
-  local storage = ffi.titan_ffi_char.new_array(size)
+  local storage = CChar.new_array(size)
   local remaining = number as lua.lua_Unsigned
   local index = 0
   while index < size do
     local destination = size - index - 1
     if little_endian then destination = index end
-    local octet: ffi.titan_ffi_unsigned_char =
-      0 as ffi.titan_ffi_unsigned_char
+    local octet: unsigned char =
+      0 as unsigned char
     if index >= lua.lua_Integer.sizeof and negative then
-      octet = 255 as ffi.titan_ffi_unsigned_char
+      octet = 255 as unsigned char
     else
       octet =
         (remaining & (255 as lua.lua_Unsigned))
-          as ffi.titan_ffi_unsigned_char
+          as unsigned char
       remaining =
-        remaining >> (8 as ffi.titan_ffi_int)
+        remaining >> (8 as int)
     end
-    storage[destination] = octet as ffi.titan_ffi_char
+    storage[destination] = octet as char
     index = index + 1
   end
   return storage as string
@@ -279,7 +281,7 @@ local function check_unsigned_pack_range(number: lua.lua_Integer,
     local shift = size * 8
     local limit =
       (1 as lua.lua_Unsigned) <<
-      (shift as ffi.titan_ffi_int)
+      (shift as int)
     if (number as lua.lua_Unsigned) >= limit then
       raise "unsigned overflow"
     end
@@ -296,10 +298,10 @@ end
 local function pack_float_bytes(number: lua.lua_Number,
                                 little_endian: boolean,
                                 native_little_endian: boolean): string
-  local converted = number as ffi.titan_ffi_float
-  local storage = ffi.titan_ffi_char.new_array(
-    ffi.titan_ffi_float.sizeof as integer)
-  local output = storage as *ffi.titan_ffi_char
+  local converted = number as foreign float
+  local storage = CChar.new_array(
+    foreign float.sizeof as integer)
+  local output = storage as *char
   cstring.memcpy(
     output, converted, #storage as cstring.size_t)
   return ordered_native_bytes(
@@ -310,9 +312,9 @@ end
 local function pack_number_bytes(number: lua.lua_Number,
                                  little_endian: boolean,
                                  native_little_endian: boolean): string
-  local storage = ffi.titan_ffi_char.new_array(
+  local storage = CChar.new_array(
     lua.lua_Number.sizeof as integer)
-  local output = storage as *ffi.titan_ffi_char
+  local output = storage as *char
   cstring.memcpy(
     output, number, #storage as cstring.size_t)
   return ordered_native_bytes(
@@ -323,10 +325,10 @@ end
 local function pack_double_bytes(number: lua.lua_Number,
                                  little_endian: boolean,
                                  native_little_endian: boolean): string
-  local converted = number as ffi.titan_ffi_double
-  local storage = ffi.titan_ffi_char.new_array(
-    ffi.titan_ffi_double.sizeof as integer)
-  local output = storage as *ffi.titan_ffi_char
+  local converted = number as double
+  local storage = CChar.new_array(
+    double.sizeof as integer)
+  local output = storage as *char
   cstring.memcpy(
     output, converted, #storage as cstring.size_t)
   return ordered_native_bytes(
@@ -344,7 +346,7 @@ local function unpack_integer_bytes(data: string, position: integer,
                                     size: integer,
                                     little_endian: boolean,
                                     signed: boolean): lua.lua_Integer
-  local bytes = data as const *ffi.titan_ffi_unsigned_char
+  local bytes = data as const *unsigned char
   local limit = size
   if limit > lua.lua_Integer.sizeof then
     limit = lua.lua_Integer.sizeof as integer
@@ -353,7 +355,7 @@ local function unpack_integer_bytes(data: string, position: integer,
   local index = limit - 1
   while index >= 0 do
     result =
-      result << (8 as ffi.titan_ffi_int)
+      result << (8 as int)
     local source_index = size - index - 1
     if little_endian then source_index = index end
     result = result |
@@ -364,7 +366,7 @@ local function unpack_integer_bytes(data: string, position: integer,
   if size < lua.lua_Integer.sizeof and signed then
     local mask =
       (1 as lua.lua_Unsigned) <<
-      ((size * 8 - 1) as ffi.titan_ffi_int)
+      ((size * 8 - 1) as int)
     result = (result ~ mask) - mask
   elseif size > lua.lua_Integer.sizeof then
     local extension = 0
@@ -399,14 +401,14 @@ local function unpack_float_bytes(data: string, position: integer,
                                   native_little_endian: boolean):
                                   lua.lua_Number
   local bytes = native_ordered_slice(
-    data, position, ffi.titan_ffi_float.sizeof as integer,
+    data, position, foreign float.sizeof as integer,
     little_endian, native_little_endian)
-  local source = bytes as const *ffi.titan_ffi_char
-  local converted: ffi.titan_ffi_float =
-    0.0 as ffi.titan_ffi_float
+  local source = bytes as const *char
+  local converted: foreign float =
+    0.0 as foreign float
   cstring.memcpy(
     converted, source,
-    ffi.titan_ffi_float.sizeof as cstring.size_t)
+    foreign float.sizeof as cstring.size_t)
   return converted as lua.lua_Number
 end
 
@@ -417,7 +419,7 @@ local function unpack_number_bytes(data: string, position: integer,
   local bytes = native_ordered_slice(
     data, position, lua.lua_Number.sizeof as integer,
     little_endian, native_little_endian)
-  local source = bytes as const *ffi.titan_ffi_char
+  local source = bytes as const *char
   local converted: lua.lua_Number = 0.0 as lua.lua_Number
   cstring.memcpy(
     converted, source,
@@ -430,13 +432,13 @@ local function unpack_double_bytes(data: string, position: integer,
                                    native_little_endian: boolean):
                                    lua.lua_Number
   local bytes = native_ordered_slice(
-    data, position, ffi.titan_ffi_double.sizeof as integer,
+    data, position, double.sizeof as integer,
     little_endian, native_little_endian)
-  local source = bytes as const *ffi.titan_ffi_char
-  local converted: ffi.titan_ffi_double =
-    0.0 as ffi.titan_ffi_double
+  local source = bytes as const *char
+  local converted: double =
+    0.0 as double
   cstring.memcpy(
     converted, source,
-    ffi.titan_ffi_double.sizeof as cstring.size_t)
+    double.sizeof as cstring.size_t)
   return converted as lua.lua_Number
 end

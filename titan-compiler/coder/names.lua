@@ -591,20 +591,33 @@ end
 
 function owned_c_metatable_key(typ)
     assert(typ._tag == "Type.COwned")
+    if not types.first_non_exportable_type(typ) then
+        return types.serialize(typ)
+    end
     local scope = types.c_ffi_scope_key(typ)
     return (scope and scope .. "\0" or "") .. types.tostring(typ)
 end
+coder._owned_c_metatable_key = owned_c_metatable_key
 
 function owned_c_metatable(ctx, typ)
     local tlcontext = ctx.tlcontext or ctx
     local key = owned_c_metatable_key(typ)
     local entry = tlcontext.owned_c_metatables[key]
     if not entry then
-        local scope = types.c_ffi_scope_key(typ) or tlcontext.module
+        local portable = not types.first_non_exportable_type(typ)
+        local scope = portable and "portable"
+            or types.c_ffi_scope_key(typ) or tlcontext.module
+        local display = "Titan owned C " .. scope .. " "
+            .. types.tostring(typ) .. " metatable"
+        local registry_key = display
+        if portable then
+            registry_key = "Titan owned C portable "
+                .. types.serialize(typ) .. " metatable"
+        end
         entry = {
             slot = nextupvalue(tlcontext),
-            name = "Titan owned C " .. scope .. " "
-                .. types.tostring(typ) .. " metatable",
+            name = display,
+            registry_key = registry_key,
         }
         tlcontext.owned_c_metatables[key] = entry
     end
@@ -629,26 +642,33 @@ end
 -- function type, allocating one (numbered per module) on first use. Tags are
 -- keyed by the canonical type string and shared across all modules through the
 -- Lua registry (publish-or-recover, emitted in _init). C-bearing function types
--- additionally include their defining Titan module in the registry key because
--- imported C typedef identity is module-local; C-free types retain the shared
--- key so `(integer) -> integer` values keep their cross-module exact fast path.
+-- use one global portable-family key when their complete graph is made only of
+-- surface C99 descriptors. Header-defined typedef identity remains
+-- module-local and therefore carries its FFI scope. C-free types retain their
+-- original shared key so `(integer) -> integer` values keep their cross-module
+-- exact fast path.
 function coder._function_type_tag_cache_key(ftype, fallback_scope)
     local key = types.tostring(ftype)
-    local c_bearing = types.first_c_ffi_type(ftype) ~= nil
+    local c_bearing = types.contains_c_ffi_type(ftype)
     if not c_bearing then return "Titan\0" .. key end
+    if not types.first_non_exportable_type(ftype) then
+        return "C\0portable\0" .. types.serialize(ftype)
+    end
     local scope = types.c_ffi_scope_key(ftype) or fallback_scope or ""
     return "C\0" .. scope .. "\0" .. key
 end
 
 function function_type_tag(tlcontext, ftype --[[:table]])
     local key = types.tostring(ftype)
-    local c_bearing = types.first_c_ffi_type(ftype) ~= nil
+    local c_bearing = types.contains_c_ffi_type(ftype)
     -- The display spelling is not a structural identity: a C typedef named
     -- `integer`, for example, deliberately renders like Titan `integer`.
     -- Keep the two runtime ABI families in distinct local-cache buckets so a
     -- C-bearing callable can never reuse the native tag of a C-free callable
     -- merely because their diagnostics have the same text.
     local ffi_scope = types.c_ffi_scope_key(ftype)
+    local portable = c_bearing
+        and not types.first_non_exportable_type(ftype)
     local cache_key = coder._function_type_tag_cache_key(
         ftype, tlcontext.module)
     local entry = tlcontext.functags[cache_key]
@@ -657,7 +677,11 @@ function function_type_tag(tlcontext, ftype --[[:table]])
         tlcontext.functag_count = n + 1
         local registry_key = key
         if c_bearing then
-            registry_key = (ffi_scope or tlcontext.module) .. " " .. key
+            if portable then
+                registry_key = "portable " .. types.serialize(ftype)
+            else
+                registry_key = (ffi_scope or tlcontext.module) .. " " .. key
+            end
         end
         entry = {
             id = tlcontext.prefix .. "functag_" .. n,

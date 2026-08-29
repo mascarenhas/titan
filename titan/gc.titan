@@ -2,7 +2,7 @@ local lua = foreign import "lua.h"
 local cstddef = foreign import "stddef.h"
 local ffi = foreign import "titan/ffi.h"
 
-local function require_gc_result(result: ffi.titan_ffi_int): integer
+local function require_gc_result(result: int): integer
   if result < 0 then
     raise "garbage collector operation is unavailable"
   end
@@ -115,15 +115,15 @@ function count(): integer
   return kilobytes * 1024 + remaining_bytes
 end
 
-local function parameter(which: ffi.titan_ffi_int,
+local function parameter(which: int,
                          setting: integer?): integer
-  local configured = -1 as ffi.titan_ffi_int
+  local configured = -1 as int
   if setting then
     local supplied = setting as integer
     if supplied < 0 or supplied > 100000 then
       raise "garbage collector parameter must be between 0 and 100000"
     end
-    configured = supplied as ffi.titan_ffi_int
+    configured = supplied as int
   end
   return require_gc_result(lua.lua_gc(
     L, lua.LUA_GCPARAM, which, configured))

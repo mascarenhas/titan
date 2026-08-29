@@ -49,9 +49,9 @@ local function copy_interval(subject: string, first: integer,
                              count: integer): string
   if count == 0 then return "" end
   if count < 0 then raise "resulting string is too large" end
-  local storage = ffi.titan_ffi_char.new_array(count)
-  local output = storage as *ffi.titan_ffi_char
-  local source = subject as const *ffi.titan_ffi_char
+  local storage = CChar.new_array(count)
+  local output = storage as *char
+  local source = subject as const *char
   cstring.memcpy(output, source + first - 1,
                  count as cstring.size_t)
   return storage as string

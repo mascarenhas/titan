@@ -22,13 +22,13 @@ local type UvTwoIntegerCallbackEntry =
            lua.lua_Integer, lua.lua_Integer) -> ()
 local type UvSizePointerCallbackEntry =
   foreign (*lua.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
-           libuv.size_t, ffi.titan_ffi_void_ptr) -> ()
+           libuv.size_t, *void) -> ()
 local type UvIntegerPointerCallbackEntry =
   foreign (*lua.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
-           lua.lua_Integer, ffi.titan_ffi_void_ptr) -> ()
+           lua.lua_Integer, *void) -> ()
 local type UvPointerCallbackEntry =
   foreign (*lua.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
-           ffi.titan_ffi_void_ptr) -> ()
+           *void) -> ()
 
 -- titan.uv is deliberately a thin callback/continuation adapter. There is one
 -- tag identity per module instance and one outer uv_run driver per Runtime.
@@ -76,11 +76,11 @@ local function setup_program_args(): boolean
   defer lua.lua_settop(L, top)
   lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGC_KEY)
   if lua.lua_type(L, -1) == lua.LUA_TNIL then return false end
-  local argc = lua.lua_tointegerx(L, -1, nil) as ffi.titan_ffi_int
+  local argc = lua.lua_tointegerx(L, -1, nil) as int
   lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGV_KEY)
-  local argv = lua.lua_touserdata(L, -1) as *ffi.titan_ffi_char_ptr
+  local argv = lua.lua_touserdata(L, -1) as **char
   local configured = libuv.uv_setup_args(argc, argv)
-  lua.lua_pushlightuserdata(L, configured as ffi.titan_ffi_void_ptr)
+  lua.lua_pushlightuserdata(L, configured as *void)
   lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGV_KEY)
   return true
 end
