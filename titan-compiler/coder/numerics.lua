@@ -2,9 +2,6 @@ local core = require "titan-compiler.coder.core"
 local _ENV = core
 
 function coder._resolve_cast_type(typ)
-    -- `Type.Typedef` is the legacy scalar typedef representation retained by
-    -- a few compiler paths; current C imports use `Type.CTypedef`.
-    while typ and typ._tag == "Type.Typedef" do typ = typ._type end
     return types.resolve_c_typedef(typ)
 end
 
@@ -991,8 +988,7 @@ function coder._codeis(ctx, node)
         -- an underlying GC object.
         predicate = render("iscollectable(&$SOURCE)", { SOURCE = source })
         predicate_stats = ""
-    elseif (source_type._tag == "Type.CPointer"
-            or source_type._tag == "Type.Pointer")
+    elseif source_type._tag == "Type.CPointer"
            and target_type._tag == "Type.String" then
         predicate = render("($SOURCE != NULL)", { SOURCE = source })
         predicate_stats = ""

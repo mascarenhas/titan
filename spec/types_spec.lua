@@ -1002,24 +1002,6 @@ describe("Titan types", function()
                     types.CTypedef("third", cint)))
             assert.is_true(types.normalize(aliases) == cint)
 
-            local legacy = {
-                _tag = "Type.Typedef",
-                name = "legacy",
-                _type = {
-                    _tag = "Type.Typedef",
-                    name = "older",
-                    _type = types.Integer(),
-                },
-            }
-            assert.equal("Type.Integer", types.normalize(legacy)._tag)
-
-            local cycle = {
-                _tag = "Type.Typedef",
-                name = "cycle",
-            }
-            cycle._type = cycle
-            assert.is_nil(types.normalize(cycle))
-
             local qualified =
                 types.CTypedef("const_int", cint, {"const"})
             assert.is_true(types.normalize(qualified) == cint)
@@ -1027,18 +1009,6 @@ describe("Titan types", function()
 
         it("keeps relation classifications invariant under long aliases",
         function()
-            local function legacy_chain(base)
-                local result = base
-                for index = 1, 64 do
-                    result = {
-                        _tag = "Type.Typedef",
-                        name = "legacy_" .. index,
-                        _type = result,
-                    }
-                end
-                return result
-            end
-
             local function c_chain(base)
                 local result = base
                 for index = 1, 64 do
@@ -1053,34 +1023,8 @@ describe("Titan types", function()
                 return (result.kind or "") .. ":" .. (result.op or "")
             end
 
-            local i, f, v =
-                types.Integer(), types.Float(), types.Value()
-            local alias_i = legacy_chain(i)
-            assert.is_true(types.normalize(alias_i) == i)
-            assert.equal(types.has_tvalue_representation(i),
-                types.has_tvalue_representation(alias_i))
-            assert.equal(types.has_sound_gradual_guard(i),
-                types.has_sound_gradual_guard(alias_i))
-            assert.equal(types.consistent(i, v),
-                types.consistent(alias_i, v))
-            assert.equal(classification(types.gradual_guard(i)),
-                classification(types.gradual_guard(alias_i)))
-            assert.equal(classification(types.dynamic_coercion(i)),
-                classification(types.dynamic_coercion(alias_i)))
-            assert.equal(classification(types.coercion(i, f)),
-                classification(types.coercion(alias_i, f)))
-            assert.equal(classification(types.written_cast(v, i)),
-                classification(types.written_cast(v, alias_i)))
-            assert.equal(classification(types.comparable(i, v)),
-                classification(types.comparable(alias_i, v)))
-            assert.equal(classification(
-                types.assignment_adjustment(i, v)),
-                classification(
-                    types.assignment_adjustment(alias_i, v)))
-            assert.equal(classification(types.callable_adjustment(
-                    fn({i}), fn({v}))),
-                classification(types.callable_adjustment(
-                    fn({alias_i}), fn({v}))))
+            local i, v =
+                types.Integer(), types.Value()
 
             local ci = types.CInteger("int", true, 3, 32)
             local alias_ci = c_chain(ci)
@@ -1102,22 +1046,12 @@ describe("Titan types", function()
         end)
 
         it("rejects cyclic alias graphs in every new relation", function()
-            local legacy_a = {
-                _tag = "Type.Typedef",
-                name = "legacy_a",
-            }
-            local legacy_b = {
-                _tag = "Type.Typedef",
-                name = "legacy_b",
-            }
-            legacy_a._type, legacy_b._type = legacy_b, legacy_a
-
             local c_a = types.CTypedef("c_a", false)
             local c_b = types.CTypedef("c_b", c_a)
             c_a.target = c_b
 
             local i, v = types.Integer(), types.Value()
-            for _, cycle in ipairs({legacy_a, legacy_b, c_a, c_b}) do
+            for _, cycle in ipairs({c_a, c_b}) do
                 assert.is_nil(types.normalize(cycle))
                 assert.is_false(
                     types.has_tvalue_representation(cycle))
@@ -1256,7 +1190,6 @@ describe("Titan types", function()
             for _, typ in ipairs({
                     types.Nil(), types.Value(),
                     types.Option(types.Integer()),
-                    {_tag = "Type.Pointer", type = types.Integer()},
                     types.CPointer(cint, {}),
                 }) do
                 assert.is_true(types.accepts_missing_nil(typ),
@@ -1615,17 +1548,12 @@ describe("Titan types", function()
         it("nil-fills only directly nil-accepting missing results",
         function()
             local i = types.Integer()
-            local titan_pointer = {
-                _tag = "Type.Pointer",
-                type = types.Nil(),
-            }
             local c_pointer = types.CPointer(
                 types.CInteger("int", true, 3, 32), {})
             local admitted = {
                 types.Nil(),
                 types.Value(),
                 types.Option(i),
-                titan_pointer,
                 c_pointer,
             }
             for index, expected in ipairs(admitted) do
@@ -2717,10 +2645,6 @@ describe("Titan types", function()
                 types.CPointer(cint(), {})
             local function_pointer = types.CPointer(
                 types.CFunction({cint()}, cint(), false, "cdecl"), {})
-            local legacy_pointer = {
-                _tag = "Type.Pointer",
-                type = types.Nil(),
-            }
 
             for _, gc_type in ipairs({
                 record,
@@ -2750,12 +2674,6 @@ describe("Titan types", function()
                     void_pointer, function_pointer)).conversion.op)
             assert.falsy(types.coercion(
                 void_pointer, function_pointer))
-            assert.equal("legacy_pointer_to_c_void",
-                assert(types.written_cast(
-                    legacy_pointer, void_pointer)).conversion.op)
-            assert.falsy(types.coercion(
-                legacy_pointer, void_pointer))
-
             -- String keeps its established implicit byte-buffer conversion,
             -- rather than participating in the GC-identity conversion.
             assert.equal("string_to_c_pointer",
@@ -2872,13 +2790,6 @@ describe("Titan types", function()
                 mismatched, profile)
             assert.is_nil(ok)
             assert.match("disagrees with the selected target profile", err)
-        end)
-
-        it("pretty-prints legacy C struct and union placeholders", function()
-            assert.same("struct ffi_point",
-                types.tostring({ _tag = "Struct", name = "ffi_point" }))
-            assert.same("union ffi_value",
-                types.tostring({ _tag = "Union", name = "ffi_value" }))
         end)
 
         it("treats owned C pointers as GC values, but C modules as non-values", function()
@@ -3425,31 +3336,9 @@ describe("Titan types", function()
             assert.equal("sample.Show", types.tostring(types.erase(
                 types.TypeParameter(
                     "T", types.Nominal("sample.Show")))))
-
-            local legacy_alias = {
-                _tag = "Type.Typedef",
-                name = "legacy",
-                _type = rigid,
-            }
-            local rewritten_legacy = types.substitute(
-                legacy_alias, generic_scope, {types.Integer()})
-            assert.is_false(rewritten_legacy == legacy_alias)
-            assert.equal("legacy", rewritten_legacy.name)
-            assert.equal("Type.Integer", rewritten_legacy._type._tag)
-            assert.equal("Type.Parameter", legacy_alias._type._tag)
-
-            local legacy_struct = {_tag = "Struct", name = "Legacy"}
-            assert.is_true(types.erase(legacy_struct) == legacy_struct)
         end)
 
         it("rejects malformed generic rewrites and callable tails", function()
-            local integer_alias = {
-                _tag = "Type.Typedef",
-                name = "integer_alias",
-                _type = types.Integer(),
-            }
-            assert.is_true(types.valid_varg_element(integer_alias))
-
             local pointer = types.CPointer(
                 types.CInteger("int", true, 3, 32), {})
             assert.has_error(function()
@@ -3472,9 +3361,6 @@ describe("Titan types", function()
                 types.erase(types.Function(
                     {}, {}, true, false, false))
             end, "Type.Function reserved vararg field must be false")
-            assert.has_error(function()
-                types.erase({_tag = "Type.Unknown"})
-            end, "unsupported tag in generic type rewrite: Type.Unknown")
         end)
 
         it("recognizes aliased owned payloads and generic callable tails",
@@ -3502,23 +3388,16 @@ describe("Titan types", function()
             local generic_scope = scope("tail")
             local rigid = types.Parameter(
                 generic_scope, 1, "T", false)
-            local integer_alias = {
-                _tag = "Type.Typedef",
-                name = "integer_alias",
-                _type = types.Integer(),
-            }
             local tvalue = types.CStruct(
                 "TValue", "TValue", false, {}, false, false)
             for _, tail in ipairs({
                 rigid,
-                integer_alias,
                 types.Option(types.Integer()),
                 tvalue,
             }) do
                 assert.is_true(types.transient_roundtrip(
                     types.Function({}, {}, false, tail, false)))
             end
-            assert.is_true(types.transient_roundtrip(integer_alias))
             assert.is_false(types.transient_roundtrip(
                 types.Nominal("sample.Malformed", {false})))
         end)

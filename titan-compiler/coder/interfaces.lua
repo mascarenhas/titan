@@ -1306,8 +1306,7 @@ function coder._interface_adapter_nil_fill(typ, destination)
         return "setnilvalue(&" .. destination .. ");"
     elseif typ._tag == "Type.Nil" then
         return destination .. " = 0;"
-    elseif typ._tag == "Type.Pointer"
-           or typ._tag == "Type.CPointer" then
+    elseif typ._tag == "Type.CPointer" then
         return destination .. " = NULL;"
     end
     error("Interface adapter cannot nil-fill "

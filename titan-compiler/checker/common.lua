@@ -383,8 +383,7 @@ function check_varg_elem(t, loc, errors, role)
         checker.typeerror(errors, loc,
             "%s cannot have type nil", subject)
         return types.Invalid()
-    elseif t._tag == "Type.Pointer"
-           or types.resolve_c_typedef(t)._tag == "Type.CPointer" then
+    elseif types.resolve_c_typedef(t)._tag == "Type.CPointer" then
         checker.typeerror(errors, loc,
             "%s cannot have a foreign pointer type", subject)
         return types.Invalid()

@@ -346,13 +346,6 @@ local function is_c_tag(tag)
         and tag ~= "Type.CModule"
 end
 
-local legacy_c_tags = {
-    ["Type.Pointer"] = true,
-    ["Type.Typedef"] = true,
-    Struct = true,
-    Union = true,
-}
-
 local portable_c_integer_specs = {
     ["_Bool"] = { signed = false, rank = 0 },
     char = { rank = 1 },
@@ -552,7 +545,7 @@ function types.c_pointer_has_qual(t, wanted)
 end
 
 local function find_c_type(
-        t, include_legacy, descend_function_values, skip_portable)
+        t, descend_function_values, skip_portable)
     local function visit_type(typ, seen)
         if type(typ) ~= "table" then
             return nil
@@ -571,8 +564,6 @@ local function find_c_type(
                 return typ
             end
             return nil
-        elseif include_legacy and legacy_c_tags[tag] then
-            return typ
         end
 
         if tag == "Type.TypeParameter" then
@@ -730,11 +721,11 @@ local function find_c_type(
 end
 
 function types.first_c_type(t)
-    return find_c_type(t, false, false, false)
+    return find_c_type(t, false, false)
 end
 
 function types.first_non_exportable_type(t)
-    return find_c_type(t, true, true, true)
+    return find_c_type(t, true, true)
 end
 
 function types.is_c(t)
@@ -822,7 +813,7 @@ function types.is_c_array(t)
 end
 
 function types.contains_c_ffi_type(t)
-    return find_c_type(t, true, true, false) ~= nil
+    return find_c_type(t, true, false) ~= nil
 end
 
 
@@ -1155,7 +1146,7 @@ function types.mark_c_ffi_include(typ, include, seen)
         or tag == "Type.CArray" or tag == "Type.CFunction"
         or tag == "Type.CStruct" or tag == "Type.CUnion"
         or tag == "Type.CField" or tag == "Type.CTypedef"
-        or tag == "Type.COwned" or tag == "Type.Pointer"
+        or tag == "Type.COwned"
         or (tag == "Type.CInteger" and typ._c_enum_identity)
     if declaration_node and not typ._c_origin_header then
         typ._c_origin_header = include
@@ -1180,8 +1171,6 @@ function types.mark_c_ffi_include(typ, include, seen)
         types.mark_c_ffi_include(typ.target, include, seen)
     elseif tag == "Type.COwned" then
         types.mark_c_ffi_include(typ.pointee, include, seen)
-    elseif tag == "Type.Pointer" then
-        types.mark_c_ffi_include(typ.type, include, seen)
     end
 end
 
@@ -1215,35 +1204,12 @@ function types.c_ffi_includes(typ)
             visit(value.ret)
         elseif tag == "Type.CField" then
             visit(value.type)
-        elseif tag == "Type.Pointer" then
-            visit(value.type)
         end
         -- A retained C typedef, struct, union, or enum emits only its own
         -- spelling. Do not walk the hidden target or aggregate fields.
     end
     visit(typ)
     return includes
-end
-
---- Check if two pointer types are different and can be coerced.
-local function can_coerce_pointer(source, target)
-    if types.equals(source, target) then
-        return false
-    elseif target.type._tag == "Type.Nil" then
-        -- all pointers are convertible to void*
-        if source._tag == "Type.String" then
-            return true
-        elseif source.tag == "Type.Nil" then
-            return true
-        elseif source._tag == "Type.Pointer" then
-            return true
-        end
-    end
-    return false
-end
-
-local function is_void_pointer(typ)
-    return typ._tag == "Type.Pointer" and typ.type._tag == "Type.Nil"
 end
 
 local function resolved_c(t)
@@ -1557,15 +1523,9 @@ function types.is_counted_c_character_owner(t)
 end
 
 function types.is_pointer_to_string_cast(source, target)
-    return (is_void_pointer(source)
-            or is_c_void_pointer(source)
+    return (is_c_void_pointer(source)
             or is_c_char_pointer(source))
         and target._tag == "Type.String"
-end
-
-function types.is_legacy_pointer_to_c_void_cast(source, target)
-    return source._tag == "Type.Pointer"
-        and is_c_void_pointer(target)
 end
 
 function types.is_string_to_c_pointer_coercion(source, target)
@@ -1574,21 +1534,12 @@ function types.is_string_to_c_pointer_coercion(source, target)
              or is_c_void_pointer(target))
 end
 
-local function resolve_value_typedef(t)
-    local seen = {}
-    while t and t._tag == "Type.Typedef" and not seen[t] do
-        seen[t] = true
-        t = t._type
-    end
-    return resolved_c(t)
-end
-
 -- A written cast of one of these statically GC-backed Titan values to C
 -- `void *` exposes the address of its native representation object, not a
 -- payload buffer. Function values are TValue-backed and therefore need a
 -- runtime collectability check in the coder; arbitrary `value` is excluded.
 function types.is_gc_identity_void_pointer_cast(source, target)
-    source = resolve_value_typedef(source)
+    source = resolved_c(source)
     return is_c_void_pointer(target)
         and source
         and (source._tag == "Type.Array"
@@ -1623,9 +1574,7 @@ function types.has_tvalue_representation(t, seen)
     seen[t] = false
 
     local result
-    if t._tag == "Type.Typedef" then
-        result = types.has_tvalue_representation(t._type, seen)
-    elseif types.is_direct_c(t) then
+    if types.is_direct_c(t) then
         result = c_value_compatible(t)
     else
         local tag = t._tag
@@ -1665,7 +1614,7 @@ function types.is_truthy(typ)
             typ.erased_constraint))
     end
     return tag ~= "Type.Nil" and tag ~= "Type.Value" and tag ~= "Type.Option"
-        and tag ~= "Type.Pointer" and tag ~= "Type.Boolean"
+        and tag ~= "Type.Boolean"
         and tag ~= "Type.CPointer"
 end
 
@@ -2087,10 +2036,6 @@ type_equals = function(t1, t2, seen)
     elseif tag1 == "Type.Map" then
         return type_equals(t1.keys, t2.keys, seen) and
                type_equals(t1.values, t2.values, seen)
-    elseif tag1 == "Type.Pointer" then
-        return type_equals(t1.type, t2.type, seen)
-    elseif tag1 == "Type.Typedef" then
-        return t1.name == t2.name
     elseif tag1 == "Type.CInteger" then
         if t1._c_enum_identity or t2._c_enum_identity then
             return t1._c_enum_identity ~= nil
@@ -2320,9 +2265,7 @@ function types.normalize(typ)
             return nil
         end
         seen[typ] = true
-        if typ._tag == "Type.Typedef" then
-            typ = typ._type
-        elseif typ._tag == "Type.CTypedef" then
+        if typ._tag == "Type.CTypedef" then
             typ = typ.target
         else
             break
@@ -2413,8 +2356,6 @@ function types.valid_varg_element(typ)
         local carrier = typ.erased_constraint ~= false
             and typ.erased_constraint or types.Value()
         return types.valid_varg_element(carrier)
-    elseif tag == "Type.Typedef" then
-        return types.valid_varg_element(typ._type)
     end
     return false
 end
@@ -2423,8 +2364,7 @@ local function canonical_callable_tail(typ, role)
     if typ == false then return false end
     if typ._tag == "Type.Nil" then
         error("a " .. role .. " cannot have type nil", 3)
-    elseif typ._tag == "Type.Pointer"
-       or types.resolve_c_typedef(typ)._tag == "Type.CPointer" then
+    elseif types.resolve_c_typedef(typ)._tag == "Type.CPointer" then
         error("a " .. role .. " cannot have a foreign pointer type", 3)
     elseif not types.valid_varg_element(typ) then
         error("a " .. role .. " cannot use type " .. types.tostring(typ) ..
@@ -2618,15 +2558,11 @@ local function rewrite_type(root, policy)
             -- select a different physical DSO.
             out.file = typ.file
             out.prefix = typ.prefix
-        elseif tag == "Type.Typedef" then
-            out = types.clone_graph(typ)
-            out._type = rewrite(typ._type)
         elseif tag == "Type.Invalid" or tag == "Type.Nil"
             or tag == "Type.Void" or tag == "Type.Boolean"
             or tag == "Type.Integer" or tag == "Type.Float"
             or tag == "Type.String" or tag == "Type.Value"
-            or tag:match("^Type%.C") or tag == "Type.Pointer"
-            or tag == "Struct" or tag == "Union" then
+            or tag:match("^Type%.C") then
             -- C declarations are compilation-unit-local immutable leaves from
             -- the generic algebra's perspective. Type parameters cannot occur
             -- inside their declarator graph.
@@ -2952,8 +2888,6 @@ local function generic_tail_eligible(typ, seen)
         return generic_tail_eligible(
             typ.erased_constraint == false and types.Value()
                 or types.erase_constraint(typ.erased_constraint), seen)
-    elseif typ._tag == "Type.Typedef" then
-        return generic_tail_eligible(typ._type, seen)
     elseif typ._tag == "Type.Option" then
         local ok = typ.base._tag ~= "Type.Option"
             and typ.base._tag ~= "Type.Value"
@@ -2998,8 +2932,6 @@ function types.transient_roundtrip(typ)
            or tag == "Type.Integer" or tag == "Type.Float"
            or tag == "Type.String" or tag == "Type.Value" then
             ok = true
-        elseif tag == "Type.Typedef" then
-            ok, offender = visit(value._type)
         elseif tag == "Type.CTypedef" then
             ok, offender = visit(value.target)
         elseif types.is_c_tvalue(value) then
@@ -3207,7 +3139,7 @@ function types.accepts_missing_nil(target)
     target = types.normalize(target)
     local tag = target and target._tag
     return tag == "Type.Nil" or tag == "Type.Value"
-        or tag == "Type.Option" or tag == "Type.Pointer"
+        or tag == "Type.Option"
         or tag == "Type.CPointer"
 end
 
@@ -4265,9 +4197,6 @@ local function coercion_impl(source, target, policy, seen)
         end
     elseif types.is_direct_c(source) or types.is_direct_c(target) then
         result = false
-    elseif target._tag == "Type.Pointer"
-       and can_coerce_pointer(source, target) then
-        result = coercion_plan("legacy_pointer", source, target)
     elseif source._tag == "Type.Integer"
        and target._tag == "Type.Float" then
         result = coercion_plan("integer_to_float", source, target)
@@ -4374,8 +4303,6 @@ local function explicit_conversion(source, target)
         op = "pointer_to_string"
     elseif types.is_gc_identity_void_pointer_cast(source, target) then
         op = "gc_identity_to_void_pointer"
-    elseif types.is_legacy_pointer_to_c_void_cast(source, target) then
-        op = "legacy_pointer_to_c_void"
     elseif types.is_c_function_pointer_void_cast(source, target) then
         op = "c_function_pointer_to_void"
     elseif types.is_c_void_function_pointer_cast(source, target) then
@@ -4799,14 +4726,6 @@ function types.tostring(t)
         return prefix .. "{ " .. types.tostring(t.elem) .. " }"
     elseif tag == "Type.Map" then
         return "{ " .. types.tostring(t.keys) .. " : " .. types.tostring(t.values) .. " }"
-    elseif tag == "Type.Pointer" then
-        if is_void_pointer(t) then
-            return "void pointer"
-        else
-            return "pointer to " .. types.tostring(t.type)
-        end
-    elseif tag == "Type.Typedef" then
-        return t.name
     elseif tag == "Type.Function" then
         local out = {"("}
         local ptypes = {}
@@ -4934,10 +4853,6 @@ function types.tostring(t)
         return "owned *" .. types.tostring(t.pointee)
     elseif tag == "Type.CModule" then
         return "C module " .. t.name
-    elseif tag == "Struct" then
-        return "struct " .. (t.name or "<anonymous>")
-    elseif tag == "Union" then
-        return "union " .. (t.name or "<anonymous>")
     else
         error("impossible: " .. tostring(tag))
     end

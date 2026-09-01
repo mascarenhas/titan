@@ -1798,10 +1798,6 @@ describe("type-relation soundness (end-to-end)", function()
         local char_pointer = types.CPointer(c_char, {})
         local function_pointer = types.CPointer(
             types.CFunction({}, types.CVoid(), false, false), {})
-        local legacy_pointer = {
-            _tag = "Type.Pointer",
-            type = types.Nil(),
-        }
         local gc_array = types.Array(types.Integer(), false)
         local counted_char = types.COwned(c_char, true)
         local counted_int = types.COwned(c_integer, true)
@@ -1871,7 +1867,6 @@ describe("type-relation soundness (end-to-end)", function()
             {function_pointer, void_pointer,
                 "c_function_pointer_to_void"},
             {gc_array, void_pointer, "gc_identity_to_void_pointer"},
-            {legacy_pointer, void_pointer, "legacy_pointer_to_c_void"},
             {char_pointer, types.String(), "pointer_to_string"},
             {counted_char, types.String(), "counted_owner_to_string"},
             {void_pointer, char_pointer, "c_void_to_object_pointer"},
@@ -1934,8 +1929,6 @@ describe("type-relation soundness (end-to-end)", function()
 
         rejects_explicit(
             "gc_identity_to_void_pointer", gc_array, float_pointer)
-        rejects_explicit(
-            "legacy_pointer_to_c_void", legacy_pointer, float_pointer)
         rejects_explicit(
             "pointer_to_string", int_pointer, types.String())
         rejects_explicit(

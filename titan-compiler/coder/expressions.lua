@@ -2782,52 +2782,6 @@ function codeexp_dispatch(ctx, node, iscondition, target)
             ctx, adjustment, node.exp._type, node._type, cexp, node.loc,
             node._callable_adapter)
         return cstats .. astats, aexp
-    elseif tag == "Ast.ExpCast"
-           and (node.exp._type._tag == "Type.Typedef"
-                or node._type._tag == "Type.Typedef") then
-        -- A scalar foreign typedef (e.g. size_t) IS its underlying scalar in C,
-        -- so `<typedef> as T` (or a cast TO a typedef) behaves exactly like the
-        -- cast of/to the underlying type. Resolve the typedef(s) and re-dispatch
-        -- through the ordinary cast arms via a synthetic cast node, mirroring
-        -- `ctype` (which recurses through `Type.Typedef._type`). We never mutate
-        -- the shared AST/type tables in place; the synthetic node carries its own
-        -- resolved types and reuses the original operand and location.
-        local function resolve(t)
-            -- Unwrap ALL typedef levels: typedefs can chain (e.g. macOS's
-            -- `size_t` -> `__darwin_size_t` -> `unsigned long`, glibc's
-            -- `clock_t` -> `__clock_t` -> long). A one-level unwrap leaves a
-            -- Typedef on the synthesized cast, which re-enters this arm forever.
-            while t and t._tag == "Type.Typedef" do t = t._type end
-            return t
-        end
-        local stype = resolve(node.exp._type)
-        local ttype = resolve(node._type)
-        if types.equals(stype, ttype) then
-            -- typedef-vs-underlying identity (e.g. size_t as integer): no-op
-            return codeexp(ctx, node.exp, iscondition, target)
-        end
-        local synthexp
-        if node.exp._type._tag == "Type.Typedef" then
-            -- Re-tag the operand with its underlying type by wrapping it in a
-            -- pass-through cast node so the existing arms see a native source.
-            synthexp = { _tag = "Ast.ExpCast", loc = node.exp.loc,
-                         exp = node.exp, target = stype, _type = stype,
-                         _typedef_resolved = true }
-        else
-            synthexp = node.exp
-        end
-        local synthcast = { _tag = "Ast.ExpCast", loc = node.loc,
-                            exp = synthexp, target = ttype, _type = ttype }
-        for _, key in ipairs({
-            "_implicit_coercion",
-            "_adjustment",
-            "_written_cast",
-            "_c_conversion",
-            "_operator_conversion",
-        }) do
-            synthcast[key] = node[key]
-        end
-        return codeexp(ctx, synthcast, iscondition, target)
     elseif tag == "Ast.ExpCast" and node._typedef_resolved then
         -- Pass-through wrapper produced above: the operand's static type is a
         -- typedef but its C representation already is the underlying scalar, so
@@ -3243,10 +3197,6 @@ function codeexp_dispatch(ctx, node, iscondition, target)
             TYPENAME = c_string_literal(types.tostring(node._type)),
             THROW_WRONG_CAST = codethrow(node.loc, "%s:%d:%d: type error, expected %s but found nil", { "$FILE", "$LINE", "$COL", "$TYPENAME" })
         }), tmpname
-    elseif tag == "Ast.ExpCast" and node._type._tag == "Type.Pointer" then
-        local cstats, cexp = codeexp(ctx, node.exp)
-        local fstats, fexp = nativetoforeignexp(ctx, node.exp, cexp)
-        return cstats .. fstats, foreigncast(fexp, node._type)
     elseif tag == "Ast.ExpConcat" then
         local strs, copies = {}, {}
         local ctmp, tmpname, tmpslot = newtmp(ctx, types.String(), true)
