@@ -4685,7 +4685,7 @@ local function tostring_typeparams(typeparams)
     return "<" .. table.concat(rendered, ", ") .. ">"
 end
 
-function types.tostring(t)
+function types.tostring(t, wrap)
     local tag = t._tag
     if tag == "Type.GenericScope" then
         return "scope[" .. types.generic_scope_key(t) .. "]"
@@ -4738,8 +4738,12 @@ function types.tostring(t)
         table.insert(out, table.concat(ptypes, ", "))
         table.insert(out, ")")
         local rtypes = {}
-        for _, rettype in ipairs(t.rettypes) do
+        if #t.rettypes == 1 and not t.flexrettype then
+          table.insert(rtypes, types.tostring(t.rettypes[1], true))
+        else
+          for _, rettype in ipairs(t.rettypes) do
             table.insert(rtypes, types.tostring(rettype))
+          end
         end
         if t.flexrettype then
             table.insert(rtypes, "...: " .. types.tostring(t.flexrettype))
@@ -4761,7 +4765,8 @@ function types.tostring(t)
             -- from a `nil`-returning function `(P...) -> nil`
             table.insert(out, " -> ()")
         end
-        return table.concat(out)
+        local res = table.concat(out)
+        return wrap and "(" .. res .. ")" or res
     elseif tag == "Type.Method" or tag == "Type.StaticMethod" then
         local out = {t.fqtn,
              tag == "Type.Method" and ":" or ".",
@@ -4776,8 +4781,12 @@ function types.tostring(t)
         table.insert(out, table.concat(ptypes, ", "))
         table.insert(out, ")")
         local rtypes = {}
-        for _, rettype in ipairs(t.rettypes) do
+        if #t.rettypes == 1 and not t.flexrettype then
+          table.insert(rtypes, types.tostring(t.rettypes[1], true))
+        else
+          for _, rettype in ipairs(t.rettypes) do
             table.insert(rtypes, types.tostring(rettype))
+          end
         end
         if t.flexrettype then
             table.insert(rtypes, "...: " .. types.tostring(t.flexrettype))
@@ -4803,7 +4812,7 @@ function types.tostring(t)
         if #args == 0 then return t.fqtn end
         return t.fqtn .. "<" .. tostring_list(args) .. ">"
     elseif tag == "Type.Option" then
-        return types.tostring(t.base) .. "?"
+        return types.tostring(t.base, true) .. "?"
     elseif tag == "Type.CVoid" then
         return "void"
     elseif tag == "Type.CInteger" then
@@ -4814,13 +4823,31 @@ function types.tostring(t)
         return t.spelling
     elseif tag == "Type.CPointer" then
         local quals = t.quals and #t.quals > 0
-            and table.concat(t.quals, " ") .. " " or ""
-        return quals .. types.tostring(t.pointee) .. " *"
+            and table.concat(t.quals, " ")
+        local base = "*" .. types.tostring(t.pointee, true)
+        if quals then
+          if wrap then
+            return "(" .. quals .. " " .. base .. ")"
+          else
+            return quals .. " " .. base
+          end
+        else
+          return base
+        end
     elseif tag == "Type.CArray" then
         local len = t.len and tostring(t.len) or ""
         local quals = t.quals and #t.quals > 0
-            and table.concat(t.quals, " ") .. " " or ""
-        return quals .. types.tostring(t.elem) .. "[" .. len .. "]"
+            and table.concat(t.quals, " ")
+        local base = types.tostring(t.elem, true) .. "[" .. len .. "]"
+        if quals then
+          if wrap then
+            return "(" .. quals .. " " .. base .. ")"
+          else
+            return quals .. " " .. base
+          end
+        else
+          return base
+        end
     elseif tag == "Type.CFunction" then
         local params = {}
         local rendered_params = tostring_list(t.params)
@@ -4830,27 +4857,44 @@ function types.tostring(t)
         if t.vararg then
             table.insert(params, "...")
         end
-        local return_qualifiers =
-            t._return_declaration_qualifiers
-            and #t._return_declaration_qualifiers > 0
-            and table.concat(
-                t._return_declaration_qualifiers, " ") .. " "
-            or ""
-        return return_qualifiers .. types.tostring(t.ret)
-            .. " (" .. table.concat(params, ", ") .. ")"
+        local res = "foreign " .. " (" .. table.concat(params, ", ") .. ")" .. "->" .. types.tostring(t.ret, true)
+        if wrap then
+            return "(" .. res .. ")"
+        else
+            return res
+        end
     elseif tag == "Type.CStruct" then
-        return "struct " .. (c_display_name(t.tagname or t.cname or t.typedef) or "<anonymous>")
+        local display_name = c_display_name(t.tagname or t.cname or t.typedef)
+        if t._ffi_scope and display_name then
+          return t._ffi_scope .. "." .. display_name
+        else
+          local wrap_left = wrap and "(" or ""
+          local wrap_right = wrap and ")" or ""
+          return wrap_left .. "struct " .. (display_name or "<anonymous>") .. wrap_right
+        end
     elseif tag == "Type.CUnion" then
-        return "union " .. (c_display_name(t.tagname or t.cname or t.typedef) or "<anonymous>")
+        local display_name = c_display_name(t.tagname or t.cname or t.typedef)
+        if t._ffi_scope and display_name then
+          return t._ffi_scope .. "." .. display_name
+        else
+          local wrap_left = wrap and "(" or ""
+          local wrap_right = wrap and ")" or ""
+          return wrap_left .. "union " .. (display_name or "<anonymous>") .. wrap_right
+        end
     elseif tag == "Type.CField" then
         return t.name .. ": " .. types.tostring(t.type)
     elseif tag == "Type.CTypedef" then
-        return t.name
+        if t._ffi_scope then
+          return t._ffi_scope .. "." .. t.name
+        else
+          -- avoid accidentaly aliasing Titan type
+          return "foreign " .. t.name
+        end
     elseif tag == "Type.COwned" then
         if t.count then
-            return "owned " .. types.tostring(t.pointee) .. "[]"
+            return "owned " .. types.tostring(t.pointee, true) .. "[]"
         end
-        return "owned *" .. types.tostring(t.pointee)
+        return "owned *" .. types.tostring(t.pointee, true)
     elseif tag == "Type.CModule" then
         return "C module " .. t.name
     else

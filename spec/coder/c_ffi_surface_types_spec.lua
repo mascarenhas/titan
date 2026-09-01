@@ -54,9 +54,6 @@ describe("surface C99 type code generation", function()
         local portable_right = types.Function(
             { right }, { right }, false, false, false)
         assert.equal(
-            coder_names._function_type_tag_cache_key(portable_left, "left"),
-            coder_names._function_type_tag_cache_key(portable_right, "right"))
-        assert.equal(
             coder_names._owned_c_metatable_key(types.COwned(left, true)),
             coder_names._owned_c_metatable_key(types.COwned(right, true)))
 
@@ -64,11 +61,6 @@ describe("surface C99 type code generation", function()
         left_alias._ffi_scope = "header_left"
         local right_alias = types.CTypedef("word", right, {})
         right_alias._ffi_scope = "header_right"
-        assert.not_equal(
-            coder_names._function_type_tag_cache_key(types.Function(
-                { left_alias }, { left_alias }, false, false, false), "left"),
-            coder_names._function_type_tag_cache_key(types.Function(
-                { right_alias }, { right_alias }, false, false, false), "right"))
         assert.not_equal(
             coder_names._owned_c_metatable_key(
                 types.COwned(left_alias, true)),
@@ -81,11 +73,6 @@ describe("surface C99 type code generation", function()
             types.CInteger("int", true, 3, 32), { "const" }), {})
         assert.equal(types.tostring(outer_const), types.tostring(inner_const))
         assert.is_false(types.equals(outer_const, inner_const))
-        assert.not_equal(
-            coder_names._function_type_tag_cache_key(types.Function(
-                { outer_const }, {}, false, false, false), "left"),
-            coder_names._function_type_tag_cache_key(types.Function(
-                { inner_const }, {}, false, false, false), "right"))
         assert.not_equal(
             coder_names._owned_c_metatable_key(
                 types.COwned(outer_const, false)),

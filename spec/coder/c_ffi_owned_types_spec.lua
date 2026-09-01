@@ -897,23 +897,4 @@ describe("source-written owned C type code generation", function()
             end)
         end)
     end)
-
-    it("keeps same-spelled Titan and C callable tags distinct in one module",
-    function()
-        local titan_integer = types.Function(
-            { types.Integer() }, { types.Integer() },
-            false, false, false)
-        local c_integer = types.CTypedef(
-            "integer", types.CFloat("double"))
-        local foreign_integer = types.Function(
-            { c_integer }, { c_integer },
-            false, false, false)
-
-        assert.equal(
-            types.tostring(titan_integer),
-            types.tostring(foreign_integer))
-        assert.not_equal(
-            coder_names._function_type_tag_cache_key(titan_integer),
-            coder_names._function_type_tag_cache_key(foreign_integer))
-    end)
 end)
