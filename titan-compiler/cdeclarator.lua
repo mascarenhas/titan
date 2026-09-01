@@ -493,7 +493,7 @@ render_declarator = function(typ, name, quals, expand_typedef)
     elseif tag == "Type.COwned" then
         return render_declarator({
             _tag = "Type.CPointer",
-            pointee = { _tag = "Type.CTypedef", target = { _tag = "Type.CStruct", tagname = "Udata" } },
+            pointee = { _tag = "Type.CTypedef", name = "Udata", target = { _tag = "Type.CStruct", tagname = "Udata" }, quals = {} },
             quals = {},
         }, name, quals, expand_typedef)
     elseif tag == "Type.CVoid" then
