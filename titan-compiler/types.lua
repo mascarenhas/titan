@@ -1574,7 +1574,7 @@ function types.has_tvalue_representation(t, seen)
     seen[t] = false
 
     local result
-    elseif types.is_direct_c(t) then
+    if types.is_direct_c(t) then
         result = c_value_compatible(t)
     else
         local tag = t._tag
