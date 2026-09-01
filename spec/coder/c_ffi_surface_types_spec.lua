@@ -43,43 +43,6 @@ describe("surface C99 type code generation", function()
         ]])
     end)
 
-    it("gives portable and header-local C graphs distinct identity rules",
-    function()
-        local left = types.CInteger("int", true, 3, 32)
-        left._ffi_scope = "header_left"
-        local right = types.CInteger("int", true, 3, 32)
-        right._ffi_scope = "header_right"
-        local portable_left = types.Function(
-            { left }, { left }, false, false, false)
-        local portable_right = types.Function(
-            { right }, { right }, false, false, false)
-        assert.equal(
-            coder_names._owned_c_metatable_key(types.COwned(left, true)),
-            coder_names._owned_c_metatable_key(types.COwned(right, true)))
-
-        local left_alias = types.CTypedef("word", left, {})
-        left_alias._ffi_scope = "header_left"
-        local right_alias = types.CTypedef("word", right, {})
-        right_alias._ffi_scope = "header_right"
-        assert.not_equal(
-            coder_names._owned_c_metatable_key(
-                types.COwned(left_alias, true)),
-            coder_names._owned_c_metatable_key(
-                types.COwned(right_alias, true)))
-
-        local outer_const = types.CPointer(types.CPointer(
-            types.CInteger("int", true, 3, 32), {}), { "const" })
-        local inner_const = types.CPointer(types.CPointer(
-            types.CInteger("int", true, 3, 32), { "const" }), {})
-        assert.equal(types.tostring(outer_const), types.tostring(inner_const))
-        assert.is_false(types.equals(outer_const, inner_const))
-        assert.not_equal(
-            coder_names._owned_c_metatable_key(
-                types.COwned(outer_const, false)),
-            coder_names._owned_c_metatable_key(
-                types.COwned(inner_const, false)))
-    end)
-
     it("shares portable callable and owner identity across modules", function()
         local ok, err = h.generate_modules({
             surface_provider = [[

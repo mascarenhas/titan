@@ -700,7 +700,6 @@ toplevel_visitor = util.make_visitor({
                 local decl, conversion_error, declaration =
                     foreigntypes.convert(st, ftype, fname, include)
                 if decl then
-                    types.mark_c_ffi_scope(decl, st.modname)
                     types.mark_c_ffi_include(decl, include)
                     local ordinary
                     if is_foreign_ordinary_identifier(fname, ftype) then

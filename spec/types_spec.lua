@@ -2177,8 +2177,8 @@ describe("Titan types", function()
         it("keeps C compatibility structural across source scopes", function()
             local left = types.CPointer(cint(), {})
             local right = types.CPointer(cint(), {})
-            types.mark_c_ffi_scope(left, "left")
-            types.mark_c_ffi_scope(right, "right")
+            left._ffi_scope = "left"
+            right._ffi_scope = "right"
 
             assert.truthy(types.equals(left, right))
             assert.truthy(types.c_declaration_type_equals(left, right))

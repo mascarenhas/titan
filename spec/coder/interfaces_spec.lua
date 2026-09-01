@@ -109,8 +109,7 @@ describe("interfaces (end-to-end)", function()
         local ctx = { tlcontext = tlcontext }
         local expr = coder._owned_c_metatable_expr(ctx, owned)
         assert.truthy(expr:find("hvalue(&_mod->uv[", 1, true), expr)
-        local key = coder._owned_c_metatable_key(owned)
-        assert.equal(types.serialize(owned), key)
+        local key = types.tostring(owned)
         assert.is_truthy(
             tlcontext.owned_c_metatables[key])
     end)

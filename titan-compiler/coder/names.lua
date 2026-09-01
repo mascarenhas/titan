@@ -586,35 +586,16 @@ function coder._array_writer(ctx, elem, plan)
     return entry
 end
 
-function owned_c_metatable_key(typ)
-    assert(typ._tag == "Type.COwned")
-    if not types.first_non_exportable_type(typ) then
-        return types.serialize(typ)
-    end
-    local scope = types.c_ffi_scope_key(typ)
-    return (scope and scope .. "\0" or "") .. types.tostring(typ)
-end
-coder._owned_c_metatable_key = owned_c_metatable_key
-
 function owned_c_metatable(ctx, typ)
     local tlcontext = ctx.tlcontext or ctx
-    local key = owned_c_metatable_key(typ)
+    local key = types.tostring(typ)
     local entry = tlcontext.owned_c_metatables[key]
     if not entry then
-        local portable = not types.first_non_exportable_type(typ)
-        local scope = portable and "portable"
-            or types.c_ffi_scope_key(typ) or tlcontext.module
-        local display = "Titan owned C " .. scope .. " "
-            .. types.tostring(typ) .. " metatable"
-        local registry_key = display
-        if portable then
-            registry_key = "Titan owned C portable "
-                .. types.serialize(typ) .. " metatable"
-        end
+        local display = "Titan owned C " .. key .. " metatable"
         entry = {
             slot = nextupvalue(tlcontext),
             name = display,
-            registry_key = registry_key,
+            registry_key = display,
         }
         tlcontext.owned_c_metatables[key] = entry
     end
