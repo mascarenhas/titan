@@ -2924,12 +2924,6 @@ describe("compiler module loader", function()
             })))
         assert.is_string(sourceinterface.serialize(wrapped))
 
-        reject(direct(with_type("source_manifest_bad_header", {
-            _tag = "Type.Pointer",
-            type = types.Integer(),
-            _ffi_scope = "source_manifest_bad_header",
-            _c_origin_header = { rendered = "" },
-        })), "has no stable rendered spelling")
         reject(direct(with_type("source_manifest_bad_descriptor", {})),
             "is not a type descriptor")
         reject(direct(with_type("source_manifest_unspellable_enum", {
@@ -3221,15 +3215,6 @@ end
                 { aggregate_pointer, carray, ctypedef }, cint, false, false))
             cfunction._paramstyle = "prototype"
             cfunction._return_declaration_qualifiers = { "const" }
-            local legacy_pointer = cmetadata({
-                _tag = "Type.Pointer",
-                type = cint,
-            })
-            local legacy_typedef = cmetadata({
-                _tag = "Type.Typedef",
-                name = "legacy_count",
-                _type = legacy_pointer,
-            })
 
             local callable_scope = types.GenericScope(
                 name, false, "identity", "callable", "function")
@@ -3330,8 +3315,6 @@ end
                 { "CTypedef", ctypedef },
                 { "CUnion", aggregate_union },
                 { "CVoid", cvoid },
-                { "LegacyPointer", legacy_pointer },
-                { "LegacyTypedef", legacy_typedef },
             }
             if reverse then
                 for index = #alias_entries, 1, -1 do
@@ -5752,18 +5735,6 @@ typedef double titan_driver_symlink_value;
                         name = "meta.noncanonical", members = {} }]]
                 end,
                 expected = "did not construct a canonical Type.Module",
-            },
-            {
-                name = "meta.member_schema",
-                abi = function() return driver.TITAN_ABI_VERSION end,
-                metadata = function()
-                    return [[Module("meta.member_schema", {
-                        ModuleMember("meta.member_schema", "bad",
-                            { _tag = "Type.Unknown" }, false)
-                    })]]
-                end,
-                expected = "Type.Unknown is not valid in a " ..
-                    "value-facing type graph",
             },
             {
                 name = "meta.interface_schema",

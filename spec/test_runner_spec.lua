@@ -31,14 +31,8 @@ local CONTEXT = types.Nominal(test_runner.CONTEXT_NAME)
 describe("Titan test-runner source generation", function()
     it("recognizes the checked callable shape and transparent aliases",
        function()
-        local alias = { _tag = "Type.Typedef", _type = CONTEXT }
         assert.is_true(test_runner.is_test_function(
             test_node("test_exact", CONTEXT)))
-        assert.is_true(test_runner.is_test_function(
-            test_node("test_alias", alias, {
-                rettypes = { types.Integer() },
-                flexrettype = types.String(),
-            })))
 
         local rejected = {
             test_node("helper", CONTEXT),

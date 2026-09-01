@@ -637,8 +637,6 @@ function coder._raw_ctype(typ --[[:table]])
     elseif typ._tag == "Type.Map" then return "Table*"
     elseif typ._tag == "Type.Value" then return "TValue"
     elseif typ._tag == "Type.Nominal" then return "Udata*"
-    elseif typ._tag == "Type.Pointer" then
-        return cdeclarator.render_type_name(typ)
     elseif typ._tag == "Type.COwned" then
         return cdeclarator.render_type_name(typ)
     elseif types.is_direct_c(typ) then
@@ -650,7 +648,6 @@ function coder._raw_ctype(typ --[[:table]])
     elseif typ._tag == "Type.Function" then return "TValue"
     -- A foreign typedef of a supported scalar (e.g. size_t -> integer) can
     -- leak in via inference; use the C type of its resolved underlying type.
-    elseif typ._tag == "Type.Typedef" then return coder._raw_ctype(typ._type)
     else error("invalid type " .. types.tostring(typ))
     end
 end
@@ -676,7 +673,7 @@ end
 -- values are protected by explicit spill/reload slots below, keeping the source
 -- local/param C autos ordinary (and avoiding volatile in the function ABI).
 function cvardecl(ctx, typ, name)
-    if types.is_direct_c(typ) or typ._tag == "Type.Pointer" then
+    if types.is_direct_c(typ) then
         return coder._render_c_declaration(typ, name)
     end
     return ctype(typ) .. " " .. name
@@ -1080,12 +1077,6 @@ function coder._checked_coercion_plan_impl(
         coder._checked_coercion_plan_impl(
             coercion.inner, source.base, target,
             use .. " Option force", seen)
-    elseif op == "legacy_pointer" then
-        assert(target._tag == "Type.Pointer"
-               and (source._tag == "Type.Pointer"
-                    or source._tag == "Type.String"
-                    or source._tag == "Type.Nil"),
-            use .. " has a mismatched legacy-pointer operation")
     elseif op == "interface_wrapper" then
         assert(source._tag == "Type.Nominal"
                and target._tag == "Type.Nominal"
@@ -1172,7 +1163,7 @@ function coder._checked_callable_plan_impl(
         typ = types.normalize(typ)
         local tag = typ and typ._tag
         return tag == "Type.Nil" or tag == "Type.Value"
-            or tag == "Type.Option" or tag == "Type.Pointer"
+            or tag == "Type.Option"
             or tag == "Type.CPointer"
     end
 
@@ -1507,9 +1498,6 @@ function coder._checked_explicit_conversion_plan(
     elseif op == "gc_identity_to_void_pointer" then
         assert(types.is_gc_identity_void_pointer_cast(source, target),
             use .. " has a mismatched GC-identity pointer operation")
-    elseif op == "legacy_pointer_to_c_void" then
-        assert(types.is_legacy_pointer_to_c_void_cast(source, target),
-            use .. " has a mismatched legacy-to-C-pointer operation")
     elseif op == "c_function_pointer_to_void" then
         assert(types.is_c_function_pointer_void_cast(source, target),
             use .. " has a mismatched C-function-to-void-pointer operation")
@@ -1992,7 +1980,7 @@ function coder._emit_array_writers(tlcontext, sigs, code, initfuncs)
 end
 
 function cpointerdecl(typ, name)
-    if types.is_direct_c(typ) or typ._tag == "Type.Pointer" then
+    if types.is_direct_c(typ) then
         return coder._render_c_declaration(
             types.CPointer(typ, {}), name)
     end
@@ -2000,7 +1988,7 @@ function cpointerdecl(typ, name)
 end
 
 function cpointertype(typ)
-    if types.is_direct_c(typ) or typ._tag == "Type.Pointer" then
+    if types.is_direct_c(typ) then
         return coder._render_c_type_name(types.CPointer(typ, {}))
     end
     return ctype(typ) .. "*"
@@ -2010,8 +1998,7 @@ function cfunctiondecl(rettype, name, params, is_pointer)
     local declarator = is_pointer and "(*" .. name .. ")" or name
     declarator = declarator .. "(" .. params .. ")"
     if rettype
-       and (types.is_direct_c(rettype)
-            or rettype._tag == "Type.Pointer") then
+       and types.is_direct_c(rettype) then
         return coder._render_c_declaration(rettype, declarator)
     end
     return (rettype and ctype(rettype) or "void") .. " " .. declarator

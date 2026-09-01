@@ -108,9 +108,9 @@ function newforeigntmp(ctx --[[:table]], typ --[[:table]],
     if typ._tag == "Type.String" then
         fdecl = "char* " .. tmpname
         finit = " = NULL"
-    elseif typ._tag == "Type.Pointer" or types.is_direct_c(typ) then
+    elseif types.is_direct_c(typ) then
         fdecl = coder._render_c_declaration(typ, tmpname)
-        if typ._tag == "Type.Pointer" or typ._tag == "Type.COwned"
+        if typ._tag == "Type.COwned"
            or rtyp._tag == "Type.CPointer" then
             finit = " = NULL"
         elseif rtyp._tag == "Type.CInteger" or rtyp._tag == "Type.CFloat" then
@@ -455,8 +455,7 @@ function nativetoforeignexp(ctx, exp, cexp, target, projection)
 
     if exp._type._tag == "Type.Integer"
     or exp._type._tag == "Type.Float"
-    or exp._type._tag == "Type.Boolean"
-    or exp._type._tag == "Type.Pointer" then
+    or exp._type._tag == "Type.Boolean" then
         return "", cexp
     end
 
@@ -522,8 +521,7 @@ function foreigntonativeexp(ctx, exp, cexp, target)
 
     if exp._type._tag == "Type.Integer"
     or exp._type._tag == "Type.Float"
-    or exp._type._tag == "Type.Boolean"
-    or exp._type._tag == "Type.Pointer" then
+    or exp._type._tag == "Type.Boolean" then
         return "", cexp
     end
 
@@ -545,10 +543,6 @@ function foreigntonativeexp(ctx, exp, cexp, target)
         ]], { TEXP = texp, TMP = tmp, CEXP = cexp })
         local mkstats, mkexp = makestring(ctx, tmp, target)
         return guard .. "\n" .. mkstats, mkexp
-    end
-
-    if exp._type._tag == "Type.Typedef" then
-        return foreigntonativeexp(ctx, exp._type, cexp, target)
     end
 
     error("don't know how to handle type "..types.tostring(exp._type))

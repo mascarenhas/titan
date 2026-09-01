@@ -64,11 +64,7 @@ The same factory builds the checker's semantic types:
 `"Type.Integer"` and `"Type.Record"`. Some type values are
 *not* made through `typedecl` and break its conventions:
 `types.Module` is a hand-written function (its `members` table is both
-an array and a name-keyed map), and the FFI's `Type.Pointer`,
-`Type.Typedef` and `Type.Unknown` are ad-hoc table literals built in
-`foreigntypes.lua` (which also emits `Struct`/`Union`
-placeholder tables that drop the `Type.` prefix entirely).
-Code that walks types must tolerate all of them. See
+an array and a name-keyed map). See
 [the type checker](checker.md) for the type language itself.
 
 Do not confuse the two layers with similar names: `Ast.Type*` nodes

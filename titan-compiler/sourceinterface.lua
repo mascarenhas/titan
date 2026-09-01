@@ -154,14 +154,6 @@ local SCHEMAS = {
         { "modname", "atom" }, { "name", "atom" }, { "type", "type" },
         { "isconst", "atom" }, { "islocal", "flag" },
     },
-    ["Type.Pointer"] = {
-        { "type", "type" }, { "_ffi_scope", "atom" },
-        { "_c_origin_header", "header" },
-    },
-    ["Type.Typedef"] = {
-        { "name", "atom" }, { "_type", "type" },
-        { "_ffi_scope", "atom" }, { "_c_origin_header", "header" },
-    },
     ["Type.CInteger"] = {
         { "spelling", "atom" }, { "signed", "atom" },
         { "rank", "atom" }, { "bits", "atom" },

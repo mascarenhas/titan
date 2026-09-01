@@ -480,9 +480,6 @@ function generic_collect_local_constraint_parameters(
             generic_collect_local_constraint_parameters(
                 typ.flexrettype, scope, found, seen)
         end
-    elseif tag == "Type.Typedef" then
-        generic_collect_local_constraint_parameters(
-            typ._type, scope, found, seen)
     elseif tag == "Type.CTypedef" then
         generic_collect_local_constraint_parameters(
             typ.target, scope, found, seen)

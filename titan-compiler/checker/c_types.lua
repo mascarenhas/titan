@@ -417,7 +417,7 @@ function checker._ensure_c_enum_supported(
     local children = {}
     local child_spelling_only = spelling_only
     if tag == "Type.CStruct" or tag == "Type.CUnion"
-       or tag == "Type.COwned" or tag == "Type.Pointer" then
+       or tag == "Type.COwned" then
         return true
     elseif tag == "Type.CPointer" then
         children[1] = typ.pointee
@@ -735,8 +735,6 @@ function foreign_redeclaration_batch.collect_reads(typ, reads, seen)
             foreign_redeclaration_batch.collect_reads(param, reads, seen)
         end
         foreign_redeclaration_batch.collect_reads(typ.ret, reads, seen)
-    elseif tag == "Type.Pointer" then
-        foreign_redeclaration_batch.collect_reads(typ.type, reads, seen)
     end
 end
 

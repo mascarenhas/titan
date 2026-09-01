@@ -988,13 +988,6 @@ describe("union module interfaces", function()
                     end,
                     pattern = "Type%.CTypedef",
                 },
-                {
-                    label = "unknown descriptor",
-                    make = function()
-                        return { _tag = "Type.Unknown" }
-                    end,
-                    pattern = "Type%.Unknown",
-                },
             }
             local placements = {
                 function(method, typ)

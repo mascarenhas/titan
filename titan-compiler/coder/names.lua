@@ -165,9 +165,6 @@ function toboolean(typ --[[:table]], src --[[:string]])
         tmpl = "!l_isfalse(&$SRC)"
     elseif typ._tag == "Type.Option" and typ.base._tag ~= "Type.Boolean" then
         tmpl = "!ttisnil(&$SRC)"
-    elseif typ._tag == "Type.Pointer" then
-        -- a foreign C pointer is truthy iff it is non-NULL
-        tmpl = "($SRC != NULL)"
     elseif types.resolve_c_typedef(typ)._tag == "Type.CPointer" then
         tmpl = "($SRC != NULL)"
     else error("invalid type " .. types.tostring(typ)) end

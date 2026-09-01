@@ -1066,7 +1066,7 @@ describe("closures across modules (end-to-end)", function()
 end)
 
 -- Boxes whose value type only arises through `foreign import`: a foreign
--- `Type.Pointer` (e.g. FILE*) and a scalar `Type.Typedef` (e.g. size_t). Both
+-- `Type.CPointer` (e.g. FILE*) and a scalar `Type.CTypedef` (e.g. size_t). Both
 -- are non-gc, so a captured-and-mutated local of those types uses the raw
 -- 0-uservalue Udata0 box (ctype = foreignctype(typ) / ctype(underlying),
 -- sizeudata(0, sizeof(ctype)), nuvalue = 0, raw getudatamem, no barrier). These
@@ -1187,7 +1187,7 @@ describe("closures over foreign-typed boxes (end-to-end)", function()
 
     it("captures and reassigns a scalar foreign typedef (raw Udata0 box) #stress",
     function()
-        -- `strlen` returns `size_t`, which stays a `Type.Typedef` on the local `n`
+        -- `strlen` returns `size_t`, which stays a `Type.CTypedef` on the local `n`
         -- (it resolves to ctype lua_Integer only at the storage layer). Captured
         -- and reassigned in the lambda, `n` is boxed raw. The closure compares the
         -- boxed size_t against a fresh strlen and reassigns it (returning boolean,

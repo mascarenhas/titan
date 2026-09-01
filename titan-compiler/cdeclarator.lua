@@ -231,12 +231,12 @@ local function is_extent_declarator(value)
     if is_extent_pointer_sequence(value) then return true end
     if type(value) ~= "table" then return false end
     if value.declarator ~= nil or value.params ~= nil
-       or value.name ~= nil then
+        or value.name ~= nil then
         return true
     end
     for _, part in ipairs(value) do
         if is_extent_pointer_sequence(part)
-           or type(part) == "table" and part.idx ~= nil then
+            or type(part) == "table" and part.idx ~= nil then
             return true
         end
     end
@@ -246,7 +246,7 @@ end
 render_extent_type_name = function(parts, declarator)
     local base_count = #parts
     if declarator == nil and base_count > 0
-       and is_extent_declarator(parts[base_count]) then
+        and is_extent_declarator(parts[base_count]) then
         declarator = parts[base_count]
         base_count = base_count - 1
     end
@@ -288,8 +288,8 @@ render_extent_type_fragment = function(value)
     elseif value.idx ~= nil then
         return "[" .. render_extent_array_suffix(value) .. "]"
     elseif type(value[1]) == "string"
-       or type(value[1]) == "table"
-          and (value[1].type == "struct"
+        or type(value[1]) == "table"
+        and (value[1].type == "struct"
             or value[1].type == "union"
             or value[1].type == "enum") then
         return render_extent_type_name(value)
@@ -335,7 +335,7 @@ end
 
 local function looks_like_extent_type_fragment(value)
     if type(value) ~= "table" or value.op or value.unop
-       or value.postfix then
+        or value.postfix then
         return false
     end
     if value.declarator ~= nil then return true end
@@ -376,7 +376,7 @@ render_extent_expression = function(expression)
             operand .. "))"
     elseif op == "?" then
         if expression[1] == nil or expression[2] == nil
-           or expression[3] == nil or expression[4] ~= nil then
+            or expression[3] == nil or expression[4] ~= nil then
             error("cannot render a malformed conditional array extent", 3)
         end
         return "(" .. render_extent_expression(expression[1])
@@ -392,14 +392,14 @@ render_extent_expression = function(expression)
         end
         return "(" .. table.concat(parts, ", ") .. ")"
     elseif op and expression[2] == nil
-       and unary_expression_operators[op] then
+        and unary_expression_operators[op] then
         if expression[1] == nil then
             error("cannot render a malformed unary array extent", 3)
         end
         return "(" .. op .. render_extent_expression(expression[1]) .. ")"
     elseif op and binary_expression_operators[op] then
         if expression[1] == nil or expression[2] == nil
-           or expression[3] ~= nil then
+            or expression[3] ~= nil then
             error("cannot render a malformed binary array extent", 3)
         end
         return "(" .. render_extent_expression(expression[1])
@@ -430,7 +430,7 @@ local function render_array_extent(len)
     if len == nil or len == false or len == "" then
         return ""
     elseif type(len) == "number" or type(len) == "string"
-       or type(len) == "table" then
+        or type(len) == "table" then
         return render_extent_expression(len)
     end
     error("cannot render a symbolic C array extent", 3)
@@ -441,10 +441,10 @@ local render_declarator
 local function selected_typedef_target(typ, expand_typedef)
     local seen = {}
     while type(typ) == "table"
-       and typ._tag == "Type.CTypedef"
-       and expand_typedef
-       and expand_typedef(typ)
-       and not seen[typ] do
+        and typ._tag == "Type.CTypedef"
+        and expand_typedef
+        and expand_typedef(typ)
+        and not seen[typ] do
         seen[typ] = true
         typ = typ.target
     end
@@ -493,7 +493,7 @@ render_declarator = function(typ, name, quals, expand_typedef)
     elseif tag == "Type.COwned" then
         return render_declarator({
             _tag = "Type.CPointer",
-            pointee = { _tag = "Type.Typedef", name = "Udata" },
+            pointee = { _tag = "Type.CTypedef", target = { _tag = "Type.CStruct", tagname = "Udata" } },
             quals = {},
         }, name, quals, expand_typedef)
     elseif tag == "Type.CVoid" then
@@ -541,28 +541,6 @@ render_declarator = function(typ, name, quals, expand_typedef)
         return render_declarator(
             typ.ret, nested_name,
             typ._return_declaration_qualifiers, expand_typedef)
-    elseif tag == "Type.Pointer" then
-        local pointee = typ.type
-        if pointee and pointee._tag == "Type.Nil" then
-            pointee = { _tag = "Type.CVoid" }
-        end
-        local pointee_tag = pointee and pointee._tag
-        local nested_name = pointer_name(name, quals,
-            pointee_tag == "Type.CArray" or
-            pointee_tag == "Type.CFunction")
-        return render_declarator(
-            pointee, nested_name, nil, expand_typedef)
-    elseif tag == "Type.String" then
-        return render_declarator({
-            _tag = "Type.CPointer",
-            pointee = {
-                _tag = "Type.CInteger",
-                spelling = "char",
-            },
-            quals = {},
-        }, name, quals, expand_typedef)
-    elseif tag == "Type.Typedef" then
-        return finish_base(typ.name, name, quals)
     end
     error("unknown foreign C type " .. tostring(tag), 3)
 end
@@ -597,7 +575,7 @@ end
 -- declaration-level qualifiers that the C parser stores separately from the
 -- structural type (for example the `const` in `extern const T value`).
 function cdeclarator.render_declaration(
-        typ, name, quals, expand_typedef)
+    typ, name, quals, expand_typedef)
     assert(type(name) == "string", "C declaration name must be a string")
     if expand_typedef ~= nil then
         assert(type(expand_typedef) == "function",
