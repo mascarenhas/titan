@@ -93,8 +93,8 @@ local HARNESS = [=[
 static char backing_root_key;
 static char proxy_root_key;
 static char weak_root_key;
-static char first_function_tag_candidate;
-static char second_function_tag_candidate;
+static const char *first_function_tag_candidate = "Titan function type unit.first tag";
+static const char *second_function_tag_candidate = "Titan function type unit.second tag";
 static int coercing_writer_calls;
 
 typedef struct MetatableFaultAllocator {
@@ -1191,8 +1191,8 @@ static void test_function_type_tag_publication(void) {
 
     top = lua_gettop(first);
     first_tag = titan_publish_function_type_tag(
-        first, first_key, &first_function_tag_candidate);
-    assert(first_tag == &first_function_tag_candidate);
+        first, first_key);
+    assert(first_tag == first_key);
     assert(lua_gettop(first) == top);
 
     /*
@@ -1200,13 +1200,13 @@ static void test_function_type_tag_publication(void) {
     ** first provider's canonical pointer.
     */
     recovered_tag = titan_publish_function_type_tag(
-        first, first_key, &second_function_tag_candidate);
+        first, first_function_tag_candidate);
     assert(recovered_tag == first_tag);
     assert(lua_gettop(first) == top);
 
     other_tag = titan_publish_function_type_tag(
-        first, second_key, &second_function_tag_candidate);
-    assert(other_tag == &second_function_tag_candidate);
+        first, second_key);
+    assert(other_tag == second_key);
     assert(lua_gettop(first) == top);
 
     /*
@@ -1215,8 +1215,8 @@ static void test_function_type_tag_publication(void) {
     */
     top = lua_gettop(second);
     recovered_tag = titan_publish_function_type_tag(
-        second, first_key, &second_function_tag_candidate);
-    assert(recovered_tag == &second_function_tag_candidate);
+        second, first_function_tag_candidate);
+    assert(recovered_tag == first_function_tag_candidate);
     assert(lua_gettop(second) == top);
 
     lua_close(first);
@@ -1311,47 +1311,47 @@ end
 
 describe("dense Array stock-Lua runtime", function()
     it("keeps compiler-internal construction helpers off the Lua stack",
-       function()
-        local runtime = read_file("titan-runtime/titan.c")
-        local header = read_file("titan-runtime/titan.h")
-        local source = runtime .. "\n" .. header
-        for _, name in ipairs({
-            "titan_array_try_proxy_either",
-            "titan_const_array_metatable",
-            "titan_const_array_new",
-        }) do
-            assert.matches("static%s+l_inline%s+[^\n]-" .. name ..
-                "%s*%b()%s*%b{}", header)
-            assert.is_nil(runtime:match(
-                "%f[%w_]" .. name .. "%f[^%w_]%s*%b()%s*%b{}"),
-                name .. " must stay in the installed inline header")
-        end
-        for _, name in ipairs({
-            "titan_array_new_impl",
-            "titan_array_new",
-            "titan_const_array_new",
-            "titan_array_shallow_copy",
-            "titan_array_freeze",
-        }) do
-            local body = c_function_body(source, name)
-            local without_asserts = body:gsub("lua_assert%s*%b()", "")
-            assert.is_nil(without_asserts:match(
-                "%f[%w_]lua_[%w_]*%s*%("),
-                name .. " calls the public Lua stack API")
-            assert.is_nil(body:match("%f[%w_]luaL_[%w_]*%s*%("),
-                name .. " raises a public auxiliary-library error")
-            assert.is_nil(body:match("L%s*%-%>%s*top"),
-                name .. " changes the Lua stack directly")
-        end
-    end)
+        function()
+            local runtime = read_file("titan-runtime/titan.c")
+            local header = read_file("titan-runtime/titan.h")
+            local source = runtime .. "\n" .. header
+            for _, name in ipairs({
+                "titan_array_try_proxy_either",
+                "titan_const_array_metatable",
+                "titan_const_array_new",
+            }) do
+                assert.matches("static%s+l_inline%s+[^\n]-" .. name ..
+                    "%s*%b()%s*%b{}", header)
+                assert.is_nil(runtime:match(
+                        "%f[%w_]" .. name .. "%f[^%w_]%s*%b()%s*%b{}"),
+                    name .. " must stay in the installed inline header")
+            end
+            for _, name in ipairs({
+                "titan_array_new_impl",
+                "titan_array_new",
+                "titan_const_array_new",
+                "titan_array_shallow_copy",
+                "titan_array_freeze",
+            }) do
+                local body = c_function_body(source, name)
+                local without_asserts = body:gsub("lua_assert%s*%b()", "")
+                assert.is_nil(without_asserts:match(
+                        "%f[%w_]lua_[%w_]*%s*%("),
+                    name .. " calls the public Lua stack API")
+                assert.is_nil(body:match("%f[%w_]luaL_[%w_]*%s*%("),
+                    name .. " raises a public auxiliary-library error")
+                assert.is_nil(body:match("L%s*%-%>%s*top"),
+                    name .. " changes the Lua stack directly")
+            end
+        end)
 
     it("preserves capacity, length, proxy, callback, and GC invariants",
-       function()
-        compile_and_run(false)
-    end)
+        function()
+            compile_and_run(false)
+        end)
 
     it("keeps both construction objects rooted under HARDMEMTESTS",
-       function()
-        compile_and_run(true)
-    end)
+        function()
+            compile_and_run(true)
+        end)
 end)

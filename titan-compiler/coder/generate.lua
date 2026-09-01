@@ -751,14 +751,12 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
     -- to the defining module because imported C type identity is module-local.
     local initfunctags = {}
     for _, entry in ipairs(tlcontext.functag_list) do
-        table.insert(sigs, "static const void *" .. entry.id .. ";")
+        table.insert(sigs, render("static const char *" .. entry.id .. " = $KEYSTR;",
+          { KEYSTR = c_string_literal("Titan function type " .. entry.key .. " tag") }))
         table.insert(initfunctags, render([[
-            $ID = titan_publish_function_type_tag(
-                L, $KEYSTR, (const void *)&$ID);
+            $ID = titan_publish_function_type_tag(L, $ID);
         ]], {
             ID = entry.id,
-            KEYSTR = c_string_literal(
-                "Titan function type " .. entry.registry_key .. " tag"),
         }))
     end
 

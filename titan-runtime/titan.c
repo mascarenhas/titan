@@ -28,41 +28,28 @@ typedef char titan_array_assert_capacity_fits_lua_integer[
 typedef char titan_array_assert_useful_capacity[
     (TITAN_ARRAY_MAX_CAPACITY >= 2u) ? 1 : -1];
 
-const void *titan_publish_function_type_tag(lua_State *L,
-                                            const char *registry_key,
-                                            const void *candidate) {
-    int base;
-    const void *canonical;
-
-    if (registry_key == NULL || registry_key[0] == '\0')
-        luaL_error(L, "invalid Titan function-type registry key");
-    if (candidate == NULL)
-        luaL_error(L, "invalid Titan function-type tag candidate");
+const char *titan_publish_function_type_tag(lua_State *L,
+                                            const char *candidate) {
     if (!lua_checkstack(L, 1))
         luaL_error(L, "stack overflow publishing Titan function-type tag");
-    base = lua_gettop(L);
 
     /*
     ** The type-specific string slot elects one canonical tag independently of
     ** module/provider load order. A later publisher recovers that pointer
     ** rather than publishing its own translation-unit-local candidate.
     */
-    lua_getfield(L, LUA_REGISTRYINDEX, registry_key);
+    lua_getfield(L, LUA_REGISTRYINDEX, candidate);
     if (lua_isnil(L, -1)) {
         lua_pop(L, 1);
-        canonical = candidate;
-        lua_pushlightuserdata(L, (void *)canonical);
-        lua_setfield(L, LUA_REGISTRYINDEX, registry_key);
+        lua_pushlightuserdata(L, (void *)candidate);
+        lua_setfield(L, LUA_REGISTRYINDEX, candidate);
+        return candidate;
     }
     else {
-        if (!lua_islightuserdata(L, -1))
-            luaL_error(L, "invalid Titan function-type tag registry entry");
-        canonical = lua_touserdata(L, -1);
+        const char *canonical = (const char *)lua_touserdata(L, -1);
         lua_pop(L, 1);
+        return canonical;
     }
-
-    lua_settop(L, base);
-    return canonical;
 }
 
 static Table *titan_array_callback_metatable(lua_State *L, int index) {

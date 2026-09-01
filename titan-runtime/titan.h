@@ -332,8 +332,8 @@ LUAI_FUNC void titan_init_paths(lua_State *L);
 /* Publish/recover one type-specific canonical pointer. The candidate is an
 ** opaque identity key and is never dereferenced. The helper preserves the Lua
 ** stack on success. */
-LUAI_FUNC const void *titan_publish_function_type_tag(
-    lua_State *L, const char *registry_key, const void *candidate);
+LUAI_FUNC const char *titan_publish_function_type_tag(
+    lua_State *L, const char *candidate);
 
 /*
 ** Dense Array runtime. A backing Table has no metatable, uses only its array
