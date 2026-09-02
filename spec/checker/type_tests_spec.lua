@@ -128,13 +128,13 @@ describe("type-test expressions (typechecker)", function()
             typedef int test_array[2];
             typedef struct test_record { int field; } test_record;
         ]], function(header)
-            h.assert_type_error("cannot cast 'value' to 'test_array'", [[
+            h.assert_type_error("cannot cast 'value' to '.-test_array'", [[
                 local c = foreign import "]] .. header .. [["
                 function array(v: value): boolean
                     return v is c.test_array
                 end
             ]])
-            h.assert_type_error("cannot cast 'value' to 'test_record'", [[
+            h.assert_type_error("cannot cast 'value' to '.-test_record'", [[
                 local c = foreign import "]] .. header .. [["
                 function aggregate(v: value): boolean
                     return v is c.test_record

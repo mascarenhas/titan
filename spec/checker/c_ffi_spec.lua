@@ -705,10 +705,10 @@ describe("C FFI type checking", function()
                 "C assignment receiver must have persistent storage", "")
             assert.equal(4, count, err)
             assert.match(
-                "expression of type 'ffi_outer' is a by%-value C aggregate",
+                "expression of type '.-ffi_outer' is a by%-value C aggregate",
                 err)
             assert.match(
-                "expression of type 'ffi_payload' is a by%-value C aggregate",
+                "expression of type '.-ffi_payload' is a by%-value C aggregate",
                 err)
         end)
     end)
@@ -1686,7 +1686,7 @@ describe("C FFI type checking", function()
                 end
             ]])
             assert.falsy(ok)
-            assert.match("cannot cast 'ffi_callback' to 'value'", err)
+            assert.match("cannot cast '.-ffi_callback' to 'value'", err)
 
             ok, err = run_checker([[
                 local c = foreign import "]] .. header .. [["
@@ -2102,7 +2102,7 @@ describe("C FFI type checking", function()
                 end
             ]])
             assert.falsy(ok)
-            assert.match("cannot cast 'ffi_arr' to 'value'", err)
+            assert.match("cannot cast '.-ffi_arr' to 'value'", err)
 
             ok, err = run_checker([[
                 local c = foreign import "]] .. header .. [["
@@ -2113,7 +2113,7 @@ describe("C FFI type checking", function()
                 end
             ]])
             assert.falsy(ok)
-            assert.match("cannot cast 'value' to 'ffi_arr'", err)
+            assert.match("cannot cast 'value' to '.-ffi_arr'", err)
         end)
     end)
 
@@ -2130,7 +2130,7 @@ describe("C FFI type checking", function()
                 end
             ]])
             assert.falsy(ok)
-            assert.match("cannot cast 'ffi_point' to 'value'", err)
+            assert.match("cannot cast '.-ffi_point' to 'value'", err)
 
             ok, err = run_checker([[
                 local c = foreign import "]] .. header .. [["
@@ -2141,7 +2141,7 @@ describe("C FFI type checking", function()
                 end
             ]])
             assert.falsy(ok)
-            assert.match("cannot cast 'value' to 'ffi_point'", err)
+            assert.match("cannot cast 'value' to '.-ffi_point'", err)
         end)
     end)
 
@@ -2169,7 +2169,7 @@ describe("C FFI type checking", function()
                 end
             ]])
             assert.falsy(ok)
-            assert.match("cannot export C FFI type 'ffi_count'", err)
+            assert.match("cannot export C FFI type '.-ffi_count'", err)
         end)
     end)
 
@@ -2188,7 +2188,7 @@ describe("C FFI type checking", function()
                 ]]
             }, "b")
             assert.falsy(ok)
-            assert.match("cannot export C FFI type 'ffi_count'", err)
+            assert.match("cannot export C FFI type '.-ffi_count'", err)
         end)
     end)
 
@@ -2202,7 +2202,7 @@ describe("C FFI type checking", function()
                 end
             ]])
             assert.falsy(ok)
-            assert.match("cannot export C FFI type 'ffi_count'", err)
+            assert.match("cannot export C FFI type '.-ffi_count'", err)
         end)
     end)
 
@@ -2318,7 +2318,7 @@ describe("C FFI type checking", function()
                 end
             ]])
             assert.falsy(ok)
-            assert.match("cannot export C FFI type 'ffi_count'", err)
+            assert.match("cannot export C FFI type '.-ffi_count'", err)
         end)
     end)
 
@@ -2332,7 +2332,7 @@ describe("C FFI type checking", function()
                 end
             ]])
             assert.falsy(ok)
-            assert.match("cannot export C FFI type 'ffi_point'", err)
+            assert.match("cannot export C FFI type '.-ffi_point'", err)
         end)
     end)
 end)

@@ -121,10 +121,12 @@ describe("source-written owned C types", function()
             local items_alias = ast[3]._type
             assert.equal("Type.COwned", item_alias._tag)
             assert.is_false(item_alias.count)
-            assert.equal("owned *ffi_item", types.tostring(item_alias))
+            assert.equal(string.format("owned *test.%s.ffi_item", header),
+                types.tostring(item_alias))
             assert.equal("Type.COwned", items_alias._tag)
             assert.is_true(items_alias.count)
-            assert.equal("owned ffi_item[]", types.tostring(items_alias))
+            assert.equal(string.format("owned test.%s.ffi_item[]", header),
+                types.tostring(items_alias))
         end)
     end)
 
@@ -502,7 +504,7 @@ describe("source-written owned C types", function()
                 end
             ]])
             assert.falsy(ok)
-            assert.match("flexible%-array field 'ffi_wide_flexible%.items'", err)
+            assert.match("flexible%-array field '.-ffi_wide_flexible%.items'", err)
             assert.match("count 4611686018427387904 exceeds SIZE_MAX", err)
 
             ok, err = check_with_header(header, [[

@@ -724,6 +724,8 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
                 lua_newtable(L);
                 lua_pushliteral(L, $DISPLAY);
                 lua_setfield(L, -2, "__name");
+                lua_pushliteral(L, $TAG);
+                lua_setfield(L, -2, "__type");
                 lua_pushliteral(L, "__metatable");
                 lua_pushliteral(L, $DISPLAY);
                 lua_settable(L, -3);
@@ -739,6 +741,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         ]], {
             NAME = c_string_literal(entry.registry_key),
             DISPLAY = c_string_literal(entry.name),
+            TAG = c_string_literal(entry.tag),
             INDEX = c_integer_literal(entry.slot),
         }))
     end
@@ -751,14 +754,19 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
     -- to the defining module because imported C type identity is module-local.
     local initfunctags = {}
     for _, entry in ipairs(tlcontext.functag_list) do
-        table.insert(sigs, "static const void *" .. entry.id .. ";")
-        table.insert(initfunctags, render([[
-            $ID = titan_publish_function_type_tag(
-                L, $KEYSTR, (const void *)&$ID);
+        table.insert(sigs, render([[
+            static const char $TAGNAME[] = $TAG;
+            static const char *$ID = $TAGNAME;
         ]], {
+            TAGNAME = entry.id .. "_tag",
+            TAG = c_string_literal(entry.tag),
             ID = entry.id,
-            KEYSTR = c_string_literal(
-                "Titan function type " .. entry.registry_key .. " tag"),
+        }))
+        table.insert(initfunctags, render([[
+            $ID = titan_publish_function_type_tag(L, $KEYSTR, $ID);
+        ]], {
+            KEYSTR = c_string_literal("Titan function type " .. entry.key .. " tag"),
+            ID = entry.id,
         }))
     end
 

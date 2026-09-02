@@ -107,7 +107,7 @@ describe("flexible return schemas (typechecker)", function()
             local joined = table.concat(errs, "\n")
             assert.match("flexible return cannot have a foreign pointer type",
                 joined)
-            assert.match("flexible return cannot use type ffi_int",
+            assert.match("flexible return cannot use type .-ffi_int",
                 joined)
             assert.match("no supported variadic%-value representation",
                 joined)

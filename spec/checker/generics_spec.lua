@@ -1749,7 +1749,7 @@ describe("generic declarations and explicit calls", function()
             assert.match("has no sound transient round trip", errors[2])
             assert.match("has no sound transient round trip", errors[3])
             assert.match(
-                "argument 2.-expected ffi_intptr %* but found integer",
+                "argument 2.-expected %*.-ffi_intptr but found integer",
                 errors[4])
             for index = 5, 7 do
                 assert.match("cannot close", errors[index])

@@ -3020,6 +3020,9 @@ static struct titan_symlink_origin *titan_symlink_origin_get(void) {
             local p2 = test.point()
             assert(p1 ~= p2)
             assert(getmetatable(p1) == getmetatable(p2))
+            local mt = debug.getmetatable(p1)
+            assert(type(mt) == 'table')
+            assert(mt.__type == "Record('test.Point',{Field('test.Point', 'x', Float(), 0, false),Field('test.Point', 'y', Float(), 1, false)},{new = StaticMethod('test.Point', 'new',{Float(),Float()},{Nominal('test.Point')},false,false,{\"x\",\"y\"})},{},2)")
         ]])
     end)
 

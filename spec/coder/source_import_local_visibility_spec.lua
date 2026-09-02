@@ -300,9 +300,9 @@ struct SourceOwnedRuntime { int field; };
         }, "source_runtime_owned_consumer")
 
         local forwarder = read_file("source_runtime_owned_forwarder.c")
-        assert.falsy(forwarder:find(header, 1, true), forwarder)
+        assert.falsy(forwarder:match("#include [^\n]*" .. header:gsub("%p", "%%%0")), forwarder)
         local consumer = read_file("source_runtime_owned_consumer.c")
-        assert.truthy(consumer:find(header, 1, true), consumer)
+        assert.truthy(consumer:match("#include [^\n]*" .. header:gsub("%p", "%%%0")), consumer)
         os.remove(header)
 
         call("source_runtime_owned_consumer", [[

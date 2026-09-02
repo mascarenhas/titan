@@ -244,7 +244,7 @@ describe("surface C99 types", function()
                 'local c = foreign import "' .. header .. '"\n' ..
                 "type Word = c.local_word")
             assert.falsy(ok)
-            assert.match("cannot export C FFI type 'local_word'", err)
+            assert.match("cannot export C FFI type '.-local_word'", err)
             assert.match("non%-portable header%-defined type", err)
         end)
     end)

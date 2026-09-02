@@ -641,7 +641,7 @@ describe("contextual calls through value (typechecker)", function()
             assert.same(2, #errs)
             assert.match("a flexible return cannot have a foreign pointer type",
                 errs[1])
-            assert.match("cannot construct an array with element type int %*",
+            assert.match("cannot construct an array with element type %*int",
                 errs[2])
             assert.match("genuine Lua writes have no sound dynamic coercion",
                 errs[2])
