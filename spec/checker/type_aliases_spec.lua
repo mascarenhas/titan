@@ -400,7 +400,7 @@ describe("Titan type aliases", function()
                 end
             ]])
             assert.same(1, #errors)
-            assert.match("cannot export C FFI type 'ffi_int'", errors[1])
+            assert.match("cannot export C FFI type '.-ffi_int'", errors[1])
         end)
     end)
 

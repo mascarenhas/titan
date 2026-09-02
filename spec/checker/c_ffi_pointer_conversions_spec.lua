@@ -444,8 +444,8 @@ describe("contextual unsafe C object-pointer conversions", function()
             assert.falsy(ok)
             assert.match("cannot take a mutable C address", err, 1, true)
             assert.match(
-                "non-addressable expression of type 'ffi_source'",
-                err, 1, true)
+                "non%-addressable expression of type '.-ffi_source'",
+                err)
         end)
     end)
 

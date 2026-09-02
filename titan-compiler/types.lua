@@ -4809,7 +4809,7 @@ function types.tostring(t, wrap)
         if t.vararg then
             table.insert(params, "...")
         end
-        local res = "foreign " .. " (" .. table.concat(params, ", ") .. ")" .. "->" .. types.tostring(t.ret, true)
+        local res = "foreign " .. " (" .. table.concat(params, ", ") .. ")" .. " -> " .. types.tostring(t.ret, true)
         if wrap then
             return "(" .. res .. ")"
         else

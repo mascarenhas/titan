@@ -232,7 +232,7 @@ typefromnode = util.make_visitor({
                 if checker._ensure_c_enum_supported(
                         st, typ, node.loc, errors, nil,
                         defer_c_enum_carrier and true or false) then
-                    typ._ffi_scope = typ._ffi_scope or (st.modname .. "." .. mod.name)
+                    typ._ffi_scope = typ._ffi_scope or (st.modname .. "." .. mod._type.name)
                     return typ
                 end
                 return types.Invalid()

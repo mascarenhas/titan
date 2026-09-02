@@ -98,9 +98,9 @@ describe("Titan types", function()
             types.tostring(types.Array(types.Integer(), true)))
 
         local c_integer = types.CInteger("int", true, 3, 32)
-        assert.same("{ const int * }", types.tostring(types.Array(
+        assert.same("{ const *int }", types.tostring(types.Array(
             types.CPointer(c_integer, {"const"}), false)))
-        assert.same("const { int * }", types.tostring(types.Array(
+        assert.same("const { *int }", types.tostring(types.Array(
             types.CPointer(c_integer, {}), true)))
     end)
 
@@ -158,7 +158,7 @@ describe("Titan types", function()
         local fixed = types.Function({}, {elem}, false, false, false)
         local flexible = types.Function({}, {}, false, false, elem)
 
-        assert.same("() -> () -> integer", types.tostring(fixed))
+        assert.same("() -> (() -> integer)", types.tostring(fixed))
         assert.same("() -> (...: () -> integer)", types.tostring(flexible))
         assert.not_equal(types.tostring(fixed), types.tostring(flexible))
     end)
@@ -1827,7 +1827,7 @@ describe("Titan types", function()
         assert.same("((integer) -> integer, integer) -> integer",
             types.tostring(types.Function({intfn, int}, {int}, false, false, false)))
         -- (integer) -> ((integer) -> integer)
-        assert.same("(integer) -> (integer) -> integer",
+        assert.same("(integer) -> ((integer) -> integer)",
             types.tostring(types.Function({int}, {intfn}, false, false, false)))
     end)
 
@@ -2147,11 +2147,11 @@ describe("Titan types", function()
             assert.same("foreign float",
                 types.tostring(types.CFloat("float")))
             assert.same("double", types.tostring(types.CFloat("double")))
-            assert.same("const int *", types.tostring(types.CPointer(int, {"const"})))
+            assert.same("const *int", types.tostring(types.CPointer(int, {"const"})))
             assert.same("int[4]", types.tostring(types.CArray(int, 4)))
             assert.same("const int[4]",
                 types.tostring(types.CArray(int, 4, {"const"})))
-            assert.same("double (int, ...)", types.tostring(
+            assert.same("foreign  (int, ...) -> double", types.tostring(
                 types.CFunction({int}, types.CFloat("double"), true, "cdecl")))
             assert.same("struct point", types.tostring(
                 types.CStruct("struct point", "point", false, {}, true, false)))
@@ -2159,7 +2159,7 @@ describe("Titan types", function()
                 types.CUnion("union value", "value", false, {}, true)))
             assert.same("x: int", types.tostring(
                 types.CField(false, "x", int, false, false)))
-            assert.same("size_t", types.tostring(types.CTypedef("size_t", int)))
+            assert.same("foreign size_t", types.tostring(types.CTypedef("size_t", int)))
             assert.same("owned *int",
                 types.tostring(types.COwned(int, false)))
             assert.same("owned int[]",
@@ -2306,7 +2306,7 @@ describe("Titan types", function()
             local const_return = types.CFunction(
                 {second_int}, second_int, false, "cdecl")
             const_return._return_declaration_qualifiers = {"const"}
-            assert.equal("const ffi_second_int (ffi_second_int)",
+            assert.equal("foreign  (foreign ffi_second_int) -> foreign ffi_second_int",
                 types.tostring(const_return))
             assert.is_false(types.c_function_types_equal(
                 first, const_return))
@@ -2369,7 +2369,7 @@ describe("Titan types", function()
             assert.is_false(types.consistent(first, first_value))
             assert.is_false(types.callable_adjustment(first, first_value))
             assert.is_false(types.callable_adjustment(first_value, first))
-            assert.equal("const void ()", types.tostring(const_void))
+            assert.equal("foreign  () -> void", types.tostring(const_void))
 
             local unknown_array =
                 types.CArray(first_int, nil)
@@ -3288,7 +3288,7 @@ describe("Titan types", function()
             end, "type argument 1 is not a type")
             assert.has_error(function()
                 types.substitute(rigid, generic_scope, {pointer})
-            end, "type argument 1 ('int *') has no sound transient round trip")
+            end, "type argument 1 ('*int') has no sound transient round trip")
             assert.is_true(types.equals(pointer,
                 types.substitute_inference(
                     rigid, generic_scope, {pointer})))
@@ -3305,7 +3305,7 @@ describe("Titan types", function()
             valid, argument_error =
                 types.validate_type_arguments(typeparams, {pointer})
             assert.is_nil(valid)
-            assert.equal("type argument 1 ('int *') has no sound " ..
+            assert.equal("type argument 1 ('*int') has no sound " ..
                 "transient round trip", argument_error)
         end)
 

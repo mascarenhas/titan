@@ -2042,7 +2042,7 @@ describe("Titan type checker", function()
                 end
             ]])
             assert.falsy(ok)
-            assert.match("expected char %* but found void %*", err)
+            assert.match("expected %*char but found %*void", err)
         end)
     end)
 

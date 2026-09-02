@@ -1248,7 +1248,7 @@ describe("interfaces (typechecker)", function()
             h.close_checker_probe_session(session)
             assert.is_true(ran, failure)
             assert.falsy(ok)
-            assert.match("cannot export C FFI type 'ffi_int'", err)
+            assert.match("cannot export C FFI type '.-ffi_int'", err)
         end)
     end)
 
