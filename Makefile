@@ -438,7 +438,7 @@ TITAN_SHARE_DIR            ?= $(TITAN_INSTALL_TREE)/share/titan
 # ./lua-5.5.1 tree. The generated C and the runtime include its backtrace.h and
 # link its static archive (driver.lua references ./libbacktrace/.libs/...).
 LIBBT_DIR := libbacktrace
-LIBBT_URL := https://github.com/ianlancetaylor/libbacktrace.git
+LIBBT_URL := git@github.com:ianlancetaylor/libbacktrace.git
 LIBBT_LIB := $(LIBBT_DIR)/.libs/libbacktrace.a
 LIBBT_CLONE_STAMP := $(LIBBT_DIR)/.titan-cloned
 LIBBT_BUILD_CONFIG := $(LIBBT_DIR)/.titan-build-config
