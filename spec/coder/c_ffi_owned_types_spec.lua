@@ -43,7 +43,8 @@ describe("source-written owned C type code generation", function()
                 int value;
             } ffi_item;
         ]], function(header)
-            local csrc = h.compile_and_read_c([[
+            local csrc = h.with_extra_cflags({ '-DTITAN_COMPILER_TESTS' }, function ()
+              return h.compile_and_read_c([[
                 local c = foreign import "]] .. header .. [["
                 local type Item = owned *c.ffi_item
                 local item: Item = c.ffi_item.new()
@@ -54,7 +55,8 @@ describe("source-written owned C type code generation", function()
                     local made: Item = c.ffi_item.new()
                     return made
                 end
-            ]])
+              ]])
+            end)
             local lookup = assert(csrc:find(
                 "luaL_getmetatable(L, \"Titan owned C", 1, true))
             local construct = assert(csrc:find(
@@ -62,7 +64,7 @@ describe("source-written owned C type code generation", function()
             local name = assert(csrc:find(
                 "lua_setfield(L, -2, \"__name\");", construct, true))
             local type_key = assert(csrc:find(
-                "lua_setfield(L, -2, \"__type\");", name, true))
+                "lua_rawsetp(L, -2, TITAN_MT_TYPE);", name, true))
             local metatable_key = assert(csrc:find(
                 "lua_pushliteral(L, \"__metatable\");", type_key, true))
             local metatable = assert(csrc:find(
@@ -77,14 +79,15 @@ describe("source-written owned C type code generation", function()
                 true))
 
             local ok, err = h.call("test", [[
+                local registry = debug.getregistry()
                 local item = test.make()
                 local public_name = getmetatable(item)
                 local metatable = debug.getmetatable(item)
                 assert(type(public_name) == "string")
                 assert(type(metatable) == "table")
                 assert(metatable.__name == public_name)
-                assert(type(metatable.__type) == "string")
-                assert(metatable.__type == "COwned(CTypedef(\"ffi_item\",CStruct(false,\"ffi_item\",false,{},true,false),{}),false)")
+                assert(metatable[registry.TITAN_BRAND] == 6)
+                assert(metatable[registry.TITAN_MT_TYPE] == "COwned(CTypedef(\"ffi_item\",CStruct(false,\"ffi_item\",false,{},true,false),{}),false)")
                 assert(tostring(item):sub(1, #public_name + 2) ==
                        public_name .. ": ")
             ]])

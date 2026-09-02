@@ -1715,7 +1715,7 @@ upvalue[5] = bound-interface strict Titan-generic entry as an LCF TValue
 The canonical self-removed function-type tag stored in upvalue 1 remains the
 exact native-call identity. Non-exact dispatch instead requires at least five
 upvalues and compares the raw pointer bits in upvalue 3 with
-`TITAN_FUNCTION_CLOSURE_BRAND`. The brand is the same fixed ABI sentinel for
+`TITAN_BRAND`. The brand is the same fixed ABI sentinel for
 source and compiled providers; it requires no reverse registry publication or
 provider-order protocol.
 

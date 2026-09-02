@@ -544,7 +544,7 @@ values.
 
 Only after the exact comparison fails does the coder test the type-independent
 closure brand in fixed `upvalue[3]`. The brand is the opaque, ABI-owned
-64-bit pointer sentinel `TITAN_FUNCTION_CLOSURE_BRAND`; it is never
+64-bit pointer sentinel `TITAN_BRAND`; it is never
 dereferenced. A C closure must have at least five upvalues before the coder
 reads that slot. Raw equality is then enough to trust the rest of the private
 layout: no registry access or other `ttis*` shape checks occur. An unrelated C

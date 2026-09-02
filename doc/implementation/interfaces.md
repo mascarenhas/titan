@@ -425,7 +425,7 @@ An Interface bound-method **source** closure has six zero-based upvalues:
 0  Interface-owner module Udata
 1  self-removed function-type tag
 2  native bound trampoline pointer
-3  TITAN_FUNCTION_CLOSURE_BRAND
+3  TITAN_BRAND
 4  captured Interface wrapper
 5  strict Lua-stack entry
 ```

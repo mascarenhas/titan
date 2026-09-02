@@ -215,7 +215,7 @@ declaration strict light C function last; wrappers store their target relay.
 `codevaluecall` first performs the likely exact static-tag comparison; an exact
 match uses the native pointer (ordinary body or wrapper adapter) without a Lua
 registry lookup. Only after a mismatch does it compare fixed `upvalue[3]`
-against `TITAN_FUNCTION_CLOSURE_BRAND`. Both predicates require the minimum
+against `TITAN_BRAND`. Both predicates require the minimum
 private shape and otherwise compare trusted raw pointer bits. A branded
 mismatch pushes the closure's trailer plus the closure; non-Titan callable
 values use Lua's ordinary call machinery, receive the already adjusted and

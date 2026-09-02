@@ -5201,7 +5201,7 @@ function types.serialize(t)
             serialize_names(t.quals) .. ")"
     elseif tag == "Type.CArray" then
         return "CArray(" .. types.serialize(t.elem) .. "," ..
-            (t.len and tostring(t.len) or "false") .. "," ..
+            util.tostring(t.len) .. "," ..
             serialize_names(t.quals) .. ")"
     elseif tag == "Type.CFunction" then
         return "CFunction(" .. serialize_type_list(t.params) .. "," ..
@@ -5223,7 +5223,7 @@ function types.serialize(t)
         return "CField(false," ..
             string.format("%q", t.name) .. "," ..
             types.serialize(t.type) .. "," ..
-            (t.bitfield and tostring(t.bitfield) or "false") .. "," ..
+            util.tostring(t.bitfield) .. "," ..
             tostring(t.flexible_array or false) .. ")"
     elseif tag == "Type.CTypedef" then
         return "CTypedef(" .. string.format("%q", t.name) .. "," ..

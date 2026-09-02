@@ -141,7 +141,7 @@ realization checks exactly:
 * the carrier is a non-null `CClosure`;
 * `5 <= nupvalues < MAXUPVAL`;
 * upvalue 1 is lightuserdata equal to the exact source-`A` function tag; and
-* upvalue 3 is lightuserdata equal to `TITAN_FUNCTION_CLOSURE_BRAND`.
+* upvalue 3 is lightuserdata equal to `TITAN_BRAND`.
 
 Once the exact tag and brand establish the private Titan carrier, generated code
 trusts the remaining branded layout. Construction deliberately does not probe

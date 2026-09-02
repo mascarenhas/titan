@@ -232,6 +232,8 @@ static void titan_array_initialize_metatable(lua_State *L,
                                              int other_index,
                                              int mutable) {
     metatable_index = lua_absindex(L, metatable_index);
+    lua_pushinteger(L, mutable ? TITAN_ARRAY : TITAN_CONST_ARRAY);
+    lua_rawsetp(L, metatable_index, TITAN_BRAND);
     lua_pushstring(L, name);
     lua_setfield(L, metatable_index, "__name");
     lua_pushstring(L, name);

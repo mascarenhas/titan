@@ -15,6 +15,13 @@
 #include "lvm.h"
 
 /*
+** Small trusted Lua-internal value bridges live with their FFI declarations.
+** Includes shared macros and inline functions between the C FFI and the Titan
+** runtime
+*/
+#include "titan/ffi.h"
+
+/*
 ** ===========================================================================
 ** VENDORED FROM Lua 5.5.1 src/ldo.c lines 61-109 (keep VERBATIM; re-sync on
 ** every Lua upgrade). The struct must stay byte-compatible with the linked
@@ -36,7 +43,7 @@
 typedef struct lua_longjmp {
   struct lua_longjmp *previous;
   jmp_buf b;
-  volatile TStatus status;  /* error code */
+  volatile TStatus status; /* error code */
 } lua_longjmp;
 
 /* --- END verbatim --- */
@@ -45,26 +52,15 @@ typedef struct lua_longjmp {
 ** Statement-form setjmp selector, mirroring the upstream LUAI_THROW/LUAI_TRY
 ** #ifdef ladder (lua-5.5.1/src/ldo.c:74-107) but expressed as a value usable in
 ** an `if (TITAN_SETJMP(buf) == 0) { ... }` boundary (the upstream LUAI_TRY is
-** function-form and takes a Pfunc; we cannot use it for inline straight-line C).
+** function-form and takes a Pfunc; we cannot use it for inline straight-line
+* C).
 ** The same selection (_setjmp on POSIX, setjmp otherwise) keeps the buffer
 ** read/written by the same routine the linked liblua.a uses for LUAI_THROW.
 */
 #if defined(LUA_USE_POSIX)
-#define TITAN_SETJMP(buf)  _setjmp(buf)
+#define TITAN_SETJMP(buf) _setjmp(buf)
 #else
-#define TITAN_SETJMP(buf)  setjmp(buf)
-#endif
-
-#ifdef __GNUC__
-#define TITAN_LIKELY(x) __builtin_expect((x), 1)
-#define TITAN_UNLIKELY(x) __builtin_expect((x), 0)
-#define TITAN_UNUSED __attribute__((unused))
-#define TITAN_NOINLINE __attribute__((noinline))
-#else
-#define TITAN_LIKELY(x) (x)
-#define TITAN_UNLIKELY(x) (x)
-#define TITAN_UNUSED
-#define TITAN_NOINLINE
+#define TITAN_SETJMP(buf) setjmp(buf)
 #endif
 
 /* TITAN_ABI_VERSION is the monotonic compiled-module compatibility integer,
@@ -84,11 +80,6 @@ typedef struct lua_longjmp {
 #define TITAN_PATH_KEY "ec10e486-d8fd-11e7-87f4-e7e9581a929c"
 #define TITAN_LIBS_KEY "ecfc9174-d8fd-11e7-8be2-abbaa3ded45f"
 #define TITAN_BT_STATE_KEY "a222927d-0e7b-4f7a-93d9-1a6ce7111a5c"
-#define TITAN_MAIN_BOOTSTRAP_KEY "41c48a97-55a5-4514-a76f-79ab028ae6e0"
-#define TITAN_MAIN_ARGC_KEY "fd9c8d85-f521-4052-92e6-8af5c349e5bb"
-#define TITAN_MAIN_ARGV_KEY "fc1376f3-2cb7-48d4-969c-c02df930cf68"
-
-#define TITAN_BACKTRACE_KEY "57d80578-2534-4856-ad3b-bde8cba4c445"
 
 /* Registry sub-table mapping a native Titan C symbol name (the mangled name the
 ** coder emits for a function/method/static/anonymous native entry) -> the
@@ -102,26 +93,6 @@ typedef struct lua_longjmp {
 ** module ABI. */
 #define TITAN_NAMES_KEY "a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"
 
-/* Opaque ABI-owned brand stored as light userdata in every Titan function
-** closure. It is compared only as raw pointer bits and must never be
-** dereferenced. Together with the fixed upvalue slot/count, this
-** astronomically unlikely sentinel distinguishes Titan closures without a
-** Lua-registry lookup on generic calls. */
-#define TITAN_FUNCTION_CLOSURE_BRAND                                      \
-  ((void *)(uintptr_t)UINT64_C(0x649b61b49f68a8b2))
-
-/* When set (boolean true) in the registry, errorhandler() KEEPS the existing
-** TITAN_BACKTRACE_KEY slot instead of regenerating it, and clears the pin. A
-** pending re-raise sets the pin so the original error's trace is preserved; a
-** fresh error leaves it clear so it gets a freshly-captured trace. */
-#define TITAN_TRACE_PINNED "5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"
-
-/* Temporary handoff slot used by Titan coroutines. A dead coroutine entry
-** stages its own trace here; the resume/error side captures a new propagation
-** trace, appends it, stores the combined trace in TITAN_BACKTRACE_KEY, and
-** sets TITAN_TRACE_PINNED for the final re-raise. */
-#define TITAN_TRACE_APPEND_KEY "4f895b66-bae0-4e97-afb3-83a31f2f9e96"
-
 #define TITAN_LUAINTEGER_NBITS cast_int(sizeof(lua_Integer) * CHAR_BIT)
 
 /*
@@ -133,9 +104,9 @@ typedef struct lua_longjmp {
 */
 #define TITAN_ARRAY_METATABLE "Titan array metatable"
 #define TITAN_CONST_ARRAY_METATABLE "Titan const array metatable"
-#define TITAN_ARRAY_MAX_CAPACITY                                             \
-  (((1u << (l_numbits(int) - 1)) < (MAX_SIZET / (sizeof(Value) + 1)))         \
-       ? (1u << (l_numbits(int) - 1))                                        \
+#define TITAN_ARRAY_MAX_CAPACITY                                               \
+  (((1u << (l_numbits(int) - 1)) < (MAX_SIZET / (sizeof(Value) + 1)))          \
+       ? (1u << (l_numbits(int) - 1))                                          \
        : cast_uint(MAX_SIZET / (sizeof(Value) + 1)))
 
 /*
@@ -332,8 +303,9 @@ LUAI_FUNC void titan_init_paths(lua_State *L);
 /* Publish/recover one type-specific canonical pointer. The candidate is an
 ** opaque identity key and is never dereferenced. The helper preserves the Lua
 ** stack on success. */
-LUAI_FUNC const char *titan_publish_function_type_tag(
-    lua_State *L, const char *registry_key, const char *candidate);
+LUAI_FUNC const char *titan_publish_function_type_tag(lua_State *L,
+                                                      const char *registry_key,
+                                                      const char *candidate);
 
 /*
 ** Dense Array runtime. A backing Table has no metatable, uses only its array
@@ -345,8 +317,7 @@ LUAI_FUNC const char *titan_publish_function_type_tag(
 LUAI_FUNC void titan_array_metatables(lua_State *L, Table **mutable_out,
                                       Table **const_out);
 /* Read the already-initialized canonical pair without changing L->top. */
-LUAI_FUNC void titan_array_cached_metatables(lua_State *L,
-                                             Table **mutable_out,
+LUAI_FUNC void titan_array_cached_metatables(lua_State *L, Table **mutable_out,
                                              Table **const_out);
 LUAI_FUNC Table *titan_array_metatable(lua_State *L);
 static l_inline Table *titan_const_array_metatable(lua_State *L) {
@@ -361,7 +332,8 @@ static l_inline lua_Unsigned titan_array_length(const Table *backing) {
   return *lenhint(backing);
 }
 
-static l_inline void titan_array_set_length(Table *backing, lua_Unsigned length) {
+static l_inline void titan_array_set_length(Table *backing,
+                                            lua_Unsigned length) {
   *lenhint(backing) = cast_uint(length);
 }
 
@@ -386,14 +358,16 @@ static l_inline Udata *titan_array_try_proxy(Table *backing, Table *metatable) {
 }
 
 /* Reject a null/collapsed tag pair before testing either exact identity. */
-static l_inline Udata *titan_array_try_proxy_either(
-    Table *backing, Table *mutable_metatable, Table *const_metatable) {
+static l_inline Udata *titan_array_try_proxy_either(Table *backing,
+                                                    Table *mutable_metatable,
+                                                    Table *const_metatable) {
   Udata *proxy;
   if (mutable_metatable == NULL || const_metatable == NULL ||
       mutable_metatable == const_metatable)
     return NULL;
   proxy = titan_array_try_proxy(backing, mutable_metatable);
-  return proxy != NULL ? proxy : titan_array_try_proxy(backing, const_metatable);
+  return proxy != NULL ? proxy
+                       : titan_array_try_proxy(backing, const_metatable);
 }
 
 static l_inline Table *titan_array_try_backing(const TValue *value,
@@ -407,8 +381,9 @@ static l_inline Table *titan_array_try_backing(const TValue *value,
   return NULL;
 }
 
-static l_inline Table *titan_array_try_backing_either(
-    const TValue *value, Table *mutable_metatable, Table *const_metatable) {
+static l_inline Table *titan_array_try_backing_either(const TValue *value,
+                                                      Table *mutable_metatable,
+                                                      Table *const_metatable) {
   if (mutable_metatable == NULL || const_metatable == NULL ||
       mutable_metatable == const_metatable)
     return NULL;
@@ -446,8 +421,7 @@ static l_inline Table *titan_const_array_new(lua_State *L, Table *metatable,
 
 LUAI_FUNC Table *titan_array_shallow_copy(lua_State *L, Table *source,
                                           Table *mutable_metatable,
-                                          Table *const_metatable,
-                                          StkId result);
+                                          Table *const_metatable, StkId result);
 LUAI_FUNC Table *titan_array_freeze(lua_State *L, Table *backing,
                                     Table *mutable_metatable,
                                     Table *const_metatable);
@@ -459,9 +433,29 @@ LUAI_FUNC lu_byte titan_array_get(Table *backing, lua_Integer index,
 LUAI_FUNC void titan_array_set_stack(lua_State *L, Table *backing,
                                      lua_Integer index, int value_index);
 
-int errorhandler(lua_State *L);
-
-/* Small trusted Lua-internal value bridges live with their FFI declarations. */
-#include "titan/ffi.h"
+static l_inline Table *titan_ensure_metatables_table(lua_State *L) {
+  luaL_checkstack(L, 1, "stack overflow creating metatables table");
+#ifdef TITAN_COMPILER_TESTS
+  lua_pushlightuserdata(L, TITAN_BRAND);
+  lua_setfield(L, LUA_REGISTRYINDEX, "TITAN_BRAND");
+  lua_pushlightuserdata(L, TITAN_MT_TYPE);
+  lua_setfield(L, LUA_REGISTRYINDEX, "TITAN_MT_TYPE");
+  lua_pushlightuserdata(L, TITAN_MT_STATICS);
+  lua_setfield(L, LUA_REGISTRYINDEX, "TITAN_MT_STATICS");
+  lua_pushlightuserdata(L, TITAN_MT_MEMBERMAP);
+  lua_setfield(L, LUA_REGISTRYINDEX, "TITAN_MT_MEMBERMAP");
+#endif
+  lua_getfield(L, LUA_REGISTRYINDEX, TITAN_METATABLES_KEY);
+  TValue *v = s2v(L->top.p - 1);
+  if (ttisnil(v)) {
+    L->top.p--;
+    lua_newtable(L);
+    v = s2v(L->top.p - 1);
+    lua_setfield(L, LUA_REGISTRYINDEX, TITAN_METATABLES_KEY);
+  } else {
+    L->top.p--;
+  }
+  return hvalue(v);
+}
 
 #endif

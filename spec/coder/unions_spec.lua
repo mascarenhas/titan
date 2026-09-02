@@ -25,33 +25,33 @@ describe("unions (end-to-end)", function()
     after_each(clean_generated_modules)
 
     it("describes public constructor symbols from source and interfaces",
-    function()
-        local ok, err, ast, modtype = h.run_checker([[
+        function()
+            local ok, err, ast, modtype = h.run_checker([[
             union Message
                 some: integer
             end
         ]])
-        assert.truthy(ok, err)
+            assert.truthy(ok, err)
 
-        local expected = {
-            symbol = "test_\\u2133_Message_\\u2131_some_titanstatic",
-            owner = "union function 'test.Message.some'",
-        }
-        local source_symbols = coder.external_symbols("test", ast)
-        local interface_symbols =
-            coder.interface_external_symbols("test", modtype)
-        local function find_symbol(symbols)
-            for _, entry in ipairs(symbols) do
-                if entry.symbol == expected.symbol then return entry end
+            local expected = {
+                symbol = "test_\\u2133_Message_\\u2131_some_titanstatic",
+                owner = "union function 'test.Message.some'",
+            }
+            local source_symbols = coder.external_symbols("test", ast)
+            local interface_symbols =
+                coder.interface_external_symbols("test", modtype)
+            local function find_symbol(symbols)
+                for _, entry in ipairs(symbols) do
+                    if entry.symbol == expected.symbol then return entry end
+                end
             end
-        end
-        assert.same(expected, find_symbol(source_symbols))
-        assert.same(expected, find_symbol(interface_symbols))
-    end)
+            assert.same(expected, find_symbol(source_symbols))
+            assert.same(expected, find_symbol(interface_symbols))
+        end)
 
     it("constructs empty and payload variants and dispatches without fallthrough",
-    function()
-        h.run_coder([[
+        function()
+            h.run_coder([[
             union Message
                 quit
                 write: string
@@ -117,12 +117,12 @@ describe("unions (end-to-end)", function()
             assert(test.make_with_surplus())
             assert(test.surplus_effects == 1)
         ]])
-    end)
+        end)
 
     it("compiles the exact imported positional record-payload example",
-    function()
-        local ok, err = h.generate_modules({
-            messages = [[
+        function()
+            local ok, err = h.generate_modules({
+                messages = [[
                 record Delta
                     x: float
                     y: float
@@ -132,7 +132,7 @@ describe("unions (end-to-end)", function()
                     move: Delta
                 end
             ]],
-            message_consumer = [[
+                message_consumer = [[
                 local m = import "messages"
                 local moved = m.Message.move({ x = 1.0, y = 2.0 })
 
@@ -143,13 +143,13 @@ describe("unions (end-to-end)", function()
                     end
                 end
             ]],
-        }, "message_consumer")
-        assert.truthy(ok, err)
-        local rok, out = h.call("message_consumer", [[
+            }, "message_consumer")
+            assert.truthy(ok, err)
+            local rok, out = h.call("message_consumer", [[
             assert(message_consumer.total() == 3.0)
         ]])
-        assert.truthy(rok, out)
-    end)
+            assert.truthy(rok, out)
+        end)
 
     it("forces an optional scrutinee once before any arm handlers", function()
         h.run_coder([[
@@ -341,8 +341,8 @@ describe("unions (end-to-end)", function()
     end)
 
     it("matches if-block cleanup for fallthrough, return, raise, and break",
-    function()
-        h.run_coder([[
+        function()
+            h.run_coder([[
             union Branch
                 selected: integer
                 other: integer
@@ -495,7 +495,7 @@ describe("unions (end-to-end)", function()
             assert(test.case_break(selected) == test.if_break(true, 7))
             assert(test.case_break(other) == test.if_break(false, 9))
         ]])
-    end)
+        end)
 
     it("lets an arm break its enclosing loop and nests cases safely", function()
         h.run_coder([[
@@ -723,8 +723,8 @@ describe("unions (end-to-end)", function()
     end)
 
     it("covers representative union payload storage and case loads once",
-    function()
-        local csrc = h.compile_and_read_c([[
+        function()
+            local csrc = h.compile_and_read_c([[
             local ffi =
                 foreign import "spec/fixtures/c_tvalue_soundness.h"
 
@@ -801,25 +801,25 @@ describe("unions (end-to-end)", function()
             end
         ]])
 
-        assert.match(
-            "sethvalue%s*%(%s*L,%s*&_tmp_%d+%->uv%[1%]%.uv,%s*", csrc)
-        assert.match(
-            "hvalue%s*%(%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)", csrc)
-        assert.not_match("titan_array_require_proxy", csrc)
-        assert.match(
-            "luaC_barrierback%s*%(%s*L,%s*obj2gco%s*%(%s*_tmp_%d+%s*%)"
+            assert.match(
+                "sethvalue%s*%(%s*L,%s*&_tmp_%d+%->uv%[1%]%.uv,%s*", csrc)
+            assert.match(
+                "hvalue%s*%(%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)", csrc)
+            assert.not_match("titan_array_require_proxy", csrc)
+            assert.match(
+                "luaC_barrierback%s*%(%s*L,%s*obj2gco%s*%(%s*_tmp_%d+%s*%)"
                 .. ",%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)",
-            csrc)
+                csrc)
 
-        local ok, err = h.call("test", [[
+            local ok, err = h.call("test", [[
             assert(test.exercise() == 39)
         ]])
-        assert.truthy(ok, err)
-    end)
+            assert.truthy(ok, err)
+        end)
 
     it("round-trips the full payload matrix across full and minor GC #stress",
-    function()
-        local csrc = h.compile_and_read_c([[
+        function()
+            local csrc = h.compile_and_read_c([[
             local ffi = foreign import "titan/ffi.h"
             local lua = foreign import "lua.h"
 
@@ -1097,27 +1097,27 @@ describe("unions (end-to-end)", function()
             end
         ]])
 
-        -- Direct Array payloads remain a Table * in uv[1]. Present
-        -- Option(Array) values likewise carry that backing in their TValue;
-        -- neither construction nor case binding may introduce a proxy.
-        assert.match(
-            "sethvalue%s*%(%s*L,%s*&_tmp_%d+%->uv%[1%]%.uv,%s*", csrc)
-        assert.match(
-            "hvalue%s*%(%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)", csrc)
-        assert.not_match("titan_array_require_proxy", csrc)
-        assert.match(
-            "luaC_barrierback%s*%(%s*L,%s*obj2gco%s*%(%s*_tmp_%d+%s*%)"
+            -- Direct Array payloads remain a Table * in uv[1]. Present
+            -- Option(Array) values likewise carry that backing in their TValue;
+            -- neither construction nor case binding may introduce a proxy.
+            assert.match(
+                "sethvalue%s*%(%s*L,%s*&_tmp_%d+%->uv%[1%]%.uv,%s*", csrc)
+            assert.match(
+                "hvalue%s*%(%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)", csrc)
+            assert.not_match("titan_array_require_proxy", csrc)
+            assert.match(
+                "luaC_barrierback%s*%(%s*L,%s*obj2gco%s*%(%s*_tmp_%d+%s*%)"
                 .. ",%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)",
-            csrc)
+                csrc)
 
-        local rok, err = h.call("test", [[
+            local rok, err = h.call("test", [[
             assert(test.exercise_payloads(false) == 236)
             assert(test.array_option_is_nil(false))
             assert(test.exercise_payloads(true) == 236)
             assert(test.array_option_is_nil(true))
         ]])
-        assert.truthy(rok, err)
-    end)
+            assert.truthy(rok, err)
+        end)
 
     it("keeps payloads and captured binders alive across collections", function()
         h.run_coder([[
@@ -1240,8 +1240,9 @@ describe("unions (end-to-end)", function()
     end)
 
     it("exposes constructors and methods but keeps representation opaque to Lua",
-    function()
-        h.run_coder([[
+        function()
+            h.with_extra_cflags({ '-DTITAN_COMPILER_TESTS' }, function()
+                h.run_coder([[
             union Message
                 quit
                 write: string
@@ -1260,7 +1261,8 @@ describe("unions (end-to-end)", function()
             function consume(message: Message): integer
                 return message:length()
             end
-        ]], [[
+          ]], [[
+            local registry = debug.getregistry()
             assert(test.Message.write == test.Message.write)
             assert(test.Message.hidden == nil)
             local message = test.Message.write("hello")
@@ -1269,16 +1271,20 @@ describe("unions (end-to-end)", function()
             assert(getmetatable(message) == "Titan union test.Message")
             local mt = debug.getmetatable(message)
             assert(type(mt) == "table")
-            assert(mt.__type == "Union(\"test.Message\",{Variant('test.Message', 'quit', false, 0),Variant('test.Message', 'write', String(), 1)},{[\"quit\"] = StaticMethod('test.Message', 'quit',{},{Nominal('test.Message')},false,false,false),[\"write\"] = StaticMethod('test.Message', 'write',{String()},{Nominal('test.Message')},false,false,false)},{[\"length\"] = Method('test.Message', 'length',{},{Integer()},false,false,{})},3)")
+            assert(mt[registry.TITAN_BRAND] == 4)
+            assert(mt[registry.TITAN_MT_TYPE] == "Union(\"test.Message\",{Variant('test.Message', 'quit', false, 0),Variant('test.Message', 'write', String(), 1)},{[\"quit\"] = StaticMethod('test.Message', 'quit',{},{Nominal('test.Message')},false,false,false),[\"write\"] = StaticMethod('test.Message', 'write',{String()},{Nominal('test.Message')},false,false,false)},{[\"length\"] = Method('test.Message', 'length',{},{Integer()},false,false,{})},3)")
+            assert(mt[registry.TITAN_MT_MEMBERMAP].length(message) == 5)
+            assert(mt[registry.TITAN_MT_STATICS].write == test.Message.write)
             assert(not pcall(function() return message.tag end))
             assert(not pcall(function() message.payload = 1 end))
-        ]])
-    end)
+          ]])
+            end)
+        end)
 
     it("uses one canonical imported constructor closure as a first-class value",
-    function()
-        local ok, err = h.generate_modules({
-            union_provider = [[
+        function()
+            local ok, err = h.generate_modules({
+                union_provider = [[
                 seed: integer = 40
 
                 function increment(n: integer): integer
@@ -1295,7 +1301,7 @@ describe("unions (end-to-end)", function()
                     quit
                 end
             ]],
-            union_consumer = [[
+                union_consumer = [[
                 local provider = import "union_provider"
 
                 function run(): integer
@@ -1332,16 +1338,16 @@ describe("unions (end-to-end)", function()
                     return pair.first + pair.second
                 end
             ]],
-        }, "union_consumer")
-        assert.truthy(ok, err)
-        local rok, out = h.call("union_consumer", [[
+            }, "union_consumer")
+            assert.truthy(ok, err)
+            local rok, out = h.call("union_consumer", [[
             assert(union_consumer.run() == 42)
             assert(union_consumer.same())
             assert(union_consumer.direct() == 41)
             assert(union_consumer.record_static() == 42)
         ]])
-        assert.truthy(rok, out)
-    end)
+            assert.truthy(rok, out)
+        end)
 
     it("reconstructs imported constructor closure slots through a DSO", function()
         local ok, err = h.build_so_chain({

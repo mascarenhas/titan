@@ -18,17 +18,17 @@ function coder._assert_erased_boundary(ast)
     local function generic_reason(value)
         local tag = rawget(value, "_tag")
         if tag == "Type.GenericScope"
-           or tag == "Type.TypeParameter"
-           or tag == "Type.Parameter"
-           or tag == "Type.FunctionScheme"
-           or tag == "Type.GenericAlias" then
+            or tag == "Type.TypeParameter"
+            or tag == "Type.Parameter"
+            or tag == "Type.FunctionScheme"
+            or tag == "Type.GenericAlias" then
             return "generic type form " .. tag
         elseif tag == "Type.Nominal" and nonempty(rawget(value, "args")) then
             return "generic type form " .. tag
         elseif (tag == "Type.Record" or tag == "Type.Union"
                 or tag == "Type.Interface" or tag == "Type.Method"
                 or tag == "Type.StaticMethod")
-           and (nonempty(rawget(value, "scope"))
+            and (nonempty(rawget(value, "scope"))
                 or nonempty(rawget(value, "typeparams"))) then
             return "generic type form " .. tag
         elseif tag == "Type.Inference" or tag == "Type.InferenceCell"
@@ -38,13 +38,13 @@ function coder._assert_erased_boundary(ast)
             return "generic AST form " .. tag
         elseif type(tag) == "string" and tag:sub(1, 4) == "Ast." then
             for _, field in ipairs({
-                    "typeparams", "typeargs", "_nominal_typeargs" }) do
+                "typeparams", "typeargs", "_nominal_typeargs" }) do
                 if nonempty(rawget(value, field)) then
                     return "generic AST field '" .. field .. "' on " .. tag
                 end
             end
         elseif type(tag) == "string"
-           and (tag:find("Inference", 1, true)
+            and (tag:find("Inference", 1, true)
                 or tag:find("TypeVariable", 1, true)) then
             return "generic inference form " .. tag
         end
@@ -79,17 +79,17 @@ function coder._assert_erased_boundary(ast)
             for key, child in next, value do
                 local semantic_type_binding = key == "_decl" and
                     (tag == "Ast.TypeName" or
-                     tag == "Ast.TypeQualName" or
-                     tag == "Ast.TypeParam")
+                        tag == "Ast.TypeQualName" or
+                        tag == "Ast.TypeParam")
                 if not (skip_declared_type and
                         (key == "_declared_type" or
-                         key == "_erased_registry" or
-                         key == "_surface_typeparams" or
-                         key == "_surface_typeargs" or
-                         key == "_declared_method" or
-                         key == "_resolved_typearg" or
-                         key == "_surface_named_args" or
-                         semantic_type_binding)) then
+                            key == "_erased_registry" or
+                            key == "_surface_typeparams" or
+                            key == "_surface_typeargs" or
+                            key == "_declared_method" or
+                            key == "_resolved_typearg" or
+                            key == "_surface_named_args" or
+                            semantic_type_binding)) then
                     enqueue(key)
                     enqueue(child)
                 end
@@ -127,22 +127,22 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         -- The prefix distinguishes C-bearing from C-free callable shapes whose
         -- human-readable type strings happen to collide.
         functags = {},
-        functag_list = {},   -- same entries, in allocation order (for emission)
+        functag_list = {},            -- same entries, in allocation order (for emission)
         functag_count = 0,
-        array_writer_list = {}, -- constructed Array element policies
+        array_writer_list = {},       -- constructed Array element policies
         array_writer_count = 0,
-        interface_pairs = {}, -- canonical concrete/interface key -> exact pair
-        interface_pair_list = {}, -- pair entries in discovery order
-        callable_adapters = {}, -- frozen plan object -> translation-unit site
-        callable_adapter_list = {}, -- growing discovery-order site registry
+        interface_pairs = {},         -- canonical concrete/interface key -> exact pair
+        interface_pair_list = {},     -- pair entries in discovery order
+        callable_adapters = {},       -- frozen plan object -> translation-unit site
+        callable_adapter_list = {},   -- growing discovery-order site registry
         callable_adapter_count = 0,
-        bound_luas = {},     -- mangled bound-Lua-trampoline name -> { module }
-        bound_stricts = {},  -- mangled bound-strict-entry name -> { module }
-        static_slots = {},   -- "fqtn.name" -> module upvalue slot of a static's closure
+        bound_luas = {},              -- mangled bound-Lua-trampoline name -> { module }
+        bound_stricts = {},           -- mangled bound-strict-entry name -> { module }
+        static_slots = {},            -- "fqtn.name" -> module upvalue slot of a static's closure
         nominal_namespace_slots = {}, -- nominal fqtn -> module uv slot of its static-namespace table
-        lambdas = {},        -- ExpFunction nodes pending file-scope emission
-        lambda_count = 0,    -- counter for unique lambda native/Lua names
-        names = {},          -- { native C symbol, qualified Titan name } pairs for the trace name table
+        lambdas = {},                 -- ExpFunction nodes pending file-scope emission
+        lambda_count = 0,             -- counter for unique lambda native/Lua names
+        names = {},                   -- { native C symbol, qualified Titan name } pairs for the trace name table
         source_foreign_headers = {},
         upvalue = 0
     }
@@ -250,15 +250,30 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
     -- module members.
     for _, node in ipairs(ast) do
         if not node._ignore
-           and (node._tag == "Ast.TopLevelRecord"
+            and (node._tag == "Ast.TopLevelRecord"
                 or node._tag == "Ast.TopLevelUnion") then
             local slot = tlcontext.nominal_namespace_slots[node._type.name]
             table.insert(funcs, render([[
                 lua_newtable(L);
+                {
+                  // set nominal_metatable[TITAN_MT_STATICS] = <statics table>
+                  TValue _vmeta;
+                  TString *_name = luaS_new(L, $NAME);
+                  lu_byte tag = luaH_getstr(_titan_metatables, _name, &_vmeta);
+                  (void)tag;
+                  Table *_meta = hvalue(&_vmeta);
+                  lua_assert(!tagisempty(tag));
+                  TValue _key;
+                  setpvalue(&_key, TITAN_MT_STATICS);
+                  luaH_set(L, _meta, &_key, s2v(L->top.p - 1));
+                  invalidateTMcache(_meta);
+                  luaC_barrierback(L, obj2gco(_meta), s2v(L->top.p - 1));
+                }
                 setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
                 luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$SLOT].uv);
                 lua_pop(L, 1);
             ]], {
+                NAME = c_string_literal(node._type.name),
                 SLOT = c_integer_literal(slot),
             }))
             if not node.islocal then
@@ -304,7 +319,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
                             titan_pushmodule(L, _mod);
                             lua_pushlightuserdata(L, (void*)$FUNCTAG);
                             lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
-                            lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND);
+                            lua_pushlightuserdata(L, TITAN_BRAND);
                             lua_pushcfunction(L, $STRICTNAME);
                             lua_pushcclosure(L, $LUANAME, 5);
                             setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
@@ -323,10 +338,10 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
                         register_readonly_member(node.name, node._closure_upvalue)
                     else
                         error("BUG: exported function '" .. node.name
-                              .. "' has no canonical-closure slot")
+                            .. "' has no canonical-closure slot")
                     end
                 elseif tag == "Ast.TopLevelFunc" and node.islocal
-                       and node._closure_upvalue then
+                    and node._closure_upvalue then
                     -- A referenced `local` function has no module-table entry, so
                     -- emit its Lua entry and build its canonical closure straight
                     -- into the shadow slot.
@@ -336,7 +351,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
                         titan_pushmodule(L, _mod);
                         lua_pushlightuserdata(L, (void*)$FUNCTAG);
                         lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
-                        lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND);
+                        lua_pushlightuserdata(L, TITAN_BRAND);
                         lua_pushcfunction(L, $STRICTNAME);
                         lua_pushcclosure(L, $LUANAME, 5);
                         setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
@@ -373,7 +388,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
                             titan_pushmodule(L, _mod);
                             lua_pushlightuserdata(L, (void*)$FUNCTAG);
                             lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
-                            lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND);
+                            lua_pushlightuserdata(L, TITAN_BRAND);
                             lua_pushcfunction(L, $STRICTNAME);
                             lua_pushcclosure(L, $LUANAME, 5);
                             setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
@@ -387,7 +402,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
                             titan_pushmodule(L, _mod);
                             lua_pushlightuserdata(L, (void*)$FUNCTAG);
                             lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
-                            lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND);
+                            lua_pushlightuserdata(L, TITAN_BRAND);
                             lua_pushcfunction(L, $STRICTNAME);
                             lua_pushcclosure(L, $LUANAME, 5);
                             setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
@@ -621,12 +636,12 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
                 return 1;
             }
          ]], {
-             INDEXNAME = coder._module_metamethod_name(modname, "index"),
-             NEWINDEXNAME = coder._module_metamethod_name(
-                 modname, "newindex"),
-             MODSTR = c_string_literal(modname),
-             SWITCH_GET = table.concat(switch_get, "\n"),
-             SWITCH_SET = table.concat(switch_set, "\n"),
+            INDEXNAME = coder._module_metamethod_name(modname, "index"),
+            NEWINDEXNAME = coder._module_metamethod_name(
+                modname, "newindex"),
+            MODSTR = c_string_literal(modname),
+            SWITCH_GET = table.concat(switch_get, "\n"),
+            SWITCH_SET = table.concat(switch_set, "\n"),
         }))
 
         create_meta = render([[
@@ -656,8 +671,8 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         ]], {
             INDEXNAME = coder._module_metamethod_name(modname, "index"),
             NEWINDEXNAME = coder._module_metamethod_name(modname, "newindex"),
-            MODMETA = c_string_literal("Titan module ".. modname .. " metatable"),
-            MODNAME = c_string_literal("Titan module ".. modname),
+            MODMETA = c_string_literal("Titan module " .. modname .. " metatable"),
+            MODNAME = c_string_literal("Titan module " .. modname),
             GVARMAP = table.concat(gvar_map, "\n")
         })
     end
@@ -722,18 +737,32 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
             if (lua_isnil(L, -1)) {
                 lua_pop(L, 1);
                 lua_newtable(L);
+                lua_pushinteger(L, TITAN_OWNED);
+                lua_rawsetp(L, -2, TITAN_BRAND);
                 lua_pushliteral(L, $DISPLAY);
                 lua_setfield(L, -2, "__name");
                 lua_pushliteral(L, $TAG);
-                lua_setfield(L, -2, "__type");
+                lua_rawsetp(L, -2, TITAN_MT_TYPE);
                 lua_pushliteral(L, "__metatable");
                 lua_pushliteral(L, $DISPLAY);
                 lua_settable(L, -3);
                 lua_pushvalue(L, -1);
                 lua_setfield(L, LUA_REGISTRYINDEX, $NAME);
-            } else if (!lua_istable(L, -1)) {
-                luaL_error(L,
-                    "invalid Titan owned C metatable registry entry");
+            } else {
+                if (!lua_istable(L, -1)) {
+                    luaL_error(L,
+                        "invalid Titan owned C metatable registry entry");
+                }
+                int tag = lua_rawgetp(L, -1, TITAN_BRAND);
+                if (tag != LUA_TNUMBER) {
+                    luaL_error(L,
+                        "invalid Titan owned C metatable registry entry");
+                }
+                if (ivalue(s2v(L->top.p - 1)) != TITAN_OWNED) {
+                    luaL_error(L,
+                        "invalid Titan owned C metatable registry entry");
+                }
+                lua_pop(L, 1);
             }
             setobj2t(L, &_mod->uv[$INDEX].uv, s2v(L->top.p - 1));
             luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$INDEX].uv);
@@ -806,7 +835,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
 
     assert(tlcontext.upvalue <= 0xFFFF,
         ("module '%s' requires %d module-state slots; Lua supports at most %d")
-            :format(modname, tlcontext.upvalue, 0xFFFF))
+        :format(modname, tlcontext.upvalue, 0xFFFF))
     table.insert(code, render(init, {
         INITNAME = tlcontext.prefix .. 'init',
         LUAOPEN_NAME = 'luaopen_' .. mangle_qn(modname),
@@ -823,7 +852,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         INITRECORDS = table.concat(initrecs, "\n"),
         FUNCS = table.concat(funcs, "\n"),
         INITNAMES = initnames,
-        MODNAMESTR = c_string_literal("Titan module "..modname),
+        MODNAMESTR = c_string_literal("Titan module " .. modname),
         INITSOURCEIDENTITY = render([[
             setpvalue(&_mod->uv[$INDEX].uv, (void *)$IDENTITY());
         ]], {
@@ -882,9 +911,9 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
     local supplemental_keys = {}
     for key in pairs(supplemental_foreign_includes) do
         if not direct_foreign_include_keys[key]
-           and not (ast._foreign_header_output
-               and ast._foreign_header_include_keys
-               and ast._foreign_header_include_keys[key]) then
+            and not (ast._foreign_header_output
+                and ast._foreign_header_include_keys
+                and ast._foreign_header_include_keys[key]) then
             supplemental_keys[#supplemental_keys + 1] = key
         end
     end
