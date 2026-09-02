@@ -333,7 +333,7 @@ LUAI_FUNC void titan_init_paths(lua_State *L);
 ** opaque identity key and is never dereferenced. The helper preserves the Lua
 ** stack on success. */
 LUAI_FUNC const char *titan_publish_function_type_tag(
-    lua_State *L, const char *candidate);
+    lua_State *L, const char *registry_key, const char *candidate);
 
 /*
 ** Dense Array runtime. A backing Table has no metatable, uses only its array

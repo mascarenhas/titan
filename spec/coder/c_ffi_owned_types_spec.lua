@@ -61,14 +61,16 @@ describe("source-written owned C type code generation", function()
                 "lua_newtable(L);", lookup, true))
             local name = assert(csrc:find(
                 "lua_setfield(L, -2, \"__name\");", construct, true))
+            local type_key = assert(csrc:find(
+                "lua_setfield(L, -2, \"__type\");", name, true))
             local metatable_key = assert(csrc:find(
-                "lua_pushliteral(L, \"__metatable\");", name, true))
+                "lua_pushliteral(L, \"__metatable\");", type_key, true))
             local metatable = assert(csrc:find(
                 "lua_settable(L, -3);", metatable_key, true))
             local publish = assert(csrc:find(
-                "lua_setfield(L, LUA_REGISTRYINDEX", name, true))
+                "lua_setfield(L, LUA_REGISTRYINDEX", type_key, true))
             assert.is_true(lookup < construct and construct < name)
-            assert.is_true(name < metatable_key and
+            assert.is_true(name < type_key and type_key < metatable_key and
                 metatable_key < metatable and metatable < publish)
             assert.truthy(csrc:find(
                 "invalid Titan owned C metatable registry entry", publish,
@@ -81,6 +83,8 @@ describe("source-written owned C type code generation", function()
                 assert(type(public_name) == "string")
                 assert(type(metatable) == "table")
                 assert(metatable.__name == public_name)
+                assert(type(metatable.__type) == "string")
+                assert(metatable.__type == "COwned(CTypedef(\"ffi_item\",CStruct(false,\"ffi_item\",false,{},true,false),{}),false)")
                 assert(tostring(item):sub(1, #public_name + 2) ==
                        public_name .. ": ")
             ]])

@@ -2753,10 +2753,47 @@ describe("Titan types", function()
                 types.CModule("ffi", {}, {}),
             }) do
                 assert.truthy(types.first_non_exportable_type(malformed))
-                local ok, err = pcall(types.serialize, malformed)
-                assert.falsy(ok)
-                assert.matches("cannot serialize C FFI type", err)
             end
+        end)
+
+        it("serializes and deserializes all C FFI type shapes", function()
+            local int = cint()
+            local ptr = types.CPointer(int, {"const"})
+            local arr = types.CArray(int, 4, {})
+            local func = types.CFunction({int, ptr}, types.CFloat("double"), true, "cdecl")
+            local st = types.CStruct("struct point", "point", false, {}, true, false)
+            local un = types.CUnion("union data", "data", false, {}, true)
+            local field = types.CField(false, "x", int, false, false)
+            local alias = types.CTypedef("ffi_int", int, {"const"})
+            local owned_ptr = types.COwned(int, false)
+            local owned_arr = types.COwned(int, true)
+            local mod = types.CModule("myffi", {
+                func = types.ModuleMember("myffi", "func", func, {"a", "b"})
+            }, {
+                Point = st
+            })
+
+            local function round_trip(typ)
+                local s = types.serialize(typ)
+                local rebuilt = assert(load("return " .. s, "c-type", "t", types))()
+                assert.truthy(types.equals(typ, rebuilt))
+                return s, rebuilt
+            end
+
+            round_trip(types.CVoid())
+            round_trip(int)
+            round_trip(types.CFloat("float"))
+            round_trip(types.CFloat("double"))
+            round_trip(ptr)
+            round_trip(arr)
+            round_trip(func)
+            round_trip(st)
+            round_trip(un)
+            round_trip(field)
+            round_trip(alias)
+            round_trip(owned_ptr)
+            round_trip(owned_arr)
+            round_trip(mod)
         end)
 
         it("reattaches target numeric traits to recovered portable scalars",

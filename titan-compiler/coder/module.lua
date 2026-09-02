@@ -500,6 +500,9 @@ function coderecorddec(ctx, code, initrecs, node)
         lua_pushliteral(L, "__metatable");
         lua_pushliteral(L, "Titan record $TYPE");
         lua_rawset(L, -3);
+        lua_pushliteral(L, "__type");
+        lua_pushliteral(L, $TAG);
+        lua_rawset(L, -3);
         lua_newtable(L);
         $FIELDMAP
         lua_pushliteral(L, "__index");
@@ -523,6 +526,7 @@ function coderecorddec(ctx, code, initrecs, node)
         NEWINDEXNAME = coder._nominal_metamethod_name(
             node._type.name, "newindex"),
         TYPE = node._type.name,
+        TAG = c_string_literal(types.serialize(node._type)),
         FIELDMAP = table.concat(fieldmap, "\n")
     }))
 end
@@ -601,6 +605,9 @@ function coder._codeuniondec(ctx, code, initnominals, node)
             lua_pushliteral(L, "__metatable");
             lua_pushliteral(L, "Titan union $TYPE");
             lua_rawset(L, -3);
+            lua_pushliteral(L, "__type");
+            lua_pushliteral(L, $TAG);
+            lua_rawset(L, -3);
             lua_newtable(L);
             $METHODMAP
             lua_pushliteral(L, "__index");
@@ -621,6 +628,7 @@ function coder._codeuniondec(ctx, code, initnominals, node)
         NEWINDEXNAME = coder._nominal_metamethod_name(
             node._type.name, "newindex"),
         TYPE = node._type.name,
+        TAG = c_string_literal(types.serialize(node._type)),
         METHODMAP = table.concat(methodmap, "\n"),
     }))
 end
@@ -904,6 +912,9 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
             lua_pushliteral(L, "__metatable");
             lua_pushliteral(L, "Titan interface $TYPE");
             lua_rawset(L, -3);
+            lua_pushliteral(L, "__type");
+            lua_pushliteral(L, $TAG);
+            lua_rawset(L, -3);
             lua_newtable(L);
             $MEMBERMAP
             lua_pushliteral(L, "__index");
@@ -920,6 +931,7 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
         }
     ]], {
         TYPE = interface.name,
+        TAG = c_string_literal(types.serialize(interface)),
         INDEXNAME = coder._nominal_metamethod_name(
             interface.name, "index"),
         NEWINDEXNAME = coder._nominal_metamethod_name(

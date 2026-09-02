@@ -1180,6 +1180,9 @@ static void test_per_state_metatables(void) {
 static void test_function_type_tag_publication(void) {
     static const char *first_key = "Titan function type unit.first tag";
     static const char *second_key = "Titan function type unit.second tag";
+    static const char *first_tag_candidate = "Function({},{},false,false,false)";
+    static const char *first_tag_candidate_dup = "Function({},{},false,false,false)";
+    static const char *second_tag_candidate = "Function({Integer()},{Integer()},false,false,false)";
     lua_State *first = luaL_newstate();
     lua_State *second = luaL_newstate();
     const void *first_tag;
@@ -1191,8 +1194,8 @@ static void test_function_type_tag_publication(void) {
 
     top = lua_gettop(first);
     first_tag = titan_publish_function_type_tag(
-        first, first_key);
-    assert(first_tag == first_key);
+        first, first_key, first_tag_candidate);
+    assert(first_tag == first_tag_candidate);
     assert(lua_gettop(first) == top);
 
     /*
@@ -1200,13 +1203,13 @@ static void test_function_type_tag_publication(void) {
     ** first provider's canonical pointer.
     */
     recovered_tag = titan_publish_function_type_tag(
-        first, first_function_tag_candidate);
+        first, first_key, first_tag_candidate_dup);
     assert(recovered_tag == first_tag);
     assert(lua_gettop(first) == top);
 
     other_tag = titan_publish_function_type_tag(
-        first, second_key);
-    assert(other_tag == second_key);
+        first, second_key, second_tag_candidate);
+    assert(other_tag == second_tag_candidate);
     assert(lua_gettop(first) == top);
 
     /*
@@ -1215,8 +1218,8 @@ static void test_function_type_tag_publication(void) {
     */
     top = lua_gettop(second);
     recovered_tag = titan_publish_function_type_tag(
-        second, first_function_tag_candidate);
-    assert(recovered_tag == first_function_tag_candidate);
+        second, first_key, first_tag_candidate_dup);
+    assert(recovered_tag == first_tag_candidate_dup);
     assert(lua_gettop(second) == top);
 
     lua_close(first);

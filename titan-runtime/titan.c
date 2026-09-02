@@ -29,6 +29,7 @@ typedef char titan_array_assert_useful_capacity[
     (TITAN_ARRAY_MAX_CAPACITY >= 2u) ? 1 : -1];
 
 const char *titan_publish_function_type_tag(lua_State *L,
+                                            const char *registry_key,
                                             const char *candidate) {
     if (!lua_checkstack(L, 1))
         luaL_error(L, "stack overflow publishing Titan function-type tag");
@@ -38,11 +39,11 @@ const char *titan_publish_function_type_tag(lua_State *L,
     ** module/provider load order. A later publisher recovers that pointer
     ** rather than publishing its own translation-unit-local candidate.
     */
-    lua_getfield(L, LUA_REGISTRYINDEX, candidate);
+    lua_getfield(L, LUA_REGISTRYINDEX, registry_key);
     if (lua_isnil(L, -1)) {
         lua_pop(L, 1);
         lua_pushlightuserdata(L, (void *)candidate);
-        lua_setfield(L, LUA_REGISTRYINDEX, candidate);
+        lua_setfield(L, LUA_REGISTRYINDEX, registry_key);
         return candidate;
     }
     else {

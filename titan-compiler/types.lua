@@ -4946,7 +4946,7 @@ function types.validate_union_source_projection(union)
 end
 
 local function serialize_literal(value)
-    if value == false then return "false" end
+    if value == false or value == nil then return "false" end
     if value == true then return "true" end
     if type(value) == "string" then return string.format("%q", value) end
     error("cannot serialize generic metadata literal " .. tostring(value), 3)
@@ -4968,12 +4968,6 @@ end
 
 function types.serialize(t)
     local tag = t._tag
-    local ctyp = types.first_non_exportable_type(t)
-    if ctyp then
-        local displayed, description = pcall(types.tostring, ctyp)
-        if not displayed then description = tostring(ctyp._tag) end
-        error("cannot serialize C FFI type " .. description)
-    end
 
     if tag == "Type.GenericScope" then
         return "GenericScope(" ..
@@ -5205,12 +5199,67 @@ function types.serialize(t)
     elseif tag == "Type.CPointer" then
         return "CPointer(" .. types.serialize(t.pointee) .. "," ..
             serialize_names(t.quals) .. ")"
+    elseif tag == "Type.CArray" then
+        return "CArray(" .. types.serialize(t.elem) .. "," ..
+            (t.len and tostring(t.len) or "false") .. "," ..
+            serialize_names(t.quals) .. ")"
     elseif tag == "Type.CFunction" then
         return "CFunction(" .. serialize_type_list(t.params) .. "," ..
-            types.serialize(t.ret) .. ",false,false)"
+            types.serialize(t.ret) .. "," ..
+            tostring(t.vararg or false) .. "," ..
+            (t.abi and string.format("%q", t.abi) or "false") .. ")"
+    elseif tag == "Type.CStruct" then
+        return "CStruct(" .. serialize_literal(t.cname) .. "," ..
+            serialize_literal(t.tagname) .. "," ..
+            serialize_literal(t.typedef) .. ",{}," ..
+            tostring(t.complete or false) .. "," ..
+            tostring(t.has_fam or false) .. ")"
+    elseif tag == "Type.CUnion" then
+        return "CUnion(" .. serialize_literal(t.cname) .. "," ..
+            serialize_literal(t.tagname) .. "," ..
+            serialize_literal(t.typedef) .. ",{}," ..
+            tostring(t.complete or false) .. ")"
+    elseif tag == "Type.CField" then
+        return "CField(false," ..
+            string.format("%q", t.name) .. "," ..
+            types.serialize(t.type) .. "," ..
+            (t.bitfield and tostring(t.bitfield) or "false") .. "," ..
+            tostring(t.flexible_array or false) .. ")"
+    elseif tag == "Type.CTypedef" then
+        return "CTypedef(" .. string.format("%q", t.name) .. "," ..
+            types.serialize(t.target) .. "," ..
+            serialize_names(t.quals) .. ")"
     elseif tag == "Type.COwned" then
         return "COwned(" .. types.serialize(t.pointee) .. "," ..
             tostring(t.count) .. ")"
+    elseif tag == "Type.CModule" then
+        local member_names = {}
+        for name in pairs(t.members or {}) do
+            table.insert(member_names, name)
+        end
+        table.sort(member_names, util.bytewise_less)
+        local members = {}
+        for _, name in ipairs(member_names) do
+            table.insert(members,
+                "[" .. string.format("%q", name) .. "] = " ..
+                types.serialize(t.members[name]))
+        end
+        local type_member_names = {}
+        for name in pairs(t.type_members or {}) do
+            table.insert(type_member_names, name)
+        end
+        table.sort(type_member_names, util.bytewise_less)
+        local type_members = {}
+        for _, name in ipairs(type_member_names) do
+            table.insert(type_members,
+                "[" .. string.format("%q", name) .. "] = " ..
+                types.serialize(t.type_members[name]))
+        end
+        return "CModule(" ..
+            string.format("%q", t.name) .. "," ..
+            "{" .. table.concat(members, ",") .. "}" ..
+            ",{" .. table.concat(type_members, ",") .. "}" ..
+            ")"
     elseif tag == "Type.Integer"     then return "Integer()"
     elseif tag == "Type.Boolean"     then return "Boolean()"
     elseif tag == "Type.String"      then return "String()"
