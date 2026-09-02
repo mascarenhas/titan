@@ -169,7 +169,7 @@ jobs:
           '
 
       - name: Build the bundled libbacktrace
-        run: make libbacktrace
+        run: LIBBT_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/ianlancetaylor/libbacktrace.git" make libbacktrace
 
       - name: Build the pinned bundled libuv
         run: make libuv
