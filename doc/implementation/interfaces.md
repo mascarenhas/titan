@@ -459,6 +459,12 @@ their own private cache slot and recover the exact registry metatable during
 initialization. Interfaces consume no importer-reconstructed public-prefix
 slot.
 
+The Interface metatable also carries discoverable runtime reflection metadata:
+* `TITAN_BRAND`: lightuserdata key set to integer tag `TITAN_INTERFACE` (5);
+* `TITAN_MT_TYPE`: lightuserdata key set to the serialized Interface descriptor string (`Interface(...)`);
+* `TITAN_MT_MEMBERMAP`: lightuserdata key holding the member map table;
+* Registered in the per-state global metatables table `_titan_metatables[<fully-qualified-name>]` (`TITAN_METATABLES_KEY`), alongside its reverse pointer map in the Lua registry (`registry[metatable_pointer] = <fully-qualified-name>`).
+
 The central nominal leaf for an Interface target first performs the ordinary
 exact-wrapper metatable check. Otherwise it requires full userdata with a
 metatable and raw-reads that candidate metatable using the target Interface

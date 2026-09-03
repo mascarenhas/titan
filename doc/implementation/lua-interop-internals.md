@@ -357,10 +357,15 @@ module's `_init`:
 
 ```c
 luaL_newmetatable(L, "Titan record interop.Point metatable");
+const void *_mtp = lua_topointer(L, -1);
+lua_pushinteger(L, TITAN_RECORD);
+lua_rawsetp(L, -2, TITAN_BRAND);
 lua_pushliteral(L, "__metatable");
 lua_pushliteral(L, "Titan record interop.Point");
 lua_rawset(L, -3);
-lua_newtable(L);                 /* the fieldmap */
+lua_pushliteral(L, "Record('interop.Point', ...)");
+lua_rawsetp(L, -2, TITAN_MT_TYPE);
+lua_newtable(L);                 /* the membermap / fieldmap */
 lua_pushliteral(L, "x");
 lua_pushinteger(L, 0);
 lua_rawset(L, -3);
@@ -368,27 +373,59 @@ lua_rawset(L, -3);
 lua_pushliteral(L, "move");
 /* Module is upvalue of Lua entry point of method */
 titan_pushmodule(L, _mod);
-lua_pushcclosure(L, interop_\u2133_Point_\u2131_move_titanentry_luamethod, 1);
+lua_pushcclosure(L, interop_ℳ_Point_ℱ_move_titanentry_luamethod, 1);
 lua_rawset(L, -3);
+lua_pushvalue(L, -1);            /* membermap */
+lua_rawsetp(L, -3, TITAN_MT_MEMBERMAP); /* metatable[TITAN_MT_MEMBERMAP] = membermap */
 lua_pushliteral(L, "__index");
-lua_pushvalue(L, -2);            /* fieldmap */
-titan_pushmodule(L, _mod);       /* module */
-lua_pushcclosure(L, interop_\u2133_Point_\u2131_meta_index, 2);
+lua_pushvalue(L, -2);            /* membermap */
+titan_pushmodule(L, _mod);       /* _mod as upvalue[1] */
+lua_pushcclosure(L, interop_ℳ_Point_ℱ_meta_index, 2);
 lua_rawset(L, -4);
 /* ... __newindex wired the same way ... */
+// Set _titan_metatables[type] = metatable
+TString *_type = luaS_new(L, "interop.Point");
+int _hres = luaH_psetstr(_titan_metatables, _type, s2v(L->top.p-2));
+if (_hres == HOK) {
+  luaC_barrierback(L, obj2gco(_titan_metatables), s2v(L->top.p - 2));
+} else {
+  setsvalue2s(L, L->top.p - 1, _type);
+  luaH_finishset(L, _titan_metatables, s2v(L->top.p - 1), s2v(L->top.p - 2), _hres);
+  luaC_barrierback(L, obj2gco(_titan_metatables), s2v(L->top.p - 2));
+}
+lua_pop(L, 2);                   /* pop membermap and metatable */
+/* Index from metatable pointer to typename for error messages */
+lua_pushliteral(L, "interop.Point");
+lua_rawsetp(L, LUA_REGISTRYINDEX, _mtp);
 ```
 
 `__metatable` is the **string** `"Titan record interop.Point"`, so
 `getmetatable(p)` returns that string — the metatable is protected — and
 `setmetatable` on a record raises, as it does on any userdata
 (`debug.getmetatable` still sees the real table; the cross-module
-identity spec compares metatables that way). The **fieldmap** table is
+identity spec compares metatables that way). The **membermap** (fieldmap) table is
 the first upvalue shared by the
-`<module>_\u2133_<rec>_\u2131_meta_index` and `..._meta_newindex` closures;
-the second is the module. The fieldmap maps each field name to its integer user-value index (`uv[0..n-1]` in declaration order) and each public
-method name to the method's Lua-entry C closure, itself closed over the module.
-Local fields and local methods are not entered in this table, but public fields
-keep their original indices even when a local field came before them.
+`<module>_ℳ_<rec>_ℱ_meta_index` and `..._meta_newindex` closures;
+the second is the module. The membermap is also stored directly in the
+metatable at lightuserdata key `TITAN_MT_MEMBERMAP` for runtime reflection.
+It maps each field name to its integer user-value index (`uv[0..n-1]` in
+declaration order) and each public method name to the method's Lua-entry C
+closure, itself closed over the module. Local fields and local methods are not
+entered in this table, but public fields keep their original indices even when
+a local field came before them.
+
+The record metatable also records:
+* `TITAN_BRAND`: lightuserdata key set to integer constant `TITAN_RECORD` (3),
+  distinguishing record metatables from arrays, unions, interfaces, and owned C types;
+* `TITAN_MT_TYPE`: lightuserdata key set to the serialized type descriptor
+  string (`types.serialize(...)`), providing discoverable runtime type schema;
+* `TITAN_MT_MEMBERMAP`: lightuserdata key set to the member map table (field
+  indices and method closures);
+* `TITAN_MT_STATICS`: lightuserdata key set to the record's static-namespace
+  table containing constructors (`Point.new`) and static functions (attached during
+  function/static initialization);
+* `_titan_metatables["interop.Point"] = metatable`: registered in the global
+  metatables table (keyed in the Lua registry by `TITAN_METATABLES_KEY`).
 
 ### `__index`: fields and methods
 
@@ -469,6 +506,10 @@ Record functions need no record metatable: each record name becomes a plain Lua
 `mod.Point` through the module `Udata`'s `__index` to that table, then
 does an ordinary table lookup plus a wrapped call — `new` was desugared
 into a record function by the parser long before codegen.
+To make these constructors and static methods discoverable from instance values
+at runtime without going through the module table, generated initialization also
+attaches this static-namespace table directly to the record metatable under the
+lightuserdata key `TITAN_MT_STATICS` (`metatable[TITAN_MT_STATICS] = <statics table>`).
 Local records are not entered in the module member map. Public records with a
 local `new` still allocate their namespace table for Titan-internal use, but
 local record functions are not inserted into the Lua-visible table.
@@ -477,7 +518,9 @@ local record functions are not inserted into the Lua-visible table.
 
 Every Array proxy uses one of the canonical mutable/const per-state metatable
 pair, so an outer guard remains a direct qualifier-exact metatable comparison
-even for nested Arrays. The proxy has exactly two traced user values: user
+even for nested Arrays. Both metatables are branded under lightuserdata key
+`TITAN_BRAND`: `TITAN_ARRAY` (1) for mutable arrays and `TITAN_CONST_ARRAY` (2)
+for const arrays. The proxy has exactly two traced user values: user
 value 1 is the private backing Table; mutable user value 2 is the Lua writer
 closure chosen from the final constructed element type, while const user value
 2 is nil. The backing Table retains its key-0 reverse link to the proxy.
@@ -529,6 +572,13 @@ dispatch, so a method extracted with `debug` cannot be borrowed onto another
 record or union. Plain Lua can construct and pass union values but cannot
 inspect or mutate their representation.
 
+Like record metatables, union metatables carry discoverable runtime metadata:
+* `TITAN_BRAND`: lightuserdata key set to integer constant `TITAN_UNION` (4);
+* `TITAN_MT_TYPE`: lightuserdata key set to the serialized union type descriptor (`Union(...)`);
+* `TITAN_MT_MEMBERMAP`: lightuserdata key holding the public method map table (also used as `__index`);
+* `TITAN_MT_STATICS`: lightuserdata key holding the union's static-namespace table containing variant constructors and static functions;
+* Registered in the global metatables table `_titan_metatables[<fqtn>]` (`TITAN_METATABLES_KEY`) and in the reverse pointer registry map `registry[metatable_pointer] = <fqtn>`.
+
 ## Interfaces from Lua
 
 An Interface wrapper is a protected full userdata whose `__index` map exposes
@@ -539,6 +589,12 @@ receiver, applies the Interface signature's dynamic argument plans, and then
 loads the declaration-order payload entry. It invokes that entry with wrapper
 user value 0 as the concrete owner's `_mod` and user value 1 as the concrete
 receiver.
+
+Interface metatables also carry discoverable runtime metadata:
+* `TITAN_BRAND`: lightuserdata key set to integer constant `TITAN_INTERFACE` (5);
+* `TITAN_MT_TYPE`: lightuserdata key set to the serialized interface type descriptor (`Interface(...)`);
+* `TITAN_MT_MEMBERMAP`: lightuserdata key holding the member map table (used as `__index`);
+* Registered in the global metatables table `_titan_metatables[<fqtn>]` (`TITAN_METATABLES_KEY`) and in the reverse pointer registry map `registry[metatable_pointer] = <fqtn>`.
 
 Lua can retain and call a wrapper produced by Titan, pass it back through a
 sink expecting the same nominal Interface, or pass bare full userdata whose
@@ -665,6 +721,9 @@ inventory:
 | `"Titan module <modname> metatable"` | the module `Udata`'s member metatable (only if the module exports anything) |
 | `"Titan record <fqtn> metatable"` | the record metatable (`luaL_newmetatable`) — also the record's type identity (a type check compares `uvalue(v)->metatable`) |
 | `"Titan union <fqtn> metatable"` | the union metatable and exact nominal identity; its `__index` exposes only methods and its `__newindex` rejects writes |
+| `"Titan interface <fqtn> metatable"` | the interface metatable and nominal wrapper identity; its `__index` exposes member snapshots/methods and its `__newindex` rejects writes |
+| `"Titan owned C <display> metatable"` | the owned C metatable; stamped with `TITAN_BRAND` = `TITAN_OWNED` and `TITAN_MT_TYPE` |
+| `TITAN_METATABLES_KEY` (`"9db55616-03e8-4dec-8077-618025b1bb69"`) | the global metatables table mapping each nominal fully qualified type name (`<fqtn>`) to its canonical metatable |
 | `TITAN_ARRAY_METATABLE_PAIR` (`"Titan array metatable pair"`) | the canonical pair table containing the mutable and const proxy metatables; generated modules cache both Table pointers in consecutive `_mod` slots |
 | `TITAN_ARRAY_METATABLE` / `TITAN_CONST_ARRAY_METATABLE` | named mutable/const projections repaired from the canonical pair for ordinary registry lookup |
 | the metatable pointer itself (via `lua_rawsetp`) | the FQTN string — the reverse map, metatable → name, used only in error messages |
@@ -683,7 +742,39 @@ inventory:
 | `TITAN_LAZY_GLOBAL_LIBS_KEY` (private to `ltitanlib.c`) | generated-shim `_loadlibglobal`'s per-state canonical-path lazy/global handle cache |
 | `"Titan function type <serialized type> tag"` | a shared light-userdata identity tag for each first-class function type |
 
-The UUID-string constants are defined in `titan-runtime/titan.h`.
+The UUID-string constants are defined in `titan-runtime/titan.h` and `titan-runtime/titan/ffi.h`.
+
+### Discoverable runtime type information
+
+Beyond string-keyed registry entries, Titan embeds discoverable runtime type
+information directly in Titan metatables and function closures using
+lightuserdata keys:
+
+* **`TITAN_BRAND`** (`0x649b61b49f68a8b2`):
+  - In every Titan function closure, stored in `upvalue[3]` to distinguish Titan
+    closures from foreign closures on generic calls.
+  - In every Titan metatable, stored as a key mapped to an integer enum distinguishing
+    the type kind:
+    - `TITAN_ARRAY` (1): mutable dense array
+    - `TITAN_CONST_ARRAY` (2): const dense array
+    - `TITAN_RECORD` (3): record
+    - `TITAN_UNION` (4): union
+    - `TITAN_INTERFACE` (5): interface
+    - `TITAN_OWNED` (6): owned C type (`COwned`)
+* **`TITAN_MT_TYPE`** (`0xD70BB58499779830`): lightuserdata key stored on
+  nominal metatables (records, unions, interfaces) and owned C metatables
+  mapping to the serialized type descriptor string (`types.serialize(...)`).
+* **`TITAN_MT_MEMBERMAP`** (`0x310D781561E92F6D`): lightuserdata key stored on
+  nominal metatables mapping to the member map table (field indices and method
+  closures for records; method closures for unions; member map for interfaces).
+* **`TITAN_MT_STATICS`** (`0x83370ABAA56047AE`): lightuserdata key stored on
+  record and union metatables mapping to the nominal type's static table
+  (containing constructors like `Point.new` and user-declared static functions).
+
+In compiler test builds (`#ifdef TITAN_COMPILER_TESTS`),
+`titan_ensure_metatables_table` additionally publishes these lightuserdata keys
+into the Lua registry under their string names (`"TITAN_BRAND"`, `"TITAN_MT_TYPE"`,
+`"TITAN_MT_MEMBERMAP"`, `"TITAN_MT_STATICS"`) for test inspection.
 
 Interface witnesses add no registry key. They are ordinary traced entries at
 raw `concrete_metatable[target_Interface_metatable]`; the value is the first

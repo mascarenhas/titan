@@ -34,7 +34,10 @@ The proxy has exactly two user values and one of two canonical per-state
 metatables. User value 1 (C user-value index 0) is the backing. Mutable user
 value 2 (index 1) is the module-local writer closure selected by the Array's
 final construction element type; const user value 2 is nil. The metatable—not
-the writer—is the exact mutable/const tag. The writer is behavior for genuine
+the writer—is the exact mutable/const tag. Both canonical metatables are
+branded under the lightuserdata key `TITAN_BRAND` (`metatable[TITAN_BRAND]`),
+identifying the type kind and qualifier: `TITAN_ARRAY` (1) for mutable
+arrays and `TITAN_CONST_ARRAY` (2) for const arrays. The writer is behavior for genuine
 Lua writes, not proof of current contents. The backing table has no metatable.
 Array slot 0 is private and holds the canonical proxy Udata; the table's hash part
 is empty (`nhsize = 0`), and every user element position `k` (`1..N`) maps directly

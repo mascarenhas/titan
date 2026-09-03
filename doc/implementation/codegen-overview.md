@@ -811,17 +811,21 @@ Udata *counter_init(lua_State *L) {
     if(lua_isnil(L, -1)) {
         _initialized = 1;
         /* create and register _mod (luaS_newudata(L, 0, NUPVALS));
+           titan_ensure_metatables_table(L) (ensures global _titan_metatables table),
            $INITSOURCEIDENTITY (this translation unit's immutable token),
            $INITARRAYMETA (canonical mutable/const Array metatable caches),
            $LOADMODULES1 (dlopen dynamic deps), $INITMODULES (dep inits),
            $LOADGLOBALS (symbols published by transitive RTLD_GLOBAL deps),
-           $INITRECORDS (record, union, and Interface metatables),
+           $INITRECORDS (record, union, and Interface metatables, stamping
+           TITAN_BRAND, TITAN_MT_TYPE, TITAN_MT_MEMBERMAP, and registering
+           into _titan_metatables),
            $INITFUNCTAGS, $INITPAIRS (Interface method payloads and
            conditional concrete-metatable witness registration),
            $INITARRAYWRITERS (module-local writer closures), then canonical
            function closures; $INITNAMES (trace names), $INITVARS (variable
            initializers); install public nominal namespaces into their uv
-           slots; $CREATEMETA
+           slots and attach them to record and union metatables at TITAN_MT_STATICS;
+           $CREATEMETA
            (member metatable on the udata) */
         return _mod;
     } else {
@@ -856,7 +860,10 @@ Idempotency works at two independent levels:
   share the DSO form, while static selection uses the archive. Record type
   identity is the metatable, a
   per-Lua-state object cached in a `_mod` user value rather than a C static, so
-  this branch no longer re-fetches any tag cache.
+  this branch no longer re-fetches any tag cache. Nominal metatables are
+  discoverable across modules through the registry's `TITAN_METATABLES_KEY`
+  table and carry typed runtime metadata (`TITAN_BRAND`, `TITAN_MT_TYPE`,
+  `TITAN_MT_MEMBERMAP`, `TITAN_MT_STATICS`).
 
 `$INITPAIRS` serves both native and per-state work. It fills each private
 exact/adjusted pair array after function pointers are available, then raw-checks

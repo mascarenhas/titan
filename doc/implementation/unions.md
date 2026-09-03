@@ -331,6 +331,13 @@ A union instance's Lua metatable exposes only public methods:
 * no variant, tag, or payload member is present; and
 * `__metatable` is the protected string `"Titan union <fqtn>"`.
 
+Like records, union metatables carry discoverable runtime reflection metadata:
+* `TITAN_BRAND`: lightuserdata key set to integer constant `TITAN_UNION` (4);
+* `TITAN_MT_TYPE`: lightuserdata key set to the serialized union type descriptor (`Union(...)`);
+* `TITAN_MT_MEMBERMAP`: lightuserdata key holding the public method map table (the `__index` table);
+* `TITAN_MT_STATICS`: lightuserdata key holding the union's static-namespace table containing variant constructors and static functions;
+* Registered in the per-state global metatables table `_titan_metatables[<fqtn>]` (`TITAN_METATABLES_KEY`), alongside the reverse pointer map in the Lua registry (`registry[metatable_pointer] = <fqtn>`).
+
 The `__index` entry first performs the same exact nominal metatable check used
 by other Lua entry wrappers. Methods therefore cannot be borrowed onto a
 different union or record userdata.
