@@ -31,12 +31,13 @@ local function expand(src)
     -- Abort runaway expansion (an unbounded loop would otherwise hang busted).
     -- Legitimate expansions finish in a few thousand VM instructions; this is
     -- many orders of magnitude more headroom.
+    local previous_hook, previous_mask, previous_count = debug.gethook()
     debug.sethook(function()
         error("cpp expansion exceeded its instruction budget "
             .. "(likely unbounded macro recursion)", 2)
     end, "", 20000000)
     local ok, rctx, err = pcall(cpp.parse_file, tmp, fd, ctx)
-    debug.sethook()
+    debug.sethook(previous_hook, previous_mask, previous_count)
     os.remove(tmp)
     assert(ok, rctx)  -- on a hook/runtime error, rctx is the message
     assert(rctx, err) -- parse_file returned (nil, err)
