@@ -7,12 +7,42 @@
 #include "lstate.h"
 #include "lua.h"
 
+/* Opaque ABI-owned brand stored as light userdata in every Titan function
+** closure. It is compared only as raw pointer bits and must never be
+** dereferenced. Together with the fixed upvalue slot/count, this
+** astronomically unlikely sentinel distinguishes Titan closures without a
+** Lua-registry lookup on generic calls. */
+#define TITAN_BRAND ((void *)(uintptr_t)UINT64_C(0x649b61b49f68a8b2))
+
+#define TITAN_MT_TYPE ((void *)(uintptr_t)UINT64_C(0xD70BB58499779830))
+#define TITAN_MT_STATICS ((void *)(uintptr_t)UINT64_C(0x83370ABAA56047AE))
+#define TITAN_MT_MEMBERMAP ((void *)(uintptr_t)UINT64_C(0x310D781561E92F6D))
+
+/*
+** Titan types that have a metatable
+*/
+#define TITAN_ARRAY 1
+#define TITAN_CONST_ARRAY 2
+#define TITAN_RECORD 3
+#define TITAN_UNION 4
+#define TITAN_INTERFACE 5
+#define TITAN_OWNED 6
+
 #define TITAN_BACKTRACE_KEY "57d80578-2534-4856-ad3b-bde8cba4c445"
+/* When set (boolean true) in the registry, errorhandler() KEEPS the existing
+** TITAN_BACKTRACE_KEY slot instead of regenerating it, and clears the pin. A
+** pending re-raise sets the pin so the original error's trace is preserved; a
+** fresh error leaves it clear so it gets a freshly-captured trace. */
 #define TITAN_TRACE_PINNED "5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"
+/* Temporary handoff slot used by Titan coroutines. A dead coroutine entry
+** stages its own trace here; the resume/error side captures a new propagation
+** trace, appends it, stores the combined trace in TITAN_BACKTRACE_KEY, and
+** sets TITAN_TRACE_PINNED for the final re-raise. */
 #define TITAN_TRACE_APPEND_KEY "4f895b66-bae0-4e97-afb3-83a31f2f9e96"
 #define TITAN_MAIN_BOOTSTRAP_KEY "41c48a97-55a5-4514-a76f-79ab028ae6e0"
 #define TITAN_MAIN_ARGC_KEY "fd9c8d85-f521-4052-92e6-8af5c349e5bb"
 #define TITAN_MAIN_ARGV_KEY "fc1376f3-2cb7-48d4-969c-c02df930cf68"
+#define TITAN_METATABLES_KEY "9db55616-03e8-4dec-8077-618025b1bb69"
 
 #ifdef __GNUC__
 #define TITAN_LIKELY(x) __builtin_expect((x), 1)
@@ -71,5 +101,9 @@ static inline Udata *lmacro_uvalue(const TValue *o) { return uvalue(o); }
 static inline CClosure *lmacro_clCvalue(const TValue *o) { return clCvalue(o); }
 
 static inline void *lmacro_pvalue(const TValue *o) { return pvalue(o); }
+
+static inline int lmacro_ttype(const TValue *o) { return ttype(o); }
+
+static inline int lmacro_ttypetag(const TValue *o) { return ttypetag(o); }
 
 #endif

@@ -24,8 +24,8 @@ describe("contextual calls through value (code generation)", function()
     end)
 
     it("keeps exact Titan function-value calls on the static likely path",
-    function()
-        local generated = generate([[
+        function()
+            local generated = generate([[
             function increment(number: integer): integer
                 return number + 1
             end
@@ -38,48 +38,48 @@ describe("contextual calls through value (code generation)", function()
             end
         ]])
 
-        local exact = assert(generated:find(
-            "if (TITAN_LIKELY(_vc_callee != NULL", 1, true))
-        local static_tag = assert(generated:find(
-            "pvalueraw(valraw(&_vc_callee->upvalue[1]))", exact, true))
-        local fallback = assert(generated:find(
-            "} else {", static_tag, true))
-        local brand = assert(generated:find(
-            "pvalueraw(valraw(&_vc_callee->upvalue[3]))",
-            fallback, true))
-        local strict_dispatch = assert(generated:find(
-            "if (_vc_is_titan)", brand, true))
-        assert.is_true(exact < static_tag)
-        assert.is_true(static_tag < fallback)
-        assert.is_true(fallback < brand)
-        assert.is_true(brand < strict_dispatch)
+            local exact = assert(generated:find(
+                "if (TITAN_LIKELY(_vc_callee != NULL", 1, true))
+            local static_tag = assert(generated:find(
+                "pvalueraw(valraw(&_vc_callee->upvalue[1]))", exact, true))
+            local fallback = assert(generated:find(
+                "} else {", static_tag, true))
+            local brand = assert(generated:find(
+                "pvalueraw(valraw(&_vc_callee->upvalue[3]))",
+                fallback, true))
+            local strict_dispatch = assert(generated:find(
+                "if (_vc_is_titan)", brand, true))
+            assert.is_true(exact < static_tag)
+            assert.is_true(static_tag < fallback)
+            assert.is_true(fallback < brand)
+            assert.is_true(brand < strict_dispatch)
 
-        local exact_segment = generated:sub(exact, fallback - 1)
-        assert.truthy(exact_segment:find(
-            "_vc_callee->nupvalues >= 5", 1, true))
-        assert.is_nil(exact_segment:find("ttislightuserdata", 1, true))
-        assert.is_nil(exact_segment:find("ttisfulluserdata", 1, true))
-        assert.is_nil(exact_segment:find("ttislcf", 1, true))
+            local exact_segment = generated:sub(exact, fallback - 1)
+            assert.truthy(exact_segment:find(
+                "_vc_callee->nupvalues >= 5", 1, true))
+            assert.is_nil(exact_segment:find("ttislightuserdata", 1, true))
+            assert.is_nil(exact_segment:find("ttisfulluserdata", 1, true))
+            assert.is_nil(exact_segment:find("ttislcf", 1, true))
 
-        local classifier = generated:sub(fallback, strict_dispatch - 1)
-        assert.truthy(classifier:find(
-            "_vc_callee->nupvalues >= 5", 1, true))
-        assert.truthy(classifier:find(
-            "== TITAN_FUNCTION_CLOSURE_BRAND", 1, true))
-        assert.is_nil(classifier:find("ttis", 1, true))
-        assert.is_nil(classifier:find("lua_getfield", 1, true))
-        assert.is_nil(generated:find(
-            "titan_is_function_type_tag", 1, true))
-        assert.truthy(generated:find(
-            "lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND)",
-            1, true))
-        assert.truthy(generated:find(
-            "pvalue(&_fn->upvalue[1]) != test_functag_", 1, true))
-    end)
+            local classifier = generated:sub(fallback, strict_dispatch - 1)
+            assert.truthy(classifier:find(
+                "_vc_callee->nupvalues >= 5", 1, true))
+            assert.truthy(classifier:find(
+                "== TITAN_BRAND", 1, true))
+            assert.is_nil(classifier:find("ttis", 1, true))
+            assert.is_nil(classifier:find("lua_getfield", 1, true))
+            assert.is_nil(generated:find(
+                "titan_is_function_type_tag", 1, true))
+            assert.truthy(generated:find(
+                "lua_pushlightuserdata(L, TITAN_BRAND)",
+                1, true))
+            assert.truthy(generated:find(
+                "pvalue(&_fn->upvalue[1]) != test_functag_", 1, true))
+        end)
 
     it("honors finite, open, and zero demand for every Lua callable kind",
-    function()
-        run_coder([[
+        function()
+            run_coder([[
             function finite(f: value): (integer, integer?)
                 return f()
             end
@@ -123,11 +123,11 @@ describe("contextual calls through value (code generation)", function()
 
             assert(test.cfunction(string.byte, "A") == 65)
         ]])
-    end)
+        end)
 
     it("closes dependent contextual calls without repeating lexical evaluation",
-    function()
-        run_coder([[
+        function()
+            run_coder([[
             function agree<T>(left: T, right: T): T
                 return left
             end
@@ -247,11 +247,11 @@ describe("contextual calls through value (code generation)", function()
                 assert(test.trace() == 1231, test.trace())
             end
         ]])
-    end)
+        end)
 
     it("runs dependent derived demands and open inputs once in order",
-    function()
-        run_coder([[
+        function()
+            run_coder([[
             function agree<T>(left: T, right: T): T return left end
             function take<T>(items: {T}, witness: T): T return witness end
             function pick<T>(left: T?, right: T): T return right end
@@ -340,7 +340,7 @@ describe("contextual calls through value (code generation)", function()
             assert(test.selected() == 1)
             assert(test.ordered())
         ]])
-    end)
+        end)
 
     it("keeps inner results open in nested outer(inner()) calls", function()
         run_coder([[
@@ -376,8 +376,8 @@ describe("contextual calls through value (code generation)", function()
     end)
 
     it("recovers an exact contextual tag instead of adding a Lua frame",
-    function()
-        run_coder([[
+        function()
+            run_coder([[
             function original(probe: () -> integer): integer
                 return probe()
             end
@@ -393,11 +393,11 @@ describe("contextual calls through value (code generation)", function()
                 ("contextual fast=") .. fast_depth
                     .. (" lua slow=") .. slow_depth)
         ]])
-    end)
+        end)
 
     it("does not expose results hidden by a fixed static function type",
-    function()
-        local source = [[
+        function()
+            local source = [[
             function wide(): (integer, integer, integer)
                 return 11, 22, 33
             end
@@ -419,19 +419,19 @@ describe("contextual calls through value (code generation)", function()
             end
         ]]
 
-        -- All three consumers are open sinks, but their producer is statically
-        -- fixed-only. Both non-exact branches (strict Titan and genuine Lua)
-        -- must ask the VM for exactly that one visible result; LUA_MULTRET
-        -- would leak a wider runtime callable.
-        local csrc = generate(source)
-        local _, finite_calls = csrc:gsub(
-            "luaD_callnoyield%(L, restorestack%(L, _vc_func%), 1%);", "")
-        assert.equal(6, finite_calls)
-        assert.not_match(
-            "luaD_callnoyield%(L, restorestack%(L, _vc_func%), LUA_MULTRET%)",
-            csrc)
+            -- All three consumers are open sinks, but their producer is statically
+            -- fixed-only. Both non-exact branches (strict Titan and genuine Lua)
+            -- must ask the VM for exactly that one visible result; LUA_MULTRET
+            -- would leak a wider runtime callable.
+            local csrc = generate(source)
+            local _, finite_calls = csrc:gsub(
+                "luaD_callnoyield%(L, restorestack%(L, _vc_func%), 1%);", "")
+            assert.equal(6, finite_calls)
+            assert.not_match(
+                "luaD_callnoyield%(L, restorestack%(L, _vc_func%), LUA_MULTRET%)",
+                csrc)
 
-        run_coder(source, [[
+            run_coder(source, [[
             local function check(f, expected)
                 local xs = test.array_sink(f)
                 assert(#xs == 1 and xs[1] == expected)
@@ -446,11 +446,11 @@ describe("contextual calls through value (code generation)", function()
             check(test.wide, 11)
             check(function() return 44, 55, 66 end, 44)
         ]])
-    end)
+        end)
 
     it("fails when an absent flexible slot is forced to a non-option",
-    function()
-        run_coder([[
+        function()
+            run_coder([[
             function absent(): (...: integer)
                 return
             end
@@ -484,5 +484,5 @@ describe("contextual calls through value (code generation)", function()
             expect_absent_slot_error(test.generic_required, function() end)
             assert(test.generic_required(function() return 23 end) == 23)
         ]])
-    end)
+        end)
 end)

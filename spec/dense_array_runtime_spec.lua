@@ -353,12 +353,16 @@ static void test_array_metatable_publication(void) {
     value = lua_totvalue(L, -1);
     assert(ttistable(&value));
     assert(hvalue(&value) == metatable);
-    lua_pop(L, 1);
+    lua_rawgetp(L, -1, TITAN_BRAND);
+    assert(lua_tointeger(L, -1) == TITAN_ARRAY);
+    lua_pop(L, 2);
     lua_getfield(L, LUA_REGISTRYINDEX, TITAN_CONST_ARRAY_METATABLE);
     value = lua_totvalue(L, -1);
     assert(ttistable(&value));
     assert(hvalue(&value) == const_metatable);
-    lua_pop(L, 1);
+    lua_rawgetp(L, -1, TITAN_BRAND);
+    assert(lua_tointeger(L, -1) == TITAN_CONST_ARRAY);
+    lua_pop(L, 2);
     lua_close(L);
 }
 

@@ -1797,7 +1797,7 @@ The following code has been modified to include a line number before every line,
 1122:                     && pvalue(&_ca_source->upvalue[1]) == $SOURCE_TAG
 1123:                     && ttislightuserdata(&_ca_source->upvalue[3])
 1124:                     && pvalue(&_ca_source->upvalue[3])
-1125:                         == TITAN_FUNCTION_CLOSURE_BRAND) {
+1125:                         == TITAN_BRAND) {
 1126:                 int _ca_nup = (int)_ca_source->nupvalues;
 1127:                 $LINE
 1128:                 CClosure *_ca_wrapper =
@@ -2000,7 +2000,7 @@ The following code has been modified to include a line number before every line,
 1987:                 _vc_callee != NULL
 1988:                 && _vc_callee->nupvalues >= 5
 1989:                 && pvalueraw(valraw(&_vc_callee->upvalue[3]))
-1990:                     == TITAN_FUNCTION_CLOSURE_BRAND;
+1990:                     == TITAN_BRAND;
 1991:             if (_vc_is_titan) {
 1992:                 /* Branded non-exact Titan closure: call its trailing strict
 1993:                    entry. The original closure is the hidden first VM argument

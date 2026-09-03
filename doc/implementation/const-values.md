@@ -179,15 +179,19 @@ with two traced user values. Their proxy metatables differ:
 mutable proxy: TITAN_ARRAY_METATABLE
   uv[0] backing Table
   uv[1] construction-selected writer CClosure
+  metatable[TITAN_BRAND] = TITAN_ARRAY (1)
 
 const proxy: TITAN_CONST_ARRAY_METATABLE
   uv[0] backing Table
   uv[1] nil
+  metatable[TITAN_BRAND] = TITAN_CONST_ARRAY (2)
 ```
 
 `titan_array_metatables` creates or recovers both canonical metatables as one
 pair. The pair table is the publication point, so callbacks cannot observe one
-registered identity while the other is only partly initialized. The mutable
+registered identity while the other is only partly initialized. Both metatables
+carry `TITAN_BRAND` identifying their mutable (`TITAN_ARRAY`) vs const
+(`TITAN_CONST_ARRAY`) kind. The mutable
 metatable has `__index`, `__newindex`, and `__len`; the const metatable has
 `__index` and `__len` only. Each callback captures both identities so nested
 Array boxing/validation accepts exactly either canonical tag and never a

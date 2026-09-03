@@ -9,12 +9,12 @@ comment:
 
 coverage:
   status:
+    patch:
+      default:
+        target: 90
     project:
       default:
-        target: auto
-        # This branch establishes compiler-only coverage and excludes spec/.
-        # Remove the tolerance after master has a report under that baseline.
-        threshold: 2%
+        target: 90
 
 ignore:
   - "spec"

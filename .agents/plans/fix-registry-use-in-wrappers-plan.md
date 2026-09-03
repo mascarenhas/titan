@@ -20,7 +20,7 @@ This refactoring restored the proper compiler invariant: **`_mod` for any genera
   - `_ca_wrapper->upvalue[0]` is initialized with `_mod` (the module owning the cast and the adapter).
   - `_ca_wrapper->upvalue[1]` = `$TARGET_TAG`.
   - `_ca_wrapper->upvalue[2]` = `$TARGET_ADAPTER` (native entry).
-  - `_ca_wrapper->upvalue[3]` = `TITAN_FUNCTION_CLOSURE_BRAND`.
+  - `_ca_wrapper->upvalue[3]` = `TITAN_BRAND`.
   - `_ca_wrapper->upvalue[nup - 2]` = `_ca_source` (the wrapped source closure).
   - `_ca_wrapper->upvalue[nup - 1]` = `$TARGET_STRICT` (strict entry).
 - **Fast Path Call Site ([coder/calls.lua](file:///home/mascarenhas/Code/titan/titan-compiler/coder/calls.lua))**:

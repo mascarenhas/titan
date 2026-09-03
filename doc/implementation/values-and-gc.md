@@ -161,12 +161,12 @@ install the metatable and two user values directly with Lua-internal stores and
 barriers, never through the public stack API. No user-value edge is untraced.
 
 A canonical Titan **source** function is a `CClosure`. Its header is `_mod`,
-canonical function-type tag, native-entry pointer, and opaque closure brand;
+canonical function-type tag, native-entry pointer, and opaque closure brand (`TITAN_BRAND`);
 captures begin at upvalue 4; the final upvalue is the declaration's strict
 light C function. The last slot does not move capture indices. Exact dispatch
 first compares the canonical static tag and then trusts this private layout
 without a registry lookup. After an exact-tag mismatch, generic dispatch
-compares the fixed 64-bit brand sentinel in upvalue 3. Both require the private
+compares the fixed 64-bit brand sentinel (`TITAN_BRAND`) in upvalue 3. Both require the private
 minimum shape and otherwise read trusted raw pointer bits without `ttis*`
 checks. With five structural source upvalues, at most 250 captures fit under
 Lua's 255-upvalue limit.
@@ -261,14 +261,24 @@ or not it has a payload, so the check is total.
 The metatable, being a per-Lua-state heap object, cannot live in a C
 static: it is cached in a `_mod` user value (`type2metatable` allocates
 the slot lazily; `_init` fills it with `luaL_getmetatable`), and the
-type check reads it per-state from there. One registry entry per record
-type survives, plus a metatable-keyed reverse map for error messages
-(with `$TYPE` the fully qualified type name):
+type check reads it per-state from there. In the Lua registry, the
+canonical metatable is registered under its conventional name, mapped by
+its fully qualified type name in the global `TITAN_METATABLES_KEY` table,
+and indexed in reverse by pointer for error messages (with `$TYPE` the fully
+qualified type name):
 
 | Registry key | Value | Used for |
 | --- | --- | --- |
 | `"Titan record $TYPE metatable"` | the metatable (`luaL_newmetatable`) | wiring `_mod` user values; `__metatable` is protected with the string `"Titan record $TYPE"` |
+| `TITAN_METATABLES_KEY` | table mapping `$TYPE` -> metatable | global discovery of nominal metatables across modules |
 | the metatable pointer itself (`lua_rawsetp`) | the FQTN string | the *reverse* map, metatable → name, for error messages |
+
+In addition, each record metatable embeds discoverable runtime type metadata
+using lightuserdata keys:
+* `TITAN_BRAND`: integer tag `TITAN_RECORD` (3), identifying the metatable kind;
+* `TITAN_MT_TYPE`: serialized type descriptor string (`Record(...)`);
+* `TITAN_MT_MEMBERMAP`: member map table holding field indices and method closures;
+* `TITAN_MT_STATICS`: table holding constructors (`Point.new`) and static methods.
 
 ### Wrap and unwrap at the boundary
 

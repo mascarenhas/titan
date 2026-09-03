@@ -18,8 +18,8 @@ function expression_contains_call(node)
             or (node.first and expression_contains_call(node.first))
             or (node.last and expression_contains_call(node.last))
     elseif tag == "Ast.ExpCast" or tag == "Ast.ExpIs"
-           or tag == "Ast.ExpUnop"
-           or tag == "Ast.ExpAdjust" then
+        or tag == "Ast.ExpUnop"
+        or tag == "Ast.ExpAdjust" then
         return expression_contains_call(node.exp)
     elseif tag == "Ast.ExpBinop" then
         return expression_contains_call(node.lhs)
@@ -98,7 +98,7 @@ function named_ordered_call_args(ctx, args, order)
 end
 
 function newforeigntmp(ctx --[[:table]], typ --[[:table]],
-                             initializer --[[:string?]])
+                       initializer --[[:string?]])
     local tmp = ctx.tmp
     ctx.tmp = ctx.tmp + 1
     local tmpname = "_tmp_" .. tmp
@@ -111,7 +111,7 @@ function newforeigntmp(ctx --[[:table]], typ --[[:table]],
     elseif types.is_direct_c(typ) then
         fdecl = coder._render_c_declaration(typ, tmpname)
         if typ._tag == "Type.COwned"
-           or rtyp._tag == "Type.CPointer" then
+            or rtyp._tag == "Type.CPointer" then
             finit = " = NULL"
         elseif rtyp._tag == "Type.CInteger" or rtyp._tag == "Type.CFloat" then
             finit = " = 0"
@@ -119,7 +119,7 @@ function newforeigntmp(ctx --[[:table]], typ --[[:table]],
             finit = " = { {0}, 0 }"
         end
     else
-        error("don't know how to convert foreign type "..types.tostring(typ))
+        error("don't know how to convert foreign type " .. types.tostring(typ))
     end
     if initializer then
         finit = " = " .. initializer
@@ -194,20 +194,20 @@ function mutable_out_anchor(ctx, exp, target)
         local operand = source.exp
         local conversion = source._c_conversion
         if conversion and conversion.kind ==
-           "address_then_unsafe_object_pointer" then
+            "address_then_unsafe_object_pointer" then
             direct_address_source = operand
             mutable_authority = true
         elseif is_addressable_local(operand)
-           and source._adjustment
-           and source._adjustment.kind == "direct_coercion"
-           and source._adjustment.coercion
-           and source._adjustment.coercion.op == "mutable_c_address" then
+            and source._adjustment
+            and source._adjustment.kind == "direct_coercion"
+            and source._adjustment.coercion
+            and source._adjustment.coercion.op == "mutable_c_address" then
             -- Preserve the local root across an exact-address inner cast and
             -- an unrelated-pointer outer cast.
             direct_address_source = operand
             mutable_authority = true
         elseif is_addressable_local(operand)
-           and source._written_cast then
+            and source._written_cast then
             local written = coder._checked_written_cast_plan(
                 source._written_cast, operand._type, source._type,
                 "mutable C out-argument cast")
@@ -223,8 +223,8 @@ function mutable_out_anchor(ctx, exp, target)
 
     source = direct_address_source or exp
     if not mutable_authority
-       or not is_addressable_local(source)
-       or not types.is_gc(source._type) then
+        or not is_addressable_local(source)
+        or not types.is_gc(source._type) then
         return nil
     end
     local decl = source.var._decl
@@ -277,9 +277,9 @@ function nativetoforeignexp(ctx, exp, cexp, target, projection)
     end
 
     if projection and target
-       and coder._is_numeric_type(exp._type)
-       and coder._is_numeric_type(target)
-       and not types.equals(stype, ttype) then
+        and coder._is_numeric_type(exp._type)
+        and coder._is_numeric_type(target)
+        and not types.equals(stype, ttype) then
         local mode = "boundary"
         if coercion then
             coder._checked_numeric_coercion(
@@ -311,7 +311,7 @@ function nativetoforeignexp(ctx, exp, cexp, target, projection)
     end
 
     if operation == "c_automatic_to_owned"
-       or operation == "c_automatic_array_to_owned" then
+        or operation == "c_automatic_array_to_owned" then
         local source_stats = ""
         local source_address
         local bytes
@@ -320,7 +320,7 @@ function nativetoforeignexp(ctx, exp, cexp, target, projection)
         if is_addressable_local(exp) then
             local allocation_plan = exp.var._decl._c_allocation_plan
             if allocation_plan
-               and allocation_plan.storage == "automatic_fam" then
+                and allocation_plan.storage == "automatic_fam" then
                 fam_plan = allocation_plan
                 local storage = assert(exp.var._decl._c_fam_storage)
                 source_address = storage.address
@@ -371,7 +371,7 @@ function nativetoforeignexp(ctx, exp, cexp, target, projection)
     end
 
     if operation == "c_function_pointer_to_void"
-       or operation == "c_void_to_function_pointer" then
+        or operation == "c_void_to_function_pointer" then
         return "", render("titan_cast_func($TARGET, $SOURCE)", {
             TARGET = coder._render_c_type_name(target),
             SOURCE = cexp,
@@ -417,7 +417,7 @@ function nativetoforeignexp(ctx, exp, cexp, target, projection)
     end
 
     if target and not types.equals(stype, ttype)
-       and not has_projection_authority then
+        and not has_projection_authority then
         error("native-to-foreign conversion lacks checker authority: "
             .. types.tostring(exp._type) .. " -> "
             .. types.tostring(target))
@@ -440,12 +440,12 @@ function nativetoforeignexp(ctx, exp, cexp, target, projection)
     end
 
     if stype._tag == "Type.Value"
-       and (not ttype or ttype._tag == "Type.Value") then
+        and (not ttype or ttype._tag == "Type.Value") then
         return "", cexp
     end
 
     if stype._tag == "Type.COwned"
-       and (not ttype or ttype._tag == "Type.CPointer") then
+        and (not ttype or ttype._tag == "Type.CPointer") then
         return "", render("getudatamem($EXP)", { EXP = cexp })
     end
 
@@ -454,8 +454,8 @@ function nativetoforeignexp(ctx, exp, cexp, target, projection)
     end
 
     if exp._type._tag == "Type.Integer"
-    or exp._type._tag == "Type.Float"
-    or exp._type._tag == "Type.Boolean" then
+        or exp._type._tag == "Type.Float"
+        or exp._type._tag == "Type.Boolean" then
         return "", cexp
     end
 
@@ -493,7 +493,7 @@ function nativetoforeignexp(ctx, exp, cexp, target, projection)
         }), tmp
     end
 
-    error("don't know how to handle type "..types.tostring(exp._type))
+    error("don't know how to handle type " .. types.tostring(exp._type))
 end
 
 function foreigntonativeexp(ctx, exp, cexp, target)
@@ -520,8 +520,8 @@ function foreigntonativeexp(ctx, exp, cexp, target)
     end
 
     if exp._type._tag == "Type.Integer"
-    or exp._type._tag == "Type.Float"
-    or exp._type._tag == "Type.Boolean" then
+        or exp._type._tag == "Type.Float"
+        or exp._type._tag == "Type.Boolean" then
         return "", cexp
     end
 
@@ -545,7 +545,7 @@ function foreigntonativeexp(ctx, exp, cexp, target)
         return guard .. "\n" .. mkstats, mkexp
     end
 
-    error("don't know how to handle type "..types.tostring(exp._type))
+    error("don't know how to handle type " .. types.tostring(exp._type))
 end
 
 function finish_foreign_call(ctx, ret, prestats, ccall, poststats)
@@ -594,7 +594,7 @@ end
 -- C-vararg calls retain their separate explicit-scalar path and never reach
 -- this helper.
 local function code_adjusted_foreign_args(
-        ctx, node, cfunc, castats, caexps, poststats)
+    ctx, node, cfunc, castats, caexps, poststats)
     local adjusted = assert(node._arg_adjustment)
     assert(not cfunc.vararg and not adjusted.open_source
         and #adjusted.tail_scalars == 0)
@@ -777,7 +777,7 @@ function is_static_callee(node)
     if node.exp._tag ~= "Ast.ExpVar" then return false end
     local var = node.exp.var
     if node._direct_foreign_reference then
-        return true   -- foreign call, handled by codeforeigncall
+        return true -- foreign call, handled by codeforeigncall
     end
     local decl = var._decl
     return decl ~= nil and (decl._tag == "Ast.TopLevelFunc"
@@ -794,7 +794,7 @@ end
 -- Shared by codecall (static call site) and codevaluecall (first-class value
 -- fast path) -- both build the struct identically (§5.7).
 function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
-                                  dots_tail, nstatic, caexps, castats)
+                            dots_tail, nstatic, caexps, castats)
     local callee_vararg = callee_ftype.varargtype
     if not dots_tail then
         -- Static arg list into a variadic callee. Keep the elements on the C
@@ -810,7 +810,7 @@ function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
         local vname = "_varg_" .. suffix
         local arrlen = math.max(n, 1)
         local inits = n > 0 and ("{ " .. table.concat(vargexps, ", ") .. " }")
-                              or "{ 0 }"
+            or "{ 0 }"
         table.insert(castats, render([[
             $ELEM_CT $ARGS[$ARRLEN] = $INITS;
             $STRUCT $VARG = { $N, $ARGS };
@@ -830,15 +830,15 @@ function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
         -- over-supplied static args (those beyond the callee's fixed params), all
         -- already coerced to the callee element type by the checker.
         local va = assert(ctx.varargs, "forwarding '...' outside a variadic function")
-        local eg = callee_vararg          -- callee element type
-        local ef = va.elem                -- this function's `...` element type
+        local eg = callee_vararg -- callee element type
+        local ef = va.elem       -- this function's `...` element type
         -- C representation alone is not enough: Array and Map share Table*,
         -- while Option(Array), Option(Map), value, and Function share TValue.
         -- Only an equal semantic element type is representation-equivalent
         -- across this exact descriptor edge.
         local same_representation = types.equals(ef, eg)
-        local k = nstatic                 -- static-prefix arg count
-        local m = #callee_ftype.params    -- callee fixed-param count
+        local k = nstatic              -- static-prefix arg count
+        local m = #callee_ftype.params -- callee fixed-param count
         local tail_start = va.start
         if node._open_args then
             -- The checker has already projected any borrowed fixed arguments
@@ -891,7 +891,7 @@ function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
             ctx.uses_base_off = true
             local struct = varg_struct_name(eg)
             local elem_ct = ctype(eg)
-            local nprefix = #vargexps      -- static-prefix elements (only k > m)
+            local nprefix = #vargexps -- static-prefix elements (only k > m)
             local suffix = tostring(ctx.tmp)
             ctx.tmp = ctx.tmp + 1
             local udname = "_vargud_" .. suffix
@@ -937,7 +937,7 @@ function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
                 local dst = render("$VNAME->args[$NPREFIX + _vj]",
                     { VNAME = vname, NPREFIX = c_integer_literal(nprefix) })
                 local adjustment = assert(node._open_args
-                        and node._open_args.adjustment,
+                    and node._open_args.adjustment,
                     "open variadic forwarding lacks checker adjustment")
                 local result_root
                 if coder._adjustment_allocates_gc(adjustment) then
@@ -1156,7 +1156,7 @@ end
 -- traced result slot. Fallback values retain their original identity and are
 -- published into that same result slot by the mutually exclusive branch.
 function coder._emit_callable_adapter_value(
-        ctx, adapter, raw, loc, use, result_root)
+    ctx, adapter, raw, loc, use, result_root)
     use = use or "callable adapter construction"
     adapter = coder._validate_callable_adapter_plan(
         adapter, adapter.source, adapter.target, use, {})
@@ -1186,7 +1186,7 @@ function coder._emit_callable_adapter_value(
                     && pvalue(&_ca_source->upvalue[1]) == $SOURCE_TAG
                     && ttislightuserdata(&_ca_source->upvalue[3])
                     && pvalue(&_ca_source->upvalue[3])
-                        == TITAN_FUNCTION_CLOSURE_BRAND) {
+                        == TITAN_BRAND) {
                 int _ca_nup = (int)_ca_source->nupvalues;
                 $LINE
                 CClosure *_ca_wrapper =
@@ -1247,7 +1247,7 @@ function coder._adjustment_allocates_gc(adjustment)
     end
     if adjustment.interface_conversion then return true end
     if adjustment.kind == "gradual_view"
-       and coder._may_discover_interface(adjustment.target) then
+        and coder._may_discover_interface(adjustment.target) then
         return true
     end
     local coercion = adjustment.coercion
@@ -1257,8 +1257,8 @@ function coder._adjustment_allocates_gc(adjustment)
         end
         if plan.op == "interface_wrapper" then return true end
         if plan.op == "option_map"
-           or plan.op == "option_wrap"
-           or plan.op == "option_force" then
+            or plan.op == "option_wrap"
+            or plan.op == "option_force" then
             return coercion_allocates(plan.inner)
         end
         return false
@@ -1272,8 +1272,8 @@ end
 -- an annotated cast carrying the exact checker plan; code generation never
 -- reruns a type relation to rediscover permission.
 function coder._code_adjustment_value(
-        ctx, adjustment, source_type, target, raw, loc, adapter_alias,
-        result_root)
+    ctx, adjustment, source_type, target, raw, loc, adapter_alias,
+    result_root)
     adjustment = coder._checked_adjustment_plan(
         adjustment, source_type, target, "value adjustment")
     if adjustment.kind == "identity" then
@@ -1297,7 +1297,7 @@ function coder._code_adjustment_value(
             result_root)
     end
     if adjustment.kind == "gradual_view"
-       and adjustment.op == "structural" then
+        and adjustment.op == "structural" then
         -- Arrays, Maps, and callables retain a durable view whose component
         -- observations are guarded later. An Option has no separate mutable
         -- backing: its present payload is the immediate component observation.
@@ -1307,11 +1307,11 @@ function coder._code_adjustment_value(
         local asource = assert(adjustment.source)
         local atarget = assert(adjustment.target)
         if asource._tag ~= "Type.Option"
-           or atarget._tag ~= "Type.Option" then
+            or atarget._tag ~= "Type.Option" then
             return "", raw
         end
         assert(adjustment.guard
-               and adjustment.guard.op == "option",
+            and adjustment.guard.op == "option",
             "structural Option view lacks its strict guard plan")
         -- Most successful guards only borrow the existing payload. A present
         -- Interface leaf may dynamically construct a wrapper. Ordinarily this
@@ -1344,9 +1344,9 @@ function coder._code_adjustment_value(
         }), dstname
     end
     assert(adjustment.kind == "direct_coercion"
-            or (adjustment.kind == "gradual_view"
-                and (adjustment.op == "inject"
-                     or adjustment.op == "project")),
+        or (adjustment.kind == "gradual_view"
+            and (adjustment.op == "inject"
+                or adjustment.op == "project")),
         "unknown checker adjustment kind " .. tostring(adjustment.kind))
 
     local csrc, srcname = newtmp(ctx, source_type)
@@ -1384,7 +1384,7 @@ end
 -- instead use the supplied result slot as its ordinary VM lookup destination;
 -- buffered sinks pass a distinct slot for every still-live result.
 function coder._convert_result_run_element(
-        ctx, run, target, index, loc, result_root, result_stack)
+    ctx, run, target, index, loc, result_root, result_stack)
     local readstats, raw
     if run.read then
         readstats, raw = run.read(
@@ -1398,9 +1398,9 @@ function coder._convert_result_run_element(
     if types.equals(run.elem, target) then
         assert(run.adjustment.kind == "identity",
             "equal open result elements lack an identity checker adjustment: "
-                .. types.tostring(run.elem) .. " -> "
-                .. types.tostring(target) .. " used "
-                .. tostring(run.adjustment.kind))
+            .. types.tostring(run.elem) .. " -> "
+            .. types.tostring(target) .. " used "
+            .. tostring(run.adjustment.kind))
         return readstats, raw
     end
     -- A non-contiguous reader may need result_root to retain its raw VM result
@@ -1479,7 +1479,7 @@ end
 -- may simultaneously provide a fixed primary value and the dynamic run, so
 -- open-source identity is orthogonal to fixed/tail membership.
 function coder._codeadjustedopen(
-        ctx, adjusted, want, effectively_open, stabilize)
+    ctx, adjusted, want, effectively_open, stabilize)
     stabilize = stabilize or materialize_code
     local fixed_index, tail_index, discard_set = {}, {}, {}
     for i, exp in ipairs(adjusted.fixed) do fixed_index[exp] = i end
@@ -1571,7 +1571,7 @@ function coder._emit_open_vararg_struct(ctx, node, callee_ftype, tailnames,
         ctx, node, #tailnames, run, stats)
     local root_depth
     if run.retain_read_results
-       or coder._adjustment_allocates_gc(run.adjustment) then
+        or coder._adjustment_allocates_gc(run.adjustment) then
         root_depth = ctx.depth
         for _ = 1, 200 do reserveslot(ctx) end
     end
@@ -1696,11 +1696,11 @@ function codevaluecall(ctx, node)
     --    use the callee's declared parameter type; surplus static args use the
     --    vararg element type and become native backing-struct elements. Slow
     --    branches later box these same values into their Lua argument slots.
-    local argnames, argtypes = {}, {}   -- fixed-param args (both paths)
-    local vargexps = {}                 -- surplus static-arg C exprs (struct + push)
+    local argnames, argtypes = {}, {} -- fixed-param args (both paths)
+    local vargexps = {}               -- surplus static-arg C exprs (struct + push)
     local inputrun, inputtail
     if callee_vararg and node._arg_adjustment
-       and node._arg_adjustment.open_source then
+        and node._arg_adjustment.open_source then
         local astats, fixednames, tailnames, run = coder._codeadjustedopen(
             ctx, node._arg_adjustment, "LUA_MULTRET", "1", coder._freeze_code)
         for _, stat in ipairs(astats) do table.insert(stats, stat) end
@@ -1728,7 +1728,7 @@ function codevaluecall(ctx, node)
             table.insert(stats, astat)
             if i <= npassed then
                 local atype = (callee_vararg and i > nfixed) and callee_vararg
-                              or ftype.params[i]
+                    or ftype.params[i]
                 local adecl, aname = newtmp(ctx, atype, false)
                 table.insert(stats, adecl)
                 table.insert(stats, aname .. " = " .. aexp .. ";")
@@ -1782,11 +1782,11 @@ function codevaluecall(ctx, node)
     -- native elements remain C arguments and receive no tracing-only copies.
     -- The common `_base = restorestack(L, _base_off);` after the if/else runs on
     -- both paths (a case-3 allocation may have relocated the stack).
-    local vargca = {}   -- the two struct C exprs (_varargs ptr, _start)
-    local vargstats = {}   -- the struct-build setup statements (fast path only)
+    local vargca = {}    -- the two struct C exprs (_varargs ptr, _start)
+    local vargstats = {} -- the struct-build setup statements (fast path only)
     if callee_vararg and not inputrun then
         emit_vararg_struct(ctx, node, ftype, vargexps, dots_tail, npassed,
-                           vargca, vargstats)
+            vargca, vargstats)
     end
 
     -- 4a. fast path: the value is a Titan closure whose exact type tag matches
@@ -1863,7 +1863,7 @@ function codevaluecall(ctx, node)
         if argnames[i] then
             table.insert(argpushes,
                 setboxed(ctx, argtypes[i], "s2v(L->top.p)", argnames[i])
-                    .. " L->top.p++;")
+                .. " L->top.p++;")
         end
     end
     local npush_dynamic = ""
@@ -1888,7 +1888,7 @@ function codevaluecall(ctx, node)
         for _, name in ipairs(inputtail) do
             table.insert(argpushes,
                 setboxed(ctx, callee_vararg, "s2v(L->top.p)", name)
-                    .. " L->top.p++;")
+                .. " L->top.p++;")
         end
         local pushstats, pushexp
         if node._arg_adjustment.open_source._tag == "Ast.ExpDots" then
@@ -1919,14 +1919,14 @@ function codevaluecall(ctx, node)
             PUSHSTATS = pushstats,
             SETSLOT = setboxed(ctx,
                 node._arg_adjustment.open_source._tag == "Ast.ExpDots"
-                    and inputrun.elem or callee_vararg,
+                and inputrun.elem or callee_vararg,
                 "s2v(L->top.p)", pushexp),
         }))
     else
         for _, vexp in ipairs(vargexps) do
             table.insert(argpushes,
                 setboxed(ctx, callee_vararg, "s2v(L->top.p)", vexp)
-                    .. " L->top.p++;")
+                .. " L->top.p++;")
         end
     end
     if dots_tail and not inputvarg then
@@ -2080,17 +2080,17 @@ function codevaluecall(ctx, node)
             }
             $ANCHORRUN
         ]], {
-            NFIXED = c_integer_literal(abi_nresults),
-            WANT = flexrun.call_demand,
-            EFFECTIVELY_OPEN = flexrun.effectively_open,
-            FILE = c_string_literal(node.loc.filename),
-            LINE = c_integer_literal(node.loc.line),
-            COL = c_integer_literal(node.loc.col),
-            DESC = flexrun.desc,
-            READONE = readone,
-            IMMEDIATE_ANCHOR = immediate_anchor,
-            ANCHORRUN = coder._anchor_result_run(flexrun),
-        })
+                NFIXED = c_integer_literal(abi_nresults),
+                WANT = flexrun.call_demand,
+                EFFECTIVELY_OPEN = flexrun.effectively_open,
+                FILE = c_string_literal(node.loc.filename),
+                LINE = c_integer_literal(node.loc.line),
+                COL = c_integer_literal(node.loc.col),
+                DESC = flexrun.desc,
+                READONE = readone,
+                IMMEDIATE_ANCHOR = immediate_anchor,
+                ANCHORRUN = coder._anchor_result_run(flexrun),
+            })
         end
         lua_slowopen = make_slowopen(false)
         strict_slowopen = make_slowopen(true)
@@ -2130,7 +2130,7 @@ function codevaluecall(ctx, node)
                 _vc_callee != NULL
                 && _vc_callee->nupvalues >= 5
                 && pvalueraw(valraw(&_vc_callee->upvalue[3]))
-                    == TITAN_FUNCTION_CLOSURE_BRAND;
+                    == TITAN_BRAND;
             if (_vc_is_titan) {
                 /* Branded non-exact Titan closure: call its trailing strict
                    entry. The original closure is the hidden first VM argument
@@ -2261,7 +2261,7 @@ function codecall(ctx, node)
             end
         end
         table.insert(caexps, modarg)
-        table.insert(caexps, "NULL")  -- _fn: a static top-level call has no closure
+        table.insert(caexps, "NULL") -- _fn: a static top-level call has no closure
     else
         assert(node.args._tag == "Ast.ArgsMethod")
         if node._interface then
@@ -2270,12 +2270,12 @@ function codecall(ctx, node)
             local index = assert(node._interface_method_index)
             local indexed = interface.methods[index + 1]
             assert(interface._tag == "Type.Interface"
-                   and index >= 0
-                   and indexed
-                   and indexed.name == mtype.name
-                   and types.equals(
-                       types.method_function_type(indexed),
-                       types.method_function_type(mtype)),
+                and index >= 0
+                and indexed
+                and indexed.name == mtype.name
+                and types.equals(
+                    types.method_function_type(indexed),
+                    types.method_function_type(mtype)),
                 "Interface call has a noncanonical method slot")
             local cstat, wrapper = coder._freeze(ctx, node.exp)
             local fptr = fresh_lowering_name(
@@ -2351,7 +2351,7 @@ function codecall(ctx, node)
     if node.args._tag == "Ast.ArgsMethod" then
         callee_ftype = node._interface_method or node._method
     elseif fnode._tag == "Ast.VarDot"
-           and fnode._decl and fnode._decl._tag == "Type.StaticMethod" then
+        and fnode._decl and fnode._decl._tag == "Type.StaticMethod" then
         callee_ftype = fnode._decl
     else
         callee_ftype = fnode._type
@@ -2398,7 +2398,7 @@ function codecall(ctx, node)
             table.insert(caexps, argexp)
         end
     elseif callee_vararg and node._arg_adjustment
-           and node._arg_adjustment.open_source then
+        and node._arg_adjustment.open_source then
         local astats, fixednames, tailnames, run = coder._codeadjustedopen(
             ctx, node._arg_adjustment, "LUA_MULTRET", "1", coder._freeze_code)
         for _, stat in ipairs(astats) do table.insert(castats, stat) end
@@ -2453,7 +2453,7 @@ function codecall(ctx, node)
     -- case-3 backing allocation acquires a new traced root.
     if callee_vararg and not inputrun then
         emit_vararg_struct(ctx, node, callee_ftype, vargexps, dots_tail,
-                           npassed, caexps, castats)
+            npassed, caexps, castats)
     end
     -- Keep the complete fixed ABI prefix in native temporaries even when this
     -- consumer hides some or all of it. Consumer-visible results get separate

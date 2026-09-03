@@ -1006,12 +1006,16 @@ a metatable. New allocations stamp that metatable onto the `Udata`, and
 userdata. This prevents unrelated full userdata, including Titan records, from
 being reinterpreted as C payload memory.
 
-The module initializer constructs each owned-C metatable privately, installs
-its protected display name, and publishes the registry key only after setup
-succeeds. The registry cannot expose a half-initialized identity, and a
-pre-existing non-table registry value is rejected. This is a metatable
-publication rule, not a transaction boundary for the complete module
-initializer.
+The module initializer constructs each owned-C metatable privately, stamps
+it with `TITAN_BRAND` set to integer constant `TITAN_OWNED` (6) and its serialized
+`COwned` type descriptor under lightuserdata key `TITAN_MT_TYPE`, installs
+its protected display name (`__name` and `__metatable`), and publishes the registry
+key only after setup succeeds. When recovering a pre-existing metatable from the registry,
+generated code strictly validates the entry: it must be a table whose `TITAN_BRAND`
+property is an integer equal to `TITAN_OWNED`, or it errors with `"invalid Titan owned C metatable registry entry"`.
+The registry cannot expose a half-initialized identity, and an incompatible or
+corrupted entry is rejected. This is a metatable publication rule, not a transaction
+boundary for the complete module initializer.
 
 Making C-bearing Titan function types source-nameable exposes a separate
 registry-identity issue. `types.contains_c_ffi_type` still separates C ABI

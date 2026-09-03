@@ -1,24 +1,6 @@
 local h = require 'spec.support.helpers'
 local driver = require 'titan-compiler.driver'
 
-local function with_extra_cflags(flags, fn)
-    local previous = driver.EXTRA_CFLAGS
-    local configured = {}
-    for _, flag in ipairs(previous or {}) do
-        configured[#configured + 1] = flag
-    end
-    for _, flag in ipairs(flags) do
-        configured[#configured + 1] = flag
-    end
-    driver.EXTRA_CFLAGS = configured
-    driver.configure_foreign_c()
-    local results = table.pack(xpcall(fn, debug.traceback))
-    driver.EXTRA_CFLAGS = previous
-    driver.configure_foreign_c()
-    if not results[1] then error(results[2], 0) end
-    return table.unpack(results, 2, results.n)
-end
-
 local function with_header(contents, fn)
     local header = os.tmpname() .. ".h"
     local f = assert(io.open(header, "w"))
@@ -136,7 +118,7 @@ describe("C FFI code generation", function()
     end)
 
     it("probes enum carriers under warning-as-error policies", function()
-        with_extra_cflags({ "-Wall", "-Werror" }, function()
+        h.with_extra_cflags({ "-Wall", "-Werror" }, function()
             with_header([[
                 typedef enum { FFI_WARN_NEG = -1,
                                FFI_WARN_POS = 1 } ffi_warn_enum;
@@ -257,7 +239,7 @@ describe("C FFI code generation", function()
             ]])
         end)
 
-        with_extra_cflags({ "-fshort-enums", "-Wall", "-Werror" }, function()
+        h.with_extra_cflags({ "-fshort-enums", "-Wall", "-Werror" }, function()
             with_header([[
                 typedef enum { FFI_SHORT_NEG = -1,
                                FFI_SHORT_MAX = 127 } ffi_short_enum;

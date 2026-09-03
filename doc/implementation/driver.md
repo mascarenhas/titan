@@ -1307,6 +1307,10 @@ commands.
   for keyed interface maps whose text must be reproducible.
 * **`util.split_string(str, delim)`** — plain-pattern split; used to
   turn the `-l` comma list into linker flags.
+* **`util.tostring(v)`** — recursively formats primitive values and nested
+  tables (both array-like sequences and keyed maps) into canonical Lua-literal
+  string representations; used by `types.serialize` for compound C-FFI type
+  metadata (such as array lengths and bitfield tables).
 * **`util.to_set`**, **`util.curry`**, **`util.any`** — small
   functional helpers (`any` in the coder, `to_set` in the c-parser,
   `curry` only in the specs).

@@ -52,6 +52,8 @@ Udata *$INITNAME(lua_State *L) {
         Udata *_mod = luaS_newudata(L, 0, $NUPVALS);
         titan_pushmodule(L, _mod);
         lua_setfield(L, LUA_REGISTRYINDEX, $MODNAMESTR);
+        Table *_titan_metatables = titan_ensure_metatables_table(L);
+        (void)_titan_metatables; // in case this module does not publish any types
         $INITSOURCEIDENTITY
         $INITARRAYMETA
         $LOADMODULES1
@@ -134,7 +136,7 @@ end
 -- Generates the code for importing the module, and storing it
 -- in the corresponding local state slot
 function import_module(loadmods, initmods, sigs, mprefixes,
-                             dynamic, node)
+                       dynamic, node)
     local modname = node.modname
     local upvalue = node._upvalue
     local mprefix = mangle_qn(modname) .. "_"
@@ -233,8 +235,8 @@ function import_module(loadmods, initmods, sigs, mprefixes,
 end
 
 function init_data_from_other_modules(tlcontext, includes, loadmods,
-                                            loadglobals, initmetas, mprefixes,
-                                            static_deps)
+                                      loadglobals, initmetas, mprefixes,
+                                      static_deps)
     -- When linking dynamically, we need to make 'static' variables and load the values
     -- from the other module's dynamic library
     -- When linking statically, we only need to make 'extern' forward declarations.
@@ -491,35 +493,48 @@ function coderecorddec(ctx, code, initrecs, node)
         }))
     end
     table.insert(initrecs, render([[
-        {
+      {
         /* If we are here then this is the first time
            this module is initialized in the current Lua state,
            so there is no metatable stored for this record */
         luaL_newmetatable(L, "Titan record $TYPE metatable");
         const void *_mtp = lua_topointer(L, -1);
+        lua_pushinteger(L, TITAN_RECORD);
+        lua_rawsetp(L, -2, TITAN_BRAND);
         lua_pushliteral(L, "__metatable");
         lua_pushliteral(L, "Titan record $TYPE");
         lua_rawset(L, -3);
-        lua_pushliteral(L, "__type");
         lua_pushliteral(L, $TAG);
-        lua_rawset(L, -3);
+        lua_rawsetp(L, -2, TITAN_MT_TYPE);
         lua_newtable(L);
         $FIELDMAP
+        lua_pushvalue(L, -1); /* fieldmap */
+        lua_rawsetp(L, -3, TITAN_MT_MEMBERMAP);  /* metatable.[TITAN_MT_MEMBERMAP] = membermap */
         lua_pushliteral(L, "__index");
-        lua_pushvalue(L, -2);            /* fieldmap */
+        lua_pushvalue(L, -2);            /* membermap */
         titan_pushmodule(L, _mod);       /* _mod as upvalue[1] */
         lua_pushcclosure(L, $INDEXNAME, 2);
         lua_rawset(L, -4);
         lua_pushliteral(L, "__newindex");
-        lua_pushvalue(L, -2);            /* fieldmap */
+        lua_pushvalue(L, -2);            /* membermap */
         titan_pushmodule(L, _mod);       /* _mod as upvalue[1] */
         lua_pushcclosure(L, $NEWINDEXNAME, 2);
         lua_rawset(L, -4);
-        lua_pop(L, 2); /* pop fieldmap and metatable */
-        /* Index from metatable pointer to typename for error messages */
-        lua_pushstring(L, "$TYPE");
-        lua_rawsetp(L, LUA_REGISTRYINDEX, _mtp);
+        // Set _titan_metatables[type] = metatable
+        TString *_type = luaS_new(L, "$TYPE");
+        int _hres = luaH_psetstr(_titan_metatables, _type, s2v(L->top.p-2));
+        if (_hres == HOK) {
+          luaC_barrierback(L, obj2gco(_titan_metatables), s2v(L->top.p - 2));
+        } else {
+          setsvalue2s(L, L->top.p - 1, _type);
+          luaH_finishset(L, _titan_metatables, s2v(L->top.p - 1), s2v(L->top.p - 2), _hres);
+          luaC_barrierback(L, obj2gco(_titan_metatables), s2v(L->top.p - 2));
         }
+        lua_pop(L, 2); /* pop fieldmap/type and metatable */
+        /* Index from metatable pointer to typename for error messages */
+        lua_pushliteral(L, "$TYPE");
+        lua_rawsetp(L, LUA_REGISTRYINDEX, _mtp);
+      }
     ]], {
         INDEXNAME = coder._nominal_metamethod_name(
             node._type.name, "index"),
@@ -602,14 +617,17 @@ function coder._codeuniondec(ctx, code, initnominals, node)
         {
             luaL_newmetatable(L, "Titan union $TYPE metatable");
             const void *_mtp = lua_topointer(L, -1);
+            lua_pushinteger(L, TITAN_UNION);
+            lua_rawsetp(L, -2, TITAN_BRAND);
             lua_pushliteral(L, "__metatable");
             lua_pushliteral(L, "Titan union $TYPE");
             lua_rawset(L, -3);
-            lua_pushliteral(L, "__type");
             lua_pushliteral(L, $TAG);
-            lua_rawset(L, -3);
+            lua_rawsetp(L, -2, TITAN_MT_TYPE);
             lua_newtable(L);
             $METHODMAP
+            lua_pushvalue(L, -1); /* methodmap */
+            lua_rawsetp(L, -3, TITAN_MT_MEMBERMAP);  /* metatable[TITAN_MT_MEMBERMAP] = methodmap */
             lua_pushliteral(L, "__index");
             lua_pushvalue(L, -2);
             titan_pushmodule(L, _mod);
@@ -618,8 +636,18 @@ function coder._codeuniondec(ctx, code, initnominals, node)
             lua_pushliteral(L, "__newindex");
             lua_pushcfunction(L, $NEWINDEXNAME);
             lua_rawset(L, -4);
+            // Set _titan_metatables[type] = metatable
+            TString *_type = luaS_new(L, "$TYPE");
+            int _hres = luaH_psetstr(_titan_metatables, _type, s2v(L->top.p-2));
+            if (_hres == HOK) {
+              luaC_barrierback(L, obj2gco(_titan_metatables), s2v(L->top.p - 2));
+            } else {
+              setsvalue2s(L, L->top.p-1, _type);
+              luaH_finishset(L, _titan_metatables, s2v(L->top.p - 1), s2v(L->top.p - 2), _hres);
+              luaC_barrierback(L, obj2gco(_titan_metatables), s2v(L->top.p - 2));
+            }
             lua_pop(L, 2);
-            lua_pushstring(L, "$TYPE");
+            lua_pushliteral(L, "$TYPE");
             lua_rawsetp(L, LUA_REGISTRYINDEX, _mtp);
         }
     ]], {
@@ -634,10 +662,10 @@ function coder._codeuniondec(ctx, code, initnominals, node)
 end
 
 function coder._code_interface_method_artifacts(
-        tlcontext, sigs, code, interface, method_node, index)
+    tlcontext, sigs, code, interface, method_node, index)
     local method = assert(method_node._type)
     assert(method._tag == "Type.Method"
-           and interface.methods[index + 1] == method,
+        and interface.methods[index + 1] == method,
         "Interface method AST/descriptor order mismatch")
     local ftype = types.method_function_type(method)
     local luaname = coder._interface_method_luaname(method)
@@ -798,7 +826,7 @@ end
 function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
     local interface = assert(node._type)
     assert(interface._tag == "Type.Interface"
-           and types.validate_interface_descriptor(interface),
+        and types.validate_interface_descriptor(interface),
         "malformed Interface declaration reached code generation")
     assert(#node.fields == #interface.fields)
     assert(#node.methods == #interface.methods)
@@ -909,14 +937,17 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
         {
             luaL_newmetatable(L, "Titan interface $TYPE metatable");
             const void *_mtp = lua_topointer(L, -1);
+            lua_pushinteger(L, TITAN_INTERFACE);
+            lua_rawsetp(L, -2, TITAN_BRAND);
             lua_pushliteral(L, "__metatable");
             lua_pushliteral(L, "Titan interface $TYPE");
             lua_rawset(L, -3);
-            lua_pushliteral(L, "__type");
             lua_pushliteral(L, $TAG);
-            lua_rawset(L, -3);
+            lua_rawsetp(L, -2, TITAN_MT_TYPE);
             lua_newtable(L);
             $MEMBERMAP
+            lua_pushvalue(L, -1); /* membermap */
+            lua_rawsetp(L, -3, TITAN_MT_MEMBERMAP);  /* metatable[TITAN_MT_MEMBERMAP] = membermap */
             lua_pushliteral(L, "__index");
             lua_pushvalue(L, -2);
             titan_pushmodule(L, _mod);
@@ -925,8 +956,19 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
             lua_pushliteral(L, "__newindex");
             lua_pushcfunction(L, $NEWINDEXNAME);
             lua_rawset(L, -4);
+            // Set _titan_metatables[type] = metatable
+            TString *_type = luaS_new(L, "$TYPE");
+            int _hres = luaH_psetstr(_titan_metatables, _type, s2v(L->top.p-2));
+            if (_hres == HOK) {
+              luaC_barrierback(L, obj2gco(_titan_metatables), s2v(L->top.p - 2));
+            } else {
+              setsvalue2s(L, L->top.p-1, _type);
+              luaH_finishset(L, _titan_metatables, s2v(L->top.p - 1), s2v(L->top.p - 2), _hres);
+              luaC_barrierback(L, obj2gco(_titan_metatables), s2v(L->top.p - 2));
+            }
+            // Pop membermap/type and metatable
             lua_pop(L, 2);
-            lua_pushstring(L, "$TYPE");
+            lua_pushliteral(L, "$TYPE");
             lua_rawsetp(L, LUA_REGISTRYINDEX, _mtp);
         }
     ]], {
@@ -972,7 +1014,7 @@ function allocate_upvalues(tlcontext, ast)
                     public_slots["function:" .. node.name])
             elseif node._tag == "Ast.TopLevelStatic" and not node.islocal then
                 node._closure_upvalue = public_slots[
-                    "static:" .. node._type.fqtn .. "." .. node._type.name]
+                "static:" .. node._type.fqtn .. "." .. node._type.name]
             end
         end
     end
@@ -1013,7 +1055,7 @@ function allocate_upvalues(tlcontext, ast)
                     source_slots["function:" .. node.name])
             elseif node._tag == "Ast.TopLevelStatic" and node.islocal then
                 node._closure_upvalue = assert(source_slots[
-                    "static:" .. node._type.fqtn .. "." .. node._type.name])
+                "static:" .. node._type.fqtn .. "." .. node._type.name])
             end
         end
     end
@@ -1031,10 +1073,10 @@ function allocate_upvalues(tlcontext, ast)
                 assert(node._closure_upvalue,
                     "static lacks public or source-private closure slot")
                 tlcontext.static_slots[
-                    node._type.fqtn .. "." .. node._type.name] =
+                node._type.fqtn .. "." .. node._type.name] =
                     node._closure_upvalue
             elseif node._tag == "Ast.TopLevelRecord"
-                   or node._tag == "Ast.TopLevelUnion" then
+                or node._tag == "Ast.TopLevelUnion" then
                 tlcontext.nominal_namespace_slots[node._type.name] =
                     nextupvalue(tlcontext)
             end
@@ -1074,7 +1116,7 @@ function coder.generate_foreign_header(modname, ast, tlcontext)
         if not node._ignore and node._tag == "Ast.TopLevelForeignImport" then
             add_include(direct, assert(node._include))
         elseif not node._ignore and node._tag == "Ast.TopLevelImport"
-               and node._source_import and node._foreign_header then
+            and node._source_import and node._foreign_header then
             local line = "#include " .. c_string_literal(node._foreign_header)
             if not seen[line] then
                 seen[line] = true
@@ -1087,7 +1129,9 @@ function coder.generate_foreign_header(modname, ast, tlcontext)
     local visited = {}
     local function collect_type(typ)
         if type(typ) ~= "table" or not typ._tag
-           or not typ._tag:match("^Type%.") then return end
+            or not typ._tag:match("^Type%.") then
+            return
+        end
         for _, include in ipairs(types.c_ffi_includes(typ)) do
             if include and include.rendered then
                 origins[include.rendered] = include

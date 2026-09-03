@@ -3000,7 +3000,8 @@ static struct titan_symlink_origin *titan_symlink_origin_get(void) {
     end)
 
     it("gets record from Titan and sends it back", function ()
-        run_coder([[
+        h.with_extra_cflags({ '-DTITAN_COMPILER_TESTS' }, function ()
+          run_coder([[
             record Point
                 x: float
                 y: float
@@ -3011,7 +3012,8 @@ static struct titan_symlink_origin *titan_symlink_origin_get(void) {
             function unpack(p: Point): (float, float)
                 return p.x, p.y
             end
-        ]], [[
+          ]], [[
+            local registry = debug.getregistry()
             local p1 = test.point()
             assert(type(p1) == 'userdata')
             local x, y = test.unpack(p1)
@@ -3022,8 +3024,12 @@ static struct titan_symlink_origin *titan_symlink_origin_get(void) {
             assert(getmetatable(p1) == getmetatable(p2))
             local mt = debug.getmetatable(p1)
             assert(type(mt) == 'table')
-            assert(mt.__type == "Record('test.Point',{Field('test.Point', 'x', Float(), 0, false),Field('test.Point', 'y', Float(), 1, false)},{new = StaticMethod('test.Point', 'new',{Float(),Float()},{Nominal('test.Point')},false,false,{\"x\",\"y\"})},{},2)")
-        ]])
+            assert(mt[registry.TITAN_BRAND] == 3)
+            assert(1 == mt[registry.TITAN_MT_MEMBERMAP].y)
+            assert(test.Point.new == mt[registry.TITAN_MT_STATICS].new)
+            assert(mt[registry.TITAN_MT_TYPE] == "Record('test.Point',{Field('test.Point', 'x', Float(), 0, false),Field('test.Point', 'y', Float(), 1, false)},{new = StaticMethod('test.Point', 'new',{Float(),Float()},{Nominal('test.Point')},false,false,{\"x\",\"y\"})},{},2)")
+          ]])
+        end)
     end)
 
     it("gets record from titan and sends it back to wrong type", function ()

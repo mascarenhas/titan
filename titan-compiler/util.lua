@@ -1,5 +1,27 @@
 local util = {}
 
+function util.tostring(v)
+    if type(v) ~= "table" then
+        return string.format("%q", v)
+    end
+
+    local parts = {}
+    local seen = {}
+
+    for i, v in ipairs(v) do
+        seen[i] = true
+        table.insert(parts, util.tostring(v))
+    end
+
+    for k, v in pairs(v) do
+        if not seen[k] then
+            table.insert(parts, string.format("[%s] = %s", util.tostring(k), util.tostring(v)))
+        end
+    end
+
+    return "{" .. table.concat(parts, ", ") .. "}"
+end
+
 function util.get_file_contents(filename)
     local f, err = io.open(filename, "r")
     if not f then
@@ -23,7 +45,6 @@ function util.set_file_contents(filename, contents)
     f:close()
     return true
 end
-
 
 -- Barebones string-based template function for generating C/Lua code. Replaces
 -- $VAR and ${VAR} placeholders in the `code` template by the corresponding

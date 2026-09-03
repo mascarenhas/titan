@@ -7,7 +7,7 @@ local _ENV = core
 -- the original closure as one hidden first argument and applies gradual tag
 -- guards before calling the same native entry.
 function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
-                           lua_name, options)
+                     lua_name, options)
     options = options or {}
     local strict = options.strict == true
     local hidden = strict and 1 or 0
@@ -16,7 +16,7 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
     local interface_method_index = options.interface_method_index
     if interface_method_index ~= nil then
         assert(not strict and typ._tag == "Type.Method"
-               and interface_method_index >= 0,
+            and interface_method_index >= 0,
             "invalid Interface Lua-entry dispatch configuration")
     end
     if not strict then
@@ -36,7 +36,7 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
         end
     end
     if not unavailable_result and typ.flexrettype
-       and not types.has_tvalue_representation(typ.flexrettype) then
+        and not types.has_tvalue_representation(typ.flexrettype) then
         unavailable_result = "flexible return has type '"
             .. types.tostring(typ.flexrettype) .. "'"
     end
@@ -90,11 +90,11 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
         local registered_method =
             interface.methods[interface_method_index + 1]
         assert(interface._tag == "Type.Interface"
-               and registered_method
-               and registered_method.name == typ.name
-               and types.equals(
-                   types.method_function_type(registered_method),
-                   types.method_function_type(typ)),
+            and registered_method
+            and registered_method.name == typ.name
+            and types.equals(
+                types.method_function_type(registered_method),
+                types.method_function_type(typ)),
             "Interface Lua-entry method index is not canonical")
         local payload_name =
             "_titan_interface_method_" .. tostring(interface_method_index)
@@ -165,7 +165,7 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
                 tlcontext, options.strict_vararg_plan, varargtype,
                 "_varargs->args[_vj]",
                 "s2v(L->ci->func.p + " .. (nfixed + hidden)
-                    .. " + 1 + _vj)",
+                .. " + 1 + _vj)",
                 loc, "strict Titan variadic parameter", true)
         else
             assert(options.dynamic_vararg_plan ~= nil,
@@ -174,7 +174,7 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
                 tlcontext, options.dynamic_vararg_plan, varargtype,
                 "_varargs->args[_vj]",
                 "s2v(L->ci->func.p + " .. (nfixed + hidden)
-                    .. " + 1 + _vj)",
+                .. " + 1 + _vj)",
                 loc, "genuine Lua variadic parameter", true)
         end
         table.insert(stats, render([[
@@ -300,7 +300,7 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
             FIXEDSETS = table.concat(fixedsets, "\n"),
             SETFLEX = setboxed(tlcontext, flexrettype,
                 "s2v(_firstret + " .. c_integer_literal(#typ.rettypes)
-                    .. " + _fri)", "_flexdesc.args[_fri]"),
+                .. " + _fri)", "_flexdesc.args[_fri]"),
         }))
     elseif #typ.rettypes == 0 then
         -- zero-return `() -> ()`: invoke the void native entry purely for
@@ -395,7 +395,7 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
         if options.callable_adapter then
             local adapter = options.callable_adapter
             assert(adapter.target == typ
-                   or types.equals(adapter.target, typ),
+                or types.equals(adapter.target, typ),
                 "callable strict relay has a mismatched target")
             carrier = render([[
             ptrdiff_t _strict_raw_nargs = L->top.p - func - 1;
@@ -418,7 +418,7 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
                     || pvalue(&_fn->upvalue[2])
                         != titan_cast_func(void *, $ADAPTER)
                     || pvalue(&_fn->upvalue[3])
-                        != TITAN_FUNCTION_CLOSURE_BRAND
+                        != TITAN_BRAND
                     || fvalue(&_fn->upvalue[_fn->nupvalues - 1])
                         != $STRICTENTRY)) {
                 return luaL_error(L,
@@ -611,8 +611,8 @@ function coder._emit_callable_adapter(tlcontext, site)
         })
     local declarations = table.concat({
         "static TITAN_NOINLINE "
-            .. coder._callable_adapter_signature(
-                site.native, adapter.target, false) .. ";",
+        .. coder._callable_adapter_signature(
+            site.native, adapter.target, false) .. ";",
         "static int " .. site.strict .. "(lua_State *L);",
     }, "\n")
     return declarations, native_body .. "\n" .. strict_body
@@ -652,8 +652,8 @@ function coder._foreign_function_is_inline(node)
     end
     local conditional = stats[first]
     if not conditional or conditional._tag ~= "Ast.StatIf"
-       or #conditional.thens ~= 1
-       or not return_block(conditional.thens[1].block) then
+        or #conditional.thens ~= 1
+        or not return_block(conditional.thens[1].block) then
         return false
     end
     if first == #stats and return_block(conditional.elsestat) then
@@ -817,7 +817,7 @@ function coder._foreign_raw_exp(ctx, node)
         end
         return coder._foreign_raw_var(ctx, node.var)
     elseif tag == "Ast.VarName" or tag == "Ast.VarDot"
-           or tag == "Ast.VarBracket" then
+        or tag == "Ast.VarBracket" then
         return coder._foreign_raw_var(ctx, node)
     elseif tag == "Ast.ExpCall" then
         return coder._foreign_raw_call(ctx, node)
@@ -825,7 +825,7 @@ function coder._foreign_raw_exp(ctx, node)
         local stats, exp = coder._foreign_raw_exp(ctx, node.exp)
         local operation
         if node._adjustment
-           and node._adjustment.kind == "direct_coercion" then
+            and node._adjustment.kind == "direct_coercion" then
             operation = node._adjustment.coercion.op
         elseif node._written_cast then
             if node._written_cast.op == "coercion" then
@@ -840,7 +840,7 @@ function coder._foreign_raw_exp(ctx, node)
         if operation == "c_address" or operation == "mutable_c_address" then
             return stats, "(&(" .. exp .. "))"
         elseif operation == "c_function_pointer_to_void"
-               or operation == "c_void_to_function_pointer" then
+            or operation == "c_void_to_function_pointer" then
             return stats, render("titan_cast_func($TARGET, $SOURCE)", {
                 TARGET = coder._render_c_type_name(node._type),
                 SOURCE = exp,
@@ -864,10 +864,15 @@ function coder._foreign_raw_exp(ctx, node)
         local rstats, rhs = coder._foreign_freeze(
             ctx, node.rhs, trait and trait.rhs_target or nil, "rhs")
         local op = trait and trait.cop or node.op
-        if op == "~=" then op = "!="
-        elseif op == "~" then op = "^"
-        elseif op == "and" then op = "&&"
-        elseif op == "or" then op = "||" end
+        if op == "~=" then
+            op = "!="
+        elseif op == "~" then
+            op = "^"
+        elseif op == "and" then
+            op = "&&"
+        elseif op == "or" then
+            op = "||"
+        end
         return lstats .. "\n" .. rstats,
             "((" .. lhs .. ") " .. op .. " (" .. rhs .. "))"
     end
@@ -883,7 +888,7 @@ function coder._foreign_raw_lvalue(ctx, node)
         return bstats .. "\n" .. istats,
             "(" .. base .. ")[" .. index .. "]"
     elseif node._tag == "Ast.VarDot"
-           and node._decl and node._decl._tag == "Type.CField" then
+        and node._decl and node._decl._tag == "Type.CField" then
         local base_type = types.resolve_c_typedef(node.exp._type)
         if base_type._tag == "Type.CPointer" then
             local stats, base = coder._foreign_freeze(
@@ -893,8 +898,8 @@ function coder._foreign_raw_lvalue(ctx, node)
         local base_node = node.exp._tag == "Ast.ExpVar"
             and node.exp.var or node.exp
         if base_node._tag == "Ast.VarName"
-           or base_node._tag == "Ast.VarDot"
-           or base_node._tag == "Ast.VarBracket" then
+            or base_node._tag == "Ast.VarDot"
+            or base_node._tag == "Ast.VarBracket" then
             local stats, base = coder._foreign_raw_lvalue(ctx, base_node)
             return stats, "(" .. base .. ")." .. node._decl.name
         end
@@ -1005,10 +1010,10 @@ function coder._foreign_raw_stat(ctx, node)
             "{", start_stats, finish_stats, step_stats,
             coder._render_c_declaration(node.decl._type, control) .. ";",
             "for (" .. control .. " = " .. start .. "; (" .. step
-                .. " >= 0 ? " .. control .. " <= " .. finish .. " : "
-                .. control .. " >= " .. finish .. "); " .. control
-                .. " += " .. step .. ") "
-                .. coder._foreign_raw_block(ctx, node.block),
+            .. " >= 0 ? " .. control .. " <= " .. finish .. " : "
+            .. control .. " >= " .. finish .. "); " .. control
+            .. " += " .. step .. ") "
+            .. coder._foreign_raw_block(ctx, node.block),
             "}",
         }, "\n")
     end
@@ -1170,7 +1175,7 @@ function codefuncdec(tlcontext, node)
     -- so a try with no escaping return adds no dead locals.
     local entrysave = ctx.used_entry_restore
         and "\n        lua_longjmp *_entry_errorjmp = L->errorJmp;"
-            .. "\n        l_uint32 _entry_nC = L->nCcalls;" or ""
+        .. "\n        l_uint32 _entry_nC = L->nCcalls;" or ""
     if nslots > 0 then
         table.insert(stats, 1, render([[
         $ENTRYGC
@@ -1262,7 +1267,7 @@ function codeinitializerdec(tlcontext, node)
         and "\n        ptrdiff_t _base_off = savestack(L, _base);" or ""
     local entrysave = ctx.used_entry_restore
         and "\n        lua_longjmp *_entry_errorjmp = L->errorJmp;"
-            .. "\n        l_uint32 _entry_nC = L->nCcalls;" or ""
+        .. "\n        l_uint32 _entry_nC = L->nCcalls;" or ""
     if nslots > 0 then
         table.insert(stats, 1, render([[
         $ENTRYGC
@@ -1445,7 +1450,7 @@ function lambda_register(tlcontext, node)
         node._lambda_lua = tlcontext.prefix .. "lambda_" .. n .. "_" .. TITAN_ENTRY_TAG .. "_lua"
         node._lambda_strict =
             tlcontext.prefix .. "lambda_" .. n .. "_" ..
-                TITAN_ENTRY_TAG .. "_strict"
+            TITAN_ENTRY_TAG .. "_strict"
         -- An anonymous function shows as "anonymous function at <file>:<defline>"
         -- (the lambda's DEFINITION loc), formatted into the name table here.
         register_trace_name(tlcontext, node._lambda_native, anon_qualname(node.loc))
@@ -1532,7 +1537,7 @@ function codelambda(ctx, node)
         setpvalue(&$CLOSURE->upvalue[1], (void *)$FUNCTAG);
         setpvalue(&$CLOSURE->upvalue[2],
             titan_cast_func(void *, $NATIVE));
-        setpvalue(&$CLOSURE->upvalue[3], TITAN_FUNCTION_CLOSURE_BRAND);
+        setpvalue(&$CLOSURE->upvalue[3], TITAN_BRAND);
         $CAPTURES
         setfvalue(&$CLOSURE->upvalue[$STRICTINDEX], $STRICTNAME);
         lua_assert(iswhite($CLOSURE));
@@ -1572,7 +1577,7 @@ function codemethodref(ctx, node)
     local is_interface = node._interface_bound == true
     local mtype = is_interface
         and assert(node._interface_method) or node._method
-    local ftype = node._type      -- Type.Function (self removed)
+    local ftype = node._type -- Type.Function (self removed)
     local nativename = is_interface
         and coder._interface_bound_method_name(mtype)
         or bound_method_name(mtype)
@@ -1592,7 +1597,7 @@ function codemethodref(ctx, node)
     local modexpr = "_mod"
     if mod ~= ctx.module then
         ctx.functions[mtype.fqtn .. (is_interface
-                and ":interface-bound:" or ":bound:") .. mtype.name] = {
+            and ":interface-bound:" or ":bound:") .. mtype.name] = {
             module = mod,
             record = record,
             name = mtype.name,
@@ -1634,7 +1639,7 @@ function codemethodref(ctx, node)
         setpvalue(&$CLOSURE->upvalue[1], (void *)$FUNCTAG);
         setpvalue(&$CLOSURE->upvalue[2],
             titan_cast_func(void *, $NATIVE));
-        setpvalue(&$CLOSURE->upvalue[3], TITAN_FUNCTION_CLOSURE_BRAND);
+        setpvalue(&$CLOSURE->upvalue[3], TITAN_BRAND);
         $SETSELF
         setfvalue(&$CLOSURE->upvalue[5], $STRICTNAME);
         lua_assert(iswhite($CLOSURE));
@@ -1737,7 +1742,7 @@ function codelambdadec(tlcontext, node)
         and "\n        ptrdiff_t _base_off = savestack(L, _base);" or ""
     local entrysave = ctx.used_entry_restore
         and "\n        lua_longjmp *_entry_errorjmp = L->errorJmp;"
-            .. "\n        l_uint32 _entry_nC = L->nCcalls;" or ""
+        .. "\n        l_uint32 _entry_nC = L->nCcalls;" or ""
     if nslots > 0 then
         table.insert(stats, 1, render([[
         $ENTRYGC
@@ -1827,7 +1832,7 @@ function codevardec(ctx, initvars, switch_get, switch_set, gvar_map, node)
         CDECL = cvardecl(ctx, node._type, "_var"),
         SETSLOT = setslot(node._type, node._slot, "_var"),
         BARRIER = types.is_gc(node._type)
-                  and "luaC_barrierback(L, obj2gco(_mod), " .. node._slot .. ");" or ""
+            and "luaC_barrierback(L, obj2gco(_mod), " .. node._slot .. ");" or ""
     }))
     if not node.islocal then
         table.insert(gvar_map, render([[
@@ -1872,8 +1877,8 @@ function codevardec(ctx, initvars, switch_get, switch_set, gvar_map, node)
                     node._slot, "_value", node.loc,
                     "Lua module-variable write"),
                 BARRIER = types.is_gc(node._type)
-                          and "luaC_barrierback(L, obj2gco(_mod), "
-                              .. node._slot .. ");" or ""
+                    and "luaC_barrierback(L, obj2gco(_mod), "
+                    .. node._slot .. ");" or ""
             }))
         end
     end

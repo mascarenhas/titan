@@ -97,6 +97,24 @@ end
 
 -- ===== code generation: compile a single module / app =====
 
+function M.with_extra_cflags(flags, fn)
+    local previous = driver.EXTRA_CFLAGS
+    local configured = {}
+    for _, flag in ipairs(previous or {}) do
+        configured[#configured + 1] = flag
+    end
+    for _, flag in ipairs(flags) do
+        configured[#configured + 1] = flag
+    end
+    driver.EXTRA_CFLAGS = configured
+    driver.configure_foreign_c()
+    local results = table.pack(xpcall(fn, debug.traceback))
+    driver.EXTRA_CFLAGS = previous
+    driver.configure_foreign_c()
+    if not results[1] then error(results[2], 0) end
+    return table.unpack(results, 2, results.n)
+end
+
 function M.compile(modname, ast)
     local ok, err, libname = driver.compile(modname, ast, nil, {}, verbose())
     if not ok then return ok, err end

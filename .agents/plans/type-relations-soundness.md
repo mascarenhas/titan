@@ -502,7 +502,7 @@ the upvalues themselves. Both the exact and non-exact predicates first require
 the five-upvalue minimum. The exact branch compares the raw pointer bits in
 upvalue 1 with the canonical static tag. After that comparison fails, the
 non-exact branch compares only the raw pointer bits in fixed upvalue 3 with
-the random 64-bit ABI sentinel `TITAN_FUNCTION_CLOSURE_BRAND`; there is no
+the random 64-bit ABI sentinel `TITAN_BRAND`; there is no
 registry lookup or other `ttis*` shape check. Requiring the correct count,
 slot, and sentinel makes accidental recognition by a foreign C closure
 astronomically unlikely. A Lua closure, Lua light C function, foreign C
