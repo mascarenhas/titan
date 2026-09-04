@@ -338,13 +338,13 @@ STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.titan \
 	titan/http/headers.titan titan/http/native.titan \
 	titan/http/server.titan
 STDLIB_MODULES := coroutine uv async timer io fs net ssl url http os peg string \
-	math lua iteration gc test
+	math lua iteration gc test reflect
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
 STDLIB_QUALIFIED_SOS := $(addprefix titan/,$(STDLIB_SOS))
 STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
 	titan.io titan.fs titan.net titan.ssl titan.url titan.http titan.os \
 	titan.peg titan.string \
-	titan.math titan.lua titan.iteration titan.gc titan.test
+	titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/async.titan titan/timer.titan titan/io.titan titan/fs.titan \
 	titan/net.titan titan/ssl.titan titan/url.titan \
@@ -357,14 +357,14 @@ STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/string/regex_api.titan titan/string/regex_compile.titan \
 	titan/string/regex_parser.titan \
 	titan/math.titan titan/lua.titan titan/iteration.titan titan/gc.titan \
-	titan/test.titan
+	titan/test.titan titan/reflect.titan
 STDLIB_GENERATED_FOREIGN_HEADERS := titan/coroutine.titan.h \
 	titan/fs.titan.h titan/uv/uv.titan.h titan/http/http.titan.h
 STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua titan/async.lua \
 	titan/timer.lua titan/io.lua titan/fs.lua titan/net.lua titan/ssl.lua \
 	titan/url.lua titan/http.lua titan/os.lua \
 	titan/peg.lua titan/string.lua titan/math.lua titan/lua.lua \
-	titan/iteration.lua titan/gc.lua titan/test.lua
+	titan/iteration.lua titan/gc.lua titan/test.lua titan/reflect.lua
 STDLIB_CONTAINER := titan.so
 STDLIB_STATIC_ARCHIVE := titan.a
 STDLIB_PROVIDER_OUTPUTS := $(STDLIB_CONTAINER) $(STDLIB_STATIC_ARCHIVE)
@@ -2159,7 +2159,7 @@ TITAN_STDLIB_TEST_ROOTS := $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
 	coroutine.tests iteration.tests gc.tests lua.tests math.tests peg.tests \
 	string.core_test string.format_pack_test string.regex_test async.tests \
 	uv.task_tests io.tests fs.tests timer.tests net.tests ssl.tests http.tests \
-	url.tests os.tests os.process_tests uv.runtime_tests
+	url.tests os.tests os.process_tests uv.runtime_tests reflect.tests
 TITAN_TEST_BUILD_DIR ?= .titan-tests
 TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)
 TITAN_TEST_TIMEOUT ?= 120

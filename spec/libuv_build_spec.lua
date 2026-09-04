@@ -17,20 +17,20 @@ local UV_TYPES_FIXTURE =
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "os", "peg", "string", "math", "lua", "iteration", "gc",
-    "test",
+    "test", "reflect",
 }
 local STDLIB_ROOTS = {
     "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
     "titan.io", "titan.fs", "titan.net", "titan.ssl", "titan.url",
     "titan.http", "titan.os", "titan.peg", "titan.string", "titan.math",
-    "titan.lua", "titan.iteration", "titan.gc", "titan.test",
+    "titan.lua", "titan.iteration", "titan.gc", "titan.test", "titan.reflect",
 }
 local STDLIB_SHIMS = {
     "titan/coroutine.lua", "titan/uv.lua", "titan/async.lua",
     "titan/timer.lua", "titan/io.lua", "titan/fs.lua", "titan/net.lua",
     "titan/ssl.lua", "titan/url.lua", "titan/http.lua", "titan/os.lua",
     "titan/peg.lua", "titan/string.lua", "titan/math.lua", "titan/lua.lua",
-    "titan/iteration.lua", "titan/gc.lua", "titan/test.lua",
+    "titan/iteration.lua", "titan/gc.lua", "titan/test.lua", "titan/reflect.lua",
 }
 local LPEGLABEL_INCLUDE =
     "-I" .. lfs.currentdir() .. "/vendor/lpeglabel"
@@ -1303,6 +1303,7 @@ describe("libuv Makefile configuration", function()
                 "titan/string/regex_parser.titan",
                 "titan/math.titan", "titan/lua.titan",
                 "titan/iteration.titan", "titan/gc.titan", "titan/test.titan",
+                "titan/reflect.titan",
             }, expanded)
         end)
 
@@ -1647,11 +1648,11 @@ describe("libuv Makefile configuration", function()
             }, public_declarations(path))
         end)
 
-    it("pins current metadata for all eighteen standard modules",
+    it("pins current metadata for all nineteen standard modules",
         function()
             local expected = assert(loadfile(STDLIB_TYPES_FIXTURE))()
             local expected_uv = assert(loadfile(UV_TYPES_FIXTURE))()
-            assert.equal(18, #STDLIB_ROOTS)
+            assert.equal(19, #STDLIB_ROOTS)
             assert.equal(expected.uv, expected_uv,
                 "standalone titan.uv metadata fixture is stale")
 
@@ -1689,11 +1690,11 @@ describe("libuv Makefile configuration", function()
             end
         end)
 
-    it("exports nineteen DSO openers for eighteen standard modules",
+    it("exports twenty DSO openers for nineteen standard modules",
         function()
-            assert.equal(18, #STDLIB_MODULES)
-            assert.equal(18, #STDLIB_ROOTS)
-            assert.equal(18, #STDLIB_SHIMS)
+            assert.equal(19, #STDLIB_MODULES)
+            assert.equal(19, #STDLIB_ROOTS)
+            assert.equal(19, #STDLIB_SHIMS)
 
             local container = installed_stdlib_container()
             local ok, output, why, code = run_argv(tool_argv(
@@ -1717,7 +1718,7 @@ describe("libuv Makefile configuration", function()
                     found[symbol] = true
                 end
             end
-            assert.equal(19, (function()
+            assert.equal(20, (function()
                 local count = 0
                 for _ in pairs(found) do count = count + 1 end
                 return count

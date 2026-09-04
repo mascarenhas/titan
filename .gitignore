@@ -75,6 +75,7 @@
 /titan/iteration.lua
 /titan/gc.lua
 /titan/test.lua
+/titan/reflect.lua
 
 # Native runtime command-line configuration stamps
 /titan-runtime/.titan-*-build-config

@@ -6,7 +6,7 @@ local source_inventory = require "spec.support.source_inventory"
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "os", "peg", "string", "math", "lua", "iteration", "gc",
-    "test",
+    "test", "reflect",
 }
 local LUA_CPATH_SUFFIX = "/lib/lua/5.5/?.so"
 local COMPILER_SLICE_PATHS = {}
