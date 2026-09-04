@@ -1,0 +1,327 @@
+-- Native behavior tests for titan.reflect.
+local test = import "test"
+local reflect = import "reflect"
+local gc = import "gc"
+local io = import "io"
+
+record SimpleRecord
+  x: integer
+  y: integer
+end
+
+record PersonRecord
+  const id: integer
+  name: string
+  items: {string}
+end
+
+union TestShape
+  circle: integer
+  rect: SimpleRecord
+  empty
+end
+
+interface Greeter
+  prefix: string
+  function greet(): string
+end
+
+record GreeterImpl
+  const prefix: string
+end
+
+function GreeterImpl:greet(): string
+  return self.prefix .. " world"
+end
+
+function test_inspect_primitives(_context: test.Context)
+  local v_nil = reflect.inspect(nil)
+  case v_nil
+  when is_nil then
+    test.assert(true)
+  else
+    test.assert(false, "expected is_nil")
+  end
+
+  local v_true = reflect.inspect(true)
+  case v_true
+  when is_boolean: b then
+    test.assert(b == true)
+  else
+    test.assert(false, "expected is_boolean")
+  end
+
+  local v_false = reflect.inspect(false)
+  case v_false
+  when is_boolean: b then
+    test.assert(b == false)
+  else
+    test.assert(false, "expected is_boolean")
+  end
+
+  local v_int = reflect.inspect(42)
+  case v_int
+  when is_integer: n then
+    test.assert(n == 42)
+  else
+    test.assert(false, "expected is_integer")
+  end
+
+  local v_neg = reflect.inspect(-100)
+  case v_neg
+  when is_integer: n then
+    test.assert(n == -100)
+  else
+    test.assert(false, "expected is_integer")
+  end
+
+  local v_float = reflect.inspect(3.14)
+  case v_float
+  when is_float: f then
+    test.assert(f == 3.14)
+  else
+    test.assert(false, "expected is_float")
+  end
+
+  local v_str = reflect.inspect("hello world")
+  case v_str
+  when is_string: s then
+    test.assert(s == "hello world")
+  else
+    test.assert(false, "expected is_string")
+  end
+end
+
+function test_inspect_arrays(_context: test.Context)
+  local arr: {integer} = {10, 20, 30}
+  local v = reflect.inspect(arr)
+  case v
+  when is_array: av then
+    local elements = av.val
+    test.assert(#elements == 3)
+    test.assert(elements[1] as integer == 10)
+    test.assert(elements[2] as integer == 20)
+    test.assert(elements[3] as integer == 30)
+  else
+    test.assert(false, "expected is_array")
+  end
+end
+
+function test_inspect_maps(_context: test.Context)
+  local m: {string: integer} = { ["alpha"] = 1, ["beta"] = 2 }
+  local v = reflect.inspect(m)
+  case v
+  when is_map: mv then
+    local map_val = mv.val
+    test.assert(map_val["alpha"] as integer == 1)
+    test.assert(map_val["beta"] as integer == 2)
+  else
+    test.assert(false, "expected is_map")
+  end
+end
+
+function test_inspect_records(_context: test.Context)
+  local r: SimpleRecord = { x = 10, y = 20 }
+  local v = reflect.inspect(r)
+  case v
+  when is_record: rv then
+    test.assert(rv.n_fields == 2)
+    test.assert(rv:get(1) as integer == 10)
+    test.assert(rv:get(2) as integer == 20)
+
+    rv:set(1, 99)
+    test.assert(rv:get(1) as integer == 99)
+    test.assert(r.x == 99)
+
+    -- Accessing out of bounds field should fail
+    local had_err = false
+    do
+      local _ = rv:get(0)
+    catch
+      had_err = true
+    end
+    test.assert(had_err, "getting field index 0 should error")
+
+    had_err = false
+    do
+      local _ = rv:get(3)
+    catch
+      had_err = true
+    end
+    test.assert(had_err, "getting field index 3 should error")
+
+    had_err = false
+    do
+      rv:set(3, 1)
+    catch
+      had_err = true
+    end
+    test.assert(had_err, "setting field index 3 should error")
+  else
+    test.assert(false, "expected is_record")
+  end
+end
+
+function test_inspect_record_const_and_barrier(_context: test.Context)
+  local p: PersonRecord = { id = 7, name = "initial", items = {"item1"} }
+  local v = reflect.inspect(p)
+  case v
+  when is_record: rv then
+    test.assert(rv.n_fields == 3)
+    test.assert(rv:get(1) as integer == 7)
+    test.assert(rv:get(2) as string == "initial")
+
+    -- Setting const field (index 1 is id) should error
+    local had_const_err = false
+    do
+      rv:set(1, 8)
+    catch
+      had_const_err = true
+    end
+    test.assert(had_const_err, "setting const field should error")
+
+    -- Setting mutable field and verifying GC write barrier
+    local new_str = "allocated_" .. "string_value"
+    rv:set(2, new_str)
+    gc.collect()
+    test.assert(rv:get(2) as string == "allocated_string_value")
+    test.assert(p.name == "allocated_string_value")
+  else
+    test.assert(false, "expected is_record")
+  end
+end
+
+function test_inspect_unions(_context: test.Context)
+  local c = TestShape.circle(42)
+  local v = reflect.inspect(c)
+  case v
+  when is_union: uv then
+    test.assert(uv.tag == 0)
+    test.assert(uv.payload as integer == 42)
+    test.assert(#uv.descriptor.variants == 3)
+    test.assert(uv.descriptor.variants[1].name == "circle")
+  else
+    test.assert(false, "expected is_union")
+  end
+
+  local e = TestShape.empty()
+  local ve = reflect.inspect(e)
+  case ve
+  when is_union: uve then
+    test.assert(uve.tag == 2)
+    test.assert(uve.payload == nil)
+    test.assert(uve.descriptor.variants[3].name == "empty")
+  else
+    test.assert(false, "expected is_union")
+  end
+end
+
+function test_inspect_interfaces(_context: test.Context)
+  local impl: GreeterImpl = { prefix = "hello" }
+  local g: Greeter = impl
+  local v = reflect.inspect(g)
+  case v
+  when is_interface: iv then
+    test.assert(iv.descriptor.name ~= "")
+    test.assert(iv.n_fields == 1)
+    test.assert(iv:get(1) as string == "hello")
+
+    local had_err = false
+    do
+      local _ = iv:get(2)
+    catch
+      had_err = true
+    end
+    test.assert(had_err, "out of bounds field access should error")
+  else
+    test.assert(false, "expected is_interface")
+  end
+end
+
+function test_inspect_functions(_context: test.Context)
+  local v = reflect.inspect(test_inspect_primitives)
+  case v
+  when is_titan_function: tf then
+    test.assert(tf.native_entry ~= nil)
+    test.assert(tf.lua_entry ~= nil)
+    test.assert(#tf.descriptor.param_descriptors >= 1)
+  else
+    test.assert(false, "expected is_titan_function")
+  end
+end
+
+function test_nominal_descriptors(_context: test.Context)
+  -- Record descriptor
+  local r_desc: reflect.RecordType? = reflect.record_descriptor("titan.reflect.FieldType")
+  test.assert(r_desc ~= nil, "titan.reflect.FieldType should be found")
+  local rt = r_desc as reflect.RecordType
+  test.assert(rt.name == "titan.reflect.FieldType")
+  test.assert(#rt.fields == 4)
+
+  -- Union descriptor
+  local u_desc: reflect.UnionType? = reflect.union_descriptor("titan.reflect.Type")
+  test.assert(u_desc ~= nil, "titan.reflect.Type should be found")
+  local ut = u_desc as reflect.UnionType
+  test.assert(ut.name == "titan.reflect.Type")
+  test.assert(#ut.variants == 25)
+
+  -- Interface descriptor
+  local iface_desc: reflect.InterfaceType? = reflect.interface_descriptor("titan.io.Reader")
+  test.assert(iface_desc ~= nil, "titan.io.Reader should be found")
+  local ift = iface_desc as reflect.InterfaceType
+  test.assert(ift.name == "titan.io.Reader")
+  test.assert(#ift.methods >= 2)
+
+  -- find_nominal
+  local nom_rec: reflect.NominalType? = reflect.find_nominal("titan.reflect.FieldType")
+  test.assert(nom_rec ~= nil)
+  case nom_rec as reflect.NominalType
+  when is_record: r then
+    test.assert(r.name == "titan.reflect.FieldType")
+  else
+    test.assert(false, "expected is_record")
+  end
+
+  local nom_union: reflect.NominalType? = reflect.find_nominal("titan.reflect.Type")
+  test.assert(nom_union ~= nil)
+  case nom_union as reflect.NominalType
+  when is_union: u then
+    test.assert(u.name == "titan.reflect.Type")
+  else
+    test.assert(false, "expected is_union")
+  end
+
+  -- Nonexistent queries
+  local unk_nom: reflect.NominalType? = reflect.find_nominal("nonexistent.Nominal")
+  test.assert(unk_nom == nil)
+
+  local unk_r: reflect.RecordType? = reflect.record_descriptor("nonexistent.Record")
+  test.assert(unk_r == nil)
+
+  local unk_u: reflect.UnionType? = reflect.union_descriptor("nonexistent.Union")
+  test.assert(unk_u == nil)
+
+  local unk_if: reflect.InterfaceType? = reflect.interface_descriptor("nonexistent.Interface")
+  test.assert(unk_if == nil)
+end
+
+function test_named_type_resolve(_context: test.Context)
+  local r_desc: reflect.RecordType? = reflect.record_descriptor("titan.reflect.FieldType")
+  test.assert(r_desc ~= nil)
+  local rt = r_desc as reflect.RecordType
+  -- Field 3 of FieldType is descriptor: Type, which is named titan.reflect.Type
+  local f3_type = rt.fields[3].descriptor
+  case f3_type
+  when is_named: named then
+    test.assert(named.name == "titan.reflect.Type")
+    local resolved = named:resolve()
+    case resolved
+    when is_union: u_res then
+      test.assert(u_res.name == "titan.reflect.Type")
+    else
+      test.assert(false, "expected union Type")
+    end
+  else
+    test.assert(false, "expected is_named")
+  end
+end
