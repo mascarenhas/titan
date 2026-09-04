@@ -19,6 +19,7 @@ end
 
 record RecordValue
   -- raw data for quick access to the underlying fields
+  local udata: *lobject.Udata
   local nuvalue: integer
   local uv: *lobject.UValue -- note that this is 0-based, so field 1 is index 0
   local indexes: { integer } -- descriptor field index -> uv index
@@ -28,6 +29,7 @@ record RecordValue
   const val: value
   const descriptor: RecordType
 end
+
 
 record UnionValue
   const tag: integer
@@ -313,12 +315,10 @@ function RecordValue:set(i: integer, v: value)
     raise "cannot set const field " .. str.tostring(i)
   end
   local uv_idx = self.indexes[i]
-  local top = luac.lua_gettop(L)
-  defer luac.lua_settop(L, top)
-  ffi.lua_pushtvalue(L, self.val)
-  ffi.lua_pushtvalue(L, v)
-  luac.lua_setiuservalue(L, -2, (uv_idx + 1) as int)
+  self.uv[uv_idx].uv = v
+  ffi.luamacro_luaC_barrierback(L, self.udata, self.uv[uv_idx].uv)
 end
+
 
 
 
@@ -1169,6 +1169,7 @@ local function init_brand_handlers()
       is_const[#is_const + 1] = desc.fields[i].is_const
     end
     return Value.is_record({
+      udata = u,
       nuvalue = nuv,
       uv = uv_ptr,
       indexes = indexes,
@@ -1177,6 +1178,7 @@ local function init_brand_handlers()
       val = v,
       descriptor = desc
     })
+
   end
 
   brand_handlers[4] = function(v: value, mt: value): Value

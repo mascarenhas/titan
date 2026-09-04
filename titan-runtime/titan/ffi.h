@@ -122,6 +122,11 @@ static inline void *luamacro_getudatamem(Udata *u) { return getudatamem(u); }
 
 static inline void *luamacro_ccl_f(const CClosure *cl) { return (void *)(uintptr_t)cl->f; }
 
+static inline void luamacro_luaC_barrierback(lua_State *L, Udata *u, const TValue *v) {
+  luaC_barrierback(L, obj2gco(u), v);
+}
+
 #endif
+
 
 
