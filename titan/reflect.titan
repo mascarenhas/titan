@@ -50,7 +50,7 @@ end
 record TitanFunctionValue
   const val: (...: value) -> (...: value)
   const native_entry: *void
-  const lua_entry: foreign (*lua_State) -> int
+  const lua_entry: *void
   const descriptor: FunctionType
 end
 
@@ -61,7 +61,7 @@ end
 
 record LuaCFunctionValue
   const val: (...: value) -> (...: value)
-  const entry: foreign (*lua_State) -> int
+  const entry: *void
 end
 
 record OwnedForeignPointerValue
@@ -313,9 +313,14 @@ function RecordValue:set(i: integer, v: value)
     raise "cannot set const field " .. str.tostring(i)
   end
   local uv_idx = self.indexes[i]
-  local u = ffi.titan_uvalue(self.val)
-  ffi.titan_set_udata_uv(L, u, uv_idx as int, v)
+  local top = luac.lua_gettop(L)
+  defer luac.lua_settop(L, top)
+  ffi.lua_pushtvalue(L, self.val)
+  ffi.lua_pushtvalue(L, v)
+  luac.lua_setiuservalue(L, -2, (uv_idx + 1) as int)
 end
+
+
 
 function InterfaceValue:get(i: integer): value
   if i < 1 or i > self.n_fields then
@@ -364,7 +369,8 @@ end
 local function get_metatable_val(v: value): value?
   local top = luac.lua_gettop(L)
   defer luac.lua_settop(L, top)
-  if ffi.titan_getmetatable(L, v) ~= 0 then
+  ffi.lua_pushtvalue(L, v)
+  if luac.lua_getmetatable(L, -1) ~= 0 then
     local mt: value = ffi.lua_totvalue(L, -1)
     return mt
   end
@@ -374,7 +380,8 @@ end
 local function rawgetp_val(tab: value, p: *void): value?
   local top = luac.lua_gettop(L)
   defer luac.lua_settop(L, top)
-  local t = ffi.titan_rawgetp(L, tab, p)
+  ffi.lua_pushtvalue(L, tab)
+  local t = luac.lua_rawgetp(L, -1, p)
   if t == luac.LUA_TNIL or t == luac.LUA_TNONE then
     return nil
   end
@@ -385,7 +392,7 @@ end
 local function get_metatable_by_name(name: string): value?
   local top = luac.lua_gettop(L)
   defer luac.lua_settop(L, top)
-  local t = ffi.titan_get_metatables_table(L)
+  local t = luac.lua_getfield(L, luac.LUA_REGISTRYINDEX, ffi.TITAN_METATABLES_KEY)
   if t ~= luac.LUA_TTABLE then
     return nil
   end
@@ -396,6 +403,7 @@ local function get_metatable_by_name(name: string): value?
   local res: value = ffi.lua_totvalue(L, -1)
   return res
 end
+
 
 -- Cache from metatable (value) to type descriptor record (RecordType/UnionType/InterfaceType/Type)
 local mt_cache: {value: value} = {}
@@ -1054,40 +1062,55 @@ function interface_descriptor(name: string): InterfaceType?
   return nil
 end
 
+local function is_titan_closure(cl: *lobject.CClosure): boolean
+  if (cl.nupvalues as integer) < 5 then
+    return false
+  end
+  local upvalues: *lobject.TValue = cl.upvalue as *lobject.TValue
+  local brand_slot = upvalues[3]
+  if ffi.luamacro_ttislightuserdata(brand_slot) == 0 then
+    return false
+  end
+  return ffi.lmacro_pvalue(brand_slot) == ffi.TITAN_BRAND
+end
+
 local function inspect_function(v: value): Value
-  if ffi.titan_islclosure(v) ~= 0 then
-    local info: owned *ffi.TitanLuaFuncInfo = ffi.TitanLuaFuncInfo.new()
-    if ffi.titan_get_lua_func_info(L, v, info) == 0 then
+  local tv: lobject.TValue = v
+  if ffi.luamacro_ttisLclosure(tv) ~= 0 then
+    local ar: owned *luac.lua_Debug = luac.lua_Debug.new()
+    ffi.lua_pushtvalue(L, v)
+    if luac.lua_getinfo(L, ">Su", ar) == 0 then
       raise "could not get Lua function info"
     end
     local src = ""
-    if info.source ~= nil then
-      src = info.source as string
+    if ar.source ~= nil then
+      src = ar.source as string
     end
-    local short_src = (info.short_src as *char) as string
+    local short_src = (ar.short_src as *char) as string
     local what = ""
-    if info.what ~= nil then
-      what = info.what as string
+    if ar.what ~= nil then
+      what = ar.what as string
     end
     local desc: LuaFunctionType = {
       source = src,
       short_source = short_src,
-      line_defined = info.linedefined as integer,
-      last_line_defined = info.lastlinedefined as integer,
+      line_defined = ar.linedefined as integer,
+      last_line_defined = ar.lastlinedefined as integer,
       what = what,
-      is_vararg = info.isvararg ~= 0,
-      n_params = info.nparams as integer
+      is_vararg = ar.isvararg ~= 0,
+      n_params = ar.nparams as integer
     }
     return Value.is_lua_function({
       val = v as (...: value) -> (...: value),
       descriptor = desc
     })
-  elseif ffi.titan_iscclosure(v) ~= 0 then
-    local cl = ffi.titan_clCvalue(v)
-    if ffi.titan_is_titan_closure(cl) ~= 0 then
-      local native_entry = ffi.titan_get_closure_native(cl)
-      local lua_entry = ffi.titan_get_ccl_entry(cl)
-      local tag_ptr = ffi.titan_get_closure_tag(cl)
+  elseif ffi.luamacro_ttisCclosure(tv) ~= 0 then
+    local cl = ffi.lmacro_clCvalue(tv)
+    if is_titan_closure(cl) then
+      local upvalues: *lobject.TValue = cl.upvalue as *lobject.TValue
+      local native_entry = ffi.lmacro_pvalue(upvalues[2])
+      local lua_entry = ffi.luamacro_ccl_f(cl)
+      local tag_ptr = ffi.lmacro_pvalue(upvalues[1]) as *char
       local tag_str = tag_ptr as string
       local ftype = hydrate_type(tag_str)
       local desc: FunctionType? = nil
@@ -1105,14 +1128,14 @@ local function inspect_function(v: value): Value
         descriptor = desc as FunctionType
       })
     else
-      local entry = ffi.titan_get_ccl_entry(cl)
+      local entry = ffi.luamacro_ccl_f(cl)
       return Value.is_lua_c_function({
         val = v as (...: value) -> (...: value),
         entry = entry
       })
     end
-  elseif ffi.titan_islcf(v) ~= 0 then
-    local entry = ffi.titan_fvalue(v)
+  elseif ffi.luamacro_ttislcf(tv) ~= 0 then
+    local entry = ffi.luamacro_fvalue(tv)
     return Value.is_lua_c_function({
       val = v as (...: value) -> (...: value),
       entry = entry
@@ -1135,9 +1158,10 @@ local function init_brand_handlers()
 
   brand_handlers[3] = function(v: value, mt: value): Value
     local desc = get_or_hydrate_record_type(mt)
-    local u = ffi.titan_uvalue(v)
-    local nuv = ffi.titan_getudatanuv(u) as integer
-    local uv_ptr = ffi.titan_getudatauv(u)
+    local tv: lobject.TValue = v
+    local u = ffi.lmacro_uvalue(tv)
+    local nuv = u.nuvalue as integer
+    local uv_ptr = u.uv as *lobject.UValue
     local indexes: {integer} = {}
     local is_const: {boolean} = {}
     for i = 1, #desc.fields do
@@ -1157,11 +1181,16 @@ local function init_brand_handlers()
 
   brand_handlers[4] = function(v: value, mt: value): Value
     local desc = get_or_hydrate_union_type(mt)
-    local u = ffi.titan_uvalue(v)
-    local uv_ptr = ffi.titan_getudatauv(u)
-    local tag = ffi.titan_ivalue(uv_ptr[0].uv)
+    local tv: lobject.TValue = v
+    local u = ffi.lmacro_uvalue(tv)
+    local uv_ptr = u.uv as *lobject.UValue
+    local tag: integer = 0
+    local tag_val: value = uv_ptr[0].uv
+    if tag_val is integer then
+      tag = tag_val as integer
+    end
     local payload: value = nil
-    if ffi.titan_getudatanuv(u) > 1 then
+    if (u.nuvalue as integer) > 1 then
       payload = uv_ptr[1].uv
     end
     return Value.is_union({
@@ -1174,9 +1203,10 @@ local function init_brand_handlers()
 
   brand_handlers[5] = function(v: value, mt: value): Value
     local desc = get_or_hydrate_interface_type(mt)
-    local u = ffi.titan_uvalue(v)
-    local nuv = ffi.titan_getudatanuv(u) as integer
-    local uv_ptr = ffi.titan_getudatauv(u)
+    local tv: lobject.TValue = v
+    local u = ffi.lmacro_uvalue(tv)
+    local nuv = u.nuvalue as integer
+    local uv_ptr = u.uv as *lobject.UValue
     local wrapped = uv_ptr[1].uv
     return Value.is_interface({
       nuvalue = nuv,
@@ -1190,12 +1220,20 @@ local function init_brand_handlers()
 
   brand_handlers[6] = function(v: value, mt: value): Value
     local t = get_or_hydrate_owned_type(mt)
-    local u = ffi.titan_uvalue(v)
-    local payload = ffi.titan_getudatamem(u)
-    local size = ffi.titan_getudatalen(u) as integer
+    local tv: lobject.TValue = v
+    local u = ffi.lmacro_uvalue(tv)
+    local payload = ffi.luamacro_getudatamem(u)
+    local size = u.len as integer
     case t
     when is_owned_foreign_array: arr_t then
-      local count = ffi.titan_get_owned_array_count(u)
+      local count: integer = 0
+      if (u.nuvalue as integer) > 0 then
+        local uv_ptr = u.uv as *lobject.UValue
+        local count_val: value = uv_ptr[0].uv
+        if count_val is integer then
+          count = count_val as integer
+        end
+      end
       return Value.is_owned_foreign_array({
         val = v,
         payload = payload,
@@ -1244,14 +1282,15 @@ local function init_tag_handlers()
   end
 
   tag_handlers[3] = function(v: value): Value
-    return Value.is_raw_pointer(ffi.titan_pvalue(v))
+    local tv: lobject.TValue = v
+    return Value.is_raw_pointer(ffi.lmacro_pvalue(tv))
   end
 
   tag_handlers[4] = function(v: value): Value
-    if ffi.titan_isinteger(v) ~= 0 then
-      return Value.is_integer(ffi.titan_ivalue(v))
+    if v is integer then
+      return Value.is_integer(v as integer)
     else
-      return Value.is_float(ffi.titan_fltvalue(v))
+      return Value.is_float(v as float)
     end
   end
 
@@ -1272,18 +1311,21 @@ local function init_tag_handlers()
   end
 
   tag_handlers[9] = function(v: value): Value
-    return Value.is_lua_thread({ val = v, thread = ffi.titan_thvalue(v) })
+    local tv: lobject.TValue = v
+    return Value.is_lua_thread({ val = v, thread = ffi.lmacro_thvalue(tv) })
   end
 end
 
 function inspect(v: value): Value
-  local tag = ffi.titan_ttype(v)
+  local tv: lobject.TValue = v
+  local tag = ffi.lmacro_ttype(tv)
   local idx = tag + 1
   if idx >= 1 and idx <= #tag_handlers then
     return tag_handlers[idx](v)
   end
   return Value.is_nil()
 end
+
 
 do
   init_hydration_env()

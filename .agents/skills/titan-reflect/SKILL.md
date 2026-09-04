@@ -59,7 +59,7 @@ when is_union: uv then
 when is_interface: iv then
   local field_val = iv:get(1)
 when is_titan_function: tf then
-  local c_fn = tf.lua_entry
+  local c_fn = tf.lua_entry -- *void pointer to lua_CFunction entry
 else
   -- other variants
 end

@@ -416,10 +416,10 @@ function setslot(typ --[[:table]], dst --[[:string]], src --[[:string]])
         } while (0);]]
     elseif typ._tag == "Type.CPointer" or
            (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CPointer") then
-        tmpl = "setpvalue($DST, ((void*)(uintptr_t)$SRC));"
+        tmpl = "setpvalue($DST, ((void*)$SRC));"
     elseif typ._tag == "Type.CArray" or
            (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CArray") then
-        tmpl = "setpvalue($DST, ((void*)(uintptr_t)$SRC));"
+        tmpl = "setpvalue($DST, ((void*)$SRC));"
     elseif typ._tag == "Type.COwned" then
         tmpl = "setuvalue(L, $DST, $SRC);"
     else
@@ -933,7 +933,8 @@ function coder._is_boxable_c_value_plan_type(typ)
         or typ._tag == "Type.CFloat"
         or typ._tag == "Type.COwned"
         or types.is_c_tvalue(typ)
-        or typ._tag == "Type.CPointer"
+        or (typ._tag == "Type.CPointer"
+            and types.c_pointer_category(typ) ~= "function")
 end
 
 function coder._checked_coercion_plan_impl(

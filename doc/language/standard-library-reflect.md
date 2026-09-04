@@ -160,7 +160,7 @@ Functions are partitioned into three variants:
 record TitanFunctionValue
   const val: (...: value) -> (...: value)
   const native_entry: *void
-  const lua_entry: foreign (*lua_State) -> int
+  const lua_entry: *void
   const descriptor: FunctionType
 end
 
@@ -171,7 +171,7 @@ end
 
 record LuaCFunctionValue
   const val: (...: value) -> (...: value)
-  const entry: foreign (*lua_State) -> int
+  const entry: *void
 end
 ```
 
