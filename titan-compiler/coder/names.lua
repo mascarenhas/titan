@@ -145,7 +145,7 @@ function getslot(typ --[[:table]], dst --[[:string?]], src --[[:string]])
            (typ._tag == "Type.CTypedef"
             and (types.resolve_c_typedef(typ)._tag == "Type.CPointer"
                  or types.resolve_c_typedef(typ)._tag == "Type.CArray")) then
-        tmpl = "$DST (($CT)pvalue($SRC))"
+        tmpl = "$DST (($CT)(uintptr_t)pvalue($SRC))"
         ct = coder._render_c_type_name(
             cdeclarator.adjust_parameter_type(typ))
     elseif typ._tag == "Type.COwned" then

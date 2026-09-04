@@ -212,7 +212,9 @@ local standard_imports = {
     math = "titan.math",
     gc = "titan.gc",
     iteration = "titan.iteration",
+    reflect = "titan.reflect",
 }
+
 
 function parser.normalize_import(modname)
     local source_required = modname:sub(-6) == ".titan"

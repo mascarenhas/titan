@@ -5,7 +5,9 @@
 #include "ldo.h"
 #include "lobject.h"
 #include "lstate.h"
+#include "lgc.h"
 #include "lua.h"
+
 
 /* Opaque ABI-owned brand stored as light userdata in every Titan function
 ** closure. It is compared only as raw pointer bits and must never be
@@ -106,4 +108,102 @@ static inline int lmacro_ttype(const TValue *o) { return ttype(o); }
 
 static inline int lmacro_ttypetag(const TValue *o) { return ttypetag(o); }
 
+typedef struct TitanLuaFuncInfo {
+  const char *source;
+  char short_src[LUA_IDSIZE];
+  int linedefined;
+  int lastlinedefined;
+  const char *what;
+  int isvararg;
+  int nparams;
+} TitanLuaFuncInfo;
+
+static inline int titan_get_lua_func_info(lua_State *L, TValue v, TitanLuaFuncInfo *out) {
+  lua_Debug ar;
+  lua_pushtvalue(L, v);
+  if (!lua_getinfo(L, ">Su", &ar)) return 0;
+  out->source = ar.source;
+  for (int i = 0; i < LUA_IDSIZE; i++) {
+    out->short_src[i] = ar.short_src[i];
+  }
+  out->linedefined = ar.linedefined;
+  out->lastlinedefined = ar.lastlinedefined;
+  out->what = ar.what;
+  out->isvararg = ar.isvararg;
+  out->nparams = ar.nparams;
+  return 1;
+}
+
+static inline int titan_ttype(TValue v) { return ttype(&v); }
+static inline int titan_ttypetag(TValue v) { return ttypetag(&v); }
+static inline int titan_isinteger(TValue v) { return ttisinteger(&v); }
+static inline lua_Integer titan_ivalue(TValue v) { return ivalue(&v); }
+static inline lua_Number titan_fltvalue(TValue v) { return fltvalue(&v); }
+static inline void *titan_pvalue(TValue v) { return pvalue(&v); }
+static inline Udata *titan_uvalue(TValue v) { return uvalue(&v); }
+static inline lua_State *titan_thvalue(TValue v) { return thvalue(&v); }
+static inline CClosure *titan_clCvalue(TValue v) { return clCvalue(&v); }
+static inline lua_CFunction titan_fvalue(TValue v) { return fvalue(&v); }
+
+static inline int titan_islclosure(TValue v) { return ttisLclosure(&v); }
+static inline int titan_iscclosure(TValue v) { return ttisCclosure(&v); }
+static inline int titan_islcf(TValue v) { return ttislcf(&v); }
+
+static inline void *titan_getudatamem(Udata *u) { return getudatamem(u); }
+static inline size_t titan_getudatalen(Udata *u) { return u->len; }
+static inline unsigned short titan_getudatanuv(Udata *u) { return u->nuvalue; }
+static inline UValue *titan_getudatauv(Udata *u) { return u->uv; }
+
+static inline void titan_set_udata_uv(lua_State *L, Udata *u, int idx, TValue v) {
+  setobj(L, &u->uv[idx].uv, &v);
+  luaC_barrierback(L, obj2gco(u), &v);
+}
+
+static inline int titan_getmetatable(lua_State *L, TValue v) {
+  lua_pushtvalue(L, v);
+  if (lua_getmetatable(L, -1)) {
+    lua_remove(L, -2);
+    return 1;
+  }
+  lua_pop(L, 1);
+  return 0;
+}
+
+static inline int titan_rawgetp(lua_State *L, TValue tab, const void *p) {
+  lua_pushtvalue(L, tab);
+  int t = lua_rawgetp(L, -1, p);
+  lua_remove(L, -2);
+  return t;
+}
+
+static inline int titan_get_metatables_table(lua_State *L) {
+  return lua_getfield(L, LUA_REGISTRYINDEX, TITAN_METATABLES_KEY);
+}
+
+static inline int titan_is_titan_closure(const CClosure *cl) {
+  return cl->nupvalues >= 5 &&
+         ttislightuserdata(&cl->upvalue[3]) &&
+         pvalue(&cl->upvalue[3]) == TITAN_BRAND;
+}
+
+static inline const char *titan_get_closure_tag(const CClosure *cl) {
+  return (const char *)pvalue(&cl->upvalue[1]);
+}
+
+static inline void *titan_get_closure_native(const CClosure *cl) {
+  return pvalue(&cl->upvalue[2]);
+}
+
+static inline lua_CFunction titan_get_ccl_entry(const CClosure *cl) {
+  return cl->f;
+}
+
+static inline lua_Integer titan_get_owned_array_count(Udata *u) {
+  if (u->nuvalue > 0 && ttisinteger(&u->uv[0].uv)) {
+    return ivalue(&u->uv[0].uv);
+  }
+  return 0;
+}
+
 #endif
+

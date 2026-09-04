@@ -1516,8 +1516,7 @@ local function c_value_compatible(t)
     t = resolved_c(t)
     return t and (t._tag == "Type.CInteger"
         or t._tag == "Type.CFloat"
-        or (t._tag == "Type.CPointer"
-            and resolved_c(t.pointee)._tag ~= "Type.CFunction")
+        or t._tag == "Type.CPointer"
         or t._tag == "Type.COwned"
         or types.is_c_tvalue(t))
 end
