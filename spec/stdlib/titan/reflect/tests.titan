@@ -325,3 +325,14 @@ function test_named_type_resolve(_context: test.Context)
     test.assert(false, "expected is_named")
   end
 end
+
+function test_named_type_resolve_unknown(_context: test.Context)
+  local unk_named = reflect.NamedType.new("nonexistent.Nominal")
+  local unk_res = unk_named:resolve()
+  case unk_res
+  when is_value then
+    test.assert(true)
+  else
+    test.assert(false, "expected is_value from unknown nominal resolve")
+  end
+end

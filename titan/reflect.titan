@@ -113,7 +113,6 @@ union Value
 end
 
 record NamedType
-  local resolved: NominalType? -- cache for `resolve()`
   const name: string
 end
 
@@ -330,22 +329,10 @@ function InterfaceValue:get(i: integer): value
 end
 
 function NamedType:resolve(): Type
-  if self.resolved ~= nil then
-    local r = self.resolved as NominalType
-    case r
-    when is_record: rec then
-      return Type.is_record(rec)
-    when is_union: un then
-      return Type.is_union(un)
-    when is_interface: iface then
-      return Type.is_interface(iface)
-    end
-  end
   local found: NominalType? = find_nominal(self.name)
   if found == nil then
-    raise "could not resolve nominal type '" .. self.name .. "'"
+    return Type.is_value()
   end
-  self.resolved = found
   local r = found as NominalType
   case r
   when is_record: rec then
