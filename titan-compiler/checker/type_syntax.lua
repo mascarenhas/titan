@@ -30,6 +30,9 @@ end
 function resolve_surface_c_type(name, st, errors, loc)
     if not foreigntypes.is_surface_primitive_name(name) then return nil end
     if name == "void" then return types.CVoid() end
+    if name == "lua_State" then
+        return types.CStruct(nil, "lua_State", nil, {}, false, false)
+    end
 
     local service, service_error = ensure_probe_service(st)
     if not service then

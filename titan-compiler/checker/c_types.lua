@@ -1790,8 +1790,7 @@ end
 function lua_state_pointer_type(st)
     local lua_state = st:find_foreign_type("lua_State")
         or st:find_foreign_type("struct@lua_State")
-        or types.CTypedef("lua_State",
-            types.CStruct(nil, "lua_State", nil, {}, false, false))
+        or types.CStruct(nil, "lua_State", nil, {}, false, false)
     return types.CPointer(
         lua_state,
         {})

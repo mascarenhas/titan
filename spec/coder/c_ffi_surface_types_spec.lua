@@ -110,4 +110,40 @@ describe("surface C99 type code generation", function()
         ]])
         assert.truthy(called, message)
     end)
+
+    it("exports *lua_State across module boundaries", function()
+        local ok, err = h.generate_modules({
+            surface_provider = [[
+                type Callback = foreign (*lua_State) -> int
+
+                record Holder
+                    state: *lua_State
+                end
+
+                function make_holder(s: *lua_State): Holder
+                    return { state = s }
+                end
+
+                function extract(h: Holder): *lua_State
+                    return h.state
+                end
+            ]],
+            surface_consumer = [[
+                local provider = import "surface_provider"
+
+                function roundtrip(): boolean
+                    local h = provider.make_holder(L)
+                    local s: *lua_State = provider.extract(h)
+                    return (s as *void) == (L as *void)
+                end
+            ]],
+        }, "surface_consumer", nil, { interface = "compiled" })
+        assert.truthy(ok, err)
+
+        local called, message = h.call("surface_consumer", [[
+            assert(surface_consumer.roundtrip())
+        ]])
+        assert.truthy(called, message)
+    end)
 end)
+

@@ -248,4 +248,32 @@ describe("surface C99 types", function()
             assert.match("non%-portable header%-defined type", err)
         end)
     end)
+
+    it("accepts lua_State as built-in exportable FFI type without foreign import", function()
+        local ok, err = run_checker([[
+            type StatePtr = *lua_State
+            type Callback = foreign (*lua_State) -> int
+
+            record StateHolder
+                state: *lua_State
+            end
+
+            function inspect_state(s: *lua_State): *lua_State
+                local cur: *lua_State = L
+                return s
+            end
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    it("rejects lua_State by value as incomplete C struct", function()
+        local ok, err = run_checker([[
+            function test(): integer
+                local s: lua_State
+                return 0
+            end
+        ]])
+        assert.falsy(ok)
+        assert.match("requires complete C struct type 'lua_State'", err)
+    end)
 end)

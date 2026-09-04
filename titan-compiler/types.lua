@@ -439,7 +439,8 @@ function types.is_portable_c_type_graph(root)
                      or pointee_tag == "Type.CInteger"
                      or pointee_tag == "Type.CFloat"
                      or pointee_tag == "Type.CPointer"
-                     or pointee_tag == "Type.CFunction")
+                     or pointee_tag == "Type.CFunction"
+                     or types.is_c_lua_state(t.pointee))
                 and visit(t.pointee, "pointee")
         elseif tag == "Type.CFunction" then
             ok = t._paramstyle == nil
@@ -474,6 +475,8 @@ function types.is_portable_c_type_graph(root)
                      or pointee_tag == "Type.CFloat"
                      or pointee_tag == "Type.CPointer")
                 and visit(t.pointee, "owned")
+        elseif tag == "Type.CStruct" then
+            ok = types.is_c_lua_state(t) and position == "pointee"
         end
         active[t] = nil
         return ok
@@ -742,6 +745,15 @@ end
 function types.is_direct_c(t)
     t = types.resolve_c_typedef(t)
     return t and is_c_tag(t._tag) or false
+end
+
+function types.is_c_lua_state(t)
+    if not t then
+        return false
+    end
+    local rt = types.resolve_c_typedef(t)
+    return rt and rt._tag == "Type.CStruct"
+        and (rt.tagname == "lua_State" or rt.cname == "lua_State")
 end
 
 function types.is_c_tvalue(t)
@@ -1749,6 +1761,7 @@ c_declaration_type_equals = function(
         -- tag namespace. Equal named file-scope tags therefore denote the same
         -- C type even when independent extraction allocated two objects.
         return ltype == rtype
+            or (types.is_c_lua_state(ltype) and types.is_c_lua_state(rtype))
             or (ltype._c_tag_scope == "file"
                 and rtype._c_tag_scope == "file"
                 and ltype.tagname ~= nil
@@ -2008,6 +2021,9 @@ type_equals = function(t1, t2, seen)
     elseif tag1 == "Type.CFunction" then
         return c_function_type_equals(t1, t2, seen)
     elseif tag1 == "Type.CStruct" then
+        if types.is_c_lua_state(t1) and types.is_c_lua_state(t2) then
+            return true
+        end
         return t1.cname == t2.cname and
                t1.tagname == t2.tagname and
                t1.typedef == t2.typedef and
@@ -4816,6 +4832,9 @@ function types.tostring(t, wrap)
             return res
         end
     elseif tag == "Type.CStruct" then
+        if types.is_c_lua_state(t) then
+            return "lua_State"
+        end
         local display_name = c_display_name(t.tagname or t.cname or t.typedef)
         if t._ffi_scope and display_name then
           return t._ffi_scope .. "." .. display_name

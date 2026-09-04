@@ -364,7 +364,9 @@ function Encoder:descriptor(value, label)
        and not value._c_declaration_spelling then
         fail("unspellable anonymous C enum reached a source interface")
     elseif tag == "Type.CStruct" or tag == "Type.CUnion" then
-        self:require_aggregate_origin(value, tag)
+        if not types.is_c_lua_state(value) then
+            self:require_aggregate_origin(value, tag)
+        end
     end
 
     self.next_id = self.next_id + 1
