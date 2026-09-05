@@ -1927,16 +1927,23 @@ describe("type-relation soundness (end-to-end)", function()
         local counted_char = types.COwned(c_char, true)
         local counted_int = types.COwned(c_integer, true)
 
-        local valid_address = {
-            kind = "coercion",
-            op = "mutable_c_address",
-            source = c_integer,
-            target = int_pointer,
-        }
-        assert.equal(valid_address,
-            coder_values._checked_coercion_plan(
-                valid_address, c_integer, int_pointer,
-                "test mutable C address"))
+        for _, case in ipairs({
+            {c_integer, int_pointer},
+            {int_pointer, pointer_pointer},
+            {const_int_pointer, types.CPointer(const_int_pointer, {})},
+        }) do
+            local source, target = table.unpack(case)
+            local valid_address = {
+                kind = "coercion",
+                op = "mutable_c_address",
+                source = source,
+                target = target,
+            }
+            assert.equal(valid_address,
+                coder_values._checked_coercion_plan(
+                    valid_address, source, target,
+                    "test mutable C address"))
+        end
 
         local function rejects(body)
             local ok, err = pcall(body)
@@ -2003,11 +2010,13 @@ describe("type-relation soundness (end-to-end)", function()
             coder_values._checked_coercion_plan({
                 kind = "coercion",
                 op = "mutable_c_address",
-                source = int_pointer,
+                source = float_pointer,
                 target = pointer_pointer,
-            }, int_pointer, pointer_pointer,
+            }, float_pointer, pointer_pointer,
                 "test C pointer conversion")
         end)
+        rejects_coercion("mutable_c_address", const_int_pointer,
+            pointer_pointer)
         rejects(function()
             coder_values._checked_coercion_plan({
                 kind = "coercion",

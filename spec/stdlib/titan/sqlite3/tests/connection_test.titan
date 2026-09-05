@@ -1,0 +1,101 @@
+function test_connect_memory_and_temporary_databases(context: test.Context)
+  runtime_test.run(function ()
+    local memory = sqlite3.connect(":memory:")
+    defer memory:close()
+    local temporary = sqlite3.connect("")
+    defer temporary:close()
+    execute_sql(memory, "CREATE TABLE item (value INTEGER)")
+    execute_sql(memory, "INSERT INTO item VALUES (17)")
+    test.assert(scalar_integer(memory, "SELECT value FROM item") == 17,
+                "memory database did not preserve inserted data")
+    test.assert(scalar_integer(temporary, "SELECT 29") == 29,
+                "temporary database did not execute a query")
+  end)
+end
+
+function test_file_database_persists_across_connections(context: test.Context)
+  runtime_test.run(function ()
+    local path = fs.tmpname()
+    defer fs.unlink(path)
+    local connection = sqlite3.connect(path)
+    defer connection:close()
+    execute_sql(connection, "CREATE TABLE persisted (value INTEGER)")
+    execute_sql(connection, "INSERT INTO persisted VALUES (73)")
+    connection:close()
+
+    local reopened = sqlite3.connect(path)
+    defer reopened:close()
+    test.assert(scalar_integer(reopened, "SELECT value FROM persisted") == 73,
+                "closed file database lost its committed data")
+  end)
+end
+
+function test_connect_rejects_nul_and_reports_native_open_failure(
+    context: test.Context)
+  runtime_test.run(function ()
+    expect_wrapper_error(function ()
+      local connection = sqlite3.connect(":memory:\0suffix")
+      connection:close()
+    end)
+    local file = fs.tmpname()
+    defer fs.unlink(file)
+    expect_native_error(function ()
+      local connection = sqlite3.connect(file .. "/database")
+      connection:close()
+    end, 14)
+  end)
+end
+
+function test_prepare_requires_one_real_statement(context: test.Context)
+  runtime_test.run(function ()
+    local connection = sqlite3.connect(":memory:")
+    defer connection:close()
+    local invalid: {string} = {
+      "", " \n\t ", "-- comment only", "/* only a comment */",
+      "SELECT 1\0; SELECT 2", "SELECT 1; SELECT 2",
+    }
+    for index = 1, #invalid do
+      expect_wrapper_error(function ()
+        local statement = connection:prepare(invalid[index])
+        statement:close()
+      end)
+    end
+    local row = first_row(connection,
+        "SELECT ';not another statement' AS text; -- ; trailing\n/* ; */")
+    test.assert(row:get(1) as string == ";not another statement",
+                "single-statement validation parsed semicolons itself")
+    expect_native_error(function ()
+      local statement = connection:prepare("SELECT FROM")
+      statement:close()
+    end, 1)
+    test.assert(scalar_integer(connection, "SELECT 7") == 7,
+                "prepare errors left the Connection reserved")
+  end)
+end
+
+function test_connection_close_rejects_owned_statements(context: test.Context)
+  runtime_test.run(function ()
+    local connection = sqlite3.connect(":memory:")
+    defer connection:close()
+    local statement = connection:prepare("SELECT 1")
+    defer statement:close()
+    expect_wrapper_error(function () connection:close() end)
+    local cursor = statement:query()
+    defer cursor:close()
+    test.assert(required_row(cursor):get(1) as integer == 1,
+                "rejected Connection close damaged its Statement")
+    expect_wrapper_error(function () statement:close() end)
+    cursor:close()
+    statement:close()
+    statement:close()
+    connection:close()
+    connection:close()
+    expect_wrapper_error(function () connection:get_autocommit() end)
+    expect_wrapper_error(function () connection:commit() end)
+    expect_wrapper_error(function () connection:rollback() end)
+    expect_wrapper_error(function () connection:set_autocommit(false) end)
+    expect_wrapper_error(function () connection:prepare("SELECT 2") end)
+    expect_wrapper_error(function () statement:execute() end)
+    expect_wrapper_error(function () statement:query() end)
+  end)
+end

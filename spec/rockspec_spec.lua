@@ -6,7 +6,7 @@ local source_inventory = require "spec.support.source_inventory"
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "os", "peg", "string", "math", "lua", "iteration", "gc",
-    "test", "reflect",
+    "test", "reflect", "sqlite3", "json",
 }
 local LUA_CPATH_SUFFIX = "/lib/lua/5.5/?.so"
 local COMPILER_SLICE_PATHS = {}
@@ -289,13 +289,16 @@ describe("standalone-prefix source installation", function()
         assert_absent(PREFIX .. "/include/titan_lpeglabel_namespace.h")
         assert_absent(PREFIX .. "/share/lua/5.5/lpeglabel-build")
         assert_absent(PREFIX .. "/lib/libtitan-llhttp.a")
+        assert_absent(PREFIX .. "/lib/libtitan-sqlite3.a")
+        assert_absent(TITAN_LIBDIR .. "/libtitan-sqlite3.a")
+        assert_absent(PREFIX .. "/include/sqlite3.h")
         assert_absent(PREFIX .. "/lib/libssl.a")
         assert_absent(PREFIX .. "/lib/libcrypto.a")
         assert_file(PREFIX .. "/share/titan/THIRD_PARTY_NOTICES.md")
         for _, license in ipairs({
             "libuv-LICENSE", "lpeglabel-LICENSE", "lpeg-LICENSE",
             "lpeg-patterns-LICENSE", "ta-regex-LICENSE", "lua-LICENSE",
-            "llhttp-LICENSE", "openssl-LICENSE",
+            "llhttp-LICENSE", "sqlite3-LICENSE", "openssl-LICENSE",
         }) do
             assert_file(PREFIX .. "/share/titan/LICENSES/" .. license)
         end
@@ -311,6 +314,7 @@ describe("standalone-prefix source installation", function()
             "lstrlib.c", "Lua 5.5.1",
             "OpenSSL 3.5.7", "OPENSSL_MODE=system",
             "llhttp 9.4.3", "Copyright Fedor Indutny, 2018",
+            "SQLite 3.53.4", "public domain",
         }) do
             assert.truthy(notices:find(notice, 1, true), notice)
         end
@@ -688,6 +692,22 @@ describe("standalone-prefix source installation", function()
             "titan/iteration.titan",
             "titan/gc.titan",
             "titan/test.titan",
+            "titan/sqlite3/sqlite3.titan",
+            "titan/sqlite3/bindings.titan",
+            "titan/sqlite3/row.titan",
+            "titan/sqlite3/worker.titan",
+            "titan/sqlite3/native.h",
+            "titan/json/json.titan",
+            "titan/json/parser.titan",
+            "titan/json/decoder.titan",
+            "titan/json/writer.titan",
+            "titan/json/numbers.titan",
+            "spec/stdlib/titan/json/tests/tests.titan",
+            "spec/stdlib/titan/json/tests/parser_test.titan",
+            "spec/stdlib/titan/json/tests/mapping_test.titan",
+            "spec/stdlib/titan/json/tests/core_test.titan",
+            "doc/language/standard-library-json.md",
+            "doc/implementation/json-library.md",
             "titan-compiler/test_runner.lua",
             "LICENSES/lpeglabel-LICENSE",
             "LICENSES/lpeg-LICENSE",
@@ -695,6 +715,7 @@ describe("standalone-prefix source installation", function()
             "LICENSES/ta-regex-LICENSE",
             "LICENSES/lua-LICENSE",
             "LICENSES/llhttp-LICENSE",
+            "LICENSES/sqlite3-LICENSE",
             "LICENSES/openssl-LICENSE",
             "THIRD_PARTY_NOTICES.md",
         }) do
@@ -705,6 +726,8 @@ describe("standalone-prefix source installation", function()
             assert.falsy(path:match("/libtitan%-lpeglabel[.]a$"), path)
             assert.falsy(path:match("/vendor/lpeglabel/.*[.]o$"), path)
             assert.falsy(path:find("/llhttp-build/", 1, true), path)
+            assert.falsy(path:find("/sqlite3-build/", 1, true), path)
+            assert.falsy(path:find("/sqlite-autoconf-", 1, true), path)
             assert.falsy(path:find("/llhttp-release-v", 1, true), path)
             assert.falsy(path:find("/openssl-build/", 1, true), path)
             assert.falsy(path:match("/openssl%-%d"), path)
@@ -912,6 +935,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             local iteration = require "titan.iteration"
             local gc = require "titan.gc"
             local testing = require "titan.test"
+            local json = require "titan.json"
             local builtin_string = require "string"
             -- Requiring only the public facade must initialize uv globally.
             -- The returned uv-owned Task resolves its methods transitively;
@@ -958,6 +982,9 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             assert(type(iteration) == "userdata")
             assert(type(gc) == "userdata")
             assert(type(testing) == "userdata")
+            assert(type(json) == "userdata")
+            local json_source = '{"answer":42,"values":[1,null,3]}'
+            assert(json.encode(json.decode(json_source)) == json_source)
             assert(not testing.testing())
             assert(not testing.verbose())
             assert(peg.literal("installed"):match("installed") == 10)
@@ -988,6 +1015,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
                 iteration = iteration,
                 gc = gc,
                 test = testing,
+                json = json,
             }) do
                 local symbol = "luaopen_titan_" .. name
                 assert(package.searchpath("titan." .. name, package.path) ==

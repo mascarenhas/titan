@@ -184,6 +184,16 @@ operations, so a public API that uses it must document starvation and
 synchronization responsibilities rather than claiming isolated background
 execution.
 
+An operation that retires native ownership may instead use source-private
+`uv.run_foreign_cleanup(f, arg)` from a direct `import "uv.titan"`. It uses
+the same worker request and after-work ownership, but its distinct Call variant
+has the existing close-operation cancellation policy: pending cancellation
+allows submission and ordinary completion, so several deferred destructors can
+finish. Keep this path limited to close, finalize, reset, and unpublished-result
+disposal. Ordinary I/O continues through public `async.run_foreign`; do not
+temporarily edit Task flags, launch detached cleanup Tasks, or run a blocking
+destructor on the loop thread.
+
 ## Adding a single-shot callback operation
 
 Use filesystem requests in `file.titan` as the general template,
@@ -635,7 +645,7 @@ generated `titan.uv` object, and leave no reference to a retired shim. Keep them
 aligned with the real callback protocol rather than inferring correctness from
 parameter count alone.
 
-After rebuilding the canonical nineteen-root provider, mechanically extract
+After rebuilding the canonical twenty-one-root provider, mechanically extract
 its exact serialized interface and compare it with
 `spec/fixtures/libuv/titan_uv_types.lua`:
 
@@ -680,7 +690,7 @@ make titan-stdlib-test-run
 The final two commands complete the uncovered stdlib gate without rebuilding
 the native executable; `make stdlib-test` performs the complete gate from
 scratch. A `TITAN_FILTER` selects cases at run time; it does not rebuild or
-narrow the 23-root executable.
+narrow the 25-root executable.
 
 The real installation path and both link policies remain release boundaries:
 

@@ -1451,8 +1451,13 @@ function types.c_mutable_address_coerceable(source, target)
         return false
     elseif is_c_function_pointer(source_res) then
         return false
+    elseif source_res._tag == "Type.CPointer" then
+        -- A pointer local is itself mutable C storage. Taking its address for
+        -- an exact T ** out parameter preserves every qualifier on T; it is
+        -- not a reinterpretation of the pointer's current address. Keep the
+        -- endpoint exact so an ordinary T * -> void * remains a value cast.
+        return c_assignable_equal(source, target_res.pointee)
     elseif source_res._tag == "Type.CVoid"
-        or source_res._tag == "Type.CPointer"
         or source_res._tag == "Type.CArray"
         or source_res._tag == "Type.CFunction"
         or source_res._tag == "Type.COwned"

@@ -1,0 +1,390 @@
+local async = import "async"
+local timer = import "timer"
+local sqlite3 = import "sqlite3"
+local fs = import "fs"
+local gc = import "gc"
+local strings = import "string"
+local test = import "test"
+local fixture = foreign import "sqlite3_worker_fixture.h"
+
+local function arm(point: integer)
+  test.assert(fixture.titan_sqlite_fixture_arm(point as int) == 0,
+              "could not arm SQLite worker fixture")
+end
+
+local function join_cancelled(target: async.Task, reason: string)
+  case async.join(target)
+  when cancelled: cancellation then
+    case cancellation
+    when simple: message then
+      test.assert(message == reason, "SQLite changed cancellation reason")
+    else
+      raise "SQLite changed simple cancellation into complex cancellation"
+    end
+  else
+    raise "SQLite worker Task did not finish cancelled"
+  end
+end
+
+local function cleanup_target(target: async.Task)
+  fixture.titan_sqlite_fixture_release()
+  if not target:status():has_finished() then
+    target:cancel(async.CancellationReason.simple("fixture cleanup"))
+  end
+  async.join(target)
+end
+
+local function wait_ready(target: async.Task)
+  while fixture.titan_sqlite_fixture_ready() == 0 and
+        not target:status():has_finished() do
+    timer.yield()
+  end
+  test.assert(fixture.titan_sqlite_fixture_ready() ~= 0 and
+              not target:status():has_finished(),
+              "SQLite operation did not enter its native worker gate")
+end
+
+local function scalar(connection: sqlite3.Connection, sql: string): integer
+  local statement = connection:prepare(sql)
+  defer statement:close()
+  local cursor = statement:query()
+  defer cursor:close()
+  local row = cursor:fetch()
+  return row:get(1)
+end
+
+local function execute_sql(connection: sqlite3.Connection, sql: string)
+  local statement = connection:prepare(sql)
+  defer statement:close()
+  statement:execute()
+end
+
+local function assert_overlap_rejected(action: () -> ())
+  local caught = false
+  do
+    action()
+  catch
+    if error is sqlite3.Error then
+      local failure: sqlite3.Error = error
+      test.assert(failure.code == nil,
+                  "overlap reached SQLite instead of failing before submission")
+      caught = true
+    else
+      raise
+    end
+  end
+  test.assert(caught, "overlapping Connection work was accepted")
+end
+
+local function assert_unrelated_progress()
+  local ticked = false
+  local ticker = async.run<nil, value>(function (): nil
+    timer.yield()
+    ticked = true
+    return nil
+  end)
+  test.assert(async.join(ticker):has_succeeded() and ticked,
+              "blocked SQLite work stopped another Task's timer")
+  local independent = sqlite3.connect(":memory:")
+  defer independent:close()
+  test.assert(scalar(independent, "SELECT 29") == 29,
+              "blocked SQLite work stopped an independent Connection")
+  local path = fs.tmpname()
+  defer fs.unlink(path)
+  fs.write_file(path, "independent filesystem work")
+  test.assert(fs.read_file(path) == "independent filesystem work",
+              "blocked SQLite work stopped independent filesystem I/O")
+end
+
+local function cancel_while_blocked(target: async.Task, reason: string)
+  wait_ready(target)
+  target:cancel(async.CancellationReason.simple(reason))
+  gc.collect()
+  gc.collect()
+  test.assert(not target:status():has_finished() and
+              fixture.titan_sqlite_fixture_completed() == 0,
+              "cancellation retired accepted SQLite work before its callback")
+  assert_unrelated_progress()
+end
+
+local function cancelled_open()
+  local published = false
+  arm(fixture.TITAN_SQLITE_GATE_OPEN)
+  local target = async.run<nil, value>(function (): nil
+    local connection = sqlite3.connect(":memory:")
+    defer connection:close()
+    published = true
+    return nil
+  end)
+  defer cleanup_target(target)
+  cancel_while_blocked(target, "cancel accepted SQLite open")
+  test.assert(fixture.titan_sqlite_fixture_live_connections() == 1,
+              "accepted open lost its unpublished native Connection")
+  local closes = fixture.titan_sqlite_fixture_closed_connections() as integer
+  fixture.titan_sqlite_fixture_release()
+  join_cancelled(target, "cancel accepted SQLite open")
+  test.assert(not published and
+              fixture.titan_sqlite_fixture_live_connections() == 0 and
+              fixture.titan_sqlite_fixture_closed_connections() as integer ==
+                closes + 1,
+              "cancelled open did not retire its unpublished handle exactly once")
+end
+
+local function cancelled_prepare()
+  local connection = sqlite3.connect(":memory:")
+  defer connection:close()
+  local published = false
+  arm(fixture.TITAN_SQLITE_GATE_PREPARE)
+  local target = async.run<nil, value>(function (): nil
+    local statement = connection:prepare("SELECT 11")
+    defer statement:close()
+    published = true
+    return nil
+  end)
+  defer cleanup_target(target)
+  cancel_while_blocked(target, "cancel accepted SQLite prepare")
+  assert_overlap_rejected(function () connection:get_autocommit() end)
+  fixture.titan_sqlite_fixture_release()
+  join_cancelled(target, "cancel accepted SQLite prepare")
+  test.assert(not published and
+              scalar(connection, "SELECT titan_test_statement_count()") == 1,
+              "cancelled prepare left an unpublished native Statement")
+end
+
+local function cancelled_step()
+  local connection = sqlite3.connect(":memory:")
+  defer connection:close()
+  local statement = connection:prepare(
+      "SELECT titan_test_gate(), ?, titan_test_owned()")
+  defer statement:close()
+  local published = false
+  local destroyed = fixture.titan_sqlite_fixture_released_blobs() as integer
+  arm(fixture.TITAN_SQLITE_GATE_STEP)
+  local target = async.run<nil, value>(function (): nil
+    -- This temporary Blob is owned solely by the suspended operation while
+    -- the supervisor requests cancellation and forces full GC.
+    local cursor = statement:query(
+        sqlite3.Blob.new(strings.rep("input\0bytes", 8192)))
+    defer cursor:close()
+    published = true
+    return nil
+  end)
+  defer cleanup_target(target)
+  cancel_while_blocked(target, "cancel accepted SQLite step")
+  assert_overlap_rejected(function ()
+    statement:execute(sqlite3.Blob.new("overlapping input"))
+  end)
+  assert_overlap_rejected(function () connection:prepare("SELECT 3") end)
+  assert_overlap_rejected(function () statement:close() end)
+  fixture.titan_sqlite_fixture_release()
+  join_cancelled(target, "cancel accepted SQLite step")
+  test.assert(not published and fixture.titan_sqlite_fixture_live_blobs() == 0 and
+              fixture.titan_sqlite_fixture_released_blobs() as integer ==
+                destroyed + 1,
+              "cancelled query did not reset and free its native row exactly once")
+  local reused = statement:query(sqlite3.Blob.new("new"))
+  defer reused:close()
+  local row = reused:fetch()
+  test.assert(row:get(1) as integer == 47,
+              "cancelled query left its Statement unusable")
+  local bytes: sqlite3.Blob = row:get(2)
+  test.assert(bytes.bytes == "new", "cancelled query retained its old bindings")
+  reused:close()
+  statement:close()
+  test.assert(scalar(connection, "SELECT titan_test_statement_count()") == 1,
+              "Statement close left a native statement after cancelled step")
+end
+
+local function cancelled_execute()
+  local connection = sqlite3.connect(":memory:")
+  defer connection:close()
+  execute_sql(connection, "CREATE TABLE item (number INTEGER)")
+  local statement = connection:prepare(
+      "INSERT INTO item VALUES (titan_test_gate())")
+  defer statement:close()
+  local returned = false
+  arm(fixture.TITAN_SQLITE_GATE_STEP)
+  local target = async.run<nil, value>(function (): nil
+    statement:execute()
+    returned = true
+    return nil
+  end)
+  defer cleanup_target(target)
+  cancel_while_blocked(target, "cancel accepted SQLite execute")
+  fixture.titan_sqlite_fixture_release()
+  join_cancelled(target, "cancel accepted SQLite execute")
+  test.assert(not returned and scalar(connection, "SELECT count(*) FROM item") == 1
+              and scalar(connection, "SELECT number FROM item") == 47,
+              "cancelled execute was retried or hid completed SQL effects")
+end
+
+local function cancelled_close()
+  local connection = sqlite3.connect(":memory:")
+  defer connection:close()
+  local completed = false
+  arm(fixture.TITAN_SQLITE_GATE_CLOSE)
+  local target = async.run<nil, value>(function (): nil
+    connection:close()
+    completed = true
+    return nil
+  end)
+  defer cleanup_target(target)
+  cancel_while_blocked(target, "cancel accepted SQLite close")
+  local closes = fixture.titan_sqlite_fixture_closed_connections() as integer
+  test.assert(fixture.titan_sqlite_fixture_live_connections() == 1,
+              "cancelled close abandoned its native handle before completion")
+  fixture.titan_sqlite_fixture_release()
+  join_cancelled(target, "cancel accepted SQLite close")
+  connection:close()
+  test.assert(completed and fixture.titan_sqlite_fixture_live_connections() == 0
+              and fixture.titan_sqlite_fixture_closed_connections() as integer ==
+                closes + 1,
+              "close completion was interrupted or the handle closed twice")
+end
+
+local function cancelled_reset()
+  local connection = sqlite3.connect(":memory:")
+  defer connection:close()
+  local statement = connection:prepare("SELECT titan_test_owned()")
+  defer statement:close()
+  local cursor = statement:query()
+  defer cursor:close()
+  test.assert(fixture.titan_sqlite_fixture_live_blobs() == 1,
+              "reset fixture did not retain its SQLite-owned result")
+  local completed = false
+  local destroyed = fixture.titan_sqlite_fixture_released_blobs() as integer
+  arm(fixture.TITAN_SQLITE_GATE_RESET)
+  local target = async.run<nil, value>(function (): nil
+    cursor:close()
+    completed = true
+    return nil
+  end)
+  defer cleanup_target(target)
+  cancel_while_blocked(target, "cancel accepted SQLite reset")
+  test.assert(fixture.titan_sqlite_fixture_live_blobs() == 1,
+              "cancelled reset freed row ownership before native completion")
+  fixture.titan_sqlite_fixture_release()
+  join_cancelled(target, "cancel accepted SQLite reset")
+  cursor:close()
+  test.assert(completed and fixture.titan_sqlite_fixture_live_blobs() == 0 and
+              fixture.titan_sqlite_fixture_released_blobs() as integer ==
+                destroyed + 1,
+              "reset completion was interrupted or disposed its row twice")
+  local reused = statement:query()
+  defer reused:close()
+  local row = reused:fetch()
+  local bytes: sqlite3.Blob = row:get(1)
+  test.assert(bytes.bytes == "raw\0data",
+              "Statement was not reusable after cancellation during reset")
+end
+
+local function result_allocation_failure()
+  local connection = sqlite3.connect(":memory:")
+  defer connection:close()
+  local statement = connection:prepare(
+      "SELECT zeroblob(40000), titan_test_owned()")
+  defer statement:close()
+  local rejected = false
+  local destroyed = fixture.titan_sqlite_fixture_released_blobs() as integer
+  do
+    test.assert(fixture.titan_sqlite_fixture_limit_allocations(L, 32768) == 0,
+                "could not install the result-allocation fault")
+    defer fixture.titan_sqlite_fixture_restore_allocator(L)
+    do
+      local unexpected = statement:query()
+      unexpected:close()
+    catch
+      rejected = true
+    end
+  end
+  test.assert(rejected and
+              fixture.titan_sqlite_fixture_failed_allocations() >= 2,
+              "large result allocation did not reject its emergency-GC retry")
+  test.assert(fixture.titan_sqlite_fixture_live_blobs() == 0 and
+              fixture.titan_sqlite_fixture_released_blobs() as integer ==
+                destroyed + 1,
+              "failed query publication did not reset its native result")
+  local reused = statement:query()
+  defer reused:close()
+  local row = reused:fetch()
+  local large: sqlite3.Blob = row:get(1)
+  test.assert(#large.bytes == 40000,
+              "allocation failure kept the Statement or Connection reserved")
+  reused:close()
+  statement:close()
+  test.assert(scalar(connection, "SELECT titan_test_statement_count()") == 1,
+              "result-allocation failure left a native statement after close")
+end
+
+local function fetch_allocation_failure()
+  local connection = sqlite3.connect(":memory:")
+  defer connection:close()
+  local statement = connection:prepare(
+      "SELECT x'61', titan_test_owned() " ..
+      "UNION ALL SELECT zeroblob(40000), titan_test_owned()")
+  defer statement:close()
+  local destroyed = fixture.titan_sqlite_fixture_released_blobs() as integer
+  local cursor = statement:query()
+  defer cursor:close()
+  local first = cursor:fetch()
+  local saved: sqlite3.Blob = first:get(2)
+  local rejected = false
+  do
+    test.assert(fixture.titan_sqlite_fixture_limit_allocations(L, 32768) == 0,
+                "could not install the fetch-allocation fault")
+    defer fixture.titan_sqlite_fixture_restore_allocator(L)
+    do
+      cursor:fetch()
+    catch
+      rejected = true
+    end
+  end
+  test.assert(rejected and
+              fixture.titan_sqlite_fixture_failed_allocations() >= 2,
+              "large fetch allocation did not reject its emergency-GC retry")
+  test.assert(saved.bytes == "raw\0data" and
+              fixture.titan_sqlite_fixture_live_blobs() == 0 and
+              fixture.titan_sqlite_fixture_released_blobs() as integer ==
+                destroyed + 2,
+              "failed fetch publication lost a saved row or native reset")
+  cursor:close()
+  local reused = statement:query()
+  defer reused:close()
+  reused:fetch()
+  local second = reused:fetch()
+  local large: sqlite3.Blob = second:get(1)
+  test.assert(#large.bytes == 40000,
+              "fetch-allocation failure prevented a subsequent execution")
+end
+
+function main(args: {string}): integer
+  test.assert(#args == 2, "worker fixture requires a scenario and result path")
+  test.assert(fixture.titan_sqlite_fixture_install() == 0,
+              "could not install SQLite test auto-extension")
+  local scenario = args[1]
+  if scenario == "open" then
+    cancelled_open()
+  elseif scenario == "prepare" then
+    cancelled_prepare()
+  elseif scenario == "step" then
+    cancelled_step()
+  elseif scenario == "execute" then
+    cancelled_execute()
+  elseif scenario == "close" then
+    cancelled_close()
+  elseif scenario == "reset" then
+    cancelled_reset()
+  elseif scenario == "query_allocation_failure" then
+    result_allocation_failure()
+  elseif scenario == "fetch_allocation_failure" then
+    fetch_allocation_failure()
+  else
+    raise "unknown SQLite worker fixture scenario"
+  end
+  test.assert(fixture.titan_sqlite_fixture_timed_out() == 0 and
+              fixture.titan_sqlite_fixture_live_connections() == 0 and
+              fixture.titan_sqlite_fixture_live_blobs() == 0,
+              "worker fixture timed out or retained a native resource")
+  fs.write_file(args[2], scenario)
+  return 0
+end

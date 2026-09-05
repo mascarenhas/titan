@@ -37,6 +37,10 @@ jobs:
       LLHTTP_VERSION: "9.4.3"
       LLHTTP_SHA256: "1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39"
       LLHTTP_BUILD_PROFILE: "static-pic-hidden-c99-v1"
+      SQLITE3_VERSION: "3.53.4"
+      SQLITE3_RELEASE: "3530400"
+      SQLITE3_SHA256: "0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c"
+      SQLITE3_BUILD_PROFILE: "static-pic-hidden-c99-threadsafe1-v1"
       OPENSSL_VERSION: "3.5.7"
       OPENSSL_SHA256: "a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8"
       OPENSSL_BUILD_PROFILE: "static-pic-hidden-minimal-v1"
@@ -88,6 +92,17 @@ jobs:
           key: ubuntu-24.04-${{ runner.arch }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-${{ env.LLHTTP_BUILD_PROFILE }}
           restore-keys: |
             ubuntu-24.04-${{ runner.arch }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-
+
+      - name: Cache bundled SQLite amalgamation and static build
+        uses: ubicloud/cache@v4
+        with:
+          path: |
+            sqlite-autoconf-${{ env.SQLITE3_RELEASE }}
+            sqlite-autoconf-${{ env.SQLITE3_RELEASE }}.tar.gz
+            sqlite3-build
+          key: ubuntu-24.04-${{ runner.arch }}-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-${{ env.SQLITE3_BUILD_PROFILE }}
+          restore-keys: |
+            ubuntu-24.04-${{ runner.arch }}-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-
 
       - name: Cache bundled OpenSSL source and static build
         uses: ubicloud/cache@v4
@@ -149,7 +164,7 @@ jobs:
             clean_titan_environment \
               "$PREFIX/bin/luarocks" remove titan --force
           fi
-          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test reflect; do
+          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test reflect sqlite3 json; do
             rm -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           rm -f "$PREFIX/share/titan/0.6/src/titan/test.titan"
@@ -176,6 +191,9 @@ jobs:
 
       - name: Build the pinned private llhttp support
         run: make llhttp
+
+      - name: Build the pinned private SQLite support
+        run: make sqlite3
 
       - name: Build the pinned bundled OpenSSL support
         run: make openssl
@@ -407,6 +425,10 @@ jobs:
       LLHTTP_VERSION: "9.4.3"
       LLHTTP_SHA256: "1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39"
       LLHTTP_BUILD_PROFILE: "static-pic-hidden-c99-v1"
+      SQLITE3_VERSION: "3.53.4"
+      SQLITE3_RELEASE: "3530400"
+      SQLITE3_SHA256: "0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c"
+      SQLITE3_BUILD_PROFILE: "static-pic-hidden-c99-threadsafe1-v1"
       OPENSSL_VERSION: "3.5.7"
       OPENSSL_SHA256: "a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8"
       OPENSSL_BUILD_PROFILE: "static-pic-hidden-minimal-v1"
@@ -456,6 +478,17 @@ jobs:
           restore-keys: |
             macos-latest-${{ runner.arch }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-
 
+      - name: Cache bundled SQLite amalgamation and static build
+        uses: actions/cache@v5
+        with:
+          path: |
+            sqlite-autoconf-${{ env.SQLITE3_RELEASE }}
+            sqlite-autoconf-${{ env.SQLITE3_RELEASE }}.tar.gz
+            sqlite3-build
+          key: macos-latest-${{ runner.arch }}-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-${{ env.SQLITE3_BUILD_PROFILE }}
+          restore-keys: |
+            macos-latest-${{ runner.arch }}-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-
+
       - name: Cache bundled OpenSSL source and static build
         uses: actions/cache@v5
         with:
@@ -491,6 +524,9 @@ jobs:
 
       - name: Build the pinned private llhttp support
         run: make llhttp
+
+      - name: Build the pinned private SQLite support
+        run: make sqlite3
 
       - name: Build the pinned bundled OpenSSL support
         run: make openssl
@@ -601,7 +637,7 @@ jobs:
       READLINE_MODE: system
       # Native dependency caches stop at the pre-LuaRocks boundary. Bump the
       # schema when their build recipes or cached layout change.
-      SANITIZER_NATIVE_CACHE_SCHEMA: "v1"
+      SANITIZER_NATIVE_CACHE_SCHEMA: "v2"
       CC: cc
       AR: ar
       RANLIB: ranlib
@@ -610,12 +646,15 @@ jobs:
       SANITIZER_LIBUV_SHA256: "66d511b9e6e334c0e62279eb234fbfb2b3110b1479c09b95b44c7afca8cff9e7"
       SANITIZER_LLHTTP_VERSION: "9.4.3"
       SANITIZER_LLHTTP_SHA256: "1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39"
+      SANITIZER_SQLITE3_VERSION: "3.53.4"
+      SANITIZER_SQLITE3_RELEASE: "3530400"
+      SANITIZER_SQLITE3_SHA256: "0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c"
       SANITIZER_OPENSSL_VERSION: "3.5.7"
       SANITIZER_OPENSSL_SHA256: "a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8"
       # Generated Titan translation units are large enough that combining
       # optimization with sanitizer instrumentation can exhaust this job's
       # budget. O0 retains the complete ASan/UBSan instrumentation;
-      # Lua, libbacktrace, libuv, and OpenSSL remain at O1 below.
+      # Lua and bundled native dependencies remain at O1 below.
       SANITIZER_FLAGS: "-O0 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       # Make's content stamps deliberately revisit native dependencies from
       # later targets, so their complete O1 configuration must remain in the
@@ -629,6 +668,7 @@ jobs:
       LIBUV_BUILD_TYPE: Debug
       LIBUV_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LLHTTP_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      SQLITE3_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       OPENSSL_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       OPENSSL_EXTRA_CONFIGURE_FLAGS: "no-asm"
       TITAN_EXTRA_CFLAGS: "-O0 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
@@ -684,6 +724,7 @@ jobs:
               "libbacktrace=$libbacktrace_rev" \
               "libuv=$SANITIZER_LIBUV_VERSION:$SANITIZER_LIBUV_SHA256" \
               "llhttp=$SANITIZER_LLHTTP_VERSION:$SANITIZER_LLHTTP_SHA256" \
+              "sqlite3=$SANITIZER_SQLITE3_VERSION:$SANITIZER_SQLITE3_SHA256" \
               "openssl=$SANITIZER_OPENSSL_VERSION:$SANITIZER_OPENSSL_SHA256" \
               "readline_mode=$READLINE_MODE" \
               "lua_cflags=$LUA_MYCFLAGS" \
@@ -697,6 +738,7 @@ jobs:
               "titan_cppflags=${TITAN_EXTRA_CPPFLAGS:-}" \
               "titan_cflags=$TITAN_EXTRA_CFLAGS" \
               "llhttp_cflags=$LLHTTP_BUILD_CFLAGS" \
+              "sqlite3_cflags=$SQLITE3_BUILD_CFLAGS" \
               "openssl_cflags=$OPENSSL_BUILD_CFLAGS" \
               "openssl_configure=$OPENSSL_EXTRA_CONFIGURE_FLAGS" \
               "cc_command=${CC:-cc}" \
@@ -733,6 +775,9 @@ jobs:
             llhttp-release-v${{ env.SANITIZER_LLHTTP_VERSION }}
             llhttp-release-v${{ env.SANITIZER_LLHTTP_VERSION }}.tar.gz
             llhttp-build
+            sqlite-autoconf-${{ env.SANITIZER_SQLITE3_RELEASE }}
+            sqlite-autoconf-${{ env.SANITIZER_SQLITE3_RELEASE }}.tar.gz
+            sqlite3-build
             openssl-${{ env.SANITIZER_OPENSSL_VERSION }}
             openssl-${{ env.SANITIZER_OPENSSL_VERSION }}.tar.gz
             openssl-build
@@ -745,7 +790,7 @@ jobs:
           # CPU slots while overlapping configuration, download, and compile
           # work on a cold cache miss.
           bash spec/support/ci_sanitizer_capture.sh native-dependencies \
-            make openssl lua libuv libbacktrace llhttp
+            make openssl lua libuv libbacktrace llhttp sqlite3
           grep -qx 'provider=system' \
             "lua-5.5.1/.titan-readline-8.3-p3.config"
 
@@ -758,6 +803,7 @@ jobs:
           test -f libbacktrace/.libs/libbacktrace.a
           test -f libuv-build/libuv.a
           test -f llhttp-build/libtitan-llhttp.a
+          test -f sqlite3-build/libtitan-sqlite3.a
           test -f openssl-build/libssl.a
           test -f openssl-build/libcrypto.a
           test ! -e "$PREFIX/bin/luarocks"
@@ -779,6 +825,9 @@ jobs:
             llhttp-release-v${{ env.SANITIZER_LLHTTP_VERSION }}
             llhttp-release-v${{ env.SANITIZER_LLHTTP_VERSION }}.tar.gz
             llhttp-build
+            sqlite-autoconf-${{ env.SANITIZER_SQLITE3_RELEASE }}
+            sqlite-autoconf-${{ env.SANITIZER_SQLITE3_RELEASE }}.tar.gz
+            sqlite3-build
             openssl-${{ env.SANITIZER_OPENSSL_VERSION }}
             openssl-${{ env.SANITIZER_OPENSSL_VERSION }}.tar.gz
             openssl-build
@@ -824,7 +873,7 @@ jobs:
           test -f "$TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT/manifest.txt"
           test -f "$snapshot_provider" && test ! -L "$snapshot_provider"
           cmp "$snapshot_provider" "$provider"
-          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test reflect; do
+          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test reflect sqlite3 json; do
             test -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           test -f "$PREFIX/share/titan/0.6/src/titan/test.titan" &&
@@ -886,6 +935,22 @@ jobs:
           bash spec/support/ci_sanitizer_capture.sh ssl-http \
             make titan-stdlib-test-run \
               TITAN_FILTER='test_ssl_http_fresh_process_sanitizer_composition$'
+
+      - name: Run native SQLite sanitizer gate
+        run: |
+          bash spec/support/ci_sanitizer_capture.sh sqlite3-tests \
+            make titan-stdlib-test-run TITAN_FILTER='^sqlite3%.tests%.'
+
+      - name: Run native JSON sanitizer gate
+        run: |
+          bash spec/support/ci_sanitizer_capture.sh json-mapping-gc \
+            make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_mapping_allocated_constructor_arguments_survive_collection'
+          bash spec/support/ci_sanitizer_capture.sh json-wide-folds \
+            make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_parser_wide_fold_collections'
+          bash spec/support/ci_sanitizer_capture.sh json-nesting \
+            make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_parser_supported_nesting_boundary'
+          bash spec/support/ci_sanitizer_capture.sh json-numbers \
+            make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_core_float_range_tags_and_round_trips'
 
       - name: Run native reflection sanitizer gate
         run: |

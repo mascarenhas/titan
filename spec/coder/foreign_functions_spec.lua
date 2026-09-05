@@ -315,6 +315,165 @@ describe("source-defined foreign functions", function()
         end)
     end)
 
+    it("writes local pointer outputs and uses native size and alignment", function()
+        with_header([[
+            #include <stddef.h>
+            typedef struct ffi_item { int value; } ffi_item;
+            static int ffi_outputs(ffi_item **item, const char **text) {
+                static ffi_item object = { 7 };
+                *item = &object;
+                *text = "x";
+                return 0;
+            }
+            static int ffi_layout(size_t size, size_t alignment) {
+                return size == sizeof(ffi_item)
+                    && alignment == _Alignof(ffi_item);
+            }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                foreign function outputs(): int
+                    local item: *c.ffi_item = nil
+                    local text: const *char = nil
+                    c.ffi_outputs(item, text)
+                    local erased: *void = item
+                    if erased ~= item then return -1 end
+                    if c.ffi_layout(c.ffi_item.sizeof,
+                                    c.ffi_item.alignof) == 0 then return -2 end
+                    return item.value + (text[0] as int)
+                end
+
+                function result(): integer
+                    return outputs()
+                end
+
+                function ordinary_result(): integer
+                    local item: *c.ffi_item = nil
+                    local text: const *char = nil
+                    c.ffi_outputs(item, text)
+                    return item.value + (text[0] as integer)
+                end
+            ]], [[
+                assert(test.result() == 127)
+                assert(test.ordinary_result() == 127)
+            ]])
+        end)
+    end)
+
+    it("evaluates foreign elseif conditions lazily and once", function()
+        with_header([[
+            static int ffi_trace = 0;
+            static int ffi_condition(int digit, int selected) {
+                ffi_trace = ffi_trace * 10 + digit;
+                return digit == selected;
+            }
+            static void ffi_clear(void) { ffi_trace = 0; }
+            static int ffi_observed(void) { return ffi_trace; }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                foreign function select_arm(selected: int): int
+                    c.ffi_clear()
+                    local result: int = 0
+                    if c.ffi_condition(1, selected) then
+                        result = 10
+                    elseif c.ffi_condition(2, selected) then
+                        result = 20
+                    elseif c.ffi_condition(3, selected) then
+                        result = 30
+                    else
+                        result = 40
+                    end
+                    return c.ffi_observed() * 100 + result
+                end
+
+                function result(selected: integer): integer
+                    return select_arm(selected)
+                end
+            ]], [[
+                assert(test.result(1) == 110)
+                assert(test.result(2) == 1220)
+                assert(test.result(3) == 12330)
+                assert(test.result(4) == 12340)
+            ]])
+        end)
+    end)
+
+    it("uses the C ABI for source foreign call statements and deferred calls",
+    function()
+        with_header([[
+            static int ffi_value = 0;
+            static void ffi_reset(void) { ffi_value = 0; }
+            static int ffi_add(int value) { ffi_value += value; return ffi_value; }
+            static int ffi_current(void) { return ffi_value; }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                foreign function add(amount: int)
+                    c.ffi_add(amount)
+                end
+
+                foreign function add_result(amount: int): int
+                    return c.ffi_add(amount)
+                end
+
+                function exercise(): integer
+                    c.ffi_reset()
+                    defer add(20)
+                    add(1)
+                    add_result(2)
+                    return c.ffi_current()
+                end
+
+                function current(): integer
+                    return c.ffi_current()
+                end
+            ]], [[
+                assert(test.exercise() == 3)
+                assert(test.current() == 23)
+            ]])
+        end)
+    end)
+
+    it("preserves raw pointer carriers in written pointer casts", function()
+        with_header([[
+            static void *ffi_slot = 0;
+            static void *ffi_pointer_source(void) { return &ffi_slot; }
+            static void ffi_pointer_sink(void **pointer) {
+                *pointer = (void *)"written";
+            }
+            static int ffi_written(void) {
+                return ffi_slot != 0 && ((const char *)ffi_slot)[0] == 'w';
+            }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+                local type Pointer = *void
+
+                foreign function call_pointer(): *Pointer
+                    return c.ffi_pointer_source() as *Pointer
+                end
+
+                foreign function local_pointer(): int
+                    local raw = c.ffi_pointer_source()
+                    c.ffi_pointer_sink(raw as *Pointer)
+                    if raw ~= c.ffi_pointer_source() then return -1 end
+                    return c.ffi_written()
+                end
+
+                function result(): integer
+                    if call_pointer() ~= c.ffi_pointer_source() then return -2 end
+                    return local_pointer()
+                end
+            ]], [[
+                assert(test.result() == 1)
+            ]])
+        end)
+    end)
+
     it("renders the closed raw-C variable and inline-shape branches", function()
         local cmodule = types.CModule("fixture", {}, {})
         local ctx = coder_declarations._new_foreign_context({ module = "test" })

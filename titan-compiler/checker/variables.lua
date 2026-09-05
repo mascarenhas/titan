@@ -764,9 +764,12 @@ function mutable_c_call_argument_decl(exp, target)
         elseif conversion and conversion.kind ==
                "address_then_unsafe_object_pointer" then
             direct_address_source = exp.exp
-        elseif is_mutable_c_address_source(exp.exp)
-           and types.c_mutable_address_coerceable(
-               exp.exp._type, exp._type) then
+        elseif (exp._adjustment
+                and exp._adjustment.kind == "direct_coercion"
+                and exp._adjustment.coercion.op == "mutable_c_address")
+           or (exp._written_cast
+                and exp._written_cast.op == "coercion"
+                and exp._written_cast.coercion.op == "mutable_c_address") then
             -- An inner explicit cast may take the exact local address before
             -- an outer unsafe pointer reinterpretation reaches the parameter.
             direct_address_source = exp.exp
@@ -780,11 +783,16 @@ function mutable_c_call_argument_decl(exp, target)
         return exp.var._decl, exp
     end
 
+    local source = types.resolve_c_typedef(exp._type)
+    -- Pointer-local mutation needs the actual address plan found above. An
+    -- explicit pointer reinterpretation may have the same endpoint types but
+    -- addresses external storage, not the local variable containing its bits.
+    if source and source._tag == "Type.CPointer" then return nil end
+
     if types.c_mutable_address_coerceable(exp._type, target) then
         return exp.var._decl, exp
     end
 
-    local source = types.resolve_c_typedef(exp._type)
     local planned_conversion = adjusted._adjustment
         or adjusted._assignment_adjustment
         or adjusted._written_cast

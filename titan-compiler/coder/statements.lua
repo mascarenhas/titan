@@ -3017,13 +3017,11 @@ function codestat_dispatch(ctx, node)
             return codemultiassignment(ctx, node)
         end
     elseif tag == "Ast.StatCall" then
-        local callee = node.callexp.exp
         local callcode
         if node.callexp._c_pointer_call then
             local fstats, fexp = codecfunctionptrcall(ctx, node.callexp)
             callcode = fstats .. "\n    ((void)(" .. fexp .. "));"
-        elseif callee.var and callee.var._tag == "Ast.VarDot"
-           and callee.var.exp._type._tag == "Type.CModule" then
+        elseif node.callexp._direct_foreign_reference then
             local fstats, fexp = codeforeigncall(ctx, node.callexp)
             callcode = fstats .. "\n    ((void)(" .. fexp .. "));"
         else

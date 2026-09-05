@@ -1,0 +1,176 @@
+local json_cstdlib = foreign import "stdlib.h"
+local json_clocale = foreign import "locale.h"
+
+local function json_byte(subject: string, position: integer): integer
+  local bytes = subject as const *unsigned char
+  return bytes[position - 1] as integer
+end
+
+-- The PEG has already validated the token. Keep decimal arithmetic exact until
+-- an integer target has been decided; binary floating point cannot distinguish
+-- adjacent integers above 2^53.
+local function decimal_integer(token: string, source: string, position: integer,
+                                path: Path): integer
+  local negative = json_byte(token, 1) == 45
+  local index = 1
+  if negative then index = 2 end
+  local start = index
+  local point_position = 0
+  local fraction = 0
+  local after_point = false
+  while index <= #token do
+    local byte = json_byte(token, index)
+    if byte == 101 or byte == 69 then break end
+    if byte == 46 then
+      after_point = true
+      point_position = index
+    else
+      if after_point then fraction = fraction + 1 end
+    end
+    index = index + 1
+  end
+  local coefficient = strings.sub(token, start, index - 1)
+  if point_position ~= 0 then
+    coefficient = strings.sub(token, start, point_position - 1) ..
+                  strings.sub(token, point_position + 1, index - 1)
+  end
+  local exponent = 0
+  if index <= #token then
+    index = index + 1
+    local exponent_negative = false
+    local sign = json_byte(token, index)
+    if sign == 43 or sign == 45 then
+      exponent_negative = sign == 45
+      index = index + 1
+    end
+    -- Saturate beyond any scale that could affect this bounded token. Even
+    -- million-digit exponents take one pass and never overflow an integer.
+    local saturation = #token + 20
+    while index <= #token do
+      local digit = json_byte(token, index) - 48
+      if exponent <= saturation // 10 then
+        exponent = exponent * 10 + digit
+        if exponent > saturation then exponent = saturation end
+      else
+        exponent = saturation
+      end
+      index = index + 1
+    end
+    if exponent_negative then exponent = -exponent end
+  end
+  local first = 1
+  while first <= #coefficient and json_byte(coefficient, first) == 48 do
+    first = first + 1
+  end
+  if first > #coefficient then return 0 end
+  local last = #coefficient
+  local scale = exponent - fraction
+  if scale < 0 then
+    while last >= first and scale < 0 and json_byte(coefficient, last) == 48 do
+      last = last - 1
+      scale = scale + 1
+    end
+    if scale < 0 then
+      json_fail("non_integral", "number is not an exact integer", path, source, position)
+    end
+  end
+  if last - first + 1 + scale > 19 then
+    json_fail("integer_range", "integer is outside the Titan integer range", path, source, position)
+  end
+  -- Accumulate negatively so the asymmetric minimum integer remains usable.
+  local limit = -math.maxinteger
+  if negative then limit = math.mininteger end
+  local quotient = limit // 10 + 1
+  local last_digit = -(limit - quotient * 10)
+  local result = 0
+  index = first
+  while index <= last + scale do
+    local digit = 0
+    if index <= last then digit = json_byte(coefficient, index) - 48 end
+    if result < quotient or (result == quotient and digit > last_digit) then
+      json_fail("integer_range", "integer is outside the Titan integer range", path, source, position)
+    end
+    result = result * 10 - digit
+    index = index + 1
+  end
+  if negative then return result end
+  return -result
+end
+
+local function decimal_float(token: string, source: string, position: integer,
+                              path: Path): float
+  local convention = json_clocale.localeconv()
+  local point = convention.decimal_point as string
+  local normalized = token
+  if point ~= "." then
+    local index = 1
+    while index <= #token do
+      if json_byte(token, index) == 46 then
+        normalized = strings.sub(token, 1, index - 1) .. point ..
+                     strings.sub(token, index + 1)
+        break
+      end
+      index = index + 1
+    end
+  end
+  local result: float = json_cstdlib.strtod(normalized, nil)
+  if result ~= result or result == math.huge or result == -math.huge then
+    json_fail("number_range", "number is outside the finite float range", path, source, position)
+  end
+  if result == 0.0 then
+    local index = 1
+    while index <= #token do
+      local byte = json_byte(token, index)
+      if byte == 101 or byte == 69 then break end
+      if byte >= 49 and byte <= 57 then
+        json_fail("number_range", "nonzero number underflows to zero", path, source, position)
+      end
+      index = index + 1
+    end
+  end
+  return result
+end
+
+local function number_value(node: Node, integer_target: boolean,
+                             float_target: boolean, source: string,
+                             path: Path): value
+  local ending: integer = node.scalar
+  local token = strings.sub(source, node.position, ending - 1)
+  if integer_target then return decimal_integer(token, source, node.position, path) end
+  if not float_target then
+    local integer_form = true
+    local index = 1
+    while index <= #token do
+      local byte = json_byte(token, index)
+      if byte == 46 or byte == 101 or byte == 69 then
+        integer_form = false
+        break
+      end
+      index = index + 1
+    end
+    if integer_form then return decimal_integer(token, source, node.position, path) end
+  end
+  return decimal_float(token, source, node.position, path)
+end
+
+local function float_text(number: float, path: Path): string
+  if number ~= number or number == math.huge or number == -math.huge then
+    json_fail("non_finite", "JSON cannot represent a nonfinite number", path, nil, nil)
+  end
+  local text = strings.format("%.17g", number)
+  local convention = json_clocale.localeconv()
+  local point = convention.decimal_point as string
+  if point ~= "." then
+    local first?, last? = strings.find(text, point)
+    if first ~= nil then
+      text = strings.sub(text, 1, first - 1) .. "." .. strings.sub(text, last + 1)
+    end
+  end
+  local has_marker = false
+  for index = 1, #text do
+    local byte = json_byte(text, index)
+    if byte == 46 or byte == 101 or byte == 69 then has_marker = true end
+  end
+  if not has_marker then text = text .. ".0" end
+  return text
+end

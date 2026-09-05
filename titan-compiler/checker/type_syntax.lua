@@ -846,6 +846,19 @@ function trycoerce(source, target, errors, use,
         return n, n._adjustment
     end
 
+    local source_c_type = types.resolve_c_typedef(source._type)
+    if source_c_type and source_c_type._tag == "Type.CPointer"
+       and types.c_mutable_address_coerceable(source._type, target) then
+        -- An exact pointer out-parameter denotes the pointer variable's own
+        -- storage. A const/captured binding or temporary has no mutable local
+        -- address; do not silently reinterpret its pointer value instead.
+        checker.typeerror(errors, source.loc,
+            "cannot take a mutable C address of non-addressable "
+            .. "expression of type '%s'%s", types.tostring(source._type),
+            use and (" in " .. use) or "")
+        return failed_c_adjustment(source, target), false, true
+    end
+
     local adjustment = precomputed_adjustment
     local interface_conversion =
         adjustment and adjustment.interface_conversion or nil

@@ -1,0 +1,296 @@
+local async = import "async"
+local uv = import "uv.titan"
+local reflect = import "reflect"
+local strings = import "string"
+local math = import "math"
+
+record Error
+  const message: string
+  const code: integer?
+  const extended_code: integer?
+  const operation: string
+end
+
+record Connection
+  local handle: *sqlc.sqlite3
+  local statements: integer
+  local busy: boolean
+  local active_statement: Statement?
+end
+
+record Statement
+  local const connection: Connection
+  local handle: *sqlc.sqlite3_stmt
+  local parameter_count: integer
+end
+
+record Cursor
+  const columns: const {Column}
+  local const statement: Statement
+  local pending: Row?
+  local exhausted: boolean
+  local closed: boolean
+end
+
+local function check_result(packet: *sqlnative.TitanSqlitePacket,
+                             operation: string)
+  if packet.failed == 0 then return end
+  local message = "SQLite operation failed"
+  if packet.message ~= nil then
+    message = packet.message as string
+  elseif packet.fallback_message ~= nil then
+    message = packet.fallback_message as string
+  end
+  if packet.cleanup_code ~= 0 then
+    message = message .. "; cleanup: "
+    if packet.cleanup_message ~= nil then
+      message = message .. (packet.cleanup_message as string)
+    else
+      message = message .. "SQLite code " .. (packet.cleanup_code as integer)
+    end
+  end
+  local code: integer?
+  local extended_code: integer?
+  if packet.code ~= 0 then
+    code = packet.code
+    extended_code = packet.extended_code
+  end
+  raise Error.new(message, code, extended_code, operation)
+end
+
+-- A packet is rooted by its suspended caller and this lexical cleanup. Raw
+-- pointers passed to run_foreign alone do not retain their pointees. SQLite
+-- resource retirement remains on a worker even during cancellation unwind.
+local function retire_packet(packet: *sqlnative.TitanSqlitePacket)
+  if packet.owns_db ~= 0 or packet.owns_stmt ~= 0 or packet.needs_reset ~= 0 then
+    uv.run_foreign_cleanup(sqlite_retire_worker, packet)
+  end
+end
+
+local function Connection:reserve(operation: string, allow_cursor: boolean)
+  if not self.handle then
+    raise Error.new("connection is closed", nil, nil, operation)
+  end
+  if self.busy then
+    raise Error.new("connection has an outstanding operation", nil, nil, operation)
+  end
+  if not allow_cursor and self.active_statement ~= nil then
+    raise Error.new("connection has an active cursor", nil, nil, operation)
+  end
+  self.busy = true
+end
+
+local function Statement:require_open(operation: string)
+  if not self.handle then
+    raise Error.new("statement is closed", nil, nil, operation)
+  end
+end
+
+function connect(name: string): Connection
+  check_no_nul(name, "connect")
+  -- Allocate the public shell before acquiring the native handle.
+  local connection = Connection.new(nil, 0, false, nil)
+  local packet: owned *sqlnative.TitanSqlitePacket = sqlnative.TitanSqlitePacket.new()
+  defer sqlite_free_packet(packet)
+  defer retire_packet(packet)
+  copy_input(packet, name, "connect")
+  async.run_foreign(sqlite_open_worker, packet)
+  check_result(packet, "connect")
+  connection.handle = packet.db
+  packet.owns_db = 0
+  return connection
+end
+
+function Connection:prepare(sql: string): Statement
+  self:reserve("prepare", true)
+  defer self.busy = false
+  check_no_nul(sql, "prepare")
+  local statement = Statement.new(self, nil, 0)
+  local packet: owned *sqlnative.TitanSqlitePacket = sqlnative.TitanSqlitePacket.new()
+  defer sqlite_free_packet(packet)
+  defer retire_packet(packet)
+  packet.db = self.handle
+  copy_input(packet, sql, "prepare")
+  async.run_foreign(sqlite_prepare_worker, packet)
+  check_result(packet, "prepare")
+  statement.parameter_count = packet.parameter_count
+  statement.handle = packet.stmt
+  self.statements = self.statements + 1
+  packet.owns_stmt = 0
+  return statement
+end
+
+function Connection:close()
+  if not self.handle then return end
+  self:reserve("close", false)
+  defer self.busy = false
+  if self.statements ~= 0 then
+    raise Error.new("connection owns open statements", nil, nil, "close")
+  end
+  local packet: owned *sqlnative.TitanSqlitePacket = sqlnative.TitanSqlitePacket.new()
+  defer sqlite_free_packet(packet)
+  packet.db = self.handle
+  -- A failed submission leaves the public owner open and available for retry.
+  defer do
+    if packet.db == nil then self.handle = nil end
+  end
+  uv.run_foreign_cleanup(sqlite_close_worker, packet)
+  check_result(packet, "close")
+end
+
+function Statement:close()
+  if not self.handle then return end
+  self.connection:reserve("statement.close", true)
+  defer self.connection.busy = false
+  if self.connection.active_statement == self then
+    raise Error.new("statement has an active cursor", nil, nil, "statement.close")
+  end
+  local packet: owned *sqlnative.TitanSqlitePacket = sqlnative.TitanSqlitePacket.new()
+  defer sqlite_free_packet(packet)
+  packet.db = self.connection.handle
+  packet.stmt = self.handle
+  defer do
+    if packet.stmt == nil then
+      self.handle = nil
+      self.connection.statements = self.connection.statements - 1
+    end
+  end
+  uv.run_foreign_cleanup(sqlite_finalize_worker, packet)
+  check_result(packet, "statement.close")
+end
+
+local function Connection:transaction(worker: foreign (*void) -> (),
+                                      operation: string)
+  self:reserve(operation, false)
+  defer self.busy = false
+  local packet: owned *sqlnative.TitanSqlitePacket = sqlnative.TitanSqlitePacket.new()
+  defer sqlite_free_packet(packet)
+  packet.db = self.handle
+  async.run_foreign(worker, packet)
+  check_result(packet, operation)
+end
+
+function Connection:commit()
+  self:transaction(sqlite_commit_worker, "commit")
+end
+
+function Connection:rollback()
+  self:transaction(sqlite_rollback_worker, "rollback")
+end
+
+function Connection:get_autocommit(): boolean
+  self:reserve("get_autocommit", true)
+  defer self.busy = false
+  local packet: owned *sqlnative.TitanSqlitePacket = sqlnative.TitanSqlitePacket.new()
+  defer sqlite_free_packet(packet)
+  packet.db = self.handle
+  async.run_foreign(sqlite_autocommit_worker, packet)
+  return packet.autocommit ~= 0
+end
+
+function Connection:set_autocommit(autocommit: boolean)
+  if autocommit then
+    self:transaction(sqlite_commit_worker, "set_autocommit")
+  else
+    self:transaction(sqlite_begin_worker, "set_autocommit")
+  end
+end
+
+function Statement:execute(...: value): integer
+  self:require_open("execute")
+  self.connection:reserve("execute", false)
+  defer self.connection.busy = false
+  local packet: owned *sqlnative.TitanSqlitePacket = sqlnative.TitanSqlitePacket.new()
+  defer sqlite_free_packet(packet)
+  defer retire_packet(packet)
+  packet.db = self.connection.handle
+  packet.stmt = self.handle
+  self:bind(packet, "execute", ...)
+  async.run_foreign(sqlite_execute_worker, packet)
+  check_result(packet, "execute")
+  return packet.changes
+end
+
+function Statement:query(...: value): Cursor
+  self:require_open("query")
+  self.connection:reserve("query", false)
+  defer self.connection.busy = false
+  local packet: owned *sqlnative.TitanSqlitePacket = sqlnative.TitanSqlitePacket.new()
+  defer sqlite_free_packet(packet)
+  defer retire_packet(packet)
+  packet.db = self.connection.handle
+  packet.stmt = self.handle
+  self:bind(packet, "query", ...)
+  async.run_foreign(sqlite_query_worker, packet)
+  check_result(packet, "query")
+  local columns = decode_columns(packet)
+  local row: Row?
+  if packet.has_row ~= 0 then row = decode_row(packet, columns) end
+  local cursor = Cursor.new(columns, self, row, packet.done ~= 0, false)
+  if not cursor.exhausted then self.connection.active_statement = self end
+  packet.needs_reset = 0
+  return cursor
+end
+
+function Cursor:fetch(): Row?
+  if self.closed then
+    raise Error.new("cursor is closed", nil, nil, "fetch")
+  end
+  if self.pending ~= nil then
+    local row: Row? = self.pending
+    self.pending = nil
+    return row
+  end
+  if self.exhausted then return nil end
+  self.statement.connection:reserve("fetch", true)
+  defer self.statement.connection.busy = false
+  local packet: owned *sqlnative.TitanSqlitePacket = sqlnative.TitanSqlitePacket.new()
+  defer sqlite_free_packet(packet)
+  packet.db = self.statement.connection.handle
+  packet.stmt = self.statement.handle
+  packet.needs_reset = 1
+  local published = false
+  defer do
+    if not published then
+      retire_packet(packet)
+      self.closed = true
+      self.statement.connection.active_statement = nil
+    end
+  end
+  async.run_foreign(sqlite_fetch_worker, packet)
+  check_result(packet, "fetch")
+  if packet.done ~= 0 then
+    self.exhausted = true
+    self.statement.connection.active_statement = nil
+    published = true
+    return nil
+  end
+  local row = decode_row(packet, self.columns)
+  packet.needs_reset = 0
+  published = true
+  return row
+end
+
+function Cursor:close()
+  if self.closed then return end
+  if self.exhausted then
+    self.closed = true
+    return
+  end
+  self.statement.connection:reserve("cursor.close", true)
+  defer self.statement.connection.busy = false
+  local packet: owned *sqlnative.TitanSqlitePacket = sqlnative.TitanSqlitePacket.new()
+  defer sqlite_free_packet(packet)
+  packet.db = self.statement.connection.handle
+  packet.stmt = self.statement.handle
+  packet.needs_reset = 1
+  defer do
+    if packet.needs_reset == 0 then
+      self.closed = true
+      self.pending = nil
+      self.statement.connection.active_statement = nil
+    end
+  end
+  uv.run_foreign_cleanup(sqlite_reset_worker, packet)
+  check_result(packet, "cursor.close")
+end

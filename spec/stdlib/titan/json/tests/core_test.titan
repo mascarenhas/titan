@@ -1,0 +1,208 @@
+local core_locale = foreign import "locale.h"
+
+local function core_error(action: () -> (), code: string): json.Error
+  local failure = expect_json_error(action)
+  test.assert(failure.code == code, "expected " .. code .. ", got " .. failure.code)
+  return failure
+end
+
+local function core_integer(source: string, expected: integer)
+  case reflect.inspect(json.decode(source, reflect.Type.is_integer()))
+  when is_integer: actual then test.assert(actual == expected, source)
+  else raise "integer descriptor did not produce an integer"
+  end
+end
+
+function test_core_scalars_containers_and_escaping(_context: test.Context)
+  test.assert(json.encode(nil) == "null")
+  test.assert(json.encode(true) == "true" and json.encode(false) == "false")
+  test.assert(json.encode(42) == "42" and json.encode(42.0) == "42.0")
+  local empty_array: {value} = {}
+  local empty_map: {string: value} = {}
+  test.assert(json.encode(empty_array) == "[]" and json.encode(empty_map) == "{}")
+  local array: {value} = {1, nil, 3, nil}
+  test.assert(json.encode(array) == "[1,null,3]")
+  test.assert(#array == 3 and array[2] == nil, "encoding changed the Array")
+  local frozen: const {value} = {false, "ok"}
+  test.assert(json.encode(frozen) == '[false,"ok"]')
+  local text = "a\0\1\b\t\n\f\r\"\\é😀"
+  local encoded = json.encode(text)
+  test.assert(encoded == [["a\u0000\u0001\b\t\n\f\r\"\\é😀"]])
+  test.assert(json.decode(encoded) == text)
+  local object: {string: value} = {["z"] = 2, ["a"] = false, ["middle"] = "text"}
+  test.assert(json.encode(object) == [[{"a":false,"middle":"text","z":2}]])
+  local utf8_keys: {string: value} = {}
+  utf8_keys["é"] = 2
+  utf8_keys["z"] = 1
+  test.assert(json.encode(utf8_keys) == [[{"z":1,"é":2}]])
+end
+
+function test_core_exact_integer_conversion(_context: test.Context)
+  test.assert(json.encode(math.maxinteger) == "9223372036854775807")
+  test.assert(json.encode(math.mininteger) == "-9223372036854775808")
+  core_integer("9223372036854775807", math.maxinteger)
+  core_integer("-9223372036854775808", math.mininteger)
+  core_integer("9223372036854775807.0", math.maxinteger)
+  core_integer("-9223372036854775808.000e0", math.mininteger)
+  core_integer("9007199254740993.0", 9007199254740993)
+  core_integer("900719925474099300e-2", 9007199254740993)
+  core_integer("123.4500e2", 12345)
+  core_integer("10000000000000000000000000000000000e-34", 1)
+  core_integer("-0", 0)
+  core_integer("0e999999999999999999999999", 0)
+  core_integer("-0.0e-999999999999999999999", 0)
+  core_error(function() json.decode("9223372036854775808") end, "integer_range")
+  core_error(function() json.decode("-9223372036854775809") end, "integer_range")
+  core_error(function() json.decode("9223372036854775808.0", reflect.Type.is_integer()) end,
+             "integer_range")
+  core_error(function() json.decode("1.0000000000000001", reflect.Type.is_integer()) end,
+             "non_integral")
+  core_error(function() json.decode("1e-999999999999", reflect.Type.is_integer()) end,
+             "non_integral")
+  core_error(function() json.decode("1e999999999999", reflect.Type.is_integer()) end,
+             "integer_range")
+end
+
+function test_core_float_range_tags_and_round_trips(_context: test.Context)
+  local samples: {float} = {0.0, -0.0, 1.0, -1.25, math.pi, 1.2345678901234567,
+    9007199254740992.0, 1.7976931348623157e308, 2.2250738585072014e-308,
+    4.9406564584124654e-324}
+  for index = 1, #samples do
+    local sample = samples[index] as float
+    local encoded = json.encode(sample)
+    case reflect.inspect(json.decode(encoded))
+    when is_float: actual then
+      test.assert(actual == sample, "float round trip changed " .. encoded)
+      if sample == 0.0 then test.assert(1.0 / actual == 1.0 / sample) end
+    else raise "float round trip lost its numeric tag"
+    end
+  end
+  test.assert(json.encode(-0.0) == "-0.0")
+  case reflect.inspect(json.decode("1e0"))
+  when is_float: number then test.assert(number == 1.0)
+  else raise "exponent notation did not produce a float"
+  end
+  case reflect.inspect(json.decode("-0"))
+  when is_integer: number then test.assert(number == 0)
+  else raise "integer negative zero did not normalize"
+  end
+  local wide: float = json.decode("9223372036854775808", reflect.Type.is_float())
+  test.assert(wide == 9223372036854775808.0)
+  core_error(function() json.decode("1e309") end, "number_range")
+  core_error(function() json.decode("1e-9999") end, "number_range")
+  core_error(function() json.encode(math.huge) end, "non_finite")
+  core_error(function() json.encode(-math.huge) end, "non_finite")
+  core_error(function() json.encode(0.0 / 0.0) end, "non_finite")
+end
+
+function test_core_locale_independent_numbers(_context: test.Context)
+  local original = core_locale.setlocale(core_locale.LC_NUMERIC, nil) as string
+  defer core_locale.setlocale(core_locale.LC_NUMERIC, original)
+  local candidates: {string} = {"de_DE.UTF-8", "fr_FR.UTF-8", "pt_BR.UTF-8",
+    "de_DE.utf8", "fr_FR.utf8", "French_France.1252"}
+  local changed = false
+  for index = 1, #candidates do
+    if core_locale.setlocale(core_locale.LC_NUMERIC, candidates[index]) ~= nil then
+      local point = core_locale.localeconv().decimal_point as string
+      if point ~= "." then changed = true; break end
+    end
+  end
+  if not changed then test.skip("no alternate numeric locale installed") end
+  local before = core_locale.setlocale(core_locale.LC_NUMERIC, nil) as string
+  test.assert(json.encode(1234.5) == "1234.5")
+  test.assert(json.decode("1234.5", reflect.Type.is_float()) == 1234.5)
+  core_integer("9007199254740993.0", 9007199254740993)
+  test.assert((core_locale.setlocale(core_locale.LC_NUMERIC, nil) as string) == before,
+              "JSON changed the process numeric locale")
+end
+
+function test_core_options_and_limits(_context: test.Context)
+  test.assert(json.decode("null", nil, json.DecodeOption.null_value(false)) == false)
+  test.assert(json.decode("null", nil, json.DecodeOption.null_value(false),
+    json.DecodeOption.null_value(nil)) == nil)
+  test.assert(json.encode(false, json.EncodeOption.null_value(false)) == "null")
+  test.assert(json.encode(0.0, json.EncodeOption.null_value(0)) == "null")
+  test.assert(json.encode("", json.EncodeOption.null_value("")) == "null")
+  test.assert(json.encode(false, json.EncodeOption.null_value(false),
+    json.EncodeOption.null_value(nil)) == "false")
+  test.assert(json.decode("null", reflect.Type.is_nil(), json.DecodeOption.null_value(false)) == nil)
+  test.assert(json.decode("null", reflect.Type.is_option(reflect.Type.is_string()),
+    json.DecodeOption.null_value(false)) == nil)
+  core_error(function() json.encode(1, json.EncodeOption.max_bytes(0)) end, "invalid_option")
+  core_error(function() json.decode("1", nil, json.DecodeOption.max_nodes(-1)) end, "invalid_option")
+  core_error(function() json.encode(1, json.EncodeOption.max_depth(0)) end, "invalid_option")
+  core_error(function() json.decode("1", nil, json.DecodeOption.max_depth(100000)) end, "invalid_option")
+  core_error(function() json.encode(1, json.EncodeOption.null_value(0.0 / 0.0)) end, "invalid_option")
+  core_error(function() json.decode("1", nil, json.DecodeOption.null_value(0.0 / 0.0)) end,
+             "invalid_option")
+  test.assert(json.encode(1, json.EncodeOption.max_bytes(0), json.EncodeOption.max_bytes(1)) == "1")
+  test.assert(json.encode("x", json.EncodeOption.max_bytes(3)) == [["x"]])
+  core_error(function() json.encode("x", json.EncodeOption.max_bytes(2)) end, "limit_exceeded")
+  core_error(function() json.encode("\0", json.EncodeOption.max_bytes(7)) end, "limit_exceeded")
+  local exact: {value} = {1, nil, 2}
+  test.assert(json.encode(exact, json.EncodeOption.max_nodes(4), json.EncodeOption.max_depth(1)) ==
+              "[1,null,2]")
+  core_error(function() json.encode(exact, json.EncodeOption.max_nodes(3)) end, "limit_exceeded")
+  local nested: {value} = {exact}
+  core_error(function() json.encode(nested, json.EncodeOption.max_depth(1)) end, "limit_exceeded")
+  local event = MappingEvent.empty()
+  test.assert(json.encode(event, json.EncodeOption.max_nodes(2)) == [[{"tag":"empty"}]])
+  core_error(function() json.encode(event, json.EncodeOption.max_nodes(1)) end, "limit_exceeded")
+  test.assert(json.encode(event, json.EncodeOption.null_value("empty")) == [[{"tag":"empty"}]])
+  local empty_key: {string: value} = {}
+  empty_key[""] = 1
+  test.assert(json.encode(empty_key, json.EncodeOption.null_value("")) == [[{"":1}]])
+  core_error(function()
+    json.decode([[{"name":"Ada","active":true,"extra":[null,null]}]],
+      mapping_target("MappingPerson"), json.DecodeOption.ignore_unknown_fields(true),
+      json.DecodeOption.max_nodes(5))
+  end, "limit_exceeded")
+end
+
+function test_core_cycles_sharing_and_unsupported_values(_context: test.Context)
+  local cycle: {value} = {}
+  cycle[1] = cycle
+  local failure = core_error(function() json.encode(cycle) end, "cycle")
+  test.assert(failure.path == "$[1]" and failure.position == nil and
+              failure.line == nil and failure.column == nil)
+  local shared: {value} = {1}
+  local repeated: {value} = {shared, shared}
+  test.assert(json.encode(repeated) == "[[1],[1]]")
+  local map_cycle: {string: value} = {}
+  map_cycle["self"] = map_cycle
+  core_error(function() json.encode(map_cycle) end, "cycle")
+  local record_cycle = MappingLink.new(1, nil)
+  record_cycle.next = record_cycle
+  core_error(function() json.encode(record_cycle) end, "cycle")
+  local invalid_keys: {value: value} = {}
+  invalid_keys[1] = "number key"
+  core_error(function() json.encode(invalid_keys) end, "invalid_map_key")
+  core_error(function() json.encode(function() end) end, "unsupported_type")
+  local length = 4
+  local owner = char.new_array(length)
+  core_error(function() json.encode(owner) end, "unsupported_type")
+  local malformed: {string} = {strings.char(128), strings.char(192, 175),
+    strings.char(237, 160, 128), strings.char(244, 144, 128, 128), strings.char(226, 130)}
+  for index = 1, #malformed do
+    local text = malformed[index] as string
+    core_error(function() json.encode(text) end, "invalid_utf8")
+  end
+end
+
+function test_core_raw_sentinel_and_map_iteration(_context: test.Context)
+  local loader = lua.load([[
+    return function()
+      local mt = {
+        __eq = function() error("JSON called equality metamethod") end,
+        __pairs = function() error("JSON called pairs metamethod") end,
+        __index = function() error("JSON called index metamethod") end,
+        __tostring = function() error("JSON called tostring metamethod") end,
+      }
+      return setmetatable({a = 1}, mt), setmetatable({a = 1}, mt)
+    end
+  ]], "json-raw-values", nil)
+  local factory = loader() as () -> (value, value)
+  local first, second = factory()
+  test.assert(json.encode(first, json.EncodeOption.null_value(first)) == "null")
+  test.assert(json.encode(first, json.EncodeOption.null_value(second)) == [[{"a":1}]])
+end

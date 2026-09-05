@@ -22,6 +22,8 @@ local lua = require "titan.lua"
 local iteration = require "titan.iteration"
 local gc = require "titan.gc"
 local testing = require "titan.test"
+local sqlite3 = require "titan.sqlite3"
+local json = require "titan.json"
 
 local path = os.tmpname()
 os.remove(path)
@@ -48,6 +50,18 @@ local task = async.run(function()
     writer:write("\0payload")
     assert(writer:drain() == "writer\0payload")
     assert(writer:drain() == "")
+
+    local database = sqlite3.connect(":memory:")
+    local statement = database:prepare(
+        "SELECT ?1 AS answer, ?2 AS payload, NULL AS empty")
+    local cursor = statement:query(42, sqlite3.Blob.new("sqlite\0payload"))
+    local row = assert(cursor:fetch())
+    assert(cursor:fetch() == nil)
+    cursor:close()
+    statement:close()
+    database:close()
+    assert(#row.columns == 3 and row:get(1) == 42)
+    assert(row:get(2).bytes == "sqlite\0payload" and row:get(3) == nil)
     task_finished = true
 end)
 async.loop()
@@ -59,6 +73,15 @@ assert(strings.len("a\0b") == 3)
 local found = strings.match("regex42", "([0-9]+)")
 assert(found and found:whole() == "42" and found:group(1) == "42")
 assert(strings.find("a\0b", "\0b") == 2)
+
+local json_source = '{"answer":42,"values":[1,null,3]}'
+assert(json.encode(json.decode(json_source)) == json_source)
+local sentinel = {}
+local preserved = json.decode('[1,null,null]', nil,
+    json.DecodeOption.null_value(sentinel))
+assert(#preserved == 3 and rawequal(preserved[3], sentinel))
+assert(json.encode(preserved, json.EncodeOption.null_value(sentinel)) ==
+       '[1,null,null]')
 
 assert(math.sqrt(81.0) == 9.0)
 assert(math.tonumber("0xff") == 255)
@@ -88,6 +111,8 @@ assert(type(net) == "userdata")
 assert(type(ssl) == "userdata")
 assert(type(http) == "userdata")
 assert(type(testing) == "userdata")
+assert(type(sqlite3) == "userdata")
+assert(type(json) == "userdata")
 assert(not testing.testing())
 assert(not testing.verbose())
 

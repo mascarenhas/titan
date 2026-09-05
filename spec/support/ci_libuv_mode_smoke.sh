@@ -115,7 +115,7 @@ check_canonical_container() {
         test -f "$PROVIDER.dSYM/Contents/Resources/DWARF/titan.so"
     fi
 
-    for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test reflect; do
+    for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test reflect sqlite3 json; do
         local shim="$SHIM_ROOT/titan/$module.lua"
 
         test -f "$shim"
@@ -163,6 +163,8 @@ local expected = {
     ["titan.gc"] = true,
     ["titan.test"] = true,
     ["titan.reflect"] = true,
+    ["titan.sqlite3"] = true,
+    ["titan.json"] = true,
 }
 
 local scanned, scan_error = metadata.scan_archive(archive, {
@@ -281,6 +283,13 @@ require_no_titan_dependency() {
 require_no_lpeglabel_dependency() {
     if has_lpeglabel_dependency "$1"; then
         echo "Titan image unexpectedly depends on an LPegLabel DSO" >&2
+        exit 1
+    fi
+}
+
+require_no_sqlite3_dependency() {
+    if inspect_dependencies "$1" | grep -qi libsqlite3; then
+        echo "Titan image unexpectedly depends on a SQLite DSO" >&2
         exit 1
     fi
 }
@@ -450,6 +459,7 @@ LUA
         exit 1
     fi
     require_no_lpeglabel_dependency "$static_provider"
+    require_no_sqlite3_dependency "$static_provider"
     if has_libuv_dependency "$static_provider"; then
         echo "static system-libuv provider depends on a libuv DSO" >&2
         exit 1
@@ -517,6 +527,9 @@ local lua = import "lua"
 local iteration = import "iteration"
 local gc = import "gc"
 local testing = import "test"
+local sqlite3 = import "sqlite3"
+local json = import "json"
+local reflect = import "reflect"
 
 local function check(condition: boolean, message: string)
   if not condition then raise message end
@@ -530,6 +543,49 @@ end
 local function check_parent_stream(query: () -> boolean)
   local tty = query()
   check(tty or not tty, "static parent stdio query failed")
+end
+
+record JsonSmokeRecord
+  const answer: integer
+end
+
+union JsonSmokeMessage
+  ready: JsonSmokeRecord
+end
+
+local function check_json_provider()
+  local input = JsonSmokeMessage.ready(JsonSmokeRecord.new(42))
+  local encoded = json.encode(input)
+  check(encoded == [[{"tag":"ready","value":{"answer":42}}]],
+        "static JSON union encoding failed")
+  local descriptor = reflect.Type.is_named(
+    reflect.NamedType.new("static_uv_smoke.JsonSmokeMessage"))
+  local decoded: JsonSmokeMessage = json.decode(encoded, descriptor)
+  check(json.encode(decoded) == encoded,
+        "static JSON reflected constructor decoding failed")
+  local values: {value} = json.decode("[1,null,3]")
+  check(#values == 3 and values[2] == nil,
+        "static JSON array hole decoding failed")
+end
+
+local function check_sqlite_provider()
+  local database = sqlite3.connect(":memory:")
+  defer database:close()
+  local statement = database:prepare(
+    "SELECT ?1 AS answer, ?2 AS payload, NULL AS empty")
+  defer statement:close()
+  local cursor = statement:query(42, sqlite3.Blob.new("sqlite\0payload"))
+  defer cursor:close()
+  local row: sqlite3.Row = cursor:fetch()
+  check(cursor:fetch() == nil, "static SQLite cursor did not exhaust")
+  cursor:close()
+  statement:close()
+  database:close()
+  local answer: integer = row:get(1)
+  local blob: sqlite3.Blob = row:get(2)
+  check(#row.columns == 3 and answer == 42 and
+        blob.bytes == "sqlite\0payload" and row:get(3) == nil,
+        "static SQLite provider changed owned row values")
 end
 
 local function listen_available(): (net.Server, integer)
@@ -569,6 +625,7 @@ function main(args: {string}): integer
     check(system.pid() > 0 and #system.cwd() > 0 and
           #system.exepath() > 0,
           "static os identity behavior failed")
+    check_json_provider()
     check(#peg.version() > 0,
           "static PEG native engine initialization failed")
     check(strings.len("static\0string") == 13,
@@ -602,6 +659,7 @@ function main(args: {string}): integer
     gc.resume()
     check(not gc.paused() and gc.count() > 0,
           "static GC resume or count behavior failed")
+    check_sqlite_provider()
 
     local tls_error = ssl.Error.new(
       0, "STATIC_SSL_READY", "static SSL module loaded", "static-smoke")
@@ -752,6 +810,7 @@ TITAN
 
     require_no_titan_dependency "$executable"
     require_no_lpeglabel_dependency "$executable"
+    require_no_sqlite3_dependency "$executable"
     if [[ $OPENSSL_MODE == bundled ]]; then
         if has_openssl_dependency "$executable"; then
             echo "bundled static Titan executable depends on an OpenSSL DSO" >&2
@@ -821,6 +880,7 @@ check_bundled_mode() {
         exit 1
     fi
     require_no_lpeglabel_dependency "$PROVIDER"
+    require_no_sqlite3_dependency "$PROVIDER"
     check_openssl_policy
     if has_libuv_dependency "$PROVIDER"; then
         echo "bundled titan.so unexpectedly has a dynamic libuv dependency" >&2
@@ -845,6 +905,7 @@ check_system_mode() {
         exit 1
     fi
     require_no_lpeglabel_dependency "$PROVIDER"
+    require_no_sqlite3_dependency "$PROVIDER"
     check_openssl_policy
     if defines_uv_version "$STATIC_ARCHIVE"; then
         echo "system libuv was copied into installed titan.a" >&2

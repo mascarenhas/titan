@@ -119,14 +119,14 @@ The installed files used to compile Titan code include:
 | `$ROCKS_TREE/lib/libbacktrace.a` | The separate vendored native unwinder/symbolizer archive |
 | `$ROCKS_TREE/include/minicoro.h`, `titan.h` | Non-Lua top-level SDK headers |
 | `$ROCKS_TREE/include/titan/ffi.h` | Namespaced portable FFI and audited Lua-internal bridge header |
-| `$ROCKS_TREE/lib/titan/0.6/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus nineteen independent logical modules from `titan.coroutine` through `titan.reflect` |
-| `$ROCKS_TREE/lib/titan/0.6/titan.a` | The self-describing static form of the same nineteen logical standard modules, plus native support, private LPegLabel/llhttp payload, and bundled libuv/OpenSSL payload when those modes are selected |
-| `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iteration,gc,test,reflect}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
+| `$ROCKS_TREE/lib/titan/0.6/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus twenty-one independent logical modules from `titan.coroutine` through `titan.json` |
+| `$ROCKS_TREE/lib/titan/0.6/titan.a` | The self-describing static form of the same twenty-one logical standard modules, plus native support, private LPegLabel/llhttp/SQLite payload, and bundled libuv/OpenSSL payload when those modes are selected |
+| `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iteration,gc,test,reflect,sqlite3,json}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
 | `$ROCKS_TREE/share/titan/0.6/src/titan/test.titan` | Canonical compiler-data source used for the source-private native test-runner protocol |
 
-The nineteen-module pair, shims, and test support source are the coordinated
+The twenty-one-module pair, shims, and test support source are the coordinated
 ABI-2 standard image. `titan.io` owns the shared Interface vocabulary and
-I/O helpers; bare native support adds the twentieth DSO opener without adding
+I/O helpers; bare native support adds the twenty-second DSO opener without adding
 a logical metadata key.
 
 Bundled-libuv installs also contain `$ROCKS_TREE/include/uv.h` and
@@ -298,7 +298,7 @@ The Titan-owned Lua's configured default `package.cpath` contains
 `$PREFIX/lib/titan/0.6/?.so` before `$PREFIX/lib/lua/5.5/?.so`. The first
 template lets the generated `titan.*` loaders find the canonical provider; the
 second remains the root-discovery anchor. The default `package.path` finds all
-nineteen loaders under `$PREFIX/share/lua/5.5/titan/`. In the currently supported
+twenty-one loaders under `$PREFIX/share/lua/5.5/titan/`. In the currently supported
 layout
 `ROCKS_TREE == PREFIX`, so `titanc` can use the first entry ending in
 `/lib/lua/5.5/?.so` to recover its Titan SDK/rocks root.
@@ -350,13 +350,13 @@ absent, the build atomically stages that bootstrap at
 `$ROCKS_TREE/lib/titan/0.6/titan.so` so the just-installed compiler can load
 its native support table; a repeated install preserves an already valid full
 image. After LuaRocks deploys the compiler, the source-only `post_install` hook
-invokes that `titanc` once for all nineteen current standard roots, with private
+invokes that `titanc` once for all twenty-one current standard roots, with private
 LPegLabel, selected libuv, HTTP/llhttp, and TLS/OpenSSL payload after
 `ltitanlib.o`. It stages the paired providers, generated loaders, and exact `titan.test`
 compiler source privately, validates them, and publishes them with rollback, committing
 `titan.a` before `titan.so` and using the DSO rename as the final commit point.
 Publication recognizes the bootstrap and current complete pair as recoverable
-states in the active `0.6` library namespace; nineteen modules are the current
+states in the active `0.6` library namespace; twenty-one modules are the current
 installed contract. No earlier Titan installation is a migration source.
 There is no separate Make install pass or pre-install hook. The provider,
 generated loaders, and SDK files remain
@@ -508,16 +508,26 @@ PEG-based URL parsing. Math, dynamic Lua loading, generic
 iteration, and GC control live in `titan.math`, `titan.lua`, `titan.iteration`, and
 `titan.gc`; `titan.test` supplies native test contexts and assertions.
 [`titan.reflect`](doc/language/standard-library-reflect.md) inspects runtime
-values, nominal schemas, and public fields. GC-backed
+values, nominal schemas, and public fields.
+[`titan.json`](doc/language/standard-library-json.md) encodes ordinary values
+and decodes explicit reflected schemas, including records and tagged unions.
+Its PEG parser reports labeled errors with byte positions and line/column;
+optional null sentinels preserve null-valued container entries.
+[`titan.sqlite3`](doc/language/standard-library-sqlite3.md) embeds SQLite for
+asynchronous prepared statements, owned rows and cursors, reflection binding
+and mapping, and explicit transactions. SQLite runs in libuv's native worker
+pool, with cancellation-insensitive resource retirement. Its private pinned
+amalgamation enters both provider forms in either libuv/OpenSSL mode.
+GC-backed
 owners can attach table/full-userdata finalizers
 without discarding an existing metatable. Clean validation builds pass all
-nineteen roots to one `titanc` invocation, while the five high-level libuv
+twenty-one roots to one `titanc` invocation, while the six high-level libuv
 facades explicitly import `uv.titan` for their private collaboration edges; the
 source graph is statically resolved
 inside the paired `titan.so` and `titan.a` providers. Bundled mode carries
 libuv's objects into both forms; system mode keeps the pkg-config-selected
 library as a repeated final-link input. The private LPegLabel objects enter
-both forms in either libuv mode. Nineteen generated Lua loaders expose the
+both forms in either libuv mode. Twenty generated Lua loaders expose the
 qualified logical entries.
 Its source is the reviewed folder ensemble rooted at `titan/uv/uv.titan`, with
 `file.titan`, `os.titan`, `process.titan`, `runtime.titan`, `task.titan`, and
@@ -662,7 +672,7 @@ Module-owned standard-library behavior, including fresh-process and host-stdio
 cases, lives under `spec/stdlib/titan/`: compiled Titan parents launch focused
 standalone fixtures through C99 `system`, consume explicit temporary result
 files, and clean them with `defer`. The Makefile names
-all 23 roots explicitly and compiles them together with one `titanc --test`
+all 25 roots explicitly and compiles them together with one `titanc --test`
 invocation. `make titan-stdlib-test-build` places the executable and synthetic
 runner outputs below `.titan-tests/`; it passes `--no-uv-bootstrap` so each
 async test explicitly owns one Runtime and completes Runtime-bound cleanup
@@ -713,7 +723,7 @@ LuaCov stats. Local shards do not collect LuaCov data.
 `BUSTED_FILTER` and `TITAN_FILTER` are independent Lua-pattern selectors;
 filtering one domain does not skip the other, so use a leaf target when only one
 is wanted. A Titan filter changes execution only—the build still compiles all
-23 source-authoritative roots.
+25 source-authoritative roots.
 
 ```sh
 $ make stdlib-test
@@ -820,7 +830,7 @@ need the SDL2 development headers installed.
 C, compiled modules, coverage data), including nested `titan/uv/uv.c` and
 `titan/uv/uv.o`, the `titan/http`, `titan/peg`, and `titan/string` folder-main
 outputs, and
-the nineteen known generated standard-library loaders, while
+the twenty-one known generated standard-library loaders, while
 keeping source files and downloaded dependency trees.
 `make distclean` additionally removes the downloaded or cloned Lua, GNU
 Readline, LuaRocks, libbacktrace, libuv, OpenSSL, and llhttp source/build trees

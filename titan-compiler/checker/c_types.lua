@@ -1276,7 +1276,8 @@ function c_pseudo_member(typ, name, st)
             _tag = "Type.CPseudoSize",
             ctype = typ,
             name = name,
-            type = types.Integer(),
+            type = checker._foreign_function_depth > 0
+                and size_entry.type or types.Integer(),
             result_source = size_entry.type,
         }
     end

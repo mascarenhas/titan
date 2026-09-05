@@ -54,6 +54,18 @@ parser from llhttp 9.4.3, obtained from
 Copyright Fedor Indutny, 2018, and is distributed under the MIT license
 reproduced in `LICENSES/llhttp-LICENSE`.
 
+## SQLite
+
+Titan's `titan.sqlite3` standard module statically incorporates SQLite 3.53.4,
+obtained from <https://sqlite.org/2026/sqlite-autoconf-3530400.tar.gz>.
+The official amalgamation and its matching header are in the public domain.
+The source's author disclaimer and blessing are reproduced in
+`LICENSES/sqlite3-LICENSE`. See <https://sqlite.org/copyright.html>.
+
+The private archive is built with `SQLITE_THREADSAFE=1` and is incorporated
+into both standard-provider configurations; it is not installed as a separate
+SQLite library or header.
+
 ## lpeg_patterns URI grammar
 
 Titan's `titan.url` URI grammar is derived from lpeg_patterns commit
