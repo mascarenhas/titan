@@ -24,7 +24,121 @@ local function lua_executable()
     return "lua"
 end
 
+local function native_target_profile()
+    local driver = require "titan-compiler.driver"
+    local context = driver.new_resolver_context()
+    local profile, err = driver.get_target_profile(context)
+    assert(driver.close_resolver_context(context))
+    return assert(profile, err)
+end
+
+local function check_profile_source(code, options, body)
+    local parser = require "titan-compiler.parser"
+    local checker = require "titan-compiler.checker"
+    local types = require "titan-compiler.types"
+    local previous_registry = types.registry
+    types.registry = {}
+    local ran, failure = xpcall(function()
+        local ast = assert(parser.parse("profile_only.titan", code))
+        local _, errors = checker.check(
+            "profile_only", ast, code, "profile_only.titan", nil, options)
+        body(ast, errors)
+    end, debug.traceback)
+    types.registry = previous_registry
+    assert.truthy(ran, failure)
+end
+
 describe("direct-checker target profiles", function()
+    it("checks contextual scalars and callback results with only a semantic profile",
+    function()
+        local profile = native_target_profile()
+        local profile_calls = 0
+        local probe_calls = 0
+        check_profile_source([[
+            function identity(number: int): int return number end
+            function answer(callback: foreign (*lua_State) -> int): integer
+                return callback(L)
+            end
+        ]], {
+            target_profile_provider = function()
+                profile_calls = profile_calls + 1
+                return profile
+            end,
+            probe_service_provider = function()
+                probe_calls = probe_calls + 1
+                return nil, "unexpected native probe"
+            end,
+        }, function(ast, errors)
+            assert.equal(0, #errors, table.concat(errors, "\n"))
+            assert.equal(1, profile_calls)
+            assert.equal(0, probe_calls)
+            local integer = ast[1].params[1]._type
+            assert.equal(profile.identity, integer._c_numeric_carriers.identity)
+            assert.same(profile.integers.int.type._c_numeric,
+                integer._c_numeric)
+            assert.not_equal(profile.integers.int.type, integer)
+            local result = ast[2].block.stats[1].exps[1]
+            assert.equal("c_integer_to_integer", result._adjustment.coercion.op)
+            assert.equal(profile.identity,
+                result.exp._c_pointer_call.ret._c_numeric_carriers.identity)
+        end)
+    end)
+
+    it("reports an unavailable semantic profile without a native fallback",
+    function()
+        local profile_calls = 0
+        local probe_calls = 0
+        check_profile_source([[
+            function identity(number: int): int return number end
+        ]], {
+            target_profile_provider = function()
+                profile_calls = profile_calls + 1
+                return nil, "fixture semantic profile unavailable"
+            end,
+            probe_service_provider = function()
+                probe_calls = probe_calls + 1
+                return nil, "unexpected native fallback"
+            end,
+        }, function(_, errors)
+            assert.is_true(#errors > 0)
+            assert.matches("fixture semantic profile unavailable",
+                table.concat(errors, "\n"), 1, true)
+            assert.equal(1, profile_calls)
+            assert.equal(0, probe_calls)
+        end)
+    end)
+
+    it("rejects native service disagreement before probing an operator",
+    function()
+        local csemantics = require "titan-compiler.csemantics"
+        local types = require "titan-compiler.types"
+        local native = native_target_profile()
+        local semantic = types.clone_graph(native)
+        semantic.floats.double.mantissa_digits =
+            semantic.floats.double.mantissa_digits - 1
+        semantic.identity = assert(csemantics.profile_identity(semantic))
+        semantic = assert(csemantics.import_profile(
+            assert(csemantics.export_profile(semantic))))
+        local probe_calls = 0
+        check_profile_source([[
+            function add(left: int, right: int): int
+                return left + right
+            end
+        ]], {
+            target_profile_provider = function() return semantic end,
+            probe_service_provider = function()
+                probe_calls = probe_calls + 1
+                return { profile = native }
+            end,
+        }, function(_, errors)
+            assert.is_true(#errors > 0)
+            assert.matches(
+                "native C target profile disagrees with semantic target profile",
+                table.concat(errors, "\n"), 1, true)
+            assert.equal(1, probe_calls)
+        end)
+    end)
+
     it("derives the selected target without loading the compiler driver",
        function()
         local header = os.tmpname() .. ".h"

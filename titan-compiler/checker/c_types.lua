@@ -77,10 +77,40 @@ function new_direct_probe_service()
     return cprobe.new_service(service_options)
 end
 
+-- Numeric metadata and contextual primitive type syntax need the target's
+-- exact scalar model, but do not themselves perform a native C operation.
+-- A resolver may supply its validated analysis-only build profile here.
+function ensure_c_profile(st)
+    if st.c_profile then return st.c_profile end
+    if st.c_profile_error then return nil, st.c_profile_error end
+    if not st.target_profile_provider then
+        local service, err = ensure_probe_service(st)
+        if not service then return nil, err end
+        return st.c_profile
+    end
+    local profile, err = st.target_profile_provider()
+    local identity
+    if profile then identity, err = csemantics.profile_identity(profile) end
+    if not identity then
+        st.c_profile_error = err or "target C profile is unavailable"
+        return nil, st.c_profile_error
+    end
+    st.c_profile = types.clone_graph(profile)
+    st.c_profile.identity = identity
+    return st.c_profile
+end
+
 function ensure_probe_service(st)
     if st.probe_service then return st.probe_service end
     if st.probe_service_error then
         return nil, st.probe_service_error
+    end
+    if st.target_profile_provider then
+        local profile, profile_error = ensure_c_profile(st)
+        if not profile then
+            st.probe_service_error = profile_error
+            return nil, profile_error
+        end
     end
     local service, err
     if st.probe_service_provider then
@@ -101,6 +131,19 @@ function ensure_probe_service(st)
         end
         st.owns_probe_service = false
         return nil, st.probe_service_error
+    end
+    if st.c_profile then
+        local live_identity, profile_error =
+            csemantics.profile_identity(service.profile)
+        if not live_identity or live_identity ~= st.c_profile.identity then
+            st.probe_service_error = profile_error or
+                "native C target profile disagrees with semantic target profile"
+            if st.owns_probe_service and type(service.close) == "function" then
+                pcall(service.close, service)
+            end
+            st.owns_probe_service = false
+            return nil, st.probe_service_error
+        end
     end
     st.probe_service = service
     -- C conversion completes canonical tag graphs in place. Give each checker

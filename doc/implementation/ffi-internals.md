@@ -407,6 +407,17 @@ target profile: it compares the serialized signedness/rank/width fields and
 attaches the checker-only lowering traits, rejecting a mismatch before the
 interface is published. These checks, not the availability of a constructor in
 the deserialization environment, are the authority for portable C metadata.
+
+An API-5 analysis-only embedded provider may supply that target through a
+validated build-profile manifest rather than native SDK discovery. The pure
+profile boundary does not skip numeric normalization or synthesize traits from
+individual module types. Exported profile data contains only version/identity,
+C and Lua carrier names, character properties, canonical integer ranges and
+widths, and floating representation properties. Import reconstructs all Type
+leaves and lowering traits; no caller-supplied annotations survive. Native C
+probes independently acquire the live target and reject disagreement with the
+semantic host's declared target.
+
 The decoder also reapplies `types.has_tvalue_representation` to every decoded
 module variable, record field, union payload, and interface field, so a hostile
 interface cannot place an unboxable direct C aggregate or function in a

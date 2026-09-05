@@ -199,11 +199,11 @@ function finish_c_operator(node, st, errors, decide, operands)
     local trait, decision_error = decide(st.c_profile)
     if not trait and decision_error
        and decision_error:match("target profile") then
-        local _, profile_error = ensure_probe_service(st)
+        local _, profile_error = ensure_c_profile(st)
         if not st.c_profile then
             checker.typeerror(errors, node.loc,
                 "cannot determine C operator '%s' semantics because the "
-                .. "configured C probe service is unavailable: %s",
+                .. "configured C target profile is unavailable: %s",
                 node.op, tostring(profile_error))
             node._type = types.Invalid()
             return true

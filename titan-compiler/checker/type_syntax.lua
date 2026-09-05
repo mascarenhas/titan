@@ -34,13 +34,13 @@ function resolve_surface_c_type(name, st, errors, loc)
         return types.CStruct(nil, "lua_State", nil, {}, false, false)
     end
 
-    local service, service_error = ensure_probe_service(st)
-    if not service then
+    local profile, profile_error = ensure_c_profile(st)
+    if not profile then
         return invalid(errors, loc,
             "cannot resolve C99 type '%s': %s", name,
-            tostring(service_error))
+            tostring(profile_error))
     end
-    local typ = foreigntypes.surface_primitive(st.c_profile, name)
+    local typ = foreigntypes.surface_primitive(profile, name)
     if not typ then
         return invalid(errors, loc,
             "C99 type '%s' is unavailable in the target C profile", name)
