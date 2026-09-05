@@ -31,6 +31,7 @@ local types = typedecl("Type", {
         StaticMethod = {"fqtn", "name", "params", "rettypes", "varargtype", "flexrettype", "paramnames", "scope", "typeparams"},
         Option       = {"base"},
         CVoid        = {},
+        CNamed         = { "tagname" },
         CInteger     = {"spelling", "signed", "rank", "bits"},
         CFloat       = {"spelling"},
         CPointer     = {"pointee", "quals"},
@@ -439,7 +440,8 @@ function types.is_portable_c_type_graph(root)
                      or pointee_tag == "Type.CInteger"
                      or pointee_tag == "Type.CFloat"
                      or pointee_tag == "Type.CPointer"
-                     or pointee_tag == "Type.CFunction")
+                     or pointee_tag == "Type.CFunction"
+                     or types.is_c_lua_state(t.pointee))
                 and visit(t.pointee, "pointee")
         elseif tag == "Type.CFunction" then
             ok = t._paramstyle == nil
@@ -474,6 +476,8 @@ function types.is_portable_c_type_graph(root)
                      or pointee_tag == "Type.CFloat"
                      or pointee_tag == "Type.CPointer")
                 and visit(t.pointee, "owned")
+        elseif tag == "Type.CStruct" then
+            ok = types.is_c_lua_state(t) and position == "pointee"
         end
         active[t] = nil
         return ok
@@ -742,6 +746,15 @@ end
 function types.is_direct_c(t)
     t = types.resolve_c_typedef(t)
     return t and is_c_tag(t._tag) or false
+end
+
+function types.is_c_lua_state(t)
+    if not t then
+        return false
+    end
+    local rt = types.resolve_c_typedef(t)
+    return rt and rt._tag == "Type.CStruct"
+        and (rt.tagname == "lua_State" or rt.cname == "lua_State")
 end
 
 function types.is_c_tvalue(t)
@@ -1504,8 +1517,7 @@ local function c_value_compatible(t)
     t = resolved_c(t)
     return t and (t._tag == "Type.CInteger"
         or t._tag == "Type.CFloat"
-        or (t._tag == "Type.CPointer"
-            and resolved_c(t.pointee)._tag ~= "Type.CFunction")
+        or t._tag == "Type.CPointer"
         or t._tag == "Type.COwned"
         or types.is_c_tvalue(t))
 end
@@ -1749,6 +1761,7 @@ c_declaration_type_equals = function(
         -- tag namespace. Equal named file-scope tags therefore denote the same
         -- C type even when independent extraction allocated two objects.
         return ltype == rtype
+            or (types.is_c_lua_state(ltype) and types.is_c_lua_state(rtype))
             or (ltype._c_tag_scope == "file"
                 and rtype._c_tag_scope == "file"
                 and ltype.tagname ~= nil
@@ -1922,20 +1935,6 @@ end
 
 type_equals = function(t1, t2, seen)
     if t1 == t2 then
-        if type(t1) == "table"
-           and t1._tag == "Type.Interface" then
-            return types.validate_interface_descriptor(t1) ~= nil
-        elseif type(t1) == "table"
-           and t1._tag == "Type.Array" then
-            return type(t1.isconst) == "boolean" or t1.isconst == "maybe"
-        elseif type(t1) == "table"
-           and (t1._tag == "Type.Field"
-                or t1._tag == "Type.ModuleVariable") then
-            return type(t1.isconst) == "boolean"
-        elseif type(t1) == "table"
-           and t1._tag == "Type.Function" then
-            return t1.vararg == false
-        end
         return true
     elseif type(t1) ~= "table" or type(t2) ~= "table" then
         return false
@@ -2008,6 +2007,9 @@ type_equals = function(t1, t2, seen)
     elseif tag1 == "Type.CFunction" then
         return c_function_type_equals(t1, t2, seen)
     elseif tag1 == "Type.CStruct" then
+        if types.is_c_lua_state(t1) and types.is_c_lua_state(t2) then
+            return true
+        end
         return t1.cname == t2.cname and
                t1.tagname == t2.tagname and
                t1.typedef == t2.typedef and
@@ -4816,6 +4818,9 @@ function types.tostring(t, wrap)
             return res
         end
     elseif tag == "Type.CStruct" then
+        if types.is_c_lua_state(t) then
+            return "lua_State"
+        end
         local display_name = c_display_name(t.tagname or t.cname or t.typedef)
         if t._ffi_scope and display_name then
           return t._ffi_scope .. "." .. display_name
@@ -4952,10 +4957,10 @@ local function serialize_literal(value)
     error("cannot serialize generic metadata literal " .. tostring(value), 3)
 end
 
-local function serialize_type_list(list)
+local function serialize_type_list(list, seen_ctypes)
     local out = {}
     for _, typ in ipairs(list or {}) do
-        out[#out + 1] = types.serialize(typ)
+        out[#out + 1] = types.serialize(typ, seen_ctypes)
     end
     return "{" .. table.concat(out, ",") .. "}"
 end
@@ -4966,7 +4971,8 @@ local function serialize_generic_tail(scope, typeparams)
         serialize_type_list(typeparams)
 end
 
-function types.serialize(t)
+function types.serialize(t, seen_ctypes)
+    seen_ctypes = seen_ctypes or {}
     local tag = t._tag
 
     if tag == "Type.GenericScope" then
@@ -5066,7 +5072,7 @@ function types.serialize(t)
             return "Nominal('" .. t.fqtn .. "')"
         end
         return "Nominal(" .. string.format("%q", t.fqtn) .. "," ..
-            serialize_type_list(args) .. ")"
+            serialize_type_list(args, seen_ctypes) .. ")"
     elseif tag == "Type.Field" then
         if type(t.isconst) ~= "boolean" then
             error("cannot serialize malformed Field const qualifier")
@@ -5197,40 +5203,71 @@ function types.serialize(t)
     elseif tag == "Type.CFloat" then
         return "CFloat(" .. string.format("%q", t.spelling) .. ")"
     elseif tag == "Type.CPointer" then
-        return "CPointer(" .. types.serialize(t.pointee) .. "," ..
+        return "CPointer(" .. types.serialize(t.pointee, seen_ctypes) .. "," ..
             serialize_names(t.quals) .. ")"
     elseif tag == "Type.CArray" then
-        return "CArray(" .. types.serialize(t.elem) .. "," ..
+        return "CArray(" .. types.serialize(t.elem, seen_ctypes) .. "," ..
             util.tostring(t.len) .. "," ..
             serialize_names(t.quals) .. ")"
     elseif tag == "Type.CFunction" then
-        return "CFunction(" .. serialize_type_list(t.params) .. "," ..
-            types.serialize(t.ret) .. "," ..
+        return "CFunction(" .. serialize_type_list(t.params, seen_ctypes) .. "," ..
+            types.serialize(t.ret, seen_ctypes) .. "," ..
             tostring(t.vararg or false) .. "," ..
             (t.abi and string.format("%q", t.abi) or "false") .. ")"
     elseif tag == "Type.CStruct" then
+        local name = t.cname or t.tagname
+        if name then
+            local name = "struct@" .. name
+            if seen_ctypes[name] then
+                return "CNamed(" .. string.format("%q", name) .. ")"
+            end
+            seen_ctypes[name] = true
+        end
+        local fields = {}
+        for _, field in ipairs(t.fields) do
+            table.insert(fields, types.serialize(field, seen_ctypes))
+        end
         return "CStruct(" .. serialize_literal(t.cname) .. "," ..
             serialize_literal(t.tagname) .. "," ..
-            serialize_literal(t.typedef) .. ",{}," ..
+            serialize_literal(t.typedef) .. ",{" ..
+            table.concat(fields, ",") .. "}," ..
             tostring(t.complete or false) .. "," ..
             tostring(t.has_fam or false) .. ")"
     elseif tag == "Type.CUnion" then
+        local name = t.cname or t.tagname
+        if name then
+            local name = "union@" .. name
+            if seen_ctypes[name] then
+                return "CNamed(" .. string.format("%q", name) .. ")"
+            end
+            seen_ctypes[name] = true
+        end
+        local fields = {}
+        for _, field in ipairs(t.fields) do
+            table.insert(fields, types.serialize(field, seen_ctypes))
+        end
         return "CUnion(" .. serialize_literal(t.cname) .. "," ..
             serialize_literal(t.tagname) .. "," ..
-            serialize_literal(t.typedef) .. ",{}," ..
+            serialize_literal(t.typedef) .. ",{" ..
+            table.concat(fields, ",") .. "}," ..
             tostring(t.complete or false) .. ")"
     elseif tag == "Type.CField" then
         return "CField(false," ..
             string.format("%q", t.name) .. "," ..
-            types.serialize(t.type) .. "," ..
+            types.serialize(t.type, seen_ctypes) .. "," ..
             util.tostring(t.bitfield) .. "," ..
             tostring(t.flexible_array or false) .. ")"
     elseif tag == "Type.CTypedef" then
+        local name = "typedef@" .. t.name
+        if seen_ctypes[name] then
+            return "CNamed(" .. string.format("%q", name) .. ")"
+        end
+        seen_ctypes[name] = true
         return "CTypedef(" .. string.format("%q", t.name) .. "," ..
-            types.serialize(t.target) .. "," ..
+            types.serialize(t.target, seen_ctypes) .. "," ..
             serialize_names(t.quals) .. ")"
     elseif tag == "Type.COwned" then
-        return "COwned(" .. types.serialize(t.pointee) .. "," ..
+        return "COwned(" .. types.serialize(t.pointee, seen_ctypes) .. "," ..
             tostring(t.count) .. ")"
     elseif tag == "Type.CModule" then
         local member_names = {}

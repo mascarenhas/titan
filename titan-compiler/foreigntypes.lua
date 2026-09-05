@@ -719,6 +719,7 @@ local surface_primitive_spellings = {
     ["foreign float"] = "float",
     double = "double",
     ["long double"] = "long double",
+    lua_State = "lua_State",
 }
 
 local surface_primitive_components = {
@@ -731,12 +732,16 @@ local surface_primitive_components = {
     int = true,
     long = true,
     double = true,
+    lua_State = true,
 }
 
 function foreigntypes.surface_primitive(profile, surface)
     local spelling = surface_primitive_spellings[surface]
     if not spelling then return nil end
     if spelling == "void" then return types.CVoid() end
+    if spelling == "lua_State" then
+        return types.CStruct(nil, "lua_State", nil, {}, false, false)
+    end
     local entry = profile and profile.integers
         and profile.integers[spelling]
     if not entry then

@@ -365,11 +365,13 @@ lua_pushliteral(L, "Titan record interop.Point");
 lua_rawset(L, -3);
 lua_pushliteral(L, "Record('interop.Point', ...)");
 lua_rawsetp(L, -2, TITAN_MT_TYPE);
+titan_pushmodule(L, _mod);
+lua_rawsetp(L, -2, TITAN_MT_MOD);
 lua_newtable(L);                 /* the membermap / fieldmap */
 lua_pushliteral(L, "x");
-lua_pushinteger(L, 0);
+lua_pushlightuserdata(L, (void *)interop_ℳ_Point_ℱ_x_fieldaccessor);
 lua_rawset(L, -3);
-/* ... "y" -> 1 likewise ... */
+/* ... "y" -> its generated typed accessor likewise ... */
 lua_pushliteral(L, "move");
 /* Module is upvalue of Lua entry point of method */
 titan_pushmodule(L, _mod);
@@ -408,11 +410,13 @@ the first upvalue shared by the
 `<module>_ℳ_<rec>_ℱ_meta_index` and `..._meta_newindex` closures;
 the second is the module. The membermap is also stored directly in the
 metatable at lightuserdata key `TITAN_MT_MEMBERMAP` for runtime reflection.
-It maps each field name to its integer user-value index (`uv[0..n-1]` in
-declaration order) and each public method name to the method's Lua-entry C
-closure, itself closed over the module. Local fields and local methods are not
-entered in this table, but public fields keep their original indices even when
-a local field came before them.
+It maps each public field name to the lightuserdata address of its generated
+typed accessor and each public method name to the method's Lua-entry C
+closure, itself closed over the module. Local fields and local methods are
+absent. The accessor knows the original storage index and uses ordinary
+boxing on reads and the field's dynamic conversion plan plus a GC barrier on
+writes. Reflection caches that same accessor with the module owner stored
+under `TITAN_MT_MOD`; it does not inspect the metamethod closure's upvalues.
 
 The record metatable also records:
 * `TITAN_BRAND`: lightuserdata key set to integer constant `TITAN_RECORD` (3),
@@ -420,7 +424,8 @@ The record metatable also records:
 * `TITAN_MT_TYPE`: lightuserdata key set to the serialized type descriptor
   string (`types.serialize(...)`), providing discoverable runtime type schema;
 * `TITAN_MT_MEMBERMAP`: lightuserdata key set to the member map table (field
-  indices and method closures);
+  accessor addresses and method closures);
+* `TITAN_MT_MOD`: lightuserdata key retaining the declaring module userdata;
 * `TITAN_MT_STATICS`: lightuserdata key set to the record's static-namespace
   table containing constructors (`Point.new`) and static functions (attached during
   function/static initialization);
@@ -862,7 +867,7 @@ eager load. A second Lua state repeats its own cache insertion and promotion
 request while the operating-system loader may reuse the mapped image.
 
 The installed standard layout has paired providers at
-`<root>/lib/titan/0.6/{titan.so,titan.a}` and eighteen generated shims below
+`<root>/lib/titan/0.6/{titan.so,titan.a}` and nineteen generated shims below
 `<root>/share/lua/5.5/titan/`; the shims use the DSO form. A direct-libuv
 extension explicitly imports
 `uv` and foreign-imports `uv.h`; Titan runtime initialization loads the

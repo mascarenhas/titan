@@ -787,22 +787,21 @@ describe("portable C99 compiled-interface validation", function()
             types.Module(modname, {}, { Void = types.CVoid() }), modname))
     end)
 
-    it("rejects C function pointers in TValue-backed slots", function()
+    it("round-trips C function pointers in TValue-backed slots", function()
         local cint = types.CInteger("int", true, 3, 32)
         local callback = types.CPointer(types.CFunction(
             { cint }, cint, false, false), {})
 
-        reject(variable_module(callback),
-            "module variable 'item' has no TValue representation")
+        local modules = { variable_module(callback) }
 
         local record_name = modname .. ".Box"
         local record_field = types.Field(
             record_name, "item", callback, 0, false)
         local record = types.Record(
             record_name, { record_field }, {}, {}, 2)
-        reject(types.Module(modname, {
+        modules[#modules + 1] = types.Module(modname, {
             types.ModuleMember(modname, "Box", record, false),
-        }), "record field 'item' has no TValue representation")
+        })
 
         local union_name = modname .. ".Choice"
         local variant = types.Variant(
@@ -812,16 +811,23 @@ describe("portable C99 compiled-interface validation", function()
                 union_name, "present", { callback },
                 { types.Nominal(union_name) }, false, false, false),
         }, {}, 1)
-        reject(types.Module(modname, {
+        modules[#modules + 1] = types.Module(modname, {
             types.ModuleMember(modname, "Choice", union, false),
-        }), "union variant 'present' payload has no TValue representation")
+        })
 
         local interface_name = modname .. ".View"
         local interface = types.Interface(interface_name, {
             types.Field(interface_name, "item", callback, 0, true),
         }, {})
-        reject(types.Module(modname, {}, { View = interface }),
-            "interface field 'item' has no TValue representation")
+        modules[#modules + 1] = types.Module(modname, {}, { View = interface })
+
+        for _, modtype in ipairs(modules) do
+            assert.is_true(driver.validate_module_interface(modtype, modname))
+            local rebuilt = assert(load("return " .. types.serialize(modtype),
+                "portable callback metadata", "t", types))()
+            assert.is_true(driver.validate_module_interface(rebuilt, modname))
+            assert.is_true(types.equals(modtype, rebuilt))
+        end
     end)
 
     it("rejects direct value-facing void descriptors", function()

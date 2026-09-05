@@ -1148,6 +1148,33 @@ function generic_lower_assignment(node, state)
     generic_reclassify_node_open_adjustments(node, state)
 end
 
+function generic_lower_forin(node, state)
+    -- The adjusted tuple owns every evaluated setup expression, including
+    -- surplus values absent from the four legacy `exps` slots.
+    local adjusted = node._tuple_adjustment
+    for _, exp in ipairs(adjusted.exps) do
+        local lowered = generic_lower_expression(exp, state)
+        replace_adjusted_value(adjusted, exp, lowered)
+        for index, discard in ipairs(adjusted.discards) do
+            if discard == exp then adjusted.discards[index] = lowered end
+        end
+    end
+    node.exps = adjusted.fixed
+    generic_reclassify_node_open_adjustments(node, state)
+
+    -- These private edges are executable AST, not just type annotations.
+    -- Reclassify their casts before erasing types (T? -> T may become
+    -- value -> value). Keep calls as raw producers for the coder's hidden
+    -- result declarations and extra-result slots.
+    generic_lower_call_in_place(node._init_call, state)
+    generic_lower_call_in_place(node._next_call, state)
+    if node._close_call then
+        generic_lower_call_in_place(node._close_call, state)
+    end
+    generic_lower_node(node._visible_stat, state)
+    generic_lower_node(node.block, state)
+end
+
 function generic_lower_node(node, state)
     if type(node) ~= "table" or type(node._tag) ~= "string" then return end
     local tag = node._tag
@@ -1158,6 +1185,9 @@ function generic_lower_node(node, state)
         return
     elseif tag == "Ast.StatCase" then
         generic_lower_case(node, state)
+        return
+    elseif tag == "Ast.StatForIn" then
+        generic_lower_forin(node, state)
         return
     end
 

@@ -425,10 +425,9 @@ function generic_infer_forin_scheme(
         for index, parameter in ipairs(signature.params) do
             local actual = tuple_adjustment.fixed[index + 1]
             if actual and not already_consumed(actual) then
-                generic_unify_inference(context, parameter,
+                generic_unify_adjusted_inference(context, parameter,
                     actual._type, "generic for hidden argument " .. index,
                     actual.loc)
-                generic_infer_constraint_evidence(context)
             end
         end
 
@@ -442,7 +441,7 @@ function generic_infer_forin_scheme(
                     pattern = optionize(signature.flexrettype)
                 end
                 if pattern then
-                    generic_unify_result_inference(context, pattern,
+                    generic_unify_adjusted_inference(context, pattern,
                         expected, "generic for variable " .. decl.name,
                         decl.loc)
                 end

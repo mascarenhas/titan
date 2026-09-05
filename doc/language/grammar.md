@@ -266,6 +266,7 @@ basictype  ::= nil | boolean | integer | float | string | value
             |  '{' type ':' type '}'
             |  '{' type '}'
             |  const '{' type '}'
+            |  '(' type ')'
 ownedtype  ::= owned '*' cownedpayload
             |  owned cownedpayload '[' ']'
 cownedpayload ::= nil | boolean | integer | float | string | value
@@ -274,6 +275,7 @@ cownedpayload ::= nil | boolean | integer | float | string | value
             |  const '*' cownedpayload
             |  Name
             |  ownedtype
+            |  '(' type ')'
 funargtypes::= '(' [type {',' type} [',' varargtype] | varargtype] ')'
 varargtype ::= '...' ':' type
 resulttypes::= '(' [type {',' type} [',' flexrettype] | flexrettype] ')'
@@ -320,13 +322,22 @@ before the tail: `(integer, ...: string)` is valid, while
 `a -> (b -> c)`) and binds tighter than the commas of an enclosing
 parenthesized result list.
 
+Parentheses may also group any one type, with no new type identity:
+`(T)?` is `T?`, `({K: V})?` makes a Map optional, and `((T) -> U)?`
+makes the complete function optional. Grouping is recursive and is allowed
+inside generic arguments and C pointer/owned payloads. Empty, multiple, and
+flexible type lists are not single types: `()`, `(T, U)`, and `(...: T)`
+need their parameter/result-list context and cannot receive an outer `?`.
+See [Parenthesized types](types.md#parenthesized-types).
+
 `owned *mod.T` is the scalar GC-owner spelling and `owned mod.T[]` is
 the dynamically counted owner spelling. The first `*` of the scalar form is
 the ownership marker, so another pointer layer belongs to the payload:
 `owned **mod.T` owns one `mod.T *`, while `owned *mod.T[]` owns an array of
-`mod.T *`. `cownedpayload` is optionless so the one trailing `?` accepted by
-`simpletype` wraps the complete owner. The parser accepts the shared payload
-shape above; the checker then requires a complete, allocatable imported C
+`mod.T *`. An unparenthesized `cownedpayload` consumes no option suffix, so
+the trailing `?` accepted by `simpletype` wraps the complete owner. A grouped
+payload follows the ordinary type grammar. The parser accepts the shared payload
+shape above; the checker then requires a complete, allocatable C
 object type and rejects Titan, `void`, function, incomplete, fixed-array
 typedef, and nested-owner payloads. A flexible-array-member struct is a scalar
 owner allocated through its special `.new(count)` constructor. A numeral

@@ -3025,7 +3025,8 @@ static struct titan_symlink_origin *titan_symlink_origin_get(void) {
             local mt = debug.getmetatable(p1)
             assert(type(mt) == 'table')
             assert(mt[registry.TITAN_BRAND] == 3)
-            assert(1 == mt[registry.TITAN_MT_MEMBERMAP].y)
+            assert(type(mt[registry.TITAN_MT_MEMBERMAP].y) == 'userdata')
+            assert(mt[registry.TITAN_MT_MOD] == test)
             assert(test.Point.new == mt[registry.TITAN_MT_STATICS].new)
             assert(mt[registry.TITAN_MT_TYPE] == "Record('test.Point',{Field('test.Point', 'x', Float(), 0, false),Field('test.Point', 'y', Float(), 1, false)},{new = StaticMethod('test.Point', 'new',{Float(),Float()},{Nominal('test.Point')},false,false,{\"x\",\"y\"})},{},2)")
           ]])
@@ -3258,11 +3259,18 @@ static struct titan_symlink_origin *titan_symlink_origin_get(void) {
         ]], [[
             local b = test.box()
             assert(b.shown == 31)
+            b.shown = 42.0
+            assert(b.shown == 42 and math.type(b.shown) == 'integer')
             assert(test.reveal(b) == 22)
             assert(test.via_values() == 37 + 13)
             local ok, err = pcall(function () return b.hidden end)
             assert(not ok)
             assert(err:match('not found'))
+            ok, err = pcall(function () b.shown = 3.5 end)
+            assert(not ok and err:match('no integer representation'))
+            assert(b.shown == 42)
+            ok, err = pcall(function () b.hidden = 5 end)
+            assert(not ok and err:match('not found'))
             ok, err = pcall(function () return b:secret() end)
             assert(not ok)
             assert(err:match("not found"))
@@ -4106,12 +4114,15 @@ describe("single-Udata representation (GC stress)", function()
         ]])
     end)
 
-    -- 4. Empty record: 0 fields => allocates 0+1 user values. Construct via new,
+    -- 4. Empty record: no field user values. Construct via new,
     -- return to Lua (must be userdata), and round-trip through a Titan function
     -- that takes and returns it.
     it("empty record constructs and round-trips", function ()
         run_coder([[
             record E
+            end
+            function E:answer(): integer
+                return 42
             end
             function mk(): E
                 return E.new()
@@ -4122,6 +4133,7 @@ describe("single-Udata representation (GC stress)", function()
         ]], [[
             local e = test.mk()
             assert(type(e) == 'userdata')
+            assert(e:answer() == 42)
             collectgarbage()
             local e2 = test.id(e)
             assert(e == e2)

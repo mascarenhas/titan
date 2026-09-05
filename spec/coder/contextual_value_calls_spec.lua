@@ -77,6 +77,65 @@ describe("contextual calls through value (code generation)", function()
                 "pvalue(&_fn->upvalue[1]) != test_functag_", 1, true))
         end)
 
+    it("calls static and constructor closures through widened signatures",
+        function()
+            run_coder([[
+            record Callables
+                base: integer
+            end
+
+            function Callables.add(n: integer): integer return n + 10 end
+            function Callables.identity<T>(item: T): T return item end
+            function Callables:add_to(n: integer): integer
+                return self.base + n
+            end
+            function Callables:echo<T>(item: T): T return item end
+
+            union Choice
+                item: integer
+                empty
+            end
+
+            function call(fn: (...: value) -> (...: value),
+                          ...: value): (...: value)
+                return fn(...)
+            end
+
+            function call_method(fn: (value, ...: value) -> (...: value),
+                                 receiver: value, ...: value): (...: value)
+                return fn(receiver, ...)
+            end
+
+            function payload(choice: Choice): integer
+                case choice
+                when item: n then return n
+                when empty then return 0
+                end
+            end
+        ]], [[
+            assert(test.call(test.Callables.add, 8) == 18)
+            assert(test.call(test.Callables.identity, "generic") == "generic")
+            assert(test.call(test.Callables.identity, false) == false)
+
+            local receiver = test.call(test.Callables.new, 20)
+            assert(test.call_method(receiver.add_to, receiver, 7) == 27)
+            assert(test.call_method(receiver.echo, receiver, false) == false)
+
+            assert(test.payload(test.call(test.Choice.item, 31)) == 31)
+            assert(test.payload(test.call(test.Choice.empty)) == 0)
+
+            -- Widening still enters the closure's strict parameter guards;
+            -- only a genuine Lua call performs numeric coercion.
+            for _, fn in ipairs({test.Callables.add, test.Callables.new,
+                                 test.Choice.item}) do
+                local ok, err = pcall(test.call, fn, 8.0)
+                assert(not ok)
+                assert(tostring(err):find("expected integer tag", 1, true), err)
+            end
+            assert(test.Callables.add(8.0) == 18)
+        ]])
+        end)
+
     it("honors finite, open, and zero demand for every Lua callable kind",
         function()
             run_coder([[

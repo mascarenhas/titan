@@ -635,7 +635,7 @@ generated `titan.uv` object, and leave no reference to a retired shim. Keep them
 aligned with the real callback protocol rather than inferring correctness from
 parameter count alone.
 
-After rebuilding the canonical eighteen-root provider, mechanically extract
+After rebuilding the canonical nineteen-root provider, mechanically extract
 its exact serialized interface and compare it with
 `spec/fixtures/libuv/titan_uv_types.lua`:
 
@@ -680,7 +680,7 @@ make titan-stdlib-test-run
 The final two commands complete the uncovered stdlib gate without rebuilding
 the native executable; `make stdlib-test` performs the complete gate from
 scratch. A `TITAN_FILTER` selects cases at run time; it does not rebuild or
-narrow the 22-root executable.
+narrow the 23-root executable.
 
 The real installation path and both link policies remain release boundaries:
 

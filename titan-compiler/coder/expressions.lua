@@ -1889,6 +1889,22 @@ function codecpseudonew(ctx, node)
         }, true)
         metadata = "setivalue(&" .. tmpname
             .. "->uv[0].uv, _count);"
+    elseif plan.array then
+        nuvalues = 1
+        sizecode = render([[
+            size_t _elem_size = sizeof($CT);
+            if (TITAN_UNLIKELY((size_t)_count > ((size_t)-1) / _elem_size)) {
+                luaL_error(L, "%s:%d:%d: C allocation size overflow", $FILE, $LINE, $COL);
+            }
+            size_t _nbytes = (size_t)_count * _elem_size;
+        ]], {
+            CT = coder._render_c_declaration(ctyp, ""),
+            FILE = c_string_literal(node.loc.filename),
+            LINE = c_integer_literal(node.loc.line),
+            COL = c_integer_literal(node.loc.col),
+        }, true)
+        metadata = "setivalue(&" .. tmpname
+            .. "->uv[0].uv, _count);"
     else
         sizecode = render([[
             size_t _elem_size = sizeof($CT);

@@ -51,10 +51,10 @@ writer and byte-preserving normalization helpers. Neither dependency exposes
 private engine or storage state to URL.
 The adapter state and close rules are documented with their owner in
 [The libuv continuation runtime](libuv-runtime.md#string-specialized-channel-adapters).
-Production places all eighteen logical modules and LPegLabel in one static
+Production places all nineteen logical modules and LPegLabel in one static
 bundle.
 
-The installed standard build requests eighteen roots in stable order:
+The installed standard build requests nineteen roots in stable order:
 
 ```text
 titan.coroutine
@@ -75,6 +75,7 @@ titan.lua
 titan.iteration
 titan.gc
 titan.test
+titan.reflect
 ```
 
 The request order keeps `titan.io` before its concrete stream users, places
@@ -84,8 +85,8 @@ non-topological. Recursive import loading resolves both the
 `titan.async`/`titan.net`/`titan.os` to `titan.string` to `titan.peg` chains
 and the `titan.url` PEG/string dependencies while those facades are processed.
 
-The paired `titan.so`/`titan.a` therefore contains eighteen logical protocols
-and eighteen archive metadata keys. The DSO exposes nineteen Lua openers: bare
+The paired `titan.so`/`titan.a` therefore contains nineteen logical protocols
+and nineteen archive metadata keys. The DSO exposes twenty Lua openers: bare
 `luaopen_titan` support plus one entry per logical module. The provider's
 metadata-free payload begins with `ltitanlib.o`, then the private
 `libtitan-lpeglabel.a`, then the selected libuv payload, private llhttp

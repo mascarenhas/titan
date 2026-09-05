@@ -91,6 +91,7 @@ use the chapters below for the normative language reference.
 | [Iteration standard library](standard-library-iteration.md) | Lua-compatible Map traversal, corrected generic-for iterator tuples, and Array iteration that preserves inner nil elements. |
 | [Garbage-collection standard library](standard-library-gc.md) | Weak Maps and ephemerons, collector actions and mode switches, byte counts, and Lua 5.5 tuning parameters. |
 | [Testing Titan code](standard-library-test.md) | The `titan.test` API, native `titanc --test` discovery, subtests and cleanup, filtering, failure output, and process statuses. |
+| [Reflection standard library](standard-library-reflect.md) | Runtime inspection of 19 value kinds, public nominal descriptors, explicit type resolution, erased generic schemas, callable metadata, and checked dynamic field access. |
 | [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, ownership, allocation, and limitations. |
 | [Foreign functions](foreign-functions.md) | Source-defined exact C-ABI entry points, the restricted raw-C body, pointer types, explicit source collaboration, generated companions, sequencing, and callback use. |
 | [C FFI declarations and expressions](c-ffi-expressions.md) | Named C tags, host-validated pointer conversions, target-directed automatic/owned allocation (including flexible tails), typed object-macro values, macro-projected fields, and target-correct C operators. |

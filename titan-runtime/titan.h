@@ -261,20 +261,6 @@ static l_inline int titan_eq_intfloat(lua_Integer i, lua_Number f) {
   return i == fi;
 }
 
-/*
-** Macro to convert between function pointers and object/void pointers.
-** These casts are not portable ISO C, but the supported toolchains and
-** POSIX dynamic-symbol contract provide them. (The '__extension__' in GNU
-** compilers is only to avoid warnings.)
-** Named titan_cast_func because Lua 5.5's llimits.h defines its own
-** single-argument cast_func.
-*/
-#if defined(__GNUC__)
-#define titan_cast_func(t, p) (__extension__(t)(p))
-#else
-#define titan_cast_func(t, p) ((t)(p))
-#endif
-
 inline static TString *_integer2str(lua_State *L, lua_Integer i) {
   char _cvtbuff[LUA_N2SBUFFSZ];
   size_t len;
@@ -444,6 +430,10 @@ static l_inline Table *titan_ensure_metatables_table(lua_State *L) {
   lua_setfield(L, LUA_REGISTRYINDEX, "TITAN_MT_STATICS");
   lua_pushlightuserdata(L, TITAN_MT_MEMBERMAP);
   lua_setfield(L, LUA_REGISTRYINDEX, "TITAN_MT_MEMBERMAP");
+  lua_pushlightuserdata(L, TITAN_MT_MOD);
+  lua_setfield(L, LUA_REGISTRYINDEX, "TITAN_MT_MOD");
+  lua_pushlightuserdata(L, TITAN_MT_PAYLOAD);
+  lua_setfield(L, LUA_REGISTRYINDEX, "TITAN_MT_PAYLOAD");
 #endif
   lua_getfield(L, LUA_REGISTRYINDEX, TITAN_METATABLES_KEY);
   TValue *v = s2v(L->top.p - 1);

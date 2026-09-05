@@ -1,0 +1,1089 @@
+local luac = foreign import "lua.h"
+local ffi = foreign import "titan/ffi.h"
+local lobject = foreign import "lobject.h"
+local iteration = import "iteration"
+local lua = import "lua"
+local str = import "string"
+
+record ArrayValue
+  const val: { value }
+end
+
+record ConstArrayValue
+  const val: const { value }
+end
+
+record MapValue
+  const val: { value: value }
+end
+
+record RecordValue
+  -- val keeps this borrowed receiver alive.
+  local const udata: *lobject.Udata
+  const n_fields: integer
+  -- record value for use as receiver in method calls
+  const val: value
+  const descriptor: RecordType
+end
+
+
+record UnionValue
+  const tag: integer
+  const payload: value -- nil for empty variant
+  -- union value for use as receiver in method calls
+  const val: value
+  const descriptor: UnionType
+end
+
+record InterfaceValue
+  local const udata: *lobject.Udata
+  const n_fields: integer
+  const val: value -- the interface wrapper, receiver for method calls
+  const wrapped: value -- underlying record/union
+  const descriptor: InterfaceType
+end
+
+record TitanFunctionValue
+  const val: (...: value) -> (...: value)
+  const native_entry: *void
+  const lua_entry: foreign (*lua_State) -> int
+  const descriptor: FunctionType
+end
+
+record LuaFunctionValue
+  const val: (...: value) -> (...: value)
+  const descriptor: LuaFunctionType
+end
+
+record LuaCFunctionValue
+  const val: (...: value) -> (...: value)
+  const entry: foreign (*lua_State) -> int
+end
+
+record OwnedForeignPointerValue
+  const val: value
+  const payload: *void
+  const size: integer
+  const descriptor: OwnedForeignPointerType
+end
+
+record OwnedForeignArrayValue
+  const val: value
+  const payload: *void
+  const size: integer
+  const count: integer
+  const descriptor: OwnedForeignArrayType
+end
+
+record LuaUserdataValue
+  const val: value
+end
+
+record LuaThreadValue
+  const val: value
+  const thread: *lua_State
+end
+
+union Value
+  is_nil
+  is_integer: integer
+  is_float: float
+  is_boolean: boolean
+  is_string: string
+  is_array: ArrayValue
+  is_const_array: ConstArrayValue
+  is_map: MapValue
+  is_record: RecordValue
+  is_union: UnionValue
+  is_interface: InterfaceValue
+  is_titan_function: TitanFunctionValue
+  is_lua_function: LuaFunctionValue
+  is_lua_c_function: LuaCFunctionValue
+  is_owned_foreign_pointer: OwnedForeignPointerValue
+  is_owned_foreign_array: OwnedForeignArrayValue
+  is_lua_userdata: LuaUserdataValue
+  is_lua_thread: LuaThreadValue
+  is_raw_pointer: *void
+end
+
+record NamedType
+  const name: string
+end
+
+union ArrayTypeConstness
+  is_mutable
+  is_const
+  is_maybe_const
+end
+
+record ArrayType
+  const is_const: ArrayTypeConstness
+  const elem_descriptor: Type
+end
+
+record MapType
+  const key_descriptor: Type
+  const value_descriptor: Type
+end
+
+record RecordType
+  const name: string
+  const fields: const { FieldType }
+  const statics: const { StaticFunctionType }
+  const methods: const { MethodType }
+end
+
+record UnionType
+  local const payload_reader: foreign (*lua_State, *lobject.Udata, *ffi.TValue) -> ()
+  const name: string
+  const variants: const { VariantType }
+  const statics: const { StaticFunctionType }
+  const methods: const { MethodType }
+end
+
+record InterfaceType
+  const name: string
+  const fields: const { FieldType }
+  const methods: const { MethodType }
+end
+
+record FieldType
+  -- Module ownership and accessor identity are captured once during hydration.
+  local const module: value
+  local const accessor: foreign (*lua_State, *lobject.Udata, *lobject.Udata, *ffi.TValue, int) -> ()
+  const name: string
+  const index: integer
+  const descriptor: Type
+  -- always true for interface fields
+  const is_const: boolean
+end
+
+record MethodType
+  const name: string
+  const param_names: const { string }
+  const param_descriptors: const { Type }
+  const vararg_descriptor: Type?
+  const return_descriptors: const { Type }
+  const flexret_descriptor: Type?
+  const callable: (value, ...: value) -> (...: value)
+end
+
+record StaticFunctionType
+  const name: string
+  const param_names: const { string }
+  const param_descriptors: const { Type }
+  const vararg_descriptor: Type?
+  const return_descriptors: const { Type }
+  const flexret_descriptor: Type?
+  const callable: (...: value) -> (...: value)
+end
+
+record VariantType
+  const name: string
+  const tag: integer
+  const descriptor: Type? -- absence means empty variant
+  const callable: (value) -> value
+end
+
+record FunctionType
+  const param_descriptors: const { Type }
+  const vararg_descriptor: Type?
+  const return_descriptors: const { Type }
+  const flexret_descriptor: Type?
+end
+
+record ForeignFunctionType
+  const param_descriptors: const { Type }
+  const is_vararg: boolean
+  const return_descriptor: Type
+end
+
+record OwnedForeignPointerType
+  const pointee_descriptor: Type
+end
+
+record OwnedForeignArrayType
+  const elem_descriptor: Type
+end
+
+record ForeignIntegerType
+  const spelling: string
+  const is_signed: boolean
+  const rank: integer
+  const bits: integer
+end
+
+record ForeignFloatType
+  const spelling: string
+end
+
+record ForeignNamedType
+  const name: string
+  local const declarations: {string: Type}
+end
+
+record ForeignPointerType
+  const pointee_descriptor: Type
+  const quals: const { string }
+end
+
+record ForeignArrayType
+  const elem_descriptor: Type
+  const len: value
+  const quals: const { string }
+end
+
+record ForeignStructType
+  const cname: string
+  const tagname: string
+  const typedef: string
+  const fields: const { ForeignFieldType }
+  const is_complete: boolean
+  const has_fam: boolean
+end
+
+record ForeignUnionType
+  const cname: string
+  const tagname: string
+  const typedef: string
+  const fields: const { ForeignFieldType }
+  const is_complete: boolean
+end
+
+record ForeignFieldType
+  const name: string
+  const descriptor: Type
+  const bitfield: value
+  const is_flexible_array: boolean
+end
+
+record ForeignTypedefType
+  const name: string
+  const target_descriptor: Type
+  const quals: const { string }
+end
+
+record LuaFunctionType
+  const source: string
+  const short_source: string
+  const line_defined: integer
+  const last_line_defined: integer
+  const what: string
+  const is_vararg: boolean
+  const n_params: integer
+end
+
+union Type
+  is_nil
+  is_boolean
+  is_integer
+  is_float
+  is_string
+  is_value
+  is_named: NamedType
+  is_array: ArrayType
+  is_map: MapType
+  is_record: RecordType
+  is_union: UnionType
+  is_interface: InterfaceType
+  is_option: Type
+  is_function: FunctionType
+  is_foreign_function: ForeignFunctionType
+  is_owned_foreign_pointer: OwnedForeignPointerType
+  is_owned_foreign_array: OwnedForeignArrayType
+  is_foreign_void
+  is_foreign_named: ForeignNamedType
+  is_foreign_integer: ForeignIntegerType
+  is_foreign_float: ForeignFloatType
+  is_foreign_pointer: ForeignPointerType
+  is_foreign_array: ForeignArrayType
+  is_foreign_struct: ForeignStructType
+  is_foreign_union: ForeignUnionType
+  is_foreign_typedef: ForeignTypedefType
+end
+
+union NominalType
+  is_record: RecordType
+  is_union: UnionType
+  is_interface: InterfaceType
+end
+
+function RecordValue:get(i: integer): value
+  if i < 1 or i > self.n_fields then
+    raise "field index " .. str.tostring(i) .. " out of bounds [1, " .. str.tostring(self.n_fields) .. "]"
+  end
+  local field = self.descriptor.fields[i]
+  local module: ffi.TValue = field.module
+  local result: ffi.TValue = nil
+  field.accessor(L, ffi.lmacro_uvalue(module), self.udata, result, 0)
+  return result as value
+end
+
+function RecordValue:set(i: integer, v: value)
+  if i < 1 or i > self.n_fields then
+    raise "field index " .. str.tostring(i) .. " out of bounds [1, " .. str.tostring(self.n_fields) .. "]"
+  end
+  local field = self.descriptor.fields[i]
+  local module: ffi.TValue = field.module
+  local source: ffi.TValue = v
+  field.accessor(L, ffi.lmacro_uvalue(module), self.udata, source, 1)
+end
+
+function InterfaceValue:get(i: integer): value
+  if i < 1 or i > self.n_fields then
+    raise "field index " .. str.tostring(i) .. " out of bounds [1, " .. str.tostring(self.n_fields) .. "]"
+  end
+  local field = self.descriptor.fields[i]
+  local module: ffi.TValue = field.module
+  local result: ffi.TValue = nil
+  field.accessor(L, ffi.lmacro_uvalue(module), self.udata, result, 0)
+  return result as value
+end
+
+function NamedType:resolve(): Type
+  local found: NominalType? = find_nominal(self.name)
+  if found == nil then
+    return Type.is_value()
+  end
+  local r = found as NominalType
+  case r
+  when is_record: rec then
+    return Type.is_record(rec)
+  when is_union: un then
+    return Type.is_union(un)
+  when is_interface: iface then
+    return Type.is_interface(iface)
+  end
+end
+
+function ForeignNamedType:resolve(): Type
+  local resolved: Type? = self.declarations[self.name]
+  if resolved == nil then
+    raise "unknown foreign type " .. self.name
+  end
+  return resolved
+end
+
+function Type:resolve(): Type
+  case self
+  when is_named: named then
+    return named:resolve()
+  when is_foreign_named: named then
+    return named:resolve()
+  else
+    return self
+  end
+end
+
+-- Titan metatable by name registry
+local METATABLE_BY_NAME: { string: { value: value } } = {}
+
+local function init_metatable_by_name()
+  local top = luac.lua_gettop(L)
+  defer luac.lua_settop(L, top)
+  if luac.lua_checkstack(L, 1) == 0 then
+    raise "cannot reserve stack for the nominal registry"
+  end
+  local t = luac.lua_getfield(L, luac.LUA_REGISTRYINDEX, ffi.TITAN_METATABLES_KEY)
+  if t ~= luac.LUA_TTABLE then
+    raise "Titan metatable by name registry is not a table"
+  end
+  METATABLE_BY_NAME = ffi.lua_totvalue(L, -1) as value
+end
+
+-- Cache from metatable ({ value: value }) to type
+local mt_cache: { { value: value } : Type } = {}
+
+-- Cache from qualified nominal name to NominalType
+local nominal_cache: {string: NominalType} = {}
+
+-- Active tables during hydration
+local active_membermap: { string: value }? = nil
+local active_statics: { string: value }? = nil
+local active_module: value = nil
+local active_payload_reader: value = nil
+local seen_ctypes: { string: Type } = {}
+
+local function sort_strings(arr: {string})
+  for i = 2, #arr do
+    local key = arr[i]
+    local j = i - 1
+    while j >= 1 and arr[j] > key do
+      arr[j + 1] = arr[j]
+      j = j - 1
+    end
+    arr[j + 1] = key
+  end
+end
+
+local function cast_metadata_optional<T>(v: value): T?
+  if v == nil or v == false then
+    return nil
+  else
+    return v as T
+  end
+end
+
+local function to_array<T>(v: ({ integer: T })?): const {T}
+  local res: {T} = {}
+  if v == nil then return res as const {T} end
+  for i = 1, #v do
+    res[#res + 1] = v[i]
+  end
+  return res as const {T}
+end
+
+local function to_sorted_array<T>(v: ({ string: T })?): const {T}
+  local res: {T} = {}
+  if v == nil then return res as const {T} end
+  local names: {string} = {}
+  for name, val in iteration.pairs(v) do
+    names[#names + 1] = name
+  end
+  sort_strings(names)
+  for i = 1, #names do
+    res[#res + 1] = v[names[i]]
+  end
+  return res as const {T}
+end
+
+local hydration_env: {string: value} = {}
+
+local function init_hydration_env()
+  hydration_env["Integer"] = function(): Type
+    return Type.is_integer()
+  end
+
+  hydration_env["Boolean"] = function(): Type
+    return Type.is_boolean()
+  end
+
+  hydration_env["String"] = function(): Type
+    return Type.is_string()
+  end
+
+  hydration_env["Nil"] = function(): Type
+    return Type.is_nil()
+  end
+
+  hydration_env["Float"] = function(): Type
+    return Type.is_float()
+  end
+
+  hydration_env["Value"] = function(): Type
+    return Type.is_value()
+  end
+
+  hydration_env["Void"] = function(): Type
+    return Type.is_foreign_void()
+  end
+
+  hydration_env["CVoid"] = function(): Type
+    return Type.is_foreign_void()
+  end
+
+  hydration_env["Option"] = function(base: Type): Type
+    case base
+    when is_value then return base
+    when is_option then return base
+    else return Type.is_option(base)
+    end
+  end
+
+  hydration_env["Array"] = function(elem: Type, isconst: value): Type
+    local ic: ArrayTypeConstness? = nil
+    if isconst == "maybe" then
+      ic = ArrayTypeConstness.is_maybe_const()
+    elseif isconst then
+      ic = ArrayTypeConstness.is_const()
+    else
+      ic = ArrayTypeConstness.is_mutable()
+    end
+    return Type.is_array({ is_const = ic, elem_descriptor = elem })
+  end
+
+  hydration_env["Map"] = function(keys: Type, values: Type): Type
+    return Type.is_map({ key_descriptor = keys, value_descriptor = values })
+  end
+
+  hydration_env["Nominal"] = function(fqtn: string): Type
+    return Type.is_named({ name = fqtn })
+  end
+
+  hydration_env["Field"] = function(fqtn: string, name: string, typ: Type, index: integer, isconst: boolean): FieldType
+    return {
+      module = active_module,
+      accessor = active_membermap[name] as foreign (*lua_State, *lobject.Udata, *lobject.Udata, *ffi.TValue, int) -> (),
+      name = name,
+      index = index,
+      descriptor = typ,
+      is_const = isconst
+    }
+  end
+
+  hydration_env["Variant"] = function(fqtn: string, name: string, payload: value, index: integer): VariantType
+    return {
+      name = name,
+      tag = index,
+      descriptor = cast_metadata_optional<Type>(payload),
+      callable = active_statics[name]
+    }
+  end
+
+  hydration_env["Method"] = function(fqtn: string,
+        name: string, params: value,
+        rettypes: value, varargtype: value, flexrettype: value,
+        paramnames: value): MethodType
+    return {
+      name = name,
+      param_names = to_array(cast_metadata_optional<{integer: string}>(paramnames)),
+      param_descriptors = to_array(cast_metadata_optional<{integer: Type}>(params)),
+      vararg_descriptor = cast_metadata_optional<Type>(varargtype),
+      return_descriptors = to_array(cast_metadata_optional<{integer: Type}>(rettypes)),
+      flexret_descriptor = cast_metadata_optional<Type>(flexrettype),
+      callable = active_membermap[name]
+    }
+  end
+
+  hydration_env["StaticMethod"] = function(fqtn: string,
+        name: string, params: value,
+        rettypes: value, varargtype: value, flexrettype: value,
+        paramnames: value): StaticFunctionType
+    return {
+      name = name,
+      param_names = to_array(cast_metadata_optional<{integer: string}>(paramnames)),
+      param_descriptors = to_array(cast_metadata_optional<{integer: Type}>(params)),
+      vararg_descriptor = cast_metadata_optional<Type>(varargtype),
+      return_descriptors = to_array(cast_metadata_optional<{integer: Type}>(rettypes)),
+      flexret_descriptor = cast_metadata_optional<Type>(flexrettype),
+      callable = active_statics[name]
+    }
+  end
+
+  hydration_env["Function"] = function(params: value, rettypes: value, _: value,
+        varargtype: value, flexrettype: value): Type
+    return Type.is_function({
+      param_descriptors = to_array(cast_metadata_optional<{integer: Type}>(params)),
+      vararg_descriptor = cast_metadata_optional<Type>(varargtype),
+      return_descriptors = to_array(cast_metadata_optional<{integer: Type}>(rettypes)),
+      flexret_descriptor = cast_metadata_optional<Type>(flexrettype),
+    })
+  end
+
+  hydration_env["Record"] = function(name: string,
+       fields: value, 
+       functions: value, 
+       methods: value): Type
+    return Type.is_record({
+      name = name,
+      fields = to_array(cast_metadata_optional<{integer: FieldType}>(fields)),
+      statics = to_sorted_array(cast_metadata_optional<{string: StaticFunctionType}>(functions)),
+      methods = to_sorted_array(cast_metadata_optional<{string: MethodType}>(methods))
+    })
+  end
+
+  hydration_env["Union"] = function(name: string, 
+       variants: value, 
+       functions: value, 
+       methods: value): Type
+    return Type.is_union({
+      payload_reader = active_payload_reader as foreign (*lua_State, *lobject.Udata, *ffi.TValue) -> (),
+      name = name,
+      variants = to_array(cast_metadata_optional<{integer: VariantType}>(variants)),
+      statics = to_sorted_array(cast_metadata_optional<{string: StaticFunctionType}>(functions)),
+      methods = to_sorted_array(cast_metadata_optional<{string: MethodType}>(methods))
+    })
+  end
+
+  hydration_env["Interface"] = function(name: string, 
+        fields: value, 
+        methods: value): Type
+    return Type.is_interface({
+      name = name,
+      fields = to_array(cast_metadata_optional<{integer: FieldType}>(fields)),
+      methods = to_array(cast_metadata_optional<{integer: MethodType}>(methods))
+    })
+  end
+
+  hydration_env["COwned"] = function(pointee: Type, count: value): Type
+    if count then
+      return Type.is_owned_foreign_array({ elem_descriptor = pointee })
+    else
+      return Type.is_owned_foreign_pointer({ pointee_descriptor = pointee })
+    end
+  end
+
+  hydration_env["CInteger"] = function(spelling: string, is_signed: boolean, rank: value, bits: value): Type
+    return Type.is_foreign_integer({
+      spelling = spelling,
+      is_signed = is_signed,
+      rank = cast_metadata_optional<integer>(rank),
+      bits = cast_metadata_optional<integer>(bits)
+    })
+  end
+
+  hydration_env["CFloat"] = function(spelling: string): Type
+    return Type.is_foreign_float({ spelling = spelling })
+  end
+
+  hydration_env["CPointer"] = function(pointee: Type, quals: value): Type
+    return Type.is_foreign_pointer({
+      pointee_descriptor = pointee,
+      quals = to_array(cast_metadata_optional<{integer: string}>(quals))
+    })
+  end
+
+  hydration_env["CArray"] = function(elem: Type, len: value, quals: value): Type
+    return Type.is_foreign_array({
+      elem_descriptor = elem,
+      len = len,
+      quals = to_array(cast_metadata_optional<{integer: string}>(quals))
+    })
+  end
+
+  hydration_env["CNamed"] = function(name: string): Type
+    -- Child descriptors hydrate before their enclosing declaration. Retain
+    -- this hydration's table so the reference can resolve after registration.
+    return Type.is_foreign_named({ name = name, declarations = seen_ctypes })
+  end
+
+  hydration_env["CStruct"] = function(cname: value, tagname: value, typedef: value,
+        fields: value, complete: boolean, has_fam: boolean): Type
+    local c_name: string? = cast_metadata_optional<string>(cname)
+    local tag_name: string? = cast_metadata_optional<string>(tagname)
+    local name: string? = c_name
+    if name == nil then name = tag_name end
+    local t = Type.is_foreign_struct({
+      cname = c_name or "",
+      tagname = tag_name or "",
+      typedef = cast_metadata_optional<string>(typedef) or "",
+      fields = to_array(cast_metadata_optional<{integer: ForeignFieldType}>(fields)),
+      is_complete = complete,
+      has_fam = has_fam
+    })
+    if name ~= nil then
+      seen_ctypes["struct@" .. name] = t
+    end
+    return t
+  end
+
+  hydration_env["CUnion"] = function(cname: value, tagname: value, typedef: value,
+        fields: value, complete: boolean): Type
+    local c_name: string? = cast_metadata_optional<string>(cname)
+    local tag_name: string? = cast_metadata_optional<string>(tagname)
+    local name: string? = c_name
+    if name == nil then name = tag_name end
+    local t = Type.is_foreign_union({
+      cname = c_name or "",
+      tagname = tag_name or "",
+      typedef = cast_metadata_optional<string>(typedef) or "",
+      fields = to_array(cast_metadata_optional<{integer: ForeignFieldType}>(fields)),
+      is_complete = complete
+    })
+    if name ~= nil then
+      seen_ctypes["union@" .. name] = t
+    end
+    return t
+  end
+
+  hydration_env["CField"] = function(_: value, name: string, typ: Type, bitfield: value, flex: boolean): ForeignFieldType
+    return {
+      name = name,
+      descriptor = typ,
+      bitfield = bitfield,
+      is_flexible_array = flex
+    }
+  end
+
+  hydration_env["CTypedef"] = function(name: string, target: Type, quals: value): Type
+    local t = Type.is_foreign_typedef({
+      name = name,
+      target_descriptor = target,
+      quals = to_array(cast_metadata_optional<{integer: string}>(quals))
+    })
+    seen_ctypes["typedef@" .. name] = t
+    return t
+  end
+
+  hydration_env["CFunction"] = function(params: value, ret: Type, vararg: boolean): Type
+    return Type.is_foreign_function({
+      param_descriptors = to_array(cast_metadata_optional<{integer: Type}>(params)),
+      is_vararg = vararg,
+      return_descriptor = ret
+    })
+  end
+
+  -- Parameters erase at the outer nominal boundary. Generic arguments and
+  -- binder declarations do not describe additional runtime identities.
+  hydration_env["Parameter"] = function(scope: value, index: value, name: value, constraint: value): Type
+    return cast_metadata_optional<Type>(constraint) or Type.is_value()
+  end
+  hydration_env["FunctionScheme"] = function(scope: value, parameters: value, signature: Type): Type
+    return signature
+  end
+
+  -- Binder and module tokens do not contribute runtime descriptors.
+  local ignore_fn = function(): value return nil end
+  hydration_env["GenericScope"] = ignore_fn
+  hydration_env["TypeParameter"] = ignore_fn
+  hydration_env["GenericAlias"] = ignore_fn
+  hydration_env["Module"] = ignore_fn
+  hydration_env["ModuleMember"] = ignore_fn
+  hydration_env["ModuleVariable"] = ignore_fn
+  hydration_env["CModule"] = ignore_fn
+end
+
+local function hydrate_type(typestr: string, mt: ({value: value})?): Type
+  local previous_membermap? = active_membermap
+  local previous_statics? = active_statics
+  local previous_module = active_module
+  local previous_payload_reader = active_payload_reader
+  local previous_ctypes = seen_ctypes
+  seen_ctypes = {}
+  if mt then
+    active_membermap = mt[ffi.TITAN_MT_MEMBERMAP]
+    active_statics = mt[ffi.TITAN_MT_STATICS]
+    active_module = mt[ffi.TITAN_MT_MOD]
+    active_payload_reader = mt[ffi.TITAN_MT_PAYLOAD]
+  else
+    active_membermap = nil
+    active_statics = nil
+    active_module = nil
+    active_payload_reader = nil
+  end
+  defer do
+    seen_ctypes = previous_ctypes
+    active_membermap = previous_membermap
+    active_statics = previous_statics
+    active_module = previous_module
+    active_payload_reader = previous_payload_reader
+  end
+  local chunk = lua.load("return " .. typestr, "=descriptor", hydration_env)
+  return (chunk())
+end
+
+local function get_or_hydrate_from_metatable(mt: { value: value }): Type
+  local cached? = mt_cache[mt]
+  if cached then
+    return cached
+  end
+  local typestr: string? = mt[ffi.TITAN_MT_TYPE]
+  if typestr == nil then
+    raise "metatable " .. str.tostring(mt) .. " has no type descriptor"
+  end
+  local t = hydrate_type(typestr, mt)
+  mt_cache[mt] = t
+  return t
+end
+
+function find_nominal(name: string): NominalType?
+  local cached: NominalType? = nominal_cache[name]
+  if cached then
+    return cached
+  end
+  local mt? = METATABLE_BY_NAME[name]
+  if mt == nil then
+    return nil
+  end
+  local brand: integer? = mt[ffi.TITAN_BRAND]
+  if brand == nil then
+    return nil
+  end
+  local nom: NominalType? = nil
+  local t = get_or_hydrate_from_metatable(mt)
+  case t
+    when is_record: rec then
+      nom = NominalType.is_record(rec)
+    when is_union: u then
+      nom = NominalType.is_union(u)
+    when is_interface: iface then
+      nom = NominalType.is_interface(iface)
+  else
+    return nil
+  end
+  nominal_cache[name] = nom
+  return nom
+end
+
+local function is_titan_closure(cl: *lobject.CClosure): boolean
+  if cl.nupvalues < 5 then
+    return false
+  end
+  -- Lua declares a one-element trailing array; nupvalues owns its real extent.
+  local upvalues = cl.upvalue as *ffi.TValue
+  if ffi.lmacro_ttislightuserdata(upvalues[3]) == 0 then
+    return false
+  end
+  return ffi.lmacro_pvalue(upvalues[3]) == ffi.TITAN_BRAND
+end
+
+local function inspect_function(v: value): Value
+  local tv: ffi.TValue = v
+  if ffi.lmacro_ttisLclosure(tv) ~= 0 then
+    local top = luac.lua_gettop(L)
+    defer luac.lua_settop(L, top)
+    if luac.lua_checkstack(L, 1) == 0 then
+      raise "cannot reserve stack for Lua function inspection"
+    end
+    local ar: owned *luac.lua_Debug = luac.lua_Debug.new()
+    ffi.lua_pushtvalue(L, tv)
+    if luac.lua_getinfo(L, ">Su", ar) == 0 then
+      raise "could not get Lua function info"
+    end
+    local src = ""
+    if ar.source ~= nil then
+      src = ar.source as string
+    end
+    local short_src = (ar.short_src as *char) as string
+    local what = ""
+    if ar.what ~= nil then
+      what = ar.what as string
+    end
+    local desc: LuaFunctionType = {
+      source = src,
+      short_source = short_src,
+      line_defined = ar.linedefined as integer,
+      last_line_defined = ar.lastlinedefined as integer,
+      what = what,
+      is_vararg = ar.isvararg ~= 0,
+      n_params = ar.nparams as integer
+    }
+    return Value.is_lua_function({
+      val = v as (...: value) -> (...: value),
+      descriptor = desc
+    })
+  elseif ffi.lmacro_ttisCclosure(tv) ~= 0 then
+    local cl: *lobject.CClosure = ffi.lmacro_clCvalue(tv)
+    if is_titan_closure(cl) then
+      local upvalues = cl.upvalue as *ffi.TValue
+      local native_entry = ffi.lmacro_pvalue(upvalues[2])
+      local lua_entry: foreign (*lua_State) -> int = cl.f
+      local tag_ptr = ffi.lmacro_pvalue(upvalues[1]) as *char
+      local tag_str = tag_ptr as string
+      local ftype = hydrate_type(tag_str)
+      local desc: FunctionType? = nil
+      case ftype
+      when is_function: ft then
+        desc = ft
+      end
+      if desc == nil then
+        raise "invalid function descriptor for Titan function"
+      end
+      return Value.is_titan_function({
+        val = v as (...: value) -> (...: value),
+        native_entry = native_entry,
+        lua_entry = lua_entry,
+        descriptor = desc as FunctionType
+      })
+    else
+      local entry: foreign (*lua_State) -> int = cl.f
+      return Value.is_lua_c_function({
+        val = v as (...: value) -> (...: value),
+        entry = entry
+      })
+    end
+  elseif ffi.lmacro_ttislcf(tv) ~= 0 then
+    local entry: foreign (*lua_State) -> int = ffi.lmacro_fvalue(tv)
+    return Value.is_lua_c_function({
+      val = v as (...: value) -> (...: value),
+      entry = entry
+    })
+  else
+    raise "unknown function representation"
+  end
+end
+
+local brand_handlers: {(value, ({ value: value })?) -> Value} = {}
+
+local function init_brand_handlers()
+  brand_handlers[ffi.TITAN_ARRAY] = function(v: value, mt: ({ value: value })?): Value
+    return Value.is_array({ val = v as {value} })
+  end
+
+  brand_handlers[ffi.TITAN_CONST_ARRAY] = function(v: value, mt: ({ value: value })?): Value
+    return Value.is_const_array({ val = v as const {value} })
+  end
+
+  brand_handlers[ffi.TITAN_RECORD] = function(v: value, mt: ({ value: value })?): Value
+    local t = get_or_hydrate_from_metatable(mt)
+    case t
+    when is_record: desc then
+      local tv: ffi.TValue = v
+      local u = ffi.lmacro_uvalue(tv)
+      return Value.is_record({
+        udata = u,
+        n_fields = #desc.fields,
+        val = v,
+        descriptor = desc
+      })
+    else
+      raise "metatable " .. str.tostring(mt) .. " does not describe a record"
+    end
+  end
+
+  brand_handlers[ffi.TITAN_UNION] = function(v: value, mt: ({ value: value })?): Value
+    local t = get_or_hydrate_from_metatable(mt)
+    case t
+    when is_union: desc then
+      local tv: ffi.TValue = v
+      local u = ffi.lmacro_uvalue(tv)
+      local uv_ptr = u.uv as *lobject.UValue
+      local tag: integer = 0
+      local tag_val: value = uv_ptr[0].uv
+      if tag_val is integer then
+        tag = tag_val as integer
+      end
+      local payload: ffi.TValue = nil
+      desc.payload_reader(L, u, payload)
+      return Value.is_union({
+        tag = tag,
+        payload = payload as value,
+        val = v,
+        descriptor = desc
+      })
+    else
+      raise "metatable " .. str.tostring(mt) .. " does not describe a union"
+    end
+  end
+
+  brand_handlers[ffi.TITAN_INTERFACE] = function(v: value, mt: ({ value: value })?): Value
+    local t = get_or_hydrate_from_metatable(mt)
+    case t
+    when is_interface: desc then
+      local tv: ffi.TValue = v
+      local u = ffi.lmacro_uvalue(tv)
+      local uv_ptr = u.uv as *lobject.UValue
+      local wrapped = uv_ptr[1].uv
+      return Value.is_interface({
+        udata = u,
+        n_fields = #desc.fields,
+        val = v,
+        wrapped = wrapped,
+        descriptor = desc
+      })
+    else
+      raise "metatable " .. str.tostring(mt) .. " does not describe an interface"
+    end
+  end
+
+  brand_handlers[ffi.TITAN_OWNED] = function(v: value, mt: ({ value: value })?): Value
+    local t = get_or_hydrate_from_metatable(mt)
+    local tv: ffi.TValue = v
+    local u = ffi.lmacro_uvalue(tv)
+    local payload = ffi.lmacro_getudatamem(u)
+    local size = u.len as integer
+    case t
+    when is_owned_foreign_array: arr_t then
+      local count: integer = 0
+      if (u.nuvalue as integer) > 0 then
+        local uv_ptr = u.uv as *lobject.UValue
+        local count_val: value = uv_ptr[0].uv
+        if count_val is integer then
+          count = count_val as integer
+        end
+      end
+      return Value.is_owned_foreign_array({
+        val = v,
+        payload = payload,
+        size = size,
+        count = count,
+        descriptor = arr_t
+      })
+    when is_owned_foreign_pointer: ptr_t then
+      return Value.is_owned_foreign_pointer({
+        val = v,
+        payload = payload,
+        size = size,
+        descriptor = ptr_t
+      })
+    else
+      raise "metatable " .. str.tostring(mt) .. " does not describe an owned type"
+    end
+  end
+end
+
+local function inspect_userdata(v: value): Value
+  local tv: ffi.TValue = v
+  local ud: *lobject.Udata = ffi.lmacro_uvalue(tv)
+  local mt = ud.metatable
+  if mt == nil then
+    return Value.is_lua_userdata({ val = v })
+  end
+  local mtv: ffi.TValue = nil
+  ffi.lmacro_sethvalue(L, mtv, mt)
+  local mtm: { value: value } = mtv as value
+  local brand: integer? = mtm[ffi.TITAN_BRAND]
+  if brand == nil then
+    return Value.is_lua_userdata({ val = v })
+  end
+  local brand_handler? = brand_handlers[brand]
+  if brand_handler == nil then
+    return Value.is_lua_userdata({ val = v })
+  end
+  return brand_handler(v, mtm)
+end
+
+local tag_handlers: {(value) -> Value} = {}
+
+local function init_tag_handlers()
+  tag_handlers[1] = function(v: value): Value
+    return Value.is_nil()
+  end
+
+  tag_handlers[2] = function(v: value): Value
+    return Value.is_boolean(v as boolean)
+  end
+
+  tag_handlers[3] = function(v: value): Value
+    local tv: ffi.TValue = v
+    return Value.is_raw_pointer(ffi.lmacro_pvalue(tv))
+  end
+
+  tag_handlers[4] = function(v: value): Value
+    local tv: ffi.TValue = v
+    if ffi.lmacro_ttypetag(tv) == lobject.LUA_VNUMINT then
+      return Value.is_integer(v as integer)
+    else
+      return Value.is_float(v as float)
+    end
+  end
+
+  tag_handlers[5] = function(v: value): Value
+    return Value.is_string(v as string)
+  end
+
+  tag_handlers[6] = function(v: value): Value
+    return Value.is_map({ val = v as {value: value} })
+  end
+
+  tag_handlers[7] = function(v: value): Value
+    return inspect_function(v)
+  end
+
+  tag_handlers[8] = function(v: value): Value
+    return inspect_userdata(v)
+  end
+
+  tag_handlers[9] = function(v: value): Value
+    local tv: ffi.TValue = v
+    return Value.is_lua_thread({ val = v, thread = ffi.lmacro_thvalue(tv) })
+  end
+end
+
+function inspect(v: value): Value
+  local tv: ffi.TValue = v
+  local tag = ffi.lmacro_ttype(tv)
+  local handler? = tag_handlers[tag + 1]
+  if handler then
+    return handler(v)
+  else
+    raise "unknown Lua tag " .. str.tostring(tag)
+  end
+end
+
+do
+  init_metatable_by_name()
+  init_hydration_env()
+  init_brand_handlers()
+  init_tag_handlers()
+end

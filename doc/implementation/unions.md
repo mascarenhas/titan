@@ -336,6 +336,7 @@ Like records, union metatables carry discoverable runtime reflection metadata:
 * `TITAN_MT_TYPE`: lightuserdata key set to the serialized union type descriptor (`Union(...)`);
 * `TITAN_MT_MEMBERMAP`: lightuserdata key holding the public method map table (the `__index` table);
 * `TITAN_MT_STATICS`: lightuserdata key holding the union's static-namespace table containing variant constructors and static functions;
+* `TITAN_MT_PAYLOAD`: lightuserdata key holding the generated typed payload reader used by reflection; its tag switch covers public and private variants and boxes their payloads normally;
 * Registered in the per-state global metatables table `_titan_metatables[<fqtn>]` (`TITAN_METATABLES_KEY`), alongside the reverse pointer map in the Lua registry (`registry[metatable_pointer] = <fqtn>`).
 
 The `__index` entry first performs the same exact nominal metatable check used

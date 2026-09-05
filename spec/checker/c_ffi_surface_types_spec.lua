@@ -86,7 +86,7 @@ describe("surface C99 types", function()
         assert.truthy(ok, err)
     end)
 
-    it("keeps function pointers out of module TValue slots", function()
+    it("stores portable function pointers in module TValue slots", function()
         for _, declaration in ipairs({
             "local callback: Callback = nil",
             "callback: Callback = nil",
@@ -94,9 +94,7 @@ describe("surface C99 types", function()
             local ok, err = run_checker([[
                 type Callback = foreign (int) -> int
             ]] .. declaration)
-            assert.falsy(ok)
-            assert.match("module variable 'callback'.-no TValue representation",
-                err)
+            assert.truthy(ok, err)
         end
 
         local ok, err = run_checker([[
@@ -247,5 +245,33 @@ describe("surface C99 types", function()
             assert.match("cannot export C FFI type '.-local_word'", err)
             assert.match("non%-portable header%-defined type", err)
         end)
+    end)
+
+    it("accepts lua_State as built-in exportable FFI type without foreign import", function()
+        local ok, err = run_checker([[
+            type StatePtr = *lua_State
+            type Callback = foreign (*lua_State) -> int
+
+            record StateHolder
+                state: *lua_State
+            end
+
+            function inspect_state(s: *lua_State): *lua_State
+                local cur: *lua_State = L
+                return s
+            end
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    it("rejects lua_State by value as incomplete C struct", function()
+        local ok, err = run_checker([[
+            function test(): integer
+                local s: lua_State
+                return 0
+            end
+        ]])
+        assert.falsy(ok)
+        assert.match("requires complete C struct type 'lua_State'", err)
     end)
 end)

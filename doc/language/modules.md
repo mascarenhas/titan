@@ -580,11 +580,12 @@ driver can discover the Titan root from Lua's `package.cpath`; the names do not
 have inherently identical ownership.
 
 The standard-library names `coroutine`, `uv`, `async`, `timer`, `io`, `fs`,
-`net`, `ssl`, `url`, `http`, `os`, `peg`, `string`, `test`, `lua`, `math`, `gc`, and `iteration`
- are parser sugar for the qualified module names
+`net`, `ssl`, `url`, `http`, `os`, `peg`, `string`, `test`, `lua`, `math`, `gc`,
+`iteration`, and `reflect` are parser sugar for the qualified module names
 `titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.io`,
 `titan.fs`, `titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.os`,
-`titan.peg`, `titan.string`, `titan.test`, `titan.lua`, `titan.math`, `titan.gc`, and `titan.iteration`.
+`titan.peg`, `titan.string`, `titan.test`, `titan.lua`, `titan.math`, `titan.gc`,
+`titan.iteration`, and `titan.reflect`.
 
 The qualified names then follow ordinary
 module lookup rules. Thus

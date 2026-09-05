@@ -132,7 +132,7 @@ end
 -- Keep this independent of wall-clock timing. The hook counts Lua VM
 -- instructions only while parser.parse is running and always restores any
 -- hook installed by the test runner, including when the parser raises.
-local function parse_under_instruction_budget(program_str, budget)
+local function parse_under_instruction_budget(program_str, budget, error_label)
     local previous_hook, previous_mask, previous_count = debug.gethook()
     local quantum = 100
     local instructions = 0
@@ -153,7 +153,12 @@ local function parse_under_instruction_budget(program_str, budget)
     debug.sethook(previous_hook, previous_mask, previous_count)
 
     assert.is_true(ok, tostring(ast))
-    assert.truthy(ast, err and err.label or "parser returned no AST")
+    if error_label then
+        assert.falsy(ast)
+        assert.are.equal(error_label, err and err.label)
+    else
+        assert.truthy(ast, err and err.label or "parser returned no AST")
+    end
     return ast, instructions
 end
 
@@ -1595,6 +1600,169 @@ end
               valuestype = { _tag = "Ast.TypeMap",
                   keystype = {_tag = "Ast.TypeString" },
                   valuestype = {_tag = "Ast.TypeName", name = "int" } } } )
+    end)
+
+    describe("can parenthesize any single type", function()
+        it("keeps grouping transparent and permits the outer option suffix", function()
+            for _, spelling in ipairs({"(T)", "(((T)))"}) do
+                assert_type_ast(spelling, {
+                    _tag = "Ast.TypeName", name = "T", typeargs = {},
+                })
+            end
+            for _, spelling in ipairs({"(T)?", "((T)?)", "(((T?)))"}) do
+                assert_type_ast(spelling, {
+                    _tag = "Ast.TypeOption",
+                    basetype = { _tag = "Ast.TypeName", name = "T" },
+                })
+            end
+
+            local source = "local type Wrapped = (((mod.Item)))"
+            local typ = assert(parser.parse("grouped.titan", source))[1].type
+            assert.same({filename = "grouped.titan", line = 1,
+                col = source:find("mod", 1, true)}, typ.loc)
+            assert.are.equal(source:find("Item", 1, true), typ._name_loc.col)
+        end)
+
+        it("groups containers, qualifiers, and generic arguments", function()
+            assert_type_ast("({(string): ((T)?)})?", {
+                _tag = "Ast.TypeOption",
+                basetype = {
+                    _tag = "Ast.TypeMap",
+                    keystype = { _tag = "Ast.TypeString" },
+                    valuestype = { _tag = "Ast.TypeOption",
+                        basetype = { _tag = "Ast.TypeName", name = "T" } },
+                },
+            })
+            assert_type_ast("(const? {(T)})?", {
+                _tag = "Ast.TypeOption",
+                basetype = { _tag = "Ast.TypeArray", isconst = "maybe",
+                    subtype = { _tag = "Ast.TypeName", name = "T" } },
+            })
+            assert_type_ast("(mod.Box<({(T)})?>)", {
+                _tag = "Ast.TypeQualName", module = "mod", name = "Box",
+                typeargs = { { _tag = "Ast.TypeOption",
+                    basetype = { _tag = "Ast.TypeArray",
+                        subtype = { _tag = "Ast.TypeName", name = "T" } } } },
+            })
+            assert_expression_ast("make<(T)?>()", {
+                _tag = "Ast.ExpCall", typeargs = { {
+                    _tag = "Ast.TypeOption",
+                    basetype = { _tag = "Ast.TypeName", name = "T" },
+                } },
+            })
+            assert_expression_ast("item as (T)?", {
+                _tag = "Ast.ExpCast", target = {
+                    _tag = "Ast.TypeOption",
+                    basetype = { _tag = "Ast.TypeName", name = "T" },
+                },
+            })
+        end)
+
+        it("distinguishes optional functions from optional parameters and results", function()
+            assert_type_ast("(T)? -> (U)?", {
+                _tag = "Ast.TypeFunction",
+                argtypes = { { _tag = "Ast.TypeOption",
+                    basetype = { _tag = "Ast.TypeName", name = "T" } } },
+                rettypes = { { _tag = "Ast.TypeOption",
+                    basetype = { _tag = "Ast.TypeName", name = "U" } } },
+                varargtype = false, flexrettype = false,
+            })
+            assert_type_ast("((T) -> (U))?", {
+                _tag = "Ast.TypeOption",
+                basetype = { _tag = "Ast.TypeFunction",
+                    argtypes = { { _tag = "Ast.TypeName", name = "T" } },
+                    rettypes = { { _tag = "Ast.TypeName", name = "U" } },
+                    varargtype = false, flexrettype = false },
+            })
+            assert_type_ast("((T -> U)) -> (V)?", {
+                _tag = "Ast.TypeFunction",
+                argtypes = { { _tag = "Ast.TypeFunction",
+                    argtypes = { { _tag = "Ast.TypeName", name = "T" } },
+                    rettypes = { { _tag = "Ast.TypeName", name = "U" } } } },
+                rettypes = { { _tag = "Ast.TypeOption",
+                    basetype = { _tag = "Ast.TypeName", name = "V" } } },
+            })
+        end)
+
+        it("keeps grouped type-argument and callable lists dense", function()
+            local call = assert_expression_ast("make<((T) -> (U)?), (V)?>()", {
+                _tag = "Ast.ExpCall",
+                typeargs = { { _tag = "Ast.TypeFunction" },
+                    { _tag = "Ast.TypeOption" } },
+            })
+            assert.same({call.typeargs[1], call.typeargs[2]}, call.typeargs)
+            local callable = call.typeargs[1]
+            assert.same({callable.argtypes[1]}, callable.argtypes)
+            assert.same({callable.rettypes[1]}, callable.rettypes)
+            assert.same({}, callable.argtypes[1].typeargs)
+            assert.same({}, callable.rettypes[1].basetype.typeargs)
+            assert.same({}, call.typeargs[2].basetype.typeargs)
+        end)
+
+        it("groups individual return types without turning result lists into types", function()
+            assert_program_ast([[
+                function one(): ((T))? end
+                function callback(): ((T) -> U)? end
+                function many(): ((T), (U)?, ...: ({V})) end
+            ]], {
+                { _tag = "Ast.TopLevelFunc", name = "one",
+                    rettypes = { { _tag = "Ast.TypeOption",
+                        basetype = { _tag = "Ast.TypeName", name = "T" } } },
+                    flexrettype = false },
+                { _tag = "Ast.TopLevelFunc", name = "callback",
+                    rettypes = { { _tag = "Ast.TypeOption",
+                        basetype = { _tag = "Ast.TypeFunction" } } },
+                    flexrettype = false },
+                { _tag = "Ast.TopLevelFunc", name = "many",
+                    rettypes = {
+                        { _tag = "Ast.TypeName", name = "T" },
+                        { _tag = "Ast.TypeOption",
+                            basetype = { _tag = "Ast.TypeName", name = "U" } },
+                    },
+                    flexrettype = { _tag = "Ast.TypeArray",
+                        subtype = { _tag = "Ast.TypeName", name = "V" } } },
+            })
+        end)
+
+        it("groups foreign function types and pointer or owned payloads", function()
+            assert_type_ast("(foreign ((int)) -> (int))", {
+                _tag = "Ast.TypeForeignFunction",
+                argtypes = { { _tag = "Ast.TypeName", name = "int" } },
+                rettypes = { { _tag = "Ast.TypeName", name = "int" } },
+                varargtype = false, flexrettype = false,
+            })
+            assert_type_ast("const *((c.Item))", {
+                _tag = "Ast.TypeCPointer", const = true,
+                subtype = { _tag = "Ast.TypeQualName", module = "c", name = "Item" },
+            })
+            assert_type_ast("owned *((int))", {
+                _tag = "Ast.TypeCOwned", count = false,
+                subtype = { _tag = "Ast.TypeName", name = "int" },
+            })
+            assert_type_ast("owned ((int))[]", {
+                _tag = "Ast.TypeCOwned", count = true,
+                subtype = { _tag = "Ast.TypeName", name = "int" },
+            })
+            assert_type_ast("*(int) -> int", {
+                _tag = "Ast.TypeFunction",
+                argtypes = { { _tag = "Ast.TypeCPointer",
+                    subtype = { _tag = "Ast.TypeName", name = "int" } } },
+                rettypes = { { _tag = "Ast.TypeName", name = "int" } },
+            })
+        end)
+
+        it("reports malformed groups and bare type lists as syntax errors", function()
+            for _, spelling in ipairs({"()", "(T, U)", "((T, U))", "(...: T)"}) do
+                assert_type_syntax_error(spelling, "TypeFunctionNoRet")
+            end
+            for _, spelling in ipairs({"T -> ()?", "T -> (T, U)?", "T -> (...: T)?"}) do
+                assert_type_syntax_error(spelling, "OptionTypeList")
+            end
+            assert_type_syntax_error("(T", "RParenTypelist")
+            assert_type_syntax_error("(T,)", "TypelistType")
+            assert_type_syntax_error("((T)) ->", "TypeReturnTypes")
+            assert_type_syntax_error("(T)??", "AssignVar")
+        end)
     end)
 
     describe("can parse generic type applications", function()
@@ -4413,10 +4581,7 @@ end]])
             ]], "VarargColon")
         end)
 
-        -- A BARE function type as the vararg element parses fine: `...: () -> integer`
-        -- reads the element type as the function type `() -> integer` (the `...`
-        -- element grammar is `simpletype`, and a bare function type is a
-        -- simpletype). Pin the AST so a future grammar change is noticed.
+        -- Function-type vararg elements can be bare or explicitly grouped.
         it("parses a bare function-type vararg element `...: () -> integer`", function()
             assert_program_ast([[
                 function foo(...: () -> integer): nil
@@ -4433,16 +4598,18 @@ end]])
             })
         end)
 
-        -- KNOWN PRE-EXISTING LIMITATION (not varargs-specific): a PARENTHESIZED
-        -- type is not a `simpletype` anywhere in the grammar, so `...: (() -> integer)`
-        -- -- which tries to use a parenthesized function type as the element --
-        -- fails to parse with the `TypeDecl` label. Pinned so that if the grammar
-        -- ever learns parenthesized simpletypes, this test flips and we notice.
-        it("rejects a PARENTHESIZED function-type vararg element (known limitation)", function()
-            assert_program_syntax_error([[
+        it("parses a parenthesized function-type vararg element", function()
+            assert_program_ast([[
                 function foo(...: (() -> integer)): nil
                 end
-            ]], "TypeDecl")
+            ]], {
+                { _tag = "Ast.TopLevelFunc", name = "foo",
+                    params = { { _tag = "Ast.Decl", name = false,
+                        type = { _tag = "Ast.TypeFunction",
+                            argtypes = {},
+                            rettypes = { { _tag = "Ast.TypeInteger" } },
+                            varargtype = false, flexrettype = false } } } },
+            })
         end)
     end)
 
@@ -5586,11 +5753,33 @@ end]])
 
         it("disambiguates nested parenthesized return types once", function()
             local type_string = "integer"
-            for _ = 1, 8 do
+            for _ = 1, 32 do
                 type_string = "integer -> (" .. type_string .. ") -> integer"
             end
             parse_under_instruction_budget(
-                type_test_program(type_string), budget)
+                type_test_program(type_string), 30000)
+        end)
+
+        it("bounds nested grouped optional types and their malformed counterparts", function()
+            local typ = "T"
+            for _ = 1, 16 do typ = "({(" .. typ .. ")})?" end
+            parse_under_instruction_budget(type_test_program(typ), budget)
+            parse_under_instruction_budget(
+                "function f(): " .. typ .. " end", budget)
+            parse_under_instruction_budget(
+                type_test_program("(" .. typ), budget, "RParenTypelist")
+            parse_under_instruction_budget(
+                type_test_program("(" .. typ .. ", U)"), budget,
+                "TypeFunctionNoRet")
+        end)
+
+        it("keeps long arrows flat when their operands are grouped and optional", function()
+            local parts = {}
+            for _ = 1, 200 do parts[#parts + 1] = "((T))?" end
+            local typ = table.concat(parts, " -> ")
+            parse_under_instruction_budget(type_test_program(typ), 200000)
+            parse_under_instruction_budget(
+                type_test_program(typ .. " ->"), 200000, "TypeReturnTypes")
         end)
 
         it("parses nested Arrays without retrying them as Maps", function()

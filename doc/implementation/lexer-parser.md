@@ -214,13 +214,40 @@ no-annotation sentinel needed for contextual lambda inference. Function-type
 nodes carry `argtypes`, `rettypes`, `varargtype`, and `flexrettype` as four
 separate fields. No tail sentinel is inserted into either dense list.
 
-The grammar tries `resulttypelist !RARROW` before its arrow alternatives. That
-lookahead distinguishes `(...: T)` as a flex-only result list from
-`(...: T) -> R` as a function type with an input vararg. A flexible return must
-be parenthesized, typed, last, and comma-separated from a fixed prefix;
+Function arrows form one flat operand chain, folded from the right after
+parsing. A final parenthesized operand supplies a result shape; before another
+arrow it supplies that function's parameter shape. Thus `(...: T)` is a
+flex-only result list, while `(...: T) -> R` is a function type with an input
+vararg. A flexible return must be parenthesized, typed, last, and
+comma-separated from a fixed prefix;
 `FlexRetColon`, `FlexRetType`, `FlexRetLast`, and `FlexRetParens` give those
 failures return-specific labels. See
 [Flexible returns](flexible-returns.md#parser-carriers-and-disambiguation).
+
+### Parenthesized type grouping
+
+A singleton, nonvariadic `typelist` becomes a simple type operand, so `(T)`
+returns the existing `T` node with its original source location. The parser
+creates no grouping node. A suffix on the group creates the existing
+`Ast.TypeOption`, allowing `(T)?` and `((T) -> U)?`. Parenthesized return
+operands likewise accept `?` only for one fixed result; empty, multiple, and
+flexible lists report `OptionTypeList`. Their unsuffixed list forms keep the
+ordinary zero/multiple/flexible return semantics.
+
+`groupedtype` permits the same syntax inside a prefix constructor's payload,
+including `*(int)` and `owned *(int)`. It stops at the matching `)`, so
+`*(int) -> int` remains a function taking a pointer. This production does not
+retry the parenthesized list at the start of an ordinary type operand.
+
+Type-operand and result-shape finalization uses immediate match-time captures.
+Each carrier is materialized before a named back-reference can read it;
+an outer match-time capture returns only the finished type or result shape.
+Nested type constructors are therefore evaluated once, and internal carriers
+never become named keys in AST lists such as `typeargs` or `rettypes`. A standalone
+empty, multiple, or variadic parameter list reports `TypeFunctionNoRet`
+instead of reaching the right fold's internal assertion. The flat arrow
+fold remains intact; parser tests bound successful and malformed grouped
+types, nested return shapes, and long arrow chains by Lua instruction counts.
 
 ### The precedence ladder
 

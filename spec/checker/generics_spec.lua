@@ -1605,6 +1605,49 @@ describe("generic declarations and explicit calls", function()
         assert_runtime_ast_erased(results.block)
     end)
 
+    it("reclassifies hidden iterator operations inside generic bodies", function()
+        local ast = assert_check([[
+            function step<T>(state: {T}, control: integer): (integer?, T?)
+                return nil, nil
+            end
+            function copy<T>(items: {T})
+                for index, item in step, items, 0 do
+                end
+            end
+
+            function next<T>(state: T, control: T): T?
+                return nil
+            end
+            function close<T>(state: T?)
+            end
+            function use<T>(state: T)
+                local finish: (T?) -> () = close
+                for item in next, state, state, finish do
+                end
+            end
+        ]])
+
+        local copy = toplevel(ast, "Ast.TopLevelFunc", "copy").block.stats[1]
+        -- The second result is T? at the source boundary, but both T? and T
+        -- have the value carrier. Its hidden binding must lose option_force.
+        assert.equal("Type.Option", declared_type(copy._result_decls[2])._tag)
+        assert.equal("Ast.ExpVar", copy._visible_stat.exps[2]._tag)
+        assert.equal("value", types.tostring(copy._visible_stat.exps[2]._type))
+        assert_runtime_ast_erased(copy)
+
+        local loop = toplevel(ast, "Ast.TopLevelFunc", "use").block.stats[2]
+        assert.equal("Ast.ExpVar", loop._visible_stat.exps[1]._tag)
+        assert.equal("Ast.ExpVar", loop._next_call.args.args[2]._tag)
+        assert.equal("Ast.ExpVar", loop._close_call.args.args[1]._tag)
+        for _, call in ipairs({loop._init_call, loop._next_call, loop._close_call}) do
+            for _, arg in ipairs(call.args.args) do
+                assert.equal("value", types.tostring(arg._type))
+            end
+            types.assert_erased(call._type)
+        end
+        assert_runtime_ast_erased(loop)
+    end)
+
     it("uses hidden generic-for input, result, and close evidence", function()
         local ast = assert_check([[
             function step<T>(state: {T}, control: integer):
@@ -2788,6 +2831,65 @@ describe("generic declarations and explicit calls", function()
         assert.equal("option_force", coercion(
             peel(use.block.stats[2].exps[1]).args.args[2]))
         assert_runtime_ast_erased(use.block)
+    end)
+
+    it("infers structured argument components through an outer Option", function()
+        local ast = assert_check([[
+            record Box<T> item: T end
+            function map<K,V>(items: {K:V}): integer return 0 end
+            function array<T>(items: {T}): integer return 0 end
+            function box<T>(item: Box<T>): integer return 0 end
+            function callable<T>(f: (T) -> T): integer return 0 end
+            function optional<T>(items: ({T})?): integer return 0 end
+            function variadic<T>(...: {T}): integer return 0 end
+            function use<T>(m: ({string:T})?, a: ({T})?,
+                            b: Box<T>?, f: ((T) -> T)?, raw: {T}, runs: {{T}})
+                map(m)
+                map { items = m }
+                array(a)
+                box(b)
+                callable(f)
+                optional(raw)
+                variadic(a)
+                array(...runs)
+            end
+        ]])
+        assert_runtime_ast_erased(
+            toplevel(ast, "Ast.TopLevelFunc", "use").block)
+    end)
+
+    it("keeps complete optional evidence for a direct generic binder", function()
+        local ast = assert_check([[
+            function identity<T>(item: T): T return item end
+            function use(item: ({string:integer})?)
+                local selected? = identity(item)
+            end
+        ]])
+        local selected = toplevel(ast, "Ast.TopLevelFunc", "use")
+            .block.stats[1].decls[1]
+        assert.equal("{ string : integer }?",
+            types.tostring(declared_type(selected)))
+    end)
+
+    it("keeps nested shapes and later optional argument evidence invariant", function()
+        local errs = h.check_errs([[
+            record Box<T> item: T end
+            function nested<T>(item: Box<{string:T}>): integer return 0 end
+            function pair<T>(left: {string:T}, right: {string:T}): integer
+                return 0
+            end
+            function bad_nested(item: Box<({string:integer})?>): integer
+                return nested(item)
+            end
+            function bad_later(left: ({string:integer})?,
+                               right: ({string:float})?): integer
+                return pair(left, right)
+            end
+        ]])
+        assert.equal(2, #errs)
+        assert.truthy(errs[1]:find("argument 1 of call to 'nested'", 1, true))
+        assert.truthy(errs[2]:find(
+            "expected { string : integer } but found { string : float }?", 1, true))
     end)
 
     it("preserves invariance for independently built generic containers",

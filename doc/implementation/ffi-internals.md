@@ -326,8 +326,8 @@ explicitly requested operations. No caller obtains permission from a broad boole
 * Titan `string` -> C `char *` or `void *`;
 * C `TValue` -> Titan `value`, and Titan `value` -> C `TValue`;
 * C integers, C floats, and `COwned` <-> `value`;
-* non-function C pointers -> `value`; the reverse direction is written and
-  unsafe rather than automatic;
+* C object and function pointers -> `value`; the reverse direction is written
+  and unsafe rather than automatic;
 * counted `COwned` arrays of typedef-resolved `char`, `signed char`, or
   `unsigned char` -> Titan `string`;
 * Lua-internal `Udata *` -> full-userdata `value`, with NULL -> nil; written
@@ -409,8 +409,9 @@ interface is published. These checks, not the availability of a constructor in
 the deserialization environment, are the authority for portable C metadata.
 The decoder also reapplies `types.has_tvalue_representation` to every decoded
 module variable, record field, union payload, and interface field, so a hostile
-interface cannot place a portable function pointer in a runtime `TValue` slot
-that source checking would reject.
+interface cannot place an unboxable direct C aggregate or function in a
+runtime `TValue` slot that source checking would reject. Function pointers
+have a lightuserdata representation and pass this independent storage check.
 
 ## Converting C Declarations
 
@@ -491,8 +492,9 @@ The checker has FFI-specific handling in a few narrow places:
   `.new_array` remains unavailable.
 * `Ast.TypeOption` requires its base to satisfy
   `types.has_tvalue_representation`. This admits `COwned` and other boxable C
-  scalars while rejecting by-value C aggregates/arrays, direct C functions,
-  and C function pointers before `getslot`/`setslot` code generation.
+  scalars and object/function pointers while rejecting by-value C
+  aggregates/arrays and direct C functions before `getslot`/`setslot` code
+  generation.
   Record fields and union payloads use the same predicate because they occupy
   the same kind of user-value slot. It treats Arrays, Maps, and Titan function
   values as already boxed and recurses only through `Option`; it does not
@@ -608,9 +610,9 @@ modules.
 Exportability is separate from physical slot representation. Every module
 variable lives in the module userdata's `TValue` upvalue array, so declaration
 checking also requires `types.has_tvalue_representation`; a portable C
-function pointer is consequently legal in an exported callable signature but
-not in a local or public module variable. `genluaentry` applies the same
-predicate to fixed and flexible results. If any result lacks a `TValue`
+function pointer satisfies both the export and storage checks. `genluaentry`
+applies the same predicate to fixed and flexible results, allowing boxed
+function-pointer results. If any result lacks a `TValue`
 representation, both the genuine-Lua and strict stack entry raise before the
 native entry is invoked, while exact compiled calls continue to use the native
 signature directly.
@@ -868,7 +870,7 @@ slot keeps even a temporary owner rooted across the string allocation.
 Scalar character owners and non-character arrays never enter this arm; a cast
 through `char *` retains the NUL-terminated pointer behavior above.
 
-`getslot` and `setslot` know how to box C scalars, non-function pointers, owned
+`getslot` and `setslot` know how to box C scalars, object/function pointers, owned
 userdata, and by-value C `TValue`s for `value` conversions and for Lua-facing
 slots. C numeric `getslot`/strict-get paths share the target-profile predicate
 with dynamic coercion, and `setslot` validates carrier representability before
@@ -877,10 +879,14 @@ Ordinary C object pointers are exposed as light userdata in `value`;
 `COwned` is full userdata. Lua-internal `Udata *` is the deliberate exception:
 boxing emits the full-userdata tag for that same object (or nil for NULL), and
 unboxing accepts full userdata or nil rather than lightuserdata. C arrays are
-not accepted through `value` because there is no array unboxing path. C
-function pointers are not object pointers in portable C and cannot cross
-through `value` or the object-pointer address coercions; only the explicit
-`titan_cast_func`-lowered erasure to `void *` crosses that category. By-value C
+not accepted through `value` because there is no array unboxing path.
+Function-pointer boxing uses `titan_cast_func(void *, pointer)` before storing
+lightuserdata; recovery uses the corresponding exact C function-pointer type.
+The ordinary C-to-`value` coercion permits this boxing, but recovery from an
+arbitrary `value` still requires the written `unsafe_dynamic_c_pointer` plan.
+It checks only lightuserdata/nil, with no runtime C-signature proof. Direct C
+function-pointer/`void *` conversions remain written-only, and function
+pointers do not participate in object-pointer address coercions. By-value C
 structs/unions are deliberately not boxable in v1.
 
 An option uses one `TValue` slot and delegates its present arm to these same

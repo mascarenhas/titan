@@ -47,7 +47,7 @@ an ordinary function.
 The type grammar also tries `foreignfunctype` before the ordinary arrow forms:
 
 ```text
-FOREIGN arglist RARROW rettype
+FOREIGN typelist RARROW rettype
 ```
 
 and constructs
@@ -569,5 +569,5 @@ Earlier Titan installations are not migration or compatibility inputs.
 
 Foreign declarations, allocation plans, and generated headers remain
 compiler-local. They add no public type descriptor or module-state slot, so the
-combined standard provider still has eighteen logical metadata keys and
-nineteen DSO openers including bare `luaopen_titan`.
+combined standard provider still has nineteen logical metadata keys and
+twenty DSO openers including bare `luaopen_titan`.

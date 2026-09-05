@@ -1671,6 +1671,15 @@ local portable_c_descriptor_fields = {
         pointee = true,
         count = true,
     },
+    ["Type.CStruct"] = {
+        _tag = true,
+        cname = true,
+        tagname = true,
+        typedef = true,
+        fields = true,
+        complete = true,
+        has_fam = true,
+    },
 }
 
 local function validate_portable_c_descriptor_fields(typ)
@@ -2530,7 +2539,8 @@ validate_interface_type = function(typ, context, seen)
                and pointee_tag ~= "Type.CInteger"
                and pointee_tag ~= "Type.CFloat"
                and pointee_tag ~= "Type.CPointer"
-               and pointee_tag ~= "Type.CFunction") then
+               and pointee_tag ~= "Type.CFunction"
+               and not types.is_c_lua_state(typ.pointee)) then
             return nil, "portable C pointer has a noncanonical shape"
         end
         local nested = value_context(context)
@@ -2582,6 +2592,12 @@ validate_interface_type = function(typ, context, seen)
         local nested = value_context(context)
         nested.kind = "c-owned-payload"
         return validate_interface_type(typ.pointee, nested, seen)
+    elseif tag == "Type.CStruct" then
+        if not types.is_c_lua_state(typ) or not context
+           or context.kind ~= "c-pointee" then
+            return nil, "C struct is not valid as a value-facing type"
+        end
+        return true
     elseif tag == "Type.Nominal" then
         local argument_count = dense_plain_list_length(typ.args)
         if not valid_qualified_nominal_name(typ.fqtn) then

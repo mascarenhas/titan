@@ -88,6 +88,8 @@ defs.STATEMENT_CANDIDATE = lpeg.Cb("statement_candidate")
 defs.EXPLIST_ITEM = lpeg.Cb("explist_item")
 defs.EXPLIST_ITEMS = lpeg.Cb("explist_items")
 defs.FIELD_ITEM = lpeg.Cb("field_item")
+defs.TYPE_OPERANDS = lpeg.Cb("type_operands")
+defs.RESULT_SHAPE = lpeg.Cb("result_shape")
 
 defs.GENERIC_CALL_START = #lexer.LT * lpeg.Cmt(lpeg.Cp(),
     function(_, position, start)
@@ -212,7 +214,9 @@ local standard_imports = {
     math = "titan.math",
     gc = "titan.gc",
     iteration = "titan.iteration",
+    reflect = "titan.reflect",
 }
+
 
 function parser.normalize_import(modname)
     local source_required = modname:sub(-6) == ".titan"
@@ -578,6 +582,24 @@ function defs.fold_binop_left(pos, matches)
     return lhs
 end
 
+function defs.empty_typelist()
+    return {}, false
+end
+
+function defs.single_vararg_typelist(varargtype)
+    return {}, varargtype
+end
+
+function defs.other_typelist(type, opt_or_rest, optvarargtype)
+    optvarargtype = optvarargtype or false
+    if opt_or_rest == "?" then
+        return { defs.typeopt(type, opt_or_rest) }, false
+    elseif opt_or_rest == nil or #opt_or_rest == 0 then
+        return { type }, optvarargtype
+    else
+        return { type, table.unpack(opt_or_rest) }, optvarargtype
+    end
+end
 local function is_concat_constant(exp)
     return exp._tag == "Ast.ExpString" or
         exp._tag == "Ast.ExpInteger" or
@@ -765,7 +787,7 @@ end
 -- bound-method reference. Calls retain the existing positional/named argument
 -- nodes and explicit (possibly empty) type-argument list.
 function defs.suffix_anymethod(pos, name_loc, name, typeargs, args, named)
-    if typeargs == false then
+    if not typeargs then
         return function(exp)
             return with_name_loc(ast.ExpMethodRef(pos, exp, name), name_loc)
         end
@@ -808,7 +830,7 @@ function defs.bracket_subset_to_desc(pos, last)
 end
 
 function defs.bracket_from_first_desc(pos, first, tail)
-    if tail == false then
+    if not tail then
         return {
             kind = "index",
             loc = pos,
@@ -1404,6 +1426,19 @@ function defs.singlereturn(type)
     return { rettypes = { type }, flexrettype = false }
 end
 
+-- Materialize a carrier before a named back-reference can observe it, and
+-- close its capture scope before returning to an enclosing AST list. Both
+-- boundaries matter: deferred captures replay nested constructors, while
+-- unscoped named groups leak private keys into surrounding table captures.
+function defs.type_capture(_, next_pos, value)
+    return next_pos, value
+end
+
+function defs.optional_returnshape(_, next_pos, shape)
+    if #shape.rettypes ~= 1 or shape.flexrettype then return false end
+    return next_pos, defs.singlereturn(defs.typeopt(shape.rettypes[1], "?"))
+end
+
 function defs.simple_type_operand(type)
     return {
         kind = "simple",
@@ -1413,6 +1448,9 @@ function defs.simple_type_operand(type)
 end
 
 function defs.argument_type_operand(pos, types, varargtype)
+    if #types == 1 and not varargtype then
+        return defs.simple_type_operand(types[1])
+    end
     return {
         kind = "arguments",
         loc = pos,
@@ -1484,6 +1522,7 @@ local function fold_type_operands(operands)
 end
 
 function defs.fold_type_operands(_, next_pos, operands)
+    if #operands == 1 and operands[1].kind ~= "simple" then return false end
     return next_pos, fold_type_operands(operands)
 end
 
@@ -1777,6 +1816,7 @@ local grammar = re.compile([[
                      / surfacecompoundtype
                      / namedtype
                      / ownedtype
+                     / groupedtype
 
     ownedtype       <- (P  OWNED ownedtail)                      -> finish_owned_type
 
@@ -1788,6 +1828,7 @@ local grammar = re.compile([[
     cownedbasehead  <- NIL / BOOLEAN / INTEGER / FLOAT / STRING / VALUE
                      / CVOID / CBOOL / CCHAR / CSHORT / CINT / CLONG
                      / CDOUBLE / CSIGNED / CUNSIGNED / FOREIGN / NAME / OWNED
+                     / LPAREN
 
     badconstownedpayload
                     <- &(CONST MUL (CONST MUL / MUL)* !cownedbasehead)
@@ -1811,6 +1852,11 @@ local grammar = re.compile([[
                            (!COLON / %{ConstMap})
                            RCURLY^RCurlyType)                    -> constarraytype
 
+    -- Prefix constructors consume only this grouped payload, leaving a
+    -- following arrow outside the pointer/owner. General type operands parse
+    -- their parenthesized list once through `typelist` below.
+    groupedtype     <- LPAREN type^LParenType RPAREN^RParenTypelist
+
     simpletype      <- ((((P  NIL)                               -> TypeNil
                      / (P  BOOLEAN)                              -> TypeBoolean
                      / (P  INTEGER)                              -> TypeInteger
@@ -1823,6 +1869,7 @@ local grammar = re.compile([[
                      / (P  MUL simpletype^TypeType)              -> cptrtype
                      / surfacecompoundtype
                      / namedtype
+                     / groupedtype
                      / (P  LCURLY type^TypeType
                            ((COLON type^TypeType
                                    RCURLY^RCurlyType)            -> map_type_tail
@@ -1838,15 +1885,24 @@ local grammar = re.compile([[
     -- a return-type list.
     varargtypeann   <- (P  DOTS COLON^VarargColon type^TypeDecl) -> varargtype
 
-    varargtypeopt   <- ((COMMA varargtypeann / varargtypeann)?)  -> opt
+    varargtypeopt   <- (COMMA varargtypeann)?  -> opt
 
     -- The fixed-type loop stops before a `, ...` so the optional trailing
     -- vararg (`varargtypeopt`) consumes that comma itself.
-    arglist         <- ( LPAREN
-                         {| (type (COMMA !DOTS type^TypelistType)*)? |}
-                         varargtypeopt
-                         RPAREN^RParenTypelist )                 -- produces {Type}, varargtypeopt
-
+    typelist         <- ( LPAREN
+                         (
+                            (RPAREN) -> empty_typelist /
+                            (varargtypeann RPAREN^RParenTypelist) -> single_vararg_typelist / 
+                            (type^LParenType (
+                                (RPAREN (OPT -> '?')) /
+                                (RPAREN) /
+                                ({| (COMMA !DOTS type^TypelistType)* |} varargtypeopt RPAREN^RParenTypelist)
+                              )
+                            ) -> other_typelist
+                         )
+                        )
+        -- produces {Type}, varargtypeopt
+        
     -- A flexible return tail is legal only as the final item of a parenthesized
     -- return list. Its labels deliberately do not reuse the input-vararg
     -- diagnostic, which calls the construct a variadic parameter.
@@ -1860,25 +1916,29 @@ local grammar = re.compile([[
     flexrettypeafterfixed <- ((COMMA flexrettypeann)?) -> opt
     flexrettypeonlyopt    <- (flexrettypeann?)         -> opt
 
-    resulttypelist  <- ( LPAREN
+    resulttypelist  <- ({:result_shape: (( LPAREN
                          ( {| type (COMMA !DOTS type^TypelistType)* |}
                            flexrettypeafterfixed
                          / {| '' |} flexrettypeonlyopt )
-                         RPAREN^RParenTypelist )                 -> returnshape
+                         RPAREN^RParenTypelist )                 -> returnshape)
+                                                               => type_capture :}
+                       ((OPT ((%RESULT_SHAPE => optional_returnshape)
+                              / %{OptionTypeList}))
+                        / %RESULT_SHAPE))                       => type_capture
 
     -- Function arrows form a flat operand chain which is folded from the
     -- right: `a -> b -> c` is `a -> (b -> c)`. In particular, matching an
     -- arrow commits to matching its following return operand instead of
     -- recursively retrying every prefix as a complete type.
     typefirstoperand
-                    <- (P  FOREIGN arglist &RARROW)              -> foreign_type_operand
-                     / (P  arglist &RARROW)                      -> argument_type_operand
+                    <- (P  FOREIGN !FLOAT typelist^ForeignFunctionNoTypes (&RARROW)^ForeignFunctionNoRet) -> foreign_type_operand
+                     / (P  typelist)                -> argument_type_operand
                      / (simpletype                               -> simple_type_operand)
 
-    rettypeoperand  <- (P  resulttypelist)                       -> result_type_operand
-                     / (P  FOREIGN arglist &RARROW)              -> foreign_type_operand
+    rettypeoperand  <- (DOTS %{FlexRetParens})
+                     / (P  FOREIGN !FLOAT typelist^ForeignFunctionNoTypes (&RARROW)^ForeignFunctionNoRet) -> foreign_type_operand
+                     / (P  resulttypelist)                       -> result_type_operand
                      / (simpletype                               -> simple_type_operand)
-                     / (DOTS %{FlexRetParens})
 
     arrowrettypeoperand
                     <- RARROW rettypeoperand^TypeReturnTypes
@@ -1886,8 +1946,11 @@ local grammar = re.compile([[
     rettype         <- {| rettypeoperand arrowrettypeoperand* |}
                                                                => fold_rettype_operands
 
-    type            <- {| typefirstoperand arrowrettypeoperand* |}
-                                                               => fold_type_operands
+    type            <- ({:type_operands:
+                           {| typefirstoperand arrowrettypeoperand* |}
+                                                               => type_capture :}
+                       ((%TYPE_OPERANDS => fold_type_operands)
+                        / %{TypeFunctionNoRet}))                 => type_capture
 
     recordfields    <- {| recordfield* |}                        -- produces {Decl}
 

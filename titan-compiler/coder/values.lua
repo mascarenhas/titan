@@ -402,11 +402,9 @@ function setslot(typ --[[:table]], dst --[[:string]], src --[[:string]])
     elseif typ._tag == "Type.Nominal" then tmpl = "setuvalue(L, $DST, $SRC);"
     elseif typ._tag == "Type.Option" then tmpl = "do { TValue _titan_v = $SRC; setobj2t(L, $DST, &_titan_v); } while (0);"
     elseif typ._tag == "Type.Function" then tmpl = "do { TValue _titan_v = $SRC; setobj2t(L, $DST, &_titan_v); } while (0);"
-    elseif typ._tag == "Type.CInteger" or
-           (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CInteger") then
+    elseif types.resolve_c_typedef(typ)._tag == "Type.CInteger" then
         return coder._code_checked_numeric_setslot(typ, dst, src)
-    elseif typ._tag == "Type.CFloat" or
-           (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CFloat") then
+    elseif types.resolve_c_typedef(typ)._tag == "Type.CFloat" then
         return coder._code_checked_numeric_setslot(typ, dst, src)
     elseif types.is_c_udata_pointer(typ) then
         tmpl = [[do {
@@ -414,11 +412,13 @@ function setslot(typ --[[:table]], dst --[[:string]], src --[[:string]])
             if (_titan_u == NULL) setnilvalue($DST);
             else setuvalue(L, $DST, _titan_u);
         } while (0);]]
-    elseif typ._tag == "Type.CPointer" or
-           (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CPointer") then
+    elseif types.resolve_c_typedef(typ)._tag == "Type.CPointer" then
+        if types.c_pointer_category(typ) == "function" then
+            tmpl = "setpvalue($DST, titan_cast_func(void*, $SRC));"
+        else
         tmpl = "setpvalue($DST, ((void*)$SRC));"
-    elseif typ._tag == "Type.CArray" or
-           (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CArray") then
+        end
+    elseif types.resolve_c_typedef(typ)._tag == "Type.CArray" then
         tmpl = "setpvalue($DST, ((void*)$SRC));"
     elseif typ._tag == "Type.COwned" then
         tmpl = "setuvalue(L, $DST, $SRC);"
@@ -933,8 +933,7 @@ function coder._is_boxable_c_value_plan_type(typ)
         or typ._tag == "Type.CFloat"
         or typ._tag == "Type.COwned"
         or types.is_c_tvalue(typ)
-        or (typ._tag == "Type.CPointer"
-            and types.c_pointer_category(typ) ~= "function")
+        or typ._tag == "Type.CPointer"
 end
 
 function coder._checked_coercion_plan_impl(

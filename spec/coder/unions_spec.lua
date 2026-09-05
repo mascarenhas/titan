@@ -21,6 +21,19 @@ local function clean_generated_modules()
     end
 end
 
+local function without_reflection_payload_reader(source, owner)
+    local marker = "static void test_\\u2133_" .. owner
+        .. "_\\u2131_payload_reader("
+    local start = assert(source:find(marker, 1, true))
+    local body_start = assert(source:find("{", start, true))
+    local body = assert(source:match("^%b{}", body_start))
+    -- The reflection boundary boxes an Array for Lua. Exclude precisely that
+    -- reader while retaining every constructor, case load, and other function
+    -- in the no-proxy assertion for compiler-internal payload storage.
+    return source:sub(1, start - 1)
+        .. source:sub(body_start + #body)
+end
+
 describe("unions (end-to-end)", function()
     after_each(clean_generated_modules)
 
@@ -48,6 +61,45 @@ describe("unions (end-to-end)", function()
             assert.same(expected, find_symbol(source_symbols))
             assert.same(expected, find_symbol(interface_symbols))
         end)
+
+    it("publishes a boxed payload reader including private Array variants", function()
+        h.with_extra_cflags({ "-DTITAN_COMPILER_TESTS" }, function()
+            local csrc = h.compile_and_read_c([[
+                union Packet
+                    empty
+                    numbers: {integer}
+                    local hidden: {integer}?
+                end
+
+                function private_packet(): Packet
+                    local numbers = { 41, 42 }
+                    return Packet.hidden(numbers)
+                end
+            ]])
+            local reader = "test_\\u2133_Packet_\\u2131_payload_reader"
+            local start = assert(csrc:find("static void " .. reader .. "(", 1, true))
+            local stop = assert(csrc:find("static int ", start, true))
+            local body = csrc:sub(start, stop - 1)
+            assert.truthy(body:find("case 0:", 1, true))
+            assert.truthy(body:find("case 1:", 1, true))
+            assert.truthy(body:find("case 2:", 1, true))
+            assert.truthy(body:find("setnilvalue(tv);", 1, true))
+            local _, boxed = body:gsub("titan_array_require_proxy", "")
+            assert.equal(2, boxed)
+            assert.truthy(csrc:find(
+                "titan_cast_func(void *, " .. reader .. ")", 1, true))
+            assert.truthy(csrc:find(
+                "lua_rawsetp(L, -2, TITAN_MT_PAYLOAD);", 1, true))
+            local ok, err = h.call("test", [[
+                local packet = test.private_packet()
+                local registry = debug.getregistry()
+                local mt = debug.getmetatable(packet)
+                assert(type(mt[registry.TITAN_MT_PAYLOAD]) == "userdata")
+                assert(not mt[registry.TITAN_MT_TYPE]:find("hidden", 1, true))
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
 
     it("constructs empty and payload variants and dispatches without fallthrough",
         function()
@@ -710,7 +762,8 @@ describe("unions (end-to-end)", function()
             "hvalue%s*%(%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)", csrc)
         assert.match("luaS_newudata%s*%(%s*L,%s*0,%s*1%s*%)", csrc)
         assert.match("luaS_newudata%s*%(%s*L,%s*0,%s*2%s*%)", csrc)
-        assert.not_match("titan_array_require_proxy", csrc)
+        assert.not_match("titan_array_require_proxy",
+            without_reflection_payload_reader(csrc, "Numbers"))
         assert.match("switch%s*%(%s*_case_%d+_tag%s*%)", csrc)
         assert.match("case%s+2:%s*goto%s+_case_%d+_arm_%d+;", csrc)
 
@@ -805,7 +858,8 @@ describe("unions (end-to-end)", function()
                 "sethvalue%s*%(%s*L,%s*&_tmp_%d+%->uv%[1%]%.uv,%s*", csrc)
             assert.match(
                 "hvalue%s*%(%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)", csrc)
-            assert.not_match("titan_array_require_proxy", csrc)
+            assert.not_match("titan_array_require_proxy",
+                without_reflection_payload_reader(csrc, "Payload"))
             assert.match(
                 "luaC_barrierback%s*%(%s*L,%s*obj2gco%s*%(%s*_tmp_%d+%s*%)"
                 .. ",%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)",
@@ -1104,7 +1158,8 @@ describe("unions (end-to-end)", function()
                 "sethvalue%s*%(%s*L,%s*&_tmp_%d+%->uv%[1%]%.uv,%s*", csrc)
             assert.match(
                 "hvalue%s*%(%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)", csrc)
-            assert.not_match("titan_array_require_proxy", csrc)
+            assert.not_match("titan_array_require_proxy",
+                without_reflection_payload_reader(csrc, "Payload"))
             assert.match(
                 "luaC_barrierback%s*%(%s*L,%s*obj2gco%s*%(%s*_tmp_%d+%s*%)"
                 .. ",%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)",

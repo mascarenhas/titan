@@ -342,54 +342,60 @@ end
 function coderecorddec(ctx, code, initrecs, node)
     -- (the type tag is forward-declared up front in generate(), so that
     -- forward/mutually-recursive record field types resolve)
-    local fieldmap, getswitch, setswitch = {}, {}, {}
+    local fieldmap = {}
     for _, field in ipairs(node._type.fields) do
         if not field.islocal then
+            local accessor = coder._nominal_function_prefix(
+                node._type.name, field.name) .. "_fieldaccessor"
             table.insert(fieldmap, render([[
                 lua_pushliteral(L, $NAME);
-                lua_pushinteger(L, $INDEX);
+                lua_pushlightuserdata(L, titan_cast_func(void *, $ACCESSOR));
                 lua_rawset(L, -3);
             ]], {
                 NAME = c_string_literal(field.name),
-                INDEX = c_integer_literal(field.index)
+                ACCESSOR = accessor,
             }))
-            table.insert(getswitch, render([[
-                case $INDEX: {
-                    $SETWRAPPED
-                    break;
-                }
-            ]], {
-                INDEX = c_integer_literal(field.index),
-                SETWRAPPED = copyboxed(ctx, field.type,
-                    "s2v(L->top.p - 1)", "_slot"),
-            }))
+            local write
             if field.isconst then
-                table.insert(setswitch, render([[
-                    case $INDEX: {
-                        return luaL_error(L,
-                            "%s:%d:%d: cannot assign const field '%s' in record '%s'",
-                            $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
-                    }
+                write = render([[
+                    luaL_error(L,
+                        "%s:%d:%d: cannot assign const field '%s' in record '%s'",
+                        $FILE, $LINE, $COL, $FIELD, $FQTN);
                 ]], {
-                    INDEX = c_integer_literal(field.index),
                     FILE = c_string_literal(node.loc.filename),
                     LINE = c_integer_literal(node.loc.line),
                     COL = c_integer_literal(node.loc.col),
+                    FIELD = c_string_literal(field.name),
                     FQTN = c_string_literal(node._type.name),
-                }))
+                })
             else
-                table.insert(setswitch, render([[
-                    case $INDEX: {
-                        $CHECKANDSET;
-                        break;
-                    }
+                write = render([[
+                    TValue *_dst = &_rec->uv[$INDEX].uv;
+                    $CHECKANDSET
+                    luaC_barrierback(L, obj2gco(_rec), _dst);
                 ]], {
                     INDEX = c_integer_literal(field.index),
                     CHECKANDSET = coder._dynamiccheckandset(
-                        ctx, field.dynamic_plan, field.type, "_dst", "_src",
+                        ctx, field.dynamic_plan, field.type, "_dst", "tv",
                         node.loc, "Lua record-field write")
-                }))
+                })
             end
+            table.insert(code, render([[
+                static void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_rec, TValue *tv, int write) {
+                    (void)_mod; /* scalar fields need no cached identities */
+                    if (write) {
+                        $WRITE
+                    } else {
+                        TValue *_slot = &_rec->uv[$INDEX].uv;
+                        $SETWRAPPED
+                    }
+                }
+            ]], {
+                ACCESSOR = accessor,
+                WRITE = write,
+                INDEX = c_integer_literal(field.index),
+                SETWRAPPED = copyboxed(ctx, field.type, "tv", "_slot"),
+            }))
         end
     end
     for name, method in pairs(node._type.methods) do
@@ -406,8 +412,7 @@ function coderecorddec(ctx, code, initrecs, node)
             }))
         end
     end
-    if #node._type.fields > 0 then
-        table.insert(code, render([[
+    table.insert(code, render([[
             static int $INDEXNAME(lua_State *L) {
                 TValue *_recslot = s2v(L->ci->func.p + 1);
                 CClosure *_func = clCvalue(s2v(L->ci->func.p));
@@ -416,18 +421,21 @@ function coderecorddec(ctx, code, initrecs, node)
                 $CHECKANDGET;
                 TValue *_fieldslot = s2v(L->ci->func.p + 2);
                 Table *_fieldmap = hvalue(&(_func->upvalue[0]));
-                TValue _fieldidxv;
-                lu_byte _fieldtag = luaH_get(_fieldmap, _fieldslot, &_fieldidxv);
+                TValue _memberv;
+                lu_byte _fieldtag = luaH_get(_fieldmap, _fieldslot, &_memberv);
                 if(TITAN_LIKELY(!tagisempty(_fieldtag))) {
-                    const TValue *_fieldidx = &_fieldidxv;
-                    if(ttisCclosure(_fieldidx)) {
-                        setobj2s(L, L->top.p - 1, _fieldidx);
+                    if(ttisCclosure(&_memberv)) {
+                        setobj2s(L, L->top.p - 1, &_memberv);
+                    } else if (ttislightuserdata(&_memberv)
+                               && pvalue(&_memberv) != NULL) {
+                        void (*_accessor)(lua_State *, Udata *, Udata *, TValue *, int) =
+                            titan_cast_func(
+                                void (*)(lua_State *, Udata *, Udata *, TValue *, int),
+                                pvalue(&_memberv));
+                        _accessor(L, _mod, _rec, s2v(L->top.p - 1), 0);
                     } else {
-                        TValue *_slot = &_rec->uv[ivalue(_fieldidx)].uv;
-                        (void)_slot; /* records with only local fields have no cases */
-                        switch(ivalue(_fieldidx)) {
-                            $GETCASES
-                        }
+                        return luaL_error(L,
+                            "malformed internal member map for record '%s'", $FQTN);
                     }
                     return 1;
                 } else {
@@ -442,16 +450,16 @@ function coderecorddec(ctx, code, initrecs, node)
                 $CHECKANDGET;
                 TValue *_fieldslot = s2v(L->ci->func.p + 2);
                 Table *_fieldmap = hvalue(&(_func->upvalue[0]));
-                TValue _fieldidxv;
-                lu_byte _fieldtag = luaH_get(_fieldmap, _fieldslot, &_fieldidxv);
-                if(TITAN_LIKELY(!tagisempty(_fieldtag) && ttisinteger(&_fieldidxv))) {
-                    TValue* _dst = &(_rec->uv[ivalue(&_fieldidxv)].uv);
-                    TValue* _src = s2v(L->ci->func.p + 3);
-                    (void)_src; /* records with only local fields have no cases */
-                    switch(ivalue(&_fieldidxv)) {
-                        $SETCASES
-                    }
-                    luaC_barrierback(L, obj2gco(_rec), _dst);
+                TValue _memberv;
+                lu_byte _fieldtag = luaH_get(_fieldmap, _fieldslot, &_memberv);
+                if(TITAN_LIKELY(!tagisempty(_fieldtag)
+                               && ttislightuserdata(&_memberv)
+                               && pvalue(&_memberv) != NULL)) {
+                    void (*_accessor)(lua_State *, Udata *, Udata *, TValue *, int) =
+                        titan_cast_func(
+                            void (*)(lua_State *, Udata *, Udata *, TValue *, int),
+                            pvalue(&_memberv));
+                    _accessor(L, _mod, _rec, s2v(L->ci->func.p + 3), 1);
                     return 0;
                 } else {
                     return luaL_error(L, "%s:%d:%d: field '%s' not found in record '%s'", $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
@@ -470,28 +478,7 @@ function coderecorddec(ctx, code, initrecs, node)
             FILE = c_string_literal(node.loc.filename),
             LINE = c_integer_literal(node.loc.line),
             COL = c_integer_literal(node.loc.col),
-            GETCASES = table.concat(getswitch, "\n"),
-            SETCASES = table.concat(setswitch, "\n")
         }))
-    else
-        table.insert(code, render([[
-            static int $INDEXNAME(lua_State *L) {
-                return luaL_error(L, "%s:%d:%d: field %s not found in record %s", $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
-            }
-            static int $NEWINDEXNAME(lua_State *L) {
-                return luaL_error(L, "%s:%d:%d: field %s not found in record %s", $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
-            }
-        ]], {
-            INDEXNAME = coder._nominal_metamethod_name(
-                node._type.name, "index"),
-            NEWINDEXNAME = coder._nominal_metamethod_name(
-                node._type.name, "newindex"),
-            FQTN = c_string_literal(node._type.name),
-            FILE = c_string_literal(node.loc.filename),
-            LINE = c_integer_literal(node.loc.line),
-            COL = c_integer_literal(node.loc.col),
-        }))
-    end
     table.insert(initrecs, render([[
       {
         /* If we are here then this is the first time
@@ -506,6 +493,8 @@ function coderecorddec(ctx, code, initrecs, node)
         lua_rawset(L, -3);
         lua_pushliteral(L, $TAG);
         lua_rawsetp(L, -2, TITAN_MT_TYPE);
+        titan_pushmodule(L, _mod);
+        lua_rawsetp(L, -2, TITAN_MT_MOD);
         lua_newtable(L);
         $FIELDMAP
         lua_pushvalue(L, -1); /* fieldmap */
@@ -541,7 +530,7 @@ function coderecorddec(ctx, code, initrecs, node)
         NEWINDEXNAME = coder._nominal_metamethod_name(
             node._type.name, "newindex"),
         TYPE = node._type.name,
-        TAG = c_string_literal(types.serialize(node._type)),
+        TAG = c_string_literal(types.serialize(node._declared_type or node._type)),
         FIELDMAP = table.concat(fieldmap, "\n")
     }))
 end
@@ -549,6 +538,36 @@ end
 -- Generate the Lua-facing metatable for a union. Variants, tags, and payloads
 -- are opaque; only public methods participate in lookup, and all writes fail.
 function coder._codeuniondec(ctx, code, initnominals, node)
+    local payload_reader = coder._nominal_function_prefix(
+        node._type.name, "payload_reader")
+    local payload_cases = {}
+    for _, variant in ipairs(node._type.variants) do
+        table.insert(payload_cases, render([[
+            case $INDEX: {
+                $PAYLOAD
+                return;
+            }
+        ]], {
+            INDEX = c_integer_literal(variant.index),
+            PAYLOAD = variant.payload and copyboxed(
+                ctx, variant.payload, "tv", "&_union->uv[1].uv")
+                or "setnilvalue(tv);",
+        }))
+    end
+    table.insert(code, render([[
+        static void $READER(lua_State *L, Udata *_union, TValue *tv) {
+            switch (ivalue(&_union->uv[0].uv)) {
+                $CASES
+                default:
+                    luaL_error(L, "malformed internal tag for union '%s'", $FQTN);
+                    return;
+            }
+        }
+    ]], {
+        READER = payload_reader,
+        CASES = table.concat(payload_cases, "\n"),
+        FQTN = c_string_literal(node._type.name),
+    }))
     local methodmap = {}
     local methodnames = {}
     for name, method in pairs(node._type.methods or {}) do
@@ -624,6 +643,8 @@ function coder._codeuniondec(ctx, code, initnominals, node)
             lua_rawset(L, -3);
             lua_pushliteral(L, $TAG);
             lua_rawsetp(L, -2, TITAN_MT_TYPE);
+            lua_pushlightuserdata(L, titan_cast_func(void *, $PAYLOAD_READER));
+            lua_rawsetp(L, -2, TITAN_MT_PAYLOAD);
             lua_newtable(L);
             $METHODMAP
             lua_pushvalue(L, -1); /* methodmap */
@@ -656,7 +677,8 @@ function coder._codeuniondec(ctx, code, initnominals, node)
         NEWINDEXNAME = coder._nominal_metamethod_name(
             node._type.name, "newindex"),
         TYPE = node._type.name,
-        TAG = c_string_literal(types.serialize(node._type)),
+        TAG = c_string_literal(types.serialize(node._declared_type or node._type)),
+        PAYLOAD_READER = payload_reader,
         METHODMAP = table.concat(methodmap, "\n"),
     }))
 end
@@ -836,27 +858,39 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
     -- recover the same registry metatable through type2metatable.
     type2metatable(ctx, types.Nominal(interface.name))
 
-    local membermap, fieldcases = {}, {}
+    local membermap = {}
     for _, field in ipairs(interface.fields) do
+        local accessor = coder._nominal_function_prefix(
+            interface.name, field.name) .. "_fieldaccessor"
         table.insert(membermap, render([[
             lua_pushliteral(L, $NAME);
-            lua_pushinteger(L, $INDEX);
+            lua_pushlightuserdata(L, titan_cast_func(void *, $ACCESSOR));
             lua_rawset(L, -3);
         ]], {
             NAME = c_string_literal(field.name),
-            INDEX = c_integer_literal(field.index),
+            ACCESSOR = accessor,
         }))
-        table.insert(fieldcases, render([[
-            case $INDEX: {
-                TValue *_slot = &_interface->uv[$UVINDEX].uv;
-                $SETWRAPPED
-                break;
+        table.insert(code, render([[
+            static void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_interface, TValue *tv, int write) {
+                (void)_mod;
+                if (write) {
+                    luaL_error(L,
+                        "%s:%d:%d: cannot assign member '%s' in interface '%s'",
+                        $FILE, $LINE, $COL, $FIELD, $FQTN);
+                } else {
+                    TValue *_slot = &_interface->uv[$UVINDEX].uv;
+                    $SETWRAPPED
+                }
             }
         ]], {
-            INDEX = c_integer_literal(field.index),
+            ACCESSOR = accessor,
+            FILE = c_string_literal(node.loc.filename),
+            LINE = c_integer_literal(node.loc.line),
+            COL = c_integer_literal(node.loc.col),
+            FIELD = c_string_literal(field.name),
+            FQTN = c_string_literal(interface.name),
             UVINDEX = c_integer_literal(2 + field.index),
-            SETWRAPPED = copyboxed(ctx, field.type,
-                "s2v(L->top.p - 1)", "_slot"),
+            SETWRAPPED = copyboxed(ctx, field.type, "tv", "_slot"),
         }))
     end
     for index, method_node in ipairs(node.methods) do
@@ -892,14 +926,13 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
             if (TITAN_LIKELY(!tagisempty(_membertag))) {
                 if (ttisCclosure(&_memberv)) {
                     setobj2s(L, L->top.p - 1, &_memberv);
-                } else if (ttisinteger(&_memberv)) {
-                    switch (ivalue(&_memberv)) {
-                        $FIELDCASES
-                        default:
-                            return luaL_error(L,
-                                "malformed internal member map for interface '%s'",
-                                $FQTN);
-                    }
+                } else if (ttislightuserdata(&_memberv)
+                           && pvalue(&_memberv) != NULL) {
+                    void (*_accessor)(lua_State *, Udata *, Udata *, TValue *, int) =
+                        titan_cast_func(
+                            void (*)(lua_State *, Udata *, Udata *, TValue *, int),
+                            pvalue(&_memberv));
+                    _accessor(L, _mod, _interface, s2v(L->top.p - 1), 0);
                 } else {
                     return luaL_error(L,
                         "malformed internal member map for interface '%s'",
@@ -926,7 +959,6 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
             ctx, receiver_plan, types.Nominal(interface.name),
             "_interface", "_interfaceslot", node.loc,
             "Lua Interface receiver"),
-        FIELDCASES = table.concat(fieldcases, "\n"),
         FQTN = c_string_literal(interface.name),
         FILE = c_string_literal(node.loc.filename),
         LINE = c_integer_literal(node.loc.line),
@@ -944,6 +976,8 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
             lua_rawset(L, -3);
             lua_pushliteral(L, $TAG);
             lua_rawsetp(L, -2, TITAN_MT_TYPE);
+            titan_pushmodule(L, _mod);
+            lua_rawsetp(L, -2, TITAN_MT_MOD);
             lua_newtable(L);
             $MEMBERMAP
             lua_pushvalue(L, -1); /* membermap */
@@ -973,7 +1007,7 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
         }
     ]], {
         TYPE = interface.name,
-        TAG = c_string_literal(types.serialize(interface)),
+        TAG = c_string_literal(types.serialize(node._declared_type or interface)),
         INDEXNAME = coder._nominal_metamethod_name(
             interface.name, "index"),
         NEWINDEXNAME = coder._nominal_metamethod_name(

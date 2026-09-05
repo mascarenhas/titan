@@ -362,6 +362,13 @@ supertypes. A later independently built Array/Map/nominal application therefore
 reaches the ordinary invariant assignment relation after selection instead of
 being rebuilt component by component.
 
+Argument evidence may peel one outer Option when its formal is a nonoptional
+structural shape, allowing a Map parameter such as `{K: V}` to infer from
+`({string: T})?`. Direct inference-cell formals retain the entire optional
+type. This boundary adjustment does not alter recursive structural unification;
+the ordinary argument finalizer still owns the checked Option force and rejects
+incompatible nested shapes.
+
 Constructor consumers expose evaluated component edges in language order:
 
 - positional Array/integer-Map values from left to right, including each fixed
@@ -529,6 +536,13 @@ and Maps keep their ordinary backing representations; and Options, vararg
 families, and flexible-output descriptors are selected from their erased
 ordinary element types. There is no generic carrier algebra or special Option
 ABI in coder.
+
+Generic-for lowering visits the complete adjusted setup tuple, including
+discarded surplus expressions, and its synthesized initial/next/close calls
+and visible-variable declaration. These private AST edges contain executable
+casts whose plans must be rebuilt before type erasure: an unconstrained
+`T? -> T` force becomes ordinary `value -> value`. Hidden calls remain raw
+producers so codegen can assign their fixed and extra results to loop slots.
 
 ## Focused cast and adapter insertion
 
