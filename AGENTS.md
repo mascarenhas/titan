@@ -417,8 +417,8 @@ luarocks make && bash spec/support/ci_test_groups.sh compiler  # complete covere
 make clean                                           # remove generated artifacts; `make distclean` also removes downloaded Lua/Readline/LuaRocks/libbacktrace/libuv/OpenSSL/llhttp trees
 
 TITAN_PROBE_CACHE_DISABLE=1 busted                  # full Busted tree — MUST run from repo root (all driver paths are relative)
-TITAN_PROBE_CACHE_DISABLE=1 busted spec/parser_spec.lua  # single spec file
-TITAN_PROBE_CACHE_DISABLE=1 busted spec/coder/coder_spec.lua --filter='for loop' # single test
+TITAN_ROCKS_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 busted --run=checkout spec/parser_spec.lua  # edited compiler, installed SDK
+TITAN_ROCKS_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 busted --run=checkout spec/coder/coder_spec.lua --filter='for loop' # single test
 
 ./titanc [--print-ast] [--pretty-print] [--test] [--no-uv-bootstrap] \
   [-v] [-j jobs] [--static] [--no-line-directives] \
@@ -820,7 +820,25 @@ lexer, location, parser, symtab, types, util); `spec/checker/`, `spec/coder/`,
 and
 `spec/stdlib/` need the full setup.
 
-**Gotcha — the installed rock shadows the working tree under busted.** The Busted launcher uses `luarocks.loader`, so once `$PREFIX/bin/luarocks make` has installed the `titan` rock, `require "titan-compiler.X"` inside specs resolves to the *installed snapshot* in `ROCKS_TREE` (currently the same directory as `PREFIX`), not your edited source files — edits silently do not take effect. Re-run `$PREFIX/bin/luarocks make` after changing compiler sources, before running Busted. (`make test` re-runs `luarocks make` for you each time, so it always tests current sources; `luarocks test` on its own does **not** rebuild the rock.) A direct `TITAN_PROBE_CACHE_DISABLE=1 busted` invocation without a preceding `luarocks make` can silently load a stale installed snapshot and pass or fail misleadingly.
+**Use the explicit checkout profile for focused compiler edits.** From the
+repository root, run the prefix's `busted --run=checkout` with command-scoped
+`TITAN_ROCKS_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1`. The `.busted`
+`checkout` profile prepends `./?.lua;./?/init.lua` after the LuaRocks launcher
+sets its paths. It leaves `package.cpath` unchanged; `TITAN_ROCKS_ROOT` keeps
+the installed headers and runtime libraries selected when loading checkout
+driver Lua. An ambient checkout-first `LUA_PATH` alone does not override the
+launcher. The profile's standard Busted helper prepares driver layout and
+direct checker C-header lookup through one existing resolver context, then
+closes it. It rejects a missing root option before tests start. Preserve
+private checkout ownership for concurrent compiler tests.
+
+Default Busted, `make busted-test`, and `luarocks test` still use the installed
+compiler snapshot, so reinstall compiler edits before those commands or
+`$PREFIX/bin/titanc`. `make test` reinstalls the compiler, SDK, and standard
+provider before the complete suite; `luarocks test` alone does not rebuild.
+Reinstall after runtime or standard-library changes as well. The checkout
+profile does not refresh installed artifacts or rebuild the native executable.
+Do not export the focused command's root override into canonical full runs.
 
 When the active installation's `bin` directory is on `PATH`, plain
 `luarocks test` needs neither `PREFIX` nor `ROCKS_TREE`: child interpreters use

@@ -594,8 +594,15 @@ error raised inside a semantic action escapes `parse` without restoring
   `teardown()`, but a stray `assert:set_parameter("TableFormatLevel", -1)`
   in the describe body runs at collection time — and printing a
   self-referential post-checker AST at unlimited depth hangs busted.
-* **Remember the installed-rock shadow.** Under busted,
-  `require "titan-compiler.parser"` resolves to the installed rock, not your
-  working tree — re-run `$PREFIX/bin/luarocks make titan-0.6.0-1.rockspec` after
-  editing front-end sources, or your changes silently will not be under test
-  (see the [implementation index](index.md)).
+* **Select checkout sources explicitly for focused Busted runs.** From the
+  repository root, use the prefix's `busted --run=checkout` with command-scoped
+  `TITAN_ROCKS_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1`. The `.busted`
+  profile prepends local Lua paths after the LuaRocks launcher, so
+  `require "titan-compiler.parser"` sees front-end edits. The root option
+  preserves installed headers and runtime libraries; the C module path stays
+  unchanged. Its standard Busted helper prepares direct checker C-header lookup
+  through the existing driver APIs and rejects a missing root option. Default
+  Busted and installed `titanc` still require reinstalling
+  compiler edits. Reinstall runtime and standard-library changes as well;
+  `make test` retains the full install-first gate
+  (see [repository test execution](test-runner.md#repository-dogfooding)).

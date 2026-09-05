@@ -2575,6 +2575,198 @@ fi
             if not tested then error(test_error, 0) end
         end)
 
+    it("selects checkout compiler edits through the real LuaRocks Busted launcher",
+        function()
+            local root = make_temp_dir()
+            local tested, test_error = xpcall(function()
+                local prefix = assert(prefix_from_cpath(package.cpath))
+                local launcher = prefix .. "/bin/busted"
+                local installed_types =
+                    prefix .. "/share/lua/5.5/titan-compiler/types.lua"
+                local installed_contents = read_file(installed_types)
+                local compiler = root .. "/titan-compiler"
+                assert(lfs.mkdir(compiler))
+                assert(lfs.mkdir(root .. "/titan-runtime"))
+                write_file(root .. "/titan-runtime/titan.c",
+                    "/* source checkout marker */\n")
+                write_file(root .. "/Makefile", "# source checkout marker\n")
+                assert(lfs.mkdir(root .. "/c-parser"))
+                write_file(root .. "/c-parser/cdriver.lua",
+                    read_file("c-parser/cdriver.lua"))
+                assert(lfs.mkdir(root .. "/spec"))
+                assert(lfs.mkdir(root .. "/spec/support"))
+                write_file(root .. "/spec/support/checkout_busted.lua",
+                    read_file("spec/support/checkout_busted.lua"))
+                write_file(compiler .. "/driver.lua",
+                    read_file("titan-compiler/driver.lua"))
+                local local_types = compiler .. "/types.lua"
+                local changed, replacements = read_file(
+                    "titan-compiler/types.lua"):gsub(
+                        'then return "integer"',
+                        'then return "checkout-only-integer"', 1)
+                assert.equal(1, replacements)
+                write_file(local_types, changed)
+                local report = root .. "/resolution.lua"
+                write_file(root .. "/resolution_spec.lua", [==[
+local assert = require "luassert"
+local driver = require "titan-compiler.driver"
+local types = require "titan-compiler.types"
+local cdriver = require "c-parser.cdriver"
+local lpeglabel = require "lpeglabel"
+assert.equal(5, lpeglabel.match(lpeglabel.P("kept"), "kept"))
+local context = driver.new_resolver_context()
+assert(driver.initialize_layout(context))
+assert(driver.initialize_platform(context))
+local runtime_inputs = driver.INSTALLED
+    and driver.installed_link_inputs(driver.INSTALL_PATHS, driver.IS_DARWIN)
+    or driver.source_link_inputs()
+local fields = {
+    cpath = package.cpath,
+    root = driver.TITAN_ROOT,
+    installed = driver.INSTALLED,
+    source_checkout = driver.SOURCE_CHECKOUT,
+    include = driver.INCLUDE_PATH,
+    lua_source = driver.LUA_SOURCE_PATH,
+    foreign_includes = table.concat(driver.foreign_include_dirs(), "\n"),
+    runtime_inputs = table.concat(runtime_inputs, "\n"),
+    provider = assert(package.searchpath("titan", package.cpath)),
+    lpeglabel = assert(package.searchpath("lpeglabel", package.cpath)),
+    behavior = types.tostring(types.Integer()),
+    source = debug.getinfo(types.tostring, "S").source,
+    driver_source = debug.getinfo(driver.root_from_package_cpath, "S").source,
+    cdriver_source = debug.getinfo(cdriver.process_file, "S").source,
+}
+assert(driver.close_resolver_context(context))
+local report = assert(io.open(os.getenv("TITAN_BUSTED_RESOLUTION_REPORT"), "wb"))
+report:write("return {\n")
+for key, value in pairs(fields) do
+    report:write(string.format("[%q] = %q,\n", key, value))
+end
+assert(report:write("}\n"))
+assert(report:close())
+it("uses the edited checkout compiler", function()
+    assert.equal("checkout-only-integer", fields.behavior)
+    assert.equal("@./titan-compiler/types.lua", fields.source)
+    assert.equal("@./titan-compiler/driver.lua", fields.driver_source)
+    assert.equal("@./c-parser/cdriver.lua", fields.cdriver_source)
+end)
+it("checks installed Lua headers with the direct checkout checker", function()
+    local parser = require "titan-compiler.parser"
+    local checker = require "titan-compiler.checker"
+    local source = [[
+        local lua = foreign import "lua.h"
+        local function stack_size(state: *lua.lua_State): integer
+            return lua.lua_gettop(state) as integer
+        end
+    ]]
+    local ast = assert(parser.parse("installed_header.titan", source))
+    local _, errors = checker.check(
+        "installed_header", ast, source, "installed_header.titan")
+    assert.equal(0, #errors, table.concat(errors, "\n"))
+end)
+]==])
+                local function run_fixture(profile, omit_root)
+                    local argv = {
+                        "bash", "-c",
+                        'cd "$1" && shift && exec "$@"',
+                        "titan-busted-resolution", root,
+                        "env",
+                        "-u", "LUA_PATH_5_5",
+                        "-u", "LUA_CPATH",
+                        "-u", "LUA_CPATH_5_5",
+                        "-u", "TITAN_ROCKS_ROOT",
+                    }
+                    if not omit_root then
+                        argv[#argv + 1] = "TITAN_ROCKS_ROOT=" .. prefix
+                    end
+                    for _, word in ipairs({
+                        "LUA_PATH=./?.lua;./?/init.lua;;",
+                        "TITAN_PROBE_CACHE_DISABLE=1",
+                        "TITAN_BUSTED_RESOLUTION_REPORT=" .. report,
+                        launcher, "resolution_spec.lua",
+                    }) do
+                        argv[#argv + 1] = word
+                    end
+                    if profile then
+                        argv[#argv + 1] = "--run=" .. profile
+                    end
+                    return run_argv(argv)
+                end
+
+                -- The generated launcher puts the installed compiler before
+                -- even an explicit checkout-first LUA_PATH.
+                local ok, output, why, code = run_fixture()
+                assert.falsy(ok, output)
+                assert.equal("exit", why)
+                assert.equal(1, code)
+                local installed = assert(loadfile(report))()
+                assert.equal("integer", installed.behavior)
+                assert.equal("@" .. installed_types, installed.source)
+                assert.equal("@" .. prefix ..
+                    "/share/lua/5.5/titan-compiler/driver.lua",
+                    installed.driver_source)
+                assert.equal("@" .. prefix ..
+                    "/share/lua/5.5/c-parser/cdriver.lua",
+                    installed.cdriver_source)
+                assert.is_true(installed.installed)
+                assert.is_false(installed.source_checkout)
+                assert.truthy(output:find("checkout-only-integer", 1, true),
+                    output)
+
+                write_file(root .. "/.busted", read_file(".busted"))
+                ok, output, why, code = run_fixture()
+                assert.falsy(ok, output)
+                assert.equal("exit", why)
+                assert.equal(1, code)
+                assert.same(installed, assert(loadfile(report))())
+
+                assert(os.remove(report))
+                ok, output, why, code = run_fixture("checkout", true)
+                assert.falsy(ok, output)
+                assert.equal("exit", why)
+                assert.equal(1, code)
+                assert.truthy(output:find(
+                    "checkout Busted profile requires TITAN_ROCKS_ROOT",
+                    1, true), output)
+                assert.falsy(file_exists(report))
+
+                ok, output = run_fixture("checkout")
+                assert.truthy(ok, output)
+                local checkout = assert(loadfile(report))()
+                assert.equal("checkout-only-integer", checkout.behavior)
+                assert.equal("@./titan-compiler/types.lua", checkout.source)
+                assert.equal("@./titan-compiler/driver.lua",
+                    checkout.driver_source)
+                assert.equal("@./c-parser/cdriver.lua", checkout.cdriver_source)
+                for _, field in ipairs({
+                    "cpath", "root", "installed", "source_checkout",
+                    "include", "lua_source", "foreign_includes",
+                    "runtime_inputs", "provider", "lpeglabel",
+                }) do
+                    assert.equal(installed[field], checkout[field], field)
+                end
+                assert.equal(prefix, checkout.root)
+                assert.equal(prefix .. "/include", checkout.include)
+                assert.equal(prefix .. "/src/lua-5.5.1", checkout.lua_source)
+                assert.equal(prefix .. "/lib/titan/0.6/titan.so",
+                    checkout.provider)
+                write_file(local_types,
+                    'error("broken checkout compiler must propagate", 0)\n')
+                assert(os.remove(report))
+                ok, output, why, code = run_fixture("checkout")
+                assert.falsy(ok, output)
+                assert.equal("exit", why)
+                assert.equal(1, code)
+                assert.truthy(output:find(
+                    "broken checkout compiler must propagate", 1, true),
+                    output)
+                assert.falsy(file_exists(report))
+                assert.equal(installed_contents, read_file(installed_types))
+            end, debug.traceback)
+            remove_tree(root)
+            if not tested then error(test_error, 0) end
+        end)
+
     it("forwards LuaRocks command arguments to Busted byte-for-byte",
         function()
             local root = make_temp_dir()

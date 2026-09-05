@@ -91,6 +91,9 @@ end
 
 local function new_fake_service(options, run)
     options = options or {}
+    -- Synthetic probes use only the native inputs declared by each test,
+    -- independently of the active SDK configured by a Busted helper.
+    if options.include_dirs == nil then options.include_dirs = {} end
     local state, runner, temp_provider = fake_environment(run)
     options.runner = runner
     options.temp_provider = temp_provider
@@ -393,7 +396,7 @@ describe("session-scoped C probe service", function()
 
         local discovered = assert(
             cdriver.resolve_compiler_include_dirs(nil))
-        local default_service = new_fake_service()
+        local default_service = assert(cprobe.new_service())
         local defaults =
             assert(default_service:cdriver_process_options())
         assert.same(discovered, defaults.compiler_include_dirs)

@@ -1,0 +1,7 @@
+return {
+    default = {},
+    checkout = {
+        lpath = "./?.lua;./?/init.lua",
+        helper = "spec/support/checkout_busted.lua",
+    },
+}

@@ -60,7 +60,9 @@ local function titanc(overrides, ...)
         environment[name] = value
     end
 
-    local argv = { "env" }
+    -- These subprocesses exercise source-checkout SDK selection even when
+    -- Busted itself uses the installed SDK through its checkout profile.
+    local argv = { "env", "-u", "TITAN_ROCKS_ROOT" }
     for _, name in ipairs(ENVIRONMENT_KEYS) do
         table.insert(argv, name .. "=" .. environment[name])
     end

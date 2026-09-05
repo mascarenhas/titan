@@ -761,15 +761,38 @@ also admits the infrequent cold-cache rebuild under the two-CPU policy.
 The complete macOS suite remains a manually dispatched pre-merge gate and is
 run only with explicit maintainer authorization.
 
-`luarocks test` does **not** build the rock-under-test, only its test
-dependencies, so always run `luarocks make` first (as `make test` does). If you
-drive Busted directly, set `TITAN_PROBE_CACHE_DISABLE=1` and use the `busted`
-installed in `$PREFIX/bin`; compiler fixtures intentionally reuse header
-pathnames, while the prefix-configured Lua paths find the canonical support
-provider. Once the Titan
-rock is installed, Busted loads compiler modules from that installed snapshot,
-not from the checkout. Re-run `$PREFIX/bin/luarocks make` after editing compiler
-sources.
+To test compiler Lua edits without reinstalling them, run the explicit
+`checkout` Busted profile from the repository root with the `busted` installed
+in `$PREFIX/bin` and its prepared, ABI-matched SDK:
+
+```sh
+$ TITAN_ROCKS_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 \
+    busted --run=checkout spec/parser_spec.lua
+$ TITAN_ROCKS_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 \
+    busted --run=checkout spec/coder/coder_spec.lua --filter='for loop'
+```
+
+The repository's `.busted` `checkout` profile prepends
+`./?.lua;./?/init.lua` after the LuaRocks launcher has set its paths. An ambient
+checkout-first `LUA_PATH` alone cannot override the launcher's installed paths.
+The profile leaves the C module path intact, while the existing
+`TITAN_ROCKS_ROOT` option keeps header and runtime-library selection on the
+specified installation even when the driver Lua comes from the checkout.
+The profile's standard Busted helper prepares the existing driver layout and
+direct checker's C-header lookup with that SDK before tests run; it reports a
+missing `TITAN_ROCKS_ROOT` immediately. Keep the option scoped to the focused
+command. Compiler fixtures deliberately
+reuse header pathnames, so direct runs must set `TITAN_PROBE_CACHE_DISABLE=1`
+as the Make targets already do.
+
+Default Busted runs, `make busted-test`, and `luarocks test` continue to use the
+installed compiler snapshot. Reinstall compiler changes before those commands
+or an installed `titanc` invocation. `luarocks test` does **not** build the
+rock-under-test, only its test dependencies. `make test` remains the canonical
+full validation: it installs the current compiler, SDK, and standard provider
+first. Reinstall after changing runtime or standard-library code as well; the
+explicit checkout profile does not refresh installed artifacts or rebuild the
+native aggregate executable.
 
 With a working Titan installation's `bin` directory already on `PATH`, the
 equivalent `luarocks make --force` and `luarocks test` commands work from the
