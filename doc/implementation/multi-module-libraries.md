@@ -287,7 +287,7 @@ Lua process and requires exactly one support table exposing `_loadlib` and
 proof.
 
 The production standard library is the canonical example. One compiler
-invocation names all eighteen logical roots and publishes root `titan.so` and
+invocation names all nineteen logical roots and publishes root `titan.so` and
 `titan.a`. Internal standard imports are direct. `ltitanlib.o` is shared `-X`
 payload and supplies bare `luaopen_titan` without adding a logical metadata
 key. The private namespaced five-member LPegLabel archive follows it as
@@ -296,9 +296,9 @@ llhttp archive, and finally the selected OpenSSL payload used directly by
 `titan.ssl`. The eight HTTP callback definitions already live in the generated
 `titan.http` object; there is no adapter object. Bundled archives are
 force-carried into the DSO and flattened into the archive; system-mode libuv/OpenSSL settings remain final-link inputs
-and are never copied into `titan.a`. The DSO exports nineteen Lua entries
-(`luaopen_titan` plus the eighteen logical entries); both forms define the
-eighteen logical protocols, and the archive advertises exactly eighteen
+and are never copied into `titan.a`. The DSO exports twenty Lua entries
+(`luaopen_titan` plus the nineteen logical entries); both forms define the
+nineteen logical protocols, and the archive advertises exactly nineteen
 metadata keys.
 The private LPegLabel archive and its headers remain source-build inputs; they
 are not installed in the compiler/runtime SDK. The callback-bearing
@@ -324,9 +324,9 @@ object. The exact `titan/test.titan` used by this generation is copied
 into the same private stage. The hook then executes the source-only
 `scripts/stdlib_installer.lua` directly with the installed Lua; the publisher
 is not an installed compiler module. The script rescans `titan.a`, requires
-the exact eighteen-key set, compares embedded metadata with the staged DSO and a
+the exact nineteen-key set, compares embedded metadata with the staged DSO and a
 fresh-process archive-backed validation image, validates bare
-`luaopen_titan`, the eighteen exact shims, the exact test-support source, and
+`luaopen_titan`, the nineteen exact shims, the exact test-support source, and
 the macOS dSYM, then publishes the
 paired bundle with the DSO last. It recognizes bootstrap-only and current
 complete-pair predecessors in that same namespace. Injected failures restore
@@ -335,13 +335,13 @@ effort and cannot turn the coherent install into a reported hook failure.
 The publisher does not implement cross-version migration or cleanup.
 
 The canonical installed files are the provider pair (plus the DSO's macOS
-dSYM), eighteen Lua shims, and the canonical test-support source:
+dSYM), nineteen Lua shims, and the canonical test-support source:
 
 ```text
 <root>/lib/titan/0.6/titan.so
 <root>/lib/titan/0.6/titan.a
 <root>/lib/titan/0.6/titan.so.dSYM          # macOS only
-<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iteration,gc,test}.lua
+<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iteration,gc,test,reflect}.lua
 <root>/share/titan/0.6/src/titan/test.titan
 ```
 
@@ -350,11 +350,11 @@ manifest owns the compiler Lua/script files; `luarocks remove` does not claim
 to remove Titan library-package artifacts.
 
 The checkout Make graph has one provider-pair completion/configuration stamp.
-All eighteen flat/folder source sets, native inputs, effective
+All nineteen flat/folder source sets, native inputs, effective
 `CC`/`AR`/`RANLIB`, embedded-format inputs, libuv/OpenSSL modes, dependency
 identities, and extra flags are prerequisites. The
 DSO, archive, conditional dSYM, and every shim must exist; every warm
-invocation rescans `titan.a` for the exact eighteen-key set without changing pair
+invocation rescans `titan.a` for the exact nineteen-key set without changing pair
 mtimes. `make clean` removes only exact known generated outputs. Production
 library tests treat the combined set as read-only. CI snapshots and restores
 the checkout runtime archive plus the installed DSO/archive/dSYM/shims and

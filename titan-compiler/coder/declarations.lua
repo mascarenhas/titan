@@ -75,6 +75,11 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
         assert(typ._tag == "Type.Method")
         params = { types.Nominal(typ.fqtn), table.unpack(typ.params) }
     end
+    -- Closure tags describe callable signatures, not named declarations.
+    -- Static namespaces publish this same Function shape; retaining a
+    -- StaticMethod tag here would reject its own non-exact strict calls.
+    local callable_type = types.Function(params, typ.rettypes, false,
+        typ.varargtype, typ.flexrettype)
     for i, param in ipairs(params) do
         local pname = "_param_" .. tostring(i)
         local slot = "s2v(L->ci->func.p + " .. (i + hidden) .. ")"
@@ -427,7 +432,7 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
             ]], {
                 STRICTENTRY = options.strict_name,
                 ADAPTER = titan_entry,
-                FUNCTAG = function_type_tag(tlcontext, typ),
+                FUNCTAG = function_type_tag(tlcontext, callable_type),
             })
         else
             assert(options.lua_entry)
@@ -455,7 +460,7 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
             ]], {
                 LUAENTRY = options.lua_entry,
                 STRICTENTRY = options.strict_name,
-                FUNCTAG = function_type_tag(tlcontext, typ),
+                FUNCTAG = function_type_tag(tlcontext, callable_type),
             })
         end
     else

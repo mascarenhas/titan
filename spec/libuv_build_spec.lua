@@ -4045,7 +4045,7 @@ done
                 1, true), workflow)
             assert.truthy(workflow:find(
                 "for module in coroutine uv async timer io fs net ssl url " ..
-                "http os peg string math lua iteration gc test; do",
+                "http os peg string math lua iteration gc test reflect; do",
                 1, true), workflow)
             assert.truthy(workflow:find(
                 "share/titan/0.6/src/titan/test.titan", 1, true), workflow)
@@ -4348,7 +4348,7 @@ done
 
             assert.equal(1, count_literal(sanitizer_job,
                 "make titan-stdlib-test-build"), sanitizer_job)
-            assert.equal(9, count_literal(sanitizer_job,
+            assert.equal(10, count_literal(sanitizer_job,
                 "make titan-stdlib-test-run"), sanitizer_job)
             for _, filter in ipairs({
                 "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
@@ -4359,6 +4359,7 @@ done
                 "TITAN_FILTER='^uv%.runtime_tests%.'",
                 "TITAN_FILTER='test_run_foreign_'",
                 "TITAN_FILTER='test_ssl_http_fresh_process_sanitizer_composition$'",
+                "TITAN_FILTER='^reflect%.tests%.'",
                 "TITAN_FILTER='test_peg_roots_and_releases_" ..
                 "titan_callback_patterns$'",
                 "TITAN_FILTER='test_regex_gc_rooting$'",

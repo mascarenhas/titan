@@ -498,6 +498,78 @@ describe("interfaces (end-to-end)", function()
         ]])
     end)
 
+    it("publishes boxed field accessors for records and Interfaces", function()
+        h.with_extra_cflags({ "-DTITAN_COMPILER_TESTS" }, function()
+            local csrc = h.compile_and_read_c([[
+                interface View
+                    maybe: {integer}?
+                    numbers: {integer}
+                end
+
+                record Box
+                    local hidden: integer
+                    const numbers: {integer}
+                    const maybe: {integer}?
+                end
+
+                function make(): (Box, View)
+                    local numbers = { 41, 42 }
+                    local box = Box.new(7, numbers, numbers)
+                    local view: View = box
+                    return box, view
+                end
+            ]])
+            for _, owner in ipairs({ "Box", "View" }) do
+                local prefix = "test_\\u2133_" .. owner .. "_\\u2131_"
+                for _, field in ipairs({ "numbers", "maybe" }) do
+                    local accessor = prefix .. field .. "_fieldaccessor"
+                    assert.truthy(csrc:find(
+                        "static void " .. accessor .. "(", 1, true))
+                    assert.truthy(csrc:find(
+                        "titan_cast_func(void *, " .. accessor .. ")", 1, true))
+                    local body = generated_function(csrc, accessor .. "(")
+                    assert.truthy(body:find(
+                        "titan_array_require_proxy", 1, true))
+                end
+                local getter = generated_function(csrc, prefix .. "meta_index(")
+                assert.is_nil(getter:find("switch", 1, true))
+                assert.truthy(getter:find("_accessor(L, _mod,", 1, true))
+            end
+            assert.is_nil(csrc:find("hidden_fieldaccessor", 1, true))
+            local record_getter = generated_function(csrc,
+                "test_\\u2133_Box_\\u2131_numbers_fieldaccessor(")
+            local interface_getter = generated_function(csrc,
+                "test_\\u2133_View_\\u2131_numbers_fieldaccessor(")
+            assert.truthy(record_getter:find("_rec->uv[1].uv", 1, true))
+            assert.truthy(interface_getter:find("_interface->uv[3].uv", 1, true))
+
+            local ok, err = h.call("test", [[
+                local box, view = test.make()
+                local registry = debug.getregistry()
+                local box_mt = debug.getmetatable(box)
+                local view_mt = debug.getmetatable(view)
+                for _, mt in ipairs({box_mt, view_mt}) do
+                    assert(mt[registry.TITAN_MT_MOD] == test)
+                    local members = mt[registry.TITAN_MT_MEMBERMAP]
+                    assert(type(members.numbers) == "userdata")
+                    assert(type(members.maybe) == "userdata")
+                    assert(members.hidden == nil)
+                end
+                assert(box.numbers == box.maybe)
+                assert(view.numbers == box.numbers)
+                assert(view.maybe == box.numbers)
+                box.numbers[1] = 43
+                assert(view.numbers[1] == 43)
+                box = nil
+                collectgarbage("collect")
+                assert(view.maybe[2] == 42)
+                local ok, err = pcall(function() view.numbers = nil end)
+                assert(not ok and err:find("cannot assign member 'numbers'", 1, true))
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
     it("copies shallow const-field snapshots in Interface order", function()
         h.run_coder([[
             record Payload

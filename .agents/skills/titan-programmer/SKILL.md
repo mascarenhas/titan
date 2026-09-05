@@ -1010,7 +1010,7 @@ cannot be re-exported. Circular imports are compile-time errors.
 Canonical short imports are:
 
 ```text
-coroutine uv async timer io fs net ssl url http os peg string test lua gc math iteration
+coroutine uv async timer io fs net ssl url http os peg string test lua gc math iteration reflect
 ```
 
 They mean the corresponding `titan.*` logical modules. 

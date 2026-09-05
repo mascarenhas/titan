@@ -275,9 +275,10 @@ system-llhttp mode, and neither the private archive nor headers are installed
 as runtime-SDK files.
 
 The HTTP root adds one logical protocol, archive key, generated shim, and
-`luaopen_titan_http`. The later addition of the independent `titan.test` module
-makes the coordinated current image eighteen logical modules and shims with
-nineteen DSO openers including bare `luaopen_titan` support. The complete image
+`luaopen_titan_http`. The later additions of the independent `titan.test` and
+`titan.reflect` modules make the coordinated current image nineteen logical
+modules and shims with twenty DSO openers including bare `luaopen_titan`
+support. The complete image
 lives in the `0.6` library namespace; earlier installations are not publication
 predecessors.
 

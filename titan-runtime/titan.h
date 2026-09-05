@@ -430,6 +430,10 @@ static l_inline Table *titan_ensure_metatables_table(lua_State *L) {
   lua_setfield(L, LUA_REGISTRYINDEX, "TITAN_MT_STATICS");
   lua_pushlightuserdata(L, TITAN_MT_MEMBERMAP);
   lua_setfield(L, LUA_REGISTRYINDEX, "TITAN_MT_MEMBERMAP");
+  lua_pushlightuserdata(L, TITAN_MT_MOD);
+  lua_setfield(L, LUA_REGISTRYINDEX, "TITAN_MT_MOD");
+  lua_pushlightuserdata(L, TITAN_MT_PAYLOAD);
+  lua_setfield(L, LUA_REGISTRYINDEX, "TITAN_MT_PAYLOAD");
 #endif
   lua_getfield(L, LUA_REGISTRYINDEX, TITAN_METATABLES_KEY);
   TValue *v = s2v(L->top.p - 1);

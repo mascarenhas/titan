@@ -32,6 +32,8 @@
 #define TITAN_MT_TYPE ((void *)(uintptr_t)UINT64_C(0xD70BB58499779830))
 #define TITAN_MT_STATICS ((void *)(uintptr_t)UINT64_C(0x83370ABAA56047AE))
 #define TITAN_MT_MEMBERMAP ((void *)(uintptr_t)UINT64_C(0x310D781561E92F6D))
+#define TITAN_MT_MOD ((void *)(uintptr_t)UINT64_C(0x54C6087BF019D23A))
+#define TITAN_MT_PAYLOAD ((void *)(uintptr_t)UINT64_C(0xB7D24E619053AC8F))
 
 /*
 ** Titan types that have a metatable
@@ -163,6 +165,4 @@ static inline void lmacro_sethvalue(lua_State *L, TValue *o, Table *t) {
 }
 
 #endif
-
-
 

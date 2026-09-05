@@ -2,7 +2,105 @@
 local test = import "test"
 local reflect = import "reflect"
 local gc = import "gc"
-local io = import "io"
+local lua = import "lua"
+local cstdlib = foreign import "stdlib.h"
+local luac = foreign import "lua.h"
+local ffi = foreign import "titan/ffi.h"
+local recursive_c = foreign import "reflection_recursive.h"
+
+local function expect_failure(action: () -> ())
+  local failed = false
+  do
+    action()
+  catch
+    failed = true
+  end
+  test.assert(failed, "operation should have raised")
+end
+
+local function record_value(candidate: value): reflect.RecordValue
+  case reflect.inspect(candidate)
+  when is_record: rec then return rec
+  else raise "expected a reflected record"
+  end
+end
+
+local function interface_value(candidate: value): reflect.InterfaceValue
+  case reflect.inspect(candidate)
+  when is_interface: iface then return iface
+  else raise "expected a reflected interface"
+  end
+end
+
+local function function_type(candidate: value): reflect.FunctionType
+  case reflect.inspect(candidate)
+  when is_titan_function: fn then return fn.descriptor
+  else raise "expected a reflected Titan function"
+  end
+end
+
+local function required_record(name: string): reflect.RecordType
+  local found: reflect.NominalType? = reflect.find_nominal(name)
+  test.assert(found ~= nil, "record should be registered: " .. name)
+  case found as reflect.NominalType
+  when is_record: rec then return rec
+  else raise "expected a record descriptor"
+  end
+end
+
+local function required_union(name: string): reflect.UnionType
+  local found: reflect.NominalType? = reflect.find_nominal(name)
+  test.assert(found ~= nil, "union should be registered: " .. name)
+  case found as reflect.NominalType
+  when is_union: un then return un
+  else raise "expected a union descriptor"
+  end
+end
+
+local function required_interface(name: string): reflect.InterfaceType
+  local found: reflect.NominalType? = reflect.find_nominal(name)
+  test.assert(found ~= nil, "interface should be registered: " .. name)
+  case found as reflect.NominalType
+  when is_interface: iface then return iface
+  else raise "expected an interface descriptor"
+  end
+end
+
+local function field_index(rec: reflect.RecordType, name: string): integer
+  for i = 1, #rec.fields do
+    if rec.fields[i].name == name then return i end
+  end
+  raise "missing reflected field " .. name
+end
+
+local function field_type(rec: reflect.RecordType, name: string): reflect.Type
+  return rec.fields[field_index(rec, name)].descriptor
+end
+
+local function assert_value_type(descriptor: reflect.Type)
+  case descriptor
+  when is_value then
+  else raise "expected erased value descriptor"
+  end
+end
+
+local function assert_integer_type(descriptor: reflect.Type)
+  case descriptor
+  when is_integer then
+  else raise "expected integer descriptor"
+  end
+end
+
+local function assert_interface_type(descriptor: reflect.Type, name: string)
+  case descriptor
+  when is_named: named then test.assert(named.name == name)
+  else raise "expected a named erased interface carrier"
+  end
+  case descriptor:resolve()
+  when is_interface: iface then test.assert(iface.name == name)
+  else raise "expected erased interface descriptor"
+  end
+end
 
 record SimpleRecord
   x: integer
@@ -251,79 +349,53 @@ function test_inspect_functions(_context: test.Context)
 end
 
 function test_nominal_descriptors(_context: test.Context)
-  -- Record descriptor
-  local r_desc: reflect.RecordType? = reflect.record_descriptor("titan.reflect.FieldType")
-  test.assert(r_desc ~= nil, "titan.reflect.FieldType should be found")
-  local rt = r_desc as reflect.RecordType
-  test.assert(rt.name == "titan.reflect.FieldType")
-  test.assert(#rt.fields == 4)
+  local rt = required_record("reflect.tests.SimpleRecord")
+  test.assert(rt.name == "reflect.tests.SimpleRecord")
+  test.assert(#rt.fields == 2)
+  test.assert(rt.fields[1].name == "x")
+  test.assert(rt.fields[2].name == "y")
+  assert_integer_type(rt.fields[1].descriptor)
 
-  -- Union descriptor
-  local u_desc: reflect.UnionType? = reflect.union_descriptor("titan.reflect.Type")
-  test.assert(u_desc ~= nil, "titan.reflect.Type should be found")
-  local ut = u_desc as reflect.UnionType
-  test.assert(ut.name == "titan.reflect.Type")
-  test.assert(#ut.variants == 25)
+  local ut = required_union("reflect.tests.TestShape")
+  test.assert(ut.name == "reflect.tests.TestShape")
+  test.assert(#ut.variants == 3)
+  test.assert(ut.variants[1].name == "circle")
+  test.assert(ut.variants[3].descriptor == nil)
 
-  -- Interface descriptor
-  local iface_desc: reflect.InterfaceType? = reflect.interface_descriptor("titan.io.Reader")
-  test.assert(iface_desc ~= nil, "titan.io.Reader should be found")
-  local ift = iface_desc as reflect.InterfaceType
-  test.assert(ift.name == "titan.io.Reader")
-  test.assert(#ift.methods >= 2)
+  local ift = required_interface("reflect.tests.Greeter")
+  test.assert(ift.name == "reflect.tests.Greeter")
+  test.assert(#ift.fields == 1)
+  test.assert(#ift.methods == 1)
+  test.assert(ift.fields[1].is_const)
+  test.assert(ift.methods[1].name == "greet")
+  test.assert(#ift.methods[1].param_descriptors == 0)
 
-  -- find_nominal
-  local nom_rec: reflect.NominalType? = reflect.find_nominal("titan.reflect.FieldType")
-  test.assert(nom_rec ~= nil)
-  case nom_rec as reflect.NominalType
-  when is_record: r then
-    test.assert(r.name == "titan.reflect.FieldType")
-  else
-    test.assert(false, "expected is_record")
-  end
-
-  local nom_union: reflect.NominalType? = reflect.find_nominal("titan.reflect.Type")
-  test.assert(nom_union ~= nil)
-  case nom_union as reflect.NominalType
-  when is_union: u then
-    test.assert(u.name == "titan.reflect.Type")
-  else
-    test.assert(false, "expected is_union")
-  end
-
-  -- Nonexistent queries
-  local unk_nom: reflect.NominalType? = reflect.find_nominal("nonexistent.Nominal")
-  test.assert(unk_nom == nil)
-
-  local unk_r: reflect.RecordType? = reflect.record_descriptor("nonexistent.Record")
-  test.assert(unk_r == nil)
-
-  local unk_u: reflect.UnionType? = reflect.union_descriptor("nonexistent.Union")
-  test.assert(unk_u == nil)
-
-  local unk_if: reflect.InterfaceType? = reflect.interface_descriptor("nonexistent.Interface")
-  test.assert(unk_if == nil)
+  -- Repeated queries reuse descriptors, including their callable members.
+  test.assert(required_record(rt.name) == rt)
+  test.assert(required_union(ut.name) == ut)
+  test.assert(required_interface(ift.name) == ift)
+  test.assert(reflect.find_nominal("nonexistent.Nominal") == nil)
 end
 
 function test_named_type_resolve(_context: test.Context)
-  local r_desc: reflect.RecordType? = reflect.record_descriptor("titan.reflect.FieldType")
-  test.assert(r_desc ~= nil)
-  local rt = r_desc as reflect.RecordType
-  -- Field 3 of FieldType is descriptor: Type, which is named titan.reflect.Type
-  local f3_type = rt.fields[3].descriptor
-  case f3_type
+  local ut = required_union("reflect.tests.TestShape")
+  local payload = ut.variants[2].descriptor as reflect.Type
+  case payload
   when is_named: named then
-    test.assert(named.name == "titan.reflect.Type")
-    local resolved = named:resolve()
-    case resolved
-    when is_union: u_res then
-      test.assert(u_res.name == "titan.reflect.Type")
-    else
-      test.assert(false, "expected union Type")
+    test.assert(named.name == "reflect.tests.SimpleRecord")
+    case named:resolve()
+    when is_record: resolved then
+      test.assert(resolved == required_record(named.name))
+    else raise "expected a resolved record"
     end
-  else
-    test.assert(false, "expected is_named")
+  else raise "expected a lazy nominal reference"
   end
+  case payload:resolve()
+  when is_record: resolved then test.assert(#resolved.fields == 2)
+  else raise "Type:resolve should follow a named descriptor"
+  end
+  local primitive = reflect.Type.is_integer()
+  test.assert(primitive:resolve() == primitive)
 end
 
 function test_named_type_resolve_unknown(_context: test.Context)
@@ -335,4 +407,885 @@ function test_named_type_resolve_unknown(_context: test.Context)
   else
     test.assert(false, "expected is_value from unknown nominal resolve")
   end
+end
+
+record AccessRecord
+  local hidden_first: string
+  number: integer
+  local hidden_middle: integer
+  const fixed: integer
+  items: {integer}
+  frozen: const {integer}
+  optional: boolean?
+  child: SimpleRecord?
+  choice: TestShape
+  greeter: Greeter
+  callback: (integer) -> integer
+end
+
+local function plus_one(n: integer): integer return n + 1 end
+
+local function access_record(): AccessRecord
+  local immutable: {integer} = {7, 8}
+  local impl: GreeterImpl = {prefix = "fixture"}
+  local iface: Greeter = impl
+  return {
+    hidden_first = "private", number = 11, hidden_middle = 99, fixed = 12,
+    items = {1, 2}, frozen = immutable as const {integer}, optional = false,
+    child = nil, choice = TestShape.empty(), greeter = iface,
+    callback = plus_one
+  }
+end
+
+function test_record_field_casts_and_private_gaps(_context: test.Context)
+  local candidate = access_record()
+  local rv = record_value(candidate)
+  test.assert(rv.n_fields == 9)
+  test.assert(rv.descriptor.fields[1].name == "number")
+  test.assert(rv.descriptor.fields[1].index == 1)
+  test.assert(rv.descriptor.fields[2].name == "fixed")
+  test.assert(rv.descriptor.fields[2].index == 3)
+  test.assert(rv:get(1) as integer == 11)
+  test.assert(rv:get(2) as integer == 12)
+  rv:set(1, 45)
+  test.assert(candidate.number == 45)
+  test.assert(candidate.hidden_first == "private")
+  test.assert(candidate.hidden_middle == 99)
+
+  expect_failure(function() rv:set(1, "not a number") end)
+  expect_failure(function() rv:set(1, nil) end)
+  rv:set(1, 3.0)
+  test.assert(candidate.number == 3)
+  expect_failure(function() rv:set(1, 3.5) end)
+  test.assert(candidate.number == 3)
+  rv:set(1, 45)
+  expect_failure(function() rv:set(2, 4) end)
+  expect_failure(function() rv:set(0, 4) end)
+  expect_failure(function() rv:set(-1, 4) end)
+  expect_failure(function() rv:set(rv.n_fields + 1, 4) end)
+  expect_failure(function() local _ = rv:get(-1) end)
+  test.assert(candidate.number == 45)
+  test.assert(candidate.fixed == 12)
+
+  local optional = field_index(rv.descriptor, "optional")
+  test.assert(rv:get(optional) == false)
+  rv:set(optional, nil)
+  test.assert(candidate.optional == nil)
+  rv:set(optional, true)
+  test.assert(candidate.optional == true)
+  rv:set(optional, 1)
+  test.assert(candidate.optional == true)
+  rv:set(optional, false)
+  test.assert(candidate.optional == false)
+end
+
+function test_record_container_and_nominal_accessors(_context: test.Context)
+  local candidate = access_record()
+  local rv = record_value(candidate)
+  local items = field_index(rv.descriptor, "items")
+  local frozen = field_index(rv.descriptor, "frozen")
+  test.assert(rv:get(items) == candidate.items as value)
+  test.assert(rv:get(frozen) == candidate.frozen as value)
+  local replacement: {integer} = {10, 20, 30}
+  rv:set(items, replacement)
+  test.assert(candidate.items == replacement)
+  local roundtrip = rv:get(items) as {integer}
+  roundtrip[2] = 70
+  test.assert(candidate.items[2] == 70)
+  expect_failure(function() rv:set(items, candidate.frozen) end)
+  expect_failure(function() rv:set(frozen, replacement) end)
+  expect_failure(function() rv:set(items, "not an Array") end)
+  test.assert(candidate.items == replacement)
+
+  local child = field_index(rv.descriptor, "child")
+  local point: SimpleRecord = {x = 6, y = 9}
+  rv:set(child, point)
+  test.assert(rv:get(child) == point as value)
+  test.assert(candidate.child == point)
+  expect_failure(function() rv:set(child, TestShape.empty()) end)
+  test.assert(candidate.child == point)
+  rv:set(child, nil)
+  test.assert(candidate.child == nil)
+
+  local choice = field_index(rv.descriptor, "choice")
+  local shape = TestShape.circle(31)
+  rv:set(choice, shape)
+  test.assert(rv:get(choice) == shape as value)
+  expect_failure(function() rv:set(choice, point) end)
+  test.assert(candidate.choice == shape)
+
+  local greeter = field_index(rv.descriptor, "greeter")
+  local impl: GreeterImpl = {prefix = "new"}
+  local iface: Greeter = impl
+  rv:set(greeter, iface)
+  test.assert(rv:get(greeter) == iface as value)
+  test.assert(candidate.greeter:greet() == "new world")
+  expect_failure(function() rv:set(greeter, point) end)
+
+  local callback = field_index(rv.descriptor, "callback")
+  local from_field = rv:get(callback) as (integer) -> integer
+  test.assert(from_field(4) == 5)
+  local double = function(n: integer): integer return n * 2 end
+  rv:set(callback, double)
+  test.assert(candidate.callback(4) == 8)
+  -- Dynamic function conversion stores the value and defers callability.
+  rv:set(callback, 5)
+  test.assert(rv:get(callback) == 5)
+  expect_failure(function() local _ = candidate.callback(4) end)
+  rv:set(callback, double)
+  test.assert(candidate.callback(4) == 8)
+end
+
+local function retained_record_view(): reflect.RecordValue
+  local candidate = access_record()
+  return record_value(candidate)
+end
+
+local function store_fresh_values(rv: reflect.RecordValue, child: integer,
+                                  items: integer, i: integer)
+  local point: SimpleRecord = {x = i, y = i + 1}
+  local numbers: {integer} = {i, i + 2}
+  rv:set(child, point)
+  rv:set(items, numbers)
+end
+
+function test_record_accessors_keep_owner_and_new_values_alive(_context: test.Context)
+  local was_generational = gc.generational()
+  defer do
+    if not was_generational then gc.incremental() end
+  end
+  local rv = retained_record_view()
+  gc.collect()
+  local child = field_index(rv.descriptor, "child")
+  local items = field_index(rv.descriptor, "items")
+  for i = 1, 32 do
+    -- The helper frame is gone before collection; only the old record keeps
+    -- either newly allocated payload alive.
+    store_fresh_values(rv, child, items, i)
+    gc.step(1)
+  end
+  gc.collect()
+  local point = rv:get(child) as SimpleRecord
+  test.assert(point.x == 32 and point.y == 33)
+  local restored = rv:get(items) as {integer}
+  test.assert(restored[1] == 32 and restored[2] == 34)
+end
+
+interface ArraySnapshot
+  values: {integer}
+  function zeta(n: integer): integer
+  function alpha(): integer
+end
+
+record SnapshotImpl
+  const values: {integer}
+end
+
+function SnapshotImpl:zeta(n: integer): integer return self.values[1] + n end
+function SnapshotImpl:alpha(): integer return #self.values end
+
+function test_interface_field_boxing_and_ordered_methods(_context: test.Context)
+  local values: {integer} = {3, 4}
+  local candidate: SnapshotImpl = {values = values}
+  local iface: ArraySnapshot = candidate
+  local iv = interface_value(iface)
+  test.assert(iv.val == iface as value)
+  test.assert(iv.wrapped == candidate as value)
+  test.assert(iv:get(1) == values as value)
+  local array = iv:get(1) as {integer}
+  array[1] = 30
+  test.assert(candidate.values[1] == 30)
+  test.assert(iv.descriptor.fields[1].is_const)
+  test.assert(#iv.descriptor.methods == 2)
+  test.assert(iv.descriptor.methods[1].name == "zeta")
+  test.assert(iv.descriptor.methods[2].name == "alpha")
+  test.assert(iv.descriptor.methods[1].param_names[1] == "n")
+  local added: value = iv.descriptor.methods[1].callable(iv.val, 7)
+  test.assert(added as integer == 37)
+  local count: value = iv.descriptor.methods[2].callable(iv.val)
+  test.assert(count as integer == 2)
+  expect_failure(function() local _ = iv:get(0) end)
+  expect_failure(function() local _ = iv:get(2) end)
+  gc.collect()
+  test.assert((iv:get(1) as {integer})[1] == 30)
+end
+
+record CallableRecord
+  total: integer
+end
+
+function CallableRecord:add(amount: integer): integer
+  self.total = self.total + amount
+  return self.total
+end
+
+function CallableRecord.zero(): CallableRecord return {total = 0} end
+function CallableRecord.alpha(n: integer): integer return n + 10 end
+
+local function variadic_echo(head: integer, ...: string): (integer, ...: string)
+  return head, ...
+end
+
+function test_callable_descriptors_and_invocation(_context: test.Context)
+  local desc = required_record("reflect.tests.CallableRecord")
+  test.assert(#desc.methods == 1)
+  test.assert(desc.methods[1].name == "add")
+  test.assert(desc.methods[1].param_names[1] == "amount")
+  test.assert(#desc.methods[1].param_descriptors == 1)
+  test.assert(#desc.methods[1].return_descriptors == 1)
+  test.assert(desc.methods[1].vararg_descriptor == nil)
+  test.assert(desc.methods[1].flexret_descriptor == nil)
+  assert_integer_type(desc.methods[1].param_descriptors[1])
+  assert_integer_type(desc.methods[1].return_descriptors[1])
+  test.assert(#desc.statics == 3)
+  test.assert(desc.statics[1].name == "alpha")
+  test.assert(desc.statics[2].name == "new")
+  test.assert(desc.statics[3].name == "zero")
+  local alpha: value = desc.statics[1].callable(8)
+  test.assert(alpha as integer == 18)
+  local made: value = desc.statics[3].callable()
+  local candidate = made as CallableRecord
+  local result: value = desc.methods[1].callable(candidate, 17)
+  test.assert(result as integer == 17 and candidate.total == 17)
+
+  local ft = function_type(variadic_echo)
+  test.assert(#ft.param_descriptors == 1)
+  test.assert(#ft.return_descriptors == 1)
+  assert_integer_type(ft.param_descriptors[1])
+  assert_integer_type(ft.return_descriptors[1])
+  case ft.vararg_descriptor as reflect.Type
+  when is_string then
+  else raise "expected string variadic parameter"
+  end
+  case ft.flexret_descriptor as reflect.Type
+  when is_string then
+  else raise "expected string flexible return"
+  end
+  case reflect.inspect(variadic_echo)
+  when is_titan_function: fn then
+    local head, first, second = fn.val(9, "a", "b")
+    test.assert(head as integer == 9)
+    test.assert(first as string == "a" and second as string == "b")
+  else raise "expected Titan function"
+  end
+end
+
+record GenericRecord<T>
+  item: T
+  items: {T}
+  by_name: {string: T}
+  callback: (T) -> T
+  optional: T?
+end
+
+function GenericRecord:echo<U>(item: U): U return item end
+function GenericRecord.identity<U>(item: U): U return item end
+
+union GenericUnion<T>
+  item: T
+  missing
+end
+
+local function generic_echo<T>(head: T, ...: T): (T, ...: T)
+  return head, ...
+end
+
+function test_unconstrained_generic_descriptors(_context: test.Context)
+  local rec: GenericRecord<integer> = {
+    item = 5, items = {6}, by_name = {["key"] = 7},
+    callback = plus_one, optional = nil
+  }
+  local rv = record_value(rec)
+  local desc = rv.descriptor
+  assert_value_type(field_type(desc, "item"))
+  assert_value_type(field_type(desc, "optional"))
+  case field_type(desc, "items")
+  when is_array: arr then assert_value_type(arr.elem_descriptor)
+  else raise "expected generic Array descriptor"
+  end
+  case field_type(desc, "by_name")
+  when is_map: map then
+    case map.key_descriptor
+    when is_string then
+    else raise "expected string Map key"
+    end
+    assert_value_type(map.value_descriptor)
+  else raise "expected generic Map descriptor"
+  end
+  case field_type(desc, "callback")
+  when is_function: fn then
+    assert_value_type(fn.param_descriptors[1])
+    assert_value_type(fn.return_descriptors[1])
+  else raise "expected generic function field"
+  end
+  test.assert(desc.methods[1].name == "echo")
+  assert_value_type(desc.methods[1].param_descriptors[1])
+  assert_value_type(desc.methods[1].return_descriptors[1])
+  test.assert(desc.statics[1].name == "identity")
+  assert_value_type(desc.statics[1].param_descriptors[1])
+  local answer: value = desc.methods[1].callable(rv.val, false)
+  test.assert(answer == false)
+  answer = desc.statics[1].callable("generic")
+  test.assert(answer == "generic")
+
+  -- Generic nominal applications share the owner descriptor at runtime.
+  local other: GenericRecord<string> = {
+    item = "text", items = {}, by_name = {}, optional = nil,
+    callback = function(item: string): string return item end
+  }
+  test.assert(record_value(other).descriptor == desc)
+  local un = GenericUnion<integer>.item(19)
+  case reflect.inspect(un)
+  when is_union: uv then
+    assert_value_type(uv.descriptor.variants[1].descriptor as reflect.Type)
+    test.assert(uv.payload as integer == 19)
+    local made: value = uv.descriptor.variants[1].callable(false)
+    case reflect.inspect(made)
+    when is_union: created then test.assert(created.payload == false)
+    else raise "expected reflected variant constructor result"
+    end
+  else raise "expected generic union"
+  end
+
+  local instantiated = generic_echo
+  local ft = function_type(instantiated)
+  assert_value_type(ft.param_descriptors[1])
+  assert_value_type(ft.return_descriptors[1])
+  assert_value_type(ft.vararg_descriptor as reflect.Type)
+  assert_value_type(ft.flexret_descriptor as reflect.Type)
+end
+
+interface GenericGetter<T>
+  function get(): T
+end
+
+record IntegerGetter
+  const item: integer
+end
+function IntegerGetter:get(): integer return self.item end
+
+record ConstrainedRecord<T: GenericGetter<integer>>
+  item: T
+end
+
+local function constrained_identity<T: GenericGetter<integer>>(item: T): T
+  return item
+end
+
+interface RecursiveConstraint<T: RecursiveConstraint<RecursiveMarker>>
+  function get(): T
+end
+record RecursiveMarker
+end
+function RecursiveMarker:get(): RecursiveMarker return self end
+
+function test_constrained_descriptors_keep_outer_nominal_identity(_context: test.Context)
+  local item: IntegerGetter = {item = 41}
+  local candidate: ConstrainedRecord<IntegerGetter> = {item = item}
+  local rv = record_value(candidate)
+  local carrier = field_type(rv.descriptor, "item")
+  assert_interface_type(carrier, "reflect.tests.GenericGetter")
+  case carrier:resolve()
+  when is_interface: iface then
+    test.assert(#iface.methods == 1)
+    assert_value_type(iface.methods[1].return_descriptors[1])
+  else raise "expected generic constraint owner"
+  end
+  local identity = constrained_identity
+  local ft = function_type(identity)
+  assert_interface_type(ft.param_descriptors[1], "reflect.tests.GenericGetter")
+  assert_interface_type(ft.return_descriptors[1], "reflect.tests.GenericGetter")
+
+  local recursive = required_interface("reflect.tests.RecursiveConstraint")
+  local result = recursive.methods[1].return_descriptors[1]
+  case result
+  when is_named: named then
+    test.assert(named.name == recursive.name)
+  else raise "recursive constraints must retain a lazy nominal link"
+  end
+  case result:resolve()
+  when is_interface: resolved then test.assert(resolved == recursive)
+  else raise "expected resolved recursive interface"
+  end
+end
+
+function test_number_inspection_preserves_lua_numeric_subtype(_context: test.Context)
+  local chunk = lua.load("return 4, 4.0, -0.0, 1.5")
+  local int, integral_float, negative_zero, fraction = chunk()
+  case reflect.inspect(int)
+  when is_integer: n then test.assert(n == 4)
+  else raise "Lua integer must remain integer"
+  end
+  case reflect.inspect(integral_float)
+  when is_float: n then test.assert(n == 4.0)
+  else raise "integral Lua float must remain float"
+  end
+  case reflect.inspect(negative_zero)
+  when is_float: n then test.assert(1.0 / n < 0.0)
+  else raise "negative zero must remain float"
+  end
+  case reflect.inspect(fraction)
+  when is_float: n then test.assert(n == 1.5)
+  else raise "fractional Lua float must remain float"
+  end
+end
+
+function test_const_arrays_preserve_identity_and_values(_context: test.Context)
+  local source: {integer} = {2, 4, 6}
+  local frozen = source as const {integer}
+  case reflect.inspect(frozen)
+  when is_const_array: arr then
+    test.assert(arr.val as value == frozen as value)
+    test.assert(#arr.val == 3)
+    test.assert(arr.val[2] as integer == 4)
+  else raise "expected const Array value"
+  end
+  case reflect.inspect(source)
+  when is_array: arr then test.assert(arr.val as value == source as value)
+  else raise "snapshot must preserve mutable source"
+  end
+end
+
+local function plain_lua_userdata(): value
+  local top = luac.lua_gettop(L)
+  defer luac.lua_settop(L, top)
+  if luac.lua_checkstack(L, 1) == 0 then raise "cannot reserve test stack" end
+  luac.lua_newuserdatauv(L, 1, 0)
+  return ffi.lua_totvalue(L, -1)
+end
+
+function test_lua_function_c_function_and_thread_variants(_context: test.Context)
+  local make_function = lua.load("return function(first, second, ...) return first, second, ... end",
+                                 "=reflection-fixture")
+  local candidate: value = make_function()
+  case reflect.inspect(candidate)
+  when is_lua_function: fn then
+    test.assert(fn.descriptor.source == "=reflection-fixture")
+    test.assert(fn.descriptor.short_source == "reflection-fixture")
+    test.assert(fn.descriptor.what == "Lua")
+    test.assert(fn.descriptor.line_defined == 1)
+    test.assert(fn.descriptor.last_line_defined == 1)
+    test.assert(fn.descriptor.n_params == 2)
+    test.assert(fn.descriptor.is_vararg)
+    local a, b, c = fn.val(3, false, "tail")
+    test.assert(a as integer == 3 and b == false and c == "tail")
+  else raise "expected Lua function"
+  end
+
+  local get_functions = lua.load("return math.abs, string.gmatch('ab', '.')")
+  local light, closure = get_functions()
+  case reflect.inspect(light)
+  when is_lua_c_function: fn then
+    test.assert(fn.entry ~= nil)
+    local callable = fn.val
+    test.assert(callable(-4) as integer == 4)
+  else raise "expected light Lua C function"
+  end
+  case reflect.inspect(closure)
+  when is_lua_c_function: fn then
+    test.assert(fn.entry ~= nil)
+    test.assert(fn.val() == "a")
+    test.assert(fn.val() == "b")
+  else raise "expected Lua C closure"
+  end
+
+  local create_thread = lua.load("return coroutine.create(function() end)")
+  local thread: value = create_thread()
+  case reflect.inspect(thread)
+  when is_lua_thread: inspected then
+    test.assert(inspected.val == thread)
+    test.assert(inspected.thread ~= nil)
+  else raise "expected Lua thread"
+  end
+end
+
+function test_userdata_and_raw_pointer_variants(_context: test.Context)
+  local candidate = plain_lua_userdata()
+  case reflect.inspect(candidate)
+  when is_lua_userdata: udata then test.assert(udata.val == candidate)
+  else raise "expected unbranded Lua userdata"
+  end
+  local storage = char.new_array(1)
+  storage[0] = 37 as char
+  local pointer: *void = storage as *char
+  case reflect.inspect(pointer)
+  when is_raw_pointer: raw then test.assert(raw == pointer)
+  else raise "expected raw object pointer"
+  end
+  test.assert(storage[0] as integer == 37)
+end
+
+local function without_typedef(descriptor: reflect.Type): reflect.Type
+  local result = descriptor
+  for _ = 1, 16 do
+    case result
+    when is_foreign_typedef: alias then result = alias.target_descriptor
+    else return result
+    end
+  end
+  raise "unexpectedly deep foreign typedef chain"
+end
+
+function test_owned_foreign_scalar_and_array_descriptors(_context: test.Context)
+  local owner: owned *double = double.new()
+  local owned_storage: *double = owner
+  owned_storage[0] = 2.5
+  case reflect.inspect(owner)
+  when is_owned_foreign_pointer: pointer then
+    test.assert(pointer.val == owner as value)
+    test.assert(pointer.payload ~= nil)
+    test.assert(pointer.size == double.sizeof)
+    case pointer.descriptor.pointee_descriptor
+    when is_foreign_float: scalar then test.assert(scalar.spelling == "double")
+    else raise "expected owned double descriptor"
+    end
+    gc.collect()
+    local storage = pointer.payload as *double
+    test.assert(storage[0] as float == 2.5)
+  else raise "expected owned foreign pointer"
+  end
+
+  local numbers: owned int[] = int.new_array(3)
+  numbers[1] = 42
+  case reflect.inspect(numbers)
+  when is_owned_foreign_array: arr then
+    test.assert(arr.val == numbers as value)
+    test.assert(arr.count == 3)
+    test.assert(arr.size == 3 * int.sizeof)
+    case arr.descriptor.elem_descriptor
+    when is_foreign_integer: scalar then
+      test.assert(scalar.spelling == "int")
+      test.assert(scalar.is_signed)
+      test.assert(scalar.rank > 0)
+      test.assert(scalar.bits == 8 * int.sizeof)
+    else raise "expected owned int Array descriptor"
+    end
+    gc.collect()
+    local storage = arr.payload as *int
+    test.assert(storage[1] as integer == 42)
+  else raise "expected owned foreign Array"
+  end
+
+  local empty: owned int[] = int.new_array(0)
+  case reflect.inspect(empty)
+  when is_owned_foreign_array: arr then
+    test.assert(arr.count == 0)
+    test.assert(arr.size == 0)
+  else raise "zero-length owned Array must keep Array identity"
+  end
+end
+
+function test_owned_struct_describes_public_c_fields(_context: test.Context)
+  local owner: owned *cstdlib.div_t = cstdlib.div_t.new()
+  owner.quot = 7
+  owner.rem = 2
+  case reflect.inspect(owner)
+  when is_owned_foreign_pointer: pointer then
+    test.assert(pointer.size == cstdlib.div_t.sizeof)
+    case without_typedef(pointer.descriptor.pointee_descriptor)
+    when is_foreign_struct: aggregate then
+      test.assert(aggregate.is_complete)
+      test.assert(not aggregate.has_fam)
+      test.assert(#aggregate.fields == 2)
+      test.assert(aggregate.fields[1].name == "quot")
+      test.assert(aggregate.fields[2].name == "rem")
+      test.assert(not aggregate.fields[1].is_flexible_array)
+      test.assert(aggregate.fields[1].bitfield == false)
+      case without_typedef(aggregate.fields[1].descriptor)
+      when is_foreign_integer: scalar then
+        test.assert(scalar.is_signed)
+        test.assert(scalar.bits == 8 * int.sizeof)
+      else raise "expected div_t integer field"
+      end
+    else raise "expected div_t struct descriptor"
+    end
+  else raise "expected owned div_t"
+  end
+  test.assert(owner.quot as integer == 7 and owner.rem as integer == 2)
+end
+
+local record NestedDescriptors
+  mutable: {integer}
+  immutable: const {string}
+  either: const? {boolean}
+  optional: string?
+  callback: ({integer}, ...: string) -> (boolean, ...: float)
+end
+
+function test_nested_container_qualifiers_and_optional_descriptors(_context: test.Context)
+  local desc = required_record("reflect.tests.NestedDescriptors")
+  case field_type(desc, "mutable")
+  when is_array: arr then
+    assert_integer_type(arr.elem_descriptor)
+    case arr.is_const
+    when is_mutable then
+    else raise "expected mutable Array descriptor"
+    end
+  else raise "expected Array descriptor"
+  end
+  case field_type(desc, "immutable")
+  when is_array: arr then
+    case arr.is_const
+    when is_const then
+    else raise "expected const Array descriptor"
+    end
+  else raise "expected const Array descriptor"
+  end
+  case field_type(desc, "either")
+  when is_array: arr then
+    case arr.is_const
+    when is_maybe_const then
+    else raise "expected maybe-const Array descriptor"
+    end
+  else raise "expected maybe-const Array descriptor"
+  end
+  case field_type(desc, "optional")
+  when is_option: base then
+    case base
+    when is_string then
+    else raise "expected string option payload"
+    end
+  else raise "expected optional descriptor"
+  end
+  case field_type(desc, "callback")
+  when is_function: fn then
+    case fn.param_descriptors[1]
+    when is_array: arr then assert_integer_type(arr.elem_descriptor)
+    else raise "expected nested Array argument"
+    end
+    case fn.return_descriptors[1]
+    when is_boolean then
+    else raise "expected boolean fixed result"
+    end
+    case fn.vararg_descriptor as reflect.Type
+    when is_string then
+    else raise "expected string varargs"
+    end
+    case fn.flexret_descriptor as reflect.Type
+    when is_float then
+    else raise "expected float flexible results"
+    end
+  else raise "expected nested callable descriptor"
+  end
+end
+
+union ArrayPayloads
+  local hidden: {integer}
+  mutable: {integer}
+  optional: ({integer})?
+  frozen: const {integer}
+  empty
+end
+
+function ArrayPayloads.private_array(values: {integer}): ArrayPayloads
+  return ArrayPayloads.hidden(values)
+end
+
+local function union_value(candidate: value): reflect.UnionValue
+  case reflect.inspect(candidate)
+  when is_union: un then return un
+  else raise "expected a reflected union"
+  end
+end
+
+function test_union_payload_readers_box_arrays_and_preserve_sparse_tags(_context: test.Context)
+  local values: {integer} = {21, 34}
+  local mutable = union_value(ArrayPayloads.mutable(values))
+  test.assert(mutable.tag == 1)
+  test.assert(mutable.payload == values as value)
+  local roundtrip = mutable.payload as {integer}
+  roundtrip[1] = 55
+  test.assert(values[1] == 55)
+  test.assert(#mutable.descriptor.variants == 4)
+  test.assert(mutable.descriptor.variants[1].name == "mutable")
+  test.assert(mutable.descriptor.variants[1].tag == 1)
+  test.assert(mutable.descriptor.variants[4].name == "empty")
+  test.assert(mutable.descriptor.variants[4].tag == 4)
+
+  local present = union_value(ArrayPayloads.optional(values))
+  test.assert(present.payload == values as value)
+  local absent = union_value(ArrayPayloads.optional(nil))
+  test.assert(absent.payload == nil and absent.tag == 2)
+  local snapshot = values as const {integer}
+  local frozen = union_value(ArrayPayloads.frozen(snapshot))
+  test.assert(frozen.payload == snapshot as value)
+  case reflect.inspect(frozen.payload)
+  when is_const_array: arr then test.assert(arr.val[2] as integer == 34)
+  else raise "expected boxed const Array payload"
+  end
+
+  -- Value inspection still reports a private active payload, while the public
+  -- declaration projection retains only visible variants and their real tags.
+  local hidden = union_value(ArrayPayloads.private_array(values))
+  test.assert(hidden.tag == 0)
+  test.assert(hidden.payload == values as value)
+  test.assert(hidden.descriptor == mutable.descriptor)
+  local generic = union_value(GenericUnion<{integer}>.item(values))
+  test.assert(generic.payload == values as value)
+  gc.collect()
+  test.assert((hidden.payload as {integer})[1] == 55)
+  test.assert((generic.payload as {integer})[2] == 34)
+end
+
+record OptionalArrayField
+  values: ({integer})?
+end
+
+interface QualifiedSnapshot
+  frozen: const {integer}
+  optional: ({integer})?
+end
+
+record QualifiedSnapshotImpl
+  const frozen: const {integer}
+  const optional: ({integer})?
+end
+
+function test_optional_and_const_array_field_readers(_context: test.Context)
+  local values: {integer} = {8, 13}
+  local candidate: OptionalArrayField = {values = nil}
+  local rv = record_value(candidate)
+  test.assert(rv:get(1) == nil)
+  rv:set(1, values)
+  test.assert(rv:get(1) == values as value)
+  test.assert(candidate.values == values)
+  rv:set(1, nil)
+  test.assert(rv:get(1) == nil)
+
+  local frozen = values as const {integer}
+  local source: QualifiedSnapshotImpl = {frozen = frozen, optional = values}
+  local iface: QualifiedSnapshot = source
+  local iv = interface_value(iface)
+  test.assert(iv:get(1) == frozen as value)
+  test.assert(iv:get(2) == values as value)
+  local nil_source: QualifiedSnapshotImpl = {frozen = frozen, optional = nil}
+  local nil_iface: QualifiedSnapshot = nil_source
+  test.assert(interface_value(nil_iface):get(2) == nil)
+end
+
+record ForeignFields
+  count: int
+  ratio: double
+  pointer: *int
+  storage: owned int[]
+end
+
+function test_foreign_field_accessors_check_and_box_values(_context: test.Context)
+  local storage: owned int[] = int.new_array(2)
+  storage[0] = 19
+  local pointer: *int = storage
+  local candidate: ForeignFields = {
+    count = 2, ratio = 1.25, pointer = pointer, storage = storage
+  }
+  local rv = record_value(candidate)
+  test.assert(rv:get(1) as integer == 2)
+  test.assert(rv:get(2) as float == 1.25)
+  test.assert(rv:get(3) as *int == pointer)
+  test.assert(rv:get(4) == storage as value)
+  rv:set(1, 7)
+  rv:set(2, 2.5)
+  test.assert(candidate.count as integer == 7)
+  test.assert(candidate.ratio as float == 2.5)
+  expect_failure(function() rv:set(1, 1e100) end)
+  expect_failure(function() rv:set(2, "invalid") end)
+  test.assert(candidate.count as integer == 7)
+  test.assert(candidate.ratio as float == 2.5)
+  -- Raw pointer assertions are written-cast-only, so dynamic field writes
+  -- reject them even though a getter can box the stored pointer.
+  expect_failure(function() rv:set(3, nil) end)
+  expect_failure(function() rv:set(3, pointer) end)
+  test.assert(candidate.pointer[0] as integer == 19)
+  local replacement: owned int[] = int.new_array(1)
+  replacement[0] = 23
+  rv:set(4, replacement)
+  test.assert(candidate.storage == replacement)
+  gc.collect()
+  test.assert(candidate.storage[0] as integer == 23)
+
+  case field_type(rv.descriptor, "pointer")
+  when is_foreign_pointer: ptr then
+    test.assert(#ptr.quals == 0)
+    case ptr.pointee_descriptor
+    when is_foreign_integer: scalar then test.assert(scalar.spelling == "int")
+    else raise "expected foreign integer pointee"
+    end
+  else raise "expected foreign pointer field descriptor"
+  end
+end
+
+record PrivateOnly
+  local hidden: integer
+end
+
+function test_record_without_public_fields(_context: test.Context)
+  local candidate: PrivateOnly = {hidden = 91}
+  local rv = record_value(candidate)
+  test.assert(rv.n_fields == 0)
+  test.assert(#rv.descriptor.fields == 0)
+  expect_failure(function() local _ = rv:get(1) end)
+  expect_failure(function() rv:set(1, 0) end)
+  test.assert(candidate.hidden == 91)
+end
+
+local function owned_pointee(candidate: value): reflect.Type
+  case reflect.inspect(candidate)
+  when is_owned_foreign_pointer: owner then return owner.descriptor.pointee_descriptor
+  else raise "expected owned foreign pointer descriptor"
+  end
+end
+
+local function foreign_struct(descriptor: reflect.Type): reflect.ForeignStructType
+  case without_typedef(descriptor)
+  when is_foreign_struct: aggregate then return aggregate
+  else raise "expected foreign struct descriptor"
+  end
+end
+
+local function foreign_pointer(descriptor: reflect.Type): reflect.ForeignPointerType
+  case without_typedef(descriptor)
+  when is_foreign_pointer: pointer then return pointer
+  else raise "expected foreign pointer descriptor"
+  end
+end
+
+function test_recursive_foreign_descriptors_resolve_with_retained_context(_context: test.Context)
+  local self_owner: owned *recursive_c.titan_reflect_self = recursive_c.titan_reflect_self.new()
+  local self_type = foreign_struct(owned_pointee(self_owner))
+  test.assert(#self_type.fields == 2)
+  test.assert(self_type.fields[1].name == "marker")
+  test.assert(self_type.fields[2].name == "next")
+  local back_reference = foreign_pointer(self_type.fields[2].descriptor).pointee_descriptor
+  case back_reference
+  when is_foreign_named: named then
+    test.assert(named.name ~= "")
+  else raise "recursive C pointer should retain a lazy foreign reference"
+  end
+
+  -- Resolve only after another owner has created an independent hydration
+  -- context. The original declaration map must remain available to the link.
+  local unrelated: owned *cstdlib.div_t = cstdlib.div_t.new()
+  test.assert(#foreign_struct(owned_pointee(unrelated)).fields == 2)
+  gc.collect()
+  local resolved_self = foreign_struct(back_reference:resolve())
+  test.assert(resolved_self == self_type)
+  test.assert(resolved_self.fields[1].name == "marker")
+  case back_reference
+  when is_foreign_named: named then
+    test.assert(foreign_struct(named:resolve()) == self_type)
+  else raise "expected a foreign named descriptor"
+  end
+
+  local left_owner: owned *recursive_c.titan_reflect_left = recursive_c.titan_reflect_left.new()
+  local left_type = foreign_struct(owned_pointee(left_owner))
+  test.assert(#left_type.fields == 1 and left_type.fields[1].name == "right")
+  local right_type = foreign_struct(foreign_pointer(left_type.fields[1].descriptor).pointee_descriptor)
+  test.assert(#right_type.fields == 1 and right_type.fields[1].name == "left")
+  local left_reference = foreign_pointer(right_type.fields[1].descriptor).pointee_descriptor
+  case left_reference
+  when is_foreign_named then
+  else raise "mutually recursive C structs should close with a named link"
+  end
+  local resolved_left = foreign_struct(left_reference:resolve())
+  test.assert(resolved_left == left_type)
+  test.assert(foreign_struct(back_reference:resolve()) == self_type)
 end

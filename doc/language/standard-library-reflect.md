@@ -1,121 +1,115 @@
 # Reflection standard library
 
-The `titan.reflect` module provides runtime type and value reflection for Titan programs:
+`titan.reflect` inspects runtime values, describes registered nominal types,
+and reads or writes public fields dynamically:
 
 ```titan
 local reflect = import "reflect"
+
+record Counter
+  total: integer
+end
+
+function increment(counter: Counter, amount: integer): integer
+  local inspected = reflect.inspect(counter)
+  case inspected
+  when is_record: record_value then
+    local total: integer = record_value:get(1)
+    record_value:set(1, total + amount)
+    return counter.total
+  else
+    raise "expected a record"
+  end
+end
 ```
 
-Lua programs load the module using `require "titan.reflect"`.
-
-Reflection enables dynamic inspection of values, queries into nominal types
-(records, unions, and interfaces), runtime type resolution, and field-level
-get/set operations on records and interfaces with full garbage-collection safety.
+Lua programs load the same module with `require "titan.reflect"`. Reflection
+describes values and types already available in the current Lua state; looking
+up a name does not import its module.
 
 ## Inspecting values
 
-The primary entry point for value inspection is `inspect`:
-
-```titan
+```text
 function inspect(v: value): Value
 ```
 
-`inspect` examines the runtime tag, metatable, and user value slots of any Titan
-or Lua value, returning a `Value` tagged union.
+`inspect` returns a tagged union with 19 variants. It preserves the runtime
+distinction between integers and floats: `3` is an `is_integer`, while `3.0`
+is an `is_float`.
 
-### The `Value` union
+| Variant | Payload |
+| --- | --- |
+| `is_nil` | none |
+| `is_integer` | `integer` |
+| `is_float` | `float` |
+| `is_boolean` | `boolean` |
+| `is_string` | `string` |
+| `is_array` | `ArrayValue` |
+| `is_const_array` | `ConstArrayValue` |
+| `is_map` | `MapValue` |
+| `is_record` | `RecordValue` |
+| `is_union` | `UnionValue` |
+| `is_interface` | `InterfaceValue` |
+| `is_titan_function` | `TitanFunctionValue` |
+| `is_lua_function` | `LuaFunctionValue` |
+| `is_lua_c_function` | `LuaCFunctionValue` |
+| `is_owned_foreign_pointer` | `OwnedForeignPointerValue` |
+| `is_owned_foreign_array` | `OwnedForeignArrayValue` |
+| `is_lua_userdata` | `LuaUserdataValue` |
+| `is_lua_thread` | `LuaThreadValue` |
+| `is_raw_pointer` | `*void` |
 
-```titan
-union Value
-  is_nil
-  is_integer: integer
-  is_float: float
-  is_boolean: boolean
-  is_string: string
-  is_array: ArrayValue
-  is_const_array: ConstArrayValue
-  is_map: MapValue
-  is_record: RecordValue
-  is_union: UnionValue
-  is_interface: InterfaceValue
-  is_titan_function: TitanFunctionValue
-  is_lua_function: LuaFunctionValue
-  is_lua_c_function: LuaCFunctionValue
-  is_owned_foreign_pointer: OwnedForeignPointerValue
-  is_owned_foreign_array: OwnedForeignArrayValue
-  is_lua_userdata: LuaUserdataValue
-  is_lua_thread: LuaThreadValue
-  is_raw_pointer: *void
-end
-```
+Use `case` to select the variant. `Value` describes the value's representation;
+the separate `Type` union describes its schema where one is available.
 
-Values are unpacked using Titan's `case` statement:
+### Containers and opaque values
 
-```titan
-local v = reflect.inspect(obj)
-case v
-when is_integer: n then
-  print("Integer: " .. str.tostring(n))
-when is_record: rv then
-  print("Record: " .. rv.descriptor.name)
-when is_union: uv then
-  print("Union: " .. uv.descriptor.name .. " tag " .. str.tostring(uv.tag))
-else
-  print("Other value")
-end
-```
+`ArrayValue.val`, `ConstArrayValue.val`, and `MapValue.val` expose the original
+container as `{value}`, `const {value}`, and `{value: value}`, respectively.
+Inspection does not copy the container or recover erased element type
+arguments. A Lua table is classified as a Map, including one with a metatable.
 
-### Container values
+`LuaUserdataValue.val` retains an unrecognized full userdata object.
+`LuaThreadValue.val` retains a Lua thread, and `LuaThreadValue.thread` exposes
+its `*lua_State` address. An ordinary C object or function pointer crosses
+through `value` as lightuserdata and produces `is_raw_pointer`; its address
+carries no pointee-type, C-signature, or ownership information.
 
-Arrays and maps wrap their underlying containers:
+### Records
 
-```titan
-record ArrayValue
-  const val: { value }
-end
+The public fields and operations of `RecordValue` are:
 
-record ConstArrayValue
-  const val: const { value }
-end
-
-record MapValue
-  const val: { value: value }
-end
-```
-
-### Record reflection
-
-A `RecordValue` provides access to a record's runtime fields and public schema:
-
-```titan
-record RecordValue
-  const n_fields: integer
-  const val: value
-  const descriptor: RecordType
-end
+```text
+const n_fields: integer
+const val: value
+const descriptor: RecordType
 
 function RecordValue:get(i: integer): value
 function RecordValue:set(i: integer, v: value)
 ```
 
-- `n_fields`: total number of fields in the record.
-- `descriptor`: static type descriptor (`RecordType`), including field names,
-  types, and modifiers.
-- `rv:get(i)`: reads the 1-based field at index `i` (matching `descriptor.fields[i]`).
-  Raises a runtime error if `i` is out of bounds (`i < 1` or `i > n_fields`).
-- `rv:set(i, v)`: writes value `v` to field `i`. Raises a runtime error if:
-  - `i` is out of bounds;
-  - field `i` is declared `const`;
-  - the type of `v` is incompatible with the field's declared type.
-  Writing a collectable object through `rv:set` triggers Lua's GC write barrier
-  (`luaC_barrierback`), ensuring the referenced object remains rooted and safe
-  from premature garbage collection.
+`val` retains the original record. `n_fields` is the number of **public**
+fields, equal to `#descriptor.fields`. `get(i)` and `set(i, v)` select the
+1-based entry `descriptor.fields[i]`; local fields are absent. Their presence
+can leave gaps in the separate, 0-based `FieldType.index`, so do not pass that
+stored index to `get` or `set`.
 
-### Union reflection
+Both operations reject indices outside `1..n_fields`. `get` returns the field
+in its normal boxed representation. `set` rejects const fields and applies the
+same target-directed conversion as a Lua write to the declared field. For
+example, an integral float can be written to an integer field, but a
+fractional float cannot. Conversion failure leaves the field unchanged.
+Options accept nil according to their declared type; nominal fields retain
+their ordinary record, union, or Interface checks. See
+[type conversions](types.md) for the complete boundary rules.
 
-A `UnionValue` exposes the active variant tag, optional payload, and descriptor:
+Writes update the original record. The implementation keeps the receiver and
+new collectable value reachable and applies the required garbage-collector
+write barrier. Callers do not need a separate GC operation around field access.
 
-```titan
+### Unions
+
+```text
 record UnionValue
   const tag: integer
   const payload: value
@@ -124,91 +118,140 @@ record UnionValue
 end
 ```
 
-- `tag`: the 0-based numeric variant tag of the active arm.
-- `payload`: the payload value of the variant, or `nil` if the active variant
-  carries no payload.
-- `descriptor`: the `UnionType` descriptor containing all declared variants.
-  The matching variant can be indexed as `descriptor.variants[tag + 1]`.
+`tag` is the active variant's 0-based runtime tag. `payload` is the original
+payload in its normal boxed representation, or nil for an empty variant.
+A payload-bearing variant whose payload permits nil can also contain nil;
+use its variant descriptor to distinguish those cases.
 
-### Interface reflection
+`descriptor.variants` contains public variants in declaration order. Their
+`VariantType.tag` values retain the original tags, including gaps left by
+private variants. Find an entry by comparing its `tag` with `UnionValue.tag`;
+the tag is not an index into the descriptor Array. A private active variant
+has no public variant descriptor, although inspection still exposes its
+runtime tag and payload.
 
-An `InterfaceValue` provides access to an interface view, its wrapped concrete
-instance, and its captured const fields:
+### Interfaces
 
-```titan
-record InterfaceValue
-  const n_fields: integer
-  const val: value
-  const wrapped: value
-  const descriptor: InterfaceType
-end
+```text
+const n_fields: integer
+const val: value
+const wrapped: value
+const descriptor: InterfaceType
 
 function InterfaceValue:get(i: integer): value
 ```
 
-- `n_fields`: number of fields defined on the interface.
-- `wrapped`: the underlying concrete record or union instance.
-- `descriptor`: the `InterfaceType` descriptor listing fields and methods.
-- `iv:get(i)`: reads the 1-based captured const field at index `i`.
-  Raises a runtime error if `i < 1` or `i > n_fields`.
+`val` is the Interface wrapper, and `wrapped` is its underlying concrete
+record or union. `get(i)` reads the captured const field corresponding to
+`descriptor.fields[i]`, using 1-based indices and the same bounds rule as
+record access. Interface fields have no reflection setter.
 
-### Function reflection
+Use `val` as the receiver when invoking a method from this Interface's
+descriptor. Use `wrapped` when inspecting the concrete value separately.
 
-Functions are partitioned into three variants:
+### Functions
 
-```titan
-record TitanFunctionValue
-  const val: (...: value) -> (...: value)
-  const native_entry: *void
-  const lua_entry: *void
-  const descriptor: FunctionType
+All three function-value records retain a callable `val` with type
+`(...: value) -> (...: value)`. Calling it follows ordinary dynamic callable
+argument and result adjustment.
+
+| Record | Additional public fields |
+| --- | --- |
+| `TitanFunctionValue` | `native_entry: *void`, `lua_entry: foreign (*lua_State) -> int`, `descriptor: FunctionType` |
+| `LuaFunctionValue` | `descriptor: LuaFunctionType` |
+| `LuaCFunctionValue` | `entry: foreign (*lua_State) -> int` |
+
+`LuaFunctionType` contains `source`, `short_source`, `line_defined`,
+`last_line_defined`, `what`, `is_vararg`, and `n_params`, as reported by Lua's
+debug information. Lua C closures and light C functions both produce
+`is_lua_c_function`.
+
+Use `val` for ordinary calls. The foreign entry fields are typed Lua C API
+entry points, and `native_entry` is an address without a callable Titan
+signature. Using those low-level entries requires the corresponding
+[FFI and Lua C API contracts](ffi.md).
+
+### Owned C storage
+
+```text
+record OwnedForeignPointerValue
+  const val: value
+  const payload: *void
+  const size: integer
+  const descriptor: OwnedForeignPointerType
 end
 
-record LuaFunctionValue
-  const val: (...: value) -> (...: value)
-  const descriptor: LuaFunctionType
-end
-
-record LuaCFunctionValue
-  const val: (...: value) -> (...: value)
-  const entry: *void
+record OwnedForeignArrayValue
+  const val: value
+  const payload: *void
+  const size: integer
+  const count: integer
+  const descriptor: OwnedForeignArrayType
 end
 ```
 
-`TitanFunctionValue.lua_entry` exposes the function's C entry point callable from
-the Lua C API.
+`size` reports the payload storage size in bytes; an owned Array also reports
+its element `count`. `val` retains the owner. The raw `payload` pointer borrows
+that owner's storage and does not keep it alive by itself. Reflection does not
+add a destructor or extend the lifetime of borrowed external C pointers.
 
-## Nominal type registry
+## Nominal lookup and resolution
 
-Titan nominal types (records, unions, interfaces) registered across compiled modules
-can be looked up by their fully-qualified names:
-
-```titan
+```text
 function find_nominal(name: string): NominalType?
-function record_descriptor(name: string): RecordType?
-function union_descriptor(name: string): UnionType?
-function interface_descriptor(name: string): InterfaceType?
-```
 
-`find_nominal` returns a `NominalType` union:
-
-```titan
 union NominalType
   is_record: RecordType
   is_union: UnionType
   is_interface: InterfaceType
 end
+
+record NamedType
+  const name: string
+end
+
+function NamedType:resolve(): Type
+function Type:resolve(): Type
 ```
 
-If the requested type is not registered, each function returns `nil`.
+`find_nominal` accepts a fully qualified name, such as
+`"titan.reflect.FieldType"`, and returns nil when no nominal type with that
+name is registered. Select the record, union, or Interface descriptor using
+`case`:
+
+```titan
+local reflect = import "reflect"
+
+function public_field_count(name: string): integer?
+  local found: reflect.NominalType? = reflect.find_nominal(name)
+  if found == nil then return nil end
+  case found
+  when is_record: descriptor then
+    return #descriptor.fields
+  when is_interface: descriptor then
+    return #descriptor.fields
+  else
+    return nil
+  end
+end
+```
+
+A nominal reference inside another descriptor is `Type.is_named`, carrying
+its fully qualified name. `NamedType:resolve()` returns the corresponding
+`Type.is_record`, `Type.is_union`, or `Type.is_interface`; an unknown name
+resolves to `Type.is_value()`.
+
+`Type:resolve()` performs that lookup when its receiver is `is_named`. An
+`is_foreign_named` receiver instead resolves a retained C declaration, as
+described below; other receivers are returned unchanged. This operation does
+not recursively expand Array elements, field schemas, or Option contents.
+Repeated nominal lookups reuse cached descriptors.
 
 ## Type descriptors
 
-Type descriptors model Titan's static type system at runtime.
+`Type` has the following 26 variants:
 
-### The `Type` union
-
-```titan
+```text
 union Type
   is_nil
   is_boolean
@@ -226,8 +269,9 @@ union Type
   is_function: FunctionType
   is_foreign_function: ForeignFunctionType
   is_owned_foreign_pointer: OwnedForeignPointerType
-  is_owned_foreign_array: OwnedForeignArrayArray
+  is_owned_foreign_array: OwnedForeignArrayType
   is_foreign_void
+  is_foreign_named: ForeignNamedType
   is_foreign_integer: ForeignIntegerType
   is_foreign_float: ForeignFloatType
   is_foreign_pointer: ForeignPointerType
@@ -238,51 +282,45 @@ union Type
 end
 ```
 
-### Resolving named types
+### Containers and callable signatures
 
-When a type descriptor references a nominal type by name, it appears as an
-`is_named: NamedType` variant. A `NamedType` can be resolved into its underlying
-record, union, or interface type descriptor:
+`ArrayType.elem_descriptor` describes the element and `ArrayType.is_const`
+selects `ArrayTypeConstness.is_mutable`, `is_const`, or `is_maybe_const`.
+`MapType` has `key_descriptor` and `value_descriptor`. An `is_option`
+directly carries the descriptor of its nonnil base.
 
-```titan
-record NamedType
-  const name: string
-end
+`FunctionType` contains const Arrays `param_descriptors` and
+`return_descriptors`, plus optional `vararg_descriptor` and
+`flexret_descriptor`. Nil tails mean that the signature has no corresponding
+variadic input or flexible output. An empty result Array with no flexible
+tail means zero results, not one nil result.
 
-function NamedType:resolve(): Type
-```
+`ForeignFunctionType` instead contains `param_descriptors`, `is_vararg`, and
+one `return_descriptor`, which may be `is_foreign_void`.
 
-`resolve()` looks up the nominal registry and returns the matching `is_record`,
-`is_union`, or `is_interface` type descriptor. The lookup result is cached internally
-for subsequent calls. If the nominal type is unknown, `resolve()` returns `Type.is_value()`.
+### Public nominal members
 
-### Descriptors for records, unions, and interfaces
-
-```titan
+```text
 record RecordType
   const name: string
-  const fields: const { FieldType }
-  const statics: const { StaticFunctionType }
-  const methods: const { MethodType }
+  const fields: const {FieldType}
+  const statics: const {StaticFunctionType}
+  const methods: const {MethodType}
 end
 
 record UnionType
   const name: string
-  const variants: const { VariantType }
-  const statics: const { StaticFunctionType }
-  const methods: const { MethodType }
+  const variants: const {VariantType}
+  const statics: const {StaticFunctionType}
+  const methods: const {MethodType}
 end
 
 record InterfaceType
   const name: string
-  const fields: const { FieldType }
-  const methods: const { MethodType }
+  const fields: const {FieldType}
+  const methods: const {MethodType}
 end
-```
 
-Field and variant details:
-
-```titan
 record FieldType
   const name: string
   const index: integer
@@ -297,3 +335,73 @@ record VariantType
   const callable: (value) -> value
 end
 ```
+
+These are the public fields of the descriptor records. Local record fields,
+local union variants, and local methods or statics are omitted. Public fields
+and variants retain declaration order; record and union method/static Arrays
+are sorted by name. Interface methods retain their declaration order.
+
+`MethodType` and `StaticFunctionType` contain `name`, `param_names`,
+`param_descriptors`, `vararg_descriptor`, `return_descriptors`,
+`flexret_descriptor`, and `callable`. Their fixed parameter metadata describes
+the declared arguments; a method's receiver is supplied separately:
+
+```text
+MethodType.callable: (value, ...: value) -> (...: value)
+StaticFunctionType.callable: (...: value) -> (...: value)
+```
+
+Pass the corresponding inspected `val` as the first argument of a method
+callable. A static callable takes only its ordinary arguments. A variant
+callable constructs that variant; its absent `descriptor` means it has no
+payload, so the callable may be invoked without a payload argument. Calls
+retain the ordinary checks and argument/result adjustment of the underlying
+functions.
+
+### Erased generics
+
+Reflection reports the shared runtime schema of a generic declaration. It does
+not recover a particular value's source type arguments: `Box<integer>` and
+`Box<string>` share the nominal name `module.Box`.
+
+An unconstrained type parameter appears as `Type.is_value()`. A parameter
+constrained by an Interface appears as `Type.is_named` for that outer
+Interface's fully qualified name. Call `:resolve()` explicitly to obtain its
+`is_interface` descriptor. The constraint's generic arguments are erased;
+hydration does not eagerly expand the Interface descriptor.
+
+Surrounding Array, Map, and callable structure remains visible: for an
+unconstrained `T`, `{T}` has an Array descriptor whose element is `is_value`.
+An Option retains its descriptor when its erased base needs a separate nil
+arm. An unconstrained `T?` instead becomes `is_value`, which already includes
+nil; nested Options collapse to one Option. Generic callable descriptors
+expose the same erased parameter and result shapes used at runtime.
+
+### C type details
+
+Owned descriptors expose `pointee_descriptor` or `elem_descriptor`. C pointer
+descriptors expose `pointee_descriptor` and const qualifier names; C Array
+descriptors expose `elem_descriptor`, `len`, and qualifier names.
+
+`ForeignIntegerType` reports `spelling`, `is_signed`, `rank`, and `bits`;
+`ForeignFloatType` reports `spelling`. These are target-dependent C types,
+distinct from Titan's `integer` and `float`.
+
+C struct and union descriptors report their C names, typedef spelling,
+`fields`, and completeness; structs additionally report `has_fam`. Each
+`ForeignFieldType` supplies `name`, `descriptor`, `bitfield`, and
+`is_flexible_array`. `ForeignTypedefType` supplies `name`,
+`target_descriptor`, and qualifiers. These descriptors do not make private
+header-dependent C types exportable or dynamically validate an arbitrary
+pointer's pointee.
+
+Recursive C declarations use `Type.is_foreign_named` at references that would
+otherwise expand a declaration again. Its `ForeignNamedType` payload exposes
+`const name: string`, the compiler's qualified C declaration key.
+`ForeignNamedType:resolve(): Type`, or `Type:resolve()` on that variant,
+returns the corresponding retained struct, union, or typedef descriptor.
+Resolution follows one named reference; it does not traverse pointer or
+typedef contents. The reference retains its declaration context across later
+inspections and garbage collections. An unresolved key raises
+`unknown foreign type <name>`, rather than resolving to `is_value` as an
+unknown Titan nominal name does.

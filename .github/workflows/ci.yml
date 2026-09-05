@@ -149,7 +149,7 @@ jobs:
             clean_titan_environment \
               "$PREFIX/bin/luarocks" remove titan --force
           fi
-          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test; do
+          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test reflect; do
             rm -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           rm -f "$PREFIX/share/titan/0.6/src/titan/test.titan"
@@ -824,7 +824,7 @@ jobs:
           test -f "$TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT/manifest.txt"
           test -f "$snapshot_provider" && test ! -L "$snapshot_provider"
           cmp "$snapshot_provider" "$provider"
-          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test; do
+          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test reflect; do
             test -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           test -f "$PREFIX/share/titan/0.6/src/titan/test.titan" &&
@@ -886,6 +886,11 @@ jobs:
           bash spec/support/ci_sanitizer_capture.sh ssl-http \
             make titan-stdlib-test-run \
               TITAN_FILTER='test_ssl_http_fresh_process_sanitizer_composition$'
+
+      - name: Run native reflection sanitizer gate
+        run: |
+          bash spec/support/ci_sanitizer_capture.sh reflect-tests \
+            make titan-stdlib-test-run TITAN_FILTER='^reflect%.tests%.'
 
       - name: Run PEG/regex native sanitizer gate
         env:

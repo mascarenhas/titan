@@ -25,6 +25,56 @@ end
 describe("generic erased core", function()
     after_each(clean_generated)
 
+    it("publishes declared generic nominal metadata beside erased accessors", function()
+        local _, tree = h.with_extra_cflags({ "-DTITAN_COMPILER_TESTS" }, function()
+            return h.compile_and_read_c([[
+                record Box<T>
+                    local hidden: T
+                    item: T
+                    optional: T?
+                end
+                union Choice<T>
+                    local hidden: T
+                    item: T
+                end
+                interface Reader<T>
+                    function get(): T
+                end
+                record Holder<T: Reader<integer>>
+                    item: T
+                end
+            ]])
+        end)
+        types.assert_erased(tree._type)
+        local ok, err = h.call("test", [[
+            local registry = debug.getregistry()
+            local types = require "titan-compiler.types"
+            local function descriptor(kind, name)
+                local mt = registry["Titan " .. kind .. " test." .. name .. " metatable"]
+                return assert(load("return " .. mt[registry.TITAN_MT_TYPE],
+                    "nominal descriptor", "t", types))(), mt
+            end
+            local box, mt = descriptor("record", "Box")
+            assert(#box.fields == 2 and box.fields[1].index == 1)
+            assert(box.fields[1].type._tag == "Type.Parameter")
+            assert(box.fields[1].type.erased_constraint == false)
+            assert(box.fields[2].type._tag == "Type.Option")
+            assert(box.fields[2].type.base._tag == "Type.Parameter")
+            assert(type(mt[registry.TITAN_MT_MEMBERMAP].item) == "userdata")
+            assert(mt[registry.TITAN_MT_MEMBERMAP].hidden == nil)
+            local choice = descriptor("union", "Choice")
+            assert(#choice.variants == 1 and choice.variants[1].index == 1)
+            assert(choice.variants[1].payload._tag == "Type.Parameter")
+            local reader = descriptor("interface", "Reader")
+            assert(reader.methods[1].rettypes[1]._tag == "Type.Parameter")
+            local holder = descriptor("record", "Holder")
+            local constraint = holder.fields[1].type.erased_constraint
+            assert(constraint._tag == "Type.Nominal")
+            assert(constraint.fqtn == "test.Reader")
+        ]])
+        assert.truthy(ok, err)
+    end)
+
     it("keeps declared schemes separate from ordinary erased identity code", function()
         local csource, tree = h.compile_and_read_c([[
             record Token

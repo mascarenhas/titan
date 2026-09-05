@@ -198,14 +198,13 @@ Titan module can consume `foreign (*void) -> ()`, `*void`, or
 remain unavailable to dynamic Lua coercion when they contain a raw or function
 pointer.
 
-A C function pointer has no `TValue` representation. It may therefore appear
-in a portable type alias and in callable parameters or results used by exact
-compiled Titan calls, but not in a module variable or another `TValue`-backed
-slot. If a genuine Lua call, or a typed slow call that must transport results
-through the Lua stack, reaches a Titan function with a function-pointer result,
-the wrapper raises before invoking the native body. Non-function object
-pointers retain their existing lightuserdata representation, so this
-restriction does not apply to a portable `*void` module variable or result.
+A C function pointer has a lightuserdata `TValue` representation, using
+Titan's toolchain portability cast to preserve its address. A portable
+function-pointer type may appear in aliases, callable signatures, module
+variables, record fields, union payloads, and Options. A Lua or strict stack
+entry can box a native function-pointer result. Boxing does not record its C
+signature: recovering a function pointer from an arbitrary `value` requires
+an explicit unsafe `as` cast, just as recovering an object pointer does.
 
 Header-dependent types remain local to the module that imports the header. An
 imported typedef is nonexportable even when it resolves to one of the portable
@@ -215,9 +214,9 @@ keeps compiled metadata independent of another module's C declarations and
 macro environment.
 
 A module variable, record field, or union payload may mention only a C type
-with a real `TValue` representation: a boxable scalar/object pointer, exact
-`TValue`/`Udata *`, or owned form. Direct C aggregates, arrays, functions, and
-function pointers remain ineligible as stored payloads even when their type is
+with a real `TValue` representation: a boxable scalar, object or function
+pointer, exact `TValue`/`Udata *`, or owned form. Direct C aggregates, arrays,
+and functions remain ineligible as stored payloads even when their type is
 otherwise portable. Source-written owned types may be used in aliases, variables,
 eligible record fields/union payloads, callable parameters and results,
 options, Arrays, and Maps; public use is accepted only when the complete owner
@@ -225,9 +224,9 @@ graph is built from the portable primitives above.
 
 An option stores its present value in a Lua `TValue`. A direct C type may
 therefore be used as an option base only when it has that boxed
-representation: C integers, C floats, non-function object pointers, exact
-`TValue`, and owned C storage are supported. By-value C aggregates and arrays,
-direct C functions, and C function pointers are not valid option bases.
+representation: C integers, C floats, object and function pointers, exact
+`TValue`, and owned C storage are supported. By-value C aggregates and arrays
+and direct C functions are not valid option bases.
 This is a storage-shape rule, not a promise that every value of a boxable C
 scalar fits Titan's configured carrier. Storing a particular C integer or
 floating value in an Option, Array, Map, record field, union payload, or
@@ -326,9 +325,10 @@ Allowed conversions include:
 * a counted owned array of C `char`, `signed char`, or `unsigned char` to
   Titan `string`, copying its exact allocated byte length;
 * a foreign C function name to a compatible C function pointer type;
-* C integers, C floats, non-function C pointers, and owned C userdata to
-  `value`; an ordinary pointer becomes lightuserdata, while an owner remains
-  full userdata.
+* C integers, C floats, C object and function pointers, and owned C userdata
+  to `value`; an ordinary pointer becomes lightuserdata, while an owner
+  remains full userdata. Function-pointer boxing uses Titan's toolchain
+  portability cast and accepts either implicit coercion or written `as value`.
 * `value` to a guardable C integer, C float, or owned C userdata, using either
   the strict implicit guard or the broad written/Lua dynamic rule selected by
   the [normative boundary matrix](types.md#normative-boundary-matrix).

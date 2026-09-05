@@ -1992,7 +1992,7 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 
 # FORCE runs the inexpensive completeness check on every invocation. The
 # compiler itself runs only when an input is newer, configuration changed, or
-# one public output is absent. All eighteen roots are explicit source roots in one
+# one public output is absent. All nineteen roots are explicit source roots in one
 # process, so their internal imports are linked into the paired titan.so/titan.a
 # provider. The warm check rescans the archive without rewriting either output.
 $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
@@ -2090,9 +2090,9 @@ install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 STDLIB_STAGED_EXTRA_OBJECTS = $(foreach object,$(STDLIB_EXTRA_OBJECTS),$(abspath $(object)))
 
 # LuaRocks invokes this only after deploying titanc and its Lua compiler
-# modules. Build all eighteen source roots once in a private directory on the
+# modules. Build all nineteen source roots once in a private directory on the
 # destination filesystem. The Lua publisher validates the complete protocol
-# and exact staged titan.test compiler source, commits eighteen shims, that
+# and exact staged titan.test compiler source, commits nineteen shims, that
 # source, the archive, and the one macOS dSYM before renaming titan.so last;
 # any caught failure restores the prior pair or first-install bootstrap.
 rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
