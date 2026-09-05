@@ -17,14 +17,14 @@ local UV_TYPES_FIXTURE =
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "os", "peg", "string", "math", "lua", "iteration", "gc",
-    "test", "reflect", "sqlite3",
+    "test", "reflect", "sqlite3", "json",
 }
 local STDLIB_ROOTS = {
     "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
     "titan.io", "titan.fs", "titan.net", "titan.ssl", "titan.url",
     "titan.http", "titan.os", "titan.peg", "titan.string", "titan.math",
     "titan.lua", "titan.iteration", "titan.gc", "titan.test", "titan.reflect",
-    "titan.sqlite3",
+    "titan.sqlite3", "titan.json",
 }
 local STDLIB_SHIMS = {
     "titan/coroutine.lua", "titan/uv.lua", "titan/async.lua",
@@ -32,7 +32,7 @@ local STDLIB_SHIMS = {
     "titan/ssl.lua", "titan/url.lua", "titan/http.lua", "titan/os.lua",
     "titan/peg.lua", "titan/string.lua", "titan/math.lua", "titan/lua.lua",
     "titan/iteration.lua", "titan/gc.lua", "titan/test.lua", "titan/reflect.lua",
-    "titan/sqlite3.lua",
+    "titan/sqlite3.lua", "titan/json.lua",
 }
 local LPEGLABEL_INCLUDE =
     "-I" .. lfs.currentdir() .. "/vendor/lpeglabel"
@@ -476,6 +476,7 @@ local function stdlib_source_files()
         ["$(UV_TITAN_SOURCES)"] = "UV_TITAN_SOURCES",
         ["$(STDLIB_HTTP_SOURCES)"] = "STDLIB_HTTP_SOURCES",
         ["$(SQLITE3_TITAN_SOURCES)"] = "SQLITE3_TITAN_SOURCES",
+        ["$(JSON_TITAN_SOURCES)"] = "JSON_TITAN_SOURCES",
     }
     for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES")) do
         local ensemble = source_ensembles[source]
@@ -1361,6 +1362,9 @@ int main(void) {
                 "titan/reflect.titan",
                 "titan/sqlite3/sqlite3.titan", "titan/sqlite3/bindings.titan",
                 "titan/sqlite3/row.titan", "titan/sqlite3/worker.titan",
+                "titan/json/json.titan", "titan/json/parser.titan",
+                "titan/json/decoder.titan", "titan/json/writer.titan",
+                "titan/json/numbers.titan",
             }, stdlib_source_files())
         end)
 
@@ -1694,11 +1698,11 @@ int main(void) {
             }, public_declarations(path))
         end)
 
-    it("pins current metadata for all twenty standard modules",
+    it("pins current metadata for all twenty-one standard modules",
         function()
             local expected = assert(loadfile(STDLIB_TYPES_FIXTURE))()
             local expected_uv = assert(loadfile(UV_TYPES_FIXTURE))()
-            assert.equal(20, #STDLIB_ROOTS)
+            assert.equal(21, #STDLIB_ROOTS)
             assert.equal(expected.uv, expected_uv,
                 "standalone titan.uv metadata fixture is stale")
 
@@ -1736,11 +1740,11 @@ int main(void) {
             end
         end)
 
-    it("exports twenty-one DSO openers for twenty standard modules",
+    it("exports twenty-two DSO openers for twenty-one standard modules",
         function()
-            assert.equal(20, #STDLIB_MODULES)
-            assert.equal(20, #STDLIB_ROOTS)
-            assert.equal(20, #STDLIB_SHIMS)
+            assert.equal(21, #STDLIB_MODULES)
+            assert.equal(21, #STDLIB_ROOTS)
+            assert.equal(21, #STDLIB_SHIMS)
 
             local container = installed_stdlib_container()
             local ok, output, why, code = run_argv(tool_argv(
@@ -1764,7 +1768,7 @@ int main(void) {
                     found[symbol] = true
                 end
             end
-            assert.equal(21, (function()
+            assert.equal(22, (function()
                 local count = 0
                 for _ in pairs(found) do count = count + 1 end
                 return count
@@ -2387,7 +2391,7 @@ esac
                 "titan/iteration.titan", "titan/gc.titan", "titan/test.titan",
             }
             for _, ensemble in ipairs({
-                "UV_TITAN_SOURCES", "SQLITE3_TITAN_SOURCES",
+                "UV_TITAN_SOURCES", "SQLITE3_TITAN_SOURCES", "JSON_TITAN_SOURCES",
                 "SQLITE3_TITAN_HEADERS",
             }) do
                 for _, source in ipairs(makefile_words(ensemble)) do
@@ -4304,7 +4308,7 @@ done
                 1, true), workflow)
             assert.truthy(workflow:find(
                 "for module in coroutine uv async timer io fs net ssl url " ..
-                "http os peg string math lua iteration gc test reflect sqlite3; do",
+                "http os peg string math lua iteration gc test reflect sqlite3 json; do",
                 1, true), workflow)
             assert.truthy(workflow:find(
                 "share/titan/0.6/src/titan/test.titan", 1, true), workflow)
@@ -4612,7 +4616,7 @@ done
 
             assert.equal(1, count_literal(sanitizer_job,
                 "make titan-stdlib-test-build"), sanitizer_job)
-            assert.equal(11, count_literal(sanitizer_job,
+            assert.equal(15, count_literal(sanitizer_job,
                 "make titan-stdlib-test-run"), sanitizer_job)
             for _, filter in ipairs({
                 "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
@@ -4625,6 +4629,11 @@ done
                 "TITAN_FILTER='test_ssl_http_fresh_process_sanitizer_composition$'",
                 "TITAN_FILTER='^reflect%.tests%.'",
                 "TITAN_FILTER='^sqlite3%.tests%.'",
+                "TITAN_FILTER='^json%.tests%.test_mapping_" ..
+                "allocated_constructor_arguments_survive_collection'",
+                "TITAN_FILTER='^json%.tests%.test_parser_wide_fold_collections'",
+                "TITAN_FILTER='^json%.tests%.test_parser_supported_nesting_boundary'",
+                "TITAN_FILTER='^json%.tests%.test_core_float_range_tags_and_round_trips'",
                 "TITAN_FILTER='test_peg_roots_and_releases_" ..
                 "titan_callback_patterns$'",
                 "TITAN_FILTER='test_regex_gc_rooting$'",

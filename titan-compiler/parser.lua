@@ -216,6 +216,7 @@ local standard_imports = {
     iteration = "titan.iteration",
     reflect = "titan.reflect",
     sqlite3 = "titan.sqlite3",
+    json = "titan.json",
 }
 
 

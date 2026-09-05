@@ -1,0 +1,224 @@
+# JSON-library implementation
+
+The public contract is [JSON standard library](../language/standard-library-json.md).
+`titan.json` is one folder module with an explicit Make source inventory:
+
+| Contributor | Responsibility |
+| --- | --- |
+| `titan/json/json.titan` | Public errors/options/entry points, per-call settings, private nodes and paths, common failure formatting, one module initializer |
+| `titan/json/parser.titan` | Compiled Relabel grammar, recognition budgets, delayed node folds, string decoding, labeled syntax failures |
+| `titan/json/decoder.titan` | Dynamic and descriptor-directed conversion, record and union constructors |
+| `titan/json/writer.titan` | UTF-8 validation/escaping, compact output, cycle/limit checks, reflected value traversal, byte-sorted Map keys |
+| `titan/json/numbers.titan` | Exact decimal-to-integer conversion, finite float conversion/formatting, narrow C numeric-locale boundary |
+
+All contributors share one namespace. Public declarations belong to the main;
+contributor declarations are local. No parser, native helper, or node becomes
+an independently imported module. The implementation uses the public `peg`,
+`reflect`, `string`, `math`, and `iteration` modules without a new JSON runtime
+allocation primitive or third-party JSON dependency.
+
+## Whole-document PEG
+
+The main initializer calls `build_json_pattern()` once. `parse_document`
+reuses the resulting `peg.Pattern` with anchored
+`Pattern:match(source, 1, budget)`. The start rule owns leading whitespace,
+one value, and an explicit end assertion. Module-level `peg.match` would search
+and discard the labeled failure protocol, so it is not the entry point.
+
+Value alternatives are distinguished by their leading byte. After a selected
+prefix, required continuations carry committed labels: a key after a comma,
+a colon after a key, a separator after a value, digits after decimal/exponent
+markers, and individual bytes of a literal. Whitespace is the four explicit
+JSON bytes, independent of the PEG locale. Every repeated sibling body
+consumes input; recursion follows container nesting rather than list width.
+The grammar does not recover and retry after a syntax error.
+
+String recognition accepts ASCII non-control bytes and UTF-8 scalar ranges,
+excluding surrogate code points. Escape recognition commits after the
+backslash and each required Unicode hex digit. A completed string capture is
+decoded once into a writer; surrogate-pair checks retain the offending escape's
+source position. Number captures retain start/end positions into the source,
+so conversion happens only after the requested descriptor is known.
+
+## Folds, budgets, and ownership
+
+Every JSON value produces exactly one nonnil private `Node`. A null node stays
+nonnil until conversion. Array nodes hold dense `{Node}` children; object nodes
+hold dense `{Member}` entries and a decoded-name set. A `Member` retains its
+key name, key position, and value node. This preserves source positions, duplicate
+members, trailing nulls, and the distinction between missing and explicit null.
+
+Containers use ordinary delayed PEG fold captures. A seed capture creates a
+fresh private Array/object node on each evaluation; a reducer accepts that node
+and one child/member, appends to its dense storage, and returns it. The final
+accumulator is the container node. No callback receives the entire list as a
+flexible argument run, so widths above the ordinary capture-argument boundary
+do not require eager materialization or an imperative stack of builders.
+
+The seed is a position capture plus factory, not a constant holding a mutable
+object created during grammar initialization. Delayed capture callbacks need
+not execute exactly once in general. Here their mutation is restricted to
+fresh private accumulators, and abandoned results do not escape. The object
+reducer checks duplicate decoded names, including escaped spellings and names
+whose earlier value was null.
+
+A separate fresh `ParseBudget` is passed through `peg.argument(1)`. Small local
+match-time callbacks count values and enter/leave containers. Their only result
+is match success; they do not retain one dynamic capture result per child.
+Guards are on committed paths and do not mutate state in predicates or in an
+alternative that can ordinarily fail afterward. No callback yields. A failed
+attempt discards its budget. A private `ParseFailure` raised by a guard or
+semantic capture is converted to the same public error as a grammar label;
+unrelated runtime exceptions propagate unchanged.
+
+Folds bound callback argument/result space with respect to width. The engine's
+capture records, private tree, and decoded output still require space
+proportional to input values; this API parses a whole string and makes no
+streaming-memory promise. Recognition limits run before delayed construction
+can create an oversized result tree.
+
+## Locations and complexity
+
+An anchored failure returns `(nil, label, position)`. The successful capture is
+a nonnil `Node`, so it cannot be confused with that failure triple even when
+the JSON root is null. Labels retain their exact throw positions. They are
+placed at the expectation itself rather than around a large failing rule:
+`p / %{label}` rewinds a failed `p` before throwing. Throws outside lookahead
+retain labels; predicates suppress them.
+
+`json_fail` formats the path and calls `peg.line_column(source, position)` once
+for a located failure. Paths are retained as private parent-linked components
+during traversal and materialized only when an error is raised. Successful
+parsing/conversion does not repeatedly scan source prefixes or concatenate
+growing diagnostic strings. Byte positions, CR/LF/CRLF treatment, and EOF
+positions are shared with the PEG module; columns count bytes, not display cells.
+
+Recognition and node construction perform bounded work per consumed byte/node:
+disjoint value prefixes, one whitespace owner, iterative sibling tails, one
+string decoding pass, and constant-arity fold steps. Neither lookahead nor
+ordinary choice reparses an entire nested value. Duplicate-name Maps have
+their normal expected/amortized lookup cost; this is not a collision-resistant
+worst-case hashing guarantee. Exact numeric conversion also scans its bounded
+token, without looping according to an unbounded exponent value.
+
+The parser's linearity claim is separate from reflected schema traversal and
+encoding. In particular, deterministic Map output sorts keys with a byte-order
+merge sort. It does not promise linear-time encoding of arbitrarily wide
+objects.
+
+Nesting consumes both PEG matching-stack space and native delayed-capture
+recursion space. Defaults and the maximum accepted `max_depth` are centralized
+in `json.titan`; validation must cover the actual grammar under both limits,
+plus decoder/writer nesting. JSON never changes `peg.set_max_stack` as a side
+effect of a call. Applications selecting a smaller shared PEG stack may see an
+independent engine-resource failure. Width and nesting tests exercise these
+different boundaries separately.
+
+## Exact scalar conversion
+
+The grammar validates decimal JSON syntax before any numeric helper runs.
+`number_value` chooses exact integer conversion for integer targets and dynamic
+integer-form tokens. Fraction/exponent tokens default to float; an explicit
+float target can consume any syntactically valid decimal token.
+
+`decimal_integer` separates sign, coefficient, fraction length, and exponent.
+It strips leading zeros, removes fractional trailing zeros when necessary,
+and rejects non-integral or out-of-range values before a checked negative
+accumulation. Negative accumulation includes the asymmetric minimum integer.
+Exponent accumulation saturates beyond the range that could affect the bounded
+token, avoiding overflow or work proportional to the mathematical exponent.
+The path never uses a rounded binary float to decide integer equality.
+
+`decimal_float` adapts the grammar-approved decimal point to the active numeric
+locale before calling C `strtod`; it rejects nonfinite results and nonzero
+coefficients that underflow to zero. `float_text` formats with sufficient
+decimal digits, restores the JSON decimal point, and adds a fractional marker
+when needed to preserve the float kind. These helpers read the locale's
+conventions and do not call process-global `setlocale`. Their ordinary FFI
+imports stay private to the module. The compiler retains the usual rooting
+for strings while native functions read their bytes.
+
+## Reflection conversion
+
+Encoding dispatches through `reflect.inspect`. Record and Interface fields use
+one-based public descriptor ordinals. Storage indices are not getter ordinals.
+Interface encoding reads the captured public view, not `.wrapped`. Union
+encoding searches public variants for the actual runtime `.tag`; descriptor
+positions cannot be inferred from sparse runtime tags. Private active arms
+raise instead of inventing a name.
+
+Decoding uses a caller-supplied `reflect.Type` or the dynamic schema. Named
+targets use checked `reflect.find_nominal` and fail if the owner has not been
+registered. They do not use `NamedType:resolve`'s fallback to `is_value`.
+Nominal references are resolved lazily, so recursive schemas do not need
+eagerly expanded cyclic descriptor shells. Reflection's generic erasure remains
+visible: erased value leaves decode dynamically, with no specialization registry
+or implied proof from the result's outer nominal identity.
+
+Record decoding locates public static `new`, checks member names and presence,
+and constructs a fresh argument Array in the reflected parameter order. Missing
+nil-admitting fields remain nil. It keeps the declared arity separately and
+calls `constructor.callable(...arguments[1, arity])`; ordinary `#arguments`
+would lose trailing optional nils. The ordinary constructor initializes const
+and mutable fields once. There is no partially initialized record, raw storage
+write, or allocate-then-`RecordValue:set` stage.
+
+Union decoding validates exact envelope membership and tag kind/name, checks
+whether payload presence matches the arm, recursively decodes it, then invokes
+the reflected variant callable. Payloadless and nullable-payload arms remain
+distinct. Extra envelope fields are never covered by the record-only
+`ignore_unknown_fields` option.
+
+Array/Map conversion writes at each source index/key. It does not append based
+on a result length that may have shortened after a nil. Dynamic nulls use the
+configured sentinel, while Option/nil targets and concrete container holes
+retain nil. The newly built mutable Array's storage has the `value` Lua-writer
+policy; later typed reads enforce their own guards. Const targets use the
+ordinary mutable-to-const conversion, and maybe-const targets return mutable
+Arrays. Compiler-owned boxing, nominal checks, write barriers, and traced
+callable ownership handle all constructed values.
+
+## Writer and resource policy
+
+Each encoder owns its settings, writer, output byte/node counters, and active
+ancestor set. Sentinel comparison happens before ordinary dispatch, through
+raw `value` equality, and never applies to object keys or generated tags.
+Record fields and Array elements are visited in their established order.
+Map entries are enumerated without `__pairs`, and keys must carry the actual
+string tag; byte-order sorting is independent of numeric/string locale.
+
+Ancestor membership detects cycles by identity. Removing a completed owner
+allows a shared acyclic child to appear elsewhere in the output. The operation
+does not call application codec callbacks. Escaping writes bounded chunks into
+`string.writer()` and checks output growth before accepting them. Counters use
+overflow-safe limit comparisons. Encoding reports no input location; located
+parse/schema/numeric errors share byte/line/column formatting.
+
+## Publication and validation
+
+JSON joins the existing `titan.so`/`titan.a` pair as one ordinary logical root.
+The explicit manifests now contain 21 module protocols, archive metadata keys,
+and generated shims, with 22 DSO openers including bare `luaopen_titan`. Its
+generated shim is `titan/json.lua`; there is no child DSO or independent
+LuaRocks C-module owner. The source-rock hook validates, publishes, and rolls
+back the same complete pair and exact shim inventory.
+
+Public behavior lives under `spec/stdlib/titan/json/tests/`, as the explicit
+`json.tests` root in the 25-root aggregate, without LuaCov. The existing Titan
+parser spec tests only shorthand normalization. Packaging/native-build specs
+own exact sources, module protocols, metadata fixtures, installed shims, and
+rollback. Lua/provider and static production smokes exercise dynamic decoding,
+null preservation, and a reflected record/union constructor composition.
+
+The native suite covers syntax labels and positions, null/presence behavior,
+numeric/Unicode boundaries, nominal and const mappings, cyclic versus shared
+data, and limits. Wide containers above 32767 children exercise fold width;
+deep containers exercise matching and capture recursion. Warmed doubling-size
+measurements include successful documents and malformed input near EOF, and
+support the structural complexity review without imposing fragile timing ratios
+as correctness assertions. JSON's focused sanitizer selection checks the same
+public allocation and lifetime behavior in the instrumented provider.
+
+The [Titan JSON skill](../../.agents/skills/titan-json/SKILL.md) contains
+agent-facing recipes and maintenance routing. Human API explanations remain
+in the language manual; implementation invariants remain here.

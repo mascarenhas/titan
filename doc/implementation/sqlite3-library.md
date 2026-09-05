@@ -23,8 +23,9 @@ header, or independently installed private archive. Its declarations are
 needed only during the source standard-provider build. Private symbol
 visibility follows the existing bundled native payload policy.
 
-SQLite adds one logical standard module, producing twenty module protocols,
-twenty archive metadata keys/shims, and twenty-one Lua openers including bare
+SQLite is one logical standard module in the combined provider, which has
+twenty-one module protocols,
+twenty-one archive metadata keys/shims, and twenty-two Lua openers including bare
 support `luaopen_titan`. Source, provider validation, installer rollback,
 snapshot, native aggregate, production smoke, and CI cache manifests include
 it explicitly. Native dependency cache identities include the version,

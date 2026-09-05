@@ -23,6 +23,7 @@ local iteration = require "titan.iteration"
 local gc = require "titan.gc"
 local testing = require "titan.test"
 local sqlite3 = require "titan.sqlite3"
+local json = require "titan.json"
 
 local path = os.tmpname()
 os.remove(path)
@@ -73,6 +74,15 @@ local found = strings.match("regex42", "([0-9]+)")
 assert(found and found:whole() == "42" and found:group(1) == "42")
 assert(strings.find("a\0b", "\0b") == 2)
 
+local json_source = '{"answer":42,"values":[1,null,3]}'
+assert(json.encode(json.decode(json_source)) == json_source)
+local sentinel = {}
+local preserved = json.decode('[1,null,null]', nil,
+    json.DecodeOption.null_value(sentinel))
+assert(#preserved == 3 and rawequal(preserved[3], sentinel))
+assert(json.encode(preserved, json.EncodeOption.null_value(sentinel)) ==
+       '[1,null,null]')
+
 assert(math.sqrt(81.0) == 9.0)
 assert(math.tonumber("0xff") == 255)
 local chunk = lua.load("return ...", "=provider-smoke", nil)
@@ -102,6 +112,7 @@ assert(type(ssl) == "userdata")
 assert(type(http) == "userdata")
 assert(type(testing) == "userdata")
 assert(type(sqlite3) == "userdata")
+assert(type(json) == "userdata")
 assert(not testing.testing())
 assert(not testing.verbose())
 

@@ -115,7 +115,7 @@ check_canonical_container() {
         test -f "$PROVIDER.dSYM/Contents/Resources/DWARF/titan.so"
     fi
 
-    for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test reflect sqlite3; do
+    for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test reflect sqlite3 json; do
         local shim="$SHIM_ROOT/titan/$module.lua"
 
         test -f "$shim"
@@ -164,6 +164,7 @@ local expected = {
     ["titan.test"] = true,
     ["titan.reflect"] = true,
     ["titan.sqlite3"] = true,
+    ["titan.json"] = true,
 }
 
 local scanned, scan_error = metadata.scan_archive(archive, {
@@ -527,6 +528,8 @@ local iteration = import "iteration"
 local gc = import "gc"
 local testing = import "test"
 local sqlite3 = import "sqlite3"
+local json = import "json"
+local reflect = import "reflect"
 
 local function check(condition: boolean, message: string)
   if not condition then raise message end
@@ -540,6 +543,29 @@ end
 local function check_parent_stream(query: () -> boolean)
   local tty = query()
   check(tty or not tty, "static parent stdio query failed")
+end
+
+record JsonSmokeRecord
+  const answer: integer
+end
+
+union JsonSmokeMessage
+  ready: JsonSmokeRecord
+end
+
+local function check_json_provider()
+  local input = JsonSmokeMessage.ready(JsonSmokeRecord.new(42))
+  local encoded = json.encode(input)
+  check(encoded == [[{"tag":"ready","value":{"answer":42}}]],
+        "static JSON union encoding failed")
+  local descriptor = reflect.Type.is_named(
+    reflect.NamedType.new("static_uv_smoke.JsonSmokeMessage"))
+  local decoded: JsonSmokeMessage = json.decode(encoded, descriptor)
+  check(json.encode(decoded) == encoded,
+        "static JSON reflected constructor decoding failed")
+  local values: {value} = json.decode("[1,null,3]")
+  check(#values == 3 and values[2] == nil,
+        "static JSON array hole decoding failed")
 end
 
 local function check_sqlite_provider()
@@ -599,6 +625,7 @@ function main(args: {string}): integer
     check(system.pid() > 0 and #system.cwd() > 0 and
           #system.exepath() > 0,
           "static os identity behavior failed")
+    check_json_provider()
     check(#peg.version() > 0,
           "static PEG native engine initialization failed")
     check(strings.len("static\0string") == 13,

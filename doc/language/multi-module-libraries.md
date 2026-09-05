@@ -63,7 +63,7 @@ their longest common sequence of complete components:
 | `foo.left foo.right` | `foo` | `foo.so`, `foo.a` |
 | `foo.bar.left foo.bar.right` | `foo.bar` | `foo/bar.so`, `foo/bar.a` |
 | `foo foo.bar` | `foo` | `foo.so`, `foo.a` |
-| all twenty `titan.*` standard roots | `titan` | `titan.so`, `titan.a` |
+| all twenty-one `titan.*` standard roots | `titan` | `titan.so`, `titan.a` |
 
 The comparison is component-based: `foo.bar` and `foo.baz` share `foo`, but
 `foo` and `foobar` share no module component. Unrelated roots are therefore an
@@ -244,7 +244,7 @@ legal in one program.
 
 ## The standard-library provider
 
-Titan's standard library is the twenty-root production example of this
+Titan's standard library is the twenty-one-root production example of this
 model. One
 paired provider:
 
@@ -257,7 +257,7 @@ contains the native support entry plus the independent logical modules
 `titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.io`,
 `titan.fs`, `titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.os`,
 `titan.peg`, `titan.string`, `titan.math`, `titan.lua`, `titan.iteration`,
-`titan.gc`, `titan.test`, `titan.reflect`, and `titan.sqlite3`. Their
+`titan.gc`, `titan.test`, `titan.reflect`, `titan.sqlite3`, and `titan.json`. Their
 generated logical loaders live at:
 
 ```text

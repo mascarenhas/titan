@@ -164,7 +164,7 @@ jobs:
             clean_titan_environment \
               "$PREFIX/bin/luarocks" remove titan --force
           fi
-          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test reflect sqlite3; do
+          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test reflect sqlite3 json; do
             rm -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           rm -f "$PREFIX/share/titan/0.6/src/titan/test.titan"
@@ -873,7 +873,7 @@ jobs:
           test -f "$TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT/manifest.txt"
           test -f "$snapshot_provider" && test ! -L "$snapshot_provider"
           cmp "$snapshot_provider" "$provider"
-          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test reflect sqlite3; do
+          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test reflect sqlite3 json; do
             test -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           test -f "$PREFIX/share/titan/0.6/src/titan/test.titan" &&
@@ -940,6 +940,17 @@ jobs:
         run: |
           bash spec/support/ci_sanitizer_capture.sh sqlite3-tests \
             make titan-stdlib-test-run TITAN_FILTER='^sqlite3%.tests%.'
+
+      - name: Run native JSON sanitizer gate
+        run: |
+          bash spec/support/ci_sanitizer_capture.sh json-mapping-gc \
+            make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_mapping_allocated_constructor_arguments_survive_collection'
+          bash spec/support/ci_sanitizer_capture.sh json-wide-folds \
+            make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_parser_wide_fold_collections'
+          bash spec/support/ci_sanitizer_capture.sh json-nesting \
+            make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_parser_supported_nesting_boundary'
+          bash spec/support/ci_sanitizer_capture.sh json-numbers \
+            make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_core_float_range_tags_and_round_trips'
 
       - name: Run native reflection sanitizer gate
         run: |

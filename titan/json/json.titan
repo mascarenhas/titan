@@ -1,0 +1,143 @@
+local reflect = import "reflect"
+local strings = import "string"
+local math = import "math"
+local peg = import "peg"
+local iteration = import "iteration"
+
+record Error
+  const code: string
+  const message: string
+  const position: integer?
+  const line: integer?
+  const column: integer?
+  const path: string
+end
+
+union EncodeOption
+  null_value: value
+  max_depth: integer
+  max_bytes: integer
+  max_nodes: integer
+end
+
+union DecodeOption
+  null_value: value
+  max_depth: integer
+  max_bytes: integer
+  max_nodes: integer
+  ignore_unknown_fields: boolean
+end
+
+local record Settings
+  null_value: value
+  max_depth: integer
+  max_bytes: integer
+  max_nodes: integer
+  ignore_unknown_fields: boolean
+end
+
+-- Parse nodes retain nulls, member presence and number spellings until the
+-- requested descriptor determines their representation.
+local record Node
+  const kind: string
+  const position: integer
+  const scalar: value
+  const elements: {Node}?
+  const members: {Member}?
+end
+
+local record Member
+  const name: string
+  const position: integer
+  const node: Node
+end
+
+local record Path
+  const parent: Path?
+  const name: string?
+  const index: integer?
+end
+
+local function root_path(): Path
+  return Path.new(nil, nil, nil)
+end
+
+local function path_text(path: Path): string
+  if path.parent == nil then return "$" end
+  local prefix = path_text(path.parent)
+  if path.name ~= nil then
+    return prefix .. "[" .. quoted_string(path.name, root_path()) .. "]"
+  end
+  return prefix .. "[" .. path.index .. "]"
+end
+
+local function json_fail(code: string, message: string, path: Path,
+                         source: string?, position: integer?)
+  local line: integer?
+  local column: integer?
+  if source ~= nil and position ~= nil then
+    line, column = peg.line_column(source, position)
+  end
+  raise Error.new(code, message, position, line, column, path_text(path))
+end
+
+local function field_path(path: Path, name: string): Path
+  return Path.new(path, name, nil)
+end
+
+local function index_path(path: Path, index: integer): Path
+  return Path.new(path, nil, index)
+end
+
+local function default_settings(): Settings
+  return Settings.new(nil, 32, 16 * 1024 * 1024, 1000000, false)
+end
+
+local function validate_settings(settings: Settings)
+  if settings.max_depth < 1 or settings.max_depth > 64 then
+    json_fail("invalid_option", "max_depth must be between 1 and 64", root_path(), nil, nil)
+  end
+  if settings.max_bytes < 1 or settings.max_nodes < 1 then
+    json_fail("invalid_option", "max_bytes and max_nodes must be positive", root_path(), nil, nil)
+  end
+  if settings.null_value ~= settings.null_value then
+    json_fail("invalid_option", "null_value cannot be NaN", root_path(), nil, nil)
+  end
+end
+
+function encode(subject: value, ...: EncodeOption): string
+  local settings = default_settings()
+  for index = 1, #... do
+    case ...[index]
+    when null_value: sentinel then settings.null_value = sentinel
+    when max_depth: limit then settings.max_depth = limit
+    when max_bytes: limit then settings.max_bytes = limit
+    when max_nodes: limit then settings.max_nodes = limit
+    end
+  end
+  validate_settings(settings)
+  return encode_value(subject, settings)
+end
+
+function decode(source: string, target: reflect.Type?, ...: DecodeOption): value
+  local settings = default_settings()
+  for index = 1, #... do
+    case ...[index]
+    when null_value: sentinel then settings.null_value = sentinel
+    when max_depth: limit then settings.max_depth = limit
+    when max_bytes: limit then settings.max_bytes = limit
+    when max_nodes: limit then settings.max_nodes = limit
+    when ignore_unknown_fields: ignore then settings.ignore_unknown_fields = ignore
+    end
+  end
+  validate_settings(settings)
+  if #source > settings.max_bytes then
+    json_fail("limit_exceeded", "input exceeds max_bytes", root_path(), source, settings.max_bytes + 1)
+  end
+  local node = parse_document(source, settings)
+  return decode_node(node, target, settings, source, root_path())
+end
+
+do
+  JSON_PATTERN = build_json_pattern()
+end

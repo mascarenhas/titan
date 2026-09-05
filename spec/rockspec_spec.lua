@@ -6,7 +6,7 @@ local source_inventory = require "spec.support.source_inventory"
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "os", "peg", "string", "math", "lua", "iteration", "gc",
-    "test", "reflect", "sqlite3",
+    "test", "reflect", "sqlite3", "json",
 }
 local LUA_CPATH_SUFFIX = "/lib/lua/5.5/?.so"
 local COMPILER_SLICE_PATHS = {}
@@ -697,6 +697,17 @@ describe("standalone-prefix source installation", function()
             "titan/sqlite3/row.titan",
             "titan/sqlite3/worker.titan",
             "titan/sqlite3/native.h",
+            "titan/json/json.titan",
+            "titan/json/parser.titan",
+            "titan/json/decoder.titan",
+            "titan/json/writer.titan",
+            "titan/json/numbers.titan",
+            "spec/stdlib/titan/json/tests/tests.titan",
+            "spec/stdlib/titan/json/tests/parser_test.titan",
+            "spec/stdlib/titan/json/tests/mapping_test.titan",
+            "spec/stdlib/titan/json/tests/core_test.titan",
+            "doc/language/standard-library-json.md",
+            "doc/implementation/json-library.md",
             "titan-compiler/test_runner.lua",
             "LICENSES/lpeglabel-LICENSE",
             "LICENSES/lpeg-LICENSE",
@@ -924,6 +935,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             local iteration = require "titan.iteration"
             local gc = require "titan.gc"
             local testing = require "titan.test"
+            local json = require "titan.json"
             local builtin_string = require "string"
             -- Requiring only the public facade must initialize uv globally.
             -- The returned uv-owned Task resolves its methods transitively;
@@ -970,6 +982,9 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             assert(type(iteration) == "userdata")
             assert(type(gc) == "userdata")
             assert(type(testing) == "userdata")
+            assert(type(json) == "userdata")
+            local json_source = '{"answer":42,"values":[1,null,3]}'
+            assert(json.encode(json.decode(json_source)) == json_source)
             assert(not testing.testing())
             assert(not testing.verbose())
             assert(peg.literal("installed"):match("installed") == 10)
@@ -1000,6 +1015,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
                 iteration = iteration,
                 gc = gc,
                 test = testing,
+                json = json,
             }) do
                 local symbol = "luaopen_titan_" .. name
                 assert(package.searchpath("titan." .. name, package.path) ==

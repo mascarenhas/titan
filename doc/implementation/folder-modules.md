@@ -268,14 +268,14 @@ such owner or bridge is serialized into the compiled `titan.uv` interface.
 The Makefile declares this set explicitly as `UV_TITAN_SOURCES`; it does not use a
 wildcard, so adding a production source changes the reviewed build graph.
 Every listed source is a prerequisite of the one combined standard-library
-completion target. The production compiler invocation names all twenty logical
+completion target. The production compiler invocation names all twenty-one logical
 roots:
 
 ```sh
 titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.net \
   titan.ssl titan.url titan.http titan.os \
   titan.peg titan.string \
-  titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 \
+  titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json \
   -X titan-runtime/ltitanlib.o lpeglabel-build/libtitan-lpeglabel.a \
      libuv-build/libuv.a llhttp-build/libtitan-llhttp.a \
      sqlite3-build/libtitan-sqlite3.a \
@@ -288,7 +288,7 @@ The flat high-level `titan.fs` root likewise generates
 `titan/fs.titan.h` for its canonical-path and watcher callbacks. No
 contributor C/object/header, DSO, archive, or contributor shim is built or
 installed. The one logical `titan.uv` object, its one generated
-`titan/uv.lua` shim, and the remaining nineteen logical modules (twenty in
+`titan/uv.lua` shim, and the remaining twenty logical modules (twenty-one in
 total) reside in the physical `titan.so`/`titan.a` pair. The private
 five-member LPegLabel archive is shared metadata-free payload for the
 `titan.peg`/`titan.string` folder modules. Bundled mode then supplies the
@@ -299,7 +299,7 @@ copy it into `titan.a` (and omits `libuv-build/libuv.a` from the command).
 That setting may itself select a shared or static system library. Higher
 `async`/`timer`/`fs`/`net`/`os`/`sqlite3` modules still import
 the independent logical `titan.uv` protocol, but their calls are direct
-because all twenty source roots are linked together. The high-level
+because all twenty-one source roots are linked together. The high-level
 `titan.fs` object additionally references the public libuv filesystem and
 watcher functions used by its canonical-path and watcher implementation,
 including its two source callbacks. `titan.ssl` reaches the

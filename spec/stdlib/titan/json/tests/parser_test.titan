@@ -1,0 +1,300 @@
+local function parser_add_error(
+    context: test.Context, name: string, source: string, code: string,
+    position: integer, line: integer?, column: integer?)
+  context:run(name, function(_child: test.Context)
+    local failure = expect_json_error(function() json.decode(source) end)
+    test.assert(failure.code == code,
+                "expected " .. code .. ", got " .. failure.code)
+    test.assert(failure.position == position,
+                "parser reported the wrong source byte")
+    test.assert(failure.path == "$")
+    test.assert(failure.line ~= nil and failure.column ~= nil,
+                "parser omitted its line and column")
+    if line ~= nil then test.assert(failure.line == line) end
+    if column ~= nil then test.assert(failure.column == column) end
+  end)
+end
+
+function test_parser_complete_documents_and_whitespace(_context: test.Context)
+  test.assert(json.decode(" \t\r\nfalse \r\n\t") == false)
+  test.assert(json.decode("\n null \r") == nil)
+  test.assert(json.decode(" \n\"hello\"\t") == "hello")
+  local array: {value} = json.decode(" \r[ \t]\n")
+  test.assert(#array == 0)
+  local object: {string: value} = json.decode("\t{ \r\n }\n")
+  test.assert(object["missing"] == nil)
+  local nested: {value} = json.decode(
+    "[ \n { \"a\"\t:\r[ true , false ] } , null , \"ok\" \t]")
+  test.assert(#nested == 3 and nested[2] == nil and nested[3] == "ok")
+  local first: {string: value} = nested[1]
+  local flags: {boolean} = first["a"]
+  test.assert(#flags == 2 and flags[1] == true and flags[2] == false)
+end
+
+function test_parser_labeled_structural_errors(context: test.Context)
+  parser_add_error(context, "empty_document", "", "expected_value", 1)
+  parser_add_error(context, "whitespace_document", " \t\r\n",
+                   "expected_value", 5, 2, 1)
+  parser_add_error(context, "array_missing_value", "[", "expected_value", 2)
+  parser_add_error(context, "array_initial_comma", "[,]", "expected_value", 2)
+  parser_add_error(context, "array_missing_comma", "[1 2]",
+                   "expected_array_separator", 4)
+  parser_add_error(context, "array_trailing_comma", "[1,]",
+                   "expected_value", 4)
+  parser_add_error(context, "array_missing_close", "[1",
+                   "expected_array_separator", 3)
+  parser_add_error(context, "array_wrong_close", "[1}",
+                   "expected_array_separator", 3)
+  parser_add_error(context, "array_literal_separator", "[true false]",
+                   "expected_array_separator", 7)
+  parser_add_error(context, "object_missing_key", "{", "expected_object_key", 2)
+  parser_add_error(context, "object_unquoted_key", "{a:1}",
+                   "expected_object_key", 2)
+  parser_add_error(context, "object_missing_colon", [=[{"a" 1}]=],
+                   "expected_colon", 6)
+  parser_add_error(context, "object_missing_value", [=[{"a":}]=],
+                   "expected_value", 6)
+  parser_add_error(context, "object_missing_comma", [=[{"a":1 "b":2}]=],
+                   "expected_object_separator", 8)
+  parser_add_error(context, "object_trailing_comma", [=[{"a":1,}]=],
+                   "expected_object_key", 8)
+  parser_add_error(context, "object_missing_close", [=[{"a":1]=],
+                   "expected_object_separator", 7)
+  parser_add_error(context, "object_wrong_close", [=[{"a":1]]=],
+                   "expected_object_separator", 7)
+  parser_add_error(context, "second_root", "true false", "trailing_input", 6)
+  parser_add_error(context, "data_after_array", "[1] null", "trailing_input", 5)
+  parser_add_error(context, "comment_root", "/* comment */null", "expected_value", 1)
+  parser_add_error(context, "comment_after_comma", "[1, /* x */ 2]",
+                   "expected_value", 5)
+  parser_add_error(context, "non_json_whitespace", "\vnull", "expected_value", 1)
+  parser_add_error(context, "byte_order_mark", strings.char(239, 187, 191) .. "null",
+                   "expected_value", 1)
+end
+
+function test_parser_labeled_number_and_literal_errors(context: test.Context)
+  parser_add_error(context, "plus_sign", "+1", "expected_value", 1)
+  parser_add_error(context, "leading_decimal_point", ".5", "expected_value", 1)
+  parser_add_error(context, "minus_without_digit", "-", "expected_integer_digit", 2)
+  parser_add_error(context, "minus_decimal_point", "-.5", "expected_integer_digit", 2)
+  parser_add_error(context, "double_minus", "--1", "expected_integer_digit", 2)
+  parser_add_error(context, "leading_zero", "01", "leading_zero", 2)
+  parser_add_error(context, "negative_leading_zero", "-01", "leading_zero", 3)
+  parser_add_error(context, "fraction_without_digit", "1.", "expected_fraction_digit", 3)
+  parser_add_error(context, "fraction_before_exponent", "1.e2", "expected_fraction_digit", 3)
+  parser_add_error(context, "exponent_without_digit", "1e", "expected_exponent_digit", 3)
+  parser_add_error(context, "signed_exponent_without_digit", "1e+",
+                   "expected_exponent_digit", 4)
+  parser_add_error(context, "exponent_whitespace", "1E+ 2",
+                   "expected_exponent_digit", 4)
+  parser_add_error(context, "second_fraction", "1e1.0",
+                   "invalid_number_continuation", 4)
+  parser_add_error(context, "hexadecimal", "0x1", "invalid_number_continuation", 2)
+  parser_add_error(context, "underscore", "1_000", "invalid_number_continuation", 2)
+  parser_add_error(context, "number_suffix", "1x", "invalid_number_continuation", 2)
+  parser_add_error(context, "nan_literal", "NaN", "expected_value", 1)
+  parser_add_error(context, "infinity_literal", "Infinity", "expected_value", 1)
+  parser_add_error(context, "incomplete_true", "tru", "invalid_literal", 4)
+  parser_add_error(context, "misspelled_true", "truX", "invalid_literal", 4)
+  parser_add_error(context, "misspelled_false", "fause", "invalid_literal", 3)
+  parser_add_error(context, "misspelled_null", "nulx", "invalid_literal", 4)
+  parser_add_error(context, "literal_suffix", "truex", "invalid_literal_continuation", 5)
+  parser_add_error(context, "nul_after_literal", "null\0",
+                   "invalid_literal_continuation", 5)
+end
+
+function test_parser_string_escape_and_unicode_values(_context: test.Context)
+  test.assert(json.decode([=["\"\\\/\b\f\n\r\t\u0000"]=]) == "\"\\/\b\f\n\r\t\0")
+  test.assert(json.decode([=["\uD834\uDD1E"]=]) == strings.char(240, 157, 132, 158))
+  test.assert(json.decode([=["\udbff\udfff"]=]) == strings.char(244, 143, 191, 191))
+  test.assert(json.decode([=["\uD800\uDC00"]=]) == strings.char(240, 144, 128, 128))
+  local limits = [=["\u0000\u007f\u0080\u07ff\u0800\uD7ff\uE000\uffff"]=]
+  test.assert(json.decode(limits) ==
+    strings.char(0, 127, 194, 128, 223, 191, 224, 160, 128,
+                 237, 159, 191, 238, 128, 128, 239, 191, 191))
+  local raw = "é🙂" .. strings.char(127)
+  test.assert(json.decode('"' .. raw .. '"') == raw)
+  local different: {string: value} = json.decode([=[{"é":1,"e\u0301":2}]=])
+  test.assert(different["é"] == 1 and different["e" .. strings.char(204, 129)] == 2,
+              "JSON normalized distinct Unicode spellings")
+end
+
+function test_parser_labeled_string_errors(context: test.Context)
+  parser_add_error(context, "invalid_escape", [=["\q"]=], "invalid_escape", 3)
+  parser_add_error(context, "uppercase_unicode_escape", [=["\U0041"]=],
+                   "invalid_escape", 3)
+  parser_add_error(context, "missing_escape_byte", '"abc\\', "unfinished_escape", 6)
+  parser_add_error(context, "missing_quote", '"abc', "unterminated_string", 5)
+  parser_add_error(context, "missing_first_hex", [=["\u"]=], "expected_hex_digit", 4)
+  parser_add_error(context, "invalid_hex", [=["\u12X4"]=], "expected_hex_digit", 6)
+  parser_add_error(context, "short_quad", [=["\u123"]=], "expected_hex_digit", 7)
+  parser_add_error(context, "lone_high_surrogate", [=["\uD800"]=],
+                   "invalid_surrogate", 2)
+  parser_add_error(context, "lone_low_surrogate", [=["\uDC00"]=],
+                   "invalid_surrogate", 2)
+  parser_add_error(context, "wrong_second_surrogate", [=["\uD800\u0041"]=],
+                   "invalid_surrogate", 8)
+  parser_add_error(context, "high_surrogate_then_text", [=["\uD800x"]=],
+                   "invalid_surrogate", 2)
+  parser_add_error(context, "high_surrogate_then_escape", [=["\uD800\n"]=],
+                   "invalid_surrogate", 2)
+  for octet = 0, 31 do
+    parser_add_error(context, "unescaped_control_" .. octet,
+                     '"a' .. strings.char(octet) .. 'b"', "unescaped_control", 3)
+  end
+  local malformed: {string} = {
+    strings.char(128), strings.char(192, 128), strings.char(224, 128, 128),
+    strings.char(194), strings.char(226, 130), strings.char(240, 159, 153),
+    strings.char(244, 144, 128, 128), strings.char(245, 128, 128, 128),
+    strings.char(255), strings.char(237, 160, 128), strings.char(226, 40, 161),
+  }
+  for index = 1, #malformed do
+    parser_add_error(context, "invalid_utf8_" .. index,
+                     '"' .. malformed[index] .. '"', "invalid_utf8", 2)
+  end
+end
+
+function test_parser_duplicate_decoded_keys(context: test.Context)
+  parser_add_error(context, "ordinary_duplicate", [=[{"a":1,"a":2}]=],
+                   "duplicate_key", 8)
+  parser_add_error(context, "null_duplicate", [=[{"a":null,"a":1}]=],
+                   "duplicate_key", 11)
+  parser_add_error(context, "escaped_duplicate", [=[{"a":null,"\u0061":true}]=],
+                   "duplicate_key", 11)
+  parser_add_error(context, "nul_duplicate", [=[{"\u0000":1,"\u0000":2}]=],
+                   "duplicate_key", 13)
+  parser_add_error(context, "nested_duplicate", [=[{"outer":{"a":1,"a":2}}]=],
+                   "duplicate_key", 17)
+end
+
+function test_parser_byte_line_and_column_locations(context: test.Context)
+  parser_add_error(context, "lf", "[\n1\n2]", "expected_array_separator", 5, 3, 1)
+  parser_add_error(context, "cr", "[\r1\r2]", "expected_array_separator", 5, 3, 1)
+  parser_add_error(context, "crlf", "[\r\n1\r\n2]",
+                   "expected_array_separator", 7, 3, 1)
+  parser_add_error(context, "utf8_before_error", '["é" 2]',
+                   "expected_array_separator", 7, 1, 7)
+  parser_add_error(context, "escaped_newline_is_not_a_line", [=[["\n" 2]]=],
+                   "expected_array_separator", 7, 1, 7)
+  parser_add_error(context, "eof_after_crlf", "[\r\n1",
+                   "expected_array_separator", 5, 2, 2)
+end
+
+function test_parser_long_string_spans(_context: test.Context)
+  local plain = strings.rep("abé", 16384)
+  test.assert(json.decode('"' .. plain .. '"') == plain)
+  local escaped = '"' .. strings.rep([=[\u0041\n]=], 16384) .. '"'
+  test.assert(json.decode(escaped) == strings.rep("A\n", 16384))
+  local failure = expect_json_error(function()
+    json.decode('"' .. plain)
+  end)
+  test.assert(failure.code == "unterminated_string" and
+              failure.position == #plain + 2)
+end
+
+function test_parser_fresh_folds_and_failure_state(_context: test.Context)
+  for repetition = 1, 3 do
+    local array: {value} = json.decode("[true]")
+    test.assert(#array == 1 and array[1] == true,
+                "a fold reused an earlier parse's accumulator")
+  end
+  local first: {value} = json.decode([=[[{"a":[1,null,2]},{"b":false}]]=])
+  local second: {value} = json.decode([=[[{"a":[1,null,2]},{"b":false}]]=])
+  local first_object: {string: value} = first[1]
+  local first_array: {value} = first_object["a"]
+  first_array[1] = 99
+  local second_object: {string: value} = second[1]
+  local second_array: {value} = second_object["a"]
+  test.assert(second_array[1] == 1 and second_array[2] == nil and second_array[3] == 2)
+  local failure = expect_json_error(function()
+    json.decode("[[1,]]", nil, json.DecodeOption.max_depth(2))
+  end)
+  test.assert(failure.code == "expected_value")
+  local accepted: {value} = json.decode(
+    "[[1]]", nil, json.DecodeOption.max_depth(2), json.DecodeOption.max_nodes(3))
+  local inner: {value} = accepted[1]
+  test.assert(#accepted == 1 and #inner == 1 and inner[1] == 1,
+              "failed recognition leaked its budget into a later call")
+end
+
+function test_parser_source_limits_before_null_loss(_context: test.Context)
+  local nulls: {value} = json.decode(
+    "[null,null]", nil, json.DecodeOption.max_nodes(3), json.DecodeOption.max_depth(1))
+  test.assert(#nulls == 0)
+  local failure = expect_json_error(function()
+    json.decode("[null,null]", nil, json.DecodeOption.max_nodes(2))
+  end)
+  test.assert(failure.code == "limit_exceeded" and failure.position == 7)
+  failure = expect_json_error(function()
+    json.decode([=[{"a":null}]=], nil, json.DecodeOption.max_nodes(1))
+  end)
+  test.assert(failure.code == "limit_exceeded" and failure.position == 6)
+  failure = expect_json_error(function()
+    json.decode("[[true]]", nil, json.DecodeOption.max_depth(1))
+  end)
+  test.assert(failure.code == "limit_exceeded" and failure.position == 2)
+  failure = expect_json_error(function()
+    json.decode(" \tnull", nil, json.DecodeOption.max_bytes(5))
+  end)
+  test.assert(failure.code == "limit_exceeded" and failure.position == 6)
+end
+
+function test_parser_supported_nesting_boundary(_context: test.Context)
+  local depth = 64
+  local objects = strings.rep('{"x":', depth) .. "true" .. strings.rep("}", depth)
+  local current: value = json.decode(objects, nil, json.DecodeOption.max_depth(depth))
+  for level = 1, depth do
+    local object: {string: value} = current
+    current = object["x"]
+  end
+  test.assert(current == true)
+  local arrays = strings.rep("[", depth) .. "true" .. strings.rep("]", depth)
+  current = json.decode(arrays, nil, json.DecodeOption.max_depth(depth))
+  for level = 1, depth do
+    local array: {value} = current
+    current = array[1]
+  end
+  test.assert(current == true)
+  local failure = expect_json_error(function()
+    json.decode("[" .. arrays .. "]", nil, json.DecodeOption.max_depth(depth))
+  end)
+  test.assert(failure.code == "limit_exceeded" and failure.position == depth + 1)
+  failure = expect_json_error(function()
+    json.decode('{"x":' .. objects .. "}", nil, json.DecodeOption.max_depth(depth))
+  end)
+  test.assert(failure.code == "limit_exceeded" and failure.position == depth * 5 + 1)
+end
+
+function test_parser_wide_fold_collections(context: test.Context)
+  context:run("array_over_native_result_limit", function(_child: test.Context)
+    local width = 32768
+    local source = "[" .. strings.rep("true,", width - 1) .. "true]"
+    local array: {boolean} = json.decode(source)
+    test.assert(#array == width and array[1] == true and array[width] == true)
+  end)
+  context:run("object_over_native_result_limit", function(_child: test.Context)
+    local width = 32768
+    local source = strings.writer()
+    defer source:close()
+    source:write("{")
+    for index = 1, width do
+      if index > 1 then source:write(",") end
+      source:write('"k' .. index .. '":true')
+    end
+    source:write("}")
+    local object: {string: boolean} = json.decode(source:drain())
+    test.assert(object["k1"] == true and object["k16384"] == true and
+                object["k32768"] == true)
+  end)
+  context:run("wide_nested_siblings", function(_child: test.Context)
+    local width = 32768
+    local source = "[" .. strings.rep('{"n":[]},', width - 1) .. '{"n":[]}]'
+    local array: {value} = json.decode(source)
+    test.assert(#array == width)
+    local first: {string: value} = array[1]
+    local last: {string: value} = array[width]
+    local first_inner: {value} = first["n"]
+    local last_inner: {value} = last["n"]
+    test.assert(#first_inner == 0 and #last_inner == 0)
+  end)
+end

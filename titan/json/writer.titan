@@ -1,0 +1,289 @@
+-- This UTF-8 check accepts Unicode scalar values only. JSON text never carries
+-- surrogate code points or overlong byte sequences.
+local function utf8_width(subject: string, position: integer, path: Path): integer
+  local first = json_byte(subject, position)
+  local width = 0
+  local lower = 128
+  local upper = 191
+  if first >= 194 and first <= 223 then
+    width = 2
+  elseif first >= 224 and first <= 239 then
+    width = 3
+    if first == 224 then lower = 160 end
+    if first == 237 then upper = 159 end
+  elseif first >= 240 and first <= 244 then
+    width = 4
+    if first == 240 then lower = 144 end
+    if first == 244 then upper = 143 end
+  end
+  if width == 0 or position + width - 1 > #subject then
+    json_fail("invalid_utf8", "string contains invalid UTF-8", path, nil, nil)
+  end
+  local second = json_byte(subject, position + 1)
+  if second < lower or second > upper then
+    json_fail("invalid_utf8", "string contains invalid UTF-8", path, nil, nil)
+  end
+  for offset = 2, width - 1 do
+    local byte = json_byte(subject, position + offset)
+    if byte < 128 or byte > 191 then
+      json_fail("invalid_utf8", "string contains invalid UTF-8", path, nil, nil)
+    end
+  end
+  return width
+end
+
+local function emit_quoted(subject: string, path: Path, emit: (string) -> ())
+  emit('"')
+  local first = 1
+  local position = 1
+  while position <= #subject do
+    local byte = json_byte(subject, position)
+    if byte == 34 or byte == 92 or byte < 32 then
+      if position > first then emit(strings.sub(subject, first, position - 1)) end
+      if byte == 34 then emit('\\"')
+      elseif byte == 92 then emit('\\\\')
+      elseif byte == 8 then emit('\\b')
+      elseif byte == 9 then emit('\\t')
+      elseif byte == 10 then emit('\\n')
+      elseif byte == 12 then emit('\\f')
+      elseif byte == 13 then emit('\\r')
+      else emit(strings.format('\\u%04x', byte)) end
+      position = position + 1
+      first = position
+    elseif byte < 128 then
+      position = position + 1
+    else
+      position = position + utf8_width(subject, position, path)
+    end
+  end
+  if first <= #subject then emit(strings.sub(subject, first)) end
+  emit('"')
+end
+
+local function quoted_string(subject: string, path: Path): string
+  local output = strings.writer()
+  defer output:close()
+  emit_quoted(subject, path, function(chunk: string) output:write(chunk) end)
+  return output:drain()
+end
+
+local record Encoder
+  const settings: Settings
+  const output: strings.StringWriter
+  const active: {value: boolean}
+  bytes: integer
+  nodes: integer
+end
+
+local function Encoder:append(chunk: string, path: Path)
+  if #chunk > self.settings.max_bytes - self.bytes then
+    json_fail("limit_exceeded", "encoded text exceeds max_bytes", path, nil, nil)
+  end
+  self.output:write(chunk)
+  self.bytes = self.bytes + #chunk
+end
+
+local function Encoder:quoted(subject: string, path: Path)
+  -- The escaped representation is at least this long. Reject huge inputs
+  -- before copying them; the emitter checks expansion incrementally.
+  if #subject > self.settings.max_bytes - self.bytes then
+    json_fail("limit_exceeded", "encoded text exceeds max_bytes", path, nil, nil)
+  end
+  emit_quoted(subject, path, function(chunk: string) self:append(chunk, path) end)
+end
+
+-- Bottom-up mergesort bounds Map ordering at O(n log n), including adversarial
+-- insertion orders. String comparisons are explicitly unsigned byte order.
+local function byte_less(left: string, right: string): boolean
+  local length = #left
+  if #right < length then length = #right end
+  for index = 1, length do
+    local a = json_byte(left, index)
+    local b = json_byte(right, index)
+    if a ~= b then return a < b end
+  end
+  return #left < #right
+end
+
+local function sort_keys(keys: {string})
+  local work: {string} = {}
+  local width = 1
+  while width < #keys do
+    local first = 1
+    while first <= #keys do
+      local middle = first + width
+      local ending = first + 2 * width
+      if middle > #keys + 1 then middle = #keys + 1 end
+      if ending > #keys + 1 then ending = #keys + 1 end
+      local left = first
+      local right = middle
+      for destination = first, ending - 1 do
+        if left < middle and (right >= ending or not byte_less(keys[right], keys[left])) then
+          work[destination] = keys[left]
+          left = left + 1
+        else
+          work[destination] = keys[right]
+          right = right + 1
+        end
+      end
+      first = ending
+    end
+    for index = 1, #keys do keys[index] = work[index] end
+    width = width * 2
+  end
+end
+
+local function Encoder:enter(subject: value, path: Path)
+  if self.active[subject] then
+    json_fail("cycle", "value contains an active cycle", path, nil, nil)
+  end
+  self.active[subject] = true
+end
+
+local function Encoder:array(subject: value, elements: const? {value},
+                              path: Path, depth: integer)
+  self:enter(subject, path)
+  defer self.active[subject] = nil
+  self:append("[", path)
+  for index = 1, #elements do
+    if index > 1 then self:append(",", path) end
+    self:visit(elements[index], index_path(path, index), depth)
+  end
+  self:append("]", path)
+end
+
+local function Encoder:map(subject: value, entries: {value: value},
+                            path: Path, depth: integer)
+  self:enter(subject, path)
+  defer self.active[subject] = nil
+  local keys: {string} = {}
+  local values: {string: value} = {}
+  local minimum_bytes = 2
+  for key, entry in iteration.pairs(entries) do
+    case reflect.inspect(key)
+    when is_string: name then
+      if #keys >= self.settings.max_nodes - self.nodes then
+        json_fail("limit_exceeded", "value exceeds max_nodes", path, nil, nil)
+      end
+      local overhead = 4
+      if #keys > 0 then overhead = 5 end
+      local remaining = self.settings.max_bytes - self.bytes
+      if minimum_bytes > remaining or overhead > remaining - minimum_bytes or
+          #name > remaining - minimum_bytes - overhead then
+        json_fail("limit_exceeded", "encoded text exceeds max_bytes", path, nil, nil)
+      end
+      minimum_bytes = minimum_bytes + overhead + #name
+      keys[#keys + 1] = name
+      values[name] = entry
+    else json_fail("invalid_map_key", "JSON object keys must be strings", path, nil, nil)
+    end
+  end
+  sort_keys(keys)
+  self:append("{", path)
+  for index = 1, #keys do
+    local key = keys[index]
+    local child_path = field_path(path, key)
+    if index > 1 then self:append(",", path) end
+    self:quoted(key, path)
+    self:append(":", child_path)
+    self:visit(values[key], child_path, depth)
+  end
+  self:append("}", path)
+end
+
+local function Encoder:record_fields(subject: value, fields: const {reflect.FieldType},
+                                      read: (integer) -> value, path: Path,
+                                      depth: integer)
+  self:enter(subject, path)
+  defer self.active[subject] = nil
+  self:append("{", path)
+  for index = 1, #fields do
+    local field = fields[index]
+    local child_path = field_path(path, field.name)
+    if index > 1 then self:append(",", path) end
+    self:quoted(field.name, child_path)
+    self:append(":", child_path)
+    self:visit(read(index), child_path, depth)
+  end
+  self:append("}", path)
+end
+
+local function Encoder:union_value(subject: value, inspected: reflect.UnionValue,
+                                    path: Path, depth: integer)
+  self:enter(subject, path)
+  defer self.active[subject] = nil
+  local found: reflect.VariantType?
+  for index = 1, #inspected.descriptor.variants do
+    local variant = inspected.descriptor.variants[index]
+    if variant.tag == inspected.tag then found = variant; break end
+  end
+  if found == nil then
+    json_fail("private_variant", "active union variant is private", path, nil, nil)
+  end
+  self:append('{"tag":', path)
+  self:count_node(field_path(path, "tag"))
+  self:quoted(found.name, field_path(path, "tag"))
+  if found.descriptor ~= nil then
+    self:append(',"value":', path)
+    self:visit(inspected.payload, field_path(path, "value"), depth)
+  end
+  self:append("}", path)
+end
+
+local function Encoder:count_node(path: Path)
+  if self.nodes >= self.settings.max_nodes then
+    json_fail("limit_exceeded", "value exceeds max_nodes", path, nil, nil)
+  end
+  self.nodes = self.nodes + 1
+end
+
+local function Encoder:visit(subject: value, path: Path, depth: integer)
+  self:count_node(path)
+  if subject == nil or (self.settings.null_value ~= nil and subject == self.settings.null_value) then
+    self:append("null", path)
+    return
+  end
+  local inspected = reflect.inspect(subject)
+  local container = false
+  case inspected
+  when is_array then container = true
+  when is_const_array then container = true
+  when is_map then container = true
+  when is_record then container = true
+  when is_interface then container = true
+  when is_union then container = true
+  end
+  if container then
+    depth = depth + 1
+    if depth > self.settings.max_depth then
+      json_fail("limit_exceeded", "value exceeds max_depth", path, nil, nil)
+    end
+  end
+  case inspected
+  when is_nil then self:append("null", path)
+  when is_boolean: boolean_value then
+    if boolean_value then self:append("true", path) else self:append("false", path) end
+  when is_integer: integer_value then self:append(strings.format("%d", integer_value), path)
+  when is_float: float_value then self:append(float_text(float_value, path), path)
+  when is_string: string_value then self:quoted(string_value, path)
+  when is_array: array_value then self:array(subject, array_value.val, path, depth)
+  when is_const_array: array_value then self:array(subject, array_value.val, path, depth)
+  when is_map: map_value then self:map(subject, map_value.val, path, depth)
+  when is_record: record_value then
+    self:record_fields(subject, record_value.descriptor.fields,
+      function(index: integer): value return record_value:get(index) end, path, depth)
+  when is_interface: interface_value then
+    self:record_fields(subject, interface_value.descriptor.fields,
+      function(index: integer): value return interface_value:get(index) end, path, depth)
+  when is_union: union_value then self:union_value(subject, union_value, path, depth)
+  else json_fail("unsupported_type", "value has no JSON representation", path, nil, nil)
+  end
+end
+
+local function encode_value(subject: value, settings: Settings): string
+  local output = strings.writer()
+  defer output:close()
+  local encoder = Encoder.new(settings, output, {}, 0, 0)
+  encoder:visit(subject, root_path(), 0)
+  return output:drain()
+end
