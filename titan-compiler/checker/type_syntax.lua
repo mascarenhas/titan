@@ -961,6 +961,24 @@ function tryforce(node)
     end
 end
 
+-- Logical operators observe truthiness; they do not assign their operands to
+-- boolean sinks. In particular, a value may hold any Lua value here, whereas
+-- an ordinary value-to-boolean assignment requires an actual boolean tag.
+function truthiness(node)
+    if node._type._tag == "Type.Boolean" then return node end
+    local target = types.Boolean()
+    local n = ast.ExpCast(node.loc, node, target)
+    n._implicit_coercion = true
+    n._operator_conversion = {
+        kind = "operator_conversion",
+        op = "truthiness",
+        source = node._type,
+        target = target,
+    }
+    n._type = target
+    return n
+end
+
 function trytostr(node)
     local source = node._type
     if source._tag == "Type.Integer" or
