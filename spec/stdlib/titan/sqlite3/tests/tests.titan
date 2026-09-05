@@ -1,0 +1,96 @@
+-- Public behavior of the canonical embedded SQLite provider.
+local test = import "test"
+local sqlite3 = import "sqlite3"
+local runtime_test = import "support.runtime.titan"
+local task_support = import "support.async.titan"
+local async = import "async"
+local timer = import "timer"
+local fs = import "fs"
+local math = import "math"
+local reflect = import "reflect"
+local str = import "string"
+
+local function expect_sqlite_error(action: () -> ()): sqlite3.Error
+  local caught: sqlite3.Error? = nil
+  do
+    action()
+  catch
+    if error is sqlite3.Error then
+      caught = error
+    else
+      raise
+    end
+  end
+  test.assert(caught ~= nil, "expected sqlite3.Error")
+  test.assert(#caught.message > 0 and #caught.operation > 0,
+              "SQLite error omitted its message or operation")
+  return caught
+end
+
+local function expect_wrapper_error(action: () -> ()): sqlite3.Error
+  local failure = expect_sqlite_error(action)
+  test.assert(failure.code == nil and failure.extended_code == nil,
+              "wrapper error invented native SQLite result codes")
+  return failure
+end
+
+local function expect_native_error(action: () -> (),
+                                   code: integer): sqlite3.Error
+  local failure = expect_sqlite_error(action)
+  test.assert(failure.code == code and failure.extended_code ~= nil,
+              "SQLite failure lost its native result codes")
+  return failure
+end
+
+local function execute_sql(connection: sqlite3.Connection,
+                           sql: string): integer
+  local statement = connection:prepare(sql)
+  defer statement:close()
+  return statement:execute()
+end
+
+local function required_row(cursor: sqlite3.Cursor): sqlite3.Row
+  local row? = cursor:fetch()
+  test.assert(row ~= nil, "expected a result row")
+  return row
+end
+
+-- Return a snapshot after both owners close. This is also the normal explicit
+-- application mapping boundary; no borrowed SQLite memory leaves the Cursor.
+local function first_row(connection: sqlite3.Connection,
+                         sql: string): sqlite3.Row
+  local statement = connection:prepare(sql)
+  defer statement:close()
+  local cursor = statement:query()
+  defer cursor:close()
+  return required_row(cursor)
+end
+
+local function scalar_integer(connection: sqlite3.Connection,
+                              sql: string): integer
+  return first_row(connection, sql):get(1)
+end
+
+local function assert_integer_cell(row: sqlite3.Row, index: integer,
+                                   expected: integer)
+  case reflect.inspect(row:get(index))
+  when is_integer: actual then
+    test.assert(actual == expected, "SQL INTEGER cell had the wrong value")
+  else
+    raise "SQL INTEGER cell lost its integer representation"
+  end
+end
+
+local function assert_float_cell(row: sqlite3.Row, index: integer,
+                                 expected: float)
+  case reflect.inspect(row:get(index))
+  when is_float: actual then
+    test.assert(actual == expected, "SQL REAL cell had the wrong value")
+  else
+    raise "SQL REAL cell lost its float representation"
+  end
+end
+
+local function remove_if_present(path: string)
+  if fs.stat(path) ~= nil then fs.unlink(path) end
+end

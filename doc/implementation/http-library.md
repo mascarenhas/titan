@@ -276,8 +276,8 @@ as runtime-SDK files.
 
 The HTTP root adds one logical protocol, archive key, generated shim, and
 `luaopen_titan_http`. The later additions of the independent `titan.test` and
-`titan.reflect` modules make the coordinated current image nineteen logical
-modules and shims with twenty DSO openers including bare `luaopen_titan`
+`titan.reflect` modules make the coordinated current image twenty logical
+modules and shims with twenty-one DSO openers including bare `luaopen_titan`
 support. The complete image
 lives in the `0.6` library namespace; earlier installations are not publication
 predecessors.

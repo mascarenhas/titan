@@ -1,0 +1,224 @@
+function test_execute_reuses_statement_after_success_and_constraint_error(
+    context: test.Context)
+  runtime_test.run(function ()
+    local connection = sqlite3.connect(":memory:")
+    defer connection:close()
+    execute_sql(connection,
+        "CREATE TABLE item (id INTEGER PRIMARY KEY, value TEXT)")
+    local statement = connection:prepare("INSERT INTO item VALUES (?, ?)")
+    defer statement:close()
+    test.assert(statement:execute(1, "first") == 1,
+                "execute did not report sqlite3_changes64")
+    expect_native_error(function () statement:execute(1, "duplicate") end, 19)
+    test.assert(statement:execute(2, "second") == 1 and
+                scalar_integer(connection, "SELECT count(*) FROM item") == 2,
+                "Statement was not reusable after an execution error")
+  end)
+end
+
+function test_execute_rejects_first_row_and_preserves_sqlite_change_count(
+    context: test.Context)
+  runtime_test.run(function ()
+    local connection = sqlite3.connect(":memory:")
+    defer connection:close()
+    execute_sql(connection, "CREATE TABLE item (value INTEGER)")
+    test.assert(execute_sql(connection,
+        "INSERT INTO item VALUES (1), (2), (3)") == 3,
+        "multirow INSERT did not preserve SQLite's change counter")
+    test.assert(execute_sql(connection, "CREATE TABLE unrelated (x)") == 3,
+                "DDL replaced sqlite3_changes64 with a per-statement delta")
+    test.assert(execute_sql(connection,
+        "SELECT value FROM item WHERE 0") == 3,
+        "zero-row execute did not preserve the literal change-count contract")
+    local select = connection:prepare("SELECT value FROM item")
+    defer select:close()
+    expect_sqlite_error(function () select:execute() end)
+    local cursor = select:query()
+    defer cursor:close()
+    assert_integer_cell(required_row(cursor), 1, 1)
+    cursor:close()
+    local returning = connection:prepare(
+        "INSERT INTO item VALUES (4) RETURNING value")
+    defer returning:close()
+    expect_sqlite_error(function () returning:execute() end)
+    test.assert(scalar_integer(connection, "SELECT count(*) FROM item") == 4,
+                "first-row execute rejection lost completed INSERT effects")
+  end)
+end
+
+function test_query_streams_rows_and_natural_exhaustion_releases_execution(
+    context: test.Context)
+  runtime_test.run(function ()
+    local connection = sqlite3.connect(":memory:")
+    defer connection:close()
+    local statement = connection:prepare(
+        "SELECT 3 AS value UNION ALL SELECT 5 UNION ALL SELECT 8")
+    defer statement:close()
+    local cursor = statement:query()
+    defer cursor:close()
+    assert_integer_cell(required_row(cursor), 1, 3)
+    assert_integer_cell(required_row(cursor), 1, 5)
+    assert_integer_cell(required_row(cursor), 1, 8)
+    test.assert(cursor:fetch() == nil and cursor:fetch() == nil,
+                "exhausted Cursor did not keep returning nil")
+    local repeated = statement:query()
+    defer repeated:close()
+    assert_integer_cell(required_row(repeated), 1, 3)
+    repeated:close()
+    statement:close()
+    test.assert(cursor:fetch() == nil,
+                "exhausted Cursor depended on a still-open Statement")
+  end)
+end
+
+function test_empty_query_releases_execution_before_first_fetch(
+    context: test.Context)
+  runtime_test.run(function ()
+    local connection = sqlite3.connect(":memory:")
+    defer connection:close()
+    local statement = connection:prepare("SELECT 1 AS value WHERE 0")
+    defer statement:close()
+    local empty = statement:query()
+    defer empty:close()
+    test.assert(#empty.columns == 1 and empty.columns[1].name == "value",
+                "empty query lost its result metadata")
+    -- query already reached DONE, so no fetch or close is needed to permit
+    -- another execution or to retire the prepared Statement.
+    local again = statement:query()
+    defer again:close()
+    statement:close()
+    test.assert(empty:fetch() == nil and again:fetch() == nil,
+                "already exhausted Cursor performed pending native cleanup")
+  end)
+end
+
+function test_active_cursor_rejects_reexecution_and_close_restores_statement(
+    context: test.Context)
+  runtime_test.run(function ()
+    local connection = sqlite3.connect(":memory:")
+    defer connection:close()
+    local statement = connection:prepare("SELECT 13")
+    defer statement:close()
+    local other = connection:prepare("SELECT 17")
+    defer other:close()
+    local cursor = statement:query()
+    defer cursor:close()
+    expect_wrapper_error(function () statement:query() end)
+    expect_wrapper_error(function () statement:execute() end)
+    expect_wrapper_error(function () statement:close() end)
+    expect_wrapper_error(function () other:query() end)
+    expect_wrapper_error(function () connection:commit() end)
+    cursor:close()
+    cursor:close()
+    expect_wrapper_error(function () cursor:fetch() end)
+    local reused = statement:query()
+    defer reused:close()
+    assert_integer_cell(required_row(reused), 1, 13)
+    reused:close()
+    local independent = other:query()
+    defer independent:close()
+    assert_integer_cell(required_row(independent), 1, 17)
+  end)
+end
+
+function test_query_rejects_zero_column_statements_and_accepts_returning(
+    context: test.Context)
+  runtime_test.run(function ()
+    local connection = sqlite3.connect(":memory:")
+    defer connection:close()
+    execute_sql(connection, "CREATE TABLE item (value INTEGER)")
+    local insert = connection:prepare("INSERT INTO item VALUES (1)")
+    defer insert:close()
+    expect_wrapper_error(function () insert:query() end)
+    test.assert(scalar_integer(connection, "SELECT count(*) FROM item") == 0,
+                "zero-column query mismatch was not rejected before execution")
+    local returning = connection:prepare(
+        "INSERT INTO item VALUES (7), (8) RETURNING value")
+    defer returning:close()
+    local cursor = returning:query()
+    defer cursor:close()
+    assert_integer_cell(required_row(cursor), 1, 7)
+    assert_integer_cell(required_row(cursor), 1, 8)
+    test.assert(cursor:fetch() == nil and
+                scalar_integer(connection, "SELECT count(*) FROM item") == 2,
+                "RETURNING query did not complete its modifying statement")
+  end)
+end
+
+function test_rows_preserve_all_nulls_duplicate_names_and_bounds(
+    context: test.Context)
+  runtime_test.run(function ()
+    local connection = sqlite3.connect(":memory:")
+    defer connection:close()
+    local row = first_row(connection,
+        "SELECT NULL AS duplicate, NULL AS duplicate, NULL AS tail")
+    test.assert(#row.columns == 3 and row:get(1) == nil and
+                row:get(2) == nil and row:get(3) == nil,
+                "all-NULL row was mistaken for EOF or truncated")
+    test.assert(row.columns[1].name == "duplicate" and
+                row.columns[2].name == "duplicate" and
+                row.columns[3].name == "tail",
+                "row metadata discarded duplicate column names")
+    expect_wrapper_error(function () row:get(0) end)
+    expect_wrapper_error(function () row:get(-1) end)
+    expect_wrapper_error(function () row:get(4) end)
+  end)
+end
+
+function test_row_snapshots_survive_fetch_and_all_owner_closes(
+    context: test.Context)
+  local first: sqlite3.Row? = nil
+  local second: sqlite3.Row? = nil
+  runtime_test.run(function ()
+    local connection = sqlite3.connect(":memory:")
+    defer connection:close()
+    local statement = connection:prepare(
+        "SELECT 'first' AS text, x'610062' AS bytes " ..
+        "UNION ALL SELECT 'second', x'630064'")
+    defer statement:close()
+    local cursor = statement:query()
+    defer cursor:close()
+    first = required_row(cursor)
+    second = required_row(cursor)
+    test.assert(cursor:fetch() == nil, "snapshot query did not exhaust")
+  end)
+  -- Row access is synchronous and independent of any live Task or Runtime.
+  test.assert(first:get(1) as string == "first" and
+              second:get(1) as string == "second",
+              "next fetch or close invalidated saved TEXT bytes")
+  local first_blob: sqlite3.Blob = first:get(2)
+  local second_blob: sqlite3.Blob = second:get(2)
+  test.assert(first_blob.bytes == "a\0b" and second_blob.bytes == "c\0d",
+              "next fetch or close invalidated saved BLOB bytes")
+  test.assert(first.columns[1].name == "text" and
+              first.columns[2].name == "bytes",
+              "Connection close invalidated row metadata")
+end
+
+function test_column_metadata_and_automatic_schema_reprepare(
+    context: test.Context)
+  runtime_test.run(function ()
+    local connection = sqlite3.connect(":memory:")
+    defer connection:close()
+    execute_sql(connection, "CREATE TABLE item (id INTEGER, label TEXT)")
+    execute_sql(connection, "INSERT INTO item VALUES (3, 'named')")
+    local row = first_row(connection,
+        "SELECT id, label, id + 1 AS expression FROM item")
+    test.assert(row.columns[1].declared_type == "INTEGER" and
+                row.columns[2].declared_type == "TEXT" and
+                row.columns[3].declared_type == nil,
+                "declared column types were confused with expression types")
+    local statement = connection:prepare("SELECT * FROM item")
+    defer statement:close()
+    execute_sql(connection, "ALTER TABLE item ADD COLUMN added BLOB")
+    local cursor = statement:query()
+    defer cursor:close()
+    test.assert(#cursor.columns == 3 and
+                cursor.columns[3].name == "added" and
+                cursor.columns[3].declared_type == "BLOB",
+                "query copied stale metadata before automatic reprepare")
+    local updated = required_row(cursor)
+    test.assert(#updated.columns == 3 and updated:get(3) == nil,
+                "reprepared row did not match its updated column metadata")
+  end)
+end

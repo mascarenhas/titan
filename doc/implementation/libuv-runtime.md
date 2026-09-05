@@ -116,6 +116,19 @@ submission succeeds, cancellation neither invokes `uv_cancel` nor releases the
 carrier early. The after-work callback remains authoritative and pending
 cancellation is injected only when it resumes the Task.
 
+Source collaborators that must retire native ownership use the local
+`uv.run_foreign_cleanup(f, arg)` through an explicit `import "uv.titan"`.
+It yields `Call.run_foreign_cleanup(WorkCall)` and shares the exact dispatcher,
+owner, callback, and `async.run_foreign` submission diagnostics above. Only
+this Call variant is cancellation-insensitive: a pending cancellation neither
+prevents its submission nor replaces its ordinary completion. The Task retains
+its original cancellation reason and ultimately finishes cancelled. The
+operation is reserved for close, finalize, reset, and disposal of unpublished
+native results; it is not exported by `async` and does not shield ordinary
+foreign work. It still requires a current Task, and its caller must retain the
+argument's native owners through completion. Runtime teardown starts only
+after all user Tasks, including their deferred cleanup, have retired.
+
 The pool is shared with libuv filesystem and name-resolution requests. The
 runtime adds no private queue, worker count, fairness policy, or concurrent
 access protection around it.

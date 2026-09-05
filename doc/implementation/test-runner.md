@@ -217,7 +217,7 @@ lifecycle protocol.
 
 ## Repository dogfooding
 
-The Makefile's `TITAN_STDLIB_TEST_ROOTS` manifest names 23 module-owned roots
+The Makefile's `TITAN_STDLIB_TEST_ROOTS` manifest names 24 module-owned roots
 under `spec/stdlib/titan/`. `make titan-stdlib-test-build` makes every one an
 explicit root in a single `titanc --test --no-uv-bootstrap` invocation: source
 remains authoritative, discovery sees the complete checked closure, and no import-only
@@ -229,7 +229,7 @@ module translation units are temporarily generated beside their Titan sources.
 
 `make titan-stdlib-test-run` returns to the repository root before executing,
 because several fixtures use repository-relative paths. `TITAN_FILTER` supplies
-one Lua pattern to this already built executable; it never changes the 23-root
+one Lua pattern to this already built executable; it never changes the 24-root
 compile. `make titan-stdlib-test` composes build and run, while the split leaf
 targets let sanitizer and focused development runs reuse one build in multiple
 fresh processes. `BUSTED_FILTER` is independent and belongs to
@@ -299,8 +299,8 @@ macOS gate remains manually dispatched before merge.
 ## Packaging and compatibility
 
 `titan.test` is the eighteenth ordinary logical module in the combined
-`titan.so`/`titan.a` pair, yielding twenty `luaopen_*` entries including bare
-support. Its generated Lua shim is published with the other eighteen. The
+`titan.so`/`titan.a` pair, yielding twenty-one `luaopen_*` entries including bare
+support. Its generated Lua shim is published with the other nineteen. The
 canonical private source is a compiler-data artifact, not another run-time
 module and not a LuaRocks manifest C module. `stdlib_installer.lua` validates,
 backs up, commits, and rolls it back in the same recoverable transaction before

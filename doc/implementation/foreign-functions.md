@@ -236,6 +236,16 @@ the body. Numeric `for` chooses `<=` or `>=` from the frozen step and advances
 with C addition. These paths preserve source sequencing without replacing C
 operator semantics.
 
+Each nested `elseif` scope follows the preceding arm's single `else`; the
+later condition's temporary statements remain inside that scope. Regression
+coverage checks both generated validity and lazy, once-only condition effects.
+Native `sizeof`/`alignof` expressions retain the profile's `size_t`, and exact
+pointer output arguments reuse the checker-owned `mutable_c_address` plan to
+pass the original local's address before argument freezing.
+Ordinary Titan call statements and deferred statements use the same explicit
+foreign-reference annotation as value-producing expressions to select the C
+ABI, including source-defined foreign functions with discarded or no results.
+
 Raw field and bracket expressions render C `.`/`->`/`[]` operations directly.
 They deliberately omit the ordinary `codeforeigncall`,
 `codecfunctionptrcall`, and `codecindex_parts` guards that require an implicit
@@ -569,5 +579,5 @@ Earlier Titan installations are not migration or compatibility inputs.
 
 Foreign declarations, allocation plans, and generated headers remain
 compiler-local. They add no public type descriptor or module-state slot, so the
-combined standard provider still has nineteen logical metadata keys and
-twenty DSO openers including bare `luaopen_titan`.
+combined standard provider still has twenty logical metadata keys and
+twenty-one DSO openers including bare `luaopen_titan`.

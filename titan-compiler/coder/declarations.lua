@@ -979,10 +979,9 @@ function coder._foreign_raw_stat(ctx, node)
         return "break;"
     elseif tag == "Ast.StatIf" then
         local chunks = {}
-        for index, arm in ipairs(node.thens) do
+        for _, arm in ipairs(node.thens) do
             local stats, condition = coder._foreign_raw_exp(ctx, arm.condition)
-            chunks[#chunks + 1] = (index == 1 and "" or "else ")
-                .. "{\n" .. stats .. "\nif (" .. condition .. ") "
+            chunks[#chunks + 1] = "{\n" .. stats .. "\nif (" .. condition .. ") "
                 .. coder._foreign_raw_block(ctx, arm.block)
                 .. "\nelse "
         end

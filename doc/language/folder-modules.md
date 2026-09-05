@@ -246,15 +246,16 @@ The main source keeps the shared prelude, module state, bootstrap, sole
 initializer, and the public `Error` and `OperationError` records. `task.titan`
 owns the other three public nominal types: `CancellationReason`, `TaskStatus`,
 and `Task`. The filesystem, OS, process, Runtime, timer, and TCP bridges and
-their native owner records are local declarations. The five high-level source
-modules `titan.async`, `titan.timer`, `titan.net`, `titan.os`, and `titan.fs`
+their native owner records are local declarations. The six high-level source
+modules `titan.async`, `titan.timer`, `titan.net`, `titan.os`, `titan.fs`, and
+`titan.sqlite3`
 write `import "uv.titan"` to select those locals through explicit source edges;
 they are not members of the compiled `titan.uv` interface. An ordinary
 `import "uv"`, even when source-resolved, remains public-only.
 
 These files are one logical module and therefore produce one object and one
 `titan/uv.lua` loader, never one artifact per contributor. The production
-standard-library invocation links that object with the other sixteen logical
+standard-library invocation links that object with the other nineteen logical
 roots into the canonical `titan.so`/`titan.a` provider pair.
 Titan imports select the preferred compiled form, while Lua
 `require "titan.uv"` selects the independent `titan.uv` logical module inside

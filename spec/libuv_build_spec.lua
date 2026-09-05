@@ -17,13 +17,14 @@ local UV_TYPES_FIXTURE =
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "os", "peg", "string", "math", "lua", "iteration", "gc",
-    "test", "reflect",
+    "test", "reflect", "sqlite3",
 }
 local STDLIB_ROOTS = {
     "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
     "titan.io", "titan.fs", "titan.net", "titan.ssl", "titan.url",
     "titan.http", "titan.os", "titan.peg", "titan.string", "titan.math",
     "titan.lua", "titan.iteration", "titan.gc", "titan.test", "titan.reflect",
+    "titan.sqlite3",
 }
 local STDLIB_SHIMS = {
     "titan/coroutine.lua", "titan/uv.lua", "titan/async.lua",
@@ -31,11 +32,14 @@ local STDLIB_SHIMS = {
     "titan/ssl.lua", "titan/url.lua", "titan/http.lua", "titan/os.lua",
     "titan/peg.lua", "titan/string.lua", "titan/math.lua", "titan/lua.lua",
     "titan/iteration.lua", "titan/gc.lua", "titan/test.lua", "titan/reflect.lua",
+    "titan/sqlite3.lua",
 }
 local LPEGLABEL_INCLUDE =
     "-I" .. lfs.currentdir() .. "/vendor/lpeglabel"
 local LLHTTP_NATIVE_INCLUDE =
     "-I" .. lfs.currentdir() .. "/llhttp-release-v9.4.3/include"
+local SQLITE3_NATIVE_INCLUDE =
+    "-I" .. lfs.currentdir() .. "/sqlite-autoconf-3530400"
 local BUNDLED_OPENSSL_INCLUDES = table.concat({
     "-I" .. lfs.currentdir() .. "/openssl-build/include",
     "-I" .. lfs.currentdir() .. "/openssl-3.5.7/include",
@@ -43,10 +47,12 @@ local BUNDLED_OPENSSL_INCLUDES = table.concat({
 }, " ")
 local HTTP_SSL_BUNDLED_PAYLOAD = table.concat({
     "llhttp-build/libtitan-llhttp.a",
+    "sqlite3-build/libtitan-sqlite3.a",
     "openssl-build/libssl.a",
     "openssl-build/libcrypto.a",
 }, " ")
-local HTTP_SSL_SYSTEM_PAYLOAD = "llhttp-build/libtitan-llhttp.a"
+local HTTP_SSL_SYSTEM_PAYLOAD =
+    "llhttp-build/libtitan-llhttp.a sqlite3-build/libtitan-sqlite3.a"
 local HTTP_FOREIGN_CALLBACKS = {
     { name = "llhttp_url_cb",    slot = 3, setting = "on_url" },
     { name = "llhttp_status_cb", slot = 4, setting = "on_status" },
@@ -464,6 +470,26 @@ local function makefile_words(name)
     return values
 end
 
+local function stdlib_source_files()
+    local sources = {}
+    local source_ensembles = {
+        ["$(UV_TITAN_SOURCES)"] = "UV_TITAN_SOURCES",
+        ["$(STDLIB_HTTP_SOURCES)"] = "STDLIB_HTTP_SOURCES",
+        ["$(SQLITE3_TITAN_SOURCES)"] = "SQLITE3_TITAN_SOURCES",
+    }
+    for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES")) do
+        local ensemble = source_ensembles[source]
+        if ensemble then
+            for _, constituent in ipairs(makefile_words(ensemble)) do
+                sources[#sources + 1] = constituent
+            end
+        else
+            sources[#sources + 1] = source
+        end
+    end
+    return sources
+end
+
 local function discovered_uv_sources()
     local sources = {}
     for entry in lfs.dir("titan/uv") do
@@ -867,7 +893,7 @@ describe("libuv Makefile configuration", function()
             "rock-post-install: scripts/stdlib_installer.lua " ..
             "$(STDLIB_EXTRA_OBJECTS) openssl",
             "clean-llhttp:", "clean-openssl:",
-            "clean-libuv clean-llhttp clean-openssl",
+            "clean-libuv clean-llhttp clean-sqlite3 clean-openssl",
         }) do
             assert.truthy(makefile:find(contract, 1, true), contract)
         end
@@ -893,6 +919,48 @@ describe("libuv Makefile configuration", function()
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         assert.truthy(nm_has_symbol(output, "llhttp_execute"), output)
+    end)
+
+    it("builds the pinned serialized SQLite amalgamation as private payload", function()
+        assert.same({ "3.53.4" }, makefile_words("SQLITE3_VERSION"))
+        assert.same({ "3530400" }, makefile_words("SQLITE3_RELEASE"))
+        assert.same({
+            "0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c",
+        }, makefile_words("SQLITE3_SHA256"))
+        assert.same({
+            "-std=c99", "-fPIC", "-fvisibility=hidden", "-DSQLITE_THREADSAFE=1",
+        }, makefile_words("SQLITE3_CFLAGS"))
+        local archive = "sqlite3-build/libtitan-sqlite3.a"
+        local ok, output = run_argv(tool_argv("AR", "ar", "t", archive))
+        assert.truthy(ok, output)
+        assert.same({ "sqlite3.o" }, archive_object_members(output))
+
+        local root = make_temp_dir()
+        local source, executable = root .. "/sqlite-build.c", root .. "/sqlite-build"
+        local tested, test_error = pcall(function()
+            write_file(source, [[#include "sqlite3.h"
+int main(void) {
+    return sqlite3_threadsafe() != 1 || sqlite3_libversion_number() != 3053004;
+}
+]])
+            local argv = compiler_argv("-std=c99", SQLITE3_NATIVE_INCLUDE,
+                source, "-o", executable, archive, "-lpthread", "-lm")
+            local host_ok, host = run_argv({ "uname", "-s" })
+            assert.truthy(host_ok, host)
+            if host:match("^%s*Linux%s*$") then argv[#argv + 1] = "-ldl" end
+            for _, name in ipairs({ "TITAN_EXTRA_CFLAGS", "TITAN_EXTRA_LDFLAGS" }) do
+                for _, flag in ipairs(assert(cdriver.split_shell_words(
+                        os.getenv(name) or ""))) do
+                    argv[#argv + 1] = flag
+                end
+            end
+            ok, output = run_argv(argv)
+            assert.truthy(ok, output)
+            ok, output = run_argv({ executable })
+            assert.truthy(ok, output)
+        end)
+        remove_tree(root)
+        if not tested then error(test_error, 0) end
     end)
 
     it("keeps trusted Lua value bridges inline in the FFI header", function()
@@ -1241,16 +1309,18 @@ describe("libuv Makefile configuration", function()
             assert.same({
                 "$(LTITANLIB_O)", "$(LPEGLABEL_ARCHIVE)",
                 "$(LIBUV_EXTRA_OBJECTS)", "$(LLHTTP_ARCHIVE)",
-                "$(OPENSSL_EXTRA_OBJECTS)",
+                "$(SQLITE3_ARCHIVE)", "$(OPENSSL_EXTRA_OBJECTS)",
             }, makefile_words("STDLIB_EXTRA_OBJECTS"))
             assert.same({
                 "$(LPEGLABEL_ARCHIVE)", "$(LLHTTP_ARCHIVE)",
-                "$(OPENSSL_EXTRA_OBJECTS)",
+                "$(SQLITE3_ARCHIVE)", "$(OPENSSL_EXTRA_OBJECTS)",
             }, makefile_words("STDLIB_NATIVE_IDENTITY_PREREQS"))
             assert.same({ "$(LPEGLABEL_CPPFLAGS)" },
                 makefile_words("STDLIB_LPEGLABEL_CPPFLAGS"))
             assert.same({ "$(LLHTTP_CPPFLAGS)" },
                 makefile_words("STDLIB_HTTP_CPPFLAGS"))
+            assert.same({ "$(SQLITE3_CPPFLAGS)" },
+                makefile_words("STDLIB_SQLITE3_CPPFLAGS"))
             assert.same({ "$(OPENSSL_CPPFLAGS)" },
                 makefile_words("STDLIB_OPENSSL_CPPFLAGS"))
             assert.same({
@@ -1258,27 +1328,12 @@ describe("libuv Makefile configuration", function()
                 "LICENSES/lpeglabel-LICENSE", "LICENSES/lpeg-LICENSE",
                 "LICENSES/lpeg-patterns-LICENSE",
                 "LICENSES/ta-regex-LICENSE", "LICENSES/lua-LICENSE",
-                "LICENSES/llhttp-LICENSE", "LICENSES/openssl-LICENSE",
+                "LICENSES/llhttp-LICENSE", "LICENSES/sqlite3-LICENSE",
+                "LICENSES/openssl-LICENSE",
             }, makefile_words("STDLIB_LICENSES"))
             assert.same({ STDLIB_CONTAINER },
                 makefile_words("STDLIB_CONTAINER"))
 
-            local sources = makefile_words("STDLIB_TITAN_SOURCES")
-            local expanded = {}
-            local source_ensembles = {
-                ["$(UV_TITAN_SOURCES)"] = "UV_TITAN_SOURCES",
-                ["$(STDLIB_HTTP_SOURCES)"] = "STDLIB_HTTP_SOURCES",
-            }
-            for _, source in ipairs(sources) do
-                local ensemble = source_ensembles[source]
-                if ensemble then
-                    for _, constituent in ipairs(makefile_words(ensemble)) do
-                        expanded[#expanded + 1] = constituent
-                    end
-                else
-                    expanded[#expanded + 1] = source
-                end
-            end
             assert.same({
                 "titan/coroutine.titan",
                 "titan/uv/uv.titan", "titan/uv/file.titan",
@@ -1304,19 +1359,18 @@ describe("libuv Makefile configuration", function()
                 "titan/math.titan", "titan/lua.titan",
                 "titan/iteration.titan", "titan/gc.titan", "titan/test.titan",
                 "titan/reflect.titan",
-            }, expanded)
+                "titan/sqlite3/sqlite3.titan", "titan/sqlite3/bindings.titan",
+                "titan/sqlite3/row.titan", "titan/sqlite3/worker.titan",
+            }, stdlib_source_files())
         end)
 
     it("keeps titan.gc as the sole stdlib lua_setmetatable owner",
         function()
             local callers = {}
-            for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES")) do
-                if source ~= "$(UV_TITAN_SOURCES)" and
-                    source ~= "$(STDLIB_HTTP_SOURCES)" then
-                    if read_file(source):find(
-                            "lua.lua_setmetatable", 1, true) then
-                        callers[#callers + 1] = source
-                    end
+            for _, source in ipairs(stdlib_source_files()) do
+                if read_file(source):find(
+                        "lua.lua_setmetatable", 1, true) then
+                    callers[#callers + 1] = source
                 end
             end
             assert.same({ "titan/gc.titan" }, callers)
@@ -1324,20 +1378,12 @@ describe("libuv Makefile configuration", function()
 
     it("keeps parser-sugared standard-library imports short",
         function()
-            local short = {
-                "coroutine", "uv", "async", "timer", "io", "fs", "net",
-                "ssl", "url", "http", "os", "peg", "string", "test",
-                'math', 'gc', 'lua', 'iteration'
-            }
-            for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES")) do
-                if source ~= "$(UV_TITAN_SOURCES)" and
-                    source ~= "$(STDLIB_HTTP_SOURCES)" then
-                    local contents = read_file(source)
-                    for _, module in ipairs(short) do
-                        local long = 'import "titan.' .. module .. '"'
-                        assert.falsy(contents:find(long, 1, true),
-                            source .. " uses " .. long)
-                    end
+            for _, source in ipairs(stdlib_source_files()) do
+                local contents = read_file(source)
+                for _, module in ipairs(STDLIB_MODULES) do
+                    local long = 'import "titan.' .. module .. '"'
+                    assert.falsy(contents:find(long, 1, true),
+                        source .. " uses " .. long)
                 end
             end
 
@@ -1648,11 +1694,11 @@ describe("libuv Makefile configuration", function()
             }, public_declarations(path))
         end)
 
-    it("pins current metadata for all nineteen standard modules",
+    it("pins current metadata for all twenty standard modules",
         function()
             local expected = assert(loadfile(STDLIB_TYPES_FIXTURE))()
             local expected_uv = assert(loadfile(UV_TYPES_FIXTURE))()
-            assert.equal(19, #STDLIB_ROOTS)
+            assert.equal(20, #STDLIB_ROOTS)
             assert.equal(expected.uv, expected_uv,
                 "standalone titan.uv metadata fixture is stale")
 
@@ -1690,11 +1736,11 @@ describe("libuv Makefile configuration", function()
             end
         end)
 
-    it("exports twenty DSO openers for nineteen standard modules",
+    it("exports twenty-one DSO openers for twenty standard modules",
         function()
-            assert.equal(19, #STDLIB_MODULES)
-            assert.equal(19, #STDLIB_ROOTS)
-            assert.equal(19, #STDLIB_SHIMS)
+            assert.equal(20, #STDLIB_MODULES)
+            assert.equal(20, #STDLIB_ROOTS)
+            assert.equal(20, #STDLIB_SHIMS)
 
             local container = installed_stdlib_container()
             local ok, output, why, code = run_argv(tool_argv(
@@ -1718,7 +1764,7 @@ describe("libuv Makefile configuration", function()
                     found[symbol] = true
                 end
             end
-            assert.equal(20, (function()
+            assert.equal(21, (function()
                 local count = 0
                 for _ in pairs(found) do count = count + 1 end
                 return count
@@ -1726,7 +1772,7 @@ describe("libuv Makefile configuration", function()
             assert.same(wanted, found)
         end)
 
-    it("keeps bundled SSL and HTTP implementation symbols private", function()
+    it("keeps bundled SSL, HTTP, and SQLite implementation symbols private", function()
         local host_ok, host_output, host_why, host_code =
             run_argv({ "uname", "-s" })
         assert.truthy(host_ok, host_output .. "\n(" ..
@@ -1741,6 +1787,7 @@ describe("libuv Makefile configuration", function()
             tostring(code) .. ")")
         local private_symbols = {
             "llhttp_execute", "SSL_do_handshake", "BIO_read",
+            "sqlite3_open_v2", "sqlite3_prepare_v2", "sqlite3_step",
         }
         for _, symbol in ipairs(private_symbols) do
             assert.falsy(nm_has_symbol(output, symbol),
@@ -2221,7 +2268,7 @@ exit 64
             assert.truthy(command:find(
                 "TITAN_EXTRA_CPPFLAGS='-DUSER_CPP=1 " ..
                 LPEGLABEL_INCLUDE .. " " .. LLHTTP_NATIVE_INCLUDE .. " " ..
-                BUNDLED_OPENSSL_INCLUDES ..
+                SQLITE3_NATIVE_INCLUDE .. " " .. BUNDLED_OPENSSL_INCLUDES ..
                 " -Ilibuv-v1.52.1/include -D_GNU_SOURCE'",
                 1, true), command)
             assert.truthy(command:find(
@@ -2248,7 +2295,7 @@ exit 64
             assert.truthy(command:find(
                 "TITAN_EXTRA_CPPFLAGS='-DUSER_CPP=1 " ..
                 LPEGLABEL_INCLUDE .. " " .. LLHTTP_NATIVE_INCLUDE .. " " ..
-                BUNDLED_OPENSSL_INCLUDES ..
+                SQLITE3_NATIVE_INCLUDE .. " " .. BUNDLED_OPENSSL_INCLUDES ..
                 " -I/opt/libuv/include -DUV_FAKE_PKG=1 -D_GNU_SOURCE'",
                 1, true), command)
             local system_flags =
@@ -2304,7 +2351,8 @@ esac
                 command)
             assert.truthy(command:find(
                 "TITAN_EXTRA_CPPFLAGS='-DUSER_CPP=1 " ..
-                LPEGLABEL_INCLUDE .. " " .. LLHTTP_NATIVE_INCLUDE ..
+                LPEGLABEL_INCLUDE .. " " .. LLHTTP_NATIVE_INCLUDE .. " " ..
+                SQLITE3_NATIVE_INCLUDE ..
                 " -I/opt/openssl/include -DOPENSSL_FAKE_PKG=1 " ..
                 "-DOPENSSL_API_COMPAT=30000 " ..
                 "-Ilibuv-v1.52.1/include -D_GNU_SOURCE'", 1, true), command)
@@ -2338,8 +2386,13 @@ esac
                 "titan/math.titan", "titan/lua.titan",
                 "titan/iteration.titan", "titan/gc.titan", "titan/test.titan",
             }
-            for _, source in ipairs(makefile_words("UV_TITAN_SOURCES")) do
-                sources[#sources + 1] = source
+            for _, ensemble in ipairs({
+                "UV_TITAN_SOURCES", "SQLITE3_TITAN_SOURCES",
+                "SQLITE3_TITAN_HEADERS",
+            }) do
+                for _, source in ipairs(makefile_words(ensemble)) do
+                    sources[#sources + 1] = source
+                end
             end
             for _, source in ipairs(sources) do
                 local ok, output, why, code =
@@ -2376,6 +2429,9 @@ esac
             local llhttp_build_config = root .. "/llhttp-build.config"
             local llhttp_archive_config = root .. "/llhttp-archive.config"
             local llhttp_archive = root .. "/llhttp.a"
+            local sqlite3_build_config = root .. "/sqlite3-build.config"
+            local sqlite3_archive_config = root .. "/sqlite3-archive.config"
+            local sqlite3_archive = root .. "/sqlite3.a"
             local fake_titanc = root .. "/fake-titanc"
             local build_log = root .. "/build.log"
 
@@ -2412,6 +2468,7 @@ int fixture_native_payload(void) { return 1; }
             write_file(prepared, "prepared\n")
             for _, input in ipairs({
                 llhttp_build_config, llhttp_archive_config, llhttp_archive,
+                sqlite3_build_config, sqlite3_archive_config, sqlite3_archive,
             }) do
                 write_file(input, "prepared native identity\n")
             end
@@ -2453,6 +2510,10 @@ printf 'build\n' >> %s
                     "LLHTTP_BUILD_CONFIG=" .. llhttp_build_config,
                     "LLHTTP_ARCHIVE_CONFIG=" .. llhttp_archive_config,
                     "LLHTTP_ARCHIVE=" .. llhttp_archive,
+                    "SQLITE3_BUILD_CONFIG=" .. sqlite3_build_config,
+                    "SQLITE3_ARCHIVE_CONFIG=" .. sqlite3_archive_config,
+                    "SQLITE3_ARCHIVE=" .. sqlite3_archive,
+                    "SQLITE3_TITAN_HEADERS=" .. prepared,
                     "OPENSSL_EXTRA_OBJECTS=",
                     "STDLIB_SOS=",
                     "STDLIB_QUALIFIED_SOS=",
@@ -3952,6 +4013,8 @@ done
                 "spec/fixtures/stdlib/native/async_foreign_work.c",
                 "spec/fixtures/stdlib/native/uv_stdio_probe.h",
                 "spec/fixtures/stdlib/native/uv_stdio_probe.c",
+                "spec/fixtures/stdlib/native/sqlite3_worker_fixture.h",
+                "spec/fixtures/stdlib/native/sqlite3_worker_fixture.c",
                 "spec/fixtures/stdlib/native/os_process_host_child.c",
                 "-X async_foreign_work.o uv_stdio_probe.o",
             }) do
@@ -4022,7 +4085,7 @@ done
                 "grep -E '^\\./\\.lua/var/cache/titan-probes(/|$)' " ..
                 ">/dev/null", 1, true), stdlib_job)
 
-            assert.equal(6, count_literal(workflow,
+            assert.equal(7, count_literal(workflow,
                 "uses: ubicloud/cache@v4"), workflow)
             assert.equal(2, count_literal(workflow,
                 "uses: ubicloud/cache/restore@v4"), workflow)
@@ -4204,6 +4267,10 @@ done
                 'LLHTTP_VERSION: "9.4.3"',
                 'OPENSSL_VERSION: "3.5.7"',
                 "Cache bundled llhttp source and static build",
+                "Cache bundled SQLite amalgamation and static build",
+                "sqlite-autoconf-${{ env.SQLITE3_RELEASE }}.tar.gz",
+                "Build the pinned private SQLite support",
+                "run: make sqlite3",
                 "llhttp-release-v${{ env.LLHTTP_VERSION }}.tar.gz",
                 "Cache bundled OpenSSL source and static build",
                 "openssl-${{ env.OPENSSL_VERSION }}.tar.gz",
@@ -4237,7 +4304,7 @@ done
                 1, true), workflow)
             assert.truthy(workflow:find(
                 "for module in coroutine uv async timer io fs net ssl url " ..
-                "http os peg string math lua iteration gc test reflect; do",
+                "http os peg string math lua iteration gc test reflect sqlite3; do",
                 1, true), workflow)
             assert.truthy(workflow:find(
                 "share/titan/0.6/src/titan/test.titan", 1, true), workflow)
@@ -4416,7 +4483,7 @@ done
                 'LUA_MYCFLAGS: "-fPIC -O1 -g ' ..
                 '-fsanitize=address,undefined'), sanitizer_job)
             for _, contract in ipairs({
-                'SANITIZER_NATIVE_CACHE_SCHEMA: "v1"',
+                'SANITIZER_NATIVE_CACHE_SCHEMA: "v2"',
                 "CC: cc", "AR: ar", "RANLIB: ranlib",
                 'SANITIZER_LUA_VERSION: "5.5.1"',
                 'SANITIZER_LIBUV_VERSION: "1.52.1"',
@@ -4446,6 +4513,9 @@ done
                 "libuv-v${{ env.SANITIZER_LIBUV_VERSION }}.tar.gz",
                 "llhttp-release-v${{ env.SANITIZER_LLHTTP_VERSION }}",
                 "llhttp-release-v${{ env.SANITIZER_LLHTTP_VERSION }}.tar.gz",
+                "sqlite-autoconf-${{ env.SANITIZER_SQLITE3_RELEASE }}",
+                "sqlite-autoconf-${{ env.SANITIZER_SQLITE3_RELEASE }}.tar.gz",
+                "test -f sqlite3-build/libtitan-sqlite3.a",
                 "openssl-${{ env.SANITIZER_OPENSSL_VERSION }}",
                 "openssl-${{ env.SANITIZER_OPENSSL_VERSION }}.tar.gz",
                 "uses: ubicloud/cache/save@v4",
@@ -4483,6 +4553,8 @@ done
             for _, fingerprint in ipairs({
                 "titan_abi=$TITAN_ABI_VERSION",
                 "libuv_profile=$LIBUV_BUILD_PROFILE",
+                "sqlite3=$SANITIZER_SQLITE3_VERSION:$SANITIZER_SQLITE3_SHA256",
+                "sqlite3_cflags=$SQLITE3_BUILD_CFLAGS",
                 "rock_cflags=${ROCK_CFLAGS:--O2 -fPIC}",
                 "titan_cppflags=${TITAN_EXTRA_CPPFLAGS:-}",
                 "titan_cflags=$TITAN_EXTRA_CFLAGS",
@@ -4527,12 +4599,12 @@ done
             local sanitizer_native_build_step = named_step(sanitizer_job,
                 "Build sanitizer-enabled native dependencies")
             assert.equal(1, count_literal(sanitizer_native_build_step,
-                "make openssl lua libuv libbacktrace llhttp"))
+                "make openssl lua libuv libbacktrace llhttp sqlite3"))
             assert.equal(1, count_literal(sanitizer_native_build_step,
                 "grep -qx 'provider=system'"))
             for _, serial_capture in ipairs({
                 "native-lua", "native-libbacktrace", "native-libuv",
-                "native-llhttp", "native-openssl",
+                "native-llhttp", "native-sqlite3", "native-openssl",
             }) do
                 assert.falsy(sanitizer_native_build_step:find(
                     serial_capture, 1, true), sanitizer_native_build_step)
@@ -4540,7 +4612,7 @@ done
 
             assert.equal(1, count_literal(sanitizer_job,
                 "make titan-stdlib-test-build"), sanitizer_job)
-            assert.equal(10, count_literal(sanitizer_job,
+            assert.equal(11, count_literal(sanitizer_job,
                 "make titan-stdlib-test-run"), sanitizer_job)
             for _, filter in ipairs({
                 "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
@@ -4552,6 +4624,7 @@ done
                 "TITAN_FILTER='test_run_foreign_'",
                 "TITAN_FILTER='test_ssl_http_fresh_process_sanitizer_composition$'",
                 "TITAN_FILTER='^reflect%.tests%.'",
+                "TITAN_FILTER='^sqlite3%.tests%.'",
                 "TITAN_FILTER='test_peg_roots_and_releases_" ..
                 "titan_callback_patterns$'",
                 "TITAN_FILTER='test_regex_gc_rooting$'",
@@ -4591,7 +4664,7 @@ done
                 {
                     "Build sanitizer-enabled native dependencies",
                     {
-                        "make openssl lua libuv libbacktrace llhttp",
+                        "make openssl lua libuv libbacktrace llhttp sqlite3",
                     },
                 },
                 {
@@ -4625,6 +4698,10 @@ done
                 {
                     "Run native async sanitizer gate (core-uv)",
                     { ".lua/bin/busted", "make titan-stdlib-test-run" },
+                },
+                {
+                    "Run native SQLite sanitizer gate",
+                    { "make titan-stdlib-test-run" },
                 },
                 {
                     "Run native TLS/HTTP sanitizer gate",

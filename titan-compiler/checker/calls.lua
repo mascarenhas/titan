@@ -430,7 +430,13 @@ function check_explicit_cast_relation(node, st, errors)
         end
     end
 
-    if is_mutable_c_address_source(node.exp)
+    -- Written object-pointer casts always reinterpret the pointer value. Only
+    -- an implicit exact out-parameter adjustment takes a pointer local's
+    -- address; `raw as **void` must continue to mean a C pointer cast.
+    local source_c_type = types.resolve_c_typedef(source)
+    local written_pointer_cast = source_c_type
+        and source_c_type._tag == "Type.CPointer"
+    if not written_pointer_cast and is_mutable_c_address_source(node.exp)
        and types.c_mutable_address_coerceable(source, target)
        and not types.c_address_coerceable(source, target) then
         mark_mutable_c_address_source(node.exp)
@@ -448,7 +454,8 @@ function check_explicit_cast_relation(node, st, errors)
                 target = target,
             },
         }
-    elseif types.c_mutable_address_coerceable(source, target) then
+    elseif not written_pointer_cast
+       and types.c_mutable_address_coerceable(source, target) then
         checker.typeerror(errors, node.exp.loc,
             "cannot take a mutable C address of non-addressable "
             .. "expression of type '%s'",

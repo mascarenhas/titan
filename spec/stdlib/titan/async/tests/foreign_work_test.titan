@@ -125,3 +125,34 @@ function test_run_foreign_rejects_a_null_callback(context: test.Context)
           "run_foreign did not reject its NULL callback synchronously")
   end)
 end
+
+function test_run_foreign_pending_cancellation_does_not_submit_work(
+    context: test.Context)
+  runtime_test.run(function ()
+    local fixture = new_foreign_work_fixture(80)
+    defer foreign_work.titan_async_work_fixture_destroy(fixture)
+    -- Pre-release the fixture so an erroneous submission completes promptly
+    -- and leaves a visible result instead of hanging the test.
+    release_foreign_work(
+        foreign_work.titan_async_work_fixture_release_fd(fixture) as integer)
+    local resumed = false
+    local target = async.run<nil, value>(function (): nil
+      async.running():cancel(async.CancellationReason.simple(
+          "cancel before foreign submission"))
+      async.run_foreign(blocking_foreign_work, fixture as *void)
+      resumed = true
+      return nil
+    end)
+    task_support.cleanup_task(target, "unsubmitted foreign-work cleanup")
+
+    local status = async.join(target)
+    test.assert(support.cancelled_with(status,
+          "cancel before foreign submission"),
+          "unsubmitted foreign work lost its cancellation reason")
+    test.assert(not resumed,
+          "pending cancellation returned normally from run_foreign")
+    test.assert(foreign_work.titan_async_work_fixture_result(
+          fixture) as integer == 0,
+          "pending cancellation submitted new foreign work")
+  end)
+end

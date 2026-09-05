@@ -1,0 +1,160 @@
+record BindingLookalikeBlob
+  bytes: string
+end
+
+union BindingUnion
+  empty
+end
+
+interface BindingInterface
+  name: string
+end
+
+record BindingInterfaceRecord
+  const name: string
+end
+
+local function rejected_binding(context: test.Context, name: string,
+                                 candidate: value)
+  context:run(name, function (_context: test.Context)
+    runtime_test.run(function ()
+      local connection = sqlite3.connect(":memory:")
+      defer connection:close()
+      local statement = connection:prepare("SELECT ?")
+      defer statement:close()
+      expect_wrapper_error(function ()
+        local cursor = statement:query(candidate)
+        cursor:close()
+      end)
+      local cursor = statement:query(81)
+      defer cursor:close()
+      assert_integer_cell(required_row(cursor), 1, 81)
+    end)
+  end)
+end
+
+function test_binding_scalar_tags_integer_limits_and_trailing_null(
+    context: test.Context)
+  runtime_test.run(function ()
+    local connection = sqlite3.connect(":memory:")
+    defer connection:close()
+    local statement = connection:prepare("SELECT ?, ?, ?, ?, ?, ?, ?, ?")
+    defer statement:close()
+    local cursor = statement:query(nil, false, true,
+        math.mininteger, math.maxinteger, 42.0, "héllo 世界", nil)
+    defer cursor:close()
+    local row = required_row(cursor)
+    test.assert(#row.columns == 8 and row:get(1) == nil and
+                row:get(8) == nil,
+                "NULL values truncated the binding list or row")
+    assert_integer_cell(row, 2, 0)
+    assert_integer_cell(row, 3, 1)
+    assert_integer_cell(row, 4, math.mininteger)
+    assert_integer_cell(row, 5, math.maxinteger)
+    assert_float_cell(row, 6, 42.0)
+    test.assert(row:get(7) as string == "héllo 世界",
+                "UTF-8 TEXT did not preserve its bytes")
+  end)
+end
+
+function test_binding_distinguishes_text_and_empty_or_binary_blobs(
+    context: test.Context)
+  runtime_test.run(function ()
+    local connection = sqlite3.connect(":memory:")
+    defer connection:close()
+    local statement = connection:prepare("SELECT ?, ?, ?, ?")
+    defer statement:close()
+    local binary = "\0\255a\0"
+    local cursor = statement:query("", sqlite3.Blob.new(""),
+                                  sqlite3.Blob.new(binary), "text")
+    defer cursor:close()
+    local row = required_row(cursor)
+    test.assert(row:get(1) as string == "" and row:get(4) as string == "text",
+                "ordinary strings did not round trip as TEXT")
+    local empty: sqlite3.Blob = row:get(2)
+    local bytes: sqlite3.Blob = row:get(3)
+    test.assert(empty.bytes == "" and bytes.bytes == binary,
+                "empty or binary BLOB was converted to NULL or TEXT")
+  end)
+end
+
+function test_binding_rejects_unsupported_reflection_kinds(
+    context: test.Context)
+  rejected_binding(context, "record", BindingLookalikeBlob.new("abc"))
+  local array: {integer} = {1, 2}
+  rejected_binding(context, "array", array)
+  local constant: const {integer} = {1, 2}
+  rejected_binding(context, "const_array", constant)
+  local map: {string: integer} = {["value"] = 1}
+  rejected_binding(context, "map", map)
+  rejected_binding(context, "union", BindingUnion.empty())
+  local iface: BindingInterface = BindingInterfaceRecord.new("interface")
+  rejected_binding(context, "interface", iface)
+  rejected_binding(context, "function", function (): integer return 1 end)
+  local storage: owned *int = int.new()
+  rejected_binding(context, "owned_foreign", storage)
+  local pointer: *void = storage
+  rejected_binding(context, "raw_pointer", pointer)
+end
+
+function test_binding_rejects_invalid_text_and_nonfinite_numbers(
+    context: test.Context)
+  rejected_binding(context, "embedded_nul", "before\0after")
+  rejected_binding(context, "invalid_utf8_lead", "\255")
+  rejected_binding(context, "overlong_utf8", "\192\175")
+  rejected_binding(context, "utf8_surrogate", "\237\160\128")
+  rejected_binding(context, "utf8_out_of_range", "\244\144\128\128")
+  rejected_binding(context, "truncated_utf8", "\226\130")
+  rejected_binding(context, "positive_infinity", math.huge)
+  rejected_binding(context, "negative_infinity", -math.huge)
+  rejected_binding(context, "nan", math.huge - math.huge)
+end
+
+function test_binding_exact_slots_repeated_names_and_sparse_positions(
+    context: test.Context)
+  runtime_test.run(function ()
+    local connection = sqlite3.connect(":memory:")
+    defer connection:close()
+    local repeated = connection:prepare("SELECT :shared, :shared, @other")
+    defer repeated:close()
+    local named = repeated:query(37, "other")
+    defer named:close()
+    local row = required_row(named)
+    assert_integer_cell(row, 1, 37)
+    assert_integer_cell(row, 2, 37)
+    test.assert(row:get(3) as string == "other",
+                "repeated names consumed extra argument positions")
+    named:close()
+    expect_wrapper_error(function () repeated:query(1) end)
+    expect_wrapper_error(function () repeated:query(1, 2, 3) end)
+
+    local sparse = connection:prepare("SELECT ?5, ?1")
+    defer sparse:close()
+    expect_wrapper_error(function () sparse:query(88) end)
+    local cursor = sparse:query(nil, nil, nil, nil, 88)
+    defer cursor:close()
+    local sparse_row = required_row(cursor)
+    assert_integer_cell(sparse_row, 1, 88)
+    test.assert(sparse_row:get(2) == nil,
+                "sparse numbered slots did not preserve explicit NULL")
+  end)
+end
+
+function test_binding_replaces_old_values_after_argument_error(
+    context: test.Context)
+  runtime_test.run(function ()
+    local connection = sqlite3.connect(":memory:")
+    defer connection:close()
+    local statement = connection:prepare("SELECT ?, ?")
+    defer statement:close()
+    local first = statement:query(12, "old")
+    defer first:close()
+    first:close()
+    expect_wrapper_error(function () statement:query(9) end)
+    local second = statement:query(nil, nil)
+    defer second:close()
+    local row = required_row(second)
+    test.assert(#row.columns == 2 and row:get(1) == nil and row:get(2) == nil,
+                "reused Statement retained bindings from its previous query")
+  end)
+end

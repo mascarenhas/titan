@@ -6,7 +6,7 @@ local source_inventory = require "spec.support.source_inventory"
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "os", "peg", "string", "math", "lua", "iteration", "gc",
-    "test", "reflect",
+    "test", "reflect", "sqlite3",
 }
 local LUA_CPATH_SUFFIX = "/lib/lua/5.5/?.so"
 local COMPILER_SLICE_PATHS = {}
@@ -289,13 +289,16 @@ describe("standalone-prefix source installation", function()
         assert_absent(PREFIX .. "/include/titan_lpeglabel_namespace.h")
         assert_absent(PREFIX .. "/share/lua/5.5/lpeglabel-build")
         assert_absent(PREFIX .. "/lib/libtitan-llhttp.a")
+        assert_absent(PREFIX .. "/lib/libtitan-sqlite3.a")
+        assert_absent(TITAN_LIBDIR .. "/libtitan-sqlite3.a")
+        assert_absent(PREFIX .. "/include/sqlite3.h")
         assert_absent(PREFIX .. "/lib/libssl.a")
         assert_absent(PREFIX .. "/lib/libcrypto.a")
         assert_file(PREFIX .. "/share/titan/THIRD_PARTY_NOTICES.md")
         for _, license in ipairs({
             "libuv-LICENSE", "lpeglabel-LICENSE", "lpeg-LICENSE",
             "lpeg-patterns-LICENSE", "ta-regex-LICENSE", "lua-LICENSE",
-            "llhttp-LICENSE", "openssl-LICENSE",
+            "llhttp-LICENSE", "sqlite3-LICENSE", "openssl-LICENSE",
         }) do
             assert_file(PREFIX .. "/share/titan/LICENSES/" .. license)
         end
@@ -311,6 +314,7 @@ describe("standalone-prefix source installation", function()
             "lstrlib.c", "Lua 5.5.1",
             "OpenSSL 3.5.7", "OPENSSL_MODE=system",
             "llhttp 9.4.3", "Copyright Fedor Indutny, 2018",
+            "SQLite 3.53.4", "public domain",
         }) do
             assert.truthy(notices:find(notice, 1, true), notice)
         end
@@ -688,6 +692,11 @@ describe("standalone-prefix source installation", function()
             "titan/iteration.titan",
             "titan/gc.titan",
             "titan/test.titan",
+            "titan/sqlite3/sqlite3.titan",
+            "titan/sqlite3/bindings.titan",
+            "titan/sqlite3/row.titan",
+            "titan/sqlite3/worker.titan",
+            "titan/sqlite3/native.h",
             "titan-compiler/test_runner.lua",
             "LICENSES/lpeglabel-LICENSE",
             "LICENSES/lpeg-LICENSE",
@@ -695,6 +704,7 @@ describe("standalone-prefix source installation", function()
             "LICENSES/ta-regex-LICENSE",
             "LICENSES/lua-LICENSE",
             "LICENSES/llhttp-LICENSE",
+            "LICENSES/sqlite3-LICENSE",
             "LICENSES/openssl-LICENSE",
             "THIRD_PARTY_NOTICES.md",
         }) do
@@ -705,6 +715,8 @@ describe("standalone-prefix source installation", function()
             assert.falsy(path:match("/libtitan%-lpeglabel[.]a$"), path)
             assert.falsy(path:match("/vendor/lpeglabel/.*[.]o$"), path)
             assert.falsy(path:find("/llhttp-build/", 1, true), path)
+            assert.falsy(path:find("/sqlite3-build/", 1, true), path)
+            assert.falsy(path:find("/sqlite-autoconf-", 1, true), path)
             assert.falsy(path:find("/llhttp-release-v", 1, true), path)
             assert.falsy(path:find("/openssl-build/", 1, true), path)
             assert.falsy(path:match("/openssl%-%d"), path)

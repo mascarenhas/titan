@@ -71,12 +71,25 @@ local function WorkCall:dispatch(task: Task): Immediate?
   return immediate_error(status, "async.run_foreign")
 end
 
-local function run_foreign(f: WorkFunction, arg: WorkPointer)
+local function WorkCall.from_callback(f: WorkFunction,
+                                      arg: WorkPointer): WorkCall
   if not f then raise "async.run_foreign callback must not be NULL" end
 
   local carrier: owned WorkPointer[] = WorkPointer.new_array(3)
   carrier[0] = nil
   carrier[1] = f as WorkPointer
   carrier[2] = arg
-  await(Call.run_foreign(WorkCall.new(carrier)))
+  return WorkCall.new(carrier)
+end
+
+local function run_foreign(f: WorkFunction, arg: WorkPointer)
+  await(Call.run_foreign(WorkCall.from_callback(f, arg)))
+end
+
+-- Source collaborators use this only to retire native ownership: close,
+-- finalize, reset, or dispose an unpublished result. Like the existing close
+-- Calls, both submission and ordinary completion survive pending cancellation.
+-- It is deliberately absent from the public async surface.
+local function run_foreign_cleanup(f: WorkFunction, arg: WorkPointer)
+  await(Call.run_foreign_cleanup(WorkCall.from_callback(f, arg)))
 end

@@ -231,6 +231,104 @@ describe("foreign functions (checker)", function()
         end)
     end)
 
+    it("keeps size and alignment in the C size_t domain inside foreign bodies",
+    function()
+        with_header("#include <stddef.h>\n" .. declarations, function(header)
+            local ok, err, ast = check_with_header(header, [[
+                foreign function layout(): c.size_t
+                    local size = c.ffi_item.sizeof
+                    local alignment = c.ffi_item.alignof
+                    return size + alignment
+                end
+
+                function ordinary_size(): integer
+                    return c.ffi_item.sizeof
+                end
+            ]])
+            assert.truthy(ok, err)
+            for index = 1, 2 do
+                local exp = ast[2].block.stats[index].exps[1]
+                assert.is_true(types.equals(exp._type,
+                    exp.var._decl.result_source))
+                assert.equal("Type.CInteger",
+                    types.resolve_c_typedef(exp._type)._tag)
+            end
+            assert.equal("Type.Integer",
+                ast[3].block.stats[1].exps[1]._type._tag)
+        end)
+    end)
+
+    it("takes exact mutable pointer outputs without discarding pointee const",
+    function()
+        with_header(declarations .. [[
+            void ffi_outputs(ffi_item **item, const char **text);
+            void ffi_mutable_text(char **text);
+        ]], function(header)
+            local ok, err, ast = check_with_header(header, [[
+                foreign function outputs()
+                    local item: *c.ffi_item = nil
+                    local text: const *char = nil
+                    c.ffi_outputs(item, text)
+                    local erased: *void = item
+                end
+            ]])
+            assert.truthy(ok, err)
+            local stats = ast[2].block.stats
+            local args = stats[3].callexp.args.args
+            for index = 1, 2 do
+                assert.equal("mutable_c_address",
+                    args[index]._adjustment.coercion.op)
+                assert.truthy(stats[index].decls[1]._c_address_taken)
+            end
+            assert.not_equal("mutable_c_address",
+                stats[4].exps[1]._adjustment.coercion.op)
+
+            assert_rejected(header, [[
+                foreign function wrong()
+                    local text: const *char = nil
+                    c.ffi_mutable_text(text)
+                end
+            ]], "would discard const")
+            assert_rejected(header, [[
+                foreign function immutable()
+                    const item: *c.ffi_item = nil
+                    local text: const *char = nil
+                    c.ffi_outputs(item, text)
+                end
+            ]], "cannot take a mutable C address")
+        end)
+    end)
+
+    it("retains written pointer reinterpretations beside implicit outputs",
+    function()
+        with_header([[
+            void *ffi_pointer_source(void);
+            void ffi_pointer_sink(void **pointer);
+        ]], function(header)
+            local ok, err, ast = check_with_header(header, [[
+                local type Pointer = *void
+
+                foreign function call_pointer(): *Pointer
+                    return c.ffi_pointer_source() as *Pointer
+                end
+
+                foreign function local_pointer()
+                    local raw = c.ffi_pointer_source()
+                    c.ffi_pointer_sink(raw as *Pointer)
+                end
+
+                foreign function unrelated(pointer: *double): *int
+                    return pointer as *int
+                end
+            ]])
+            assert.truthy(ok, err)
+            local raw = ast[4].block.stats[1].decls[1]
+            assert.is_nil(raw._c_address_taken)
+            assert.is_false(ast[4].block.stats[2].callexp._c_mutated_decls)
+            assert.is_nil(ast[3].block.stats[1].exps[1]._adjustment)
+        end)
+    end)
+
     it("replays source C context without parsing the generated companion",
     function()
         with_header([[

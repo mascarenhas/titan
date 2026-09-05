@@ -152,6 +152,28 @@ LLHTTP_CPPFLAGS      := -I$(abspath $(LLHTTP_SRC_DIR)/include)
 LLHTTP_CFLAGS        := -std=c99 -fPIC -fvisibility=hidden
 LLHTTP_BUILD_CFLAGS  ?=
 
+# SQLite is always private standard-provider payload. Use the official release
+# tarball's amalgamation directly; no configure/Tcl generation or system mode.
+# Its SHA-256 was checked against the official download page's SHA3-256:
+# 454e45f61c6bd75b7420e7190732dea03ce6639c63ada47bbc592f67fc340338.
+SQLITE3_VERSION       := 3.53.4
+SQLITE3_RELEASE       := 3530400
+SQLITE3_SRC_DIR       := sqlite-autoconf-$(SQLITE3_RELEASE)
+SQLITE3_TARBALL       := $(SQLITE3_SRC_DIR).tar.gz
+SQLITE3_URL           := https://sqlite.org/2026/$(SQLITE3_TARBALL)
+SQLITE3_SHA256        := 0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c
+SQLITE3_EXTRACTED     := $(SQLITE3_SRC_DIR)/.titan-extracted
+SQLITE3_BUILD_DIR     := sqlite3-build
+SQLITE3_SOURCES       := $(SQLITE3_SRC_DIR)/sqlite3.c
+SQLITE3_OBJECTS       := $(SQLITE3_BUILD_DIR)/sqlite3.o
+SQLITE3_HEADER        := $(SQLITE3_SRC_DIR)/sqlite3.h
+SQLITE3_ARCHIVE       := $(SQLITE3_BUILD_DIR)/libtitan-sqlite3.a
+SQLITE3_BUILD_CONFIG  := $(SQLITE3_BUILD_DIR)/.titan-sqlite3-build-config
+SQLITE3_ARCHIVE_CONFIG := $(SQLITE3_BUILD_DIR)/.titan-sqlite3-archive-config
+SQLITE3_CPPFLAGS      := -I$(abspath $(SQLITE3_SRC_DIR))
+SQLITE3_CFLAGS        := -std=c99 -fPIC -fvisibility=hidden -DSQLITE_THREADSAFE=1
+SQLITE3_BUILD_CFLAGS  ?=
+
 # The bundled OpenSSL release is the reproducible default.  System mode uses
 # pkg-config only for compilation/final linking and deliberately carries no
 # host OpenSSL archive into Titan's static provider.
@@ -337,14 +359,17 @@ UV_TITAN_SOURCES := \
 STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.titan \
 	titan/http/headers.titan titan/http/native.titan \
 	titan/http/server.titan
+SQLITE3_TITAN_SOURCES := titan/sqlite3/sqlite3.titan titan/sqlite3/bindings.titan \
+	titan/sqlite3/row.titan titan/sqlite3/worker.titan
+SQLITE3_TITAN_HEADERS := titan/sqlite3/native.h
 STDLIB_MODULES := coroutine uv async timer io fs net ssl url http os peg string \
-	math lua iteration gc test reflect
+	math lua iteration gc test reflect sqlite3
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
 STDLIB_QUALIFIED_SOS := $(addprefix titan/,$(STDLIB_SOS))
 STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
 	titan.io titan.fs titan.net titan.ssl titan.url titan.http titan.os \
 	titan.peg titan.string \
-	titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect
+	titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/async.titan titan/timer.titan titan/io.titan titan/fs.titan \
 	titan/net.titan titan/ssl.titan titan/url.titan \
@@ -357,30 +382,32 @@ STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/string/regex_api.titan titan/string/regex_compile.titan \
 	titan/string/regex_parser.titan \
 	titan/math.titan titan/lua.titan titan/iteration.titan titan/gc.titan \
-	titan/test.titan titan/reflect.titan
+	titan/test.titan titan/reflect.titan $(SQLITE3_TITAN_SOURCES)
 STDLIB_GENERATED_FOREIGN_HEADERS := titan/coroutine.titan.h \
-	titan/fs.titan.h titan/uv/uv.titan.h titan/http/http.titan.h
+	titan/fs.titan.h titan/uv/uv.titan.h titan/http/http.titan.h \
+	titan/sqlite3/sqlite3.titan.h
 STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua titan/async.lua \
 	titan/timer.lua titan/io.lua titan/fs.lua titan/net.lua titan/ssl.lua \
 	titan/url.lua titan/http.lua titan/os.lua \
 	titan/peg.lua titan/string.lua titan/math.lua titan/lua.lua \
-	titan/iteration.lua titan/gc.lua titan/test.lua titan/reflect.lua
+	titan/iteration.lua titan/gc.lua titan/test.lua titan/reflect.lua titan/sqlite3.lua
 STDLIB_CONTAINER := titan.so
 STDLIB_STATIC_ARCHIVE := titan.a
 STDLIB_PROVIDER_OUTPUTS := $(STDLIB_CONTAINER) $(STDLIB_STATIC_ARCHIVE)
 STDLIB_EXTRA_OBJECTS := $(LTITANLIB_O) $(LPEGLABEL_ARCHIVE) \
-	$(LIBUV_EXTRA_OBJECTS) $(LLHTTP_ARCHIVE) $(OPENSSL_EXTRA_OBJECTS)
+	$(LIBUV_EXTRA_OBJECTS) $(LLHTTP_ARCHIVE) $(SQLITE3_ARCHIVE) $(OPENSSL_EXTRA_OBJECTS)
 STDLIB_NATIVE_IDENTITY_PREREQS := $(LPEGLABEL_ARCHIVE) \
-	$(LLHTTP_ARCHIVE) $(OPENSSL_EXTRA_OBJECTS)
+	$(LLHTTP_ARCHIVE) $(SQLITE3_ARCHIVE) $(OPENSSL_EXTRA_OBJECTS)
 STDLIB_LPEGLABEL_CPPFLAGS := $(LPEGLABEL_CPPFLAGS)
 STDLIB_HTTP_CPPFLAGS := $(LLHTTP_CPPFLAGS)
+STDLIB_SQLITE3_CPPFLAGS := $(SQLITE3_CPPFLAGS)
 STDLIB_OPENSSL_CPPFLAGS := $(OPENSSL_CPPFLAGS)
 STDLIB_OPENSSL_LDFLAGS := $(OPENSSL_PROVIDER_LDFLAGS)
 STDLIB_LICENSES := LICENSES/libuv-LICENSE \
 	LICENSES/lpeglabel-LICENSE LICENSES/lpeg-LICENSE \
 	LICENSES/lpeg-patterns-LICENSE \
 	LICENSES/ta-regex-LICENSE LICENSES/lua-LICENSE \
-	LICENSES/llhttp-LICENSE LICENSES/openssl-LICENSE
+	LICENSES/llhttp-LICENSE LICENSES/sqlite3-LICENSE LICENSES/openssl-LICENSE
 STDLIB_EMBEDDED_FORMAT_INPUTS := titan-compiler/staticmetadata.lua \
 	titan-compiler/coder.lua $(wildcard titan-compiler/coder/*.lua)
 TITAN_BOOTSTRAP_SO := titan-runtime/bootstrap/titan.so
@@ -455,14 +482,14 @@ RECURSIVE_WRAPPER_GUARD = flags=$${MAKEFLAGS%% *}; case "$$flags" in -*) ;; *q*)
 
 .PHONY: all help lua readline readline-bundled-install \
 	check-readline-tools luarocks libbacktrace libuv libuv-config llhttp \
-	check-llhttp-tools openssl openssl-config check-openssl-tools \
+	check-llhttp-tools sqlite3 check-sqlite3-tools openssl openssl-config check-openssl-tools \
 	check-system-openssl invalid-openssl-mode lpeglabel \
 	check-libuv-tools check-system-libuv invalid-libuv-mode runtime titan \
 	stage-titan-bootstrap install-titan-sdk stdlib install-stdlib \
 	publish-stdlib \
 	rock-post-install rock-test test rock-build \
 	examples clean clean-lua clean-readline clean-luarocks clean-libbacktrace clean-libuv \
-	clean-llhttp clean-openssl \
+	clean-llhttp clean-sqlite3 clean-openssl \
 	distclean FORCE
 
 FORCE:
@@ -487,7 +514,7 @@ help: ## Show this help
 	@echo "Ubuntu/Debian libreadline-dev libuv1-dev libssl-dev pkg-config; Fedora"
 	@echo "readline-devel libuv-devel openssl-devel pkgconf-pkg-config; macOS brew"
 	@echo "install libuv openssl@3 pkgconf. Add clang-format only for --pretty-print."
-	@echo "llhttp is always bundled."
+	@echo "llhttp and SQLite $(SQLITE3_VERSION) are always bundled."
 	@echo "For a standalone installation, choose one writable PREFIX and run:"
 	@echo "  make lua PREFIX=/path && make luarocks PREFIX=/path && make libuv"
 	@echo "  PATH=/path/bin:\$$PATH /path/bin/luarocks make"
@@ -1421,6 +1448,161 @@ $(LLHTTP_ARCHIVE): FORCE $(LLHTTP_OBJECTS) $(LLHTTP_ARCHIVE_CONFIG)
 	  mv -f "$$tmp" "$@"; \
 	fi
 
+sqlite3: $(SQLITE3_ARCHIVE) ## Build/validate private sqlite3 support
+
+check-sqlite3-tools:
+	@missing=0; \
+	for tool in "$(firstword $(CC))" "$(firstword $(AR))" \
+		"$(firstword $(RANLIB))" tar; do \
+	  if ! command -v "$$tool" >/dev/null 2>&1; then \
+	    echo "ERROR: bundled sqlite3 requires '$$tool'." >&2; missing=1; \
+	  fi; \
+	done; \
+	if ! command -v curl >/dev/null 2>&1 && \
+	   ! command -v wget >/dev/null 2>&1; then \
+	  echo "ERROR: need curl or wget to download $(SQLITE3_TARBALL)." >&2; \
+	  missing=1; \
+	fi; \
+	if ! command -v sha256sum >/dev/null 2>&1 && \
+	   ! command -v shasum >/dev/null 2>&1; then \
+	  echo "ERROR: need sha256sum or shasum to verify sqlite3." >&2; \
+	  missing=1; \
+	fi; \
+	test "$$missing" -eq 0
+
+$(SQLITE3_TARBALL):
+	@$(MAKE) --no-print-directory check-sqlite3-tools
+	@echo "==> Downloading $(SQLITE3_URL)"
+	@if command -v curl >/dev/null 2>&1; then \
+	  curl -fL -o "$@" "$(SQLITE3_URL)"; \
+	else \
+	  wget -O "$@" "$(SQLITE3_URL)"; \
+	fi
+
+$(SQLITE3_EXTRACTED): $(SQLITE3_TARBALL)
+	@$(MAKE) --no-print-directory check-sqlite3-tools
+	@echo "==> Verifying SHA-256 for $(SQLITE3_TARBALL)"
+	@if command -v sha256sum >/dev/null 2>&1; then \
+	  printf '%s  %s\n' "$(SQLITE3_SHA256)" "$(SQLITE3_TARBALL)" | \
+	    sha256sum -c -; \
+	else \
+	  printf '%s  %s\n' "$(SQLITE3_SHA256)" "$(SQLITE3_TARBALL)" | \
+	    shasum -a 256 -c -; \
+	fi || { \
+	  echo "ERROR: checksum mismatch for $(SQLITE3_TARBALL); removing it." >&2; \
+	  rm -f "$(SQLITE3_TARBALL)"; exit 1; \
+	}
+	@echo "==> Extracting $(SQLITE3_TARBALL)"
+	rm -rf "$(SQLITE3_SRC_DIR)"
+	tar zxf "$(SQLITE3_TARBALL)"
+	@test -f "$(SQLITE3_HEADER)" || { \
+	  echo "ERROR: $(SQLITE3_TARBALL) omitted generated sqlite3 sources." >&2; \
+	  exit 1; \
+	}
+	@touch "$@"
+
+# These files arrive together from the verified release archive.  Giving Make
+# their extraction stamp as the generating rule lets a clean parallel build
+# resolve the header/source prerequisites before the source directory exists.
+$(SQLITE3_SOURCES) $(SQLITE3_HEADER): $(SQLITE3_EXTRACTED)
+	@test -f "$@" || { echo "ERROR: extracted sqlite3 omitted $@" >&2; exit 1; }
+
+$(SQLITE3_BUILD_CONFIG): FORCE $(SQLITE3_EXTRACTED) $(SQLITE3_SOURCES) \
+		$(SQLITE3_HEADER)
+	@mkdir -p "$(@D)"
+	@tmp="$@.tmp"; \
+	{ printf '%s\n' \
+		$(call make_shell_quote,SQLITE3_VERSION=$(SQLITE3_VERSION)) \
+		$(call make_shell_quote,SQLITE3_SHA256=$(SQLITE3_SHA256)) \
+		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
+		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
+		$(call make_shell_quote,CC=$(CC)) \
+		$(call make_shell_quote,AR=$(AR)) \
+		$(call make_shell_quote,RANLIB=$(RANLIB)) \
+		$(call make_shell_quote,ROCK_CFLAGS=$(ROCK_CFLAGS)) \
+		$(call make_shell_quote,TITAN_EXTRA_CPPFLAGS=$(TITAN_EXTRA_CPPFLAGS)) \
+		$(call make_shell_quote,TITAN_EXTRA_CFLAGS=$(TITAN_EXTRA_CFLAGS)) \
+		$(call make_shell_quote,SQLITE3_CPPFLAGS=$(SQLITE3_CPPFLAGS)) \
+		$(call make_shell_quote,SQLITE3_CFLAGS=$(SQLITE3_CFLAGS)) \
+		$(call make_shell_quote,SQLITE3_BUILD_CFLAGS=$(SQLITE3_BUILD_CFLAGS)) \
+		$(call make_shell_quote,SOURCES=$(SQLITE3_SOURCES)); \
+	  for input in $(SQLITE3_SOURCES) $(SQLITE3_HEADER); do \
+	    cksum "$$input"; \
+	  done; } > "$$tmp"; \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
+	  rm -f "$$tmp"; \
+	else \
+	  mv -f "$$tmp" "$@"; \
+	fi
+
+$(SQLITE3_BUILD_DIR)/%.o: $(SQLITE3_SRC_DIR)/%.c \
+		$(SQLITE3_BUILD_CONFIG)
+	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(SQLITE3_CPPFLAGS) $(ROCK_CFLAGS) \
+		$(SQLITE3_CFLAGS) $(TITAN_EXTRA_CFLAGS) $(SQLITE3_BUILD_CFLAGS) \
+		-c "$<" -o "$@"
+
+$(SQLITE3_ARCHIVE_CONFIG): FORCE $(firstword $(SQLITE3_OBJECTS))
+	@mkdir -p "$(@D)"
+	@set -e; \
+	probe="$(@D)/.titan-sqlite3-tool-probe.a"; tmp="$@.tmp"; \
+	rm -f "$$probe" "$$tmp"; \
+	if $(AR) qDc "$$probe" "$(firstword $(SQLITE3_OBJECTS))" \
+			>/dev/null 2>&1 && \
+	   $(RANLIB) -D "$$probe" >/dev/null 2>&1; then \
+	  ar_mode=qDc; ranlib_mode=-D; deterministic=yes; \
+	else \
+	  rm -f "$$probe"; \
+	  $(AR) qc "$$probe" "$(firstword $(SQLITE3_OBJECTS))" \
+			>/dev/null 2>&1 || { \
+	    echo "ERROR: configured AR supports neither qDc nor qc" >&2; exit 1; \
+	  }; \
+	  $(RANLIB) "$$probe" >/dev/null 2>&1 || { \
+	    echo "ERROR: configured RANLIB is unusable" >&2; exit 1; \
+	  }; \
+	  ar_mode=qc; ranlib_mode=ordinary; deterministic=no; \
+	fi; \
+	rm -f "$$probe"; \
+	{ printf '%s\n' \
+		$(call make_shell_quote,AR=$(AR)) \
+		$(call make_shell_quote,RANLIB=$(RANLIB)) \
+		$(call make_shell_quote,MEMBERS=$(notdir $(SQLITE3_OBJECTS))) \
+		"AR_MODE=$$ar_mode" "RANLIB_MODE=$$ranlib_mode" \
+		"DETERMINISTIC=$$deterministic"; } > "$$tmp"; \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
+	  rm -f "$$tmp"; \
+	else \
+	  mv -f "$$tmp" "$@"; \
+	fi
+
+$(SQLITE3_ARCHIVE): FORCE $(SQLITE3_OBJECTS) $(SQLITE3_ARCHIVE_CONFIG)
+	@set -e; \
+	expected="$$(printf '%s\n' $(notdir $(SQLITE3_OBJECTS)))"; actual=""; \
+	if test -f "$@" && test ! -L "$@"; then \
+	  actual="$$( $(AR) t "$@" 2>/dev/null | \
+	    awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
+	fi; \
+	newer=$(call make_shell_quote,$(filter-out FORCE,$?)); \
+	if test -n "$$newer" || test "$$actual" != "$$expected"; then \
+	  tmp="$@.tmp"; rm -f "$$tmp"; \
+	  ar_mode="$$(sed -n 's/^AR_MODE=//p' "$(SQLITE3_ARCHIVE_CONFIG)")"; \
+	  ranlib_mode="$$(sed -n 's/^RANLIB_MODE=//p' \
+	    "$(SQLITE3_ARCHIVE_CONFIG)")"; \
+	  $(AR) "$$ar_mode" "$$tmp" $(SQLITE3_OBJECTS); \
+	  if test "$$ranlib_mode" = -D; then \
+	    $(RANLIB) -D "$$tmp"; \
+	  else \
+	    $(RANLIB) "$$tmp"; \
+	  fi; \
+	  actual="$$( $(AR) t "$$tmp" 2>/dev/null | \
+	    awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
+	  test "$$actual" = "$$expected" || { \
+	    rm -f "$$tmp"; \
+	    echo "ERROR: private sqlite3 archive has wrong member order" >&2; \
+	    exit 1; \
+	  }; \
+	  mv -f "$$tmp" "$@"; \
+	fi
+
 ifeq ($(OPENSSL_MODE),bundled)
 openssl: $(OPENSSL_LIBS) ## Build bundled OpenSSL
 
@@ -1830,7 +2012,7 @@ stage-titan-bootstrap: $(TITAN_BOOTSTRAP_SO)
 # just-installed compiler. No Titan stdlib source is compiled before LuaRocks
 # deploys titanc, and the private bootstrap never shares a timestamp with the
 # final paired standard-library provider.
-titan: lpeglabel libbacktrace libuv openssl llhttp $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) ## Build Titan's native runtime and Lua bootstrap
+titan: lpeglabel libbacktrace libuv openssl llhttp sqlite3 $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) ## Build Titan's native runtime and Lua bootstrap
 	@if test -n "$(strip $(ROCKS_TREE))"; then \
 	  $(MAKE) --no-print-directory install-titan-sdk \
 		ROCKS_TREE=$(call make_shell_quote,$(ROCKS_TREE)) \
@@ -1947,6 +2129,8 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 		$(call make_shell_quote,STDLIB_EXTRA_OBJECTS=$(STDLIB_EXTRA_OBJECTS)) \
 		$(call make_shell_quote,STDLIB_LPEGLABEL_CPPFLAGS=$(STDLIB_LPEGLABEL_CPPFLAGS)) \
 		$(call make_shell_quote,STDLIB_HTTP_CPPFLAGS=$(STDLIB_HTTP_CPPFLAGS)) \
+		$(call make_shell_quote,STDLIB_SQLITE3_CPPFLAGS=$(STDLIB_SQLITE3_CPPFLAGS)) \
+		$(call make_shell_quote,SQLITE3_TITAN_HEADERS=$(SQLITE3_TITAN_HEADERS)) \
 		$(call make_shell_quote,STDLIB_OPENSSL_CPPFLAGS=$(STDLIB_OPENSSL_CPPFLAGS)) \
 		$(call make_shell_quote,STDLIB_OPENSSL_LDFLAGS=$(STDLIB_OPENSSL_LDFLAGS)) \
 		$(call make_shell_quote,STDLIB_EMBEDDED_FORMAT_INPUTS=$(STDLIB_EMBEDDED_FORMAT_INPUTS)) \
@@ -1967,6 +2151,10 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 		$(call make_shell_quote,STDLIB_UV_CFLAGS=$(STDLIB_UV_CFLAGS)) \
 		$(call make_shell_quote,STDLIB_UV_LDFLAGS=$(STDLIB_UV_LDFLAGS)) \
 		$(call make_shell_quote,LLHTTP_VERSION=$(LLHTTP_VERSION)) \
+		$(call make_shell_quote,SQLITE3_VERSION=$(SQLITE3_VERSION)) \
+		$(call make_shell_quote,SQLITE3_SHA256=$(SQLITE3_SHA256)) \
+		$(call make_shell_quote,SQLITE3_CFLAGS=$(SQLITE3_CFLAGS)) \
+		$(call make_shell_quote,SQLITE3_BUILD_CFLAGS=$(SQLITE3_BUILD_CFLAGS)) \
 		$(call make_shell_quote,LLHTTP_SHA256=$(LLHTTP_SHA256)) \
 		$(call make_shell_quote,LLHTTP_SOURCE_NAMES=$(LLHTTP_SOURCE_NAMES)) \
 		$(call make_shell_quote,LLHTTP_BUILD_CFLAGS=$(LLHTTP_BUILD_CFLAGS)) \
@@ -1979,7 +2167,8 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 			$(LPEGLABEL_BUILD_CONFIG) \
 			$(LPEGLABEL_ARCHIVE_CONFIG) $(LPEGLABEL_ARCHIVE) \
 			$(LLHTTP_BUILD_CONFIG) $(LLHTTP_ARCHIVE_CONFIG) \
-			$(LLHTTP_ARCHIVE) $(OPENSSL_EXTRA_OBJECTS); do \
+			$(SQLITE3_BUILD_CONFIG) $(SQLITE3_ARCHIVE_CONFIG) \
+			$(LLHTTP_ARCHIVE) $(SQLITE3_ARCHIVE) $(OPENSSL_EXTRA_OBJECTS); do \
 	    cksum "$$input"; \
 	  done; } \
 		> "$$tmp"; \
@@ -1992,10 +2181,10 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 
 # FORCE runs the inexpensive completeness check on every invocation. The
 # compiler itself runs only when an input is newer, configuration changed, or
-# one public output is absent. All nineteen roots are explicit source roots in one
+# one public output is absent. All twenty roots are explicit source roots in one
 # process, so their internal imports are linked into the paired titan.so/titan.a
 # provider. The warm check rescans the archive without rewriting either output.
-$(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
+$(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) $(SQLITE3_TITAN_HEADERS) titanc \
 		$(TITAN_COMPILER_LUA) Makefile $(STDLIB_CONFIG_STAMP) \
 		$(STDLIB_NATIVE_PREREQS) $(STDLIB_BOOTSTRAP_PREREQ) \
 		$(STDLIB_TOOL_PREREQS) | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
@@ -2034,7 +2223,7 @@ $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
 	    TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 	    TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)) \
 	    TITAN_RUNTIME_PREBUILT=1 \
-	    TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
+	    TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_SQLITE3_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
 	    TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))) \
 	    TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS) $(STDLIB_OPENSSL_LDFLAGS))) \
 	    $(TITANC) $(STDLIB_ROOTS) -X $(STDLIB_EXTRA_OBJECTS); \
@@ -2076,7 +2265,7 @@ install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 	  export TITAN_PATH=; \
 	  export TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)); \
 	  export TITAN_RUNTIME_PREBUILT=1; \
-	  export TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))); \
+	  export TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_SQLITE3_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))); \
 	  export TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))); \
 	  export TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS) $(STDLIB_OPENSSL_LDFLAGS))); \
 	  "$(TITAN_LUA)" -E "$(CURDIR)/scripts/stdlib_installer.lua" \
@@ -2084,15 +2273,15 @@ install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 
 # The post-install compiler runs in a private destination-filesystem directory,
 # so every -X input is absolute. Both modes carry ltitanlib.o, private LPegLabel,
-# and private llhttp. Bundled mode additionally
+# private llhttp, and private SQLite. Bundled mode additionally
 # carries the pinned libuv and OpenSSL archives; system dependencies remain
 # final-link inputs instead.
 STDLIB_STAGED_EXTRA_OBJECTS = $(foreach object,$(STDLIB_EXTRA_OBJECTS),$(abspath $(object)))
 
 # LuaRocks invokes this only after deploying titanc and its Lua compiler
-# modules. Build all nineteen source roots once in a private directory on the
+# modules. Build all twenty source roots once in a private directory on the
 # destination filesystem. The Lua publisher validates the complete protocol
-# and exact staged titan.test compiler source, commits nineteen shims, that
+# and exact staged titan.test compiler source, commits twenty shims, that
 # source, the archive, and the one macOS dSYM before renaming titan.so last;
 # any caught failure restores the prior pair or first-install bootstrap.
 rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
@@ -2128,7 +2317,7 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 	  export CC=$(call make_shell_quote,$(CC)); \
 	  export AR=$(call make_shell_quote,$(AR)); \
 	  export RANLIB=$(call make_shell_quote,$(RANLIB)); \
-	  export TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))); \
+	  export TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_SQLITE3_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))); \
 	  export TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))); \
 	  export TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS) $(STDLIB_OPENSSL_LDFLAGS))); \
 	  $(call make_shell_quote,$(ROCK_TITANC)) --tree \
@@ -2159,11 +2348,12 @@ TITAN_STDLIB_TEST_ROOTS := $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
 	coroutine.tests iteration.tests gc.tests lua.tests math.tests peg.tests \
 	string.core_test string.format_pack_test string.regex_test async.tests \
 	uv.task_tests io.tests fs.tests timer.tests net.tests ssl.tests http.tests \
-	url.tests os.tests os.process_tests uv.runtime_tests reflect.tests
+	url.tests os.tests os.process_tests uv.runtime_tests reflect.tests sqlite3.tests
 TITAN_TEST_BUILD_DIR ?= .titan-tests
 TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)
 TITAN_TEST_TIMEOUT ?= 120
 TEST_TITANC ?= titanc
+TEST_LUA ?= lua
 BUSTED ?= busted
 BUSTED_FILTER ?=
 TITAN_FILTER ?=
@@ -2193,10 +2383,16 @@ stdlib-busted-test: ## Run retained stdlib/runtime Busted specs without coverage
 		bash spec/support/run_rock_tests.sh \
 		$(STDLIB_BUSTED_TESTS) $(EXTRA_TEST_FLAGS)
 
-titan-stdlib-test-build: ## Build every native Titan stdlib test into one executable
+titan-stdlib-test-build: $(SQLITE3_HEADER) ## Build every native Titan stdlib test into one executable
 	@bash spec/support/clean_generated_test_artifacts.sh
 	@mkdir -p $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR))
 	@set +e; \
+	fixture_lua_include="$$( $(TEST_LUA) -E -e \
+	  'io.write(assert(require("titan-compiler.driver").LUA_SOURCE_PATH))' )" || exit $$?; \
+	test -n "$$fixture_lua_include" && test -f "$$fixture_lua_include/lua.h" || { \
+	  echo "ERROR: native test fixture cannot locate matching Lua headers" >&2; exit 1; \
+	}; \
+	fixture_lua_include="$$(CDPATH= cd "$$fixture_lua_include" && pwd -P)" || exit $$?; \
 	( cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); \
 	  cp $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/async_foreign_work.h)) \
 	    async_foreign_work.h && \
@@ -2212,6 +2408,14 @@ titan-stdlib-test-build: ## Build every native Titan stdlib test into one execut
 	    -I$(call make_shell_quote,$(abspath spec/fixtures/stdlib/native)) \
 	    -c $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/uv_stdio_probe.c)) \
 	    -o uv_stdio_probe.o && \
+	  cp $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/sqlite3_worker_fixture.h)) \
+	    sqlite3_worker_fixture.h && \
+	  $(CC) -std=c99 -Wall -Wextra -Werror -fPIC -pthread \
+	    $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) $(SQLITE3_CPPFLAGS) \
+	    -I"$$fixture_lua_include" \
+	    -I$(call make_shell_quote,$(abspath spec/fixtures/stdlib/native)) \
+	    -c $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/sqlite3_worker_fixture.c)) \
+	    -o sqlite3_worker_fixture.o && \
 	  $(CC) -std=c99 -Wall -Wextra -Werror \
 	    $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
 	    $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/os_process_host_child.c)) \
@@ -2322,8 +2526,11 @@ clean-llhttp: ## Remove the private llhttp source, build tree, and release tarba
 	rm -rf $(LLHTTP_SRC_DIR) $(LLHTTP_BUILD_DIR)
 	rm -f $(LLHTTP_TARBALL)
 
+clean-sqlite3: ## Remove the private SQLite amalgamation, build tree, and release tarball
+	rm -rf "$(SQLITE3_SRC_DIR)" "$(SQLITE3_BUILD_DIR)" "$(SQLITE3_TARBALL)"
+
 clean-openssl: ## Remove the bundled OpenSSL source/build trees and release tarball
 	rm -rf $(OPENSSL_SRC_DIR) $(OPENSSL_BUILD_DIR)
 	rm -f $(OPENSSL_TARBALL)
 
-distclean: clean clean-lua clean-readline clean-luarocks clean-libbacktrace clean-libuv clean-llhttp clean-openssl ## Remove all downloaded trees and artifacts
+distclean: clean clean-lua clean-readline clean-luarocks clean-libbacktrace clean-libuv clean-llhttp clean-sqlite3 clean-openssl ## Remove all downloaded trees and artifacts
