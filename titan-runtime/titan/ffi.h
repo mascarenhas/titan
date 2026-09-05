@@ -8,6 +8,19 @@
 #include "lgc.h"
 #include "lua.h"
 
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/socket.h>
+
+/* glibc's GNU getsockname declaration uses a transparent-union argument,
+** which Titan's C importer does not support. Expose the ordinary POSIX
+** sockaddr-pointer signature without changing the call or its errno. */
+static inline int titan_posix_getsockname(int descriptor,
+                                         struct sockaddr *address,
+                                         socklen_t *length) {
+  return getsockname(descriptor, address, length);
+}
+#endif
+
 /*
 ** Macro to convert between function pointers and object/void pointers.
 ** These casts are not portable ISO C, but the supported toolchains and
@@ -165,4 +178,3 @@ static inline void lmacro_sethvalue(lua_State *L, TValue *o, Table *t) {
 }
 
 #endif
-

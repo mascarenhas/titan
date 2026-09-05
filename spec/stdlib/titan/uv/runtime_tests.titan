@@ -216,7 +216,9 @@ local function assert_stdio_fixture(workspace: string, mode: string,
                                     expected: string, parent_mode: integer,
                                     nonblocking_mask: integer,
                                     expected_stdout: string,
-                                    expected_stderr: string)
+                                    expected_stderr: string,
+                                    pipe_hint: string?,
+                                    stderr_fragment: boolean?)
   local result_path = workspace .. "/" .. mode .. ".result"
   if stdio_probe.titan_uv_test_stdio_setup(parent_mode) ~= 0 then
     raise stdio_probe.titan_uv_test_stdio_failure() as string
@@ -228,9 +230,14 @@ local function assert_stdio_fixture(workspace: string, mode: string,
   local captured_stderr = ""
   do
     defer restore_stdio_probe()
-    status = command.system({
-      workspace .. "/uv_stdio_app", mode, result_path,
-    })
+    local arguments = {"env", "-u", "TITAN_STDIO_PIPE_FDS"}
+    if pipe_hint ~= nil then
+      arguments = {"env", "TITAN_STDIO_PIPE_FDS=" .. pipe_hint}
+    end
+    arguments[#arguments + 1] = workspace .. "/uv_stdio_app"
+    arguments[#arguments + 1] = mode
+    arguments[#arguments + 1] = result_path
+    status = command.system(arguments)
     finish_status =
       stdio_probe.titan_uv_test_stdio_finish(nonblocking_mask)
     stdio_probe_active = false
@@ -240,10 +247,14 @@ local function assert_stdio_fixture(workspace: string, mode: string,
   local report = fs.read_file(result_path)
   defer fs.unlink(result_path)
   local probe_failure = stdio_probe.titan_uv_test_stdio_failure() as string
+  local stderr_matches = captured_stderr == expected_stderr
+  if stderr_fragment then
+    stderr_matches = common.contains(captured_stderr, expected_stderr)
+  end
   test.assert(status == 0 and finish_status == 0 and
               report == "OK:" .. expected and
               captured_stdout == expected_stdout and
-              captured_stderr == expected_stderr,
+              stderr_matches,
               "uv stdio " .. mode .. " fixture failed: " .. report ..
               "; probe: " .. probe_failure ..
               "; stdout: " .. captured_stdout ..
@@ -293,5 +304,103 @@ function test_parent_socket_stdio_rejection_does_not_leak(
     assert_stdio_fixture(
       workspace, "socket", "parent-socket-rejected",
       stdio_probe.TITAN_UV_TEST_STDIO_SOCKET_STDOUT, 0, "", "")
+  end)
+end
+
+function test_parent_unix_stream_stdio_classification_and_transfer(
+    _context: test.Context)
+  with_stdio_fixture(function (workspace: string)
+    assert_stdio_fixture(
+      workspace, "pipes", "parent-pipes-ok",
+      stdio_probe.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL, 7,
+      "pipe-stdout", "pipe-stderr")
+  end)
+end
+
+function test_parent_stdio_hints_preserve_known_descriptor_kinds(
+    _context: test.Context)
+  with_stdio_fixture(function (workspace: string)
+    assert_stdio_fixture(workspace, "pipes", "parent-pipes-ok",
+      stdio_probe.TITAN_UV_TEST_STDIO_PIPE_ALL, 7,
+      "pipe-stdout", "pipe-stderr", "invalid")
+    assert_stdio_fixture(workspace, "tty", "parent-tty-ok",
+      stdio_probe.TITAN_UV_TEST_STDIO_TTY_SLAVE, 0, "tty-output", "", "1")
+    assert_stdio_fixture(workspace, "file", "parent-file-rejected",
+      stdio_probe.TITAN_UV_TEST_STDIO_FILE_STDOUT, 0, "", "", "1")
+    local modes = {
+      stdio_probe.TITAN_UV_TEST_STDIO_SOCKET_STDOUT,
+      stdio_probe.TITAN_UV_TEST_STDIO_INET_DATAGRAM_STDOUT,
+      stdio_probe.TITAN_UV_TEST_STDIO_UNIX_DATAGRAM_STDOUT,
+    }
+    for index = 1, #modes do
+      assert_stdio_fixture(workspace, "socket", "parent-socket-rejected",
+        modes[index], 0, "", "", "1")
+    end
+  end)
+end
+
+function test_parent_closed_stdio_reports_ebadf_without_leaking(
+    _context: test.Context)
+  with_stdio_fixture(function (workspace: string)
+    assert_stdio_fixture(workspace, "closed", "parent-closed-rejected",
+      stdio_probe.TITAN_UV_TEST_STDIO_PIPE_ALL, 0, "", "", "1")
+  end)
+end
+
+function test_parent_denied_unix_stdio_uses_only_valid_per_fd_pipe_hints(
+    _context: test.Context)
+  if stdio_probe.titan_uv_test_stdio_metadata_denial_supported() == 0 then
+    test.skip("stdio metadata denial requires Linux x86_64 or aarch64")
+  end
+  with_stdio_fixture(function (workspace: string)
+    local sockets = stdio_probe.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL
+    assert_stdio_fixture(workspace, "denied-pipes", "parent-pipes-ok",
+      sockets, 7, "pipe-stdout", "pipe-stderr", "0,1,2")
+    assert_stdio_fixture(workspace, "denied-pipes-access", "parent-pipes-ok",
+      sockets, 7, "pipe-stdout", "pipe-stderr", "0,1,2")
+    assert_stdio_fixture(workspace, "denied-stdin", "parent-stdin-ok",
+      sockets, 1, "", "", "0")
+    assert_stdio_fixture(workspace, "denied-stdout", "parent-stdout-ok",
+      sockets, 2, "pipe-stdout", "", "1")
+    assert_stdio_fixture(workspace, "denied-stderr", "parent-stderr-ok",
+      sockets, 4, "", "pipe-stderr", "2")
+    assert_stdio_fixture(workspace, "denied-reject", "parent-denied-rejected",
+      sockets, 0, "", "")
+    local invalid_hints = {"0,2", "", "01", "1 ", "1,9", "1,,2", "1,", "10"}
+    for index = 1, #invalid_hints do
+      assert_stdio_fixture(workspace, "denied-reject", "parent-denied-rejected",
+        sockets, 0, "", "", invalid_hints[index])
+    end
+  end)
+end
+
+function test_parent_partial_metadata_denial_preserves_socket_contradictions(
+    _context: test.Context)
+  if stdio_probe.titan_uv_test_stdio_metadata_denial_supported() == 0 then
+    test.skip("stdio metadata denial requires Linux x86_64 or aarch64")
+  end
+  with_stdio_fixture(function (workspace: string)
+    local sockets = stdio_probe.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL
+    assert_stdio_fixture(workspace, "deny-name-stdout", "parent-stdout-ok",
+      sockets, 2, "pipe-stdout", "", "1")
+    assert_stdio_fixture(workspace, "deny-type-stdout", "parent-stdout-ok",
+      sockets, 2, "pipe-stdout", "", "1")
+    assert_stdio_fixture(workspace, "deny-name-reject", "parent-contradiction-rejected",
+      stdio_probe.TITAN_UV_TEST_STDIO_UNIX_DATAGRAM_STDOUT, 0, "", "", "1")
+    assert_stdio_fixture(workspace, "deny-type-reject", "parent-contradiction-rejected",
+      stdio_probe.TITAN_UV_TEST_STDIO_SOCKET_STDOUT, 0, "", "", "1")
+  end)
+end
+
+function test_parent_stdio_denial_renders_operation_error_fields(
+    _context: test.Context)
+  if stdio_probe.titan_uv_test_stdio_metadata_denial_supported() == 0 then
+    test.skip("stdio metadata denial requires Linux x86_64 or aarch64")
+  end
+  with_stdio_fixture(function (workspace: string)
+    assert_stdio_fixture(workspace, "denied-diagnostic", "parent-denied-diagnostic",
+      stdio_probe.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL, 0, "",
+      "uncaught error in async Task: stdio.parent.kind: EPERM (-1): fd 1: getsockname",
+      nil, true)
   end)
 end

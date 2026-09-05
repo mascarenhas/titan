@@ -1,7 +1,9 @@
 local process_fcntl = foreign import "fcntl.h"
 local process_unistd = foreign import "unistd.h"
+local process_socket = foreign import "sys/socket.h"
 
 local type CharPointer = *char
+local type ParentStdioStat = cstat.stat
 
 -- Stream reads are the one multi-shot operation in this contributor. A
 -- stream therefore buffers callback chunks and has at most one suspended
@@ -468,6 +470,115 @@ local function duplicate_descriptor(
   return duplicate as libuv.uv_file
 end
 
+local function parent_stdio_kind_error(code: integer, descriptor: integer,
+                                       probe: string): OperationError
+  local failure = make_error(code, "stdio.parent.kind")
+  failure.message = "fd " .. descriptor .. ": " .. probe .. ": " ..
+                    failure.message
+  return failure
+end
+
+local function parent_stdio_pipe_hint(descriptor: integer): boolean
+  local configured? = os_getenv("TITAN_STDIO_PIPE_FDS")
+  if not configured then return false end
+  local hint = configured as string
+  if #hint == 0 or #hint % 2 == 0 then return false end
+  local bytes = hint as const *char
+  local selected = false
+  for index = 0, #hint - 1 do
+    local byte = bytes[index] as integer
+    if index % 2 == 0 then
+      -- Only single ASCII fd digits 0, 1, and 2 are valid tokens. Validate
+      -- the whole list before trusting any selected descriptor.
+      if byte < 48 or byte > 50 then return false end
+      if byte == descriptor + 48 then selected = true end
+    elseif byte ~= 44 then
+      return false
+    end
+  end
+  return selected
+end
+
+local function parent_stdio_kind(descriptor: integer): libuv.uv_handle_type
+  local fd = descriptor as libuv.uv_file
+  local guessed = libuv.uv_guess_handle(fd)
+  if guessed == libuv.UV_TTY or guessed == libuv.UV_NAMED_PIPE then
+    return guessed
+  end
+  if guessed ~= libuv.UV_UNKNOWN_HANDLE then
+    raise parent_stdio_kind_error(libuv.UV_ENOTSUP, descriptor,
+      "uv_guess_handle classified unsupported kind " .. (guessed as integer))
+  end
+
+  -- uv_guess_handle does not promise errno; its isatty probe can leave an
+  -- unrelated value behind. Inspect this UNKNOWN fd explicitly.
+  local metadata = ParentStdioStat.new()
+  if cstat.fstat(fd, metadata) ~= 0 then
+    local saved_errno = cerrno.errno
+    raise parent_stdio_kind_error(libuv.uv_translate_sys_error(saved_errno),
+                                   descriptor, "fstat")
+  end
+  if (metadata.st_mode & cstat.S_IFMT) ~= cstat.S_IFSOCK then
+    raise parent_stdio_kind_error(libuv.UV_ENOTSUP, descriptor,
+                                   "fstat did not identify a socket")
+  end
+
+  local address = process_socket.sockaddr_storage.new()
+  local address_size = process_socket.socklen_t.new_array(1)
+  address_size[0] = process_socket.sockaddr_storage.sizeof as
+                    process_socket.socklen_t
+  local name_status = ffi.titan_posix_getsockname(fd,
+      address as *process_socket.sockaddr, address_size)
+  local name_errno = 0
+  if name_status ~= 0 then name_errno = cerrno.errno end
+
+  local socket_type = int.new_array(1)
+  local type_size = process_socket.socklen_t.new_array(1)
+  type_size[0] = int.sizeof as process_socket.socklen_t
+  local type_status = process_socket.getsockopt(fd, process_socket.SOL_SOCKET,
+      process_socket.SO_TYPE, socket_type, type_size)
+  local type_errno = 0
+  if type_status ~= 0 then type_errno = cerrno.errno end
+
+  -- Both probes run even when the first fails: any available contradiction
+  -- defeats launcher knowledge about the missing metadata.
+  if name_status == 0 and address.ss_family ~= process_socket.AF_UNIX then
+    raise parent_stdio_kind_error(libuv.UV_ENOTSUP, descriptor,
+      "getsockname reported family " .. (address.ss_family as integer))
+  end
+  if type_status == 0 and
+     (type_size[0] ~= (int.sizeof as process_socket.socklen_t) or
+      socket_type[0] ~= process_socket.SOCK_STREAM) then
+    raise parent_stdio_kind_error(libuv.UV_ENOTSUP, descriptor,
+      "getsockopt(SO_TYPE) did not identify SOCK_STREAM")
+  end
+  if name_errno ~= 0 and name_errno ~= cerrno.EPERM and
+     name_errno ~= cerrno.EACCES then
+    raise parent_stdio_kind_error(libuv.uv_translate_sys_error(name_errno),
+                                   descriptor, "getsockname")
+  end
+  if type_errno ~= 0 and type_errno ~= cerrno.EPERM and
+     type_errno ~= cerrno.EACCES then
+    raise parent_stdio_kind_error(libuv.uv_translate_sys_error(type_errno),
+                                   descriptor, "getsockopt(SO_TYPE)")
+  end
+  if name_errno == 0 and type_errno == 0 then
+    raise parent_stdio_kind_error(libuv.UV_ENOTSUP, descriptor,
+      "uv_guess_handle remained unknown with inspectable socket metadata")
+  end
+  if parent_stdio_pipe_hint(descriptor) then return libuv.UV_NAMED_PIPE end
+
+  local missing_probe = "getsockname"
+  local denied_errno = name_errno
+  if denied_errno == 0 then
+    missing_probe = "getsockopt(SO_TYPE)"
+    denied_errno = type_errno
+  end
+  raise parent_stdio_kind_error(libuv.uv_translate_sys_error(denied_errno),
+    descriptor, missing_probe ..
+      " denied without a valid TITAN_STDIO_PIPE_FDS hint for this fd")
+end
+
 local function initialize_parent_stdio(runtime: Runtime,
                                        descriptor: integer): uv_stdio_t
   if parent_runtime ~= runtime then
@@ -482,10 +593,7 @@ local function initialize_parent_stdio(runtime: Runtime,
   end
   cached_parent_stdio[cache_index] = nil
 
-  local guessed = libuv.uv_guess_handle(descriptor as libuv.uv_file)
-  if guessed ~= libuv.UV_TTY and guessed ~= libuv.UV_NAMED_PIPE then
-    raise make_error(libuv.UV_ENOTSUP, "stdio.parent.kind")
-  end
+  local guessed = parent_stdio_kind(descriptor)
   local duplicate = duplicate_descriptor(descriptor as libuv.uv_file)
   defer close_descriptor(duplicate)
   local stdio: uv_stdio_t? = nil
