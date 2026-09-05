@@ -1673,7 +1673,7 @@ describe("C FFI type checking", function()
         end)
     end)
 
-    it("keeps C function pointers boxed out of value but permits explicit void casts", function()
+    it("boxes C function pointers and keeps pointer recovery explicit", function()
         with_header([[
             typedef int (*ffi_callback)(int);
             typedef void *ffi_vptr;
@@ -1681,12 +1681,26 @@ describe("C FFI type checking", function()
             local ok, err = run_checker([[
                 local c = foreign import "]] .. header .. [["
 
-                local function f(cb: c.ffi_callback): value
+                local function box(cb: c.ffi_callback): value
+                    return cb
+                end
+                local function written_box(cb: c.ffi_callback): value
                     return cb as value
+                end
+                local function recover(raw: value): c.ffi_callback
+                    return raw as c.ffi_callback
+                end
+            ]])
+            assert.truthy(ok, err)
+
+            ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                local function recover(raw: value): c.ffi_callback
+                    return raw
                 end
             ]])
             assert.falsy(ok)
-            assert.match("cannot cast '.-ffi_callback' to 'value'", err)
+            assert.match("types in return do not match", err)
 
             ok, err = run_checker([[
                 local c = foreign import "]] .. header .. [["
@@ -2254,10 +2268,10 @@ describe("C FFI type checking", function()
                     callback: c.ffi_callback
                 end
             ]])
-            assert.same(8, #errs)
+            assert.same(6, #errs)
             local all = table.concat(errs, "\n")
             for _, member in ipairs({
-                "structure", "aggregate", "values", "callback",
+                "structure", "aggregate", "values",
             }) do
                 assert.match(
                     "record field '" .. member ..
@@ -2274,6 +2288,7 @@ describe("C FFI type checking", function()
         with_header([[
             typedef int ffi_count;
             typedef struct ffi_handle { int value; } ffi_handle;
+            typedef int (*ffi_callback)(int);
             typedef struct TValue TValue;
             typedef struct Udata Udata;
         ]], function(header)
@@ -2286,6 +2301,7 @@ describe("C FFI type checking", function()
                     local raw: c.TValue
                     local userdata: *c.Udata
                     local owner: owned *c.ffi_handle
+                    local callback: c.ffi_callback
                 end
 
                 union Message
@@ -2295,13 +2311,14 @@ describe("C FFI type checking", function()
                     local raw: c.TValue
                     local userdata: *c.Udata
                     local owner: owned *c.ffi_handle
+                    local callback: c.ffi_callback
                 end
             ]])
             assert.truthy(ok, err)
             local union = modtype.members.Message.type
-            assert.equal(6, union.nvariants)
+            assert.equal(7, union.nvariants)
             for _, name in ipairs({
-                "count", "handle", "raw", "userdata", "owner",
+                "count", "handle", "raw", "userdata", "owner", "callback",
             }) do
                 assert.truthy(union.variants[name].islocal)
             end

@@ -392,7 +392,6 @@ describe("source-written owned C types", function()
                 "c.ffi_item",
                 "c.ffi_cell",
                 "c.ffi_row",
-                "c.ffi_callback_pointer",
             }) do
                 local ok, err = check_with_header(header,
                     "local item: " .. typename .. "? = nil\n")
@@ -400,6 +399,19 @@ describe("source-written owned C types", function()
                 assert.match("has no TValue representation", err,
                     typename)
             end
+        end)
+    end)
+
+    it("admits optional C function pointers as boxed values", function()
+        with_header(declarations, function(header)
+            local ok, err = check_with_header(header, [[
+                local callback: c.ffi_callback_pointer? = nil
+                local function box(pointer: c.ffi_callback_pointer): value
+                    local optional: c.ffi_callback_pointer? = pointer
+                    return optional
+                end
+            ]])
+            assert.truthy(ok, err)
         end)
     end)
 

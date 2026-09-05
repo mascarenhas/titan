@@ -412,7 +412,6 @@ end
 local function to_sorted_array<T>(v: ({ string: T })?): const {T}
   local res: {T} = {}
   if v == nil then return res as const {T} end
-  local v = v
   local names: {string} = {}
   local map: {string: MethodType} = {}
   for name, val in iteration.pairs(v) do

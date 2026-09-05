@@ -53,10 +53,24 @@ describe("surface C99 type code generation", function()
                 end
 
                 callback_invocations: integer = 0
+                stored_callback: Callback = nil
+
+                record CallbackBox
+                    callback: Callback
+                end
 
                 function callback(): Callback
                     callback_invocations = callback_invocations + 1
                     return plus_one
+                end
+
+                function invoke_boxed(raw: value): integer
+                    local restored = raw as Callback
+                    return restored(41 as int) as integer
+                end
+
+                function boxed_callback(): CallbackBox
+                    return CallbackBox.new(plus_one)
                 end
 
                 function expose(): value
@@ -70,6 +84,10 @@ describe("surface C99 type code generation", function()
                     items[0] = 41
                     return items
                 end
+
+                do
+                    stored_callback = plus_one
+                end
             ]],
             surface_consumer = [[
                 local provider = import "surface_provider"
@@ -78,6 +96,12 @@ describe("surface C99 type code generation", function()
                     local callback: provider.Callback = provider.callback()
                     local item: int = 41
                     return callback(item) as integer
+                end
+
+                function call_stored(): integer
+                    local box = provider.boxed_callback()
+                    return box.callback(40 as int) as integer
+                        + provider.stored_callback(0 as int) as integer
                 end
 
                 function invoke(): integer
@@ -95,16 +119,21 @@ describe("surface C99 type code generation", function()
         }, "surface_consumer", nil, { interface = "compiled" })
         assert.truthy(ok, err)
 
-        local lua_blocked, lua_message = h.call("surface_provider", [[
-            local called, call_error = pcall(surface_provider.callback)
-            assert(not called)
-            assert(call_error:match("no Lua/TValue representation"))
-            assert(surface_provider.callback_invocations == 0)
+        local lua_called, lua_message = h.call("surface_provider", [[
+            local callback = surface_provider.callback()
+            assert(type(callback) == "userdata")
+            assert(surface_provider.callback_invocations == 1)
+            assert(callback == surface_provider.stored_callback)
+            assert(surface_provider.boxed_callback().callback == callback)
+            assert(surface_provider.invoke_boxed(callback) == 42)
+            local called, call_error = pcall(surface_provider.invoke_boxed, {})
+            assert(not called and call_error:match("expected C pointer"))
         ]])
-        assert.truthy(lua_blocked, lua_message)
+        assert.truthy(lua_called, lua_message)
 
         local called, message = h.call("surface_consumer", [[
             assert(surface_consumer.call_foreign() == 42)
+            assert(surface_consumer.call_stored() == 42)
             assert(surface_consumer.invoke() == 41)
             assert(surface_consumer.count() == 43)
         ]])

@@ -170,6 +170,31 @@ bound method reference `obj:m`. See
 [Functions](functions.md), [closures](closures.md), and
 [Expressions](expressions.md).
 
+### Parenthesized types
+
+Parentheses can group any single type: `(T)` and `T` denote the same type,
+and extra layers such as `((T))` are also allowed. Grouping works in ordinary
+annotations, function parameters and results, generic type arguments, casts,
+type tests, and C pointer or owned payloads. For example, `({string: T})?`
+makes the entire Map optional, and `*(int)` is the same C pointer type as
+`*int`. Parentheses do not change the restrictions on the enclosed type.
+
+The `?` suffix applies to the complete preceding group. These function types
+therefore have different meanings:
+
+| Type | Meaning |
+| --- | --- |
+| `(T) -> (U)?` | A function taking `T` and returning `U` or nil |
+| `((T) -> U)?` | A function taking `T` and returning `U`, or nil in place of the function |
+| `(T -> U) -> V` | A function taking a `T -> U` function and returning `V` |
+
+A group contains exactly one type. `(T, U)` is a parameter or result list,
+not a tuple type, and `()` is an empty parameter or result list. Such lists
+remain valid in `() -> (T, U)` and function result annotations, but cannot
+stand alone as a variable's type or receive an outer `?`. A flexible result
+list such as `(...: T)` follows the same rule. To make the function optional,
+group the whole function type, as in `(() -> (T, U))?`.
+
 ### Foreign types
 
 Titan has contextual spellings for portable C primitives such as `int`,

@@ -87,7 +87,22 @@ describe("source-written owned C type code generation", function()
                 assert(type(metatable) == "table")
                 assert(metatable.__name == public_name)
                 assert(metatable[registry.TITAN_BRAND] == 6)
-                assert(metatable[registry.TITAN_MT_TYPE] == "COwned(CTypedef(\"ffi_item\",CStruct(false,\"ffi_item\",false,{},true,false),{}),false)")
+                local types = require "titan-compiler.types"
+                local descriptor = assert(load(
+                    "return " .. metatable[registry.TITAN_MT_TYPE],
+                    "owned C descriptor", "t", types))()
+                assert(descriptor._tag == "Type.COwned" and not descriptor.count)
+                local alias = descriptor.pointee
+                assert(alias._tag == "Type.CTypedef" and alias.name == "ffi_item")
+                local structure = alias.target
+                assert(structure._tag == "Type.CStruct")
+                assert(structure.tagname == "ffi_item" and structure.complete)
+                assert(not structure.has_fam and #structure.fields == 1)
+                local field = structure.fields[1]
+                assert(field._tag == "Type.CField" and field.name == "value")
+                assert(field.type._tag == "Type.CInteger")
+                assert(field.type.spelling == "int" and field.type.signed)
+                assert(not field.bitfield and not field.flexible_array)
                 assert(tostring(item):sub(1, #public_name + 2) ==
                        public_name .. ": ")
             ]])

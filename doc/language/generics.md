@@ -354,7 +354,14 @@ or force.
 Inference equations remain invariant structural equations over corresponding
 parts of Options, Arrays, Maps, function shapes, and applications of the same
 owner. They connect still-open cells, including cells owned by nested uses, and
-are subject to an occurs check. They do not:
+are subject to an occurs check. At an argument's outer boundary, an optional
+value can supply its present type to a nonoptional structural parameter. For
+example, passing `({string: integer})?` to `iteration.pairs` infers `K = string`
+and `V = integer`; the call still performs the ordinary nil check. A direct
+parameter `T` instead infers the whole optional type. This does not unwrap
+Options inside an existing container or callable component.
+
+Inference equations do not:
 
 - search for a common supertype;
 - choose a conversion as evidence;

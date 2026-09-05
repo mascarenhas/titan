@@ -86,7 +86,7 @@ describe("surface C99 types", function()
         assert.truthy(ok, err)
     end)
 
-    it("keeps function pointers out of module TValue slots", function()
+    it("stores portable function pointers in module TValue slots", function()
         for _, declaration in ipairs({
             "local callback: Callback = nil",
             "callback: Callback = nil",
@@ -94,9 +94,7 @@ describe("surface C99 types", function()
             local ok, err = run_checker([[
                 type Callback = foreign (int) -> int
             ]] .. declaration)
-            assert.falsy(ok)
-            assert.match("module variable 'callback'.-no TValue representation",
-                err)
+            assert.truthy(ok, err)
         end
 
         local ok, err = run_checker([[

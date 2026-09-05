@@ -275,7 +275,8 @@ describe("Titan types", function()
             { types.Integer() }, { types.Integer() }, true, false, false)
 
         assert.is_false(types.equals(valid, malformed))
-        assert.is_false(types.equals(malformed, malformed))
+        -- Equality remains reflexive; boundary validation rejects the descriptor.
+        assert.is_true(types.equals(malformed, malformed))
         assert.is_false(types.consistent(valid, malformed))
         assert.is_false(types.callable_adjustment(valid, malformed))
         assert.is_false(types.has_sound_gradual_guard(malformed))
@@ -607,7 +608,8 @@ describe("Titan types", function()
             assert.is_nil(valid)
             assert.match("does not reference",
                 validation_error)
-            assert.is_false(types.equals(malformed, malformed))
+            -- Identity equality does not replace descriptor validation.
+            assert.is_true(types.equals(malformed, malformed))
             local ok, err = pcall(types.serialize, malformed)
             assert.is_false(ok)
             assert.match("malformed Interface descriptor",
@@ -2478,7 +2480,9 @@ describe("Titan types", function()
                 types.Option(owner)))
             assert.falsy(types.has_tvalue_representation(aggregate))
             assert.falsy(types.has_tvalue_representation(direct_function))
-            assert.falsy(types.has_tvalue_representation(function_pointer))
+            assert.truthy(types.has_tvalue_representation(function_pointer))
+            assert.truthy(types.has_tvalue_representation(
+                types.Option(function_pointer)))
         end)
 
         it("does not decay an optional owner into an optional pointer",

@@ -1661,10 +1661,10 @@ function generic_close_inference_context(context)
     return valid
 end
 
-function generic_unify_result_inference(
+function generic_unify_adjusted_inference(
         context, pattern, target, term, loc)
-    -- Ordinary sinks may add or remove one outer option around a structured
-    -- result.  Use the option's element as contextual evidence, while keeping
+    -- Ordinary argument/result sinks may add or remove one outer Option
+    -- around a structured type. Use its base as boundary evidence, while keeping
     -- a direct binder authoritative (`T` itself still binds to `X?`).  The
     -- eventual ordinary assignment check remains responsible for admitting
     -- the actual option conversion.
@@ -1699,7 +1699,7 @@ function generic_infer_result_evidence(context, signature, demand)
                 pattern = optionize(signature.flexrettype)
             end
             if pattern then
-                generic_unify_result_inference(context, pattern, target,
+                generic_unify_adjusted_inference(context, pattern, target,
                     "expected result " .. index, demand.loc or context.loc)
             end
         end
@@ -1707,12 +1707,12 @@ function generic_infer_result_evidence(context, signature, demand)
     local tail = expected_type(demand.tail)
     if tail then
         for index = #(demand.fixed or {}) + 1, #signature.rettypes do
-            generic_unify_result_inference(context,
+            generic_unify_adjusted_inference(context,
                 signature.rettypes[index], tail,
                 "expected open result", demand.loc or context.loc)
         end
         if signature.flexrettype then
-            generic_unify_result_inference(context,
+            generic_unify_adjusted_inference(context,
                 signature.flexrettype, tail,
                 "expected open result", demand.loc or context.loc)
         end
@@ -1885,16 +1885,14 @@ function generic_unify_expression_results(context, signature, exp,
         if pattern then
             actual = generic_contextual_record_constructor_evidence(
                 context, pattern, exp, actual)
-            generic_unify_inference(context, pattern, actual,
+            generic_unify_adjusted_inference(context, pattern, actual,
                 term .. " " .. index, exp.loc)
-            generic_infer_constraint_evidence(context)
         end
         index = index + 1
     end
     if open and signature.varargtype then
-        generic_unify_inference(context,
+        generic_unify_adjusted_inference(context,
             signature.varargtype, open, term .. " open tail", exp.loc)
-        generic_infer_constraint_evidence(context)
     end
 end
 
@@ -2148,7 +2146,7 @@ function generic_resolve_deferred_generic_arguments(
                 result_demand({ expected or UNKNOWN_SLOT }, false, {
                     term = label,
                 }))
-            generic_unify_inference(context, item.pattern,
+            generic_unify_adjusted_inference(context, item.pattern,
                 item.exp._type, label, item.exp.loc)
             item.checked = true
         end
@@ -2212,15 +2210,13 @@ function generic_infer_positional_call(context, signature, args,
                 local finite = spread._spread_optional_type
                 for index = first_index, #signature.params do
                     local pattern = signature.params[index]
-                    generic_unify_inference(context, pattern, finite,
+                    generic_unify_adjusted_inference(context, pattern, finite,
                         "spread argument " .. index, spread.loc)
-                    generic_infer_constraint_evidence(context)
                 end
                 if signature.varargtype then
-                    generic_unify_inference(context,
+                    generic_unify_adjusted_inference(context,
                         signature.varargtype, elem,
                         "open spread argument", spread.loc)
-                    generic_infer_constraint_evidence(context)
                 end
                 elem = generic_substitute_inference(
                     context, elem, false)
@@ -2259,9 +2255,8 @@ function generic_infer_positional_call(context, signature, args,
             local evidence =
                 generic_contextual_record_constructor_evidence(
                     context, pattern, exp, exp._type)
-            generic_unify_inference(context, pattern,
+            generic_unify_adjusted_inference(context, pattern,
                 evidence, "argument " .. index, exp.loc)
-            generic_infer_constraint_evidence(context)
         end
     end
     for _, exp in ipairs(adjusted.tail_scalars) do
@@ -2270,16 +2265,15 @@ function generic_infer_positional_call(context, signature, args,
             local evidence =
                 generic_contextual_record_constructor_evidence(
                     context, signature.varargtype, exp, exp._type)
-            generic_unify_inference(context,
+            generic_unify_adjusted_inference(context,
                 signature.varargtype, evidence,
                 "variadic argument", exp.loc)
-            generic_infer_constraint_evidence(context)
         end
     end
     if adjusted.open_source and signature.varargtype
        and not consumed_spreads[adjusted.open_source]
        and not consumed_open[adjusted.open_source] then
-        generic_unify_inference(context,
+        generic_unify_adjusted_inference(context,
             signature.varargtype, adjusted.open_type,
             "open variadic argument", adjusted.open_source.loc)
     end
@@ -2348,10 +2342,9 @@ function generic_infer_named_call(context, signature, fields,
                 local evidence =
                     generic_contextual_record_constructor_evidence(
                         context, pattern, field.exp, field.exp._type)
-                generic_unify_inference(context, pattern,
+                generic_unify_adjusted_inference(context, pattern,
                     evidence, "named argument '" .. field.name .. "'",
                     field.loc)
-                generic_infer_constraint_evidence(context)
             end
             checked[field] = index
             if supplied[index] then
@@ -2364,10 +2357,9 @@ function generic_infer_named_call(context, signature, fields,
     end
     for index, name in ipairs(paramnames) do
         if not supplied[index] then
-            generic_unify_inference(context,
+            generic_unify_adjusted_inference(context,
                 signature.params[index], types.Nil(),
                 "omitted named argument '" .. name .. "'", context.loc)
-            generic_infer_constraint_evidence(context)
         end
     end
 

@@ -680,6 +680,55 @@ describe("generic erased core", function()
         ]])
     end)
 
+    it("infers optional Map arguments before their ordinary presence check", function()
+        h.run_coder([[
+            local entered: integer = 0
+
+            function identity<K, V>(items: {K: V}): {K: V}
+                entered = entered + 1
+                return items
+            end
+
+            function lookup<K, V>(items: ({K: V})?, key: K): V?
+                local present = identity(items)
+                return present[key]
+            end
+
+            function next<V>(items: {string: V}, key: string?): (string?, V?)
+                if key ~= nil then return nil, nil end
+                return "item", items["item"]
+            end
+
+            function pairs<V>(items: {string: V}):
+                    (({string: V}, string?) -> (string?, V?),
+                     {string: V}, nil, nil)
+                entered = entered + 1
+                return next, items, nil, nil
+            end
+
+            function copy<T>(items: ({string: T})?): {string: T}
+                local result: {string: T} = {}
+                for key, item in pairs(items) do
+                    result[key] = item
+                end
+                return result
+            end
+
+            function entries(): integer
+                return entered
+            end
+        ]], [[
+            assert(test.lookup({[7] = "seven"}, 7) == "seven")
+            assert(test.lookup({item = false}, "item") == false)
+            local copied = test.copy({item = false})
+            assert(copied.item == false)
+            local before = test.entries()
+            assert(not pcall(test.lookup, nil, "item"))
+            assert(not pcall(test.copy, nil))
+            assert(test.entries() == before)
+        ]])
+    end)
+
     it("runs a generic iterator with trailing generic tuple results", function()
         h.run_coder([[
             function step<T>(state: {T}, control: integer): (integer?, T?)
@@ -700,6 +749,145 @@ describe("generic erased core", function()
             end
         ]], [[
             assert(test.iterate() == 3)
+        ]])
+    end)
+
+    it("forces iterator item bindings inside an erased generic body", function()
+        h.run_coder([[
+            function step<T>(state: {T}, control: integer): (integer?, T?)
+                local next = control + 1
+                if next > #state then return nil, nil end
+                return next, state[next]
+            end
+
+            function copy<T>(items: {T}): {T}
+                local result: {T} = {}
+                for index, item in step, items, 0 do
+                    result[index] = item
+                end
+                return result
+            end
+
+            function booleans(): {boolean}
+                return copy({false, true})
+            end
+
+            function strings(): {string}
+                return copy({"first", "second"})
+            end
+        ]], [[
+            local booleans = test.booleans()
+            assert(#booleans == 2)
+            assert(booleans[1] == false and booleans[2] == true)
+            local strings = test.strings()
+            assert(#strings == 2)
+            assert(strings[1] == "first" and strings[2] == "second")
+        ]])
+    end)
+
+    it("erases an optional initial iterator control inside a generic body", function()
+        h.run_coder([[
+            function step<T>(state: T, control: T?): T?
+                if control == nil then return state end
+                return nil
+            end
+
+            function iterate<T>(state: T): integer
+                local count = 0
+                for item in step, state, nil do
+                    if item ~= state then raise "wrong item" end
+                    count = count + 1
+                end
+                return count
+            end
+        ]], [[
+            assert(test.iterate(false) == 1)
+            assert(test.iterate("item") == 1)
+        ]])
+    end)
+
+    it("erases generic iterator controls and close argument adjustments", function()
+        h.run_coder([[
+            local calls: integer = 0
+            local closes: integer = 0
+            local closed_state: value = nil
+
+            function step<T>(state: T, control: T): T?
+                if state ~= control then raise "wrong control" end
+                calls = calls + 1
+                if calls > 2 then return nil end
+                return state
+            end
+
+            function close<T>(state: T?)
+                closes = closes + 1
+                closed_state = state
+            end
+
+            function iterate<T>(state: T, mode: integer): integer
+                calls = 0
+                closes = 0
+                closed_state = nil
+                local finish: (T?) -> () = close
+                local count = 0
+                for item in step, state, state, finish do
+                    if item ~= state then raise "wrong item" end
+                    count = count + 1
+                    if mode == 1 then break end
+                    if mode == 2 then return count end
+                    if mode == 3 then raise "iteration body failed" end
+                end
+                return count
+            end
+
+            function status(): (integer, integer, value)
+                return calls, closes, closed_state
+            end
+        ]], [[
+            assert(test.iterate(false, 0) == 2)
+            local calls, closes, state = test.status()
+            assert(calls == 3 and closes == 1 and state == false)
+            for mode = 1, 2 do
+                assert(test.iterate("item", mode) == 1)
+                calls, closes, state = test.status()
+                assert(calls == 1 and closes == 1 and state == "item")
+            end
+            local ok, err = pcall(test.iterate, false, 3)
+            assert(not ok and tostring(err):find("iteration body failed", 1, true))
+            calls, closes, state = test.status()
+            assert(calls == 1 and closes == 1 and state == false)
+        ]])
+    end)
+
+    it("lowers discarded generic iterator setup expressions in source order", function()
+        h.run_coder([[
+            local order: string = ""
+
+            function stop<T>(state: T, control: T): T?
+                order = order .. "next;"
+                return nil
+            end
+
+            function close<T>(state: T)
+                order = order .. "close;"
+            end
+
+            function effect<T>(item: T): T
+                order = order .. "effect;"
+                return item
+            end
+
+            function iterate<T>(state: T): string
+                order = ""
+                local optional: T? = state
+                for item in stop, state, state, close, effect<T>(optional) do
+                    order = order .. "body;"
+                end
+                return order
+            end
+        ]], [[
+            assert(test.iterate(false) == "effect;next;close;")
+            assert(test.iterate("item") == "effect;next;close;")
         ]])
     end)
 
