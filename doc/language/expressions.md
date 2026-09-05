@@ -287,7 +287,13 @@ and the static type of the result depends on what the checker knows:
 * **Boolean context.** When the surrounding context expects a `boolean`
   (a condition of `if`/`while`/`repeat`, a `boolean` return type, a
   `boolean`-annotated variable), both operands are implicitly converted
-  to `boolean` and the result is `boolean`, whatever the operand types.
+  by truthiness and the result is `boolean`, whatever the operand types.
+  A `value` holding a string, number (including zero), table, or other
+  non-nil, non-false value is true here. This logical operation is separate
+  from assigning a bare `value` to a `boolean`, which requires an actual
+  boolean value. Each evaluated operand runs once, left to right; `and`
+  skips the right operand when the left is false, and `or` skips it when
+  the left is true.
 * **Statically truthy/falsy left operand.** Integers, floats, strings,
   arrays, maps, records, unions, and Interfaces can never be falsy, so for these `a and b`
   has the type of `b`, and `a or b` the type of `a` (the right side is

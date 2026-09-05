@@ -25,6 +25,51 @@ local function assert_rejected(source, first_sink)
 end
 
 describe("type-relation soundness (checker)", function()
+    it("separates logical truthiness from strict boolean sinks", function()
+        local ok, err, tree = run_checker([[
+            function negate(a: value): boolean
+                return not a
+            end
+            function conjoin(a: value, b: value): boolean
+                return a and b
+            end
+            function disjoin(a: value, b: value): boolean
+                return a or b
+            end
+            function boolean_default(a: value)
+                local result = a or false
+            end
+            function strict(a: value): boolean
+                return a
+            end
+            function optional<T>(a: T?): boolean
+                return not a
+            end
+        ]])
+        assert.is_true(ok, err)
+        local function assert_truthiness(exp, source_tag)
+            assert.equal("Ast.ExpCast", exp._tag)
+            assert.is_nil(exp._adjustment)
+            assert.equal("operator_conversion", exp._operator_conversion.kind)
+            assert.equal("truthiness", exp._operator_conversion.op)
+            assert.equal(source_tag, exp._operator_conversion.source._tag)
+            assert.equal("Type.Boolean", exp._type._tag)
+        end
+        assert_truthiness(tree[1].block.stats[1].exps[1].exp, "Type.Value")
+        for index = 2, 3 do
+            local op = tree[index].block.stats[1].exps[1]
+            assert_truthiness(op.lhs, "Type.Value")
+            assert_truthiness(op.rhs, "Type.Value")
+        end
+        local default = tree[4].block.stats[1].exps[1]
+        assert_truthiness(default.lhs, "Type.Value")
+        assert.equal("Ast.ExpBool", default.rhs._tag)
+        local strict = tree[5].block.stats[1].exps[1]
+        assert.equal("gradual_view", strict._adjustment.kind)
+        assert.equal("project", strict._adjustment.op)
+        assert_truthiness(tree[6].block.stats[1].exps[1].exp, "Type.Value")
+    end)
+
     it("classifies each fixed sink once and keeps one outer Option cast",
     function()
         local original = types.assignment_adjustment

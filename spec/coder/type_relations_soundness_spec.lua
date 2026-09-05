@@ -20,6 +20,131 @@ end
 describe("type-relation soundness (end-to-end)", function()
     after_each(clean)
 
+    it("uses logical truthiness without weakening strict boolean sinks", function()
+        run_coder([[
+            local log: integer = 0
+            local function observe(mark: integer, v: value): value
+                log = log * 10 + mark
+                return v
+            end
+            local function static_truth(): string
+                log = log * 10 + 3
+                return ""
+            end
+            local function static_false(): nil
+                log = log * 10 + 4
+                return nil
+            end
+            function negate(a: value): boolean
+                return not a
+            end
+            function direct(a: value): boolean
+                if a then return true else return false end
+            end
+            function conjoin(a: value, b: value): boolean
+                if a and b then return true else return false end
+            end
+            function disjoin(a: value, b: value): boolean
+                if a or b then return true else return false end
+            end
+            function contextual(a: value, b: value): (boolean, boolean)
+                local result: boolean = a and b
+                return result, a or b
+            end
+            function nested(a: value, b: value, c: value): boolean
+                return (a and b) or not c
+            end
+            function boolean_default(a: value): (boolean, boolean)
+                local right = a or false
+                local left = false or a
+                return right, left
+            end
+            function preserve_values(a: value, b: value): (value, value)
+                local disjunction = a or b
+                local conjunction = a and b
+                return disjunction, conjunction
+            end
+            function effects(a: value, b: value): (boolean, integer, boolean, integer)
+                log = 0
+                local conjunction: boolean = observe(1, a) and observe(2, b)
+                local first = log
+                log = 0
+                local disjunction: boolean = observe(1, a) or observe(2, b)
+                return conjunction, first, disjunction, log
+            end
+            function static_effects(): (boolean, boolean, integer)
+                log = 0
+                local truth: boolean = static_truth() and static_truth()
+                local falsity = not static_false()
+                return truth, falsity, log
+            end
+            function options(a: boolean?, b: string?): (boolean, boolean, boolean)
+                return not a, a and b, a or b
+            end
+            local function optional<T>(a: T?): boolean
+                return not a
+            end
+            function generic_options(): (boolean, boolean, boolean)
+                return optional<string>(nil), optional<string>(""), optional<boolean>(false)
+            end
+            local function take_boolean(a: boolean): boolean
+                return a
+            end
+            function strict_local(a: value): boolean
+                local result: boolean = a
+                return result
+            end
+            function strict_argument(a: value): boolean
+                return take_boolean(a)
+            end
+            function strict_return(a: value): boolean
+                return a
+            end
+        ]], [[
+            local samples = table.pack(nil, false, true, "", "present", 0, 2.5, {}, function() end)
+            for i = 1, samples.n do
+                local a = samples[i]
+                assert(test.direct(a) == not not a)
+                assert(test.negate(a) == not a)
+                local right, left = test.boolean_default(a)
+                assert(right == not not a and left == not not a)
+                for j = 1, samples.n do
+                    local b = samples[j]
+                    local conjunction, disjunction = test.contextual(a, b)
+                    assert(conjunction == not not (a and b))
+                    assert(disjunction == not not (a or b))
+                    assert(test.conjoin(a, b) == conjunction)
+                    assert(test.disjoin(a, b) == disjunction)
+                    local cv, cl, dv, dl = test.effects(a, b)
+                    assert(cv == conjunction and cl == (a and 12 or 1))
+                    assert(dv == disjunction and dl == (a and 1 or 12))
+                    for k = 1, samples.n do
+                        assert(test.nested(a, b, samples[k]) == not not ((a and b) or not samples[k]))
+                    end
+                end
+                for _, f in ipairs({test.strict_local, test.strict_argument, test.strict_return}) do
+                    local ok, result = pcall(f, a)
+                    assert(ok == (type(a) == "boolean"))
+                    if ok then assert(result == a) end
+                end
+            end
+            local truth, falsity, log = test.static_effects()
+            assert(truth and falsity and log == 334)
+            local a, b, c = test.options(false, "")
+            assert(a and not b and c)
+            a, b, c = test.options(nil, nil)
+            assert(a and not b and not c)
+            a, b, c = test.options(true, "present")
+            assert(not a and b and c)
+            a, b, c = test.generic_options()
+            assert(a and not b and c)
+            local disjunction, conjunction = test.preserve_values(false, "present")
+            assert(disjunction == "present" and conjunction == nil)
+            disjunction, conjunction = test.preserve_values("first", "second")
+            assert(disjunction == "first" and conjunction == "second")
+        ]])
+    end)
+
     it("separates strict Titan observations from dynamic coercion", function()
         run_coder([[
             number: integer = 0

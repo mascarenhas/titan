@@ -385,8 +385,7 @@ checkexp = util.make_visitor({
             end
             node._type = types.Integer()
         elseif op == "not" then
-            -- always coerces other values to a boolean
-            node.exp = trycoerce(node.exp, types.Boolean(), errors)
+            node.exp = truthiness(node.exp)
             node._type = types.Boolean()
         else
             error("invalid unary operation " .. op)
@@ -566,9 +565,9 @@ checkexp = util.make_visitor({
         elseif op == "and" then
             if context and context._tag == "Type.Boolean" then
                 -- convert everything to boolean if used in boolean context
-                node.lhs = trycoerce(node.lhs, types.Boolean(), errors)
+                node.lhs = truthiness(node.lhs)
                 tlhs = node.lhs._type
-                node.rhs = trycoerce(node.rhs, types.Boolean(), errors)
+                node.rhs = truthiness(node.rhs)
                 trhs = node.rhs._type
                 node._type = context
             elseif types.is_truthy(tlhs) then
@@ -583,16 +582,16 @@ checkexp = util.make_visitor({
         elseif op == "or" then
             if context and context._tag == "Type.Boolean" then
                 -- convert everything to boolean if used in boolean context
-                node.lhs = trycoerce(node.lhs, types.Boolean(), errors)
+                node.lhs = truthiness(node.lhs)
                 tlhs = node.lhs._type
-                node.rhs = trycoerce(node.rhs, types.Boolean(), errors)
+                node.rhs = truthiness(node.rhs)
                 trhs = node.rhs._type
                 node._type = context
             elseif tlhs._tag == "Type.Boolean" or trhs._tag == "Type.Boolean" then
-                -- tries to coerce to boolean if other side is boolean
-                node.lhs = trycoerce(node.lhs, types.Boolean(), errors)
+                -- use truthiness if the other side selects a boolean result
+                node.lhs = truthiness(node.lhs)
                 tlhs = node.lhs._type
-                node.rhs = trycoerce(node.rhs, types.Boolean(), errors)
+                node.rhs = truthiness(node.rhs)
                 trhs = node.rhs._type
                 node._type = types.Boolean()
             elseif types.is_truthy(tlhs) then

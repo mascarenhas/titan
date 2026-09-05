@@ -2798,6 +2798,18 @@ function codeexp_dispatch(ctx, node, iscondition, target)
             ctx, adjustment, node.exp._type, node._type, cexp, node.loc,
             node._callable_adapter)
         return cstats .. astats, aexp
+    elseif tag == "Ast.ExpCast" and node._operator_conversion
+           and node._operator_conversion.op == "truthiness" then
+        local conversion = node._operator_conversion
+        assert(conversion.kind == "operator_conversion"
+               and types.equals(conversion.source, node.exp._type)
+               and types.equals(conversion.target, node._type)
+               and node._type._tag == "Type.Boolean",
+            "logical truthiness lacks its checker-owned conversion")
+        -- Keep the operand's representation and evaluate it exactly once,
+        -- including a call whose result is statically always truthy/falsy.
+        local stats, value = materialize(ctx, node.exp)
+        return stats, toboolean(node.exp._type, value)
     elseif tag == "Ast.ExpCast" and node._typedef_resolved then
         -- Pass-through wrapper produced above: the operand's static type is a
         -- typedef but its C representation already is the underlying scalar, so

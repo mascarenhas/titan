@@ -741,9 +741,19 @@ once. **Equality on ordinary dynamic values**: when both operands are
 `TValue`-represented (`value` or options), `==`/`~=` normally compile to
 `luaV_rawequalobj(&l, &r)` and its negation. The narrowly selected
 [Map/`value` path](#equality-codebinaryop) adds table `__eq` after a failed raw
-check; `value`/`value` remains raw. **`and`/`or`** specialize on static truthiness: boolean
-operands become C `&&`/`||`; statically truthy/falsy sides short-circuit
-at compile time. In the general case the left operand is first
+check; `value`/`value` remains raw. **`and`/`or`** specialize on static truthiness.
+For a boolean result the checker wraps non-boolean operands with an
+`_operator_conversion` whose operation is `truthiness`; `not` uses the same
+operation. The coder consumes this annotation before ordinary cast dispatch,
+materializes the operand in its own representation, and calls `toboolean`.
+This keeps `value` truthiness separate from the strict tag guard selected by
+an ordinary `value`-to-`boolean` assignment. Generic annotation erasure retains
+the operator decision, including when an optional type parameter erases to
+`value`.
+
+Boolean-result operators emit explicit C branches with all right-operand
+evaluation inside the selected branch. Statically truthy/falsy value-returning
+sides short-circuit at compile time. In the general case the left operand is first
 **materialized into a temp of its own type** and the truthiness test
 runs through `toboolean(lhs-type, temp)` rather than taking the address
 of a raw left-hand expression — so the test works for a boolean C value,
