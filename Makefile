@@ -362,14 +362,16 @@ STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.titan \
 SQLITE3_TITAN_SOURCES := titan/sqlite3/sqlite3.titan titan/sqlite3/bindings.titan \
 	titan/sqlite3/row.titan titan/sqlite3/worker.titan
 SQLITE3_TITAN_HEADERS := titan/sqlite3/native.h
+JSON_TITAN_SOURCES := titan/json/json.titan titan/json/parser.titan \
+	titan/json/decoder.titan titan/json/writer.titan titan/json/numbers.titan
 STDLIB_MODULES := coroutine uv async timer io fs net ssl url http os peg string \
-	math lua iteration gc test reflect sqlite3
+	math lua iteration gc test reflect sqlite3 json
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
 STDLIB_QUALIFIED_SOS := $(addprefix titan/,$(STDLIB_SOS))
 STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
 	titan.io titan.fs titan.net titan.ssl titan.url titan.http titan.os \
 	titan.peg titan.string \
-	titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3
+	titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/async.titan titan/timer.titan titan/io.titan titan/fs.titan \
 	titan/net.titan titan/ssl.titan titan/url.titan \
@@ -382,15 +384,16 @@ STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/string/regex_api.titan titan/string/regex_compile.titan \
 	titan/string/regex_parser.titan \
 	titan/math.titan titan/lua.titan titan/iteration.titan titan/gc.titan \
-	titan/test.titan titan/reflect.titan $(SQLITE3_TITAN_SOURCES)
+	titan/test.titan titan/reflect.titan $(SQLITE3_TITAN_SOURCES) \
+	$(JSON_TITAN_SOURCES)
 STDLIB_GENERATED_FOREIGN_HEADERS := titan/coroutine.titan.h \
 	titan/fs.titan.h titan/uv/uv.titan.h titan/http/http.titan.h \
-	titan/sqlite3/sqlite3.titan.h
+	titan/sqlite3/sqlite3.titan.h titan/json/json.titan.h
 STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua titan/async.lua \
 	titan/timer.lua titan/io.lua titan/fs.lua titan/net.lua titan/ssl.lua \
 	titan/url.lua titan/http.lua titan/os.lua \
 	titan/peg.lua titan/string.lua titan/math.lua titan/lua.lua \
-	titan/iteration.lua titan/gc.lua titan/test.lua titan/reflect.lua titan/sqlite3.lua
+	titan/iteration.lua titan/gc.lua titan/test.lua titan/reflect.lua titan/sqlite3.lua titan/json.lua
 STDLIB_CONTAINER := titan.so
 STDLIB_STATIC_ARCHIVE := titan.a
 STDLIB_PROVIDER_OUTPUTS := $(STDLIB_CONTAINER) $(STDLIB_STATIC_ARCHIVE)
@@ -2181,7 +2184,7 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 
 # FORCE runs the inexpensive completeness check on every invocation. The
 # compiler itself runs only when an input is newer, configuration changed, or
-# one public output is absent. All twenty roots are explicit source roots in one
+# one public output is absent. All twenty-one roots are explicit source roots in one
 # process, so their internal imports are linked into the paired titan.so/titan.a
 # provider. The warm check rescans the archive without rewriting either output.
 $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) $(SQLITE3_TITAN_HEADERS) titanc \
@@ -2279,9 +2282,9 @@ install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 STDLIB_STAGED_EXTRA_OBJECTS = $(foreach object,$(STDLIB_EXTRA_OBJECTS),$(abspath $(object)))
 
 # LuaRocks invokes this only after deploying titanc and its Lua compiler
-# modules. Build all twenty source roots once in a private directory on the
+# modules. Build all twenty-one source roots once in a private directory on the
 # destination filesystem. The Lua publisher validates the complete protocol
-# and exact staged titan.test compiler source, commits twenty shims, that
+# and exact staged titan.test compiler source, commits twenty-one shims, that
 # source, the archive, and the one macOS dSYM before renaming titan.so last;
 # any caught failure restores the prior pair or first-install bootstrap.
 rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
@@ -2348,7 +2351,7 @@ TITAN_STDLIB_TEST_ROOTS := $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
 	coroutine.tests iteration.tests gc.tests lua.tests math.tests peg.tests \
 	string.core_test string.format_pack_test string.regex_test async.tests \
 	uv.task_tests io.tests fs.tests timer.tests net.tests ssl.tests http.tests \
-	url.tests os.tests os.process_tests uv.runtime_tests reflect.tests sqlite3.tests
+	url.tests os.tests os.process_tests uv.runtime_tests reflect.tests sqlite3.tests json.tests
 TITAN_TEST_BUILD_DIR ?= .titan-tests
 TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)
 TITAN_TEST_TIMEOUT ?= 120
@@ -2488,6 +2491,7 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 	rm -f titan/http/http.c titan/http/http.o
 	rm -f titan/peg/peg.c titan/peg/peg.o
 	rm -f titan/string/string.c titan/string/string.o
+	rm -f titan/json/json.c titan/json/json.o
 	rm -f $(STDLIB_GENERATED_FOREIGN_HEADERS)
 	rm -f $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_QUALIFIED_SOS) $(STDLIB_SOS)
 	rm -f $(STDLIB_SHIMS)

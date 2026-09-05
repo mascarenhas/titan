@@ -89,7 +89,7 @@ proceed; both standalone URL entry points remain nonthrowing.
 The URL root adds one logical protocol, archive metadata key, generated shim,
 and `luaopen_titan_url` entry to the coordinated provider. The later additions
 of the independent `titan.test` and `titan.reflect` modules make the current
-image twenty logical modules and shims with twenty-one DSO openers including
+image twenty-one logical modules and shims with twenty-two DSO openers including
 bare `luaopen_titan`.
 The complete image is published in the `0.6` library namespace; earlier Titan
 installations are not migrated or cleaned up.

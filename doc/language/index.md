@@ -92,6 +92,7 @@ use the chapters below for the normative language reference.
 | [Garbage-collection standard library](standard-library-gc.md) | Weak Maps and ephemerons, collector actions and mode switches, byte counts, and Lua 5.5 tuning parameters. |
 | [Testing Titan code](standard-library-test.md) | The `titan.test` API, native `titanc --test` discovery, subtests and cleanup, filtering, failure output, and process statuses. |
 | [Reflection standard library](standard-library-reflect.md) | Runtime inspection of 19 value kinds, public nominal descriptors, explicit type resolution, erased generic schemas, callable metadata, and checked dynamic field access. |
+| [JSON standard library](standard-library-json.md) | JSON encoding and typed reflection-directed decoding, record and union mappings, optional null preservation, Unicode/numbers, structured diagnostics, and resource limits. |
 | [SQLite standard library](standard-library-sqlite3.md) | Embedded SQLite with asynchronous native work, prepared statements, owned rows and cursors, reflection bindings and mapping, explicit transactions, and cancellation-safe cleanup. |
 | [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, ownership, allocation, and limitations. |
 | [Foreign functions](foreign-functions.md) | Source-defined exact C-ABI entry points, the restricted raw-C body, pointer types, explicit source collaboration, generated companions, sequencing, and callback use. |

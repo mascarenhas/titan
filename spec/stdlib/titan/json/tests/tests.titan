@@ -1,0 +1,20 @@
+local test = import "test"
+local json = import "titan.json"
+local reflect = import "reflect"
+local strings = import "string"
+local math = import "math"
+local lua = import "lua"
+local gc = import "gc"
+
+local function expect_json_error(action: () -> ()): json.Error
+  local caught: json.Error?
+  do
+    action()
+  catch
+    if error is json.Error then caught = error else raise end
+  end
+  test.assert(caught ~= nil, "expected json.Error")
+  test.assert(#caught.message > 0 and #caught.code > 0 and #caught.path > 0,
+              "JSON error omitted its diagnostic context")
+  return caught
+end

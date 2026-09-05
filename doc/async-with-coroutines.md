@@ -632,7 +632,7 @@ The embedded Lua contract is 5.5.1. Exact
 typed Array paths continue to use backing `Table *`. See
 [Dense Arrays](implementation/dense-arrays.md#exact-and-generic-call-paths).
 
-The rockspec and Makefile make `luarocks make` and `make test` build all twenty
+The rockspec and Makefile make `luarocks make` and `make test` build all twenty-one
 logical standard modules in paired `titan.so`/`titan.a` providers plus
 generated shims, together with the shared runtime archive containing the
 coroutine helper C object and vendored minicoro implementation. A final native

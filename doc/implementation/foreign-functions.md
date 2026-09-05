@@ -579,5 +579,5 @@ Earlier Titan installations are not migration or compatibility inputs.
 
 Foreign declarations, allocation plans, and generated headers remain
 compiler-local. They add no public type descriptor or module-state slot, so the
-combined standard provider still has twenty logical metadata keys and
-twenty-one DSO openers including bare `luaopen_titan`.
+combined standard provider still has twenty-one logical metadata keys and
+twenty-two DSO openers including bare `luaopen_titan`.
