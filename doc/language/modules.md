@@ -581,11 +581,11 @@ have inherently identical ownership.
 
 The standard-library names `coroutine`, `uv`, `async`, `timer`, `io`, `fs`,
 `net`, `ssl`, `url`, `http`, `os`, `peg`, `string`, `test`, `lua`, `math`, `gc`,
-`iteration`, and `reflect` are parser sugar for the qualified module names
+`iteration`, `reflect`, and `sqlite3` are parser sugar for the qualified module names
 `titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.io`,
 `titan.fs`, `titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.os`,
 `titan.peg`, `titan.string`, `titan.test`, `titan.lua`, `titan.math`, `titan.gc`,
-`titan.iteration`, and `titan.reflect`.
+`titan.iteration`, `titan.reflect`, and `titan.sqlite3`.
 
 The qualified names then follow ordinary
 module lookup rules. Thus

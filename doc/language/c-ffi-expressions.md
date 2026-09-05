@@ -217,6 +217,15 @@ pointer; other by-value object expressions can supply only a compatible
 `const` pointer. When the pointed-to types need the unsafe conversion above,
 Titan first takes the permitted address and then emits the validated C cast.
 
+For a mutable object-pointer local or parameter, an exact pointer-to-pointer
+target takes the address of the pointer variable itself. A `const *char` local
+can therefore receive a `const char **` output without discarding `const`.
+This exact storage conversion does not change ordinary pointer-to-`void *`
+value conversion. Const bindings, captured locals, and temporary expressions
+cannot supply mutable pointer storage.
+A written pointer `as` continues to cast the pointer's value, even when its
+target is a pointer-to-pointer type; it does not implicitly take an address.
+
 ## Target-directed C allocation
 
 An ordinary mutable local may omit its initializer only with an explicit type

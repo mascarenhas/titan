@@ -91,6 +91,7 @@ local union Call
   suspend: SuspendCall
   sleep: SleepCall
   run_foreign: WorkCall
+  run_foreign_cleanup: WorkCall
   ticker_tick: TickerTickCall
   ticker_close: TickerCloseCall
   handle_close: HandleCloseCall
@@ -133,6 +134,7 @@ end
 -- so one deferred cleanup can continue through several asynchronous closes.
 local function Call:is_cancellation_affected(): boolean
   case self
+  when run_foreign_cleanup then return false
   when ticker_close then return false
   when handle_close then return false
   when fs_close then return false
@@ -262,6 +264,7 @@ local function dispatch_call(task: Task, call: Call): Immediate?
   when suspend: operation then return operation:dispatch(task)
   when sleep: operation then return operation:dispatch(task)
   when run_foreign: operation then return operation:dispatch(task)
+  when run_foreign_cleanup: operation then return operation:dispatch(task)
   when ticker_tick: operation then return operation:dispatch(task)
   when ticker_close: operation then return operation:dispatch(task)
   when handle_close: operation then return operation:dispatch(task)

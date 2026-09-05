@@ -174,6 +174,17 @@ Literals in a foreign body are C values:
 An untyped `local p = nil` has no pointee type and is rejected; write an
 annotation such as `local p: *c.Item = nil`.
 
+`T.sizeof` and `T.alignof` keep the configured C `size_t` type inside a
+foreign body. They can be passed directly to `malloc`/`calloc` or stored in a
+C local; the ordinary Titan `integer` conversion applies only outside foreign
+bodies.
+
+A mutable pointer local or parameter can supply its address to an exact pointer
+out-parameter. For example, a local `text: const *char` passed to a C
+`const char **` parameter updates `text` and preserves its pointee constness.
+A const binding, captured local, or temporary cannot supply that mutable
+address. Passing a pointer to `void *` still passes the pointer's value.
+
 Conditions use C scalar truth rather than Lua truthiness. A numeric `for` uses a
 C integer or floating control type and C comparison/addition. Its start, limit,
 and step are evaluated once, from left to right. The compiler rejects a literal

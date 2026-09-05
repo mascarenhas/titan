@@ -233,8 +233,9 @@ $ROCKS_TREE/lib/titan/0.6/titan.so
 $ROCKS_TREE/lib/titan/0.6/titan.a
 ```
 
-Both contain the nineteen `titan.*` logical standard modules, including
-`titan.io`, `titan.ssl`, `titan.url`, `titan.http`, and `titan.test`, under
+Both contain the twenty `titan.*` logical standard modules, including
+`titan.io`, `titan.ssl`, `titan.url`, `titan.http`, `titan.test`, and
+`titan.sqlite3`, under
 ABI 2. The DSO also
 contains bare native `require "titan"` support, and the archive carries that
 support object without inventing a logical module named `titan`.
@@ -243,6 +244,10 @@ The private namespaced LPegLabel archive is another metadata-free provider
 payload. Its five objects are carried into both forms for `titan.peg` and
 `titan.string`, but the archive and headers are not installed in the SDK and
 it does not advertise a Titan logical metadata key.
+
+The private SQLite amalgamation archive is metadata-free payload in both
+libuv/OpenSSL modes; its header and archive remain private source-build inputs.
+See the [SQLite library](standard-library-sqlite3.md).
 
 The private llhttp archive is likewise metadata-free payload; the generated
 `titan.http` object owns its eight source-defined foreign callbacks and needs no

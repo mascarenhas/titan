@@ -22,6 +22,7 @@ local lua = require "titan.lua"
 local iteration = require "titan.iteration"
 local gc = require "titan.gc"
 local testing = require "titan.test"
+local sqlite3 = require "titan.sqlite3"
 
 local path = os.tmpname()
 os.remove(path)
@@ -48,6 +49,18 @@ local task = async.run(function()
     writer:write("\0payload")
     assert(writer:drain() == "writer\0payload")
     assert(writer:drain() == "")
+
+    local database = sqlite3.connect(":memory:")
+    local statement = database:prepare(
+        "SELECT ?1 AS answer, ?2 AS payload, NULL AS empty")
+    local cursor = statement:query(42, sqlite3.Blob.new("sqlite\0payload"))
+    local row = assert(cursor:fetch())
+    assert(cursor:fetch() == nil)
+    cursor:close()
+    statement:close()
+    database:close()
+    assert(#row.columns == 3 and row:get(1) == 42)
+    assert(row:get(2).bytes == "sqlite\0payload" and row:get(3) == nil)
     task_finished = true
 end)
 async.loop()
@@ -88,6 +101,7 @@ assert(type(net) == "userdata")
 assert(type(ssl) == "userdata")
 assert(type(http) == "userdata")
 assert(type(testing) == "userdata")
+assert(type(sqlite3) == "userdata")
 assert(not testing.testing())
 assert(not testing.verbose())
 

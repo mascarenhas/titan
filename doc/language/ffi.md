@@ -265,6 +265,9 @@ function int_layout(): integer
 end
 ```
 
+Inside a restricted `foreign function`, both pseudo-members instead retain
+their C `size_t` type; no Titan numeric conversion occurs.
+
 When a legal ordinary identifier collides with the type spelling, as with
 `struct stat` and `stat()`, expression lookup keeps the ordinary value usable
 and these type pseudo-members are unavailable. See
@@ -320,6 +323,9 @@ Allowed conversions include:
   foreign call;
 * mutable local or formal C values to compatible mutable `*T` or `void *`
   pointer parameters, for C out-parameters;
+* mutable local or formal C object-pointer values to an exact pointer
+  out-parameter (`T *` storage passed to `T **`), preserving all qualifiers
+  within `T`; a const/captured binding or temporary is not mutable storage;
 * Titan `string` to `char *` or `void *` for calls;
 * C `char *` or `void *` to Titan `string` with an explicit `as string`;
 * a counted owned array of C `char`, `signed char`, or `unsigned char` to

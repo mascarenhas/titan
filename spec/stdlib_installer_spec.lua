@@ -369,18 +369,18 @@ describe("recoverable paired standard-library publication", function()
     local root
     local old_failpoint
 
-    it("owns the exact current nineteen-module public layout", function()
+    it("owns the exact current twenty-module public layout", function()
         assert.same({
             "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
             "url", "http", "os", "peg", "string", "math", "lua", "iteration",
-            "gc", "test", "reflect",
+            "gc", "test", "reflect", "sqlite3",
         }, installer.MODULES)
         assert.same({
             "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
             "titan.io", "titan.fs", "titan.net", "titan.ssl", "titan.url",
             "titan.http", "titan.os", "titan.peg", "titan.string",
             "titan.math", "titan.lua", "titan.iteration", "titan.gc",
-            "titan.test", "titan.reflect",
+            "titan.test", "titan.reflect", "titan.sqlite3",
         }, installer.MODULE_NAMES)
     end)
 

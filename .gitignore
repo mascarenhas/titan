@@ -24,6 +24,11 @@
 /libuv-build/
 /libuv-v*.tar.gz
 
+# private SQLite amalgamation, native build tree, and downloaded archive
+/sqlite-autoconf-*/
+/sqlite3-build/
+/sqlite-autoconf-*.tar.gz
+
 # private llhttp release source, native build tree, and downloaded archive
 /llhttp-release-v*/
 /llhttp-build/
@@ -55,6 +60,8 @@
 /titan/fs.titan.h
 /titan/uv/uv.titan.h
 /titan/http/http.titan.h
+/titan/sqlite3/sqlite3.c
+/titan/sqlite3/sqlite3.titan.h
 
 # Generated logical-module shims for the combined standard-library image
 /titan/coroutine.lua
@@ -76,6 +83,7 @@
 /titan/gc.lua
 /titan/test.lua
 /titan/reflect.lua
+/titan/sqlite3.lua
 
 # Native runtime command-line configuration stamps
 /titan-runtime/.titan-*-build-config

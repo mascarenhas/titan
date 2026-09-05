@@ -1,0 +1,57 @@
+local command = import "support.command.titan"
+local system = import "os"
+
+local function worker_fixture_case(context: test.Context, workspace: string,
+                                   scenario: string)
+  context:run(scenario, function (_context: test.Context)
+    runtime_test.run(function ()
+      local result = workspace .. "/" .. scenario .. ".result"
+      local output, why, code = command.capture({
+        "env", "UV_THREADPOOL_SIZE=4",
+        workspace .. "/sqlite3_worker_app", scenario, result,
+      })
+      test.assert(why == "exit" and code == 0,
+                  "SQLite worker fixture failed at " .. scenario .. ": " .. output)
+      test.assert(fs.read_file(result) == scenario,
+                  "SQLite worker fixture omitted its verified completion result")
+    end)
+  end)
+end
+
+function test_worker_cancellation_retains_native_ownership_and_loop_progress(
+    context: test.Context)
+  local workspace = ""
+  runtime_test.run(function ()
+    workspace = fs.tmpname()
+    fs.unlink(workspace)
+    fs.mkdir(workspace)
+    -- This filesystem workspace must survive the parent's return and every
+    -- child case. Its removal uses the synchronous test command boundary.
+    context:cleanup(function ()
+      test.assert(command.system({"rm", "-rf", workspace}) == 0,
+                  "could not remove SQLite worker fixture workspace")
+    end)
+    fs.write_file(workspace .. "/sqlite3_worker_fixture.h",
+        fs.read_file("spec/fixtures/stdlib/native/sqlite3_worker_fixture.h"))
+    fs.write_file(workspace .. "/sqlite3_worker_app.titan",
+        fs.read_file("spec/fixtures/stdlib/titan/sqlite3_worker_app.titan"))
+    local object = system.cwd() .. "/.titan-tests/sqlite3_worker_fixture.o"
+    local status = command.system({
+      "sh", "-c", [==[
+        set -eu
+        cd "$1"
+        titanc --static sqlite3_worker_app -X "$2"
+      ]==],
+      "titan-sqlite-worker-compile", workspace, object,
+    })
+    test.assert(status == 0, "could not compile SQLite static worker fixture")
+  end)
+  worker_fixture_case(context, workspace, "open")
+  worker_fixture_case(context, workspace, "prepare")
+  worker_fixture_case(context, workspace, "step")
+  worker_fixture_case(context, workspace, "execute")
+  worker_fixture_case(context, workspace, "close")
+  worker_fixture_case(context, workspace, "reset")
+  worker_fixture_case(context, workspace, "query_allocation_failure")
+  worker_fixture_case(context, workspace, "fetch_allocation_failure")
+end

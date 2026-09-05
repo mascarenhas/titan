@@ -130,6 +130,9 @@ The checker records the target profile's authoritative `size_t` type on each
 `sizeof`/`alignof` pseudo-declaration. Code generation preserves that C result
 and uses the shared checked numeric conversion before producing Titan
 `integer`; it never emits an unchecked `size_t`-to-`lua_Integer` cast.
+Within a restricted foreign body, the pseudo-declaration's exposed type is
+that same native `size_t`, so raw C calls and local declarations need no
+Titan conversion.
 
 Contextual primitive type namespaces are self-contained. They and transparent
 Titan aliases whose complete C graph is built from contextual primitives may
@@ -498,6 +501,19 @@ Arrays decay before unsafe probing and emit the array expression rather than
 `&array`. For a by-value local aggregate targeting an unrelated object pointer,
 steps 3 and 4 compose as
 `address_then_unsafe_object_pointer`; the coder emits `(Target *)&local`.
+
+Exact pointer-local output parameters use the existing `mutable_c_address`
+plan before unsafe reinterpretation. Its endpoint check compares the local's
+complete pointer type with the target's pointee, including nested qualifiers;
+`const char *` storage can become `const char **` without qualifier loss. This
+does not turn pointer-to-`void *` into address-taking. The checker marks the
+local as assigned/address-taken and rejects an exact output-storage request
+from a const or captured binding or a temporary. Both ordinary and raw-foreign
+lowering emit the address of the original local, never the address of a copied
+argument temporary.
+Written pointer casts bypass this address selection and retain the existing
+pointer-value conversion. Mutation analysis follows the actual address plan,
+so an explicit `raw as **void` does not mark `raw` as mutated by the callee.
 
 Before probing, recursive qualifier analysis rejects reachable `const` or
 `volatile` loss. Qualifiers attached through typedefs and array element types
