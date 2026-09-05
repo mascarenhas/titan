@@ -114,6 +114,10 @@ record Snapshot
     count: integer
 end
 
+record NumberView
+    items: const? { integer }
+end
+
 const frozen_answer = 42
 
 function Box:convert(input: integer): integer
@@ -152,6 +156,14 @@ end
 
 function immutable_numbers(): const { integer }
     return { 10, 20 }
+end
+
+function number_view(items: const? { integer }): NumberView
+    return NumberView.new(items)
+end
+
+function readonly_numbers(items: const? { integer }): const? { integer }
+    return items
 end
 ]]
     local filename = workspace .. "/fixture_target.titan"
@@ -698,6 +710,7 @@ exec %s "$@"
         local embedded = assert(built.archive.entries["fixture.target"])
         assert.truthy(embedded.types:find(
             'Interface("fixture.target.Dynamic"', 1, true))
+        assert.truthy(embedded.types:find('Array(Integer(),"maybe")', 1, true))
         local image = workspace .. "/archive validation.so"
         local linked, link_err =
             driver.compile_archive_validation_image(
@@ -734,6 +747,9 @@ assert(not pcall(function() view.label = "changed" end))
 local numbers = target.immutable_numbers()
 assert(#numbers == 2 and numbers[2] == 20)
 assert(not pcall(function() numbers[1] = 99 end))
+local number_view = target.number_view(numbers)
+assert(number_view.items == numbers)
+assert(target.readonly_numbers(number_view.items) == numbers)
 ]], image),
         })
         assert.truthy(executed, execution_output)
@@ -806,6 +822,17 @@ function main(args: {string}): integer
        or view.label ~= "fixed" or view:total() ~= 3
        or numbers[2] ~= 20 then
         return 5
+    end
+    local mutable: { integer } = { 4, 5 }
+    local mutable_view = provider.number_view(mutable)
+    local const_view = provider.number_view(numbers)
+    if provider.readonly_numbers(mutable_view.items)[1] ~= 4
+       or provider.readonly_numbers(const_view.items)[2] ~= 20 then
+        return 6
+    end
+    mutable[1] = 6
+    if mutable_view.items[1] ~= 6 then
+        return 7
     end
     return 0
 end

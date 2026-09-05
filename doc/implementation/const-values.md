@@ -20,8 +20,9 @@ Ast.TopLevelVar(loc, islocal, isconst, decl, value)
 Ast.TopLevelInterface(loc, name, members, fields, methods, typeparams)
 ```
 
-Every `isconst` is an exact boolean. `TopLevelVar.value == false` preserves an
-omitted module initializer until the checker validates and normalizes it.
+`TypeArray.isconst` is exactly `false`, `true`, or `"maybe"`; declaration
+`isconst` flags remain exact booleans. `TopLevelVar.value == false` preserves
+an omitted module initializer until the checker validates and normalizes it.
 `TopLevelInterface.members` retains source order, while `fields` and `methods`
 are independent ordered projections. Interface fields reuse `Ast.Decl` and are
 created with `isconst == true`.
@@ -33,7 +34,7 @@ The parser admits:
 - `local decllist [= explist]` for mutable locals;
 - `[local] const name [?] : type` in records;
 - `name: type` and bodyless method signatures in Interface bodies; and
-- `const { type }` as the const Array type.
+- `const { type }` and `const? { type }` as qualified Array types.
 
 The `const { T }` production precedes `const *T`/ordinary Array parsing and
 rejects a colon before the closing brace, so no const Map form is created.
@@ -61,17 +62,23 @@ Type.Interface(name, fields, methods, scope, typeparams)
 
 Array qualifier equality is part of type equality, consistency, guard and
 dynamic-plan identity, rewriting, substitution, erasure, stringification, and
-serialization. `types.tostring` renders mutable `{ T }` and const
-`const { T }`.
+serialization. `types.tostring` renders mutable `{ T }`, const
+`const { T }`, and maybe-const `const? { T }`. The Array constructor,
+serializer, and compiled-interface validator accept exactly `false`, `true`,
+and `"maybe"` for this axis, including Arrays nested in public fields,
+callable signatures, Options, and containers. An absent or otherwise malformed
+qualifier is rejected rather than defaulted. Decoding a maybe-const descriptor
+does not introduce another runtime Array representation or change the provider
+ABI.
 
 Interface `fields` and `methods` are separately dense, source-ordered
 list/name-map projections. Their names share one namespace. A field is a
 canonical `Type.Field` owned by the Interface, has its zero-based target slot,
 and must carry `isconst == true`. Record fields and module variables retain
 their own required boolean. The closed decoder rejects a missing/non-boolean
-qualifier, sparse or keyed input, duplicate or cross-kind member names,
-incorrect owners or indices, and descriptors placed outside their allowed
-owner graph.
+field or module-variable qualifier, sparse or keyed input, duplicate or
+cross-kind member names, incorrect owners or indices, and descriptors placed
+outside their allowed owner graph.
 
 The driver checks the provider ABI before evaluating serialized types, so
 mismatched metadata is rejected before a descriptor can be interpreted as ABI
