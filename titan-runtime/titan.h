@@ -261,20 +261,6 @@ static l_inline int titan_eq_intfloat(lua_Integer i, lua_Number f) {
   return i == fi;
 }
 
-/*
-** Macro to convert between function pointers and object/void pointers.
-** These casts are not portable ISO C, but the supported toolchains and
-** POSIX dynamic-symbol contract provide them. (The '__extension__' in GNU
-** compilers is only to avoid warnings.)
-** Named titan_cast_func because Lua 5.5's llimits.h defines its own
-** single-argument cast_func.
-*/
-#if defined(__GNUC__)
-#define titan_cast_func(t, p) (__extension__(t)(p))
-#else
-#define titan_cast_func(t, p) ((t)(p))
-#endif
-
 inline static TString *_integer2str(lua_State *L, lua_Integer i) {
   char _cvtbuff[LUA_N2SBUFFSZ];
   size_t len;

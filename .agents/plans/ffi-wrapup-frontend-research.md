@@ -80,7 +80,7 @@ The pointer layer is required by the motivating example: `pvalue(...)` is a `voi
 
 Use the same default ABI sentinel as imported C declarations (`false` today). Do not invent the string `"cdecl"`: `types.c_function_types_equal` compares `abi` exactly, so that would make a source-written callback incompatible with every ordinary imported C prototype.
 
-Reuse `arglist`/`rettype` parsing so malformed multiple/flexible/variadic shapes receive normal syntax first and precise checker diagnostics second. The constructor can be admitted wherever a type is legal, including below `*`; it is already pointer-valued, so `*foreign (...) -> ...` deliberately means pointer-to-function-pointer.
+Reuse `typelist`/`rettype` parsing so malformed multiple/flexible/variadic shapes receive normal syntax first and precise checker diagnostics second. The constructor can be admitted wherever a type is legal, including below `*`; it is already pointer-valued, so `*foreign (...) -> ...` deliberately means pointer-to-function-pointer.
 
 ## Signature checking
 

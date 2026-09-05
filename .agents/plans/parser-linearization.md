@@ -106,7 +106,7 @@ quadratically and LPegLabel exhausted its backtrack stack around depth 38.
   `-> operand` tails. Right-fold the captured chain so `a -> b -> c` remains a
   function from `a` to a function from `b` to `c`; preserve parenthesized fixed
   and flexible argument/result carriers and foreign-function nodes. A focused
-  recursive fixture proved the former `resulttypelist !RARROW` / `arglist
+  recursive fixture proved the former `resulttypelist !RARROW` / `typelist
   RARROW` split doubled at every nested return-function layer.
 - Parse `{ type` once, then select either `: type }` for `Ast.TypeMap` or `}`
   for `Ast.TypeArray`. Preserve `TypeType` and `RCurlyType` labels on both

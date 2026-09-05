@@ -2,7 +2,7 @@ local luac = foreign import "lua.h"
 local ffi = foreign import "titan/ffi.h"
 local lobject = foreign import "lobject.h"
 local iteration = import "iteration"
-local titan_lua = import "lua"
+local lua = import "lua"
 local str = import "string"
 
 record ArrayValue
@@ -52,7 +52,7 @@ end
 record TitanFunctionValue
   const val: (...: value) -> (...: value)
   const native_entry: *void
-  const lua_entry: *void
+  const lua_entry: foreign (*lua_State) -> int
   const descriptor: FunctionType
 end
 
@@ -63,7 +63,7 @@ end
 
 record LuaCFunctionValue
   const val: (...: value) -> (...: value)
-  const entry: *void
+  const entry: foreign (*lua_State) -> int
 end
 
 record OwnedForeignPointerValue
@@ -116,8 +116,14 @@ record NamedType
   const name: string
 end
 
+union ArrayTypeConstness
+  is_mmutable
+  is_const
+  is_maybe_const
+end
+
 record ArrayType
-  const is_const: boolean
+  const is_const: ArrayTypeConstness
   const elem_descriptor: Type
 end
 
@@ -315,11 +321,8 @@ function RecordValue:set(i: integer, v: value)
   end
   local uv_idx = self.indexes[i]
   self.uv[uv_idx].uv = v
-  ffi.luamacro_luaC_barrierback(L, self.udata, self.uv[uv_idx].uv)
+  ffi.lmacro_luaC_barrierback(L, self.udata, self.uv[uv_idx].uv)
 end
-
-
-
 
 function InterfaceValue:get(i: integer): value
   if i < 1 or i > self.n_fields then
@@ -353,54 +356,29 @@ function Type:resolve(): Type
   end
 end
 
-local function get_metatable_val(v: value): value?
-  local top = luac.lua_gettop(L)
-  defer luac.lua_settop(L, top)
-  ffi.lua_pushtvalue(L, v)
-  if luac.lua_getmetatable(L, -1) ~= 0 then
-    local mt: value = ffi.lua_totvalue(L, -1)
-    return mt
-  end
-  return nil
-end
+-- Titan metatable by name registry
+local METATABLE_BY_NAME: { string: { value: value } } = {}
 
-local function rawgetp_val(tab: value, p: *void): value?
-  local top = luac.lua_gettop(L)
-  defer luac.lua_settop(L, top)
-  ffi.lua_pushtvalue(L, tab)
-  local t = luac.lua_rawgetp(L, -1, p)
-  if t == luac.LUA_TNIL or t == luac.LUA_TNONE then
-    return nil
-  end
-  local res: value = ffi.lua_totvalue(L, -1)
-  return res
-end
-
-local function get_metatable_by_name(name: string): value?
+local function init_metatable_by_name()
   local top = luac.lua_gettop(L)
   defer luac.lua_settop(L, top)
   local t = luac.lua_getfield(L, luac.LUA_REGISTRYINDEX, ffi.TITAN_METATABLES_KEY)
   if t ~= luac.LUA_TTABLE then
-    return nil
+    raise "Titan metatable by name registry is not a table"
   end
-  local mt_type = luac.lua_getfield(L, -1, name)
-  if mt_type ~= luac.LUA_TTABLE then
-    return nil
-  end
-  local res: value = ffi.lua_totvalue(L, -1)
-  return res
+  METATABLE_BY_NAME = ffi.lua_totvalue(L, -1) as value
 end
 
-
--- Cache from metatable (value) to type descriptor record (RecordType/UnionType/InterfaceType/Type)
-local mt_cache: {value: value} = {}
+-- Cache from metatable ({ value: value }) to type
+local mt_cache: { { value: value } : Type } = {}
 
 -- Cache from qualified nominal name to NominalType
 local nominal_cache: {string: NominalType} = {}
 
 -- Active tables during hydration
-local active_membermap: value? = nil
-local active_statics: value? = nil
+local active_membermap: { string: value }? = nil
+local active_statics: { string: value }? = nil
+local seen_ctypes: { string: Type } = {}
 
 local function sort_strings(arr: {string})
   for i = 2, #arr do
@@ -414,191 +392,37 @@ local function sort_strings(arr: {string})
   end
 end
 
-local function to_type_array(v: value): {Type}
-  local res: {Type} = {}
-  if v == nil then return res end
-  local top = luac.lua_gettop(L)
-  defer luac.lua_settop(L, top)
-  ffi.lua_pushtvalue(L, v)
-  if luac.lua_type(L, -1) ~= luac.LUA_TTABLE then return res end
-  local len = luac.lua_rawlen(L, -1) as integer
-  local i = 1
-  while i <= len do
-    luac.lua_rawgeti(L, (top + 1) as int, i as luac.lua_Integer)
-    local item: value = ffi.lua_totvalue(L, -1)
-    res[#res + 1] = item as Type
-    luac.lua_settop(L, (top + 1) as int)
-    i = i + 1
+local function cast_metadata_optional<T>(v: value): T?
+  if v == nil or v == false then
+    return nil
+  else
+    return v as T
   end
-  return res
 end
 
-local function to_string_array(v: value): {string}
-  local res: {string} = {}
-  if v == nil then return res end
-  local top = luac.lua_gettop(L)
-  defer luac.lua_settop(L, top)
-  ffi.lua_pushtvalue(L, v)
-  if luac.lua_type(L, -1) ~= luac.LUA_TTABLE then return res end
-  local len = luac.lua_rawlen(L, -1) as integer
-  local i = 1
-  while i <= len do
-    luac.lua_rawgeti(L, (top + 1) as int, i as luac.lua_Integer)
-    local item: value = ffi.lua_totvalue(L, -1)
-    res[#res + 1] = item as string
-    luac.lua_settop(L, (top + 1) as int)
-    i = i + 1
+local function to_array<T>(v: ({ integer: T })?): const {T}
+  local res: {T} = {}
+  if v == nil then return res as const {T} end
+  for i = 1, #v do
+    res[#res + 1] = v[i]
   end
-  return res
+  return res as const {T}
 end
 
-local function to_field_array(v: value): {FieldType}
-  local res: {FieldType} = {}
-  if v == nil then return res end
-  local top = luac.lua_gettop(L)
-  defer luac.lua_settop(L, top)
-  ffi.lua_pushtvalue(L, v)
-  if luac.lua_type(L, -1) ~= luac.LUA_TTABLE then return res end
-  local len = luac.lua_rawlen(L, -1) as integer
-  local i = 1
-  while i <= len do
-    luac.lua_rawgeti(L, (top + 1) as int, i as luac.lua_Integer)
-    local item: value = ffi.lua_totvalue(L, -1)
-    res[#res + 1] = item as FieldType
-    luac.lua_settop(L, (top + 1) as int)
-    i = i + 1
-  end
-  return res
-end
-
-local function to_variant_array(v: value): {VariantType}
-  local res: {VariantType} = {}
-  if v == nil then return res end
-  local top = luac.lua_gettop(L)
-  defer luac.lua_settop(L, top)
-  ffi.lua_pushtvalue(L, v)
-  if luac.lua_type(L, -1) ~= luac.LUA_TTABLE then return res end
-  local len = luac.lua_rawlen(L, -1) as integer
-  local i = 1
-  while i <= len do
-    luac.lua_rawgeti(L, (top + 1) as int, i as luac.lua_Integer)
-    local item: value = ffi.lua_totvalue(L, -1)
-    res[#res + 1] = item as VariantType
-    luac.lua_settop(L, (top + 1) as int)
-    i = i + 1
-  end
-  return res
-end
-
-local function to_foreign_field_array(v: value): {ForeignFieldType}
-  local res: {ForeignFieldType} = {}
-  if v == nil then return res end
-  local top = luac.lua_gettop(L)
-  defer luac.lua_settop(L, top)
-  ffi.lua_pushtvalue(L, v)
-  if luac.lua_type(L, -1) ~= luac.LUA_TTABLE then return res end
-  local len = luac.lua_rawlen(L, -1) as integer
-  local i = 1
-  while i <= len do
-    luac.lua_rawgeti(L, (top + 1) as int, i as luac.lua_Integer)
-    local item: value = ffi.lua_totvalue(L, -1)
-    res[#res + 1] = item as ForeignFieldType
-    luac.lua_settop(L, (top + 1) as int)
-    i = i + 1
-  end
-  return res
-end
-
-local function to_method_list(v: value): {MethodType}
-  local res: {MethodType} = {}
-  if v == nil then return res end
-  local top = luac.lua_gettop(L)
-  defer luac.lua_settop(L, top)
-  ffi.lua_pushtvalue(L, v)
-  if luac.lua_type(L, -1) ~= luac.LUA_TTABLE then return res end
-  local rawlen = luac.lua_rawlen(L, -1) as integer
-  if rawlen > 0 then
-    local i = 1
-    while i <= rawlen do
-      luac.lua_rawgeti(L, (top + 1) as int, i as luac.lua_Integer)
-      local item: value = ffi.lua_totvalue(L, -1)
-      res[#res + 1] = item as MethodType
-      luac.lua_settop(L, (top + 1) as int)
-      i = i + 1
-    end
-    return res
-  end
+local function to_sorted_array<T>(v: ({ string: T })?): const {T}
+  local res: {T} = {}
+  if v == nil then return res as const {T} end
+  local v = v
   local names: {string} = {}
   local map: {string: MethodType} = {}
-  luac.lua_pushnil(L)
-  while luac.lua_next(L, (top + 1) as int) ~= 0 do
-    local k_val: value = ffi.lua_totvalue(L, -2)
-    local m_val: value = ffi.lua_totvalue(L, -1)
-    if k_val is string then
-      local k = k_val as string
-      names[#names + 1] = k
-      map[k] = m_val as MethodType
-    end
-    luac.lua_settop(L, (top + 2) as int)
+  for name, val in iteration.pairs(v) do
+    names[#names + 1] = name
   end
   sort_strings(names)
-  local j = 1
-  while j <= #names do
-    res[#res + 1] = map[names[j]]
-    j = j + 1
+  for i = 1, #names do
+    res[#res + 1] = v[names[i]]
   end
-  return res
-end
-
-local function to_static_list(v: value): {StaticFunctionType}
-  local res: {StaticFunctionType} = {}
-  if v == nil then return res end
-  local top = luac.lua_gettop(L)
-  defer luac.lua_settop(L, top)
-  ffi.lua_pushtvalue(L, v)
-  if luac.lua_type(L, -1) ~= luac.LUA_TTABLE then return res end
-  local rawlen = luac.lua_rawlen(L, -1) as integer
-  if rawlen > 0 then
-    local i = 1
-    while i <= rawlen do
-      luac.lua_rawgeti(L, (top + 1) as int, i as luac.lua_Integer)
-      local item: value = ffi.lua_totvalue(L, -1)
-      res[#res + 1] = item as StaticFunctionType
-      luac.lua_settop(L, (top + 1) as int)
-      i = i + 1
-    end
-    return res
-  end
-  local names: {string} = {}
-  local map: {string: StaticFunctionType} = {}
-  luac.lua_pushnil(L)
-  while luac.lua_next(L, (top + 1) as int) ~= 0 do
-    local k_val: value = ffi.lua_totvalue(L, -2)
-    local s_val: value = ffi.lua_totvalue(L, -1)
-    if k_val is string then
-      local k = k_val as string
-      names[#names + 1] = k
-      map[k] = s_val as StaticFunctionType
-    end
-    luac.lua_settop(L, (top + 2) as int)
-  end
-  sort_strings(names)
-  local j = 1
-  while j <= #names do
-    res[#res + 1] = map[names[j]]
-    j = j + 1
-  end
-  return res
-end
-
-local function default_method(self_val: value, ...: value): (...: value)
-end
-
-local function default_static(...: value): (...: value)
-end
-
-local function default_variant(p: value): value
-  return nil
+  return res as const {T}
 end
 
 local hydration_env: {string: value} = {}
@@ -641,16 +465,22 @@ local function init_hydration_env()
   end
 
   hydration_env["Array"] = function(elem: Type, isconst: value): Type
-    local c = false
-    if isconst == true then c = true end
-    return Type.is_array({ is_const = c, elem_descriptor = elem })
+    local ic: ArrayTypeConstness? = nil
+    if isconst == "maybe" then
+      ic = ArrayTypeConstness.is_maybe_const()
+    elseif isconst then
+      ic = ArrayTypeConstness.is_const()
+    else
+      ic = ArrayTypeConstness.is_mmutable()
+    end
+    return Type.is_array({ is_const = ic, elem_descriptor = elem })
   end
 
   hydration_env["Map"] = function(keys: Type, values: Type): Type
     return Type.is_map({ key_descriptor = keys, value_descriptor = values })
   end
 
-  hydration_env["Nominal"] = function(fqtn: string, ...: value): Type
+  hydration_env["Nominal"] = function(fqtn: string): Type
     return Type.is_named({ name = fqtn })
   end
 
@@ -664,139 +494,102 @@ local function init_hydration_env()
   end
 
   hydration_env["Variant"] = function(fqtn: string, name: string, payload: value, index: integer): VariantType
-    local desc: Type? = nil
-    if payload ~= false and payload ~= nil then
-      desc = payload as Type
-    end
-    local callable: (value) -> value = default_variant
-    if active_statics then
-      local statics_map = (active_statics as value) as {string: value}
-      local fn = statics_map[name]
-      if fn then
-        callable = fn as (value) -> value
-      end
-    end
     return {
       name = name,
       tag = index,
-      descriptor = desc,
-      callable = callable
+      descriptor = cast_metadata_optional<Type>(payload),
+      callable = active_statics[name]
     }
   end
 
-  hydration_env["Method"] = function(fqtn: string, name: string, params: value, rettypes: value, varargtype: value, flexrettype: value, paramnames: value, ...: value): MethodType
-    local vararg_desc: Type? = nil
-    if varargtype ~= false and varargtype ~= nil then
-      vararg_desc = varargtype as Type
-    end
-    local flexret_desc: Type? = nil
-    if flexrettype ~= false and flexrettype ~= nil then
-      flexret_desc = flexrettype as Type
-    end
-    local callable: (value, ...: value) -> (...: value) = default_method
-    if active_membermap ~= nil then
-      local mm = (active_membermap as value) as {string: value}
-      local fn = mm[name]
-      if fn ~= nil then
-        callable = fn as (value, ...: value) -> (...: value)
-      end
-    end
+  hydration_env["Method"] = function(fqtn: string,
+        name: string, params: value,
+        rettypes: value, varargtype: value, flexrettype: value,
+        paramnames: value): MethodType
     return {
       name = name,
-      param_names = to_string_array(paramnames) as const { string },
-      param_descriptors = to_type_array(params) as const { Type },
-      vararg_descriptor = vararg_desc,
-      return_descriptors = to_type_array(rettypes) as const { Type },
-      flexret_descriptor = flexret_desc,
-      callable = callable
+      param_names = to_array(cast_metadata_optional<{integer: string}>(paramnames)),
+      param_descriptors = to_array(cast_metadata_optional<{integer: Type}>(params)),
+      vararg_descriptor = cast_metadata_optional<Type>(varargtype),
+      return_descriptors = to_array(cast_metadata_optional<{integer: Type}>(rettypes)),
+      flexret_descriptor = cast_metadata_optional<Type>(flexrettype),
+      callable = active_membermap[name]
     }
   end
 
-  hydration_env["StaticMethod"] = function(fqtn: string, name: string, params: value, rettypes: value, varargtype: value, flexrettype: value, paramnames: value, ...: value): StaticFunctionType
-    local vararg_desc: Type? = nil
-    if varargtype ~= false and varargtype ~= nil then
-      vararg_desc = varargtype as Type
-    end
-    local flexret_desc: Type? = nil
-    if flexrettype ~= false and flexrettype ~= nil then
-      flexret_desc = flexrettype as Type
-    end
-    local callable: (...: value) -> (...: value) = default_static
-    if active_statics ~= nil then
-      local statics_map = (active_statics as value) as {string: value}
-      local fn = statics_map[name]
-      if fn ~= nil then
-        callable = fn as (...: value) -> (...: value)
-      end
-    end
+  hydration_env["StaticMethod"] = function(fqtn: string,
+        name: string, params: value,
+        rettypes: value, varargtype: value, flexrettype: value,
+        paramnames: value): StaticFunctionType
     return {
       name = name,
-      param_names = to_string_array(paramnames) as const { string },
-      param_descriptors = to_type_array(params) as const { Type },
-      vararg_descriptor = vararg_desc,
-      return_descriptors = to_type_array(rettypes) as const { Type },
-      flexret_descriptor = flexret_desc,
-      callable = callable
+      param_names = to_array(cast_metadata_optional<{integer: string}>(paramnames)),
+      param_descriptors = to_array(cast_metadata_optional<{integer: Type}>(params)),
+      vararg_descriptor = cast_metadata_optional<Type>(varargtype),
+      return_descriptors = to_array(cast_metadata_optional<{integer: Type}>(rettypes)),
+      flexret_descriptor = cast_metadata_optional<Type>(flexrettype),
+      callable = active_statics[name]
     }
   end
 
-  hydration_env["Function"] = function(params: value, rettypes: value, dummy: value, varargtype: value, flexrettype: value): Type
-    local vararg_desc: Type? = nil
-    if varargtype ~= false and varargtype ~= nil then
-      vararg_desc = varargtype as Type
-    end
-    local flexret_desc: Type? = nil
-    if flexrettype ~= false and flexrettype ~= nil then
-      flexret_desc = flexrettype as Type
-    end
+  hydration_env["Function"] = function(params: value, rettypes: value, _: value,
+        varargtype: value, flexrettype: value): Type
     return Type.is_function({
-      param_descriptors = to_type_array(params) as const { Type },
-      vararg_descriptor = vararg_desc,
-      return_descriptors = to_type_array(rettypes) as const { Type },
-      flexret_descriptor = flexret_desc
+      param_descriptors = to_array(cast_metadata_optional<{integer: Type}>(params)),
+      vararg_descriptor = cast_metadata_optional<Type>(varargtype),
+      return_descriptors = to_array(cast_metadata_optional<{integer: Type}>(rettypes)),
+      flexret_descriptor = cast_metadata_optional<Type>(flexrettype),
     })
   end
 
-  hydration_env["Record"] = function(name: string, fields: value, functions_map: value, methods_map: value, ...: value): RecordType
-    return {
+  hydration_env["Record"] = function(name: string,
+       fields: value, 
+       functions: value, 
+       methods: value): Type
+    return Type.is_record({
       name = name,
-      fields = to_field_array(fields) as const { FieldType },
-      statics = to_static_list(functions_map) as const { StaticFunctionType },
-      methods = to_method_list(methods_map) as const { MethodType }
-    }
+      fields = to_array(cast_metadata_optional<{integer: FieldType}>(fields)),
+      statics = to_sorted_array(cast_metadata_optional<{string: StaticFunctionType}>(functions)),
+      methods = to_sorted_array(cast_metadata_optional<{string: MethodType}>(methods))
+    })
   end
 
-  hydration_env["Union"] = function(name: string, variants: value, functions_map: value, methods_map: value, ...: value): UnionType
-    return {
+  hydration_env["Union"] = function(name: string, 
+       variants: value, 
+       functions: value, 
+       methods: value): Type
+    return Type.is_union({
       name = name,
-      variants = to_variant_array(variants) as const { VariantType },
-      statics = to_static_list(functions_map) as const { StaticFunctionType },
-      methods = to_method_list(methods_map) as const { MethodType }
-    }
+      variants = to_array(cast_metadata_optional<{integer: VariantType}>(variants)),
+      statics = to_sorted_array(cast_metadata_optional<{string: StaticFunctionType}>(functions)),
+      methods = to_sorted_array(cast_metadata_optional<{string: MethodType}>(methods))
+    })
   end
 
-  hydration_env["Interface"] = function(name: string, fields: value, methods: value, ...: value): InterfaceType
-    return {
+  hydration_env["Interface"] = function(name: string, 
+        fields: value, 
+        methods: value): Type
+    return Type.is_interface({
       name = name,
-      fields = to_field_array(fields) as const { FieldType },
-      methods = to_method_list(methods) as const { MethodType }
-    }
+      fields = to_array(cast_metadata_optional<{integer: FieldType}>(fields)),
+      methods = to_sorted_array(cast_metadata_optional<{string: MethodType}>(methods))
+    })
   end
 
   hydration_env["COwned"] = function(pointee: Type, count: value): Type
-    if count == true then
+    if count then
       return Type.is_owned_foreign_array({ elem_descriptor = pointee })
     else
       return Type.is_owned_foreign_pointer({ pointee_descriptor = pointee })
     end
   end
 
-  hydration_env["CInteger"] = function(spelling: string, is_signed: boolean, rank: integer, bits: integer): Type
+  hydration_env["CInteger"] = function(spelling: string, is_signed: boolean, rank: value, bits: value): Type
     return Type.is_foreign_integer({
       spelling = spelling,
       is_signed = is_signed,
-      rank = rank,
-      bits = bits
+      rank = cast_metadata_optional<integer>(rank),
+      bits = cast_metadata_optional<integer>(bits)
     })
   end
 
@@ -804,55 +597,57 @@ local function init_hydration_env()
     return Type.is_foreign_float({ spelling = spelling })
   end
 
-  hydration_env["CPointer"] = function(pointee: Type, quals: {string}): Type
+  hydration_env["CPointer"] = function(pointee: Type, quals: value): Type
     return Type.is_foreign_pointer({
       pointee_descriptor = pointee,
-      quals = quals as const { string }
+      quals = to_array(cast_metadata_optional<{integer: string}>(quals))
     })
   end
 
-  hydration_env["CArray"] = function(elem: Type, len: value, quals: {string}): Type
+  hydration_env["CArray"] = function(elem: Type, len: value, quals: value): Type
     return Type.is_foreign_array({
       elem_descriptor = elem,
       len = len,
-      quals = quals as const { string }
+      quals = to_array(cast_metadata_optional<{integer: string}>(quals))
     })
   end
 
-  hydration_env["CStruct"] = function(cname: value, tagname: value, typedef: value, fields: value, complete: boolean, has_fam: boolean): Type
-    local cn = ""
-    if cname ~= false and cname ~= nil then cn = cname as string end
-    local tn = ""
-    if tagname ~= false and tagname ~= nil then tn = tagname as string end
-    local td = ""
-    if typedef ~= false and typedef ~= nil then td = typedef as string end
-    return Type.is_foreign_struct({
-      cname = cn,
-      tagname = tn,
-      typedef = td,
-      fields = to_foreign_field_array(fields) as const { ForeignFieldType },
+  hydration_env["CNamed"] = function(name: string): Type
+    return seen_ctypes[name]
+  end
+
+  hydration_env["CStruct"] = function(cname: value, tagname: value, typedef: value,
+        fields: value, complete: boolean, has_fam: boolean): Type
+    local t = Type.is_foreign_struct({
+      cname = cast_metadata_optional<string>(cname) or "",
+      tagname = cast_metadata_optional<string>(tagname) or "",
+      typedef = cast_metadata_optional<string>(typedef) or "",
+      fields = to_array(cast_metadata_optional<{integer: ForeignFieldType}>(fields)),
       is_complete = complete,
       has_fam = has_fam
     })
+    if cname or tagname then
+      seen_ctypes["struct@" .. str.tostring(cname or tagname)] = t
+    end
+    return t
   end
 
-  hydration_env["CUnion"] = function(cname: value, tagname: value, typedef: value, fields: value, complete: boolean): Type
-    local cn = ""
-    if cname ~= false and cname ~= nil then cn = cname as string end
-    local tn = ""
-    if tagname ~= false and tagname ~= nil then tn = tagname as string end
-    local td = ""
-    if typedef ~= false and typedef ~= nil then td = typedef as string end
-    return Type.is_foreign_union({
-      cname = cn,
-      tagname = tn,
-      typedef = td,
-      fields = to_foreign_field_array(fields) as const { ForeignFieldType },
+  hydration_env["CUnion"] = function(cname: value, tagname: value, typedef: value,
+        fields: value, complete: boolean): Type
+    local t = Type.is_foreign_union({
+      cname = cast_metadata_optional<string>(cname) or "",
+      tagname = cast_metadata_optional<string>(tagname) or "",
+      typedef = cast_metadata_optional<string>(typedef) or "",
+      fields = to_array(cast_metadata_optional<{integer: ForeignFieldType}>(fields)),
       is_complete = complete
     })
+    if cname or tagname then
+      seen_ctypes["union@" .. str.tostring(cname or tagname)] = t
+    end
+    return t
   end
 
-  hydration_env["CField"] = function(owner: value, name: string, typ: Type, bitfield: value, flex: boolean): ForeignFieldType
+  hydration_env["CField"] = function(_: value, name: string, typ: Type, bitfield: value, flex: boolean): ForeignFieldType
     return {
       name = name,
       descriptor = typ,
@@ -862,23 +657,25 @@ local function init_hydration_env()
   end
 
   hydration_env["CTypedef"] = function(name: string, target: Type, quals: value): Type
-    return Type.is_foreign_typedef({
+    local t = Type.is_foreign_typedef({
       name = name,
       target_descriptor = target,
-      quals = to_string_array(quals) as const { string }
+      quals = to_array(cast_metadata_optional<{integer: string}>(quals))
     })
+    seen_ctypes["typedef@" .. name] = t
+    return t
   end
 
-  hydration_env["CFunction"] = function(params: value, ret: Type, vararg: boolean, abi: value): Type
+  hydration_env["CFunction"] = function(params: value, ret: Type, vararg: boolean): Type
     return Type.is_foreign_function({
-      param_descriptors = to_type_array(params) as const { Type },
+      param_descriptors = to_array(cast_metadata_optional<{integer: Type}>(params)),
       is_vararg = vararg,
       return_descriptor = ret
     })
   end
 
   -- Ignored generic/module metadata tokens
-  local ignore_fn = function(...: value): value return false end
+  local ignore_fn = function(): value return nil end
   hydration_env["GenericScope"] = ignore_fn
   hydration_env["TypeParameter"] = ignore_fn
   hydration_env["Parameter"] = ignore_fn
@@ -890,182 +687,78 @@ local function init_hydration_env()
   hydration_env["CModule"] = ignore_fn
 end
 
-local function hydrate_with_context(typestr: string, mt: value?): value
-  if mt ~= nil then
-    active_membermap = rawgetp_val(mt as value, ffi.TITAN_MT_MEMBERMAP)
-    active_statics = rawgetp_val(mt as value, ffi.TITAN_MT_STATICS)
+local function hydrate_type(typestr: string, mt: ({value: value})?): Type
+  if mt then
+    active_membermap = mt[ffi.TITAN_MT_MEMBERMAP]
+    active_statics = mt[ffi.TITAN_MT_STATICS]
   else
     active_membermap = nil
     active_statics = nil
   end
-  local chunk = titan_lua.load("return " .. typestr, "=descriptor", hydration_env)
-  local result: value = chunk()
-  active_membermap = nil
-  active_statics = nil
-  return result
+  defer do
+    seen_ctypes = {}
+    active_membermap = nil
+    active_statics = nil
+  end
+  local chunk = lua.load("return " .. typestr, "=descriptor", hydration_env)
+  return (chunk())
 end
 
-local function hydrate_type(typestr: string): Type
-  local res = hydrate_with_context(typestr, nil)
-  return res as Type
-end
-
-local function get_or_hydrate_record_type(mt: value): RecordType
+local function get_or_hydrate_from_metatable(mt: { value: value }): Type
   local cached = mt_cache[mt]
-  if cached ~= nil then
-    return cached as RecordType
+  if cached then
+    return cached
   end
-  local typestr_val = rawgetp_val(mt, ffi.TITAN_MT_TYPE)
-  if typestr_val == nil then
-    raise "record metatable has no type descriptor"
+  local typestr: string? = mt[ffi.TITAN_MT_TYPE]
+  if typestr == nil then
+    raise "metatable " .. str.tostring(mt) .. " has no type descriptor"
   end
-  local typestr = typestr_val as string
-  local rec_type = hydrate_with_context(typestr, mt) as RecordType
-  mt_cache[mt] = rec_type
-  nominal_cache[rec_type.name] = NominalType.is_record(rec_type)
-  return rec_type
-end
-
-local function get_or_hydrate_union_type(mt: value): UnionType
-  local cached = mt_cache[mt]
-  if cached ~= nil then
-    return cached as UnionType
-  end
-  local typestr_val = rawgetp_val(mt, ffi.TITAN_MT_TYPE)
-  if typestr_val == nil then
-    raise "union metatable has no type descriptor"
-  end
-  local typestr = typestr_val as string
-  local union_type = hydrate_with_context(typestr, mt) as UnionType
-  mt_cache[mt] = union_type
-  nominal_cache[union_type.name] = NominalType.is_union(union_type)
-  return union_type
-end
-
-local function get_or_hydrate_interface_type(mt: value): InterfaceType
-  local cached = mt_cache[mt]
-  if cached ~= nil then
-    return cached as InterfaceType
-  end
-  local typestr_val = rawgetp_val(mt, ffi.TITAN_MT_TYPE)
-  if typestr_val == nil then
-    raise "interface metatable has no type descriptor"
-  end
-  local typestr = typestr_val as string
-  local iface_type = hydrate_with_context(typestr, mt) as InterfaceType
-  mt_cache[mt] = iface_type
-  nominal_cache[iface_type.name] = NominalType.is_interface(iface_type)
-  return iface_type
-end
-
-local function get_or_hydrate_owned_type(mt: value): Type
-  local cached = mt_cache[mt]
-  if cached ~= nil then
-    return cached as Type
-  end
-  local typestr_val = rawgetp_val(mt, ffi.TITAN_MT_TYPE)
-  if typestr_val == nil then
-    raise "owned foreign metatable has no type descriptor"
-  end
-  local typestr = typestr_val as string
-  local t = hydrate_with_context(typestr, mt) as Type
+  local t = hydrate_type(typestr, mt)
   mt_cache[mt] = t
   return t
 end
 
 function find_nominal(name: string): NominalType?
   local cached: NominalType? = nominal_cache[name]
-  if cached ~= nil then
+  if cached then
     return cached
   end
-  local mt = get_metatable_by_name(name)
+  local mt? = METATABLE_BY_NAME[name]
   if mt == nil then
     return nil
   end
-  local brand_val = rawgetp_val(mt as value, ffi.TITAN_BRAND)
-  if brand_val == nil or not (brand_val is integer) then
+  local brand: integer? = mt[ffi.TITAN_BRAND]
+  if brand == nil then
     return nil
   end
-  local brand = brand_val as integer
-  if brand == 3 then -- TITAN_RECORD
-    local rec = get_or_hydrate_record_type(mt as value)
-    local nom = NominalType.is_record(rec)
-    nominal_cache[name] = nom
-    return nom
-  elseif brand == 4 then -- TITAN_UNION
-    local u = get_or_hydrate_union_type(mt as value)
-    local nom = NominalType.is_union(u)
-    nominal_cache[name] = nom
-    return nom
-  elseif brand == 5 then -- TITAN_INTERFACE
-    local iface = get_or_hydrate_interface_type(mt as value)
-    local nom = NominalType.is_interface(iface)
-    nominal_cache[name] = nom
-    return nom
+  local nom: NominalType? = nil
+  local t = get_or_hydrate_from_metatable(mt)
+  case t
+    when is_record: rec then
+      nom = NominalType.is_record(rec)
+    when is_union: u then
+      nom = NominalType.is_union(u)
+    when is_interface: iface then
+      nom = NominalType.is_interface(iface)
   else
     return nil
   end
-end
-
-function record_descriptor(name: string): RecordType?
-  local nom: NominalType? = find_nominal(name)
-  if nom ~= nil then
-    local n = nom as NominalType
-    case n
-    when is_record: rec then
-      return rec
-    else
-      return nil
-    end
-  end
-  return nil
-end
-
-function union_descriptor(name: string): UnionType?
-  local nom: NominalType? = find_nominal(name)
-  if nom ~= nil then
-    local n = nom as NominalType
-    case n
-    when is_union: un then
-      return un
-    else
-      return nil
-    end
-  end
-  return nil
-end
-
-function interface_descriptor(name: string): InterfaceType?
-  local nom: NominalType? = find_nominal(name)
-  if nom ~= nil then
-    local n = nom as NominalType
-    case n
-    when is_interface: iface then
-      return iface
-    else
-      return nil
-    end
-  end
-  return nil
+  nominal_cache[name] = nom
+  return nom
 end
 
 local function is_titan_closure(cl: *lobject.CClosure): boolean
-  if (cl.nupvalues as integer) < 5 then
+  if cl.nupvalues < 4 then
     return false
   end
-  local upvalues: *lobject.TValue = cl.upvalue as *lobject.TValue
-  local brand_slot = upvalues[3]
-  if ffi.luamacro_ttislightuserdata(brand_slot) == 0 then
-    return false
-  end
-  return ffi.lmacro_pvalue(brand_slot) == ffi.TITAN_BRAND
+  return ffi.lmacro_pvalue(cl.upvalue[3]) == ffi.TITAN_BRAND
 end
 
 local function inspect_function(v: value): Value
-  local tv: lobject.TValue = v
-  if ffi.luamacro_ttisLclosure(tv) ~= 0 then
+  local tv: ffi.TValue = v
+  if ffi.lmacro_ttisLclosure(tv) ~= 0 then
     local ar: owned *luac.lua_Debug = luac.lua_Debug.new()
-    ffi.lua_pushtvalue(L, v)
+    ffi.lua_pushtvalue(L, tv)
     if luac.lua_getinfo(L, ">Su", ar) == 0 then
       raise "could not get Lua function info"
     end
@@ -1091,13 +784,12 @@ local function inspect_function(v: value): Value
       val = v as (...: value) -> (...: value),
       descriptor = desc
     })
-  elseif ffi.luamacro_ttisCclosure(tv) ~= 0 then
-    local cl = ffi.lmacro_clCvalue(tv)
+  elseif ffi.lmacro_ttisCclosure(tv) ~= 0 then
+    local cl: *lobject.CClosure = ffi.lmacro_clCvalue(tv)
     if is_titan_closure(cl) then
-      local upvalues: *lobject.TValue = cl.upvalue as *lobject.TValue
-      local native_entry = ffi.lmacro_pvalue(upvalues[2])
-      local lua_entry = ffi.luamacro_ccl_f(cl)
-      local tag_ptr = ffi.lmacro_pvalue(upvalues[1]) as *char
+      local native_entry = ffi.lmacro_pvalue(cl.upvalue[2])
+      local lua_entry: foreign (*lua_State) -> int = cl.f
+      local tag_ptr = ffi.lmacro_pvalue(cl.upvalue[1]) as *char
       local tag_str = tag_ptr as string
       local ftype = hydrate_type(tag_str)
       local desc: FunctionType? = nil
@@ -1115,14 +807,14 @@ local function inspect_function(v: value): Value
         descriptor = desc as FunctionType
       })
     else
-      local entry = ffi.luamacro_ccl_f(cl)
+      local entry: foreign (*lua_State) -> int = cl.f
       return Value.is_lua_c_function({
         val = v as (...: value) -> (...: value),
         entry = entry
       })
     end
-  elseif ffi.luamacro_ttislcf(tv) ~= 0 then
-    local entry = ffi.luamacro_fvalue(tv)
+  elseif ffi.lmacro_ttislcf(tv) ~= 0 then
+    local entry: foreign (*lua_State) -> int = ffi.lmacro_fvalue(tv)
     return Value.is_lua_c_function({
       val = v as (...: value) -> (...: value),
       entry = entry
@@ -1132,86 +824,100 @@ local function inspect_function(v: value): Value
   end
 end
 
-local brand_handlers: {(value, value) -> Value} = {}
+local brand_handlers: {(value, ({ value: value })?) -> Value} = {}
 
 local function init_brand_handlers()
-  brand_handlers[1] = function(v: value, mt: value): Value
+  brand_handlers[ffi.TITAN_ARRAY] = function(v: value, mt: ({ value: value })?): Value
     return Value.is_array({ val = v as {value} })
   end
 
-  brand_handlers[2] = function(v: value, mt: value): Value
+  brand_handlers[ffi.TITAN_CONST_ARRAY] = function(v: value, mt: ({ value: value })?): Value
     return Value.is_const_array({ val = v as const {value} })
   end
 
-  brand_handlers[3] = function(v: value, mt: value): Value
-    local desc = get_or_hydrate_record_type(mt)
-    local tv: lobject.TValue = v
-    local u = ffi.lmacro_uvalue(tv)
-    local nuv = u.nuvalue as integer
-    local uv_ptr = u.uv as *lobject.UValue
-    local indexes: {integer} = {}
-    local is_const: {boolean} = {}
-    for i = 1, #desc.fields do
-      indexes[#indexes + 1] = desc.fields[i].index
-      is_const[#is_const + 1] = desc.fields[i].is_const
+  brand_handlers[ffi.TITAN_RECORD] = function(v: value, mt: ({ value: value })?): Value
+    local t = get_or_hydrate_from_metatable(mt)
+    case t
+    when is_record: desc then
+      local tv: ffi.TValue = v
+      local u = ffi.lmacro_uvalue(tv)
+      local nuv = u.nuvalue as integer
+      local uv_ptr = u.uv as *lobject.UValue
+      local indexes: {integer} = {}
+      local is_const: {boolean} = {}
+      for i = 1, #desc.fields do
+        indexes[#indexes + 1] = desc.fields[i].index
+        is_const[#is_const + 1] = desc.fields[i].is_const
+      end
+      return Value.is_record({
+        udata = u,
+        nuvalue = nuv,
+        uv = uv_ptr,
+        indexes = indexes,
+        is_const = is_const,
+        n_fields = #desc.fields,
+        val = v,
+        descriptor = desc
+      })
+    else
+      raise "metatable " .. str.tostring(mt) .. " does not describe a record"
     end
-    return Value.is_record({
-      udata = u,
-      nuvalue = nuv,
-      uv = uv_ptr,
-      indexes = indexes,
-      is_const = is_const,
-      n_fields = #desc.fields,
-      val = v,
-      descriptor = desc
-    })
-
   end
 
-  brand_handlers[4] = function(v: value, mt: value): Value
-    local desc = get_or_hydrate_union_type(mt)
-    local tv: lobject.TValue = v
-    local u = ffi.lmacro_uvalue(tv)
-    local uv_ptr = u.uv as *lobject.UValue
-    local tag: integer = 0
-    local tag_val: value = uv_ptr[0].uv
-    if tag_val is integer then
-      tag = tag_val as integer
+  brand_handlers[ffi.TITAN_UNION] = function(v: value, mt: ({ value: value })?): Value
+    local t = get_or_hydrate_from_metatable(mt)
+    case t
+    when is_union: desc then
+      local tv: ffi.TValue = v
+      local u = ffi.lmacro_uvalue(tv)
+      local uv_ptr = u.uv as *lobject.UValue
+      local tag: integer = 0
+      local tag_val: value = uv_ptr[0].uv
+      if tag_val is integer then
+        tag = tag_val as integer
+      end
+      local payload: value = nil
+      if (u.nuvalue as integer) > 1 then
+        payload = uv_ptr[1].uv
+      end
+      return Value.is_union({
+        tag = tag,
+        payload = payload,
+        val = v,
+        descriptor = desc
+      })
+    else
+      raise "metatable " .. str.tostring(mt) .. " does not describe a union"
     end
-    local payload: value = nil
-    if (u.nuvalue as integer) > 1 then
-      payload = uv_ptr[1].uv
-    end
-    return Value.is_union({
-      tag = tag,
-      payload = payload,
-      val = v,
-      descriptor = desc
-    })
   end
 
-  brand_handlers[5] = function(v: value, mt: value): Value
-    local desc = get_or_hydrate_interface_type(mt)
-    local tv: lobject.TValue = v
-    local u = ffi.lmacro_uvalue(tv)
-    local nuv = u.nuvalue as integer
-    local uv_ptr = u.uv as *lobject.UValue
-    local wrapped = uv_ptr[1].uv
-    return Value.is_interface({
-      nuvalue = nuv,
-      uv = uv_ptr,
-      n_fields = #desc.fields,
-      val = v,
-      wrapped = wrapped,
-      descriptor = desc
-    })
+  brand_handlers[ffi.TITAN_INTERFACE] = function(v: value, mt: ({ value: value })?): Value
+    local t = get_or_hydrate_from_metatable(mt)
+    case t
+    when is_interface: desc then
+      local tv: ffi.TValue = v
+      local u = ffi.lmacro_uvalue(tv)
+      local nuv = u.nuvalue as integer
+      local uv_ptr = u.uv as *lobject.UValue
+      local wrapped = uv_ptr[1].uv
+      return Value.is_interface({
+        nuvalue = nuv,
+        uv = uv_ptr,
+        n_fields = #desc.fields,
+        val = v,
+        wrapped = wrapped,
+        descriptor = desc
+      })
+    else
+      raise "metatable " .. str.tostring(mt) .. " does not describe an interface"
+    end
   end
 
-  brand_handlers[6] = function(v: value, mt: value): Value
-    local t = get_or_hydrate_owned_type(mt)
-    local tv: lobject.TValue = v
+  brand_handlers[ffi.TITAN_OWNED] = function(v: value, mt: ({ value: value })?): Value
+    local t = get_or_hydrate_from_metatable(mt)
+    local tv: ffi.TValue = v
     local u = ffi.lmacro_uvalue(tv)
-    local payload = ffi.luamacro_getudatamem(u)
+    local payload = ffi.lmacro_getudatamem(u)
     local size = u.len as integer
     case t
     when is_owned_foreign_array: arr_t then
@@ -1238,25 +944,30 @@ local function init_brand_handlers()
         descriptor = ptr_t
       })
     else
-      return Value.is_lua_userdata({ val = v })
+      raise "metatable " .. str.tostring(mt) .. " does not describe an owned type"
     end
   end
 end
 
 local function inspect_userdata(v: value): Value
-  local mt = get_metatable_val(v)
+  local tv: ffi.TValue = v
+  local ud: *lobject.Udata = ffi.lmacro_uvalue(tv)
+  local mt = ud.metatable
   if mt == nil then
     return Value.is_lua_userdata({ val = v })
   end
-  local brand_val = rawgetp_val(mt as value, ffi.TITAN_BRAND)
-  if brand_val == nil or not (brand_val is integer) then
+  local mtv: ffi.TValue = nil
+  ffi.lmacro_sethvalue(L, mtv, mt)
+  local mtm: { value: value } = mtv as value
+  local brand: integer? = mtm[ffi.TITAN_BRAND]
+  if brand == nil then
     return Value.is_lua_userdata({ val = v })
   end
-  local brand = brand_val as integer
-  if brand >= 1 and brand <= #brand_handlers then
-    return brand_handlers[brand](v, mt as value)
+  local brand_handler? = brand_handlers[brand]
+  if brand_handler == nil then
+    return Value.is_lua_userdata({ val = v })
   end
-  return Value.is_lua_userdata({ val = v })
+  return brand_handler(v, mtm)
 end
 
 local tag_handlers: {(value) -> Value} = {}
@@ -1271,7 +982,7 @@ local function init_tag_handlers()
   end
 
   tag_handlers[3] = function(v: value): Value
-    local tv: lobject.TValue = v
+    local tv: ffi.TValue = v
     return Value.is_raw_pointer(ffi.lmacro_pvalue(tv))
   end
 
@@ -1300,21 +1011,21 @@ local function init_tag_handlers()
   end
 
   tag_handlers[9] = function(v: value): Value
-    local tv: lobject.TValue = v
+    local tv: ffi.TValue = v
     return Value.is_lua_thread({ val = v, thread = ffi.lmacro_thvalue(tv) })
   end
 end
 
 function inspect(v: value): Value
-  local tv: lobject.TValue = v
+  local tv: ffi.TValue = v
   local tag = ffi.lmacro_ttype(tv)
-  local idx = tag + 1
-  if idx >= 1 and idx <= #tag_handlers then
-    return tag_handlers[idx](v)
+  local handler? = tag_handlers[tag + 1]
+  if handler then
+    return handler(v)
+  else
+    raise "unknown Lua tag " .. str.tostring(tag)
   end
-  return Value.is_nil()
 end
-
 
 do
   init_hydration_env()

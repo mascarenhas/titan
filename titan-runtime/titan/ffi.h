@@ -8,6 +8,19 @@
 #include "lgc.h"
 #include "lua.h"
 
+/*
+** Macro to convert between function pointers and object/void pointers.
+** These casts are not portable ISO C, but the supported toolchains and
+** POSIX dynamic-symbol contract provide them. (The '__extension__' in GNU
+** compilers is only to avoid warnings.)
+** Named titan_cast_func because Lua 5.5's llimits.h defines its own
+** single-argument cast_func.
+*/
+#if defined(__GNUC__)
+#define titan_cast_func(t, p) (__extension__(t)(p))
+#else
+#define titan_cast_func(t, p) ((t)(p))
+#endif
 
 /* Opaque ABI-owned brand stored as light userdata in every Titan function
 ** closure. It is compared only as raw pointer bits and must never be
@@ -108,22 +121,45 @@ static inline int lmacro_ttype(const TValue *o) { return ttype(o); }
 
 static inline int lmacro_ttypetag(const TValue *o) { return ttypetag(o); }
 
-static inline int luamacro_ttisLclosure(const TValue *o) { return ttisLclosure(o); }
+static inline int lmacro_ttisLclosure(const TValue *o) {
+  return ttisLclosure(o);
+}
 
-static inline int luamacro_ttisCclosure(const TValue *o) { return ttisCclosure(o); }
+static inline int lmacro_ttisCclosure(const TValue *o) {
+  return ttisCclosure(o);
+}
 
-static inline int luamacro_ttislcf(const TValue *o) { return ttislcf(o); }
+static inline int lmacro_ttislcf(const TValue *o) { return ttislcf(o); }
 
-static inline int luamacro_ttislightuserdata(const TValue *o) { return ttislightuserdata(o); }
+static inline int lmacro_ttislightuserdata(const TValue *o) {
+  return ttislightuserdata(o);
+}
 
-static inline void *luamacro_fvalue(const TValue *o) { return (void *)(uintptr_t)fvalue(o); }
+static inline lua_CFunction lmacro_fvalue(const TValue *o) { return fvalue(o); }
 
-static inline void *luamacro_getudatamem(Udata *u) { return getudatamem(u); }
+static inline void *lmacro_getudatamem(Udata *u) { return getudatamem(u); }
 
-static inline void *luamacro_ccl_f(const CClosure *cl) { return (void *)(uintptr_t)cl->f; }
+static inline void *lmacro_ccl_f(const CClosure *cl) {
+  return titan_cast_func(void *, cl->f);
+}
 
-static inline void luamacro_luaC_barrierback(lua_State *L, Udata *u, const TValue *v) {
-  luaC_barrierback(L, obj2gco(u), v);
+static inline void lmacro_luaC_barrierback(lua_State *L, void *o,
+                                           const TValue *v) {
+  luaC_barrierback(L, obj2gco(o), v);
+}
+
+typedef void (*generic_func_ptr)(void);
+
+static inline generic_func_ptr titan_ptof(void *p) {
+  return titan_cast_func(generic_func_ptr, p);
+}
+
+static inline void *titan_ftop(generic_func_ptr f) {
+  return titan_cast_func(void *, f);
+}
+
+static inline void lmacro_sethvalue(lua_State *L, TValue *o, Table *t) {
+  sethvalue(L, o, t);
 }
 
 #endif

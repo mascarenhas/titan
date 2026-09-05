@@ -47,7 +47,7 @@ an ordinary function.
 The type grammar also tries `foreignfunctype` before the ordinary arrow forms:
 
 ```text
-FOREIGN arglist RARROW rettype
+FOREIGN typelist RARROW rettype
 ```
 
 and constructs

@@ -65,7 +65,7 @@ function RecordValue:set(i: integer, v: value)
 - **Const validation**: Inspects the field descriptor's `is_const` flag. Attempting to
   call `:set` on a const field raises a runtime error.
 - **GC write barrier**: Writes are performed directly into the userdata's uservalue slot
-  `self.uv[uv_idx].uv = v`, followed immediately by `luamacro_luaC_barrierback` (`luaC_barrierback`)
+  `self.uv[uv_idx].uv = v`, followed immediately by `lmacro_luaC_barrierback` (`luaC_barrierback`)
   without any Lua stack traffic. This maintains the generational garbage collection invariants for all
   collectable payloads.
 

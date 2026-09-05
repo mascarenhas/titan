@@ -87,9 +87,9 @@ wrapped in a `=> checklist` predicate that throws `%{ListTooLong}` past
 the runtime `TITAN_VARARG_MAX` cap).
 
 The **function-type annotation** uses a parallel pair, `varargtypeann` /
-`varargtypeopt`, inside `arglist` (the arrow productions); `varargtypeann`
+`varargtypeopt`, inside `typelist` (the arrow productions); `varargtypeann`
 requires the colon (`DOTS COLON^VarargColon type`) and defaults to `false`
-when absent; `arglist`'s fixed-type loop carries the same `!DOTS` guard. The
+when absent; `typelist`'s fixed-type loop carries the same `!DOTS` guard. The
 bare input `typelist` does not double as a result-tail grammar. Return lists use
 their own `...: t` carrier, so input and output tails cannot be confused.
 `defs.typefunc` combines the argument carrier and result carrier so the two

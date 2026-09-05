@@ -580,6 +580,23 @@ function defs.fold_binop_left(pos, matches)
     return lhs
 end
 
+function defs.empty_typelist()
+    return {}, false
+end
+
+function defs.single_vararg_typelist(varargtype)
+    return {}, varargtype
+end
+
+function defs.other_typelist(type, opt_or_rest, optvarargtype)
+    if opt_or_rest == "?" then
+        return { defs.typeopt(type, opt_or_rest) }, false
+    elseif opt_or_rest == nil or #opt_or_rest == 0 then
+        return { type }, optvarargtype
+    else
+        return { type, table.unpack(opt_or_rest) }, optvarargtype
+    end
+end
 local function is_concat_constant(exp)
     return exp._tag == "Ast.ExpString" or
         exp._tag == "Ast.ExpInteger" or
@@ -767,7 +784,7 @@ end
 -- bound-method reference. Calls retain the existing positional/named argument
 -- nodes and explicit (possibly empty) type-argument list.
 function defs.suffix_anymethod(pos, name_loc, name, typeargs, args, named)
-    if typeargs == false then
+    if not typeargs then
         return function(exp)
             return with_name_loc(ast.ExpMethodRef(pos, exp, name), name_loc)
         end
@@ -810,7 +827,7 @@ function defs.bracket_subset_to_desc(pos, last)
 end
 
 function defs.bracket_from_first_desc(pos, first, tail)
-    if tail == false then
+    if not tail then
         return {
             kind = "index",
             loc = pos,
@@ -1415,6 +1432,9 @@ function defs.simple_type_operand(type)
 end
 
 function defs.argument_type_operand(pos, types, varargtype)
+    if #types == 1 and not varargtype then
+        return defs.simple_type_operand(types[1])
+    end
     return {
         kind = "arguments",
         loc = pos,
@@ -1840,15 +1860,24 @@ local grammar = re.compile([[
     -- a return-type list.
     varargtypeann   <- (P  DOTS COLON^VarargColon type^TypeDecl) -> varargtype
 
-    varargtypeopt   <- ((COMMA varargtypeann / varargtypeann)?)  -> opt
+    varargtypeopt   <- (COMMA varargtypeann)?  -> opt
 
     -- The fixed-type loop stops before a `, ...` so the optional trailing
     -- vararg (`varargtypeopt`) consumes that comma itself.
-    arglist         <- ( LPAREN
-                         {| (type (COMMA !DOTS type^TypelistType)*)? |}
-                         varargtypeopt
-                         RPAREN^RParenTypelist )                 -- produces {Type}, varargtypeopt
-
+    typelist         <- ( LPAREN
+                         (
+                            (RPAREN) -> empty_typelist /
+                            (varargtypeann RPAREN^RParenTypelist) -> single_vararg_typelist / 
+                            (type^LParenType (
+                                (RPAREN (OPT -> '?')) /
+                                (RPAREN) /
+                                ({| (COMMA !DOTS type^TypelistType)* |} varargtypeopt RPAREN^RParenTypelist)
+                              )
+                            ) -> other_typelist
+                         )
+                        )
+        -- produces {Type}, varargtypeopt
+        
     -- A flexible return tail is legal only as the final item of a parenthesized
     -- return list. Its labels deliberately do not reuse the input-vararg
     -- diagnostic, which calls the construct a variadic parameter.
@@ -1873,14 +1902,14 @@ local grammar = re.compile([[
     -- arrow commits to matching its following return operand instead of
     -- recursively retrying every prefix as a complete type.
     typefirstoperand
-                    <- (P  FOREIGN arglist &RARROW)              -> foreign_type_operand
-                     / (P  arglist &RARROW)                      -> argument_type_operand
+                    <- (P  FOREIGN !FLOAT typelist^ForeignFunctionNoTypes (&RARROW)^ForeignFunctionNoRet) -> foreign_type_operand
+                     / (P  typelist)                -> argument_type_operand
                      / (simpletype                               -> simple_type_operand)
 
-    rettypeoperand  <- (P  resulttypelist)                       -> result_type_operand
-                     / (P  FOREIGN arglist &RARROW)              -> foreign_type_operand
+    rettypeoperand  <- (DOTS %{FlexRetParens})
+                     / (P  FOREIGN !FLOAT typelist^ForeignFunctionNoTypes (&RARROW)^ForeignFunctionNoRet) -> foreign_type_operand
+                     / (P  resulttypelist)                       -> result_type_operand
                      / (simpletype                               -> simple_type_operand)
-                     / (DOTS %{FlexRetParens})
 
     arrowrettypeoperand
                     <- RARROW rettypeoperand^TypeReturnTypes

@@ -165,9 +165,15 @@ local errors = {
 
    RCurlyType = "Expected '}' to close type specification.",
 
+    LParenType = "Expected type after '('",
+
     TypelistType = "Expected type after ','",
 
     RParenTypelist = "Expected ')' to close type list",
+
+    ForeignFunctionNoRet = "Expected '->' after foreign function parameter types",
+
+    ForeignFunctionNoTypes = "Expected parameter types for foreign function",
 
     TypeReturnTypes = "Expected return types after `->` to finish the function type",
 
