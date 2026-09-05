@@ -219,6 +219,136 @@ local function registered_expression(text)
 end
 
 describe("pure C expression semantics", function()
+    describe("embedded target profile metadata", function()
+        it("round-trips exact target traits as declarative data", function()
+            for _, build in ipairs({ build_lp64, build_alternative }) do
+                local original = assert(build())
+                local data = assert(csemantics.export_profile(original))
+                assert.equal(1, data.version)
+                assert.equal(original.identity, data.identity)
+                assert.equal(original.integers.int.type.bits,
+                    data.integers.int.bits)
+                assert.equal(original.integers.int.maximum,
+                    data.integers.int.maximum)
+                assert.is_nil(data.integers.int.type)
+                assert.is_nil(data.integers.int._c_numeric)
+                assert.is_nil(data.integers.int._c_numeric_carriers)
+
+                local restored = assert(csemantics.import_profile(data))
+                assert.is_true(csemantics.validate_profile(restored))
+                assert.equal(original.identity, restored.identity)
+                assert.equal(original.identity,
+                    csemantics.profile_identity(restored))
+                assert.same(data,
+                    assert(csemantics.export_profile(restored)))
+                assert.not_equal(original.integers.int.type,
+                    restored.integers.int.type)
+                assert.same(original.integers.int.type._c_numeric,
+                    restored.integers.int.type._c_numeric)
+                assert.same(original.floats.double.type._c_numeric,
+                    restored.floats.double.type._c_numeric)
+
+                local carriers =
+                    restored.integers.int.type._c_numeric_carriers
+                assert.equal(restored.identity, carriers.identity)
+                assert.equal(restored.integers[restored.lua_integer]
+                    .type._c_numeric, carriers.lua_integer)
+                assert.equal(restored.floats[restored.lua_number]
+                    .type._c_numeric, carriers.lua_number)
+                assert.equal(carriers,
+                    restored.floats.double.type._c_numeric_carriers)
+                assert.equal(carriers,
+                    restored.integers[restored.size_t]
+                        .type._c_numeric_carriers)
+
+                local recovered = types.CInteger("int",
+                    data.integers.int.signed, data.integers.int.rank,
+                    data.integers.int.bits)
+                assert.is_true(types.normalize_portable_c_numeric_types(
+                    recovered, restored))
+                assert.equal(restored.integers.int.type._c_numeric,
+                    recovered._c_numeric)
+                assert.equal(carriers, recovered._c_numeric_carriers)
+            end
+        end)
+
+        it("rejects nondeclarative and open profile data at every layer",
+        function()
+            local function reject(change)
+                local data = assert(csemantics.export_profile(
+                    assert(build_lp64())))
+                local candidate = change(data) or data
+                local restored, err = csemantics.import_profile(candidate)
+                assert.is_nil(restored)
+                assert.is_string(err)
+                assert.not_equal("", err)
+            end
+
+            reject(function() return "return arbitrary_code()" end)
+            reject(function(data) setmetatable(data, {}) end)
+            reject(function(data) data.unexpected = true end)
+            reject(function(data) setmetatable(data.integers, {}) end)
+            reject(function(data) data.integers[1] = {} end)
+            reject(function(data)
+                setmetatable(data.integers.int, {})
+            end)
+            reject(function(data)
+                data.integers.int._c_numeric = { bits = 64 }
+            end)
+            reject(function(data)
+                data.floats.double.type = types.CFloat("double")
+            end)
+            reject(function(data)
+                data.floats.double.rank = function() return 2 end
+            end)
+        end)
+
+        it("rejects forged identity and malformed scalar descriptions",
+        function()
+            local function reject(change)
+                local data = assert(csemantics.export_profile(
+                    assert(build_lp64())))
+                change(data)
+                local restored, err = csemantics.import_profile(data)
+                assert.is_nil(restored)
+                assert.is_string(err)
+                assert.not_equal("", err)
+            end
+
+            reject(function(data) data.version = 2 end)
+            reject(function(data) data.identity = "different target" end)
+            reject(function(data) data.lua_integer = "unsigned long" end)
+            reject(function(data) data.integers.int.bits = 64 end)
+            reject(function(data) data.integers.int.minimum = "-02147483648" end)
+            reject(function(data) data.integers.int.maximum = "2147483647.0" end)
+            reject(function(data) data.integers.int.precision = 32 end)
+            reject(function(data) data.integers["unsigned int"] = nil end)
+            reject(function(data) data.floats.double = nil end)
+            reject(function(data) data.floats.double.bits = 0 end)
+            reject(function(data) data.floats.double.maximum_exponent = 0 end)
+        end)
+
+        it("isolates exported data and reconstructed numeric graphs", function()
+            local original = assert(build_lp64())
+            local data = assert(csemantics.export_profile(original))
+            local first = assert(csemantics.import_profile(data))
+            local second = assert(csemantics.import_profile(data))
+            original.integers.int.maximum = "0"
+            original.integers.int.type._c_numeric.bits = 8
+            data.integers.int.maximum = "1"
+            first.integers.int.type.bits = 16
+            first.integers.int.type._c_numeric_carriers.lua_integer.bits = 16
+
+            assert.equal("2147483647", second.integers.int.maximum)
+            assert.equal(32, second.integers.int.type.bits)
+            assert.equal(32, second.integers.int.type._c_numeric.bits)
+            assert.equal(64, second.integers.int.type
+                ._c_numeric_carriers.lua_integer.bits)
+            assert.not_equal(first.integers.int.type._c_numeric_carriers,
+                second.integers.int.type._c_numeric_carriers)
+        end)
+    end)
+
     describe("target profiles and categories", function()
         it("validates an injected LP64 profile without host queries", function()
             assert.is_true(csemantics.validate_profile(lp64_profile()))

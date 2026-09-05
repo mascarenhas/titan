@@ -565,12 +565,11 @@ function checker.register_module_interface(
     -- failure and must not make a later edge in the same recovery graph reuse
     -- the unnormalized candidate as though registration had succeeded.
     if active_check_state and types.contains_c_numeric_type(type_or_error) then
-        local service, profile_error =
-            ensure_probe_service(active_check_state)
-        if not service then return nil, profile_error end
+        local profile, profile_error = ensure_c_profile(active_check_state)
+        if not profile then return nil, profile_error end
         local normalized, normalization_error =
             types.normalize_portable_c_numeric_types(
-                type_or_error, active_check_state.c_profile)
+                type_or_error, profile)
         if not normalized then return nil, normalization_error end
     end
 

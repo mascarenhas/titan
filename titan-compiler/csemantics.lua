@@ -528,6 +528,56 @@ local function make_profile_integer(
     }
 end
 
+local function attach_profile_traits(profile)
+    -- Keep the authoritative target traits on the canonical scalar descriptor
+    -- objects handed to the foreign-type converter. These fields are
+    -- deliberately outside typedecl's structural schema: they are
+    -- checker-local lowering metadata, not part of a published Titan type.
+    local integer_traits = {}
+    for spelling, entry in pairs(profile.integers) do
+        integer_traits[spelling] = {
+            kind = "integer",
+            spelling = spelling,
+            signed = entry.type.signed,
+            rank = entry.type.rank,
+            bits = entry.type.bits,
+            precision = entry.precision,
+            minimum = entry.minimum,
+            maximum = entry.maximum,
+            unsigned = entry.unsigned,
+        }
+    end
+    local float_traits = {}
+    for spelling, entry in pairs(profile.floats) do
+        float_traits[spelling] = {
+            kind = "float",
+            spelling = spelling,
+            rank = entry.rank,
+            bits = entry.bits,
+            maximum_exponent = entry.maximum_exponent,
+            maximum_macro = entry.maximum_macro,
+            radix = entry.radix,
+            mantissa_digits = entry.mantissa_digits,
+        }
+    end
+    local carrier_traits = {
+        identity = profile.identity,
+        lua_integer = assert(integer_traits[profile.lua_integer]),
+        lua_number = assert(float_traits[profile.lua_number]),
+        size_t = assert(integer_traits[profile.size_t]),
+        ptrdiff_t = assert(integer_traits[profile.ptrdiff_t]),
+        long_double = assert(float_traits["long double"]),
+    }
+    for spelling, entry in pairs(profile.integers) do
+        entry.type._c_numeric = integer_traits[spelling]
+        entry.type._c_numeric_carriers = carrier_traits
+    end
+    for spelling, entry in pairs(profile.floats) do
+        entry.type._c_numeric = float_traits[spelling]
+        entry.type._c_numeric_carriers = carrier_traits
+    end
+end
+
 -- Build a canonical target profile from injected compiler traits. This is a
 -- pure constructor: callers own acquisition of the macro table and luaconf.h
 -- spellings.
@@ -829,53 +879,7 @@ function csemantics.build_profile(macros, lua_integer, lua_number)
 
     profile.identity = assert(csemantics.profile_identity(profile))
 
-    -- Keep the authoritative target traits on the canonical scalar descriptor
-    -- objects handed to the foreign-type converter. These fields are
-    -- deliberately outside typedecl's structural schema: they are
-    -- checker-local lowering metadata, not part of a published Titan type.
-    local integer_traits = {}
-    for spelling, entry in pairs(profile.integers) do
-        integer_traits[spelling] = {
-            kind = "integer",
-            spelling = spelling,
-            signed = entry.type.signed,
-            rank = entry.type.rank,
-            bits = entry.type.bits,
-            precision = entry.precision,
-            minimum = entry.minimum,
-            maximum = entry.maximum,
-            unsigned = entry.unsigned,
-        }
-    end
-    local float_traits = {}
-    for spelling, entry in pairs(profile.floats) do
-        float_traits[spelling] = {
-            kind = "float",
-            spelling = spelling,
-            rank = entry.rank,
-            bits = entry.bits,
-            maximum_exponent = entry.maximum_exponent,
-            maximum_macro = entry.maximum_macro,
-            radix = entry.radix,
-            mantissa_digits = entry.mantissa_digits,
-        }
-    end
-    local carrier_traits = {
-        identity = profile.identity,
-        lua_integer = assert(integer_traits[profile.lua_integer]),
-        lua_number = assert(float_traits[profile.lua_number]),
-        size_t = assert(integer_traits[profile.size_t]),
-        ptrdiff_t = assert(integer_traits[profile.ptrdiff_t]),
-        long_double = assert(float_traits["long double"]),
-    }
-    for spelling, entry in pairs(profile.integers) do
-        entry.type._c_numeric = integer_traits[spelling]
-        entry.type._c_numeric_carriers = carrier_traits
-    end
-    for spelling, entry in pairs(profile.floats) do
-        entry.type._c_numeric = float_traits[spelling]
-        entry.type._c_numeric_carriers = carrier_traits
-    end
+    attach_profile_traits(profile)
     return profile
 end
 
@@ -1134,6 +1138,225 @@ function csemantics.profile_identity(profile)
         }, ":")
     end
     return table.concat(identity, "|")
+end
+
+-- A semantic host may ship its build target alongside analysis-only module
+-- metadata. Keep this wire format declarative: no Type objects, lowering
+-- annotations, compiler commands, header paths, or executable Lua are admitted.
+local profile_data_fields = {
+    version = true, identity = true, char_bit = true, char_signed = true,
+    int = true, unsigned_int = true, lua_integer = true, lua_number = true,
+    size_t = true, ptrdiff_t = true, integers = true, floats = true,
+}
+local integer_data_fields = {
+    signed = true, rank = true, bits = true, precision = true,
+    minimum = true, maximum = true, unsigned = true,
+}
+local float_data_fields = {
+    rank = true, bits = true, maximum_exponent = true, maximum_macro = true,
+    radix = true, mantissa_digits = true,
+}
+local profile_integer_specs = {
+    ["_Bool"] = { false, 0 },
+    char = { false, 1 }, -- signedness is selected by char_signed
+    ["signed char"] = { true, 1, "unsigned char" },
+    ["unsigned char"] = { false, 1 },
+    short = { true, 2, "unsigned short" },
+    ["unsigned short"] = { false, 2 },
+    int = { true, 3, "unsigned int" },
+    ["unsigned int"] = { false, 3 },
+    long = { true, 4, "unsigned long" },
+    ["unsigned long"] = { false, 4 },
+    ["long long"] = { true, 5, "unsigned long long" },
+    ["unsigned long long"] = { false, 5 },
+    ["__int128"] = { true, 6, "unsigned __int128" },
+    ["unsigned __int128"] = { false, 6 },
+}
+local profile_float_specs = {
+    float = { 1, "FLT_MAX" },
+    double = { 2, "DBL_MAX" },
+    ["long double"] = { 3, "LDBL_MAX" },
+}
+
+local function closed_profile_table(value, fields, label)
+    if type(value) ~= "table" or getmetatable(value) ~= nil then
+        return nil, label .. " must be a plain table"
+    end
+    for key in pairs(value) do
+        if not fields[key] then
+            return nil, label .. " contains unexpected field " .. tostring(key)
+        end
+    end
+    return true
+end
+
+local function bounded_profile_integer(value, lower, upper)
+    return type(value) == "number" and value >= lower and value <= upper
+        and value % 1 == 0
+end
+
+local function canonical_profile_bound(value)
+    if type(value) ~= "string" then return false end
+    local sign, magnitude = normalized_bound(value)
+    return sign ~= nil and decimal_from_parts(sign, magnitude) == value
+end
+
+function csemantics.export_profile(profile)
+    local identity, err = csemantics.profile_identity(profile)
+    if not identity then return nil, err end
+    local data = {
+        version = 1, identity = identity,
+        char_bit = profile.char_bit, char_signed = profile.char_signed,
+        int = profile.int, unsigned_int = profile.unsigned_int,
+        lua_integer = profile.lua_integer, lua_number = profile.lua_number,
+        size_t = profile.size_t, ptrdiff_t = profile.ptrdiff_t,
+        integers = {}, floats = {},
+    }
+    for spelling, entry in pairs(profile.integers) do
+        local min_sign, min_magnitude = normalized_bound(entry.minimum)
+        local max_sign, max_magnitude = normalized_bound(entry.maximum)
+        data.integers[spelling] = {
+            signed = entry.type.signed, rank = entry.type.rank,
+            bits = entry.type.bits, precision = entry.precision,
+            minimum = decimal_from_parts(min_sign, min_magnitude),
+            maximum = decimal_from_parts(max_sign, max_magnitude),
+            unsigned = entry.unsigned,
+        }
+    end
+    for spelling, entry in pairs(profile.floats) do
+        local item = {}
+        for field in pairs(float_data_fields) do item[field] = entry[field] end
+        data.floats[spelling] = item
+    end
+    -- Export accepts only the same complete canonical target that import can
+    -- reconstruct. Existing partial synthetic profiles remain useful to the
+    -- numeric helper tests but are not an authoritative host manifest.
+    local imported
+    imported, err = csemantics.import_profile(data)
+    if not imported then return nil, err end
+    return data
+end
+
+function csemantics.import_profile(data)
+    local ok, err = closed_profile_table(
+        data, profile_data_fields, "target profile data")
+    if not ok then return nil, err end
+    if data.version ~= 1 then
+        return nil, "unsupported target profile data version"
+    elseif type(data.identity) ~= "string" or data.identity == "" then
+        return nil, "target profile data identity must be a nonempty string"
+    elseif not bounded_profile_integer(data.char_bit, 1, 1024)
+       or type(data.char_signed) ~= "boolean"
+       or data.int ~= "int" or data.unsigned_int ~= "unsigned int" then
+        return nil, "target profile data has invalid C scalar parameters"
+    end
+    for _, field in ipairs({
+        "lua_integer", "lua_number", "size_t", "ptrdiff_t",
+    }) do
+        if type(data[field]) ~= "string" then
+            return nil, "target profile data must name " .. field
+        end
+    end
+    ok, err = closed_profile_table(
+        data.integers, profile_integer_specs, "target profile integer table")
+    if not ok then return nil, err end
+    ok, err = closed_profile_table(
+        data.floats, profile_float_specs, "target profile floating table")
+    if not ok then return nil, err end
+
+    local profile = {
+        char_bit = data.char_bit, char_signed = data.char_signed,
+        int = data.int, unsigned_int = data.unsigned_int,
+        lua_integer = data.lua_integer, lua_number = data.lua_number,
+        size_t = data.size_t, ptrdiff_t = data.ptrdiff_t,
+        integers = {}, floats = {},
+    }
+    for spelling, spec in pairs(profile_integer_specs) do
+        local item = data.integers[spelling]
+        local optional = spec[2] == 6
+        if item ~= nil or not optional then
+            local label = "target profile integer '" .. spelling .. "'"
+            ok, err = closed_profile_table(item, integer_data_fields, label)
+            if not ok then return nil, err end
+            local signed = spelling == "char" and data.char_signed or spec[1]
+            local unsigned = spec[3]
+            if spelling == "char" and signed then unsigned = "unsigned char" end
+            if item.signed ~= signed or item.rank ~= spec[2]
+               or item.unsigned ~= unsigned
+               or not bounded_profile_integer(item.bits, 1, data.char_bit * 1024)
+               or item.bits % data.char_bit ~= 0
+               or not bounded_profile_integer(item.precision, 1, item.bits)
+               or not canonical_profile_bound(item.minimum)
+               or not canonical_profile_bound(item.maximum) then
+                return nil, label .. " has invalid canonical fields"
+            end
+            if not signed and (item.minimum ~= "0"
+               or item.maximum ~= subtract_magnitudes(
+                    power_of_two(item.precision), "1")) then
+                return nil, label .. " has an invalid unsigned range"
+            end
+            if spelling == "_Bool" and item.precision ~= 1 then
+                return nil, label .. " must have exactly one value bit"
+            end
+            profile.integers[spelling] = make_profile_integer(
+                spelling, signed, item.rank, item.bits, item.precision,
+                item.minimum, item.maximum, unsigned)
+        end
+    end
+    local wide = profile.integers["__int128"]
+    local unsigned_wide = profile.integers["unsigned __int128"]
+    if (wide == nil) ~= (unsigned_wide == nil) then
+        return nil, "target profile must contain both __int128 scalar entries"
+    end
+    for spelling, entry in pairs(profile.integers) do
+        if entry.unsigned then
+            local unsigned = profile.integers[entry.unsigned]
+            if unsigned.type.bits ~= entry.type.bits
+               or unsigned.precision ~= entry.precision + 1 then
+                return nil, "target profile integer pair disagrees for '" ..
+                    spelling .. "'"
+            end
+        end
+    end
+    local character = profile.integers.char
+    local character_base = profile.integers[
+        data.char_signed and "signed char" or "unsigned char"]
+    if character.type.bits ~= data.char_bit
+       or character.type.bits ~= character_base.type.bits
+       or character.precision ~= character_base.precision
+       or character.minimum ~= character_base.minimum
+       or character.maximum ~= character_base.maximum then
+        return nil, "target profile char entry disagrees with its representation"
+    end
+    for spelling, spec in pairs(profile_float_specs) do
+        local item = data.floats[spelling]
+        local label = "target profile floating type '" .. spelling .. "'"
+        ok, err = closed_profile_table(item, float_data_fields, label)
+        if not ok then return nil, err end
+        if item.rank ~= spec[1] or item.maximum_macro ~= spec[2]
+           or not bounded_profile_integer(item.bits, 1, data.char_bit * 1024)
+           or item.bits % data.char_bit ~= 0 then
+            return nil, label .. " has invalid canonical fields"
+        end
+        for _, field in ipairs({ "maximum_exponent", "mantissa_digits", "radix" }) do
+            if item[field] ~= nil and not bounded_profile_integer(
+                    item[field], field == "radix" and 2 or 1, 1000000000) then
+                return nil, label .. " has invalid " .. field
+            end
+        end
+        local entry = { type = types.CFloat(spelling) }
+        for field in pairs(float_data_fields) do entry[field] = item[field] end
+        profile.floats[spelling] = entry
+    end
+    local identity
+    identity, err = csemantics.profile_identity(profile)
+    if not identity then return nil, err end
+    if identity ~= data.identity then
+        return nil, "target profile data identity disagrees with its canonical fields"
+    end
+    profile.identity = identity
+    attach_profile_traits(profile)
+    return profile
 end
 
 -- Resolve a source type to the category and canonical target type used by C

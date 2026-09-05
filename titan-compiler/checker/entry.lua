@@ -32,6 +32,7 @@ function checker.check(modname, ast, subject, filename, loader, options)
     st.probe_header_inputs = {}
     st.probe_header_input_identities = {}
     st.pending_foreign_redeclarations = {}
+    st.target_profile_provider = options.target_profile_provider
     st.probe_service_provider = options.probe_service_provider
     if filename then
         st.source_dir = filename:match("^(.*)/[^/]*$")

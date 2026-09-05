@@ -263,6 +263,27 @@ analysis-only: `provider_file` is trusted provenance which the driver does not
 stat, open, or otherwise inspect; the executable never becomes a native link
 input.
 
+Version 5 adds an optional `target_profile` to that analysis-only provider.
+It is declarative numeric metadata exported by `csemantics.export_profile`
+from the exact build SDK/toolchain. `csemantics.import_profile` validates the
+closed versioned schema and identity, reconstructs canonical scalar descriptors
+and their lowering traits, and rejects embedded interfaces whose numeric
+metadata disagrees before publishing the provider snapshot. Every context gets
+its own profile and descriptor graph; caller mutation cannot change an accepted
+snapshot. Source-overlap rejection discards the complete provider, including
+its profile, so a source-selected project keeps ordinary target selection. If
+the build profile was consumed before a late overlap, the resolver verifies
+the live target agrees before checking can continue; it rejects an unavailable
+or different target instead of retaining mixed numeric conversion traits.
+
+`driver.get_target_profile(context)` uses this trusted build target for pure
+semantic decisions without opening SDK headers or invoking a C compiler.
+The checker's `target_profile_provider` is separate from its native
+`probe_service_provider`: native header processing and compile probes still use
+`driver.get_probe_service(context)`, which acquires the live toolchain profile
+and requires it to agree with the declared target. Missing native prerequisites
+remain errors. Omitting the profile preserves ordinary driver/checker behavior.
+
 ### `driver.new_resolver_context(options)`
 
 Every resolver context owns exactly one validated compiler-I/O strategy in
@@ -274,7 +295,8 @@ Omitting it constructs the canonical synchronous Lua implementation from
 Missing or non-callable methods are rejected while the context is created.
 
 `options.embedded_interface_provider`, when present, has the closed schema
-`{ provider_file = <absolute path>, entries = { [module] = { abi, types } } }`.
+`{ provider_file = <absolute path>, entries = { [module] = { abi, types } },
+target_profile = <optional exported profile data> }`.
 The provider and every entry must be plain tables with no extra fields; logical
 names, ABI strings, serialized `Type.Module` graphs, and native symbol-prefix
 uniqueness are validated eagerly. The driver copies the inventory and retains
@@ -449,8 +471,9 @@ The analysis-facing options are narrow and caller-owned:
   without making any module dirty or retaining its AST. One overlap rejects the
   complete embedded inventory for that resolver context.
 * `embedded_interface_provider` is accepted by `new_resolver_context`, not as
-  mutable loader state. It is an API-4 semantic-client input with the closed
-  schema above; after its first successful validation, the host must treat that
+  mutable loader state. It is an API-5 semantic-client input with the closed
+  schema and optional build target profile above; after its first successful
+  validation, the host must treat that
   raw table identity as immutable. Ordinary compiler callers omit it.
 * `cached_source_entries` contains caller-certified clean, complete `source`
   entries with an annotated AST, `Type.Module`, filenames, a direct dependency
@@ -1515,13 +1538,13 @@ the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 | `driver.INSTALL_PATHS` | `driver.installed_paths` | paths below `driver.TITAN_ROOT` | Holds `lua_source`, `include`, `lib`, `libtitan`, `libbacktrace`, `liblua`, `titan_bin`, and `lua_cpath`; bundled `libuv.a` is deliberately not an installed SDK path. |
 | `driver.TITAN_BIN_PATH` | `driver.lua` | `TITAN_PATH_0_6`, `TITAN_PATH`, or `.;<root>/lib/titan/0.6` in installed mode | Roots for root-major, shallow-to-exact compiled-provider search; checkout mode retains the legacy `/usr/local` fallback. |
 | `driver.TITAN_SOURCE_PATH` | `driver.lua` | `"."` (overridden by `titanc --tree`) | Semicolon-separated roots searched for folder `P/B.titan` before flat `P.titan`, including contributor privacy checks. |
-| `driver.LANGUAGE_SERVER_API_VERSION` | `driver.lua` | `4` | Exact compiler/semantic-client handshake, independent from generated-code ABI; covers private source metadata, exact C-header dependency metadata/restatting, context-owned I/O/checkpoints, and the analysis-only embedded-interface provider below. |
+| `driver.LANGUAGE_SERVER_API_VERSION` | `driver.lua` | `5` | Exact compiler/semantic-client handshake, independent from generated-code ABI; covers private source metadata, exact C-header dependency metadata/restatting, context-owned I/O/checkpoints, and the analysis-only embedded-interface provider below. |
 | `TITAN_NO_LINE_DIRECTIVES` / `driver.EMIT_LINE_DIRECTIVES` | environment / `driver.lua` | unset / true | Exact environment value `1`, or `titanc --no-line-directives`, disables generated Titan `#line` directives for physical generated-C diagnostics; this can omit ordinary native Titan frames from logical tracebacks. |
 | `options.source_roots` | `titanc` / `driver.defaultloader` | every CLI module name | Requires explicit build roots to come from flat/folder source; other ordinary edges retain the resolver context's binary-first or test-mode source-first policy, while `.titan` edges remain source-required. Selected source descriptors also provide `program_output`. |
 | `options.known_source_modules` | semantic clients / `driver.defaultloader` | `{}` | Validated module-name set used for resolver-wide source identity and source/provider overlap planning without marking modules dirty. |
 | `options.cached_source_entries` | semantic clients / `driver.defaultloader` | `{}` | Caller-certified complete raw source entries, including exact C-header inputs, eligible for clean project-AST reuse; resolver-owned source foreign headers are regenerated. |
 | `options.cached_interfaces` | semantic clients / `driver.defaultloader` | `{}` | Serialized clean source interfaces plus exact source and C-header provenance; used without AST for ordinary imports and as transient reparse input for explicit `.titan` edges. |
-| `options.embedded_interface_provider` | semantic clients / `driver.new_resolver_context` | `nil` | API-4 closed `{ provider_file, entries }` ABI/type inventory copied from a trusted host; it precedes disk compiled lookup but never becomes a static dependency or link input. |
+| `options.embedded_interface_provider` | semantic clients / `driver.new_resolver_context` | `nil` | API-5 closed `{ provider_file, entries, target_profile? }` ABI/type inventory with an optional declarative build target profile, copied from a trusted host; it precedes disk compiled lookup but never becomes a static dependency or link input. |
 | `options.io` / `context.io` | semantic clients / `driver.new_resolver_context` | `compiler_io.new_sync()` | Validated context-owned filesystem, process, and cooperative-yield strategy. The omitted default preserves synchronous compiler and `titanc` behavior. |
 | `options.source_process_trace` | semantic clients / `driver.new_resolver_context` | `nil` | Best-effort scalar `(module_name, filename, outcome, self_cpu_ms, total_cpu_ms, parse_cpu_ms, check_cpu_ms)` observer for exclusive source-module process CPU. Parse time sums folder constituents; check and self time exclude nested source work, post-child checkpoints, complete C-header processing, and downstream FFI conversion. Cached rehydration reports zero parse/check CPU; five-argument Lua callbacks remain valid. |
 | `context.checked_source_modules` | `driver.defaultloader` | `{}` | Ordered dense list of source modules checked during this resolver run. A module is appended after its complete result is published and before `context.io:yield()`; retained cached modules are excluded. |

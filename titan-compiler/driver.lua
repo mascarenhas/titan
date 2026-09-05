@@ -36,8 +36,10 @@ driver.LUA_VERSION = version.LUA_VERSION
 -- analysis I/O and cooperative checkpoints through one resolver strategy and
 -- publishes an opaque source-visible manifest for every clean source entry.
 -- API 4 additionally accepts one validated, analysis-only embedded interface
--- provider whose entries never become native link inputs.
-driver.LANGUAGE_SERVER_API_VERSION = 4
+-- provider whose entries never become native link inputs. API 5 admits its
+-- verified build-target numeric profile for SDK-free semantic analysis while
+-- retaining live native-toolchain checks for actual C probes.
+driver.LANGUAGE_SERVER_API_VERSION = 5
 
 local LUA_CPATH_SUFFIX = "/lib/lua/" .. driver.LUA_VERSION .. "/?.so"
 
@@ -524,6 +526,8 @@ function driver.configure_foreign_c(context)
         toolchain.profile = driver.TARGET_PROFILE
         toolchain.profile_identity = driver.TARGET_PROFILE.identity
     end
+    context.foreign_c_profile_error = driver.TOOLCHAIN_ERROR or platform_err
+        or toolchain_err or profile_error
     driver.FOREIGN_C_CONFIGURATION_ID =
         driver.FOREIGN_C_CONFIGURATION_ID + 1
     context.foreign_c_configuration_id =
@@ -566,6 +570,9 @@ local function copy_embedded_interface_provider_snapshot(snapshot)
         analysis_only = true,
     }
     local memo = {}
+    if snapshot.target_profile then
+        provider.target_profile = types.clone_graph(snapshot.target_profile, memo)
+    end
     for index, name in ipairs(snapshot.key_order) do
         local entry = snapshot.entries[name]
         provider.key_order[index] = name
@@ -601,6 +608,7 @@ local function validate_embedded_interface_provider(candidate)
     local unexpected = unexpected_closed_field(candidate, {
         provider_file = true,
         entries = true,
+        target_profile = true,
     })
     if unexpected then
         return nil, "contains unexpected field " .. unexpected
@@ -624,6 +632,14 @@ local function validate_embedded_interface_provider(candidate)
         key_order = {},
         analysis_only = true,
     }
+    local profile_data = rawget(candidate, "target_profile")
+    if profile_data ~= nil then
+        local profile, profile_error = csemantics.import_profile(profile_data)
+        if not profile then
+            return nil, "target_profile is invalid: " .. tostring(profile_error)
+        end
+        provider.target_profile = profile
+    end
     local symbol_owners = {}
     for name, candidate_entry in pairs(candidate_entries) do
         if not staticmetadata.valid_module_name(name) then
@@ -671,6 +687,15 @@ local function validate_embedded_interface_provider(candidate)
         if not modtype then
             return nil, "entry for module '" .. name ..
                 "' has invalid types: " .. tostring(decode_error)
+        end
+        if provider.target_profile then
+            local normalized, profile_error =
+                types.normalize_portable_c_numeric_types(
+                    modtype, provider.target_profile)
+            if not normalized then
+                return nil, "entry for module '" .. name ..
+                    "' disagrees with target_profile: " .. tostring(profile_error)
+            end
         end
         provider.entries[name] = {
             abi = abi,
@@ -1045,6 +1070,29 @@ function driver.toolchain_descriptor(context)
     }
 end
 
+local function available_embedded_interface_provider(context)
+    local provider = context.embedded_interface_provider
+    if not provider or context.embedded_interface_provider_rejected then
+        return nil
+    end
+    for _, name in ipairs(provider.key_order) do
+        local imported = driver.imported[name]
+        local cached_source = imported and imported ~= CIRCULAR_MARK and
+            (imported.ast or imported.kind == "source")
+        if context.source_modules[name] or cached_source then
+            -- One source identity rejects the complete physical inventory. This
+            -- mirrors archive overlap rather than mixing independently selected
+            -- entries from one embedded executable with project source. A
+            -- process-global source cache is still selected source provenance,
+            -- even when this context did not rediscover its project catalog.
+            context.embedded_interface_provider_rejected = true
+            context.embedded_interface_provider_overlap = name
+            return nil
+        end
+    end
+    return provider
+end
+
 function driver.get_probe_service(context)
     if context.foreign_c_configuration_id ~=
        driver.FOREIGN_C_CONFIGURATION_ID then
@@ -1075,6 +1123,27 @@ function driver.get_probe_service(context)
     if not toolchain then
         context.probe_service_error = err
         return nil, err
+    end
+    local provider = available_embedded_interface_provider(context)
+    local declared_profile = provider and provider.target_profile
+    local declared_identity = declared_profile and declared_profile.identity
+        or context.used_embedded_target_profile_identity
+    if declared_identity then
+        -- A build profile is authority for this analysis target, never a
+        -- substitute for the native compiler/header environment of a probe.
+        -- Do not let missing SDK inputs or a different live target borrow the
+        -- embedded profile and manufacture a successful native service.
+        local live_identity, profile_error =
+            csemantics.profile_identity(toolchain.profile)
+        if not live_identity then
+            context.probe_service_error = context.foreign_c_profile_error
+                or profile_error or "native target profile is unavailable"
+            return nil, context.probe_service_error
+        elseif live_identity ~= declared_identity then
+            context.probe_service_error =
+                "native C target profile disagrees with embedded target_profile"
+            return nil, context.probe_service_error
+        end
     end
     -- Project include roots belong to one resolver/analysis. Extend the fresh
     -- descriptor rather than reconfiguring the process-global checker and
@@ -1125,6 +1194,33 @@ function driver.get_probe_service(context)
     end
     context.probe_service = service
     return service
+end
+
+-- Pure numeric type decisions may use the trusted semantic host's target
+-- without touching a C compiler or SDK. Each checker clones this profile;
+-- every native probe still crosses get_probe_service's live-target boundary.
+function driver.get_target_profile(context)
+    local provider = available_embedded_interface_provider(context)
+    if provider and provider.target_profile then
+        context.used_embedded_target_profile_identity =
+            provider.target_profile.identity
+        return provider.target_profile
+    end
+    local service, err = driver.get_probe_service(context)
+    if not service then return nil, err end
+    if type(service.profile) ~= "table" then
+        return nil, "the C probe service has no authoritative target profile"
+    end
+    local previous_identity = context.used_embedded_target_profile_identity
+    if previous_identity then
+        local identity, profile_error = csemantics.profile_identity(service.profile)
+        if not identity then return nil, profile_error end
+        if identity ~= previous_identity then
+            return nil, "source overlap changed the semantic C target profile"
+        end
+        context.used_embedded_target_profile_identity = nil
+    end
+    return service.profile
 end
 
 function driver.close_resolver_context(context)
@@ -3150,29 +3246,6 @@ function driver.find_static_interface(paths, modname, context)
     return nil
 end
 
-local function available_embedded_interface_provider(context)
-    local provider = context.embedded_interface_provider
-    if not provider or context.embedded_interface_provider_rejected then
-        return nil
-    end
-    for _, name in ipairs(provider.key_order) do
-        local imported = driver.imported[name]
-        local cached_source = imported and imported ~= CIRCULAR_MARK and
-            (imported.ast or imported.kind == "source")
-        if context.source_modules[name] or cached_source then
-            -- One source identity rejects the complete physical inventory. This
-            -- mirrors archive overlap rather than mixing independently selected
-            -- entries from one embedded executable with project source. A
-            -- process-global source cache is still selected source provenance,
-            -- even when this context did not rediscover its project catalog.
-            context.embedded_interface_provider_rejected = true
-            context.embedded_interface_provider_overlap = name
-            return nil
-        end
-    end
-    return provider
-end
-
 -- `driver.imported` intentionally remains a process-global compiler cache,
 -- but an embedded interface inventory belongs to exactly one resolver
 -- context. Reconcile only the entries whose meaning depends on that context:
@@ -3273,6 +3346,9 @@ end
 local function check_source_module(
         context, modname, ast, input, filename, loader)
     local check_options = {
+        target_profile_provider = function()
+            return driver.get_target_profile(context)
+        end,
         probe_service_provider = function()
             return driver.get_probe_service(context)
         end,
@@ -3667,6 +3743,19 @@ function driver.defaultloader(static_deps, options)
         if not provider or not provider.entries[source_name] then return true end
         context.embedded_interface_provider_rejected = true
         context.embedded_interface_provider_overlap = source_name
+
+        -- Numeric conversions may already hold traits from this inventory's
+        -- build target. Before any source replacement or later implicit
+        -- conversion can continue, require the ordinary live target to agree.
+        -- An upfront source catalog never consumes the rejected build profile
+        -- and therefore retains unrestricted ordinary target selection.
+        if context.used_embedded_target_profile_identity then
+            local profile, profile_error = driver.get_target_profile(context)
+            if not profile then
+                return nil, "cannot continue analysis after embedded provider " ..
+                    "source overlap: " .. tostring(profile_error)
+            end
+        end
 
         local selected_names = {}
         for name, mod in pairs(driver.imported) do

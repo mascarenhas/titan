@@ -5,6 +5,7 @@ local driver = require "titan-compiler.driver"
 local compiler_io = require "titan-compiler.io"
 local cdriver = require "c-parser.cdriver"
 local cprobe = require "titan-compiler.cprobe"
+local csemantics = require "titan-compiler.csemantics"
 local coder = require "titan-compiler.coder"
 local sourceinterface = require "titan-compiler.sourceinterface"
 local staticmetadata = require "titan-compiler.staticmetadata"
@@ -39,7 +40,7 @@ describe("compiler installation discovery", function()
         assert.equal("0.6.0", driver.TITAN_VERSION)
         assert.equal("0.6", driver.TITAN_LIBRARY_VERSION)
         assert.equal("_0_6", driver.TITAN_LIBRARY_VERSION_SUFFIX)
-        assert.equal(4, driver.LANGUAGE_SERVER_API_VERSION)
+        assert.equal(5, driver.LANGUAGE_SERVER_API_VERSION)
         assert.is_function(driver.serialize_source_interface)
         assert.is_function(driver.restat_c_header_dependencies)
     end)
@@ -1882,11 +1883,15 @@ describe("compiler module loader", function()
         end
     end
 
-    local function embedded_provider(filename, module_types)
+    local function embedded_provider(filename, module_types, profile)
         local provider = {
             provider_file = filename,
             entries = {},
         }
+        if profile then
+            provider.target_profile =
+                assert(csemantics.export_profile(profile))
+        end
         for name, modtype in pairs(module_types) do
             provider.entries[name] = {
                 abi = driver.TITAN_ABI_VERSION,
@@ -1894,6 +1899,29 @@ describe("compiler module loader", function()
             }
         end
         return provider
+    end
+
+    local function native_target_profile()
+        local context = driver.new_resolver_context()
+        local profile, err = driver.get_target_profile(context)
+        assert.is_true(driver.close_resolver_context(context))
+        return assert(profile, err)
+    end
+
+    local function numeric_embedded_module(name, profile)
+        local lua_state = types.CPointer(types.CStruct(
+            "lua_State", "lua_State", false, {}, false, false), {})
+        local callback = types.CPointer(types.CFunction(
+            { lua_state }, profile.integers.int.type, false, false), {})
+        local function member(member_name, result)
+            return types.ModuleMember(name, member_name,
+                types.Function({}, { result }, false, false, false), {})
+        end
+        return types.Module(name, {
+            member("callback", callback),
+            member("answer", profile.integers.int.type),
+            member("measure", profile.floats.double.type),
+        })
     end
 
     local function result_module(name, result_type)
@@ -2140,6 +2168,328 @@ describe("compiler module loader", function()
         assert.same({ "embedded_valid" }, copied.key_order)
         assert.equal("embedded_valid", copied.entries.embedded_valid.type.name)
         assert.is_true(copied.analysis_only)
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
+    it("rejects embedded numeric metadata before publishing its profile",
+    function()
+        local name = "embedded.numeric_mismatch"
+        local profile = native_target_profile()
+        local wrong = types.clone_graph(profile.integers.int.type)
+        wrong.bits = wrong.bits * 2
+        local candidate = embedded_provider(root .. "/language-server", {
+            [name] = result_module(name, wrong),
+        }, profile)
+        local ok, err = pcall(driver.new_resolver_context, {
+            embedded_interface_provider = candidate,
+        })
+        assert.is_false(ok)
+        assert.matches("disagrees with the selected target profile", err,
+            1, true)
+        assert.is_nil(driver.imported[name])
+        assert.same({}, types.registry)
+
+        -- A failed validation must not install a memoized success snapshot.
+        candidate.entries[name].types = types.serialize(
+            result_module(name, profile.integers.int.type))
+        local context = driver.new_resolver_context({
+            embedded_interface_provider = candidate,
+        })
+        assert.equal(profile.identity,
+            assert(driver.get_target_profile(context)).identity)
+        assert.is_true(driver.close_resolver_context(context))
+
+        local malformed = embedded_provider(root .. "/language-server", {
+            [name] = result_module(name, profile.integers.int.type),
+        }, profile)
+        malformed.target_profile.identity = "unrelated profile"
+        ok, err = pcall(driver.new_resolver_context, {
+            embedded_interface_provider = malformed,
+        })
+        assert.is_false(ok)
+        assert.matches("target_profile", err, 1, true)
+        assert.is_nil(driver.imported[name])
+        assert.same({}, types.registry)
+    end)
+
+    it("isolates embedded numeric profiles across cached provider snapshots",
+    function()
+        local name = "embedded.numeric_snapshot"
+        local profile = native_target_profile()
+        local candidate = embedded_provider(root .. "/language-server", {
+            [name] = numeric_embedded_module(name, profile),
+        }, profile)
+        local first = driver.new_resolver_context({
+            embedded_interface_provider = candidate,
+        })
+        local first_profile = assert(driver.get_target_profile(first))
+        local first_type = first.embedded_interface_provider.entries[name].type
+        local first_numeric = first_type.members[2].type.rettypes[1]
+        assert.equal(profile.identity,
+            first_numeric._c_numeric_carriers.identity)
+
+        candidate.target_profile.identity = "caller mutation"
+        candidate.target_profile.integers.int.bits = 8
+        first_profile.integers.int.type.bits = 16
+        first_numeric._c_numeric.bits = 16
+        first_numeric._c_numeric_carriers.lua_integer.bits = 16
+
+        local second = driver.new_resolver_context({
+            embedded_interface_provider = candidate,
+        })
+        local second_profile = assert(driver.get_target_profile(second))
+        local second_type = second.embedded_interface_provider.entries[name].type
+        local second_numeric = second_type.members[2].type.rettypes[1]
+        assert.equal(profile.identity, second_profile.identity)
+        assert.equal(profile.integers.int.type.bits,
+            second_profile.integers.int.type.bits)
+        assert.equal(profile.integers.int.type.bits, second_numeric.bits)
+        assert.equal(profile.integers.int.type._c_numeric.bits,
+            second_numeric._c_numeric.bits)
+        assert.equal(profile.integers[profile.lua_integer].type.bits,
+            second_numeric._c_numeric_carriers.lua_integer.bits)
+        assert.not_equal(first_profile, second_profile)
+        assert.not_equal(first_numeric, second_numeric)
+        assert.not_equal(first_numeric._c_numeric_carriers,
+            second_numeric._c_numeric_carriers)
+        assert.is_true(driver.close_resolver_context(first))
+        assert.is_true(driver.close_resolver_context(second))
+    end)
+
+    it("checks embedded numeric calls without SDK headers or native commands",
+    function()
+        local name = "embedded.numeric"
+        local consumer = "embedded_numeric_consumer"
+        local profile = native_target_profile()
+        local strategy = compiler_io.new_sync()
+        local read_file = strategy.read_file
+        local native_commands = 0
+        local header_reads = 0
+        function strategy:run()
+            native_commands = native_commands + 1
+            return {
+                started = false,
+                ok = false,
+                diagnostic = "native toolchain is unavailable in this embedding",
+            }
+        end
+        function strategy:read_file(path)
+            if path:match("%.h$") then
+                header_reads = header_reads + 1
+                return nil, "SDK headers are unavailable in this embedding"
+            end
+            return read_file(self, path)
+        end
+        write_file(source .. "/" .. consumer .. ".titan", [[
+            local provider = import "embedded.numeric"
+            function answer(): integer
+                local callback = provider.callback()
+                local integral: integer = callback(L)
+                local floating: float = provider.measure()
+                local boxed: value = provider.answer()
+                return integral + int.sizeof + int.alignof
+            end
+        ]])
+        local context = driver.new_resolver_context({
+            io = strategy,
+            embedded_interface_provider = embedded_provider(
+                root .. "/language-server", {
+                    [name] = numeric_embedded_module(name, profile),
+                }, profile),
+        })
+        local static_deps = {}
+        local loader = driver.defaultloader(static_deps, { context = context })
+        local ok, loaded, errors = loader(consumer)
+        assert.truthy(ok, tostring(loaded))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.equal(0, native_commands)
+        assert.equal(0, header_reads)
+        assert.is_nil(context.probe_service)
+        assert.is_nil(static_deps[name])
+
+        local statements = driver.imported[consumer].ast[2].block.stats
+        local callback = statements[1].decls[1]._type.pointee
+        assert.equal("Type.CFunction", callback._tag)
+        assert.equal(profile.identity, callback.ret._c_numeric_carriers.identity)
+        assert.equal(profile.integers.int.type._c_numeric.bits,
+            callback.ret._c_numeric.bits)
+        assert.equal("c_integer_to_integer",
+            statements[2].exps[1]._adjustment.coercion.op)
+        assert.equal("c_float_to_float",
+            statements[3].exps[1]._adjustment.coercion.op)
+        local boxed = statements[4].exps[1]._adjustment
+        assert.equal("gradual_view", boxed.kind)
+        assert.equal("inject", boxed.op)
+        assert.equal(profile.identity, boxed.source._c_numeric_carriers.identity)
+
+        -- C operators still require the selected native probe to prove their
+        -- semantics; scalar metadata and pure primitive layout do not.
+        local arithmetic_consumer = "embedded_c_arithmetic"
+        write_file(source .. "/" .. arithmetic_consumer .. ".titan", [[
+            function add(left: int, right: int): int
+                return left + right
+            end
+        ]])
+        ok, loaded, errors = loader(arithmetic_consumer)
+        assert.truthy(ok, tostring(loaded))
+        assert.is_true(#errors > 0)
+        assert.matches("native toolchain is unavailable", table.concat(errors, "\n"),
+            1, true)
+        assert.is_true(native_commands > 0)
+
+        -- An embedded semantic profile cannot stand in for native C tooling.
+        local native_consumer = "embedded_native_consumer"
+        write_file(source .. "/" .. native_consumer .. ".titan", [[
+            local native = foreign import "unavailable_native.h"
+            function answer(): integer return 42 end
+        ]])
+        ok, loaded, errors = loader(native_consumer)
+        assert.truthy(ok, tostring(loaded))
+        assert.is_true(#errors > 0)
+        assert.matches("native toolchain is unavailable", table.concat(errors, "\n"),
+            1, true)
+        assert.is_true(native_commands > 0)
+        assert.is_nil(driver.imported[native_consumer].source_manifest)
+        assert.is_true(driver.close_loader(loader))
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
+    it("rejects native probes which disagree with the embedded target profile",
+    function()
+        local profile = native_target_profile()
+        local incompatible = types.clone_graph(profile)
+        incompatible.floats.double.mantissa_digits =
+            incompatible.floats.double.mantissa_digits - 1
+        incompatible.identity =
+            assert(csemantics.profile_identity(incompatible))
+        local context = driver.new_resolver_context({
+            embedded_interface_provider = embedded_provider(
+                root .. "/language-server", {
+                    ["embedded.target"] = types.Module("embedded.target", {}),
+                }, incompatible),
+        })
+        assert.equal(incompatible.identity,
+            assert(driver.get_target_profile(context)).identity)
+        local service, err = driver.get_probe_service(context)
+        assert.is_nil(service)
+        assert.matches("target profile", err, 1, true)
+        assert.is_nil(context.probe_service)
+        assert.is_true(driver.close_resolver_context(context))
+
+        local ordinary = driver.new_resolver_context()
+        local ordinary_service = assert(driver.get_probe_service(ordinary))
+        assert.equal(profile.identity, ordinary_service.profile.identity)
+        assert.equal(profile.identity,
+            assert(driver.get_target_profile(ordinary)).identity)
+        assert.is_true(driver.close_resolver_context(ordinary))
+    end)
+
+    it("requires a live C profile when embedded numeric metadata omits target_profile",
+    function()
+        local name = "embedded.numeric_without_profile"
+        local consumer = "embedded_without_profile_consumer"
+        local profile = native_target_profile()
+        local strategy = compiler_io.new_sync()
+        local native_commands = 0
+        function strategy:run()
+            native_commands = native_commands + 1
+            return {
+                started = false,
+                ok = false,
+                diagnostic = "native profile acquisition is unavailable",
+            }
+        end
+        write_file(source .. "/" .. consumer .. ".titan", [[
+            local provider = import "embedded.numeric_without_profile"
+            function answer(): integer return provider.answer() end
+        ]])
+        local context = driver.new_resolver_context({
+            io = strategy,
+            embedded_interface_provider = embedded_provider(
+                root .. "/language-server", {
+                    [name] = result_module(name, profile.integers.int.type),
+                }),
+        })
+        local loader = driver.defaultloader({}, { context = context })
+        local ok, loaded, errors = loader(consumer)
+        assert.truthy(ok, tostring(loaded))
+        assert.is_true(#errors > 0)
+        assert.matches("native profile acquisition is unavailable",
+            table.concat(errors, "\n"), 1, true)
+        assert.is_true(native_commands > 0)
+        assert.is_nil(driver.imported[consumer].source_manifest)
+        assert.is_true(driver.close_loader(loader))
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
+    it("discards an embedded target profile when project source overlaps its inventory",
+    function()
+        local name = "embedded_profile_overlap"
+        local profile = native_target_profile()
+        local incompatible = types.clone_graph(profile)
+        incompatible.floats.double.mantissa_digits =
+            incompatible.floats.double.mantissa_digits - 1
+        incompatible.identity =
+            assert(csemantics.profile_identity(incompatible))
+        write_file(source .. "/" .. name .. ".titan", [[
+            function answer(): integer return 42 end
+        ]])
+        local context = driver.new_resolver_context({
+            embedded_interface_provider = embedded_provider(
+                root .. "/language-server", {
+                    [name] = types.Module(name, {}),
+                }, incompatible),
+        })
+        local loader = driver.defaultloader({}, {
+            context = context,
+            known_source_modules = { [name] = true },
+        })
+        local ok, loaded, errors = loader(name, { kind = "source-import" })
+        assert.truthy(ok, tostring(loaded))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.is_true(context.embedded_interface_provider_rejected)
+        assert.equal("source", driver.imported[name].kind)
+        assert.equal(profile.identity,
+            assert(driver.get_target_profile(context)).identity)
+        assert.equal(profile.identity,
+            assert(driver.get_probe_service(context)).profile.identity)
+        assert.is_true(driver.close_loader(loader))
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
+    it("rejects a late source overlap which would change an already used target profile",
+    function()
+        local name = "embedded_profile_late_overlap"
+        local profile = native_target_profile()
+        local incompatible = types.clone_graph(profile)
+        incompatible.floats.double.mantissa_digits =
+            incompatible.floats.double.mantissa_digits - 1
+        incompatible.identity =
+            assert(csemantics.profile_identity(incompatible))
+        local context = driver.new_resolver_context({
+            embedded_interface_provider = embedded_provider(
+                root .. "/language-server", {
+                    [name] = types.Module(name, {}),
+                }, incompatible),
+        })
+        local loader = driver.defaultloader({}, { context = context })
+        local ok, loaded, errors = loader(name)
+        assert.truthy(ok, tostring(loaded))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.equal(incompatible.identity,
+            assert(driver.get_target_profile(context)).identity)
+        write_file(source .. "/" .. name .. ".titan", [[
+            function answer(): integer return 42 end
+        ]])
+
+        ok, loaded = loader(name, { kind = "source-import" })
+        assert.is_false(ok)
+        assert.matches("cannot continue analysis after embedded provider source overlap",
+            loaded, 1, true)
+        assert.matches("target profile", loaded, 1, true)
+        assert.is_true(context.embedded_interface_provider_rejected)
+        assert.is_nil(driver.imported[name])
+        assert.is_true(driver.close_loader(loader))
         assert.is_true(driver.close_resolver_context(context))
     end)
 
