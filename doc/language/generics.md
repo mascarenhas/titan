@@ -349,7 +349,14 @@ selects the outer `{{integer}}`; a nonempty parent never invents the empty
 constructor's integer-element default for itself. The same postorder rule
 applies to computed Map keys and values. A context-only record constructor
 builds the selected record base and then takes any ordinary outer Option wrap
-or force.
+or force. An optional Array parameter preserves the Array context in the same
+way: `first<T>(items: ({T})?)` accepts `first({1})` with `T = integer`, checking
+the literal as `{integer}` before applying the outer Option wrap. Explicit
+type arguments, already typed Arrays, and `{}` use the same ordinary argument
+rules; an empty optional-Array argument can take its element type from explicit
+type arguments or the generic carrier fallback, and `nil` is admitted by the
+optional parameter. Incompatible elements still report an
+ordinary assignment error at the constructor or argument.
 
 Inference equations remain invariant structural equations over corresponding
 parts of Options, Arrays, Maps, function shapes, and applications of the same

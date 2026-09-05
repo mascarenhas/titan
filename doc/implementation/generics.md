@@ -367,7 +367,9 @@ structural shape, allowing a Map parameter such as `{K: V}` to infer from
 `({string: T})?`. Direct inference-cell formals retain the entire optional
 type. This boundary adjustment does not alter recursive structural unification;
 the ordinary argument finalizer still owns the checked Option force and rejects
-incompatible nested shapes.
+incompatible nested shapes. For a literal passed to an optional Array formal,
+constructor finalization retains the present Array context, completes element
+inference and checking once, then applies the ordinary outer Option wrap.
 
 Constructor consumers expose evaluated component edges in language order:
 
@@ -536,6 +538,15 @@ and Maps keep their ordinary backing representations; and Options, vararg
 families, and flexible-output descriptors are selected from their erased
 ordinary element types. There is no generic carrier algebra or special Option
 ABI in coder.
+
+At an optional Array boundary, a closed `({integer})?` and its erased
+`({value})?` carrier use the ordinary structural `gradual_view` in either
+direction. `assignment_adjustment` selects consistency before the separate
+Option/Array qualifier rules, so the outer Option does not turn this view into
+an unsupported element-adjustment wrapper. The same Array and optional slot
+are retained; closed element observations still use their ordinary strict
+guards. Consistency requires matching Array qualifiers, so a mutable-to-const
+freeze remains a separate operation and is never classified as this view.
 
 Generic-for lowering visits the complete adjusted setup tuple, including
 discarded surplus expressions, and its synthesized initial/next/close calls

@@ -2858,6 +2858,64 @@ describe("generic declarations and explicit calls", function()
             toplevel(ast, "Ast.TopLevelFunc", "use").block)
     end)
 
+    it("preserves optional Array constructor context through generic erasure",
+    function()
+        local ast = assert_check([[
+            function first<T>(items: ({T})?): T?
+                if items == nil then return nil end
+                local present: {T} = items
+                return present[1]
+            end
+            function ordinary(items: ({integer})?): integer?
+                if items == nil then return nil end
+                local present: {integer} = items
+                return present[1]
+            end
+            function use(typed: {integer}, optional: ({integer})?)
+                local inferred? = first({1})
+                local explicit? = first<integer>({2})
+                local from_typed? = first(typed)
+                local from_optional? = first(optional)
+                local empty? = first({})
+                local explicit_empty? = first<integer>({})
+                local absent? = first<integer>(nil)
+                local default_absent? = first(nil)
+                local ordinary_literal? = ordinary({3})
+                local ordinary_empty? = ordinary({})
+                local ordinary_absent? = ordinary(nil)
+            end
+        ]])
+        local use = toplevel(ast, "Ast.TopLevelFunc", "use")
+        for index, statement in ipairs(use.block.stats) do
+            local selected = declared_type(statement.decls[1])
+            assert.equal((index == 5 or index == 8) and "value" or "integer?",
+                types.tostring(selected), statement.decls[1].name)
+        end
+        assert_runtime_ast_erased(use.block)
+    end)
+
+    it("diagnoses incompatible optional Array elements without lifting conversions",
+    function()
+        local errs = h.check_errs([[
+            function first<T>(items: ({T})?): integer return 0 end
+            function ordinary(items: ({integer})?): integer return 0 end
+            function bad(strings: {string}, numbers: ({float})?)
+                first<integer>({"wrong"})
+                ordinary({"wrong"})
+                first<integer>(strings)
+                first<integer>(numbers)
+            end
+        ]])
+        assert.equal(4, #errs)
+        for _, err in ipairs(errs) do
+            assert.truthy(err:find("integer", 1, true), err)
+        end
+        assert.truthy(errs[3]:find(
+            "argument 1 of call to function 'first'", 1, true), errs[3])
+        assert.truthy(errs[4]:find(
+            "argument 1 of call to function 'first'", 1, true), errs[4])
+    end)
+
     it("keeps complete optional evidence for a direct generic binder", function()
         local ast = assert_check([[
             function identity<T>(item: T): T return item end

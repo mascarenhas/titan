@@ -1187,6 +1187,34 @@ describe("Titan types", function()
             assert.is_true(types.equals(const_i, rebuilt))
         end)
 
+        it("keeps optional Array element views structural and qualifiers invariant",
+        function()
+            local i, v = types.Integer(), types.Value()
+            for _, qualifier in ipairs({false, true, "maybe"}) do
+                local concrete = types.Option(types.Array(i, qualifier))
+                local erased = types.Option(types.Array(v, qualifier))
+                for _, pair in ipairs({
+                        {concrete, erased}, {erased, concrete},
+                }) do
+                    assert.is_true(types.consistent(pair[1], pair[2]))
+                    local adjustment = assert(types.assignment_adjustment(
+                        pair[1], pair[2]))
+                    assert.equal("gradual_view", adjustment.kind)
+                    assert.equal("structural", adjustment.op)
+                    assert.is_true(types.equals(pair[1], adjustment.source))
+                    assert.is_true(types.equals(pair[2], adjustment.target))
+                end
+            end
+
+            local mutable = types.Option(types.Array(i, false))
+            local frozen = types.Option(types.Array(v, true))
+            assert.is_false(types.consistent(mutable, frozen))
+            assert.is_false(types.assignment_adjustment(mutable, frozen))
+            assert.is_false(types.assignment_adjustment(frozen, mutable))
+            assert.is_false(types.assignment_adjustment(mutable,
+                types.Option(types.Array(types.Float(), false))))
+        end)
+
         it("uses the exact missing-nil representation frontier", function()
             local cint = types.CInteger("int", true, 3, 32)
             for _, typ in ipairs({
