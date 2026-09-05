@@ -434,6 +434,31 @@ status so the caller can stop the option sequence at its first failure.
 Replacing a choice closes unsubmitted streams that are no longer retained.
 Parent descriptors are always represented by the Runtime's pipe-or-TTY stream
 wrappers and inherited with `UV_INHERIT_STREAM`, never `UV_INHERIT_FD`.
+Classification preserves libuv's known TTY and named-pipe fast paths and
+rejects its other known kinds. For `UV_UNKNOWN_HANDLE`, an explicit `fstat`
+must identify a socket before independent `getsockname` and
+`getsockopt(SO_TYPE)` probes run. Each failure's `errno` is captured
+immediately; `errno` left by `uv_guess_handle` is not evidence. Available
+metadata must agree with `AF_UNIX` and `SOCK_STREAM`. Only a missing probe
+denied with `EPERM` or `EACCES` can use launcher knowledge from
+`TITAN_STDIO_PIPE_FDS`; other errors preserve their translated code. The hint
+parser validates the entire comma-separated sequence of single digits
+`0`, `1`, and `2` before accepting the requested descriptor. It neither
+overrides contradictory metadata nor accepts an unexplained unknown kind
+whose metadata probes both succeeded.
+
+The name probe uses `titan_posix_getsockname`, one inline adapter in the
+POSIX-guarded part of `titan/ffi.h`. It exposes the ordinary `sockaddr *`
+signature because glibc's GNU declaration uses a transparent-union parameter
+outside the C importer's supported subset. The adapter performs exactly the
+native call and preserves its return value and `errno`; it introduces no
+runtime state or exported ABI entry.
+
+Classification occurs before the existing close-on-exec duplication and
+stream-owner transfer. Failed classification creates no descriptor or handle
+owner. Successful wrappers retain the existing per-Runtime cache and teardown
+contract. Classification errors use `stdio.parent.kind` and include the
+descriptor and responsible probe in `OperationError.message`.
 Merged output uses separate child-write and parent-read pipe handles, installs
 the child stream in both child entries, and exposes the same parent stream as
 both Process outputs.
@@ -516,6 +541,13 @@ value becomes `TaskStatus<value, value>.succeeded`. A terminal raised value and
 its catch-local traceback become `async.Error { error, traceback }`; libuv
 failures nested there retain their separate
 `async.OperationError { code, name, message, operation }` identity.
+The protected Task-error renderer recognizes that exact record and formats
+its operation, symbolic name, numeric code, and message before appending the
+existing traceback. Other raised values retain Lua's ordinary string
+conversion. Both paths restore the exact entry stack top on success or error;
+the Lua conversion path reserves its temporary stack space before pushing.
+Rendering failures retain the conservative fallback text and cannot replace
+the Task's original error payload.
 Cancellation stores `CancellationReason<value>` privately until the terminal
 `cancelled` variant. Its `simple` arm contains a string and its `complex` arm
 retains an arbitrary Titan value; an omitted reason becomes

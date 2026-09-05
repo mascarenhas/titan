@@ -566,6 +566,11 @@ by the Task that raised it. Inspecting that status later with `race`, `all`, or
 `join` does not suppress the existing report. Other Tasks continue, and
 ordinary shutdown begins only after no active Tasks remain.
 
+An uncaught `OperationError` report includes the operation, symbolic error
+name, numeric code, and message before the traceback. Other raised values use
+Lua's ordinary string conversion. Rendering preserves the original error
+value in the failed Task even if conversion itself fails.
+
 `cancel(reason)` is sticky and preserves the first `CancellationReason<B>`
 directly in the Task. Nil selects
 `CancellationReason.simple("cancelled")`. The expected

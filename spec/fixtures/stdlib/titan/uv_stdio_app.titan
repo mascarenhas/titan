@@ -67,7 +67,9 @@ local function parent_tty(): string
   return "parent-tty-ok"
 end
 
-local function reject_parent_stdout(expected: string): string
+local function reject_parent_stdout(expected: string, expected_name: string?,
+                                     expected_probe: string?,
+                                     close_stdout: boolean?): string
   local warm = system.spawn("/bin/sh", {"-c", ":"})
   required_output(warm.stdin, "warm stdin"):close()
   local warm_stdout = required_input(warm.stdout, "warm stdout")
@@ -79,24 +81,80 @@ local function reject_parent_stdout(expected: string): string
   warm_stderr:close()
   async.yield()
 
+  if close_stdout and probe.titan_uv_test_stdio_close_child_stdout() ~= 0 then
+    raise "could not close child stdout for EBADF probe"
+  end
   local before = probe.titan_uv_test_stdio_open_fd_count()
   if before < 0 then raise "could not count descriptors before rejection" end
-  local rejected = false
+  local kind_rejected = false
   do
-    local process = system.spawn(
-      "/bin/sh", {"-c", ":"}, system.with_parent_stdout)
-    if process.stdin then (process.stdin as system.OutputStream):close() end
-    if process.stdout then (process.stdout as system.InputStream):close() end
-    if process.stderr then (process.stderr as system.InputStream):close() end
-    process:wait()
+    system.stdout:is_tty()
   catch
-    rejected = true
+    if not (error is async.OperationError) then
+      raise "parent classification did not raise OperationError"
+    end
+    local failure = error as async.OperationError
+    local name = expected_name or "ENOTSUP"
+    if failure.operation ~= "stdio.parent.kind" or failure.name ~= name or
+       str.find(failure.message, "fd 1:") == nil or
+       (expected_probe and str.find(failure.message, expected_probe) == nil) then
+      raise "unexpected parent classification error: " .. failure.operation ..
+            ": " .. failure.name .. ": " .. failure.message
+    end
+    kind_rejected = true
   end
-  if not rejected then raise "unsupported parent stdout was accepted" end
+  if not kind_rejected then raise "unsupported stdout classification succeeded" end
+
+  if not close_stdout then
+    -- With fd 1 closed, unrelated spawn setup can legitimately reuse that
+    -- number before the parent-stream option runs. The direct probe above
+    -- owns the EBADF assertion; live unsupported descriptors also exercise
+    -- the failed-spawn ownership path.
+    local rejected = false
+    do
+      local process = system.spawn(
+        "/bin/sh", {"-c", ":"}, system.with_parent_stdout)
+      if process.stdin then (process.stdin as system.OutputStream):close() end
+      if process.stdout then (process.stdout as system.InputStream):close() end
+      if process.stderr then (process.stderr as system.InputStream):close() end
+      process:wait()
+    catch
+      rejected = true
+    end
+    if not rejected then raise "unsupported parent stdout was accepted" end
+  end
   if probe.titan_uv_test_stdio_open_fd_count() ~= before then
     raise "parent stdout rejection leaked a descriptor"
   end
   return expected
+end
+
+local function deny_metadata(probes: integer, descriptors: integer,
+                             access_error: boolean?)
+  local access = 0
+  if access_error then access = 1 end
+  if probe.titan_uv_test_stdio_deny_metadata(probes, descriptors, access) ~= 0 then
+    raise probe.titan_uv_test_stdio_failure() as string
+  end
+end
+
+local function parent_stdout(): string
+  if system.stdout:is_tty() then raise "socket stdout was misclassified" end
+  system.stdout:write("pipe-stdout")
+  return "parent-stdout-ok"
+end
+
+local function denied_diagnostic(): string
+  local task = async.run<nil, value>(function (): nil
+    system.stdout:is_tty()
+    return nil
+  end)
+  local failed, failure? = async.join(task):has_failed()
+  if not failed or not failure then raise "denied stdio Task did not fail" end
+  if not (failure.error is async.OperationError) then
+    raise "denied stdio Task lost its OperationError"
+  end
+  return "parent-denied-diagnostic"
 end
 
 local function run_case(mode: string): string
@@ -110,6 +168,46 @@ local function run_case(mode: string): string
     return reject_parent_stdout("parent-file-rejected")
   elseif mode == "socket" then
     return reject_parent_stdout("parent-socket-rejected")
+  elseif mode == "closed" then
+    return reject_parent_stdout("parent-closed-rejected", "EBADF", "fstat", true)
+  elseif mode == "denied-pipes" or mode == "denied-pipes-access" then
+    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_ALL, 7,
+                  mode == "denied-pipes-access")
+    return parent_pipes()
+  elseif mode == "denied-stdin" then
+    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_ALL, 7)
+    if system.stdin:is_tty() or read_all(system.stdin) ~= "parent-pipe-input" then
+      raise "hinted stdin did not preserve pipe input"
+    end
+    return "parent-stdin-ok"
+  elseif mode == "denied-stdout" then
+    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_ALL, 7)
+    return parent_stdout()
+  elseif mode == "denied-stderr" then
+    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_ALL, 7)
+    if system.stderr:is_tty() then raise "hinted stderr was misclassified" end
+    system.stderr:write("pipe-stderr")
+    return "parent-stderr-ok"
+  elseif mode == "denied-reject" then
+    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_ALL, 7)
+    return reject_parent_stdout("parent-denied-rejected", "EPERM", "getsockname")
+  elseif mode == "deny-name-stdout" then
+    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_NAME, 2)
+    return parent_stdout()
+  elseif mode == "deny-type-stdout" then
+    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_TYPE, 2, true)
+    return parent_stdout()
+  elseif mode == "deny-name-reject" then
+    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_NAME, 2)
+    return reject_parent_stdout("parent-contradiction-rejected", "ENOTSUP",
+                                 "getsockopt(SO_TYPE)")
+  elseif mode == "deny-type-reject" then
+    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_TYPE, 2)
+    return reject_parent_stdout("parent-contradiction-rejected", "ENOTSUP",
+                                 "getsockname")
+  elseif mode == "denied-diagnostic" then
+    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_ALL, 7)
+    return denied_diagnostic()
   end
   raise "unknown stdio fixture mode '" .. mode .. "'"
 end

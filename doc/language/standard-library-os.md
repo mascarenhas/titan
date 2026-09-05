@@ -349,6 +349,31 @@ variant. Those records independently implement the relevant structural `io`
 interfaces, but are not process-stream values. `is_tty()` checks the private
 handle's TTY/pipe tag; captured child endpoints are pipes and report false.
 
+A sandboxed launcher may supply parent streams through Unix stream sockets
+while denying the socket metadata calls that libuv uses to recognize them.
+Such a launcher can set `TITAN_STDIO_PIPE_FDS=0,1,2` before starting Titan,
+listing only the parent descriptors it knows are pipe-compatible Unix stream
+sockets. Each token must be exactly `0`, `1`, or `2`, separated by commas;
+whitespace, empty tokens, and any other character invalidate the entire hint.
+Omitting the variable or setting it to an empty string supplies no hint.
+
+The hint applies only when libuv reports an unknown kind, `fstat` identifies a
+socket, and socket family or type inspection fails with `EPERM` or `EACCES`.
+Titan still performs both inspections: any observed family other than
+`AF_UNIX` or type other than `SOCK_STREAM` rejects the stream. Known TTY and
+pipe descriptors need no hint; regular files, TCP sockets, and datagram
+sockets are rejected whenever libuv or either explicit probe identifies their
+incompatible kind. When both socket probes are denied, Titan trusts the
+launcher's assertion about the hidden family and type; the hint does not
+validate that unavailable metadata. An unsupported kind or failed inspection
+raises `async.OperationError` with
+operation `stdio.parent.kind` and a message naming the descriptor and probe.
+An invalid descriptor retains its actual `EBADF` error.
+
+The Runtime caches each successfully initialized parent wrapper. The launcher
+must update or clear the hint when replacing inherited descriptors; changing
+the variable after a wrapper has been initialized does not reclassify it.
+
 The raw parent descriptors remain owned by the host process. Each Runtime owns
 one stream wrapper over a close-on-exec duplicate, whose teardown cannot close
 the original descriptor. A `with_parent_*` configurator installs that wrapper

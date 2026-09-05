@@ -20,6 +20,21 @@
 #include <termios.h>
 #include <unistd.h>
 
+#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <stddef.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#define TITAN_UV_TEST_STDIO_SECCOMP 1
+#if defined(__x86_64__)
+#define TITAN_UV_TEST_STDIO_AUDIT_ARCH AUDIT_ARCH_X86_64
+#else
+#define TITAN_UV_TEST_STDIO_AUDIT_ARCH AUDIT_ARCH_AARCH64
+#endif
+#endif
+
 #define OUTPUT_CAPACITY 8192
 
 static int active_mode;
@@ -137,8 +152,8 @@ static int setup_file_stdout(void) {
   return 0;
 }
 
-static int setup_socket_stdout(void) {
-  int descriptor = socket(AF_INET, SOCK_STREAM, 0);
+static int setup_socket_stdout(int family, int socket_type) {
+  int descriptor = socket(family, socket_type, 0);
   if (descriptor < 0) {
     record_failure("socket stdout setup failed: %s", strerror(errno));
     return -1;
@@ -148,6 +163,30 @@ static int setup_socket_stdout(void) {
     return -1;
   }
   close(descriptor);
+  return 0;
+}
+
+static int setup_unix_stream(int target) {
+  static const char input[] = "parent-pipe-input";
+  int descriptors[2];
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, descriptors) != 0) {
+    record_failure("socketpair(fd %d) failed: %s", target, strerror(errno));
+    return -1;
+  }
+  if (replace_target(target, descriptors[0]) != 0) {
+    close(descriptors[0]);
+    close(descriptors[1]);
+    return -1;
+  }
+  close(descriptors[0]);
+  peer_descriptors[target] = descriptors[1];
+  if (target == 0 &&
+      (write(descriptors[1], input, sizeof(input) - 1) !=
+         (ssize_t) (sizeof(input) - 1) ||
+       shutdown(descriptors[1], SHUT_WR) != 0)) {
+    record_failure("could not seed stdin socket: %s", strerror(errno));
+    return -1;
+  }
   return 0;
 }
 
@@ -276,7 +315,20 @@ int titan_uv_test_stdio_setup(int mode) {
       goto fail;
     break;
   case TITAN_UV_TEST_STDIO_SOCKET_STDOUT:
-    if (setup_socket_stdout() != 0)
+    if (setup_socket_stdout(AF_INET, SOCK_STREAM) != 0)
+      goto fail;
+    break;
+  case TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL:
+    if (setup_unix_stream(0) != 0 || setup_unix_stream(1) != 0 ||
+        setup_unix_stream(2) != 0)
+      goto fail;
+    break;
+  case TITAN_UV_TEST_STDIO_UNIX_DATAGRAM_STDOUT:
+    if (setup_socket_stdout(AF_UNIX, SOCK_DGRAM) != 0)
+      goto fail;
+    break;
+  case TITAN_UV_TEST_STDIO_INET_DATAGRAM_STDOUT:
+    if (setup_socket_stdout(AF_INET, SOCK_DGRAM) != 0)
       goto fail;
     break;
   default:
@@ -367,4 +419,90 @@ int titan_uv_test_stdio_open_fd_count(void) {
       count++;
   }
   return count;
+}
+
+int titan_uv_test_stdio_metadata_denial_supported(void) {
+#ifdef TITAN_UV_TEST_STDIO_SECCOMP
+  return 1;
+#else
+  return 0;
+#endif
+}
+
+int titan_uv_test_stdio_deny_metadata(int probes, int descriptors,
+                                      int access_error) {
+#ifdef TITAN_UV_TEST_STDIO_SECCOMP
+  const int calls[] = { SYS_getsockname, SYS_getsockopt, SYS_getpeername };
+  struct sock_filter filter[16];
+  struct sock_fprog program;
+  unsigned int branches[3];
+  unsigned int branch_count = 0;
+  unsigned int count = 0;
+  unsigned int fd_start;
+  unsigned int index;
+  const unsigned int denied_errno = access_error ? EACCES : EPERM;
+
+  /* The fixture is inactive after exec. Denial belongs only to that child,
+   * and cannot affect the aggregate's later tests or descriptor restoration. */
+  if (active_mode != 0 || probes <= 0 || (probes & ~7) != 0 ||
+      descriptors <= 0 || (descriptors & ~7) != 0) {
+    record_failure("invalid child-only stdio metadata denial request");
+    return -1;
+  }
+  filter[count++] = (struct sock_filter) BPF_STMT(
+      BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch));
+  filter[count++] = (struct sock_filter) BPF_JUMP(
+      BPF_JMP | BPF_JEQ | BPF_K, TITAN_UV_TEST_STDIO_AUDIT_ARCH, 1, 0);
+  filter[count++] = (struct sock_filter) BPF_STMT(
+      BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+  filter[count++] = (struct sock_filter) BPF_STMT(
+      BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr));
+  for (index = 0; index < 3; index++) {
+    if (!(probes & (1 << index)))
+      continue;
+    branches[branch_count++] = count;
+    filter[count++] = (struct sock_filter) BPF_JUMP(
+        BPF_JMP | BPF_JEQ | BPF_K, calls[index], 0, 0);
+  }
+  filter[count++] = (struct sock_filter) BPF_STMT(
+      BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+  fd_start = count;
+  for (index = 0; index < branch_count; index++)
+    filter[branches[index]].jt = (unsigned char) (fd_start - branches[index] - 1);
+  filter[count++] = (struct sock_filter) BPF_STMT(
+      BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0]));
+  for (index = 0; index < 3; index++) {
+    if (!(descriptors & (1 << index)))
+      continue;
+    filter[count++] = (struct sock_filter) BPF_JUMP(
+        BPF_JMP | BPF_JEQ | BPF_K, index, 0, 1);
+    filter[count++] = (struct sock_filter) BPF_STMT(
+        BPF_RET | BPF_K, SECCOMP_RET_ERRNO | denied_errno);
+  }
+  filter[count++] = (struct sock_filter) BPF_STMT(
+      BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+  program.len = (unsigned short) count;
+  program.filter = filter;
+  if (prctl(PR_SET_NO_NEW_PRIVS, 1L, 0L, 0L, 0L) != 0 ||
+      prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) != 0) {
+    record_failure("could not install child stdio metadata denial: %s",
+                   strerror(errno));
+    return -1;
+  }
+  return 0;
+#else
+  (void) probes;
+  (void) descriptors;
+  (void) access_error;
+  record_failure("stdio metadata denial requires Linux x86_64 or aarch64");
+  return -1;
+#endif
+}
+
+int titan_uv_test_stdio_close_child_stdout(void) {
+  if (active_mode != 0) {
+    record_failure("stdout may only be closed in the fresh child");
+    return -1;
+  }
+  return close(1);
 }
