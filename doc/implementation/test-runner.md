@@ -236,6 +236,40 @@ fresh processes. `BUSTED_FILTER` is independent and belongs to
 `busted-test`; `rock-test` enters both domains without inventing native group
 names.
 
+The explicit repository-root command
+`TITAN_ROCKS_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 busted --run=checkout`
+uses the `.busted` `checkout` profile to prepend `./?.lua;./?/init.lua` after
+the LuaRocks launcher initializes its paths. It loads edited checkout Lua
+compiler modules without reinstalling them; an ambient `LUA_PATH` override
+alone does not have that precedence. The profile leaves the C module path
+unchanged. The existing `TITAN_ROCKS_ROOT` option separately preserves installed
+driver layout, headers, and runtime-library inputs. Keep that root override
+scoped to the focused invocation.
+
+The profile runs Busted's standard helper
+`spec/support/checkout_busted.lua` before loading specs. It requires the root
+option, creates one existing resolver context to initialize driver layout,
+calls `driver.configure_foreign_c` so direct checker FFI imports use the same
+installed SDK, and closes the context. It changes no compiler loader or
+source-identity mechanism.
+
+The real-launcher regression in `spec/libuv_build_spec.lua` compares a
+deliberate checkout compiler edit with the unchanged installed module. It
+proves default Busted stays installed even with `.busted` present, compares
+active native dependency/SDK paths in a recognizable source checkout, and
+checks an installed `lua.h` import through the direct checker with no checkout
+Lua headers. It also requires a missing root option and a broken local module
+to fail rather than silently change layout or fall back to the install.
+
+Default Busted, `make busted-test`, and `luarocks test` continue to use the
+installed compiler; reinstall compiler edits before those commands or an
+installed `titanc` invocation. Compiler workers still own private checkout and
+temporary directories. The profile does not refresh installed tools, the
+SDK/provider, or a compiled native aggregate. Reinstall after runtime or
+standard-library changes as well. `make test` remains the canonical full gate
+because it reinstalls the current compiler and provider before testing;
+`luarocks test` does not.
+
 `run_with_timeout.sh` uses Bash monitor mode to give the executable its own
 process group and polls it at a coarse interval. At the deadline it sends
 `TERM`, then `KILL` after a short grace period, maps the timeout to status 124,
