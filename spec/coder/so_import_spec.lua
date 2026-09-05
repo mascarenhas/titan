@@ -599,6 +599,69 @@ describe(".so-only cross-module imports", function()
         assert.truthy(rok, out)
     end)
 
+    it("preserves maybe-const Arrays through .so-only metadata", function()
+        local ok, err = build_so_chain({
+            { name = "maybe_const_so_owner", src = [[
+                record Box
+                    items: const? { integer }
+                end
+
+                function identity(items: const? { integer }): const? { integer }
+                    return items
+                end
+
+                function count(items: (const? { integer })?): integer
+                    if items == nil then return -1 end
+                    return #items
+                end
+
+                function mutable(): { integer }
+                    return { 10, 20 }
+                end
+
+                function immutable(): const { integer }
+                    return { 30, 40 }
+                end
+            ]] },
+            { name = "maybe_const_so_consumer", src = [[
+                local owner = import "maybe_const_so_owner"
+
+                function mutable(): const? { integer }
+                    local box = owner.Box.new(owner.mutable())
+                    return owner.identity(box.items)
+                end
+
+                function immutable(): const? { integer }
+                    local box = owner.Box.new(owner.immutable())
+                    return owner.identity(box.items)
+                end
+
+                function count(items: const? { integer }): integer
+                    return owner.count(owner.identity(items))
+                end
+
+                function absent(): integer
+                    return owner.count(nil)
+                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+        local rok, out = call("maybe_const_so_consumer", [[
+            local consumer = maybe_const_so_consumer
+            local mutable = consumer.mutable()
+            local immutable = consumer.immutable()
+            assert(consumer.count(mutable) == 2)
+            assert(consumer.count(immutable) == 2)
+            assert(consumer.absent() == -1)
+            assert(mutable[1] == 10 and immutable[1] == 30)
+            mutable[1] = 99
+            assert(mutable[1] == 99)
+            assert(not pcall(function() immutable[1] = 99 end))
+            assert(immutable[1] == 30)
+        ]])
+        assert.truthy(rok, out)
+    end)
+
     it("constructs and uses a record from a .so-only module", function ()
         local ok, err = build_so_chain({
             { name = "rfoo", src = [[

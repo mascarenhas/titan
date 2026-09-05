@@ -741,6 +741,101 @@ assert(driver.PROBE_CACHE_DIRECTORY == nil)
     end)
 end)
 
+describe("Array compiled-interface validation", function()
+    local modname = "array_metadata"
+
+    local function variable_module(typ)
+        return types.Module(modname, {
+            types.ModuleVariable(modname, "items", typ, false),
+        })
+    end
+
+    it("round-trips all three canonical Array qualifiers", function()
+        for _, qualifier in ipairs({ false, true, "maybe" }) do
+            local array = types.Array(types.Boolean(), qualifier)
+            for _, typ in ipairs({
+                array,
+                types.Option(array),
+                types.Map(types.String(), array),
+                types.Array(array, false),
+            }) do
+                local original = variable_module(typ)
+                assert.is_true(driver.validate_module_interface(
+                    original, modname))
+                local decoded, err = driver.decode_module_interface(
+                    types.serialize(original), modname, "Array round trip")
+                assert.truthy(decoded, err)
+                assert.is_true(types.equals(original, decoded))
+            end
+        end
+    end)
+
+    it("round-trips maybe-const Arrays in checked public signatures and fields",
+    function()
+        local h = require "spec.support.helpers"
+        local ok, err, _, original = h.run_checker([[
+            record Box
+                items: const? { boolean }
+            end
+
+            interface View
+                items: const? { boolean }
+            end
+
+            function identity(items: const? { boolean }): const? { boolean }
+                return items
+            end
+
+            function optional(items: (const? { boolean })?):
+                    (const? { boolean })?
+                return items
+            end
+        ]])
+        assert.truthy(ok, err)
+        local decoded, decode_error = driver.decode_module_interface(
+            types.serialize(original), "test", "checked maybe-const metadata")
+        assert.truthy(decoded, decode_error)
+        assert.is_true(types.equals(original, decoded))
+        assert.equal("maybe", decoded.members.Box.type.fields[1].type.isconst)
+        assert.equal("maybe", decoded.type_members.View.fields[1].type.isconst)
+        assert.equal("maybe", decoded.members.identity.type.params[1].isconst)
+        assert.equal("maybe", decoded.members.optional.type.rettypes[1].base.isconst)
+    end)
+
+    it("rejects absent and malformed Array qualifiers in raw metadata", function()
+        for _, qualifier in ipairs({
+            "nil", "0", "1", '"false"', '"true"', '"Maybe"',
+            '"mutable"', "{}",
+        }) do
+            -- Raw descriptor tables bypass Array's constructor check and must
+            -- still be rejected by the compiled-interface validator.
+            local serialized = string.format([[
+                Module("array_metadata", {
+                    ModuleVariable("array_metadata", "items", {
+                        _tag = "Type.Array",
+                        elem = Boolean(),
+                        isconst = %s,
+                    }, false),
+                })
+            ]], qualifier)
+            local decoded, err = driver.decode_module_interface(
+                serialized, modname, "hostile Array qualifier")
+            assert.is_nil(decoded)
+            assert.match("array type has a noncanonical const qualifier",
+                err, 1, true)
+        end
+    end)
+
+    it("keeps module-variable const qualifiers boolean", function()
+        local modtype = variable_module(types.Array(types.Boolean(), "maybe"))
+        modtype.members.items.isconst = "maybe"
+        local ok, err = driver.validate_module_interface(modtype, modname)
+        assert.is_nil(ok)
+        assert.match("module variable 'items' has a noncanonical const qualifier",
+            err, 1, true)
+    end)
+end)
+
 describe("portable C99 compiled-interface validation", function()
     local modname = "portable_metadata"
 

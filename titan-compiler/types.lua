@@ -47,8 +47,9 @@ local types = typedecl("Type", {
 })
 
 -- Mutability is an ABI-visible axis of an Array, record field, and module
--- variable. Requiring the exact boolean at construction keeps old or hostile
--- serialized metadata from being silently normalized to mutable.
+-- variable. Arrays admit exactly false, true, or "maybe"; field and variable
+-- qualifiers require booleans. Constructors reject absent or hostile metadata
+-- instead of silently normalizing it to mutable.
 local raw_Array = types.Array
 function types.Array(elem, isconst)
     if type(isconst) ~= "boolean" and isconst ~= "maybe" then

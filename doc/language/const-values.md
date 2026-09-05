@@ -275,6 +275,11 @@ end
 `const? { T }` permits indexed reads and `#` length, but forbids indexed element
 writes (`xs[i] = v` is a compile-time error).
 
+Public fields, function parameters, and results retain `const?` when their
+module is imported from source, a shared provider, or a static archive. Passing
+an Array through this view preserves the original mutable or const Array;
+the view does not freeze or copy it.
+
 #### Assignment and Option propagation
 
 - Mutable `{ T }`, const `const { T }`, and maybe-const `const? { T }` can all

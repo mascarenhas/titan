@@ -2631,7 +2631,7 @@ validate_interface_type = function(typ, context, seen)
         end
         return true
     elseif tag == "Type.Array" then
-        if type(typ.isconst) ~= "boolean" then
+        if type(typ.isconst) ~= "boolean" and typ.isconst ~= "maybe" then
             return nil, "array type has a noncanonical const qualifier"
         end
         return validate_interface_type(
