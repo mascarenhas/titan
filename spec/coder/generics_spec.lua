@@ -779,6 +779,66 @@ describe("generic erased core", function()
         ]])
     end)
 
+    it("runs optional Array constructors once and strictly projects generic elements",
+    function()
+        h.run_coder([[
+            local log: integer = 0
+            local function mark(item: integer): integer
+                log = log * 10 + item
+                return item
+            end
+            function first<T>(items: ({T})?): T?
+                if items == nil then return nil end
+                local present: {T} = items
+                return present[1]
+            end
+            function ordinary(items: ({integer})?): integer
+                if items == nil then return -1 end
+                local present: {integer} = items
+                return #present
+            end
+            function constructors(): (integer?, integer?, integer?, integer)
+                log = 0
+                local inferred? = first({mark(1), mark(2)})
+                local explicit? = first<integer>({mark(3)})
+                local typed: {integer} = {mark(4)}
+                local from_typed? = first(typed)
+                return inferred, explicit, from_typed, log
+            end
+            function missing(): (integer?, integer?, integer?, value,
+                                 integer, integer, integer)
+                return first({}), first<integer>({}), first<integer>(nil),
+                    first(nil), ordinary({1}), ordinary({}), ordinary(nil)
+            end
+            function optional(items: ({integer})?): integer?
+                return first(items)
+            end
+            function project(items: ({value})?): integer?
+                return first<integer>(items)
+            end
+            function gradual(item: value): integer?
+                return first<integer>({item})
+            end
+            function values(): {value}
+                return {"wrong"}
+            end
+        ]], [[
+            local inferred, explicit, typed, log = test.constructors()
+            assert(inferred == 1 and explicit == 3 and typed == 4)
+            assert(log == 1234)
+            local empty, explicit_empty, absent, default_absent,
+                one, zero, missing = test.missing()
+            assert(empty == nil and explicit_empty == nil and absent == nil)
+            assert(default_absent == nil and one == 1 and zero == 0 and missing == -1)
+            assert(test.optional(nil) == nil and test.project(nil) == nil)
+            assert(test.gradual(42) == 42)
+            local ok, err = pcall(test.project, test.values())
+            assert(not ok and err:find("expected integer", 1, true))
+            ok, err = pcall(test.gradual, "wrong")
+            assert(not ok and err:find("expected integer", 1, true))
+        ]])
+    end)
+
     it("runs a generic iterator with trailing generic tuple results", function()
         h.run_coder([[
             function step<T>(state: {T}, control: integer): (integer?, T?)

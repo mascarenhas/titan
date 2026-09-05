@@ -4568,6 +4568,14 @@ function types.assignment_adjustment(source, target, policy)
         end
     end
 
+    -- Consistent structural views preserve the existing representation,
+    -- including an outer Option. Array qualifier changes still use the
+    -- separate rules below because consistency requires matching qualifiers.
+    if relation_consistent(source, target) then
+        local view = gradual_view_plan(source, target)
+        if view then return view end
+    end
+
     -- Option(Array) assignment
     if source._tag == "Type.Option" and target._tag == "Type.Option" then
         if source.base._tag == "Type.Array" and target.base._tag == "Type.Array" then
@@ -4585,11 +4593,6 @@ function types.assignment_adjustment(source, target, policy)
             end
             return false
         end
-    end
-
-    if relation_consistent(source, target) then
-        local view = gradual_view_plan(source, target)
-        if view then return view end
     end
 
     if policy.allow_coercion ~= false then
