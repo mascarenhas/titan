@@ -94,8 +94,8 @@ local function default_settings(): Settings
 end
 
 local function validate_settings(settings: Settings)
-  if settings.max_depth < 1 or settings.max_depth > 64 then
-    json_fail("invalid_option", "max_depth must be between 1 and 64", root_path(), nil, nil)
+  if settings.max_depth < 1 then
+    json_fail("invalid_option", "max_depth must be positive", root_path(), nil, nil)
   end
   if settings.max_bytes < 1 or settings.max_nodes < 1 then
     json_fail("invalid_option", "max_bytes and max_nodes must be positive", root_path(), nil, nil)

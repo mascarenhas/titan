@@ -4616,7 +4616,7 @@ done
 
             assert.equal(1, count_literal(sanitizer_job,
                 "make titan-stdlib-test-build"), sanitizer_job)
-            assert.equal(15, count_literal(sanitizer_job,
+            assert.equal(17, count_literal(sanitizer_job,
                 "make titan-stdlib-test-run"), sanitizer_job)
             for _, filter in ipairs({
                 "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
@@ -4632,13 +4632,25 @@ done
                 "TITAN_FILTER='^json%.tests%.test_mapping_" ..
                 "allocated_constructor_arguments_survive_collection'",
                 "TITAN_FILTER='^json%.tests%.test_parser_wide_fold_collections'",
-                "TITAN_FILTER='^json%.tests%.test_parser_supported_nesting_boundary'",
+                "TITAN_FILTER='^json%.tests%.test_parser_configured_nesting_boundary'",
+                "TITAN_FILTER='^json%.tests%.test_parser_" ..
+                "deep_mixed_containers_and_sibling_members'",
+                "TITAN_FILTER='^json%.tests%.test_parser_" ..
+                "peg_limit_is_independent_of_depth_option'",
                 "TITAN_FILTER='^json%.tests%.test_core_float_range_tags_and_round_trips'",
                 "TITAN_FILTER='test_peg_roots_and_releases_" ..
                 "titan_callback_patterns$'",
                 "TITAN_FILTER='test_regex_gc_rooting$'",
             }) do
                 assert.equal(1, count_literal(sanitizer_job, filter), filter)
+            end
+            local json_sanitizer_step = named_step(sanitizer_job,
+                "Run native JSON sanitizer gate")
+            for _, label in ipairs({
+                "json-nesting", "json-nesting-mixed", "json-nesting-peg-limit",
+            }) do
+                assert.equal(1, count_literal(json_sanitizer_step,
+                    "ci_sanitizer_capture.sh " .. label .. " "), label)
             end
             for _, removed in ipairs({
                 "spec/stdlib/uv_native_handles_spec.lua",
@@ -4710,6 +4722,10 @@ done
                 },
                 {
                     "Run native SQLite sanitizer gate",
+                    { "make titan-stdlib-test-run" },
+                },
+                {
+                    "Run native JSON sanitizer gate",
                     { "make titan-stdlib-test-run" },
                 },
                 {
