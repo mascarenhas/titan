@@ -239,10 +239,16 @@ function test_parser_source_limits_before_null_loss(_context: test.Context)
   test.assert(failure.code == "limit_exceeded" and failure.position == 6)
 end
 
-function test_parser_supported_nesting_boundary(_context: test.Context)
-  local depth = 64
+function test_parser_configured_nesting_boundary(_context: test.Context)
+  peg.set_max_stack(400)
+  local depth = 128
   local objects = strings.rep('{"x":', depth) .. "true" .. strings.rep("}", depth)
   local current: value = json.decode(objects, nil, json.DecodeOption.max_depth(depth))
+  test.assert(json.encode(current, json.EncodeOption.max_depth(depth)) == objects)
+  local failure = expect_json_error(function()
+    json.encode(current, json.EncodeOption.max_depth(depth - 1))
+  end)
+  test.assert(failure.code == "limit_exceeded")
   for level = 1, depth do
     local object: {string: value} = current
     current = object["x"]
@@ -250,12 +256,17 @@ function test_parser_supported_nesting_boundary(_context: test.Context)
   test.assert(current == true)
   local arrays = strings.rep("[", depth) .. "true" .. strings.rep("]", depth)
   current = json.decode(arrays, nil, json.DecodeOption.max_depth(depth))
+  test.assert(json.encode(current, json.EncodeOption.max_depth(depth)) == arrays)
+  failure = expect_json_error(function()
+    json.encode(current, json.EncodeOption.max_depth(depth - 1))
+  end)
+  test.assert(failure.code == "limit_exceeded")
   for level = 1, depth do
     local array: {value} = current
     current = array[1]
   end
   test.assert(current == true)
-  local failure = expect_json_error(function()
+  failure = expect_json_error(function()
     json.decode("[" .. arrays .. "]", nil, json.DecodeOption.max_depth(depth))
   end)
   test.assert(failure.code == "limit_exceeded" and failure.position == depth + 1)
@@ -263,6 +274,60 @@ function test_parser_supported_nesting_boundary(_context: test.Context)
     json.decode('{"x":' .. objects .. "}", nil, json.DecodeOption.max_depth(depth))
   end)
   test.assert(failure.code == "limit_exceeded" and failure.position == depth * 5 + 1)
+end
+
+function test_parser_deep_mixed_containers_and_sibling_members(_context: test.Context)
+  -- Sibling repetition retains more matching-stack entries than a single
+  -- child at each level. This application policy is separate from max_depth.
+  peg.set_max_stack(2048)
+  defer peg.set_max_stack(400)
+  local depth = 128
+  local source = "true"
+  for level = 1, depth do
+    if level % 2 == 1 then
+      source = '{"left":false,"x":' .. source .. ',"z":"after"}'
+    else
+      source = "[null," .. source .. ",false]"
+    end
+  end
+  local null: {value} = {}
+  for repetition = 1, 2 do
+    local current: value = json.decode(source, nil,
+      json.DecodeOption.max_depth(depth), json.DecodeOption.null_value(null))
+    gc.collect()
+    test.assert(json.encode(current, json.EncodeOption.max_depth(depth),
+      json.EncodeOption.null_value(null)) == source)
+    for level = depth, 1, -1 do
+      if level % 2 == 1 then
+        local object: {string: value} = current
+        test.assert(object["left"] == false and object["z"] == "after")
+        current = object["x"]
+      else
+        local array: {value} = current
+        test.assert(#array == 3 and array[1] == null and array[3] == false)
+        current = array[2]
+      end
+    end
+    test.assert(current == true)
+  end
+  local failure = expect_json_error(function()
+    json.decode("[" .. source .. "]", nil, json.DecodeOption.max_depth(depth))
+  end)
+  test.assert(failure.code == "limit_exceeded")
+end
+
+function test_parser_peg_limit_is_independent_of_depth_option(_context: test.Context)
+  peg.set_max_stack(400)
+  local source = strings.rep("[", 256) .. "true" .. strings.rep("]", 256)
+  local failed = false
+  do
+    json.decode(source, nil, json.DecodeOption.max_depth(math.maxinteger))
+  catch
+    failed = true
+    test.assert(not (error is json.Error), "JSON relabeled a PEG resource failure")
+    test.assert(strings.find(strings.tostring(error), "backtrack stack overflow", 1, true) ~= nil)
+  end
+  test.assert(failed, "expected the configured PEG stack to be exhausted")
 end
 
 function test_parser_wide_fold_collections(context: test.Context)

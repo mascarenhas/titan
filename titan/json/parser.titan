@@ -13,6 +13,11 @@ local record ParseFailure
   const position: integer
 end
 
+local record ObjectParseState
+  const names: {string: boolean}
+  pending_key: Node?
+end
+
 local JSON_PATTERN: peg.Pattern? = nil
 
 local function ParseBudget:count_value(position: integer)
@@ -68,7 +73,8 @@ local function json_parse_object_seed(position_value: value): value
   local position: integer = position_value
   local members: {Member} = {}
   local names: {string: boolean} = {}
-  return Node.new("object", position, names, nil, members)
+  local state = ObjectParseState.new(names, nil)
+  return Node.new("object", position, state, nil, members)
 end
 
 local function Node:append_parse_element(child: Node)
@@ -78,15 +84,22 @@ local function Node:append_parse_element(child: Node)
   elements[#elements + 1] = child
 end
 
-local function Node:append_parse_member(member: Member)
-  local names: {string: boolean} = self.scalar
-  if names[member.name] ~= nil then
-    raise ParseFailure.new(
-      "duplicate_key", "duplicate JSON object member", member.position)
+local function Node:append_parse_object_node(child: Node)
+  local state: ObjectParseState = self.scalar
+  local key: Node? = state.pending_key
+  if key == nil then
+    state.pending_key = child
+    return
   end
-  names[member.name] = true
+  local name: string = key.scalar
+  if state.names[name] ~= nil then
+    raise ParseFailure.new(
+      "duplicate_key", "duplicate JSON object member", key.position)
+  end
+  state.names[name] = true
   local members: {Member} = self.members
-  members[#members + 1] = member
+  members[#members + 1] = Member.new(name, key.position, child)
+  state.pending_key = nil
 end
 
 local function json_parse_array_step(
@@ -98,19 +111,13 @@ local function json_parse_array_step(
 end
 
 local function json_parse_object_step(
-    accumulator_value: value, member_value: value): value
+    accumulator_value: value, child_value: value): value
   local accumulator: Node = accumulator_value
-  local member: Member = member_value
-  accumulator:append_parse_member(member)
+  local child: Node = child_value
+  -- Member emits separate key and value nodes. Pairing them in this fresh
+  -- object state avoids a capture wrapper around every nested member value.
+  accumulator:append_parse_object_node(child)
   return accumulator
-end
-
-local function json_parse_member(
-    key_value: value, node_value: value): value
-  local key: Node = key_value
-  local node: Node = node_value
-  local name: string = key.scalar
-  return Member.new(name, key.position, node)
 end
 
 local function json_parse_true(position_value: value): value
@@ -300,7 +307,6 @@ local function build_json_pattern(): peg.Pattern
     peg.define_value("new_object", json_parse_object_seed),
     peg.define_value("append_array", json_parse_array_step),
     peg.define_value("append_object", json_parse_object_step),
-    peg.define_value("new_member", json_parse_member),
     peg.define_value("new_true", json_parse_true),
     peg.define_value("new_false", json_parse_false),
     peg.define_value("new_null", json_parse_null),
@@ -334,8 +340,8 @@ local function build_json_pattern(): peg.Pattern
                        ('}' / %{expected_object_separator})))
                ~> append_object) Leave
     ObjectSeed <- ({} '{' Enter) -> new_object
-    Member <- ((String / %{expected_object_key}) WS
-               (':' / %{expected_colon}) WS Value) -> new_member
+    Member <- (String / %{expected_object_key}) WS
+              (':' / %{expected_colon}) WS Value
 
     Number <- ({} '-'? Integer Fraction? Exponent?
                (&%json_end / %{invalid_number_continuation}) {})

@@ -300,16 +300,22 @@ there is no semantic path yet. For example, `[1 2]` reports
 error and traceback instead of being reported as malformed JSON.
 
 The default limits are 16 MiB of input/output text, 1,000,000 visited JSON
-values, and a nesting depth of 32. `max_depth` accepts 1 through 64;
-`max_bytes` and `max_nodes` require positive integers. Depth counts JSON
+values, and a nesting depth of 32. `max_depth`, `max_bytes`, and `max_nodes`
+require positive integers. Depth counts JSON
 containers: a root object or Array has depth 1, and a union envelope is an
 object. The node count includes the root, nulls, and ignored record members'
 values. Decode's byte limit applies to the complete input; encode's limit
 applies to emitted text. Exceeding a limit raises `limit_exceeded`.
 
-JSON does not modify PEG's shared stack limit. Applications that reduce it can
-encounter an independent PEG resource error before reaching JSON's supported
-depth. Streaming, pretty printing, field renaming, custom codec registries,
+The configured depth is a container budget, not a guarantee that every document
+within it fits the available execution resources. Parsing also consumes PEG
+matching-stack and delayed-capture recursion space; decoding and encoding use
+their own traversal space. JSON does not modify PEG's shared stack limit or
+convert independent engine/runtime failures into JSON limit errors. Applications
+can choose `peg.set_max_stack` for their workloads; documents with nested sibling
+lists can need more matching-stack space than equally deep single-child chains.
+Streaming,
+pretty printing, field renaming, custom codec registries,
 reference preservation, and automatic generic type tokens are outside this API.
 
 See [JSON implementation](../implementation/json-library.md) for the parser,

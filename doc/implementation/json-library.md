@@ -44,13 +44,18 @@ so conversion happens only after the requested descriptor is known.
 
 Every JSON value produces exactly one nonnil private `Node`. A null node stays
 nonnil until conversion. Array nodes hold dense `{Node}` children; object nodes
-hold dense `{Member}` entries and a decoded-name set. A `Member` retains its
+hold dense `{Member}` entries and fresh typed parse state containing a
+decoded-name set and one pending key node. A `Member` retains its
 key name, key position, and value node. This preserves source positions, duplicate
 members, trailing nulls, and the distinction between missing and explicit null.
 
 Containers use ordinary delayed PEG fold captures. A seed capture creates a
 fresh private Array/object node on each evaluation; a reducer accepts that node
-and one child/member, appends to its dense storage, and returns it. The final
+and one captured node, updates its dense storage, and returns it. The object
+grammar emits a key node and a value node as separate sibling captures; its
+reducer retains the key until the next call constructs the `Member`. This avoids
+an extra delayed-capture recursion layer around every nested member value.
+The final
 accumulator is the container node. No callback receives the entire list as a
 flexible argument run, so widths above the ordinary capture-argument boundary
 do not require eager materialization or an imperative stack of builders.
@@ -106,13 +111,17 @@ encoding. In particular, deterministic Map output sorts keys with a byte-order
 merge sort. It does not promise linear-time encoding of arbitrarily wide
 objects.
 
-Nesting consumes both PEG matching-stack space and native delayed-capture
-recursion space. Defaults and the maximum accepted `max_depth` are centralized
-in `json.titan`; validation must cover the actual grammar under both limits,
-plus decoder/writer nesting. JSON never changes `peg.set_max_stack` as a side
-effect of a call. Applications selecting a smaller shared PEG stack may see an
-independent engine-resource failure. Width and nesting tests exercise these
-different boundaries separately.
+`max_depth` accepts positive integers and defaults to 32; it is an explicit
+container budget, not an upper bound on the independent execution resources
+needed by every accepted document. Nesting consumes both PEG matching-stack
+space and native delayed-capture recursion space, plus decoder/writer traversal
+space. JSON never changes `peg.set_max_stack` as a side effect of a call or
+relabels an independent engine/runtime failure. Applications own the shared PEG
+stack policy: sibling repetitions can retain more matching-stack entries than
+single-child chains at the same depth. Tests exercise arrays and objects at 128
+with the default stack, mixed nesting with siblings at 128 with an explicitly
+configured stack, and rejection at an explicit smaller JSON budget. Width and
+nesting tests cover separate boundaries.
 
 ## Exact scalar conversion
 

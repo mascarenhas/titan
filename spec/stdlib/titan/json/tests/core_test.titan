@@ -131,7 +131,11 @@ function test_core_options_and_limits(_context: test.Context)
   core_error(function() json.encode(1, json.EncodeOption.max_bytes(0)) end, "invalid_option")
   core_error(function() json.decode("1", nil, json.DecodeOption.max_nodes(-1)) end, "invalid_option")
   core_error(function() json.encode(1, json.EncodeOption.max_depth(0)) end, "invalid_option")
-  core_error(function() json.decode("1", nil, json.DecodeOption.max_depth(100000)) end, "invalid_option")
+  core_error(function() json.encode(1, json.EncodeOption.max_depth(-1)) end, "invalid_option")
+  core_error(function() json.decode("1", nil, json.DecodeOption.max_depth(0)) end, "invalid_option")
+  core_error(function() json.decode("1", nil, json.DecodeOption.max_depth(-1)) end, "invalid_option")
+  test.assert(json.encode(1, json.EncodeOption.max_depth(math.maxinteger)) == "1")
+  test.assert(json.decode("1", nil, json.DecodeOption.max_depth(math.maxinteger)) == 1)
   core_error(function() json.encode(1, json.EncodeOption.null_value(0.0 / 0.0)) end, "invalid_option")
   core_error(function() json.decode("1", nil, json.DecodeOption.null_value(0.0 / 0.0)) end,
              "invalid_option")
@@ -157,6 +161,19 @@ function test_core_options_and_limits(_context: test.Context)
       mapping_target("MappingPerson"), json.DecodeOption.ignore_unknown_fields(true),
       json.DecodeOption.max_nodes(5))
   end, "limit_exceeded")
+end
+
+function test_core_default_depth_limit(_context: test.Context)
+  local source = strings.rep("[", 32) .. "true" .. strings.rep("]", 32)
+  local decoded: value = json.decode(source)
+  test.assert(json.encode(decoded) == source)
+  local failure = core_error(function() json.decode("[" .. source .. "]") end,
+                             "limit_exceeded")
+  test.assert(failure.position == 33)
+  local deeper: {value} = {decoded}
+  core_error(function() json.encode(deeper) end, "limit_exceeded")
+  test.assert(json.encode(deeper, json.EncodeOption.max_depth(33)) ==
+              "[" .. source .. "]")
 end
 
 function test_core_cycles_sharing_and_unsupported_values(_context: test.Context)
