@@ -948,9 +948,20 @@ jobs:
           bash spec/support/ci_sanitizer_capture.sh json-wide-folds \
             make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_parser_wide_fold_collections'
           bash spec/support/ci_sanitizer_capture.sh json-nesting \
-            make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_parser_supported_nesting_boundary'
+            make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_parser_configured_nesting_boundary'
+          bash spec/support/ci_sanitizer_capture.sh json-nesting-mixed \
+            make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_parser_deep_mixed_containers_and_sibling_members'
+          bash spec/support/ci_sanitizer_capture.sh json-nesting-peg-limit \
+            make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_parser_peg_limit_is_independent_of_depth_option'
           bash spec/support/ci_sanitizer_capture.sh json-numbers \
             make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_core_float_range_tags_and_round_trips'
+          for nesting_log in json-nesting json-nesting-mixed json-nesting-peg-limit; do
+            if ! grep -Eq '^\[==========\] [1-9][0-9]* tests? ran\.$' \
+                "$TITAN_SANITIZER_LOG_DIR/$nesting_log.log"; then
+              echo "JSON nesting sanitizer filter ran no tests: $nesting_log" >&2
+              exit 1
+            fi
+          done
 
       - name: Run native reflection sanitizer gate
         run: |

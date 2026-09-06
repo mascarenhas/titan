@@ -97,3 +97,22 @@ mutates the shared PEG stack or relabels unexpected engine failures.
   APIs, serialized metadata versions, and the native PEG engine are unchanged.
   The extension is locally wrapped and verified before this PR is opened.
   Linux CI evidence will be added to the PR after publication.
+
+## CI selector correction
+
+Inspection of the first completed sanitizer log found that the workflow still
+selected the old `test_parser_supported_nesting_boundary` name and reported
+zero tests. The regular full native suite had run the new depth tests, but the
+first green sanitizer job did not establish that nesting coverage.
+
+- Update the selector to the configured-nesting test and add separate mixed
+  sibling and independent PEG-limit selections. Require a positive native test
+  count in all three corresponding logs. Keep the guard local to this JSON
+  step and preserve the existing sanitizer capture helper behavior.
+- Update the existing workflow contract for the extra invocations and labels.
+  Each exact selector ran one test and passed in the canonical native binary.
+  Executing the actual extracted shell guard accepted singular/plural positive
+  counts and rejected zero. The focused existing Busted workflow contract
+  passed. No production, native engine, metadata, or SDK source changed.
+- Rerun Linux CI on the corrected commit and inspect the three sanitizer log
+  counts explicitly. Repin the extension to that commit and verify its CI too.
