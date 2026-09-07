@@ -598,6 +598,37 @@ function toplevel_name(node)
     end
 end
 
+-- Resolve and interpret headers separately from downstream conversion when a
+-- persistence transport needs the complete ordered import identity first.
+-- Non-cached ordinary compilation retains its existing one-pass handler.
+function prepare_foreign_import(node, st)
+    local ftypes, err, include, strategy, process_options
+    if foreign_c_config_error then
+        err = foreign_c_config_error
+    else
+        local service
+        service, err = ensure_probe_service(st)
+        if service then
+            local options
+            options, err = service:cdriver_process_options()
+            if options then
+                process_options, strategy = options, options.io
+                options.source_dir = st.source_dir
+                ftypes, err, include = cdriver.process_file(node.headername, options)
+            end
+        end
+    end
+    if ftypes then
+        local normalized
+        normalized, err = cprobe.normalize_include_descriptor(include, {
+            source_dir = st.source_dir, io = strategy,
+        })
+        if normalized then include = normalized else ftypes = nil end
+    end
+    return { ftypes = ftypes, err = err, include = include,
+        process_options = process_options }
+end
+
 -- Typecheck the toplevel node
 toplevel_visitor = util.make_visitor({
     ["Ast.TopLevelImport"] = function(node, st, errors, loader)
@@ -645,38 +676,14 @@ toplevel_visitor = util.make_visitor({
 
     ["Ast.TopLevelForeignImport"] = function(node, st, errors)
         local name = node.headername
-        local ftypes, err, include
-        local strategy
-        local process_options
-        if foreign_c_config_error then
-            err = foreign_c_config_error
-        else
-            local service
-            service, err = ensure_probe_service(st)
-            if service then
-                local options
-                options, err = service:cdriver_process_options()
-                if options then
-                    process_options = options
-                    strategy = options.io
-                    options.source_dir = st.source_dir
-                    ftypes, err, include =
-                        cdriver.process_file(name, options)
-                end
-            end
+        local prepared = st.prepared_foreign_imports
+            and st.prepared_foreign_imports[node] or prepare_foreign_import(node, st)
+        if st.defer_foreign_conversion then
+            st.prepared_foreign_imports[node] = prepared
+            return
         end
-        if ftypes then
-            local normalized
-            normalized, err = cprobe.normalize_include_descriptor(include, {
-                source_dir = st.source_dir,
-                io = strategy,
-            })
-            if normalized then
-                include = normalized
-            else
-                ftypes = nil
-            end
-        end
+        local ftypes, err, include, process_options = prepared.ftypes,
+            prepared.err, prepared.include, prepared.process_options
         if ftypes then
             node._include = include
             st.last_foreign_import_node = node
@@ -1685,12 +1692,43 @@ function checktoplevel(ast, st, errors, loader)
     reserve_toplevel_names(ast, st)
     local constructors = collect_nominal_constructors(ast)
 
+    local foreign_imports = {}
+    if st.cache_adapter then
+        st.prepared_foreign_imports = {}
+        st.defer_foreign_conversion = true
+    end
+
     for _, node in ipairs(ast) do
         if not node._ignore and
            (node._tag == "Ast.TopLevelImport" or
             node._tag == "Ast.TopLevelForeignImport") then
+            if node._tag == "Ast.TopLevelForeignImport" then
+                foreign_imports[#foreign_imports + 1] = node
+            end
             visit_toplevel(node, st, errors, loader)
         end
+    end
+    local conversion_key, conversion_payload
+    if st.cache_adapter then
+        st.defer_foreign_conversion = nil
+        conversion_key = foreigncache.key(st, foreign_imports, st.prepared_foreign_imports)
+        local restored = conversion_key and #errors == 0
+            and foreigncache.restore(st, foreign_imports, conversion_key)
+        if restored then
+            for _, node in ipairs(foreign_imports) do
+                local prepared = st.prepared_foreign_imports[node]
+                local started = cdriver.process_phase_clock(prepared.process_options)
+                cdriver.emit_process_phase(prepared.process_options,
+                    node.headername, node._include,
+                    "downstream_ffi_conversion", "cache_hit", started)
+            end
+        else
+            for _, node in ipairs(foreign_imports) do visit_toplevel(node, st, errors, loader) end
+            if conversion_key and #errors == 0 and st.cache_adapter.put then
+                conversion_payload = foreigncache.encode(st, foreign_imports, conversion_key)
+            end
+        end
+        st.prepared_foreign_imports = nil
     end
     -- Generated C places direct-source foreign headers after this module's
     -- direct C imports. Replay those headers in the same order before checking
@@ -1698,6 +1736,9 @@ function checktoplevel(ast, st, errors, loader)
     -- contextual probes see exactly the environment the C compiler will see.
     apply_source_foreign_headers(ast, st, errors)
     finalize_foreign_redeclarations(st, errors)
+    if conversion_payload and #errors == 0 then
+        foreigncache.store(st, conversion_key, conversion_payload, foreign_imports)
+    end
     -- Structural constraints cannot be decided until every nominal method
     -- signature has populated its canonical owner descriptor. Keep every
     -- signature-time application deferrable across aliases, owners, top-level

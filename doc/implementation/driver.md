@@ -284,6 +284,92 @@ The checker's `target_profile_provider` is separate from its native
 and requires it to agree with the declared target. Missing native prerequisites
 remain errors. Omitting the profile preserves ordinary driver/checker behavior.
 
+Version 6 adds compiler-owned persistent graph payloads. The embedding owns
+its database, transactions, file/provider validation, and publication policy;
+the ordinary compiler has no database dependency.
+
+* `driver.encode_project_entry(entry, options)` returns a binary Lua string or
+  `nil, error`. It accepts a complete clean source entry, preserving its full
+  annotated project AST, declared and lowered types, generic owner registry,
+  source-private links, table keys, sharing, cycles, primitive number forms,
+  binary strings, literal metatables, and CPP spacing/raw-spelling sidecars.
+  `options.project_files` is the complete allowed project filename set; when
+  omitted, only this entry's own source files are allowed. Every reachable
+  source AST must belong to that set. Resolver-owned checking-header paths are
+  excluded from the entry root and recreated by cached-source loading.
+* `driver.decode_project_entry(bytes, options)` returns a private entry graph
+  or `nil, error`. The optional `module_name` and `project_files` constrain
+  expected ownership. Decode never executes Lua, registers types, changes
+  `driver.imported`, or performs filesystem I/O. Hosts must validate all saved
+  file/provider inputs before assigning the entry to `cached_source_entries`.
+* `driver.project_entries_registry(entries)` returns a fresh declared owner
+  map for caller-certified clean project entries, or `nil, error`. A project's
+  own entry supplies its authoritative owner; imported external owners remain
+  interface graphs. The host installs this map as `types.registry` only while
+  holding its normal compiler permit. Decode and registry preparation are not
+  publication operations. Entries are independent payloads: a host can preserve
+  an unchanged row when its semantic revision and dependency validation remain
+  current, while preparing the registry from the complete current entry set.
+* `driver.language_server_cache_identity({context = context})` returns an
+  opaque digest or `nil, error`. It includes API, graph, release/library/ABI,
+  conversion and target identities, working directory, compiler command, and
+  the actual preprocessor argv/include-root/predefined-macro/forced-header
+  world. Call it once per saved analysis before reading project payloads. A
+  verified embedded profile allows a distinct native-unavailable identity
+  when no SDK is installed. Hosts additionally fingerprint the loaded compiler
+  and native-module files, embedded provider, configuration, source roots and
+  semantic schema. The generated-code ABI alone is not a cache namespace.
+
+`options.cache_adapter` on a resolver context supplies dot callbacks
+`get(kind, key)` and optional `put(kind, key, bytes, inputs)`. Reads return a
+binary string or a miss; writes return success. `inputs` is a dense ordered
+array of `{kind, path, identity}` observations. String transport exceptions and
+bad payloads degrade to ordinary compilation; non-string exceptions preserve
+the cancellation object's identity. Callbacks may suspend through the host's
+compiler boundary. Read-only clients omit `put`; saved indexing can stage
+completed writes and commit them with its own snapshot transaction.
+
+Project encode/decode options and the cache adapter also accept an optional
+`sha256_binary(bytes)` dot callback returning exactly 32 binary SHA-256 bytes.
+Embeddings can use a synchronous native digest implementation for large graph
+payloads; omission retains the dependency-free Lua implementation. The callback
+must hash the supplied complete string, including embedded NUL/high bytes,
+without changing compiler state. Its output uses the same wire checksum as the
+fallback, so payloads remain readable in either mode and no format/API version
+changes. Invalid results and string errors are cache misses; non-string
+exception objects propagate unchanged through the graph boundary.
+
+The `c-header-v1` payload is the completed interpreted C graph. The existing
+process cache remains the first tier. A disk miss runs normal preprocessing,
+parsing and registration; a disk hit still hashes every dependency and
+restats every search candidate before retaining the private graph. The fourth
+`put` argument contains the reusable header's dependency and search tails;
+the caller's forced-header/top-level search prefix is reconstructed on every
+request. Equal mtimes never certify equal bytes. Followed identity, final
+symlink identity, readability and missing/shadowing candidates are observed.
+
+The `ffi-conversion-v1` payload is one ordered compilation-unit C environment,
+including canonical tags/types, declaration histories, pending contextual
+checks, macro state, converted enums and import descriptors. Its key includes
+the module/source directory, ordered header occurrences, complete observed C
+inputs and live target/toolchain, independently of importer body bytes.
+Replay rebinds references and symbols to the current import AST and skips
+`foreigntypes.convert`. Direct-source generated-header context and final C
+declaration validation run after replay, so cached C-only state never retains
+a previous resolver's source-header temporaries. Conversion writes report
+the complete direct-C input closure in their fourth argument.
+
+The graph codec bounds bytes, strings, nodes and edges, checks its version and
+SHA-256 integrity, and allocates all table references before restoring edges
+and CPP sidecars. Functions, userdata and threads are unsupported. Corrupt,
+truncated, incompatible or nonliteral payloads are misses. Payloads are
+disposable implementation data, not portable binary-module metadata.
+`driver.compiler_cache_stats({context = context})` returns `headers` and
+`conversion` counters; conversion has `lookups`, `hits`, `misses` and `stores`.
+Use a fresh `c_header_analysis` token per saved analysis even when retaining
+the same I/O strategy's process cache: an analysis token intentionally skips
+repeat closure restats only within that one analysis.
+
 ### `driver.new_resolver_context(options)`
 
 Every resolver context owns exactly one validated compiler-I/O strategy in
@@ -1538,7 +1624,7 @@ the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 | `driver.INSTALL_PATHS` | `driver.installed_paths` | paths below `driver.TITAN_ROOT` | Holds `lua_source`, `include`, `lib`, `libtitan`, `libbacktrace`, `liblua`, `titan_bin`, and `lua_cpath`; bundled `libuv.a` is deliberately not an installed SDK path. |
 | `driver.TITAN_BIN_PATH` | `driver.lua` | `TITAN_PATH_0_6`, `TITAN_PATH`, or `.;<root>/lib/titan/0.6` in installed mode | Roots for root-major, shallow-to-exact compiled-provider search; checkout mode retains the legacy `/usr/local` fallback. |
 | `driver.TITAN_SOURCE_PATH` | `driver.lua` | `"."` (overridden by `titanc --tree`) | Semicolon-separated roots searched for folder `P/B.titan` before flat `P.titan`, including contributor privacy checks. |
-| `driver.LANGUAGE_SERVER_API_VERSION` | `driver.lua` | `5` | Exact compiler/semantic-client handshake, independent from generated-code ABI; covers private source metadata, exact C-header dependency metadata/restatting, context-owned I/O/checkpoints, and the analysis-only embedded-interface provider below. |
+| `driver.LANGUAGE_SERVER_API_VERSION` | `driver.lua` | `6` | Exact compiler/semantic-client handshake, independent from generated-code ABI; covers private source metadata, exact C-header dependencies, context-owned I/O/checkpoints, the embedded interface/target provider, and compiler-owned persistent graph payloads. |
 | `TITAN_NO_LINE_DIRECTIVES` / `driver.EMIT_LINE_DIRECTIVES` | environment / `driver.lua` | unset / true | Exact environment value `1`, or `titanc --no-line-directives`, disables generated Titan `#line` directives for physical generated-C diagnostics; this can omit ordinary native Titan frames from logical tracebacks. |
 | `options.source_roots` | `titanc` / `driver.defaultloader` | every CLI module name | Requires explicit build roots to come from flat/folder source; other ordinary edges retain the resolver context's binary-first or test-mode source-first policy, while `.titan` edges remain source-required. Selected source descriptors also provide `program_output`. |
 | `options.known_source_modules` | semantic clients / `driver.defaultloader` | `{}` | Validated module-name set used for resolver-wide source identity and source/provider overlap planning without marking modules dirty. |

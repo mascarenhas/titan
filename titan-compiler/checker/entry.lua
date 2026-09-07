@@ -24,6 +24,7 @@ function checker.check(modname, ast, subject, filename, loader, options)
     loop_depth = 0
     loop_frames = {}
     local st = symtab.new(modname)
+    st.cache_adapter = options.cache_adapter
     local previous_check_state = active_check_state
     active_check_state = st
     st.c_profile = nil

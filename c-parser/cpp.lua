@@ -106,8 +106,10 @@ end
 
 function cpp.header_file_identity(contents, path, strategy)
     strategy = strategy or default_io
+    local link = strategy:lstat(path)
     local followed = strategy:stat(path)
-    return "c-header-file-v1:sha256:" .. sha256.hex(contents) ..
+    return "c-header-file-v2:sha256:" .. sha256.hex(contents) ..
+        ";lstat=" .. attribute_identity(link) ..
         ";stat=" .. attribute_identity(followed)
 end
 
@@ -116,7 +118,7 @@ function cpp.header_input_identity(kind, path, strategy)
     if kind == "file" then
         local contents, err = read_file_contents(path, strategy)
         if not contents then
-            return "c-header-file-v1:unreadable:" ..
+            return "c-header-file-v2:unreadable:" ..
                 cpp.header_search_identity(path, nil, strategy), err
         end
         return cpp.header_file_identity(contents, path, strategy)
@@ -288,6 +290,53 @@ end
 
 function cpp.clone_graph(value)
     return clone_graph(value)
+end
+
+-- The compiler's literal graph codec owns ordinary nodes; this module alone
+-- owns token spelling/spacing sidecars. Keep their tables private while making
+-- the same complete graph available to persistent compiler caches.
+local graphcodec = require "titan-compiler.graphcodec"
+
+local function graph_annotations(node)
+    if pp_spacing[node] or pp_raw_spelling[node] then
+        return {
+            spacing = pp_spacing[node],
+            raw_spelling = pp_raw_spelling[node],
+        }
+    end
+end
+
+local function restore_graph_annotations(node, annotations)
+    for name, value in next, annotations do
+        assert((name == "spacing" or name == "raw_spelling")
+            and type(value) == "table", "invalid CPP graph annotations")
+    end
+    pp_spacing[node] = annotations.spacing
+    pp_raw_spelling[node] = annotations.raw_spelling
+end
+
+-- Other compiler-owned graph cloners use their own edge policy and memo. Let
+-- them preserve CPP provenance through that same memo without exposing either
+-- weak side table or independently copying shared token nodes.
+function cpp.copy_graph_annotations(source, target, clone)
+    local annotations = graph_annotations(source)
+    if annotations then restore_graph_annotations(target, clone(annotations)) end
+end
+
+local function graph_options(options)
+    local copy = {}
+    for key, value in pairs(options or {}) do copy[key] = value end
+    copy.annotations = graph_annotations
+    copy.restore_annotations = restore_graph_annotations
+    return copy
+end
+
+function cpp.encode_graph(value, options)
+    return graphcodec.encode(value, graph_options(options))
+end
+
+function cpp.decode_graph(payload, options)
+    return graphcodec.decode(payload, graph_options(options))
 end
 
 

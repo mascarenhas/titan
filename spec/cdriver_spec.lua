@@ -46,6 +46,139 @@ local function assert_process_file(filename, options)
     return ffi_types, include, context
 end
 
+describe("completed C header payload transport", function()
+    local files, original_match, matches, payloads, adapter
+    before_each(function()
+        files, matches, payloads = {}, 0, {}
+        cdriver.clear_process_cache()
+        local c99 = require "c-parser.c99"
+        original_match = c99.match_language_grammar
+        c99.match_language_grammar = function(...)
+            matches = matches + 1
+            return original_match(...)
+        end
+        adapter = {
+            get = function(kind, key) return payloads[kind .. "\0" .. key] end,
+            put = function(kind, key, payload)
+                payloads[kind .. "\0" .. key] = payload
+                return true
+            end,
+        }
+    end)
+    after_each(function()
+        require("c-parser.c99").match_language_grammar = original_match
+        cdriver.clear_process_cache()
+        for _, file in ipairs(files) do os.remove(file) end
+    end)
+    local function header(source)
+        local path = tmp_header(source)
+        files[#files + 1] = path
+        return path
+    end
+
+    it("reopens complete graphs without parsing and preserves macro sidecars", function()
+        local cpp = require "c-parser.cpp"
+        local path = header("typedef struct node node;\nstruct node { node *next; };\n")
+        local options = {
+            cache_adapter = adapter,
+            cppflags = { "-DTITAN_STR(x)=#x", "-DTITAN_VALUE=TITAN_STR(a + b)" },
+        }
+        local first = assert_process_file(path, options)
+        assert.equal(1, matches)
+        assert.is_not_nil(next(payloads))
+        cdriver.clear_process_cache()
+        cpp.clear_probe_cache()
+        local restored, include = assert_process_file(path, options)
+        assert.equal(1, matches)
+        assert.equal(1, cdriver.process_cache_stats().hits)
+        assert.equal('"a + b"', cpp.expand_macro("TITAN_VALUE", restored.macro_definitions))
+        assert.not_equal(first.node, restored.node)
+        assert.matches("titan-cdriver-process-v2:sha256:", include.c_header_graph_key, 1, true)
+        restored.node.def[1] = "mutated"
+        local clean = assert_process_file(path, options)
+        assert.not_equal("mutated", clean.node.def[1])
+    end)
+
+    it("invalidates changed header bytes despite preserved mtime", function()
+        local path = header("typedef int changed_type;\n")
+        local options = { cache_adapter = adapter }
+        assert_process_file(path, options)
+        local stamp = assert(lfs.attributes(path, "modification"))
+        write_file(path, "typedef unsigned changed_type;\n")
+        assert(lfs.touch(path, stamp, stamp))
+        cdriver.clear_process_cache()
+        local restored = assert_process_file(path, options)
+        assert.equal(2, matches)
+        assert.same({ "unsigned" }, restored.changed_type.def)
+    end)
+
+    it("rebuilds corrupt transport payloads and tolerates transport failure", function()
+        local path = header("typedef int safe_type;\n")
+        local options = { cache_adapter = adapter }
+        assert_process_file(path, options)
+        for key, payload in pairs(payloads) do payloads[key] = payload:sub(1, -2) end
+        cdriver.clear_process_cache()
+        assert_process_file(path, options)
+        assert.equal(2, matches)
+        cdriver.clear_process_cache()
+        options.cache_adapter = {
+            get = function() error("storage unavailable") end,
+            put = function() error("storage unavailable") end,
+        }
+        assert_process_file(path, options)
+        assert.equal(3, matches)
+    end)
+
+    it("does not publish through a read-only adapter", function()
+        local path = header("typedef int readonly_type;\n")
+        assert_process_file(path, { cache_adapter = { get = adapter.get } })
+        assert.is_nil(next(payloads))
+        assert.equal(1, matches)
+    end)
+
+    it("uses adapter checksums for persisted headers and preserves hash cancellation", function()
+        local path = header("typedef int hashed_type;\n")
+        local hashes = 0
+        adapter.sha256_binary = function(bytes)
+            hashes = hashes + 1
+            return require("titan-compiler.sha256").binary(bytes)
+        end
+        assert_process_file(path, { cache_adapter = adapter })
+        assert.equal(1, hashes)
+        cdriver.clear_process_cache()
+        assert_process_file(path, { cache_adapter = adapter })
+        assert.equal(2, hashes)
+        assert.equal(1, matches)
+        cdriver.clear_process_cache()
+        local cancelled = {}
+        adapter.sha256_binary = function() error(cancelled, 0) end
+        local ok, err = pcall(cdriver.process_file, path, { cache_adapter = adapter })
+        assert.is_false(ok)
+        assert.equal(cancelled, err)
+        adapter.sha256_binary = function() return "invalid digest" end
+        assert_process_file(path, { cache_adapter = adapter })
+        assert.equal(2, matches)
+        adapter.sha256_binary = false
+        local result, invalid = cdriver.process_file(path, { cache_adapter = adapter })
+        assert.is_nil(result)
+        assert.matches("sha256_binary", invalid, 1, true)
+    end)
+
+    it("retains direct symlink identity even when the target bytes are identical", function()
+        local path = header("typedef int link_type;\n")
+        local link = path .. ".link"
+        assert(lfs.link(path, link, true))
+        files[#files + 1] = link
+        local strategy = compiler_io.new_sync()
+        local first = assert(cdriver.header_input_identity("file", link, strategy))
+        os.remove(link)
+        assert(lfs.link(path, link))
+        local second = assert(cdriver.header_input_identity("file", link, strategy))
+        assert.not_equal(first, second)
+        assert.matches(";lstat=", first, 1, true)
+    end)
+end)
+
 describe("C FFI cdriver", function()
     describe("top-level include descriptor", function()
         it("treats absolute paths as quoted includes", function()

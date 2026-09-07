@@ -8,6 +8,10 @@ local ctypes = require("c-parser.ctypes")
 local cdefines = require("c-parser.cdefines")
 local compiler_io = require("titan-compiler.io")
 local sha256 = require("titan-compiler.sha256")
+local cacheadapter = require("titan-compiler.cacheadapter")
+
+cdriver.HEADER_CACHE_VERSION = 1
+local HEADER_CACHE_KIND = "c-header-v1"
 
 local SEP = package.config:sub(1, 1)
 local default_io = compiler_io.new_sync()
@@ -563,6 +567,15 @@ local function new_cpp_context(options)
     return cpp.new_context(config)
 end
 
+-- Exact live compiler/preprocessor world for persistent semantic namespaces.
+-- The context key includes argv, language mode, discovered include roots,
+-- predefined macro tokens and the forced-header closure.
+function cdriver.preprocessor_cache_identity(options)
+    local context, err = new_cpp_context(normalize_options(options))
+    if not context then return nil, err end
+    return context.preprocessor_configuration_key
+end
+
 -- Inspect the forced preprocessing headers without parsing a module header.
 -- cprobe uses this exact context to key compiler probes and to expose the
 -- same restattable file/search inputs even before cdriver sees a foreign
@@ -659,8 +672,56 @@ local function input_tail_matches_prefix(inputs, identities)
     return true
 end
 
+local function valid_cached_inputs(inputs, kind)
+    if type(inputs) ~= "table" then return false end
+    for index, input in ipairs(inputs) do
+        if type(input) ~= "table" or input.kind ~= kind
+           or type(input.path) ~= "string" or input.path:sub(1, 1) ~= "/"
+           or type(input.identity) ~= "string" or input.identity == "" then
+            return false
+        end
+    end
+    for key in next, inputs do
+        if math.type(key) ~= "integer" or key < 1 or key > #inputs then
+            return false
+        end
+    end
+    return true
+end
+
+local function decode_header_entry(payload, key, adapter)
+    local entry = cpp.decode_graph(payload, { sha256_binary = adapter.sha256_binary })
+    if type(entry) ~= "table" or entry.version ~= cdriver.HEADER_CACHE_VERSION
+       or entry.key ~= key or type(entry.ffi_types) ~= "table"
+       or type(entry.ffi_types.macro_definitions) ~= "table"
+       or type(entry.ffi_types.macro_changes) ~= "table"
+       or not valid_cached_inputs(entry.dependencies, "file")
+       or not valid_cached_inputs(entry.search_inputs, "search") then
+        return nil
+    end
+    for _, item in ipairs(entry.ffi_types) do
+        if type(item) ~= "table" or type(item.name) ~= "string"
+           or type(item.type) ~= "table" then return nil end
+    end
+    entry.version, entry.key = nil, nil
+    entry.weight, entry.last_used = 0, 0
+    return entry
+end
+
+local function encode_header_entry(entry, key, adapter)
+    return cpp.encode_graph({
+        version = cdriver.HEADER_CACHE_VERSION,
+        key = key,
+        ffi_types = entry.ffi_types,
+        dependencies = entry.dependencies,
+        search_inputs = entry.search_inputs,
+    }, { sha256_binary = adapter.sha256_binary })
+end
+
 local function process_file_inner(filename, options)
     options = normalize_options(options)
+    local cache_valid, cache_error = cacheadapter.validate(options.cache_adapter)
+    if not cache_valid then return nil, cache_error end
     local strategy = io_for(options)
     local analysis_entries, analysis_error =
         process_analysis_entries(options, strategy)
@@ -759,7 +820,34 @@ local function process_file_inner(filename, options)
     local search_prefix_length = #search_inputs
     local cache = process_cache_for(strategy)
     local cache_key = process_cache_key(filename, include, ctx, cwd)
+    include.c_header_graph_key = cache_key
     cache.lookups = cache.lookups + 1
+    local restored_validated
+    if not cache.entries[cache_key] and options.cache_adapter then
+        local payload = cacheadapter.get(
+            options.cache_adapter, HEADER_CACHE_KIND, cache_key)
+        local decoded, restored = pcall(decode_header_entry,
+            payload, cache_key, options.cache_adapter)
+        if not decoded then
+            if type(restored) ~= "string" then error(restored, 0) end
+            restored = nil
+        end
+        -- The disk payload supplies data, never input authority. Hash/recheck
+        -- the exact closure before inserting it into the live cache.
+        if restored and not cache.entries[cache_key]
+           and input_tail_matches_prefix(restored.dependencies, dependency_identities)
+           and input_tail_matches_prefix(restored.search_inputs, search_identities)
+           and input_tail_is_current(restored.dependencies, strategy)
+           and input_tail_is_current(restored.search_inputs, strategy) then
+            local weight = cache.tracks_weight and (graph_weight(restored)
+                + graph_weight(cache_key) + PROCESS_CACHE_MAP_SLOT_WEIGHT) or 0
+            if make_cache_room(cache, cache_key, weight) then
+                restored.weight = weight
+                store_cache_entry(cache, cache_key, restored)
+                restored_validated = restored
+            end
+        end
+    end
     while true do
         local cached = cache.entries[cache_key]
         if not cached then break end
@@ -774,7 +862,7 @@ local function process_file_inner(filename, options)
             and input_tail_matches_prefix(
                 cached.search_inputs, search_identities)
         local compatible = prefix_compatible
-            and (analysis_reuse
+            and (analysis_reuse or cached == restored_validated
                 or (input_tail_is_current(cached.dependencies, strategy)
                     and input_tail_is_current(
                         cached.search_inputs, strategy)))
@@ -996,6 +1084,21 @@ local function process_file_inner(filename, options)
         end
         cdriver.emit_process_phase(options, filename, include,
             "graph_clone", "retained_store", retained_clone_started)
+        if options.cache_adapter and options.cache_adapter.put then
+            local payload = encode_header_entry(entry, cache_key, options.cache_adapter)
+            if payload and cache.entries[cache_key] == entry then
+                local inputs = {}
+                for _, group in ipairs({ entry.dependencies, entry.search_inputs }) do
+                    for _, input in ipairs(group) do
+                        inputs[#inputs + 1] = {
+                            kind = input.kind, path = input.path, identity = input.identity,
+                        }
+                    end
+                end
+                cacheadapter.put(options.cache_adapter,
+                    HEADER_CACHE_KIND, cache_key, payload, inputs)
+            end
+        end
     end
 
     -- The fourth result is deliberately contextual rather than process-global:

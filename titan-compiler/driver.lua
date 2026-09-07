@@ -11,6 +11,11 @@ local csemantics = require "titan-compiler.csemantics"
 local compiler_io = require "titan-compiler.io"
 local sourceinterface = require "titan-compiler.sourceinterface"
 local version = require "titan-compiler.version"
+local projectcache = require "titan-compiler.projectcache"
+local cacheadapter = require "titan-compiler.cacheadapter"
+local foreigncache = require "titan-compiler.foreigncache"
+local graphcodec = require "titan-compiler.graphcodec"
+local sha256 = require "titan-compiler.sha256"
 
 local lfs = require "lfs"
 
@@ -39,7 +44,31 @@ driver.LUA_VERSION = version.LUA_VERSION
 -- provider whose entries never become native link inputs. API 5 admits its
 -- verified build-target numeric profile for SDK-free semantic analysis while
 -- retaining live native-toolchain checks for actual C probes.
-driver.LANGUAGE_SERVER_API_VERSION = 5
+-- API 6 supplies literal checked-project payloads and an optional compiler
+-- cache transport for completed C-header/conversion graphs.
+driver.LANGUAGE_SERVER_API_VERSION = 6
+driver.PROJECT_CACHE_VERSION = projectcache.VERSION
+
+function driver.encode_project_entry(entry, options)
+    return projectcache.encode(entry, options)
+end
+
+function driver.decode_project_entry(payload, options)
+    return projectcache.decode(payload, options)
+end
+
+function driver.project_entries_registry(entries)
+    return projectcache.registry(entries)
+end
+
+function driver.compiler_cache_stats(options)
+    local context = options and options.context
+    local strategy = context and context.io
+    return {
+        headers = cdriver.process_cache_stats(strategy),
+        conversion = foreigncache.stats(strategy),
+    }
+end
 
 local LUA_CPATH_SUFFIX = "/lib/lua/" .. driver.LUA_VERSION .. "/?.so"
 
@@ -499,6 +528,7 @@ function driver.configure_foreign_c(context)
     end
     local options = {
         io = io_strategy,
+        cache_adapter = context.cache_adapter,
         process_trace = context.c_header_process_trace,
         process_analysis = context.c_header_analysis,
         compiler = driver.CC,
@@ -539,6 +569,7 @@ function driver.configure_foreign_c(context)
     -- the language server is idle.
     options.process_trace = nil
     options.process_analysis = nil
+    options.cache_adapter = nil
     checker.configure_foreign_c(
         options, driver.TOOLCHAIN_ERROR or platform_err or toolchain_err or
             profile_error)
@@ -723,6 +754,8 @@ function driver.new_resolver_context(options)
     if type(options) ~= "table" then
         error("resolver context options must be a table", 2)
     end
+    local cache_valid, cache_error = cacheadapter.validate(options.cache_adapter)
+    if not cache_valid then error(cache_error, 2) end
     local embedded_interface_provider, embedded_error =
         validate_embedded_interface_provider(
             options.embedded_interface_provider)
@@ -787,6 +820,7 @@ function driver.new_resolver_context(options)
     local context = {
         _resolver_context = true,
         io = io_strategy,
+        cache_adapter = options.cache_adapter,
         prefer_static = options.prefer_static == true,
         source_first = options.source_first == true,
         provider_cache = {},
@@ -1178,6 +1212,7 @@ function driver.get_probe_service(context)
     end
     service, err = cprobe.new_service({
         io = context.io,
+        cache_adapter = context.cache_adapter,
         process_trace = context.c_header_process_trace,
         process_analysis = context.c_header_analysis,
         persistent_cache_trace = persistent_cache_trace,
@@ -1221,6 +1256,57 @@ function driver.get_target_profile(context)
         context.used_embedded_target_profile_identity = nil
     end
     return service.profile
+end
+
+-- Call once for each saved analysis, before reading project payloads. The host
+-- adds its compiler-file/provider/configuration inventory to this identity.
+-- SDK-free analysis still has an explicit native-unavailable identity when a
+-- verified embedded profile supplies the semantic target.
+function driver.language_server_cache_identity(options)
+    local context = options and options.context
+    if type(context) ~= "table" or context.io == nil then
+        return nil, "cache identity requires a resolver context"
+    end
+    local profile, err = driver.get_target_profile(context)
+    if not profile then return nil, err end
+    local identity
+    identity, err = csemantics.profile_identity(profile)
+    if not identity then return nil, err end
+    local cwd
+    cwd, err = context.io:cwd()
+    if not cwd then return nil, err end
+    local service = driver.get_probe_service(context)
+    local native_identity
+    if service then
+        local process_options
+        process_options, err = service:cdriver_process_options()
+        if not process_options then return nil, err end
+        native_identity, err = cdriver.preprocessor_cache_identity(process_options)
+        if not native_identity then return nil, err end
+    else
+        -- Failure diagnostics may contain unique probe temporary paths. Clean
+        -- SDK-free semantics depend on the explicit unavailable state and
+        -- requested configuration, not those presentation-only spellings.
+        native_identity = "native-unavailable"
+    end
+    local pieces = {}
+    for _, item in ipairs({
+        "titan-language-server-cache-v1", driver.LANGUAGE_SERVER_API_VERSION,
+        driver.TITAN_VERSION, driver.TITAN_LIBRARY_VERSION,
+        driver.TITAN_ABI_VERSION, graphcodec.VERSION, projectcache.VERSION,
+        foreigncache.VERSION, cdriver.HEADER_CACHE_VERSION, identity, cwd,
+        driver.CC, driver.CFLAGS, driver._TOOLCHAIN_FLAGS_ERROR or "", native_identity,
+    }) do
+        item = tostring(item)
+        pieces[#pieces + 1] = #item .. ":" .. item
+    end
+    for _, values in ipairs({ driver.EXTRA_CPPFLAGS or {}, driver.EXTRA_CFLAGS or {},
+        driver.foreign_include_dirs(), context.extra_ffi_include_dirs or {} }) do
+        pieces[#pieces + 1] = "[" .. #values .. ":"
+        for _, item in ipairs(values) do pieces[#pieces + 1] = #item .. ":" .. item end
+        pieces[#pieces + 1] = "]"
+    end
+    return "titan-language-server-cache-v1:sha256:" .. sha256.hex(table.concat(pieces))
 end
 
 function driver.close_resolver_context(context)
@@ -3346,6 +3432,7 @@ end
 local function check_source_module(
         context, modname, ast, input, filename, loader)
     local check_options = {
+        cache_adapter = context.cache_adapter,
         target_profile_provider = function()
             return driver.get_target_profile(context)
         end,

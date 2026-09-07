@@ -83,6 +83,7 @@ function coder._assert_erased_boundary(ast)
                         tag == "Ast.TypeParam")
                 if not (skip_declared_type and
                         (key == "_declared_type" or
+                            key == "_declared_registry" or
                             key == "_erased_registry" or
                             key == "_surface_typeparams" or
                             key == "_surface_typeargs" or

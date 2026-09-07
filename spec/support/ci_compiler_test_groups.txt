@@ -109,10 +109,13 @@
 3 spec/ctypes_spec.lua 2.516
 2 spec/driver_spec.lua 7.636
 4 spec/foreigntypes_spec.lua 0.113
+2 spec/foreigncache_spec.lua 8.000
+4 spec/graphcodec_spec.lua 0.050
 2 spec/installed_prefix_spec.lua 0.003
 4 spec/lexer_spec.lua 0.045
 2 spec/location_spec.lua 0.002
 4 spec/parser_spec.lua 0.413
+2 spec/projectcache_spec.lua 0.100
 4 spec/sha256_spec.lua 0.013
 2 spec/staticmetadata_spec.lua 0.110
 3 spec/symtab_spec.lua 0.004

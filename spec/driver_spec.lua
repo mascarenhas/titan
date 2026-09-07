@@ -40,9 +40,12 @@ describe("compiler installation discovery", function()
         assert.equal("0.6.0", driver.TITAN_VERSION)
         assert.equal("0.6", driver.TITAN_LIBRARY_VERSION)
         assert.equal("_0_6", driver.TITAN_LIBRARY_VERSION_SUFFIX)
-        assert.equal(5, driver.LANGUAGE_SERVER_API_VERSION)
+        assert.equal(6, driver.LANGUAGE_SERVER_API_VERSION)
         assert.is_function(driver.serialize_source_interface)
         assert.is_function(driver.restat_c_header_dependencies)
+        assert.is_function(driver.language_server_cache_identity)
+        assert.is_function(driver.encode_project_entry)
+        assert.is_function(driver.decode_project_entry)
     end)
 
     it("validates and stores one resolver-owned I/O strategy", function()
@@ -78,6 +81,7 @@ describe("compiler installation discovery", function()
         local captured
         local target_analysis
         local target_trace
+        local target_adapter
 
         local completed, failure = xpcall(function()
             driver.initialize_platform = function()
@@ -98,6 +102,7 @@ describe("compiler installation discovery", function()
             cdriver.target_profile_inputs = function(options)
                 target_analysis = options.process_analysis
                 target_trace = options.process_trace
+                target_adapter = options.cache_adapter
                 return {}
             end
             csemantics.build_profile = function()
@@ -110,16 +115,20 @@ describe("compiler installation discovery", function()
 
             local analysis = driver.new_c_header_analysis()
             local function trace() end
+            local adapter = { get = function() end }
             local context = driver.new_resolver_context({
                 io = compiler_io.new_sync(),
                 c_header_analysis = analysis,
                 c_header_process_trace = trace,
+                cache_adapter = adapter,
             })
             assert.is_true(driver.configure_foreign_c(context))
             assert.equal(analysis, target_analysis)
             assert.equal(trace, target_trace)
+            assert.equal(adapter, target_adapter)
             assert.is_nil(captured.process_analysis)
             assert.is_nil(captured.process_trace)
+            assert.is_nil(captured.cache_adapter)
             assert.equal(context.io, captured.io)
             assert.is_nil(captured.probe_runner)
         end, debug.traceback)
