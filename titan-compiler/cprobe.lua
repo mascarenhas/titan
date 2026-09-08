@@ -2154,6 +2154,7 @@ function Service:cdriver_process_options()
     return {
         io = self.io,
         cache_adapter = self.cache_adapter,
+        header_observations = self.header_observations,
         process_trace = self.process_trace,
         process_analysis = self.process_analysis,
         compiler = copy_array(self.compiler_argv),
@@ -2362,6 +2363,7 @@ function cprobe.new_service(options)
     local service = setmetatable({
         io = strategy,
         cache_adapter = options.cache_adapter,
+        header_observations = options.header_observations or cdriver.header_observation_index(options.header_inputs),
         process_trace = process_trace,
         process_analysis = process_analysis,
         persistent_cache_trace = persistent_cache_trace,

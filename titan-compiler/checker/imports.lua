@@ -762,6 +762,7 @@ function makemoduletype(modname, modast, st)
                 kind = input.kind,
                 path = input.path,
                 identity = input.identity,
+                observation = cdriver.copy_header_observation(input.observation),
             }
         end
         local macro_changes = {}

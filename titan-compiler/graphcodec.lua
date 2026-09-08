@@ -23,6 +23,24 @@ local function limits(options)
     return result
 end
 
+-- Every traversal, including directories and large flat tables, cooperates
+-- after bounded logical work. The callback owns scheduling/cancellation.
+function graphcodec.work(options)
+    local callback = options and options.yield
+    assert(callback == nil or type(callback) == "function",
+        "graph yield must be a function")
+    local remaining = 4096
+    return function(count, force)
+        if callback then
+            remaining = remaining - (count or 1)
+            if remaining <= 0 or force then
+                remaining = 4096
+                callback()
+            end
+        end
+    end
+end
+
 local function checksum(bytes, options)
     local digest = options.sha256_binary
     if digest == nil then digest = sha256.binary end
@@ -35,11 +53,14 @@ end
 
 local function encode(root, options)
     local bound = limits(options)
+    local work = graphcodec.work(options)
+    work(0, true)
     local nodes, ids, records = {}, {}, {}
     local external = options.external or {}
     local entry_count, byte_count = 0, 4
     local chunks = {}
     local function append(bytes)
+        work()
         chunks[#chunks + 1] = bytes
     end
     local function charge(count)
@@ -51,6 +72,7 @@ local function encode(root, options)
         return string.pack(">I4", #value) .. value
     end
     local function value(item)
+        work()
         local kind = type(item)
         if kind == "nil" then charge(1); return "n"
         elseif kind == "boolean" then charge(1); return item and "t" or "f"
@@ -83,6 +105,7 @@ local function encode(root, options)
     local root_value = value(root)
     local index = 1
     while nodes[index] do
+        work()
         local node, record = nodes[index], {}
         charge(4)
         local metatable = getmetatable(node)
@@ -112,11 +135,16 @@ local function encode(root, options)
         for _, entry in ipairs(record) do append(entry) end
     end
     local body = table.concat(chunks)
-    return MAGIC .. checksum(body, options) .. body
+    work(0, true)
+    local payload = MAGIC .. checksum(body, options) .. body
+    work(0, true)
+    return payload
 end
 
 local function decode(payload, options)
     local bound = limits(options)
+    local work = graphcodec.work(options)
+    work(0, true)
     assert(type(payload) == "string", "graph payload must be a string")
     assert(#payload <= bound.max_bytes + #MAGIC + 32,
         "graph byte limit exceeded")
@@ -147,8 +175,12 @@ local function decode(payload, options)
     assert(node_count <= (#body - position) // 6,
         "truncated graph node directory")
     local nodes, records = {}, {}
-    for index = 1, node_count do nodes[index] = {} end
+    for index = 1, node_count do
+        work()
+        nodes[index] = {}
+    end
     local function value()
+        work()
         local tag = take(1)
         if tag == "n" then return nil
         elseif tag == "t" then return true
@@ -170,6 +202,7 @@ local function decode(payload, options)
     end
     local root = value()
     for index = 1, node_count do
+        work()
         local count = integer4()
         entry_count = entry_count + count
         assert(entry_count <= bound.max_entries, "graph entry limit exceeded")
@@ -194,15 +227,18 @@ local function decode(payload, options)
     -- Establish all ordinary references before weak-key metatables or sidecar
     -- publication. The node directory roots every object through this phase.
     for index, record in ipairs(records) do
+        work()
         if record.meta then setmetatable(nodes[index], record.meta) end
     end
     for index, record in ipairs(records) do
+        work()
         if record.annotations then
             assert(type(options.restore_annotations) == "function",
                 "graph annotations have no owner")
             options.restore_annotations(nodes[index], record.annotations)
         end
     end
+    work(0, true)
     return root
 end
 

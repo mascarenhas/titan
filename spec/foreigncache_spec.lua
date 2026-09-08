@@ -10,9 +10,11 @@ describe("ordered foreign conversion payloads", function()
     local directory, files, directories, loaders, contexts, payloads, adapter
 
     local function write(path, contents)
+        local previous = lfs.attributes(path, "modification")
         local file = assert(io.open(path, "wb"))
         assert(file:write(contents))
         assert(file:close())
+        if previous then assert(lfs.touch(path, previous + 1, previous + 1)) end
     end
 
     before_each(function()
@@ -149,7 +151,7 @@ describe("ordered foreign conversion payloads", function()
         assert.is_table(first.type_members.shared)
     end)
 
-    it("invalidates same-mtime header changes and corrupt conversion blobs", function()
+    it("invalidates changed-mtime header changes and corrupt conversion blobs", function()
         local path = header("cached.h", "typedef int item_type;\n")
         local source = [[
             local c = foreign import "cached.h"
@@ -166,10 +168,95 @@ describe("ordered foreign conversion payloads", function()
         count = conversions
         local stamp = assert(lfs.attributes(path, "modification"))
         write(path, "typedef unsigned item_type;\n")
-        assert(lfs.touch(path, stamp, stamp))
+        assert(lfs.touch(path, stamp + 1, stamp + 1))
         local _, changed = check(source)
         assert.is_true(conversions > count)
         assert.equal(1, changed.conversion.misses)
+    end)
+
+    it("treats malformed literal observation inputs as a disposable cache miss", function()
+        header("cached.h", "typedef int item_type;\n")
+        local source = 'local c = foreign import "cached.h"\nfunction answer(): integer return 42 end'
+        local first = check(source)
+        local count, corrupted = conversions, false
+        for key, payload in pairs(payloads) do
+            if key:sub(1, 18) == "ffi-conversion-v1\0" then
+                local snapshot = assert(cpp.decode_graph(payload, {
+                    references = { ["foreign-import:1"] = first.ast[1] },
+                }))
+                local malformed = {}
+                setmetatable(malformed, { __index = malformed })
+                snapshot.node_includes[1].c_header_dependencies[1] = malformed
+                payloads[key] = assert(cpp.encode_graph(snapshot, {
+                    external = { [first.ast[1]] = "foreign-import:1" },
+                }))
+                corrupted = true
+            end
+        end
+        assert.is_true(corrupted)
+        local _, stats = check(source)
+        assert.is_true(conversions > count)
+        assert.equal(1, stats.conversion.misses)
+        assert.equal(0, stats.conversion.hits)
+    end)
+
+    it("preserves cancellation while validating transported observation metadata", function()
+        header("cached.h", "typedef int item_type;\n")
+        local source = 'local c = foreign import "cached.h"\nfunction answer(): integer return 42 end'
+        check(source)
+        local get, cancellation = adapter.get, {}
+        adapter.get = function(kind, key)
+            if kind == "ffi-conversion-v1" then
+                local malformed = setmetatable({}, { __index = function() error(cancellation, 0) end })
+                return get(kind, key), { malformed }
+            end
+            return get(kind, key)
+        end
+        local ok, err = pcall(check, source)
+        assert.is_false(ok)
+        assert.equal(cancellation, err)
+    end)
+
+    it("refreshes same-content touches through metadata while preserving both graphs", function()
+        local path = header("cached.h", "typedef int touched_type;\n")
+        local source = [[
+            local c = foreign import "cached.h"
+            function answer(): integer return 42 end
+        ]]
+        local metadata, refreshes = {}, {}
+        adapter.get = function(kind, key)
+            local id = kind .. "\0" .. key
+            return payloads[id], metadata[id]
+        end
+        adapter.put = function(kind, key, payload, inputs)
+            local id = kind .. "\0" .. key
+            payloads[id], metadata[id] = payload, inputs
+            return true
+        end
+        adapter.refresh_inputs = function(kind, key, inputs)
+            metadata[kind .. "\0" .. key] = inputs
+            refreshes[kind] = (refreshes[kind] or 0) + 1
+            return true
+        end
+        local first = check(source)
+        local interface = assert(driver.serialize_source_interface(first))
+        local original = {}
+        for key, payload in pairs(payloads) do original[key] = payload end
+        local count = conversions
+        local stamp = assert(lfs.attributes(path, "modification"))
+        assert(lfs.touch(path, stamp + 1, stamp + 1))
+        local touched, stats = check(source)
+        assert.equal(count, conversions)
+        assert.equal(1, stats.conversion.hits)
+        assert.equal(interface, assert(driver.serialize_source_interface(touched)))
+        assert.same(original, payloads)
+        assert.is_true((refreshes["c-header-v1"] or 0) > 0)
+        assert.equal(1, refreshes["ffi-conversion-v1"])
+        local _, warm = check(source)
+        assert.equal(count, conversions)
+        assert.equal(0, warm.headers.file_reads)
+        assert.equal(0, warm.headers.file_hashes)
+        assert.equal(1, refreshes["ffi-conversion-v1"])
     end)
 
     it("replays a fresh source-import context after its provider body changes", function()

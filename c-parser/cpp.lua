@@ -5,6 +5,8 @@ local typed = require("c-parser.typed")
 local c99 = require("c-parser.c99")
 local sha256 = require("titan-compiler.sha256")
 local compiler_io = require("titan-compiler.io")
+local cacheadapter = require("titan-compiler.cacheadapter")
+local parse_contents
 
 -- Standalone c-parser callers retain the ordinary synchronous behavior. The
 -- compiler driver passes its resolver-context strategy explicitly, so every
@@ -73,7 +75,28 @@ local function io_for(options)
     return options and options.io or default_io
 end
 
+local header_input_counters = setmetatable({}, { __mode = "k" })
+local header_counter_names = { "file_reads", "file_hashes", "metadata_reuses", "search_checks", "memo_reuses" }
+local function count_header(strategy, name)
+    local counters = header_input_counters[strategy]
+    if not counters then counters = {}; header_input_counters[strategy] = counters end
+    counters[name] = (counters[name] or 0) + 1
+end
+
+function cpp.header_input_stats(strategy)
+    local counters = header_input_counters[strategy or default_io] or {}
+    local result = {}
+    for _, name in ipairs(header_counter_names) do result[name] = counters[name] or 0 end
+    return result
+end
+
+function cpp.clear_header_input_stats(strategy)
+    if strategy then header_input_counters[strategy] = nil
+    else header_input_counters = setmetatable({}, { __mode = "k" }) end
+end
+
 local function read_file_contents(filename, strategy)
+    count_header(strategy, "file_reads")
     return strategy:read_file(filename)
 end
 
@@ -92,6 +115,7 @@ end
 
 function cpp.header_search_identity(path, openable, strategy)
     strategy = strategy or default_io
+    count_header(strategy, "search_checks")
     if openable == nil then
         openable = search_candidate_openable(path, strategy)
     end
@@ -104,13 +128,84 @@ function cpp.header_search_identity(path, openable, strategy)
     }, ";")
 end
 
-function cpp.header_file_identity(contents, path, strategy)
-    strategy = strategy or default_io
-    local link = strategy:lstat(path)
-    local followed = strategy:stat(path)
-    return "c-header-file-v2:sha256:" .. sha256.hex(contents) ..
-        ";lstat=" .. attribute_identity(link) ..
+local function physical_header(path, strategy)
+    local link, followed = strategy:lstat(path), strategy:stat(path)
+    local physical = "lstat=" .. attribute_identity(link) ..
         ";stat=" .. attribute_identity(followed)
+    local seconds = followed and followed.modified_seconds
+    local nanoseconds = followed and followed.modified_nanoseconds
+    local observation
+    if followed and followed.kind == "file"
+       and math.type(seconds) == "integer"
+       and math.type(nanoseconds) == "integer"
+       and nanoseconds >= 0 and nanoseconds < 1000000000 then
+        observation = {
+            modified_seconds = seconds,
+            modified_nanoseconds = nanoseconds,
+            physical_identity = physical,
+        }
+    end
+    return physical, observation, followed
+end
+
+-- Observed times are validation metadata, not semantic identity. Unknown or
+-- malformed legacy observations take the ordinary fresh-read path once.
+function cpp.copy_header_observation(value)
+    if type(value) ~= "table" then return nil end
+    local seconds, nanoseconds, physical = rawget(value, "modified_seconds"),
+        rawget(value, "modified_nanoseconds"), rawget(value, "physical_identity")
+    if math.type(seconds) ~= "integer" or math.type(nanoseconds) ~= "integer"
+       or nanoseconds < 0 or nanoseconds >= 1000000000
+       or type(physical) ~= "string" or physical == "" then return nil end
+    return { modified_seconds = seconds, modified_nanoseconds = nanoseconds, physical_identity = physical }
+end
+
+function cpp.same_header_observation(left, right)
+    if left == nil or right == nil then return left == right end
+    if type(left) ~= "table" or type(right) ~= "table" then return false end
+    return rawget(left, "modified_seconds") == rawget(right, "modified_seconds")
+        and rawget(left, "modified_nanoseconds") == rawget(right, "modified_nanoseconds")
+        and rawget(left, "physical_identity") == rawget(right, "physical_identity")
+end
+
+-- Certify only the timestamp surrounding the bytes actually consumed. A read
+-- racing with replacement or modification must not stamp older bytes with the
+-- newer metadata observed after the read.
+local function read_header_contents(filename, strategy)
+    local physical, observation = physical_header(filename, strategy)
+    local contents, err = read_file_contents(filename, strategy)
+    if not contents then return nil, err end
+    local after_physical, after_observation = physical_header(filename, strategy)
+    if physical ~= after_physical
+       or not cpp.same_header_observation(observation, after_observation) then
+        return nil, "C header changed while it was read: " .. filename, nil, true
+    end
+    return contents, nil, { physical_identity = physical, observation = observation }
+end
+
+local function content_identity(contents, physical, options)
+    local callback = options and options.cache_adapter
+        and options.cache_adapter.sha256_binary
+    local digest
+    if callback then
+        local ok, result = pcall(callback, contents)
+        if not ok and type(result) ~= "string" then error(result, 0) end
+        if ok and type(result) == "string" and #result == 32 then
+            digest = result:gsub(".", function(byte) return ("%02x"):format(byte:byte()) end)
+        end
+    end
+    if not digest then digest = sha256.hex(contents) end
+    return "c-header-file-v2:sha256:" .. digest .. ";" .. physical
+end
+
+function cpp.header_file_identity(contents, path, strategy, read_state)
+    strategy = strategy or default_io
+    count_header(strategy, "file_hashes")
+    local physical = read_state and read_state.physical_identity or physical_header(path, strategy)
+    -- Supplied bytes without a certified read boundary retain no observation;
+    -- final validation must freshly read them before enabling metadata reuse.
+    local observation = read_state and cpp.copy_header_observation(read_state.observation)
+    return content_identity(contents, physical), observation
 end
 
 function cpp.header_input_identity(kind, path, strategy)
@@ -121,11 +216,86 @@ function cpp.header_input_identity(kind, path, strategy)
             return "c-header-file-v2:unreadable:" ..
                 cpp.header_search_identity(path, nil, strategy), err
         end
-        return cpp.header_file_identity(contents, path, strategy)
+        local identity = cpp.header_file_identity(contents, path, strategy)
+        return identity
     elseif kind == "search" then
         return cpp.header_search_identity(path, nil, strategy)
     end
     return nil, "C header input kind must be 'file' or 'search'"
+end
+
+function cpp.header_observation_index(inputs)
+    local result = {}
+    for _, input in ipairs(type(inputs) == "table" and inputs or {}) do
+        if type(input) == "table" and input.kind == "file"
+           and type(input.path) == "string" and type(input.identity) == "string" then
+            local observation = cpp.copy_header_observation(input.observation)
+            if observation then
+                result[input.kind .. "\0" .. input.path .. "\0" .. input.identity] = observation
+            end
+        end
+    end
+    return result
+end
+
+local validation_data = {}
+
+-- A pass belongs to the caller and must never survive a validation boundary.
+-- Distinct module closures can therefore share one observation of a pathname.
+function cpp.revalidate_header_input(previous, options)
+    options = options or {}
+    local strategy = io_for(options)
+    local pass = options.header_validation or {}
+    assert(type(pass) == "table", "header_validation must be a table")
+    local records = pass[validation_data]
+    if not records then records = {}; pass[validation_data] = records end
+    local kind, path = previous.kind, previous.path
+    local key = kind .. "\0" .. path
+    local current = records[key]
+    if current then count_header(strategy, "memo_reuses") end
+    if not current then
+        current = {}
+        if kind == "search" then
+            current.identity = cpp.header_search_identity(path, nil, strategy)
+        elseif kind == "file" then
+            current.physical, current.observation, current.followed = physical_header(path, strategy)
+        else
+            return nil, "C header input kind must be 'file' or 'search'"
+        end
+        records[key] = current
+    end
+    if kind == "file" and not current.identity then
+        local baseline = options.header_observations and
+            options.header_observations[key .. "\0" .. previous.identity]
+        local saved = cpp.copy_header_observation(baseline or previous.observation)
+        local digest, certified = previous.identity:match("^c%-header%-file%-v2:sha256:(%x+);(.+)$")
+        if saved and digest and #digest == 64 and certified == saved.physical_identity
+           and cpp.same_header_observation(saved, current.observation) then
+            current.identity = previous.identity
+            count_header(strategy, "metadata_reuses")
+        else
+            -- A replacement/retarget is a different physical input: its old
+            -- timestamp is inapplicable even if numerically equal. Read once.
+            local contents = current.followed and read_file_contents(path, strategy)
+            if contents then
+                local physical, observation = physical_header(path, strategy)
+                if physical ~= current.physical
+                   or not cpp.same_header_observation(observation, current.observation) then
+                    return nil, "C header changed while it was read: " .. path
+                end
+                count_header(strategy, "file_hashes")
+                current.identity = content_identity(contents, physical, options)
+            else
+                current.identity = "c-header-file-v2:unreadable:" ..
+                    cpp.header_search_identity(path, current.followed and nil or false, strategy)
+                current.observation = nil
+            end
+        end
+    end
+    return {
+        kind = kind, path = path, identity = current.identity,
+        observation = cpp.copy_header_observation(current.observation),
+    }, nil, current.identity ~= previous.identity
 end
 
 local function debug() end
@@ -475,6 +645,8 @@ local function normalize_toolchain(options)
 
     return {
         io = io_for(options),
+        cache_adapter = options.cache_adapter,
+        header_observations = options.header_observations or cpp.header_observation_index(options.header_inputs),
         compiler = compiler,
         language_mode = language_mode,
         language_flag = language_flag,
@@ -630,6 +802,8 @@ end
 local function copy_config(config)
     return {
         io = config.io,
+        cache_adapter = config.cache_adapter,
+        header_observations = config.header_observations,
         compiler = { table.unpack(config.compiler) },
         language_mode = config.language_mode,
         language_flag = config.language_flag,
@@ -814,7 +988,8 @@ local function base_probe(config)
     local defines
     defines, err = probe_default_defines(config)
     if not defines then return nil, err end
-    probed = { incdirs = incdirs, defines = defines }
+    probed = { incdirs = incdirs, defines = defines,
+        semantic_digest = preprocessor_semantic_digest(incdirs, defines) }
     probe_cache[key] = probed
     return probed
 end
@@ -867,9 +1042,9 @@ local function scan_forced_headers(forced, incdirs, base_defines, cwd,
     }
     typed.set_type(ctx, "Ctx")
 
-    ctx.header_dependency_observer = function(path, contents)
+    ctx.header_dependency_observer = function(path, contents, read_state)
         path = cpp.absolute_lookup_path(path, cwd)
-        local identity = cpp.header_file_identity(contents, path, strategy)
+        local identity, observation = cpp.header_file_identity(contents, path, strategy, read_state)
         append_manifest(manifest, "file", path, identity)
         local previous = dependency_identities[path]
         if previous and previous ~= identity then
@@ -878,6 +1053,7 @@ local function scan_forced_headers(forced, incdirs, base_defines, cwd,
             dependency_identities[path] = identity
             dependencies[#dependencies + 1] = {
                 kind = "file", path = path, identity = identity,
+                observation = observation,
             }
         end
         return true
@@ -902,11 +1078,12 @@ local function scan_forced_headers(forced, incdirs, base_defines, cwd,
     for _, item in ipairs(forced) do
         append_manifest(manifest, "option", item.kind, item.operand)
         local selected
-        local selected_contents
+        local selected_contents, selected_read_state
         local open_error
         for _, candidate in ipairs(
                 forced_header_candidates(item.operand, cwd, incdirs)) do
-            local contents, err = strategy:read_file(candidate)
+            local contents, err, read_state, changed = read_header_contents(candidate, strategy)
+            if changed then return nil, err end
             local observed, observe_err =
                 ctx.include_search_observer(candidate, contents ~= nil)
             if not observed then
@@ -914,7 +1091,7 @@ local function scan_forced_headers(forced, incdirs, base_defines, cwd,
             end
             if contents then
                 selected = candidate
-                selected_contents = contents
+                selected_contents, selected_read_state = contents, read_state
                 break
             end
             open_error = err
@@ -928,7 +1105,7 @@ local function scan_forced_headers(forced, incdirs, base_defines, cwd,
         local output_length = #ctx.output
         local origins_length = #ctx.output_origins
         local parsed, parse_error =
-            cpp.parse_contents(selected, selected_contents, ctx)
+            parse_contents(selected, selected_contents, ctx, selected_read_state)
         if not parsed then
             return nil, "failed preprocessing forced C header '" ..
                 item.operand .. "': " .. tostring(parse_error)
@@ -952,33 +1129,173 @@ local function scan_forced_headers(forced, incdirs, base_defines, cwd,
     }
 end
 
-local function inspect_forced_configuration(configuration)
-    if #configuration.forced == 0 then
-        return {
-            dependencies = {},
-            search_inputs = {},
-            manifest = key_argv({ "titan-forced-c-headers-v1", "none" }),
-            output = {},
-            output_origins = {},
-            macro_changes = {},
-        }
+local function empty_forced_configuration()
+    return {
+        dependencies = {}, search_inputs = {},
+        manifest = key_argv({ "titan-forced-c-headers-v1", "none" }),
+        output = {}, output_origins = {}, macro_changes = {},
+    }
+end
+
+local function forced_inputs(forced)
+    local inputs = {}
+    for _, group in ipairs({ forced.dependencies, forced.search_inputs }) do
+        for _, input in ipairs(group) do
+            inputs[#inputs + 1] = {
+                kind = input.kind, path = input.path, identity = input.identity,
+                observation = cpp.copy_header_observation(input.observation),
+            }
+        end
+    end
+    return inputs
+end
+
+local function valid_forced_entry(entry, key)
+    if type(entry) ~= "table" or entry.owner ~= "titan-forced-preprocessor"
+       or entry.version ~= 1 or entry.key ~= key
+       or type(entry.forced) ~= "table" or type(entry.probed) ~= "table"
+       or type(entry.probed.incdirs) ~= "table" or type(entry.probed.defines) ~= "table"
+       or type(entry.probed.semantic_digest) ~= "string"
+       or type(entry.forced.manifest) ~= "string" then return false end
+    for _, name in ipairs({ "dependencies", "search_inputs", "output", "output_origins",
+                            "macro_changes", "scanned_defines", "incdirs", "base_defines" }) do
+        if type(entry.forced[name]) ~= "table" then return false end
+    end
+    for _, name in ipairs({ "dependencies", "search_inputs" }) do
+        local expected = name == "dependencies" and "file" or "search"
+        local inputs = entry.forced[name]
+        for _, input in ipairs(inputs) do
+            if type(input) ~= "table" or input.kind ~= expected
+               or type(input.path) ~= "string" or input.path:sub(1, 1) ~= "/"
+               or type(input.identity) ~= "string" or input.identity == "" then return false end
+        end
+        for key in next, inputs do
+            if math.type(key) ~= "integer" or key < 1 or key > #inputs then return false end
+        end
+    end
+    return true
+end
+
+local function overlay_forced_inputs(forced, saved)
+    if type(saved) ~= "table" then return end
+    local inputs = forced_inputs(forced)
+    if #saved ~= #inputs then return end
+    for index, input in ipairs(inputs) do
+        local metadata = saved[index]
+        if type(metadata) ~= "table" or metadata.kind ~= input.kind
+           or metadata.path ~= input.path or metadata.identity ~= input.identity then return end
+    end
+    for index, input in ipairs(inputs) do
+        local target = index <= #forced.dependencies and forced.dependencies[index]
+            or forced.search_inputs[index - #forced.dependencies]
+        target.observation = cpp.copy_header_observation(saved[index].observation) or target.observation
+    end
+end
+
+local function forced_entry_is_current(entry, config)
+    local refreshed, touched = {}, false
+    local options = { io = config.io, header_validation = {},
+        header_observations = config.header_observations, cache_adapter = config.cache_adapter }
+    for index, input in ipairs(forced_inputs(entry.forced)) do
+        local current, _, changed = cpp.revalidate_header_input(input, options)
+        if not current or changed then return false end
+        refreshed[index] = current
+        touched = touched or not cpp.same_header_observation(input.observation, current.observation)
+    end
+    overlay_forced_inputs(entry.forced, refreshed)
+    entry.observations_changed = entry.observations_changed or touched
+    return true
+end
+
+local function forced_graph_options(adapter)
+    return { sha256_binary = adapter and adapter.sha256_binary, yield = adapter and adapter.yield }
+end
+
+local function encode_forced_entry(entry, adapter)
+    return cpp.encode_graph({ owner = entry.owner, version = entry.version, key = entry.key,
+        forced = entry.forced, probed = entry.probed }, forced_graph_options(adapter))
+end
+
+local function completed_forced_configuration(configuration)
+    local config = configuration.original
+    local adapter = config.cache_adapter
+    local adapter_valid, adapter_error = cacheadapter.validate(adapter)
+    if not adapter_valid then return nil, adapter_error end
+    local cwd, err = config.io:cwd()
+    if not cwd then return nil, "failed determining cwd for forced C headers: " .. tostring(err) end
+    local base
+    base, err = base_probe(configuration.stripped)
+    if not base then return nil, err end
+    local key = "titan-cpp-forced-v1:sha256:" .. sha256.hex(key_argv({
+        key_argv(config_argv(config)), cwd, base.semantic_digest,
+    }))
+    local cache = probe_cache_for(config.io)
+    local slot = "forced|" .. key
+    local candidate = cache[slot]
+    if not candidate and adapter then
+        local payload, saved = cacheadapter.get(adapter, "c-header-v1", key)
+        local decoded = payload and cpp.decode_graph(payload, forced_graph_options(adapter))
+        local ok, valid = pcall(valid_forced_entry, decoded, key)
+        if ok and valid then
+            local overlaid = pcall(overlay_forced_inputs, decoded.forced, saved)
+            if overlaid then candidate = decoded end
+        end
+    end
+    while candidate do
+        local before = cache[slot]
+        local checked, current = pcall(forced_entry_is_current, candidate, config)
+        if not checked then
+            if type(current) ~= "string" then error(current, 0) end
+            current = false
+        end
+        if cache[slot] ~= before then
+            candidate = cache[slot]
+        elseif current then
+            cache[slot] = candidate
+            if candidate.observations_changed and adapter then
+                local inputs = forced_inputs(candidate.forced)
+                local refreshed = cacheadapter.refresh_inputs(adapter, "c-header-v1", key, inputs)
+                if refreshed == nil and adapter.put then
+                    local payload = encode_forced_entry(candidate, adapter)
+                    refreshed = payload and cacheadapter.put(adapter, "c-header-v1", key, payload, inputs)
+                end
+                if refreshed then candidate.observations_changed = nil end
+            end
+            if cache[slot] == candidate then
+                return clone_graph(candidate.forced), nil, candidate.probed
+            end
+            candidate = cache[slot]
+        else
+            cache[slot] = nil
+            candidate = nil
+        end
     end
 
-    local cwd, cwd_error = configuration.original.io:cwd()
-    if not cwd then
-        return nil, "failed determining cwd for forced C headers: " ..
-            tostring(cwd_error)
-    end
-    local base, err = base_probe(configuration.stripped)
-    if not base then return nil, err end
+    -- Publish only a completed scan plus its authoritative native macro probe.
+    -- Neither failed nor in-progress contexts enter memory or disk caches.
     local scanned
-    scanned, err = scan_forced_headers(
-        configuration.forced, base.incdirs, base.defines, cwd,
-        configuration.original.io)
+    scanned, err = scan_forced_headers(configuration.forced, base.incdirs, base.defines, cwd, config.io)
     if not scanned then return nil, err end
-    scanned.incdirs = copy_incdirs(base.incdirs)
-    scanned.base_defines = copy_map(base.defines)
-    return scanned
+    scanned.incdirs, scanned.base_defines = copy_incdirs(base.incdirs), copy_map(base.defines)
+    local defines
+    defines, err = probe_default_defines(config)
+    if not defines then return nil, err end
+    local probed = { incdirs = copy_incdirs(base.incdirs), defines = defines,
+        semantic_digest = preprocessor_semantic_digest(base.incdirs, defines) }
+    local entry = { owner = "titan-forced-preprocessor", version = 1, key = key,
+        forced = scanned, probed = probed }
+    if not forced_entry_is_current(entry, config) then
+        return nil, "forced C headers changed while probing the configured preprocessor"
+    end
+    entry.observations_changed = nil
+    cache[slot] = entry
+    if adapter and adapter.put then
+        local payload = encode_forced_entry(entry, adapter)
+        if payload and cache[slot] == entry then
+            cacheadapter.put(adapter, "c-header-v1", key, payload, forced_inputs(scanned))
+        end
+    end
+    return clone_graph(scanned), nil, probed
 end
 
 function cpp.inspect_forced_headers(options)
@@ -987,60 +1304,39 @@ function cpp.inspect_forced_headers(options)
     local configuration
     configuration, err = forced_configuration(config)
     if not configuration then return nil, err end
+    if #configuration.forced == 0 then return empty_forced_configuration() end
     local inspected
-    inspected, err = inspect_forced_configuration(configuration)
-    if not inspected then return nil, err end
-    return inspected
+    inspected, err = completed_forced_configuration(configuration)
+    return inspected, err
 end
 
 function cpp.new_context(options)
     local config, err = normalize_toolchain(options)
-    if not config then
-        return nil, err
-    end
-
+    if not config then return nil, err end
     local configuration
     configuration, err = forced_configuration(config)
     if not configuration then return nil, err end
-    local forced
-    forced, err = inspect_forced_configuration(configuration)
-    if not forced then return nil, err end
-
-    local key = "final|" .. key_argv(config_argv(config)) ..
-        "|forced=" .. forced.manifest
-    local probe_cache = probe_cache_for(config.io)
-    local probed = probe_cache[key]
+    local forced, probed
+    if #configuration.forced > 0 then
+        forced, err, probed = completed_forced_configuration(configuration)
+        if not forced then return nil, err end
+    else
+        forced = empty_forced_configuration()
+    end
+    local key = "final|" .. key_argv(config_argv(config)) .. "|forced=" .. forced.manifest
+    local cache = probe_cache_for(config.io)
+    probed = probed or cache[key]
     if not probed then
         local incdirs
-        if #configuration.forced == 0 then
-            incdirs, err = probe_include_paths(config)
-            if not incdirs then return nil, err end
-        else
-            incdirs = forced.incdirs
-        end
+        incdirs, err = probe_include_paths(config)
+        if not incdirs then return nil, err end
         local defines
         defines, err = probe_default_defines(config)
         if not defines then return nil, err end
-
-        if #configuration.forced > 0 then
-            local stable
-            stable, err = inspect_forced_configuration(configuration)
-            if not stable then return nil, err end
-            if stable.manifest ~= forced.manifest then
-                return nil, "forced C headers changed while probing the " ..
-                    "configured preprocessor"
-            end
-            forced = stable
-        end
-        probed = {
-            incdirs = incdirs,
-            defines = defines,
-            semantic_digest =
-                preprocessor_semantic_digest(incdirs, defines),
-        }
-        probe_cache[key] = probed
+        probed = { incdirs = incdirs, defines = defines,
+            semantic_digest = preprocessor_semantic_digest(incdirs, defines) }
     end
-
+    cache[key] = probed
     local ctx = {
         io = config.io,
         incdirs = copy_incdirs(probed.incdirs),
@@ -1050,14 +1346,8 @@ function cpp.new_context(options)
         output = { table.unpack(forced.output) },
         output_origins = { table.unpack(forced.output_origins) },
         current_dir = {},
-        -- cdriver caches completed header interpretation across resolver
-        -- contexts owned by the same I/O provider. Publish the exact ordered
-        -- compiler argv plus the forced-header world used to construct this
-        -- context, and retain language_mode even when a caller deliberately
-        -- suppresses the synthesized -std flag.
         preprocessor_configuration_key = key_argv({
-            "titan-cpp-context-v1", config.language_mode, key,
-            probed.semantic_digest,
+            "titan-cpp-context-v1", config.language_mode, key, probed.semantic_digest,
         }),
         forced_header_dependencies = forced.dependencies,
         forced_header_search_inputs = forced.search_inputs,
@@ -1461,8 +1751,9 @@ end)
 
 local function find_file(ctx, filename, mode, is_next)
     if filename:sub(1, 1) == SEP then
-        local contents = ctx.io:read_file(filename)
-        if contents then return filename, contents end
+        local contents, err, read_state, changed = read_header_contents(filename, ctx.io)
+        if changed then return nil, nil, err, true end
+        if contents then return filename, contents, nil, nil, read_state end
         return nil, nil, "file not found"
     end
     local paths = {}
@@ -1488,7 +1779,8 @@ local function find_file(ctx, filename, mode, is_next)
     end
     for _, path in ipairs(paths) do
         local pathname = path..SEP..filename
-        local contents = ctx.io:read_file(pathname)
+        local contents, err, read_state, changed = read_header_contents(pathname, ctx.io)
+        if changed then return nil, nil, err, true end
         if ctx.include_search_observer then
             local ok, observe_err =
                 ctx.include_search_observer(pathname, contents ~= nil)
@@ -1497,7 +1789,7 @@ local function find_file(ctx, filename, mode, is_next)
             end
         end
         if contents then
-            return pathname, contents
+            return pathname, contents, nil, nil, read_state
         end
     end
     return nil, nil, "file not found"
@@ -2313,7 +2605,7 @@ local run_expression = typed("Ctx, {string} -> boolean", function(ctx, tks)
     return eval_exp(ctx, exp).bits ~= 0
 end)
 
-local function parse_contents(filename, contents, ctx)
+parse_contents = function(filename, contents, ctx, read_state)
     ctx.io = ctx.io or default_io
     ctx.output_origins = ctx.output_origins or {}
     -- Record the names whose active macro definition this header closure
@@ -2329,7 +2621,7 @@ local function parse_contents(filename, contents, ctx)
 
     if ctx.header_dependency_observer then
         local observed, observe_err =
-            ctx.header_dependency_observer(filename, contents)
+            ctx.header_dependency_observer(filename, contents, read_state)
         if not observed then
             table.remove(ctx.current_dir)
             return nil, observe_err
@@ -2389,7 +2681,7 @@ local function parse_contents(filename, contents, ctx)
                 local name = tk.exp[1]
                 local mode = tk.exp.mode
                 local is_next = (tk.directive == "include_next")
-                local inc_filename, inc_contents, err, observer_failed =
+                local inc_filename, inc_contents, err, observer_failed, inc_read_state =
                     find_file(ctx, name, mode, is_next)
                 if observer_failed then
                     table.remove(ctx.current_dir)
@@ -2397,7 +2689,7 @@ local function parse_contents(filename, contents, ctx)
                 elseif not inc_filename then
                     -- fall back to trying to load an #include "..." as #include <...>;
                     -- this is necessary for Mac system headers
-                    inc_filename, inc_contents, err, observer_failed =
+                    inc_filename, inc_contents, err, observer_failed, inc_read_state =
                         find_file(ctx, name, "system", is_next)
                     if observer_failed then
                         table.remove(ctx.current_dir)
@@ -2409,7 +2701,7 @@ local function parse_contents(filename, contents, ctx)
                     return nil, name..":"..err
                 end
                 local ok, include_err =
-                    parse_contents(inc_filename, inc_contents, ctx)
+                    parse_contents(inc_filename, inc_contents, ctx, inc_read_state)
                 if not ok then
                     table.remove(ctx.current_dir)
                     return nil, name .. ":" .. include_err
@@ -2470,27 +2762,28 @@ cpp.parse_file = typed(
         end
         ctx.io = ctx.io or default_io
 
-        local contents
+        local contents, read_state
         if not fd and not filename:match("^/") then
-            local found_name, found_contents, find_error, observer_failed =
+            local found_name, found_contents, find_error, observer_failed, found_read_state =
                 find_file(ctx, filename, "system")
             if observer_failed then return nil, find_error end
             if found_contents then
-                filename, contents = found_name, found_contents
+                filename, contents, read_state = found_name, found_contents, found_read_state
             end
         end
 
         if fd then
+            count_header(ctx.io, "file_reads")
             local read_error
             contents, read_error = fd:read("a")
             fd:close()
             if not contents then return nil, read_error end
         elseif not contents then
             local read_error
-            contents, read_error = ctx.io:read_file(filename)
+            contents, read_error, read_state = read_header_contents(filename, ctx.io)
             if not contents then return nil, read_error end
         end
-        return parse_contents(filename, contents, ctx)
+        return parse_contents(filename, contents, ctx, read_state)
     end)
 
 cpp.expand_macro = typed("string, table -> string", function(macro, define_set)

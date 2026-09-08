@@ -237,25 +237,23 @@ failure `ok` is false and the second value is a message. See
 
 ### Language-server compiler API
 
-`driver.LANGUAGE_SERVER_API_VERSION` is the exact additive compiler contract
-for long-lived semantic clients. Version 1 guarantees the parser/checker source
-metadata, analysis-local FFI include roots, full-project-AST and serialized
-interface cache inputs, known-source identities, and the cooperative
-post-source-check hook used by that API generation. Version 2 additionally guarantees each
-source/cache entry's exact `c_header_dependencies` metadata and
-`driver.restat_c_header_dependencies`, including stable changed identities for
-ordinary deleted or unreadable inputs. It is intentionally independent from
-`driver.TITAN_ABI_VERSION`: two compilers may share generated-code ABI 2 while only
-one provides the language-server API. A client must reject an absent, noninteger,
-or different marker before invoking those options.
+`driver.LANGUAGE_SERVER_API_VERSION` identifies the exact compiler contract
+for long-lived semantic clients. It remains **1 until Titan's first public
+release**; prerelease compiler and language-server changes move together without
+bumping this marker. It is independent from `driver.TITAN_ABI_VERSION` and
+persisted cache schema versions. A client must reject an absent, noninteger,
+or different marker before invoking these options.
 
-Version 3 guarantees that analysis source/provider discovery, compiler probes,
-external topology resolution, and C-header restatting all use the exact
-strategy stored in the resolver context. It replaces the API-1
-`after_source_check` callback with the context-owned `yield` checkpoint and the
-ordered `checked_source_modules` publication list described below.
+The contract includes parser/checker source metadata, analysis-local FFI include
+roots, full-project ASTs, serialized interfaces, known-source identities, exact
+`c_header_dependencies`, and `driver.restat_c_header_dependencies`, including
+stable changed identities for ordinary deleted or unreadable inputs. Analysis
+source/provider discovery, compiler probes, external topology resolution, and
+C-header restatting all use the exact strategy stored in the resolver context.
+The context owns cooperative `yield` checkpoints and the ordered
+`checked_source_modules` publication list described below.
 
-Version 4 adds one trusted-host `embedded_interface_provider`. The driver
+The optional trusted-host `embedded_interface_provider` supplies one inventory. The driver
 validates and decodes its closed ABI/type inventory when that raw provider
 identity is first used, consults it before filesystem compiled providers, and
 reports the host executable as stable binary provenance. The inventory is
@@ -263,7 +261,7 @@ analysis-only: `provider_file` is trusted provenance which the driver does not
 stat, open, or otherwise inspect; the executable never becomes a native link
 input.
 
-Version 5 adds an optional `target_profile` to that analysis-only provider.
+An optional `target_profile` extends that analysis-only provider.
 It is declarative numeric metadata exported by `csemantics.export_profile`
 from the exact build SDK/toolchain. `csemantics.import_profile` validates the
 closed versioned schema and identity, reconstructs canonical scalar descriptors
@@ -284,9 +282,11 @@ The checker's `target_profile_provider` is separate from its native
 and requires it to agree with the declared target. Missing native prerequisites
 remain errors. Omitting the profile preserves ordinary driver/checker behavior.
 
-Version 6 adds compiler-owned persistent graph payloads. The embedding owns
+Compiler-owned persistent graph payloads preserve reusable semantics. The embedding owns
 its database, transactions, file/provider validation, and publication policy;
-the ordinary compiler has no database dependency.
+the ordinary compiler has no database dependency. Mtime-first header
+observations, shared validation passes, metadata-only persistence refresh and
+cooperative inner graph traversal support efficient saved-file analysis.
 
 * `driver.encode_project_entry(entry, options)` returns a binary Lua string or
   `nil, error`. It accepts a complete clean source entry, preserving its full
@@ -299,10 +299,14 @@ the ordinary compiler has no database dependency.
   excluded from the entry root and recreated by cached-source loading.
 * `driver.decode_project_entry(bytes, options)` returns a private entry graph
   or `nil, error`. The optional `module_name` and `project_files` constrain
-  expected ownership. Decode never executes Lua, registers types, changes
+  expected ownership. Optional `header_inputs` supplies current host-validated
+  observations: matching kind/path/identity records throughout the private graph
+  are refreshed during its required validation traversal, without changing the
+  payload or semantic identity. Unmatched records are retained. Decode never
+  executes Lua, registers types, changes
   `driver.imported`, or performs filesystem I/O. Hosts must validate all saved
   file/provider inputs before assigning the entry to `cached_source_entries`.
-* `driver.project_entries_registry(entries)` returns a fresh declared owner
+* `driver.project_entries_registry(entries, options)` returns a fresh declared owner
   map for caller-certified clean project entries, or `nil, error`. A project's
   own entry supplies its authoritative owner; imported external owners remain
   interface graphs. The host installs this map as `types.registry` only while
@@ -321,13 +325,27 @@ the ordinary compiler has no database dependency.
   semantic schema. The generated-code ABI alone is not a cache namespace.
 
 `options.cache_adapter` on a resolver context supplies dot callbacks
-`get(kind, key)` and optional `put(kind, key, bytes, inputs)`. Reads return a
-binary string or a miss; writes return success. `inputs` is a dense ordered
-array of `{kind, path, identity}` observations. String transport exceptions and
-bad payloads degrade to ordinary compilation; non-string exceptions preserve
-the cancellation object's identity. Callbacks may suspend through the host's
-compiler boundary. Read-only clients omit `put`; saved indexing can stage
-completed writes and commit them with its own snapshot transaction.
+`get(kind, key)` and optional `put(kind, key, bytes, inputs)` and
+`refresh_inputs(kind, key, inputs)`. Reads return a binary string or a miss,
+optionally followed by current input metadata. A nil second result means legacy
+or unavailable metadata; an empty array represents a known empty closure.
+Writes return success. `inputs` is a dense ordered array of
+`{kind, path, identity, observation?}`. An observation has integer
+`modified_seconds`, integer `modified_nanoseconds` in `[0, 1000000000)`, and a
+`physical_identity` string; it is not part of semantic/cache-key equality.
+String transport exceptions and bad payloads degrade to ordinary compilation;
+non-string exceptions preserve the cancellation object's identity. Callbacks
+may suspend through the host's compiler boundary. Read-only clients omit both
+write callbacks; saved indexing can stage completed writes and commit them
+with its own snapshot transaction.
+
+`refresh_inputs` changes only observation metadata for an existing key; hosts
+need not rewrite its potentially large semantic BLOB. Header restore uses the
+second `get` result only when the complete ordered kind/path/identity list
+matches the decoded graph. FFI replay also refreshes its decoded include records
+from the newly prepared headers. A legacy byte-only adapter can omit these
+additions: a same-content touch then re-encodes the existing graph once without
+preprocessing, parsing, conversion or source checking.
 
 Project encode/decode options and the cache adapter also accept an optional
 `sha256_binary(bytes)` dot callback returning exactly 32 binary SHA-256 bytes.
@@ -335,18 +353,39 @@ Embeddings can use a synchronous native digest implementation for large graph
 payloads; omission retains the dependency-free Lua implementation. The callback
 must hash the supplied complete string, including embedded NUL/high bytes,
 without changing compiler state. Its output uses the same wire checksum as the
-fallback, so payloads remain readable in either mode and no format/API version
-changes. Invalid results and string errors are cache misses; non-string
-exception objects propagate unchanged through the graph boundary.
+fallback, so payloads remain readable in either mode and the graph wire
+format is unchanged. Invalid results and string errors are cache misses; non-string
+exception objects propagate unchanged through the graph boundary. Required
+header content hashing also uses this callback when available; a broken string
+result/error falls back to the ordinary Lua digest, while cancellation propagates.
 
 The `c-header-v1` payload is the completed interpreted C graph. The existing
 process cache remains the first tier. A disk miss runs normal preprocessing,
-parsing and registration; a disk hit still hashes every dependency and
-restats every search candidate before retaining the private graph. The fourth
+parsing and registration; a disk hit checks every dependency's physical identity
+and saved mtime, and restats each search candidate, before retaining the graph. The fourth
 `put` argument contains the reusable header's dependency and search tails;
 the caller's forced-header/top-level search prefix is reconstructed on every
-request. Equal mtimes never certify equal bytes. Followed identity, final
-symlink identity, readability and missing/shadowing candidates are observed.
+request. Matching mtime and physical identity reuse the saved content identity
+without reading or hashing. Changed mtime reads/hashes once; equal content
+refreshes observation metadata without invalidating the interpreted graph.
+Replacement/retarget is a different physical input whose previous mtime is
+inapplicable, so it takes a fresh read/hash. Missing inputs invalidate through
+metadata without a content read. Same-physical-input changes that preserve the
+observed mtime are intentionally not detected. Timestamps retain the exact
+seconds/nanoseconds reported by the I/O strategy: native strategies can supply
+nanoseconds, while synchronous LuaFileSystem retains its reported precision.
+Absent or malformed legacy observations take a one-time fresh-read fallback.
+
+Forced `-include`/`-imacros` configurations use the same `c-header-v1` byte
+transport under a separate `titan-cpp-forced-v1:` key prefix. This compiler-owned
+envelope contains only a completed forced scan and its successful native macro
+probe, keyed by ordered compiler arguments, cwd, and the stripped preprocessor's
+actual include/macro digest. Warm contexts revalidate its full file/search
+closure and clone mutable macro/output state; fresh-process replay avoids
+another forced-header scan or forced native macro probe. Changes in ordered
+flags, macros, selection or physical inputs rebuild the context. Failed scans
+and native probes never publish a context; touch-only observations use the
+same metadata refresh callback and all codec yields/cancellation rules apply.
 
 The `ffi-conversion-v1` payload is one ordered compilation-unit C environment,
 including canonical tags/types, declaration histories, pending contextual
@@ -363,14 +402,32 @@ The graph codec bounds bytes, strings, nodes and edges, checks its version and
 SHA-256 integrity, and allocates all table references before restoring edges
 and CPP sidecars. Functions, userdata and threads are unsupported. Corrupt,
 truncated, incompatible or nonliteral payloads are misses. Payloads are
-disposable implementation data, not portable binary-module metadata.
+disposable implementation data, not portable binary-module metadata. Project
+encode/decode/registry options and cache adapters accept an optional zero-argument
+`yield` callback. Graph edge/node/directory traversal and project validation
+cooperate after at most 4096 logical work units, including large flat tables.
+Native string operations and a supplied digest remain synchronous. Cancellation
+objects propagate unchanged and no partly decoded graph is published.
 `driver.compiler_cache_stats({context = context})` returns `headers` and
 `conversion` counters; conversion has `lookups`, `hits`, `misses` and `stores`.
+Header counters additionally include cumulative `file_reads`, `file_hashes`,
+`metadata_reuses`, `search_checks`, and `memo_reuses` for that I/O strategy.
+Reads/hashes include preprocessing and forced-header work, not just cache
+validation; graph checksums are separate. Clearing a process cache resets these
+counters.
 Use a fresh `c_header_analysis` token per saved analysis even when retaining
 the same I/O strategy's process cache: an analysis token intentionally skips
 repeat closure restats only within that one analysis.
 
 ### `driver.new_resolver_context(options)`
+
+Optional resolver `header_inputs` supplies the current host-validated input
+observations for that analysis generation. The driver indexes them once by
+kind/path/semantic identity, then uses them as fresher baselines when retained
+project graphs still contain an earlier timestamp. Validation always checks
+current filesystem metadata before reusing the content identity; this baseline
+is separate from pass memoization and does not mutate retained graphs. Hosts
+can pass the complete current owner-closure union.
 
 Every resolver context owns exactly one validated compiler-I/O strategy in
 `context.io`. `options.io` supplies a table or userdata whose colon methods are
@@ -458,8 +515,7 @@ milliseconds in its normalized `run` result; process CPU is never substituted.
 Both structured callbacks are protected and may not change compilation when
 they fail.
 
-The following is the complete normative strategy contract for language-server
-API 3. Signatures use Lua multiple-return notation. Every table that crosses
+The following is the complete normative language-server strategy contract. Signatures use Lua multiple-return notation. Every table that crosses
 this boundary is an ordinary Lua table: implementations must not expose
 backend-specific records, arrays, error objects, or task handles.
 
@@ -499,7 +555,7 @@ spawn, capture, or wait failures set `started == false` and may omit fields
 that could not be established. A normal zero exit is the only successful
 result.
 
-The optional `true` arguments on `unlink` and `mkdir` are API-3 ownership
+The optional `true` arguments on `unlink` and `mkdir` are ownership
 markers, not general recursive-cleanup requests. The compiler passes
 `unlink(path, true)` only for the existing empty regular file returned by its
 immediately preceding `tmpname()` call, while it remains the sole owner. If
@@ -565,7 +621,7 @@ The analysis-facing options are narrow and caller-owned:
   without making any module dirty or retaining its AST. One overlap rejects the
   complete embedded inventory for that resolver context.
 * `embedded_interface_provider` is accepted by `new_resolver_context`, not as
-  mutable loader state. It is an API-5 semantic-client input with the closed
+  mutable loader state. It is a semantic-client input with the closed
   schema and optional build target profile above; after its first successful
   validation, the host must treat that
   raw table identity as immutable. Ordinary compiler callers omit it.
@@ -595,7 +651,7 @@ The analysis-facing options are narrow and caller-owned:
   appended to a fresh C-probe toolchain descriptor. It never changes the
   process-global foreign-C configuration used by other compiler clients.
 
-Before API-4 cache reuse, the loader reconciles the process-global cache with
+Before cache reuse, the loader reconciles the process-global cache with
 the resolver's embedded inventory. It removes embedded entries owned by a
 different resolver/provider object; when the current closed inventory remains
 active, it evicts cached DSO/archive entries for every carried logical name and
@@ -732,27 +788,43 @@ the relevant filesystem options are `source_roots` and the shared resolver
 ### `driver.restat_c_header_dependencies(dependencies, options)`
 
 This language-server helper validates a previously published ordered dependency
-array and returns the same kind/path sequence with current identities. It does
+array and returns `inputs, nil, changed`: the same kind/path sequence with current
+identities/observations and a boolean semantic-change flag (including false).
+Touch-only observation changes leave that flag false. It does
 not parse source, reparse a header, walk an include directory, or mutate the
 dependency input. When it owns a temporary resolver, creating and closing that
 resolver may initialize driver layout state and perform the context lifecycle
-work described above. It reads only the exact `file` paths and `search`
-candidates already observed by the checker. A changed transitive header or
+work described above. File content is read only when its saved physical identity
+or timestamp is inapplicable or differs. It examines only the exact `file` paths
+and `search` candidates already observed by the checker. A changed transitive header or
 newly valid earlier search candidate therefore changes the owning module's
 fingerprint.
+
+Initial ordinary, nested and forced header reads certify metadata before and
+after reading the exact bytes passed to the dependency observer. A modification
+or replacement across that boundary rejects the operation before publication.
+The observer retains that certified observation rather than restatting later;
+final closure validation then detects an edit that happened after the read.
+Caller-supplied bytes or a pre-opened `FILE*` have no certified mtime and require
+a fresh content comparison at final validation.
 
 Ordinary filesystem churn is data rather than a driver failure. If a former
 `file` cannot now be read because it was deleted, replaced by another kind, or
 became unreadable, the result carries a stable
-`c-header-file-v1:unreadable:...` identity describing its current `lstat` and
+`c-header-file-v2:unreadable:...` identity describing its current `lstat` and
 followed/read-open state. Recreating a readable file replaces that state with
-its exact byte and followed physical-file identity. Only malformed input
-metadata or an unknown dependency kind returns `nil, message`.
+its exact byte and followed physical-file identity. Malformed dependency shapes,
+unknown kinds and a file changing during the required read return `nil, message`.
 
 The optional second argument may be a resolver context, an options table with
 `context`, or an options table with `io`. The first two forms borrow the
 caller's context; the last creates and closes a temporary resolver around that
-strategy. Omitting the argument keeps the historical synchronous behavior.
+strategy. Omitting the argument uses synchronous I/O and the same mtime-first
+policy. Optional `options.header_validation` is a caller-owned table shared by
+all module closures in one coherent validation pass; it memoizes file metadata,
+required reads/hashes, and search checks by exact kind/path. Start a new table
+at every filesystem validation boundary. Ordinary parser calls keep private
+passes, and completed-analysis graph reuse remains separately branded.
 Every header read, lstat/stat, and readability check uses the selected
 `context.io`.
 
@@ -1626,13 +1698,13 @@ the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 | `driver.INSTALL_PATHS` | `driver.installed_paths` | paths below `driver.TITAN_ROOT` | Holds `lua_source`, `include`, `lib`, `libtitan`, `libbacktrace`, `liblua`, `titan_bin`, and `lua_cpath`; bundled `libuv.a` is deliberately not an installed SDK path. |
 | `driver.TITAN_BIN_PATH` | `driver.lua` | `TITAN_PATH_0_6`, `TITAN_PATH`, or `.;<root>/lib/titan/0.6` in installed mode | Roots for root-major, shallow-to-exact compiled-provider search; checkout mode retains the legacy `/usr/local` fallback. |
 | `driver.TITAN_SOURCE_PATH` | `driver.lua` | `"."` (overridden by `titanc --tree`) | Semicolon-separated roots searched for folder `P/B.titan` before flat `P.titan`, including contributor privacy checks. |
-| `driver.LANGUAGE_SERVER_API_VERSION` | `driver.lua` | `6` | Exact compiler/semantic-client handshake, independent from generated-code ABI; covers private source metadata, exact C-header dependencies, context-owned I/O/checkpoints, the embedded interface/target provider, and compiler-owned persistent graph payloads. |
+| `driver.LANGUAGE_SERVER_API_VERSION` | `driver.lua` | `1` | Exact compiler/semantic-client handshake, independent from generated-code ABI; covers private source metadata, exact C-header dependencies, context-owned I/O/checkpoints, the embedded interface/target provider, and compiler-owned persistent graph payloads. |
 | `TITAN_NO_LINE_DIRECTIVES` / `driver.EMIT_LINE_DIRECTIVES` | environment / `driver.lua` | unset / true | Exact environment value `1`, or `titanc --no-line-directives`, disables generated Titan `#line` directives for physical generated-C diagnostics; this can omit ordinary native Titan frames from logical tracebacks. |
 | `options.source_roots` | `titanc` / `driver.defaultloader` | every CLI module name | Requires explicit build roots to come from flat/folder source; other ordinary edges retain the resolver context's binary-first or test-mode source-first policy, while `.titan` edges remain source-required. Selected source descriptors also provide `program_output`. |
 | `options.known_source_modules` | semantic clients / `driver.defaultloader` | `{}` | Validated module-name set used for resolver-wide source identity and source/provider overlap planning without marking modules dirty. |
 | `options.cached_source_entries` | semantic clients / `driver.defaultloader` | `{}` | Caller-certified complete raw source entries, including exact C-header inputs, eligible for clean project-AST reuse; resolver-owned source foreign headers are regenerated. |
 | `options.cached_interfaces` | semantic clients / `driver.defaultloader` | `{}` | Serialized clean source interfaces plus exact source and C-header provenance; used without AST for ordinary imports and as transient reparse input for explicit `.titan` edges. |
-| `options.embedded_interface_provider` | semantic clients / `driver.new_resolver_context` | `nil` | API-5 closed `{ provider_file, entries, target_profile? }` ABI/type inventory with an optional declarative build target profile, copied from a trusted host; it precedes disk compiled lookup but never becomes a static dependency or link input. |
+| `options.embedded_interface_provider` | semantic clients / `driver.new_resolver_context` | `nil` | Closed `{ provider_file, entries, target_profile? }` ABI/type inventory with an optional declarative build target profile, copied from a trusted host; it precedes disk compiled lookup but never becomes a static dependency or link input. |
 | `options.io` / `context.io` | semantic clients / `driver.new_resolver_context` | `compiler_io.new_sync()` | Validated context-owned filesystem, process, and cooperative-yield strategy. The omitted default preserves synchronous compiler and `titanc` behavior. |
 | `options.source_process_trace` | semantic clients / `driver.new_resolver_context` | `nil` | Best-effort scalar `(module_name, filename, outcome, self_cpu_ms, total_cpu_ms, parse_cpu_ms, check_cpu_ms)` observer for exclusive source-module process CPU. Parse time sums folder constituents; check and self time exclude nested source work, post-child checkpoints, complete C-header processing, and downstream FFI conversion. Cached rehydration reports zero parse/check CPU; five-argument Lua callbacks remain valid. |
 | `context.checked_source_modules` | `driver.defaultloader` | `{}` | Ordered dense list of source modules checked during this resolver run. A module is appended after its complete result is published and before `context.io:yield()`; retained cached modules are excluded. |

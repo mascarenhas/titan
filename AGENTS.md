@@ -54,6 +54,13 @@ special cases, or another architectural workaround, first inspect the existing
 design and then pause to ask the maintainer about the intended invariant. Do
 not add epicycles around what may be a misunderstood simpler design.
 
+## Prerelease language-server API
+
+Keep `driver.LANGUAGE_SERVER_API_VERSION` at `1` until Titan's first public
+release. Do not bump this marker for prerelease compiler/language-server work.
+The generated-code ABI and persisted cache schemas are separate contracts;
+change them only when their own compatibility rules require it.
+
 ## Prerequisites (important — the suite cannot run without these)
 
 - **Lua 5.5.** Both the compiler's own Lua code and generated C target Lua

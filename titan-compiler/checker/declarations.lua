@@ -1600,6 +1600,7 @@ function apply_source_foreign_headers(ast, st, errors)
                                 kind = input.kind,
                                 path = input.path,
                                 identity = input.identity,
+                                observation = cdriver.copy_header_observation(input.observation),
                             }
                         end
                         if not err then

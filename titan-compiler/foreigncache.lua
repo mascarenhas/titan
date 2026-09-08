@@ -95,6 +95,7 @@ function foreigncache.encode(st, imports, key)
     return cpp.encode_graph(snapshot, {
         external = external,
         sha256_binary = st.cache_adapter and st.cache_adapter.sha256_binary,
+        yield = st.cache_adapter and st.cache_adapter.yield,
     })
 end
 
@@ -130,16 +131,78 @@ local function valid_snapshot(snapshot, imports, key)
     return valid
 end
 
+local function collect_inputs(imports)
+    local inputs, seen = {}, {}
+    for _, node in ipairs(imports) do
+        for _, name in ipairs({ "c_header_dependencies", "c_header_search_inputs" }) do
+            for _, input in ipairs(node._include[name]) do
+                local identity = input.kind .. "\0" .. input.path
+                if not seen[identity] then
+                    seen[identity] = true
+                    inputs[#inputs + 1] = {
+                        kind = input.kind, path = input.path, identity = input.identity,
+                        observation = cpp.copy_header_observation(input.observation),
+                    }
+                end
+            end
+        end
+    end
+    return inputs
+end
+
+
+local function prepare_snapshot(snapshot, imports, key, st, saved_inputs)
+    if not valid_snapshot(snapshot, imports, key) then return false end
+    -- Current prepared headers have already passed the shared file validator.
+    -- A reused converted graph keeps that fresh observation metadata, never
+    -- the older timestamps embedded in its otherwise unchanged semantic blob.
+    local saved = {}
+    if type(saved_inputs) == "table" then
+        for _, input in ipairs(saved_inputs) do
+            if type(input) == "table" and type(input.kind) == "string"
+               and type(input.path) == "string" then
+                saved[input.kind .. "\0" .. input.path] = input
+            end
+        end
+    end
+    local observations_changed = false
+    for index, node in ipairs(imports) do
+        local prepared = st.prepared_foreign_imports and st.prepared_foreign_imports[node]
+        local current_include = prepared and prepared.include
+        if not current_include then return false end
+        for _, name in ipairs({ "c_header_dependencies", "c_header_search_inputs" }) do
+            local inputs, current_inputs = snapshot.node_includes[index][name], current_include[name]
+            if type(inputs) ~= "table" or type(current_inputs) ~= "table"
+               or #inputs ~= #current_inputs then return false end
+            for ordinal, input in ipairs(inputs) do
+                local current_input = current_inputs[ordinal]
+                if type(input) ~= "table" or input.kind ~= current_input.kind
+                   or input.path ~= current_input.path or input.identity ~= current_input.identity then return false end
+                local metadata = saved[input.kind .. "\0" .. input.path]
+                local previous = metadata and metadata.identity == input.identity
+                    and metadata.observation or input.observation
+                observations_changed = observations_changed or not cpp.same_header_observation(
+                    cpp.copy_header_observation(previous), current_input.observation)
+                input.observation = cpp.copy_header_observation(current_input.observation)
+            end
+        end
+    end
+    return true, observations_changed
+end
+
 function foreigncache.restore(st, imports, key)
     local stats = counters(st)
     if stats then stats.lookups = stats.lookups + 1 end
-    local payload = cacheadapter.get(st.cache_adapter, foreigncache.KIND, key)
+    local payload, saved_inputs = cacheadapter.get(st.cache_adapter, foreigncache.KIND, key)
     local _, current = references(imports)
     local snapshot = payload and cpp.decode_graph(payload, {
         references = current,
         sha256_binary = st.cache_adapter and st.cache_adapter.sha256_binary,
+        yield = st.cache_adapter and st.cache_adapter.yield,
     })
-    local checked, valid = pcall(valid_snapshot, snapshot, imports, key)
+    local checked, valid, observations_changed = pcall(
+        prepare_snapshot, snapshot, imports, key, st, saved_inputs)
+    if not checked and type(valid) ~= "string" then error(valid, 0) end
     valid = checked and valid
     if not valid then
         if stats then stats.misses = stats.misses + 1 end
@@ -154,26 +217,21 @@ function foreigncache.restore(st, imports, key)
         node._type, node._include = snapshot.node_types[index], snapshot.node_includes[index]
         st:add_symbol(node.localname, node)
     end
+    if observations_changed then
+        local inputs = collect_inputs(imports)
+        local refreshed = cacheadapter.refresh_inputs(st.cache_adapter, foreigncache.KIND, key, inputs)
+        if refreshed == nil and st.cache_adapter.put then
+            local updated = foreigncache.encode(st, imports, key)
+            if updated then cacheadapter.put(st.cache_adapter, foreigncache.KIND, key, updated, inputs) end
+        end
+    end
     if stats then stats.hits = stats.hits + 1 end
     return true
 end
 
+
 function foreigncache.store(st, key, payload, imports)
-    local inputs, seen = {}, {}
-    for _, node in ipairs(imports) do
-        for _, name in ipairs({ "c_header_dependencies", "c_header_search_inputs" }) do
-            for _, input in ipairs(node._include[name]) do
-                local identity = input.kind .. "\0" .. input.path
-                if not seen[identity] then
-                    seen[identity] = true
-                    inputs[#inputs + 1] = {
-                        kind = input.kind, path = input.path, identity = input.identity,
-                    }
-                end
-            end
-        end
-    end
-    if cacheadapter.put(st.cache_adapter, foreigncache.KIND, key, payload, inputs) then
+    if cacheadapter.put(st.cache_adapter, foreigncache.KIND, key, payload, collect_inputs(imports)) then
         local stats = counters(st)
         if stats then stats.stores = stats.stores + 1 end
     end

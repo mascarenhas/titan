@@ -221,6 +221,7 @@ end
 -- provider-owned cache; statistics without one address the synchronous
 -- standalone cdriver provider.
 function cdriver.clear_process_cache(strategy)
+    cpp.clear_header_input_stats(strategy)
     if strategy == nil then
         process_caches = setmetatable({}, { __mode = "k" })
     else
@@ -260,16 +261,20 @@ end
 function cdriver.process_cache_stats(strategy)
     strategy = strategy or default_io
     local cache = process_caches[strategy]
+    local function with_inputs(result)
+        for name, value in pairs(cpp.header_input_stats(strategy)) do result[name] = value end
+        return result
+    end
     if not cache then
-        return {
+        return with_inputs({
             size = 0, lookups = 0, hits = 0, misses = 0,
             invalidations = 0, stores = 0, evictions = 0, oversized = 0,
             weight = 0, entry_limit = configured_process_cache_limit,
             weight_limit = configured_process_cache_weight_limit,
             tracks_weight = configured_process_cache_tracks_weight,
-        }
+        })
     end
-    return {
+    return with_inputs({
         size = cache.size,
         lookups = cache.lookups,
         hits = cache.hits,
@@ -282,7 +287,7 @@ function cdriver.process_cache_stats(strategy)
         entry_limit = cache.entry_limit,
         weight_limit = cache.weight_limit,
         tracks_weight = cache.tracks_weight,
-    }
+    })
 end
 
 local function io_for(options)
@@ -308,8 +313,8 @@ local function search_candidate_identity(path, openable, strategy)
     return cpp.header_search_identity(path, openable, strategy)
 end
 
-local function file_contents_identity(path, contents, strategy)
-    return cpp.header_file_identity(contents, path, strategy)
+local function file_contents_identity(path, contents, strategy, read_state)
+    return cpp.header_file_identity(contents, path, strategy, read_state)
 end
 
 -- Public, side-effect-free identity helper used by long-lived compiler
@@ -319,6 +324,11 @@ end
 function cdriver.header_input_identity(kind, path, strategy)
     return cpp.header_input_identity(kind, path, strategy or default_io)
 end
+
+cdriver.revalidate_header_input = cpp.revalidate_header_input
+cdriver.copy_header_observation = cpp.copy_header_observation
+cdriver.same_header_observation = cpp.same_header_observation
+cdriver.header_observation_index = cpp.header_observation_index
 
 local function file_exists(filename, strategy)
     return strategy:readable(filename)
@@ -535,6 +545,8 @@ local function preprocessor_options(options)
     if not own_dirs then return nil, dirs_error end
     return {
         io = strategy,
+        cache_adapter = options.cache_adapter,
+        header_observations = options.header_observations or cpp.header_observation_index(options.header_inputs),
         compiler = options.compiler,
         language_mode = options.language_mode,
         language_flag = options.language_flag,
@@ -614,6 +626,7 @@ local function copy_input_tail(inputs, prefix_length)
             kind = input.kind,
             path = input.path,
             identity = input.identity,
+            observation = cpp.copy_header_observation(input.observation),
         }
     end
     return copy
@@ -636,13 +649,19 @@ local function result_context(ffi_types, strategy, dependencies, search_inputs)
     }
 end
 
-local function input_tail_is_current(inputs, strategy)
-    for _, input in ipairs(inputs) do
-        local identity = cdriver.header_input_identity(
-            input.kind, input.path, strategy)
-        if identity ~= input.identity then return false end
+local function input_tail_is_current(inputs, options)
+    local observations_changed = false
+    local refreshed = {}
+    for index, input in ipairs(inputs) do
+        local current, _, changed = cdriver.revalidate_header_input(input, options)
+        if not current or changed then return false end
+        observations_changed = observations_changed or
+            not cpp.same_header_observation(input.observation, current.observation)
+        refreshed[index] = current
     end
-    return true
+    -- Publish only a completely validated tail, never a partially updated one.
+    for index, current in ipairs(refreshed) do inputs[index] = current end
+    return true, observations_changed
 end
 
 local function input_tail_matches_prefix(inputs, identities)
@@ -671,7 +690,7 @@ local function valid_cached_inputs(inputs, kind)
 end
 
 local function decode_header_entry(payload, key, adapter)
-    local entry = cpp.decode_graph(payload, { sha256_binary = adapter.sha256_binary })
+    local entry = cpp.decode_graph(payload, { sha256_binary = adapter.sha256_binary, yield = adapter.yield })
     if type(entry) ~= "table" or entry.version ~= cdriver.HEADER_CACHE_VERSION
        or entry.key ~= key or type(entry.ffi_types) ~= "table"
        or type(entry.ffi_types.macro_definitions) ~= "table"
@@ -696,7 +715,51 @@ local function encode_header_entry(entry, key, adapter)
         ffi_types = entry.ffi_types,
         dependencies = entry.dependencies,
         search_inputs = entry.search_inputs,
-    }, { sha256_binary = adapter.sha256_binary })
+    }, { sha256_binary = adapter.sha256_binary, yield = adapter.yield })
+end
+
+local function header_entry_inputs(entry)
+    local inputs = copy_input_tail(entry.dependencies, 0)
+    for _, input in ipairs(copy_input_tail(entry.search_inputs, 0)) do
+        inputs[#inputs + 1] = input
+    end
+    return inputs
+end
+
+local function overlay_header_inputs(entry, saved)
+    if type(saved) ~= "table" then return end
+    local inputs = header_entry_inputs(entry)
+    if #saved ~= #inputs then return end
+    for index, input in ipairs(inputs) do
+        local observed = saved[index]
+        if type(observed) ~= "table" or observed.kind ~= input.kind
+           or observed.path ~= input.path or observed.identity ~= input.identity then return end
+    end
+    for index, input in ipairs(inputs) do
+        local target = index <= #entry.dependencies and entry.dependencies[index]
+            or entry.search_inputs[index - #entry.dependencies]
+        target.observation = cpp.copy_header_observation(saved[index].observation) or target.observation
+    end
+end
+
+local function header_entry_is_current(entry, options)
+    local dependencies, dependency_touch = input_tail_is_current(entry.dependencies, options)
+    if not dependencies then return false end
+    local searches, search_touch = input_tail_is_current(entry.search_inputs, options)
+    if not searches then return false end
+    entry.observations_changed = entry.observations_changed or dependency_touch or search_touch
+    return true
+end
+
+local function refresh_header_observations(entry, key, adapter)
+    if not entry.observations_changed or not adapter then return end
+    local inputs = header_entry_inputs(entry)
+    local refreshed = cacheadapter.refresh_inputs(adapter, HEADER_CACHE_KIND, key, inputs)
+    if refreshed == nil and adapter.put then
+        local payload = encode_header_entry(entry, key, adapter)
+        refreshed = payload and cacheadapter.put(adapter, HEADER_CACHE_KIND, key, payload, inputs)
+    end
+    if refreshed then entry.observations_changed = nil end
 end
 
 local function process_file_inner(filename, options)
@@ -707,6 +770,11 @@ local function process_file_inner(filename, options)
     local analysis_entries, analysis_error =
         process_analysis_entries(options, strategy)
     if analysis_entries == false then return nil, analysis_error end
+    local validation_options = {
+        io = strategy, header_validation = options.header_validation or {},
+        cache_adapter = options.cache_adapter,
+        header_observations = options.header_observations or cpp.header_observation_index(options.header_inputs),
+    }
     local ctx, err = new_cpp_context(options)
     if not ctx then
         return nil, "failed configuring C preprocessor: " .. err
@@ -721,7 +789,7 @@ local function process_file_inner(filename, options)
     local dependency_identities = {}
     local search_inputs = {}
     local search_identities = {}
-    local function record_dependency(path, identity)
+    local function record_dependency(path, identity, observation)
         path = absolute_lookup_path(path, cwd)
         local previous = dependency_identities[path]
         if previous and previous ~= identity then
@@ -732,6 +800,7 @@ local function process_file_inner(filename, options)
                 kind = "file",
                 path = path,
                 identity = identity,
+                observation = cpp.copy_header_observation(observation),
             }
         end
         return true
@@ -752,10 +821,10 @@ local function process_file_inner(filename, options)
         end
         return true
     end
-    ctx.header_dependency_observer = function(path, contents)
+    ctx.header_dependency_observer = function(path, contents, read_state)
         path = absolute_lookup_path(path, cwd)
         return record_dependency(
-            path, file_contents_identity(path, contents, strategy))
+            path, file_contents_identity(path, contents, strategy, read_state))
     end
     ctx.include_search_observer = function(path, openable)
         path = absolute_lookup_path(path, cwd)
@@ -766,7 +835,7 @@ local function process_file_inner(filename, options)
     for _, dependency in ipairs(
             ctx.forced_header_dependencies or {}) do
         local recorded, record_error = record_dependency(
-            dependency.path, dependency.identity)
+            dependency.path, dependency.identity, dependency.observation)
         if not recorded then
             return nil, "failed recording forced C header: " .. record_error
         end
@@ -805,7 +874,7 @@ local function process_file_inner(filename, options)
     cache.lookups = cache.lookups + 1
     local restored_validated
     if not cache.entries[cache_key] and options.cache_adapter then
-        local payload = cacheadapter.get(
+        local payload, saved_inputs = cacheadapter.get(
             options.cache_adapter, HEADER_CACHE_KIND, cache_key)
         local decoded, restored = pcall(decode_header_entry,
             payload, cache_key, options.cache_adapter)
@@ -813,13 +882,13 @@ local function process_file_inner(filename, options)
             if type(restored) ~= "string" then error(restored, 0) end
             restored = nil
         end
-        -- The disk payload supplies data, never input authority. Hash/recheck
+        if restored then overlay_header_inputs(restored, saved_inputs) end
+        -- The disk payload supplies data, never input authority. Stat/recheck
         -- the exact closure before inserting it into the live cache.
         if restored and not cache.entries[cache_key]
            and input_tail_matches_prefix(restored.dependencies, dependency_identities)
            and input_tail_matches_prefix(restored.search_inputs, search_identities)
-           and input_tail_is_current(restored.dependencies, strategy)
-           and input_tail_is_current(restored.search_inputs, strategy) then
+           and header_entry_is_current(restored, validation_options) then
             local weight = cache.tracks_weight and (graph_weight(restored)
                 + graph_weight(cache_key) + PROCESS_CACHE_MAP_SLOT_WEIGHT) or 0
             if make_cache_room(cache, cache_key, weight) then
@@ -829,9 +898,16 @@ local function process_file_inner(filename, options)
             end
         end
     end
+    local previous_cached
     while true do
         local cached = cache.entries[cache_key]
         if not cached then break end
+        if previous_cached and cached ~= previous_cached then
+            -- A completed replacement published while validation yielded.
+            -- Restart observations as well as validation of the new graph.
+            validation_options.header_validation = {}
+        end
+        previous_cached = cached
         local analysis_entry = analysis_entries
             and analysis_entries[cache_key] or nil
         local analysis_reuse = analysis_entry ~= nil
@@ -844,9 +920,7 @@ local function process_file_inner(filename, options)
                 cached.search_inputs, search_identities)
         local compatible = prefix_compatible
             and (analysis_reuse or cached == restored_validated
-                or (input_tail_is_current(cached.dependencies, strategy)
-                    and input_tail_is_current(
-                        cached.search_inputs, strategy)))
+                or header_entry_is_current(cached, validation_options))
         cdriver.emit_process_phase(options, filename, include,
             "hit_validation", compatible and
                 (analysis_reuse and "analysis_reuse" or "current")
@@ -859,6 +933,7 @@ local function process_file_inner(filename, options)
         if cache.entries[cache_key] ~= cached then
             -- Retry without charging another logical lookup or miss.
         elseif compatible then
+            refresh_header_observations(cached, cache_key, options.cache_adapter)
             local ffi_types
             if analysis_reuse then
                 ffi_types = analysis_entry.ffi_types
@@ -883,7 +958,7 @@ local function process_file_inner(filename, options)
                     }
                 end
                 for _, input in ipairs(cached.dependencies) do
-                    assert(record_dependency(input.path, input.identity))
+                    assert(record_dependency(input.path, input.identity, input.observation))
                 end
                 for _, input in ipairs(cached.search_inputs) do
                     assert(record_search(input.path, input.identity))
@@ -912,18 +987,21 @@ local function process_file_inner(filename, options)
     if not ctx then
         return nil, "failed preprocessing '"..filename.."': " .. err
     end
+    -- Parsing is a fresh publication boundary, separate from any attempted
+    -- reuse pass above. Matching observed mtime needs no second content read.
+    local final_validation = { io = strategy, header_validation = {}, cache_adapter = options.cache_adapter,
+        header_observations = validation_options.header_observations }
     for _, input in ipairs(dependencies) do
-        local current = assert(cdriver.header_input_identity(
-            input.kind, input.path, strategy))
-        if current ~= input.identity then
+        local current, _, changed = cdriver.revalidate_header_input(input, final_validation)
+        if not current or changed then
             return nil, "C header changed while preprocessing '" ..
                 filename .. "': " .. input.path
         end
+        input.observation = current.observation
     end
     for _, input in ipairs(search_inputs) do
-        local current = assert(cdriver.header_input_identity(
-            input.kind, input.path, strategy))
-        if current ~= input.identity then
+        local current, _, changed = cdriver.revalidate_header_input(input, final_validation)
+        if not current or changed then
             return nil, "C include candidate changed while preprocessing '" ..
                 filename .. "': " .. input.path
         end
@@ -1068,14 +1146,7 @@ local function process_file_inner(filename, options)
         if options.cache_adapter and options.cache_adapter.put then
             local payload = encode_header_entry(entry, cache_key, options.cache_adapter)
             if payload and cache.entries[cache_key] == entry then
-                local inputs = {}
-                for _, group in ipairs({ entry.dependencies, entry.search_inputs }) do
-                    for _, input in ipairs(group) do
-                        inputs[#inputs + 1] = {
-                            kind = input.kind, path = input.path, identity = input.identity,
-                        }
-                    end
-                end
+                local inputs = header_entry_inputs(entry)
                 cacheadapter.put(options.cache_adapter,
                     HEADER_CACHE_KIND, cache_key, payload, inputs)
             end
