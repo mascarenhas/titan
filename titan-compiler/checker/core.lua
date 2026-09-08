@@ -18,6 +18,8 @@ util = require "titan-compiler.util"
 
 foreigntypes = require "titan-compiler.foreigntypes"
 
+foreigncache = require "titan-compiler.foreigncache"
+
 cdriver = require("c-parser.cdriver")
 
 cdefines = require("c-parser.cdefines")

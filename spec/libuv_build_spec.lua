@@ -6,6 +6,7 @@ local coder = require "titan-compiler.coder"
 local coder_names = require "titan-compiler.coder.names"
 local lfs = require "lfs"
 local parser = require "titan-compiler.parser"
+local source_inventory = require "spec.support.source_inventory"
 local staticmetadata = require "titan-compiler.staticmetadata"
 
 local PKG_CONFIG = "sh spec/fixtures/libuv/fake-pkg-config.sh"
@@ -2650,20 +2651,27 @@ fi
                     prefix .. "/share/lua/5.5/titan-compiler/types.lua"
                 local installed_contents = read_file(installed_types)
                 local compiler = root .. "/titan-compiler"
-                assert(lfs.mkdir(compiler))
+                for _, directory in ipairs({ "titan-compiler", "c-parser" }) do
+                    for _, source in ipairs(source_inventory.lua_files(directory)) do
+                        local destination = root .. "/" .. source
+                        local parent = assert(destination:match("^(.+)/[^/]+$"))
+                        if not lfs.attributes(parent) then
+                            local mkdir_ok, mkdir_output = run_argv({
+                                "mkdir", "-p", parent,
+                            })
+                            assert.truthy(mkdir_ok, mkdir_output)
+                        end
+                        write_file(destination, read_file(source))
+                    end
+                end
                 assert(lfs.mkdir(root .. "/titan-runtime"))
                 write_file(root .. "/titan-runtime/titan.c",
                     "/* source checkout marker */\n")
                 write_file(root .. "/Makefile", "# source checkout marker\n")
-                assert(lfs.mkdir(root .. "/c-parser"))
-                write_file(root .. "/c-parser/cdriver.lua",
-                    read_file("c-parser/cdriver.lua"))
                 assert(lfs.mkdir(root .. "/spec"))
                 assert(lfs.mkdir(root .. "/spec/support"))
                 write_file(root .. "/spec/support/checkout_busted.lua",
                     read_file("spec/support/checkout_busted.lua"))
-                write_file(compiler .. "/driver.lua",
-                    read_file("titan-compiler/driver.lua"))
                 local local_types = compiler .. "/types.lua"
                 local changed, replacements = read_file(
                     "titan-compiler/types.lua"):gsub(
@@ -4442,8 +4450,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 30, 29, 30, 28 }, shard_counts)
-            assert.equal(117, assigned_count)
+            assert.same({ 30, 31, 30, 29 }, shard_counts)
+            assert.equal(120, assigned_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")

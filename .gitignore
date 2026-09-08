@@ -102,3 +102,6 @@
 /.local-builds/
 
 *.check.tmp.*
+
+# Workspace language-server cache.
+.titan-ls/

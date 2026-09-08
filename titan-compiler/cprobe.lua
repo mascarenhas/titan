@@ -434,6 +434,7 @@ local function normalize_include_descriptor(descriptor, source_dir, cwd)
         rendered = rendered,
         c_header_dependencies = header_dependencies,
         c_header_search_inputs = header_search_inputs,
+        c_header_graph_key = descriptor.c_header_graph_key,
         _c_header_identity_complete = identity_complete,
     }
 end
@@ -469,6 +470,15 @@ local function source_foreign_include_alias(
             "source-foreign transitive diagnostic aliases")
     if not diagnostic_aliases then return nil, diagnostic_alias_error end
     local function stable_generated_identity(value)
+        -- New direct-file identities also retain lstat ownership. A resolver's
+        -- generated regular file still has a stable content-only logical
+        -- identity, while physical user headers retain both identities.
+        local v2_digest, link, followed = value:match(
+            "^c%-header%-file%-v2:sha256:([0-9a-f]+);lstat=([^;]+);stat=([^;]+)$")
+        if v2_digest and #v2_digest == 64 and link == followed
+           and link:match("^file:%d+:%-?%d+:%-?%d+$") then
+            return "c-header-file-v1:sha256:" .. v2_digest
+        end
         local digest, kind, mode, device, inode = value:match(
             "^c%-header%-file%-v1:sha256:([0-9a-f]+);" ..
             "stat=([^:;]+):([^:;]+):([^:;]+):([^:;]+)$")
@@ -4119,6 +4129,7 @@ function Service:cdriver_process_options()
 
     return {
         io = self.io,
+        cache_adapter = self.cache_adapter,
         process_trace = self.process_trace,
         process_analysis = self.process_analysis,
         compiler = copy_array(self.compiler_argv),
@@ -4396,6 +4407,7 @@ function cprobe.new_service(options)
 
     local service = setmetatable({
         io = strategy,
+        cache_adapter = options.cache_adapter,
         process_trace = process_trace,
         process_analysis = process_analysis,
         persistent_cache_trace = persistent_cache_trace,

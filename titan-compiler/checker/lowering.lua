@@ -1354,6 +1354,7 @@ local declared_interface_source_edge = {
     _decl = true,
     _parameter_decls = true,
 }
+local declared_interface_cpp = require "c-parser.cpp"
 
 local function clone_declared_interface_graph(value, memo)
     if type(value) ~= "table" then return value end
@@ -1367,6 +1368,9 @@ local function clone_declared_interface_graph(value, memo)
                 clone_declared_interface_graph(child, memo)
         end
     end
+    declared_interface_cpp.copy_graph_annotations(value, copy, function(child)
+        return clone_declared_interface_graph(child, memo)
+    end)
     return copy
 end
 
@@ -1463,6 +1467,11 @@ function generic_lower_erased_core(modname, tree, st, errors)
     tree._type = makemoduletype(modname, tree, st)
     tree._erased_registry = erased_registry
     generic_refresh_erased_annotations(tree)
+    -- Tooling restores this declared owner graph when normalizing an opaque
+    -- checked-project payload. Share the already-frozen interface nodes and
+    -- strip the same source-navigation edges from external owners; an erased
+    -- registry cannot recover generic or source-private surface summaries.
+    tree._declared_registry = clone_declared_interface_graph(surface_registry, clone_memo)
     types.assert_erased(tree._type)
     for _, owner in pairs(erased_registry) do types.assert_erased(owner) end
     return declared, surface_registry
