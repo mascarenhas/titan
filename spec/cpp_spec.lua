@@ -275,6 +275,7 @@ describe("c preprocessor (cpp)", function()
                 assert.not_equal(ordinary.preprocessor_configuration_key,
                     repeated.preprocessor_configuration_key)
 
+                local stamp = assert(lfs.attributes(header, "modification"))
                 output = assert(io.open(header, "wb"))
                 assert(output:write([[
 #ifndef TITAN_CPP_FORCED_IDENTITY
@@ -282,6 +283,7 @@ describe("c preprocessor (cpp)", function()
 #endif
 ]]))
                 assert(output:close())
+                assert(lfs.touch(header, stamp + 1, stamp + 1))
                 local changed = context({ "-include", header })
                 assert.not_equal(ordinary.forced_header_manifest,
                     changed.forced_header_manifest)

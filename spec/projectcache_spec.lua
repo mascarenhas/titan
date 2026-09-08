@@ -15,16 +15,18 @@ describe("checked project payloads", function()
         driver.imported, types.registry = previous_imported, previous_registry
     end)
 
-    local function load_module(name, source, retained)
+    local function load_module(name, source, retained, extra_options)
         local filename = "/tmp/titan-project-cache-" .. name .. ".titan"
-        local loader = driver.defaultloader({}, {
+        local options = {
             source_roots = { [name] = true },
             source_overrides = { [name] = {
                 kind = "generated", main = filename, files = { filename },
                 contents = { [filename] = source },
             } },
             cached_source_entries = retained,
-        })
+        }
+        for key, value in pairs(extra_options or {}) do options[key] = value end
+        local loader = driver.defaultloader({}, options)
         loaders[#loaders + 1] = loader
         local ok, result, errors = loader(name)
         assert.is_true(ok, result)
@@ -99,6 +101,115 @@ describe("checked project payloads", function()
         ok, err = pcall(driver.decode_project_entry, payload, options)
         assert.is_false(ok)
         assert.equal(cancelled, err)
+    end)
+
+    it("overlays matching current header observations throughout a private graph", function()
+        local entry = load_module("observations", "function answer(): integer return 42 end")
+        local old = { modified_seconds = 100, modified_nanoseconds = 5, physical_identity = "physical" }
+        local input = { kind = "file", path = "/observed.h", identity = "semantic", observation = old }
+        entry.c_header_dependencies = { input }
+        entry.ast._c_header_dependencies = { input }
+        entry.ast[1]._nested_header_input = {
+            kind = input.kind, path = input.path, identity = input.identity, observation = old,
+        }
+        entry.ast[1]._unmatched_header_input = {
+            kind = input.kind, path = input.path, identity = "other semantic", observation = old,
+        }
+        local payload = assert(driver.encode_project_entry(entry))
+        local current = { modified_seconds = 100, modified_nanoseconds = 6, physical_identity = "physical" }
+        local restored = assert(driver.decode_project_entry(payload, { header_inputs = {
+            { kind = input.kind, path = input.path, identity = input.identity, observation = current },
+        } }))
+        assert.same(current, restored.c_header_dependencies[1].observation)
+        assert.same(current, restored.ast[1]._nested_header_input.observation)
+        assert.same(old, restored.ast[1]._unmatched_header_input.observation)
+        assert.same(old, entry.c_header_dependencies[1].observation)
+        assert.equal(assert(driver.serialize_source_interface(entry)),
+            assert(driver.serialize_source_interface(restored)))
+        assert.same(old, assert(driver.decode_project_entry(payload)).c_header_dependencies[1].observation)
+    end)
+
+    it("cooperates during declared-registry validation and propagates cancellation", function()
+        local entry = load_module("registry_yield", "function answer(): integer return 42 end")
+        entry.ast[1]._large_annotation = {}
+        for index = 1, 20000 do entry.ast[1]._large_annotation[index] = index end
+        local calls, cancellation = 0, {}
+        local ok, err = pcall(driver.project_entries_registry, { registry_yield = entry }, {
+            yield = function()
+                calls = calls + 1
+                if calls == 2 then error(cancellation, 0) end
+            end,
+        })
+        assert.is_false(ok)
+        assert.equal(2, calls)
+        assert.equal(cancellation, err)
+    end)
+
+    it("shares the cooperative work budget across many small registry entries", function()
+        local entries = {}
+        for index = 1, 100 do
+            local name = "small_entry_" .. index
+            local annotation = {}
+            for item = 1, 100 do annotation[item] = { value = item } end
+            entries[name] = {
+                kind = "source", filename = name .. ".titan", source_files = { name .. ".titan" },
+                deps = {}, source_manifest = "source", ast = { _declared_registry = {}, annotation = annotation },
+                type = { _tag = "Type.Module", name = name, _source = true,
+                    source_members = {}, source_type_members = {} },
+            }
+        end
+        local calls = 0
+        assert(driver.project_entries_registry(entries, { yield = function() calls = calls + 1 end }))
+        assert.is_true(calls > 1)
+        local cancellation = {}
+        local ok, err = pcall(driver.project_entries_registry, entries,
+            { yield = function() error(cancellation, 0) end })
+        assert.is_false(ok)
+        assert.equal(cancellation, err)
+    end)
+
+    it("uses fresh observation baselines for later edits with retained source-import graphs", function()
+        local compiler_io = require "titan-compiler.io"
+        local strategy = compiler_io.new_sync()
+        local header = os.tmpname() .. ".h"
+        local file = assert(io.open(header, "wb"))
+        assert(file:write("typedef int retained_count;\n"))
+        assert(file:close())
+        local reads, ordinary_read = 0, strategy.read_file
+        function strategy:read_file(path)
+            if path == header then reads = reads + 1 end
+            return ordinary_read(self, path)
+        end
+        local ok, err = pcall(function()
+            local provider = load_module("baseline_provider", string.format([[
+                local c = foreign import %q
+                foreign function identity(input: c.retained_count): c.retained_count return input end
+            ]], header), nil, { io = strategy })
+            local old_stamp = provider.c_header_dependencies[1].observation.modified_seconds
+            local stamp = assert(lfs.attributes(header, "modification"))
+            assert(lfs.touch(header, stamp + 1, stamp + 1))
+            local current, restat_error, changed = driver.restat_c_header_dependencies(
+                provider.c_header_dependencies, { io = strategy })
+            assert(current, restat_error)
+            assert.is_false(changed)
+            reads = 0
+            for index = 1, 2 do
+                driver.imported, types.registry = {}, {}
+                load_module("baseline_consumer", string.format([[
+                    local provider = import "baseline_provider.titan"
+                    function answer(): integer
+                        local current = provider.identity(%d)
+                        return 42
+                    end
+                ]], index), { baseline_provider = provider }, {
+                    io = strategy, header_inputs = current,
+                })
+                assert.equal(0, reads)
+            end
+            assert.equal(old_stamp, provider.c_header_dependencies[1].observation.modified_seconds)
+        end)
+        os.remove(header)
+        assert.is_true(ok, err)
     end)
 
     it("recreates source-private checking headers after decoding a closed resolver", function()

@@ -177,6 +177,7 @@ function collect_foreign_header_inputs(includes, supplemental_includes)
                                 kind = input.kind,
                                 path = input.path,
                                 identity = input.identity,
+                                observation = cdriver.copy_header_observation(input.observation),
                             }
                         end
                     end

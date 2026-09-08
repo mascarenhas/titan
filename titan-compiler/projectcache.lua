@@ -8,7 +8,21 @@ local version = require "titan-compiler.version"
 
 local projectcache = { VERSION = 1 }
 
-local function valid_entry(entry, options)
+local function valid_entry(entry, options, work)
+    work = work or graphcodec.work(options)
+    local header_observations = {}
+    if type(options.header_inputs) == "table" then
+        for _, input in ipairs(options.header_inputs) do
+            work()
+            if type(input) == "table" and input.kind == "file"
+               and type(input.path) == "string" and type(input.identity) == "string" then
+                local observation = cpp.copy_header_observation(input.observation)
+                if observation then
+                    header_observations[input.kind .. "\0" .. input.path .. "\0" .. input.identity] = observation
+                end
+            end
+        end
+    end
     local modname = options.module_name or
         (type(entry) == "table" and type(entry.type) == "table" and entry.type.name)
     if not staticmetadata.valid_module_name(modname) or type(entry) ~= "table"
@@ -26,6 +40,7 @@ local function valid_entry(entry, options)
     end
     local files = {}
     for index, filename in ipairs(entry.source_files) do
+        work()
         if type(filename) ~= "string" or filename == "" or files[filename] then
             return nil, "project snapshot has an invalid source file list"
         end
@@ -35,11 +50,13 @@ local function valid_entry(entry, options)
         end
     end
     for key in next, entry.source_files do
+        work()
         if math.type(key) ~= "integer" or key < 1 or key > #entry.source_files then
             return nil, "project snapshot source file list must be dense"
         end
     end
     for name, present in next, entry.deps do
+        work()
         if not staticmetadata.valid_module_name(name) or present ~= true then
             return nil, "project snapshot has an invalid dependency map"
         end
@@ -48,10 +65,16 @@ local function valid_entry(entry, options)
     local seen, queue = {}, {entry}
     local index = 1
     while queue[index] do
+        work()
         local node = queue[index]
         index = index + 1
         if not seen[node] then
             seen[node] = true
+            if node.kind == "file" and type(node.path) == "string"
+               and type(node.identity) == "string" then
+                local observation = header_observations[node.kind .. "\0" .. node.path .. "\0" .. node.identity]
+                if observation then node.observation = cpp.copy_header_observation(observation) end
+            end
             if type(node._tag) == "string" and node._tag:sub(1, 4) == "Ast." then
                 local filename = type(node.loc) == "table" and node.loc.filename
                 if type(filename) ~= "string" or not allowed[filename] then
@@ -59,6 +82,7 @@ local function valid_entry(entry, options)
                 end
             end
             for key, child in next, node do
+                work()
                 if type(key) == "table" then queue[#queue + 1] = key end
                 if type(child) == "table" then queue[#queue + 1] = child end
             end
@@ -112,11 +136,14 @@ function projectcache.decode(payload, options)
     return envelope.entry
 end
 
-function projectcache.registry(entries)
+function projectcache.registry(entries, options)
+    options = options or {}
+    local work = graphcodec.work(options)
     if type(entries) ~= "table" then return nil, "project entries must be a module map" end
     local names, registry = {}, {}
     for name, entry in pairs(entries) do
-        local valid, err = valid_entry(entry, { module_name = name })
+        work()
+        local valid, err = valid_entry(entry, { module_name = name, yield = options.yield }, work)
         if not valid then return nil, err end
         if type(entry.ast._declared_registry) ~= "table" then
             return nil, "project entry has no declared owner registry"
@@ -126,6 +153,7 @@ function projectcache.registry(entries)
     table.sort(names)
     for _, name in ipairs(names) do
         for fqtn, owner in pairs(entries[name].ast._declared_registry) do
+            work()
             local declaring = type(fqtn) == "string" and fqtn:match("^(.*)%.")
             if not declaring or type(owner) ~= "table" or owner.name ~= fqtn
                or (owner._tag ~= "Type.Record" and owner._tag ~= "Type.Union"

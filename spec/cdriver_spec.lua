@@ -4,9 +4,12 @@ local cdriver = require "c-parser.cdriver"
 local compiler_io = require "titan-compiler.io"
 
 local function write_file(filename, contents)
+    local previous = lfs.attributes(filename, "modification")
     local fd = assert(io.open(filename, "wb"))
     fd:write(contents)
     fd:close()
+    -- Sync I/O can report whole-second mtimes; keep saved-edit tests distinct.
+    if previous then assert(lfs.touch(filename, previous + 1, previous + 1)) end
 end
 
 local function tmp_header(contents)
@@ -45,6 +48,178 @@ local function assert_process_file(filename, options)
     assert.is_table(include)
     return ffi_types, include, context
 end
+
+local function semantic_inputs(inputs)
+    local copy = {}
+    for index, input in ipairs(inputs) do
+        copy[index] = { kind = input.kind, path = input.path, identity = input.identity }
+    end
+    return copy
+end
+
+describe("mtime-first C header validation", function()
+    local cpp = require "c-parser.cpp"
+    local sha256 = require "titan-compiler.sha256"
+    local function fixture()
+        local world = {
+            contents = "typedef int observed_type;\n",
+            attributes = { kind = "file", mode = 33188, device = 1, inode = 17,
+                modified_seconds = 100, modified_nanoseconds = 123 },
+            reads = 0, hashes = 0, stats = 0, lstats = 0, opens = 0,
+        }
+        local function attributes()
+            if not world.attributes then return nil end
+            local copy = {}
+            for key, value in pairs(world.attributes) do copy[key] = value end
+            return copy
+        end
+        world.io = {
+            stat = function() world.stats = world.stats + 1; return attributes() end,
+            lstat = function() world.lstats = world.lstats + 1; return attributes() end,
+            readable = function() world.opens = world.opens + 1; return world.attributes ~= nil end,
+            read_file = function()
+                world.reads = world.reads + 1
+                if world.after_read then world.after_read() end
+                return world.attributes and world.contents or nil, "missing"
+            end,
+        }
+        world.adapter = { sha256_binary = function(bytes)
+            world.hashes = world.hashes + 1
+            return sha256.binary(bytes)
+        end }
+        local input = assert(cpp.revalidate_header_input(
+            { kind = "file", path = "/header.h", identity = "unobserved" },
+            { io = world.io }))
+        world.stats, world.lstats, world.reads = 0, 0, 0
+        return world, input
+    end
+    local function validate(world, input, pass)
+        return cdriver.revalidate_header_input(input, {
+            io = world.io, cache_adapter = world.adapter, header_validation = pass,
+        })
+    end
+
+    it("uses metadata only for the same physical file and exact saved nanosecond", function()
+        local world, input = fixture()
+        world.contents = "changed without changing the saved timestamp"
+        local current, err, changed = validate(world, input)
+        assert.is_nil(err)
+        assert.is_false(changed)
+        assert.same(input, current)
+        assert.equal(0, world.reads)
+        assert.equal(0, world.hashes)
+        assert.equal(0, world.opens)
+        assert.equal(1, world.stats)
+        assert.equal(1, world.lstats)
+    end)
+
+    it("hashes a same-content nanosecond touch once and shares the current observation", function()
+        local world, input = fixture()
+        world.attributes.modified_nanoseconds = 124
+        local pass = {}
+        local current, err, changed = validate(world, input, pass)
+        assert.is_nil(err)
+        assert.is_false(changed)
+        assert.equal(input.identity, current.identity)
+        assert.equal(124, current.observation.modified_nanoseconds)
+        assert.equal(123, input.observation.modified_nanoseconds)
+        assert.equal(1, world.reads)
+        assert.equal(1, world.hashes)
+        local stats, lstats = world.stats, world.lstats
+        assert.same(current, assert(validate(world, input, pass)))
+        assert.equal(stats, world.stats)
+        assert.equal(lstats, world.lstats)
+        assert.same(current, assert(validate(world, current, {})))
+        assert.equal(1, world.reads)
+        assert.equal(1, world.hashes)
+    end)
+
+    it("uses a fresh resolver baseline for an older retained graph observation", function()
+        local world, input = fixture()
+        world.attributes.modified_nanoseconds = 124
+        local current = assert(validate(world, input))
+        world.reads, world.hashes = 0, 0
+        local refreshed, err, changed = cdriver.revalidate_header_input(input, {
+            io = world.io, cache_adapter = world.adapter,
+            header_observations = cpp.header_observation_index({ current }),
+        })
+        assert.is_nil(err)
+        assert.is_false(changed)
+        assert.same(current, refreshed)
+        assert.equal(0, world.reads)
+        assert.equal(0, world.hashes)
+        assert.equal(123, input.observation.modified_nanoseconds)
+    end)
+
+    it("reads a replacement as a new input even when its mtime and bytes match", function()
+        local world, input = fixture()
+        world.attributes.inode = 18
+        local current, err, changed = validate(world, input)
+        assert.is_nil(err)
+        assert.is_true(changed)
+        assert.not_equal(input.identity, current.identity)
+        assert.equal(1, world.reads)
+        assert.equal(1, world.hashes)
+        local stable, _, repeated = validate(world, current)
+        assert.is_false(repeated)
+        assert.same(current, stable)
+        assert.equal(1, world.reads)
+    end)
+
+    it("detects missing files without attempting a content read", function()
+        local world, input = fixture()
+        world.attributes = nil
+        local current, err, changed = validate(world, input)
+        assert.is_nil(err)
+        assert.is_true(changed)
+        assert.matches("unreadable", current.identity)
+        assert.is_nil(current.observation)
+        assert.equal(0, world.reads)
+        assert.equal(0, world.hashes)
+        assert.equal(0, world.opens)
+    end)
+
+    it("backfills absent or malformed observations and rejects a racing read", function()
+        local world, input = fixture()
+        input.observation = { modified_seconds = 100, modified_nanoseconds = 1000000000,
+            physical_identity = "malformed" }
+        local current, _, changed = validate(world, input)
+        assert.is_false(changed)
+        assert.equal(123, current.observation.modified_nanoseconds)
+        assert.equal(1, world.reads)
+        current.observation = nil
+        world.after_read = function() world.attributes.modified_nanoseconds = 125 end
+        local rejected, err = validate(world, current)
+        assert.is_nil(rejected)
+        assert.matches("changed while it was read", err, 1, true)
+    end)
+
+    it("memoizes ordered search observations within one pass only", function()
+        local world = fixture()
+        local input = { kind = "search", path = "/header.h",
+            identity = cpp.header_search_identity("/header.h", nil, world.io) }
+        world.opens, world.stats, world.lstats = 0, 0, 0
+        local pass = {}
+        assert.same(input, assert(validate(world, input, pass)))
+        assert.same(input, assert(validate(world, input, pass)))
+        assert.equal(1, world.opens)
+        assert.equal(1, world.stats)
+        assert.equal(1, world.lstats)
+        world.attributes = nil
+        local _, _, changed = validate(world, input, {})
+        assert.is_true(changed)
+    end)
+
+    it("preserves cancellation identity during a required content digest", function()
+        local world, input = fixture()
+        world.attributes.modified_nanoseconds = 124
+        local cancellation = {}
+        world.adapter.sha256_binary = function() error(cancellation, 0) end
+        local ok, err = pcall(validate, world, input)
+        assert.is_false(ok)
+        assert.equal(cancellation, err)
+    end)
+end)
 
 describe("completed C header payload transport", function()
     local files, original_match, matches, payloads, adapter
@@ -99,7 +274,7 @@ describe("completed C header payload transport", function()
         assert.not_equal("mutated", clean.node.def[1])
     end)
 
-    it("invalidates changed header bytes despite preserved mtime", function()
+    it("trusts the saved physical input when its mtime is preserved", function()
         local path = header("typedef int changed_type;\n")
         local options = { cache_adapter = adapter }
         assert_process_file(path, options)
@@ -108,8 +283,256 @@ describe("completed C header payload transport", function()
         assert(lfs.touch(path, stamp, stamp))
         cdriver.clear_process_cache()
         local restored = assert_process_file(path, options)
-        assert.equal(2, matches)
-        assert.same({ "unsigned" }, restored.changed_type.def)
+        assert.equal(1, matches)
+        assert.same({ "int" }, restored.changed_type.def)
+    end)
+
+    it("refreshes touched input metadata without rewriting the persisted graph", function()
+        local path = header("typedef int touched_type;\n")
+        local metadata, puts, refreshes = {}, 0, 0
+        adapter.get = function(kind, key)
+            local id = kind .. "\0" .. key
+            return payloads[id], metadata[id]
+        end
+        adapter.put = function(kind, key, payload, inputs)
+            local id = kind .. "\0" .. key
+            payloads[id], metadata[id] = payload, inputs
+            puts = puts + 1
+            return true
+        end
+        adapter.refresh_inputs = function(kind, key, inputs)
+            metadata[kind .. "\0" .. key] = inputs
+            refreshes = refreshes + 1
+            return true
+        end
+        local strategy = compiler_io.new_sync()
+        local options = { io = strategy, cache_adapter = adapter }
+        assert_process_file(path, options)
+        local key, original = next(payloads)
+        assert.equal(1, puts)
+        local stamp = assert(lfs.attributes(path, "modification"))
+        assert(lfs.touch(path, stamp + 1, stamp + 1))
+        cdriver.clear_process_cache(strategy)
+        assert_process_file(path, options)
+        assert.equal(1, matches)
+        assert.equal(1, puts)
+        assert.equal(1, refreshes)
+        assert.equal(original, payloads[key])
+        assert.equal(1, cdriver.process_cache_stats(strategy).file_reads)
+        assert.equal(1, cdriver.process_cache_stats(strategy).file_hashes)
+        cdriver.clear_process_cache(strategy)
+        assert_process_file(path, options)
+        assert.equal(1, refreshes)
+        assert.equal(0, cdriver.process_cache_stats(strategy).file_reads)
+        assert.equal(0, cdriver.process_cache_stats(strategy).file_hashes)
+    end)
+
+    it("backfills touched observations through a legacy byte-only adapter", function()
+        local path = header("typedef int legacy_touch;\n")
+        local strategy = compiler_io.new_sync()
+        local options = { io = strategy, cache_adapter = adapter }
+        assert_process_file(path, options)
+        local stamp = assert(lfs.attributes(path, "modification"))
+        assert(lfs.touch(path, stamp + 1, stamp + 1))
+        cdriver.clear_process_cache(strategy)
+        assert_process_file(path, options)
+        assert.equal(1, matches)
+        assert.equal(1, cdriver.process_cache_stats(strategy).file_reads)
+        cdriver.clear_process_cache(strategy)
+        assert_process_file(path, options)
+        assert.equal(1, matches)
+        assert.equal(0, cdriver.process_cache_stats(strategy).file_reads)
+        assert.equal(0, cdriver.process_cache_stats(strategy).file_hashes)
+    end)
+
+    for _, flag in ipairs({ "-include", "-imacros" }) do
+        it("replays a completed " .. flag .. " context without forced-header reads or probes", function()
+            local cpp = require "c-parser.cpp"
+            local forced = header("#define FORCED_TYPE int\ntypedef int forced_declaration;\n")
+            local imported = header("typedef FORCED_TYPE imported_type;\n")
+            local metadata, refreshes, forced_probes = {}, 0, 0
+            adapter.get = function(kind, key)
+                local id = kind .. "\0" .. key
+                return payloads[id], metadata[id]
+            end
+            adapter.put = function(kind, key, payload, inputs)
+                local id = kind .. "\0" .. key
+                payloads[id], metadata[id] = payload, inputs
+                return true
+            end
+            adapter.refresh_inputs = function(kind, key, inputs)
+                metadata[kind .. "\0" .. key] = inputs
+                refreshes = refreshes + 1
+                return true
+            end
+            local strategy = compiler_io.new_sync()
+            local run = strategy.run
+            function strategy:run(argv, options)
+                for _, argument in ipairs(argv) do
+                    if argument == forced then forced_probes = forced_probes + 1 end
+                end
+                return run(self, argv, options)
+            end
+            local options = { io = strategy, cache_adapter = adapter, compiler = { "cc" },
+                compiler_include_dirs = {}, cppflags = { flag, forced } }
+            local first = assert_process_file(imported, options)
+            assert.same({ "int" }, first.imported_type.def)
+            assert.equal(flag == "-include", first.forced_declaration ~= nil)
+            local original, forced_keys = {}, 0
+            for key, payload in pairs(payloads) do
+                original[key] = payload
+                if key:find("titan-cpp-forced-v1:", 1, true) then forced_keys = forced_keys + 1 end
+            end
+            assert.equal(1, forced_keys)
+            assert.equal(1, forced_probes)
+            cpp.clear_probe_cache()
+            cdriver.clear_process_cache(strategy)
+            assert_process_file(imported, options)
+            assert.equal(1, forced_probes)
+            assert.equal(0, cdriver.process_cache_stats(strategy).file_reads)
+            assert.equal(0, cdriver.process_cache_stats(strategy).file_hashes)
+            local stamp = assert(lfs.attributes(forced, "modification"))
+            assert(lfs.touch(forced, stamp + 1, stamp + 1))
+            cpp.clear_probe_cache()
+            cdriver.clear_process_cache(strategy)
+            assert_process_file(imported, options)
+            assert.equal(1, forced_probes)
+            assert.equal(1, cdriver.process_cache_stats(strategy).file_reads)
+            assert.equal(1, cdriver.process_cache_stats(strategy).file_hashes)
+            assert.is_true(refreshes > 0)
+            assert.same(original, payloads)
+            cpp.clear_probe_cache()
+            cdriver.clear_process_cache(strategy)
+            local restored = assert_process_file(imported, options)
+            assert.same({ "int" }, restored.imported_type.def)
+            assert.equal(1, matches)
+            assert.equal(1, forced_probes)
+            assert.equal(0, cdriver.process_cache_stats(strategy).file_reads)
+            assert.equal(0, cdriver.process_cache_stats(strategy).file_hashes)
+        end)
+    end
+
+    it("keeps forced macro contexts private and cancels inside their persisted codec", function()
+        local cpp = require "c-parser.cpp"
+        local forced = header("#define PRIVATE_TYPE int\n")
+        local strategy = compiler_io.new_sync()
+        local options = { io = strategy, cache_adapter = adapter, compiler = { "cc" },
+            cppflags = { "-imacros", forced } }
+        local first = assert(cpp.new_context(options))
+        first.defines.PRIVATE_TYPE[1] = "long"
+        local second = assert(cpp.new_context(options))
+        assert.equal("int", cpp.expand_macro("PRIVATE_TYPE", second.defines))
+        cpp.clear_probe_cache()
+        local calls, cancellation = 0, {}
+        adapter.yield = function()
+            calls = calls + 1
+            if calls == 2 then error(cancellation, 0) end
+        end
+        local ok, err = pcall(cpp.new_context, options)
+        assert.is_false(ok)
+        assert.equal(cancellation, err)
+        assert.equal(2, calls)
+        adapter.yield = nil
+        assert(cpp.new_context(options))
+    end)
+
+    it("invalidates persisted forced symlink retargets and never stores missing inputs", function()
+        local cpp = require "c-parser.cpp"
+        local first = header("#define LINKED_TYPE int\n")
+        local second = header("#define LINKED_TYPE long\n")
+        local imported = header("typedef LINKED_TYPE linked_type;\n")
+        local link = first .. ".link"
+        assert(lfs.link(first, link, true))
+        files[#files + 1] = link
+        local options = { cache_adapter = adapter, compiler_include_dirs = {},
+            compiler = { "cc" }, cppflags = { "-imacros", link } }
+        assert.same({ "int" }, assert_process_file(imported, options).linked_type.def)
+        assert(os.remove(link))
+        assert(lfs.link(second, link, true))
+        cpp.clear_probe_cache()
+        cdriver.clear_process_cache()
+        assert.same({ "long" }, assert_process_file(imported, options).linked_type.def)
+        local before = {}
+        for key, payload in pairs(payloads) do before[key] = payload end
+        assert(os.remove(link))
+        local result, err = cdriver.process_file(imported, options)
+        assert.is_nil(result)
+        assert.matches("missing or unreadable", err, 1, true)
+        assert.same(before, payloads)
+    end)
+
+    it("stores no forced context until its native macro probe succeeds", function()
+        local cpp = require "c-parser.cpp"
+        local forced = header("#define COMPLETE_CONTEXT 1\n")
+        local strategy = compiler_io.new_sync()
+        local run, fail = strategy.run, true
+        function strategy:run(argv, options)
+            for _, argument in ipairs(argv) do
+                if fail and argument == forced then
+                    return { started = true, ok = false, why = "exit", status = 1,
+                        diagnostic = "injected forced context failure" }
+                end
+            end
+            return run(self, argv, options)
+        end
+        local options = { io = strategy, cache_adapter = adapter, compiler = { "cc" },
+            cppflags = { "-include", forced } }
+        local context, err = cpp.new_context(options)
+        assert.is_nil(context)
+        assert.matches("injected forced context failure", err, 1, true)
+        assert.is_nil(next(payloads))
+        fail = false
+        assert(cpp.new_context(options))
+        assert.is_not_nil(next(payloads))
+    end)
+
+    for _, mode in ipairs({ "ordinary", "nested", "include", "imacros" }) do
+        it("rejects " .. mode .. " header edits racing with their first content read", function()
+            local forced = mode == "include" or mode == "imacros"
+            local old = forced and "#define RACING_KIND int\n" or "typedef int racing_type;\n"
+            local fresh = forced and "#define RACING_KIND long\n" or "typedef long racing_type;\n"
+            local changing = header(old)
+            local target = changing
+            if mode == "nested" then target = header('#include "' .. changing .. '"\n')
+            elseif forced then target = header("typedef RACING_KIND racing_type;\n") end
+            local strategy = compiler_io.new_sync()
+            local read, raced = strategy.read_file, false
+            function strategy:read_file(path)
+                local contents, err = read(self, path)
+                if path == changing and contents and not raced then
+                    raced = true
+                    write_file(changing, fresh)
+                end
+                return contents, err
+            end
+            local options = { io = strategy, cache_adapter = adapter, compiler_include_dirs = {} }
+            if forced then options.cppflags = { "-" .. mode, changing } end
+            local result, err = cdriver.process_file(target, options)
+            assert.is_true(raced)
+            assert.is_nil(result)
+            assert.matches("C header changed while it was read", err, 1, true)
+            assert.is_nil(next(payloads))
+            local current, include = assert_process_file(target, options)
+            assert.same({ "long" }, current.racing_type.def)
+            for _, input in ipairs(include.c_header_dependencies) do
+                assert.equal(cdriver.header_input_identity(input.kind, input.path, strategy), input.identity)
+            end
+        end)
+    end
+
+    it("preserves cancellation from the first certified content read", function()
+        local path = header("typedef int cancelled_type;\n")
+        local strategy = compiler_io.new_sync()
+        local read, cancellation = strategy.read_file, {}
+        function strategy:read_file(filename)
+            if filename == path then error(cancellation, 0) end
+            return read(self, filename)
+        end
+        local ok, err = pcall(cdriver.process_file, path,
+            { io = strategy, cache_adapter = adapter, compiler_include_dirs = {} })
+        assert.is_false(ok)
+        assert.equal(cancellation, err)
+        assert.is_nil(next(payloads))
     end)
 
     it("rebuilds corrupt transport payloads and tolerates transport failure", function()
@@ -373,7 +796,7 @@ describe("C FFI cdriver", function()
                 { kind = "file", path = nested,
                   identity = assert(cdriver.header_input_identity(
                       "file", nested)) },
-            }, include.c_header_dependencies)
+            }, semantic_inputs(include.c_header_dependencies))
             assert.equal(
                 include.c_header_dependencies,
                 context.c_header_dependencies)
@@ -892,9 +1315,9 @@ extern titan_cdriver_cache_type titan_cdriver_cache_value;
         it("validates and clones once for each explicit analysis",
         function()
             cdriver.clear_process_cache()
-            local original_identity = cdriver.header_input_identity
+            local original_identity = cdriver.revalidate_header_input
             local identity_reads = 0
-            cdriver.header_input_identity = function(...)
+            cdriver.revalidate_header_input = function(...)
                 identity_reads = identity_reads + 1
                 return original_identity(...)
             end
@@ -948,7 +1371,7 @@ extern titan_cdriver_cache_type titan_cdriver_cache_value;
                 assert.equal(2, phases["graph_clone:hit"])
                 assert.equal(2, phases["graph_clone:analysis_reuse"])
             end)
-            cdriver.header_input_identity = original_identity
+            cdriver.revalidate_header_input = original_identity
             os.remove(header)
             assert.truthy(ok, err)
         end)
@@ -1309,7 +1732,7 @@ typedef TITAN_CACHE_CONFIG_TYPE titan_cache_config_type;
             cdriver.clear_process_cache()
             local c99 = require "c-parser.c99"
             local original_match = c99.match_language_grammar
-            local original_identity = cdriver.header_input_identity
+            local original_identity = cdriver.revalidate_header_input
             local matches = 0
             c99.match_language_grammar = function(...)
                 matches = matches + 1
@@ -1342,9 +1765,10 @@ typedef TITAN_CACHE_CONFIG_TYPE titan_cache_config_type;
                 local saw_first = false
                 local interleaved = false
                 local nested = false
-                cdriver.header_input_identity = function(kind, path, strategy)
-                    local identity, identity_error =
-                        original_identity(kind, path, strategy)
+                cdriver.revalidate_header_input = function(input, validation_options)
+                    local kind, path = input.kind, input.path
+                    local identity, identity_error, changed =
+                        original_identity(input, validation_options)
                     if not nested and kind == "file" and path == first then
                         saw_first = true
                     elseif not nested and not interleaved and saw_first
@@ -1363,7 +1787,7 @@ typedef TITAN_CACHE_CONFIG_TYPE titan_cache_config_type;
                         assert.same({ "long" },
                             replacement.titan_replaced_cache_type.def)
                     end
-                    return identity, identity_error
+                    return identity, identity_error, changed
                 end
 
                 local current = assert_process_file("outer.h", options)
@@ -1380,7 +1804,7 @@ typedef TITAN_CACHE_CONFIG_TYPE titan_cache_config_type;
                 assert.equal(2, stats.stores)
                 assert.equal(1, stats.size)
             end)
-            cdriver.header_input_identity = original_identity
+            cdriver.revalidate_header_input = original_identity
             c99.match_language_grammar = original_match
             remove_tree({ outer, first, second }, { root })
             assert.truthy(ok, err)
@@ -2198,7 +2622,7 @@ typedef float cached_selection;
                     identity = assert(cdriver.header_input_identity(
                         "file", imported)),
                 },
-            }, first_include.c_header_dependencies)
+            }, semantic_inputs(first_include.c_header_dependencies))
 
             write_file(forced, "#define TITAN_FORCED_TYPE long\n")
             local second, second_include =

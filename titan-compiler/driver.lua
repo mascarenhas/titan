@@ -32,21 +32,12 @@ driver.TITAN_LIBRARY_VERSION = version.TITAN_LIBRARY_VERSION
 driver.TITAN_LIBRARY_VERSION_SUFFIX = version.TITAN_LIBRARY_VERSION_SUFFIX
 driver.LUA_VERSION = version.LUA_VERSION
 
--- Version of the additive compiler contract consumed by the Titan language
--- server. This is intentionally independent from TITAN_ABI_VERSION: matching the
--- generated-code ABI does not imply support for semantic AST metadata,
--- incremental source/interface caches, analysis-local FFI include paths, or
--- cooperative scheduling. API 2 additionally guarantees exact C-header
--- dependency metadata and driver.restat_c_header_dependencies. API 3 owns all
--- analysis I/O and cooperative checkpoints through one resolver strategy and
--- publishes an opaque source-visible manifest for every clean source entry.
--- API 4 additionally accepts one validated, analysis-only embedded interface
--- provider whose entries never become native link inputs. API 5 admits its
--- verified build-target numeric profile for SDK-free semantic analysis while
--- retaining live native-toolchain checks for actual C probes.
--- API 6 supplies literal checked-project payloads and an optional compiler
--- cache transport for completed C-header/conversion graphs.
-driver.LANGUAGE_SERVER_API_VERSION = 6
+-- Exact compiler contract consumed by the language server, independent from
+-- TITAN_ABI_VERSION. Keep this marker at 1 until Titan's first public release.
+-- It covers semantic AST/source manifests, analysis-owned I/O/checkpoints,
+-- embedded interfaces/target profiles, exact C-header dependencies and
+-- mtime-first observations, and compiler-owned persistent graph payloads.
+driver.LANGUAGE_SERVER_API_VERSION = 1
 driver.PROJECT_CACHE_VERSION = projectcache.VERSION
 
 function driver.encode_project_entry(entry, options)
@@ -57,8 +48,8 @@ function driver.decode_project_entry(payload, options)
     return projectcache.decode(payload, options)
 end
 
-function driver.project_entries_registry(entries)
-    return projectcache.registry(entries)
+function driver.project_entries_registry(entries, options)
+    return projectcache.registry(entries, options)
 end
 
 function driver.compiler_cache_stats(options)
@@ -525,6 +516,7 @@ function driver.configure_foreign_c(context)
     local options = {
         io = io_strategy,
         cache_adapter = context.cache_adapter,
+        header_observations = context.header_observations,
         process_trace = context.c_header_process_trace,
         process_analysis = context.c_header_analysis,
         compiler = driver.CC,
@@ -565,6 +557,7 @@ function driver.configure_foreign_c(context)
     options.process_trace = nil
     options.process_analysis = nil
     options.cache_adapter = nil
+    options.header_observations = nil
     checker.configure_foreign_c(
         options, driver.TOOLCHAIN_ERROR or platform_err or toolchain_err or
             profile_error)
@@ -816,6 +809,7 @@ function driver.new_resolver_context(options)
         _resolver_context = true,
         io = io_strategy,
         cache_adapter = options.cache_adapter,
+        header_observations = cdriver.header_observation_index(options.header_inputs),
         prefer_static = options.prefer_static == true,
         source_first = options.source_first == true,
         provider_cache = {},
@@ -1208,6 +1202,7 @@ function driver.get_probe_service(context)
     service, err = cprobe.new_service({
         io = context.io,
         cache_adapter = context.cache_adapter,
+        header_observations = context.header_observations,
         process_trace = context.c_header_process_trace,
         process_analysis = context.c_header_analysis,
         persistent_cache_trace = persistent_cache_trace,
@@ -1404,6 +1399,7 @@ local function copy_c_header_dependencies(value, label)
             kind = kind,
             path = path,
             identity = identity,
+            observation = cdriver.copy_header_observation(input.observation),
         }
     end
     for key in pairs(value) do
@@ -1480,26 +1476,29 @@ function driver.restat_c_header_dependencies(value, options)
         if owns_context then driver.close_resolver_context(context) end
         return nil, err
     end
-    local result = {}
+    local result, changed = {}, false
+    local validation_options = {
+        io = context.io,
+        cache_adapter = context.cache_adapter,
+        header_observations = context.header_observations,
+        header_validation = options and options.header_validation or {},
+    }
     for index, dependency in ipairs(dependencies) do
-        local identity, identity_error = cdriver.header_input_identity(
-            dependency.kind, dependency.path, context.io)
-        if not identity then
+        local current, identity_error, input_changed =
+            cdriver.revalidate_header_input(dependency, validation_options)
+        if not current then
             if owns_context then driver.close_resolver_context(context) end
             return nil, "cannot fingerprint C header input '" ..
                 dependency.path .. "': " .. tostring(identity_error)
         end
-        result[index] = {
-            kind = dependency.kind,
-            path = dependency.path,
-            identity = identity,
-        }
+        result[index] = current
+        changed = changed or input_changed
     end
     if owns_context then
         local closed, close_error = driver.close_resolver_context(context)
         if not closed then return nil, close_error end
     end
-    return result
+    return result, nil, changed
 end
 
 function driver.close_loader(loader)
@@ -3427,6 +3426,7 @@ local function check_source_module(
         context, modname, ast, input, filename, loader)
     local check_options = {
         cache_adapter = context.cache_adapter,
+        header_observations = context.header_observations,
         target_profile_provider = function()
             return driver.get_target_profile(context)
         end,

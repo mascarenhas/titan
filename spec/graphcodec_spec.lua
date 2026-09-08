@@ -2,6 +2,34 @@ local codec = require "titan-compiler.graphcodec"
 local sha256 = require "titan-compiler.sha256"
 
 describe("literal compiler graph codec", function()
+    it("yields within large flat graphs and preserves inner cancellation identity", function()
+        local root = {}
+        for index = 1, 18000 do root[index] = index end
+        local yields = 0
+        local options = { yield = function() yields = yields + 1 end }
+        local payload = assert(codec.encode(root, options))
+        assert.is_true(yields > 10)
+        local previous = yields
+        assert.same(root, assert(codec.decode(payload, options)))
+        assert.is_true(yields - previous > 8)
+        local cancellation = {}
+        for _, operation in ipairs({
+            function(hook) return codec.encode(root, { yield = hook }) end,
+            function(hook) return codec.decode(payload, { yield = hook }) end,
+        }) do
+            local calls = 0
+            local ok, err = pcall(operation, function()
+                calls = calls + 1
+                if calls == 2 then error(cancellation, 0) end
+            end)
+            assert.is_false(ok)
+            assert.equal(2, calls)
+            assert.equal(cancellation, err)
+        end
+        assert.is_nil(codec.encode(root, { yield = false }))
+        assert.is_nil(codec.decode(payload, { yield = "invalid" }))
+    end)
+
     it("preserves cycles, table-key aliases and literal metatables", function()
         local key, child = {}, { value = "shared" }
         local root = { key = key, left = child, right = child }

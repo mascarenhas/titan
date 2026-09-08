@@ -14,9 +14,11 @@ local util = require "titan-compiler.util"
 local titan = require "titan"
 
 local function write_file(path, contents)
+    local previous = lfs.attributes(path, "modification")
     local file = assert(io.open(path, "wb"))
     file:write(contents)
     file:close()
+    if previous then assert(lfs.touch(path, previous + 1, previous + 1)) end
 end
 
 local function remove_tree(path)
@@ -40,7 +42,7 @@ describe("compiler installation discovery", function()
         assert.equal("0.6.0", driver.TITAN_VERSION)
         assert.equal("0.6", driver.TITAN_LIBRARY_VERSION)
         assert.equal("_0_6", driver.TITAN_LIBRARY_VERSION_SUFFIX)
-        assert.equal(6, driver.LANGUAGE_SERVER_API_VERSION)
+        assert.equal(1, driver.LANGUAGE_SERVER_API_VERSION)
         assert.is_function(driver.serialize_source_interface)
         assert.is_function(driver.restat_c_header_dependencies)
         assert.is_function(driver.language_server_cache_identity)
@@ -5669,8 +5671,8 @@ end
         assert.same(observed,
             assert(driver.restat_c_header_dependencies(
                 observed, { io = restat_io })))
-        assert.is_true((read_paths[outer] or 0) > 0)
-        assert.is_true((read_paths[late_selected] or 0) > 0)
+        assert.equal(0, read_paths[outer] or 0)
+        assert.equal(0, read_paths[late_selected] or 0)
 
         write_file(late_selected,
             "typedef long titan_driver_selected_header;\n")
