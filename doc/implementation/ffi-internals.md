@@ -95,18 +95,14 @@ and result types; and one resolver-scoped `cprobe.lua` service owns the active
 toolchain profile, header-context baselines, candidate compilation, in-memory
 caches, temporary files, and cleanup. Completed successes and deterministic
 compiler rejections may also be reused from analysis-local tables. Persistent
-reuse preserves the pre-#108 identity exactly: its toolchain key contains the
-parsed compiler/flag/include/profile/mode inputs and forced-header manifest; its
-version-2 header context contains the source directory, forced-header manifest,
-and ordered raw/rendered header descriptors and file/search inputs; and its
-version-3 digest covers the
-toolchain key, forced-header manifest, semantic key, and full probe source.
-Successful probes keep their empty `.success` markers, while only deterministic
-compiler rejections add bounded, checksummed `.negative` siblings under the same
-digest. Infrastructure failures remain retryable. The checker decides which candidates are semantically
+reuse stores the same source-keyed result on disk: SHA-256 of the complete
+unpreprocessed C probe maps to one bounded acceptance/rejection record with
+diagnostics under `<prefix>/var/cache/titan-probes/1`. Include text participates
+in that key; header contents and compiler configuration do not. Infrastructure
+failures remain retryable. The checker decides which candidates are semantically
 eligible before asking that service to compile or recover them. See
 [C FFI declarations and expressions](c-ffi-expressions.md#analysis-local-and-persistent-semantic-results)
-for the key, record, and concurrency contracts.
+for the cache and manual-clearing contracts.
 
 The checker iterates the TypeList array part in declaration order. Each
 successful `foreigntypes.convert(st, ftype)` result is either a value member or
@@ -639,40 +635,27 @@ compatibility, including typedef resolution, normalized qualification,
 parameter adjustment, and incomplete/known array composites. Structurally
 matching anonymous aggregates are only conditional candidates.
 
-After the final baseline succeeds, every queued exact or conditional pair is
-rendered as two `extern` declarations of one probe-private synthetic identifier.
-The checker submits dependency-safe waves in source order. A wave contains at
-most the first remaining occurrence of each ordinary name, and a later
-declaration whose rendered type graph could be changed by any earlier composite
-write waits for a following wave. Successful pairs are canonicalized in source
-order before the next wave is rendered, preserving chains such as `a[]`, then
-`a[3]`, then the incompatible `a[4]` probe.
+After the final baseline succeeds, queued exact or conditional pairs are checked
+one at a time in source order. Each probe renders two `extern` declarations of
+one private synthetic identifier. Its accepted composite is committed immediately
+before rendering the next pair, preserving chains such as `a[]`, then `a[3]`,
+then the incompatible `a[4]` probe. Each source-keyed cache result describes
+that single pair's verdict and diagnostics.
 
 The declaration renderer normally preserves every C typedef spelling. For a
 typedef explicitly marked as a private declaration-owned array view, the probe
 path alone instead expands its structural target and reapplies the alias
-qualifiers at the same declarator level. This makes a bound completed by an
-earlier wave visible in the next compiler question even though the real typedef
-in the cumulative header preamble remains incomplete. Canonical typedefs and
-unrelated aliases are never expanded.
+qualifiers at the same declarator level. This makes a previously completed bound
+visible in the next compiler question even though the real typedef in the
+cumulative header preamble remains incomplete. Canonical typedefs and unrelated
+aliases are never expanded.
 
-Within a wave, the service deduplicates identical rendered pairs, assigns a
-different synthetic identifier and nested C block scope to each remaining pair,
-and compiles all uncached pairs together in the same foreign-header context.
-The block scopes isolate C tags as well as ordinary identifier lookup; generated
-GCC/Clang diagnostic guards suppress only the artificial `-Wnested-externs`
-warning. A successful batch accepts and caches every pair. A rejected batch is
-cached under its exact batch source/key and recursively bisected until each
-rejected singleton has the same pair-specific compiler verdict and diagnostic
-that an independent probe would have produced; accepted sub-batches are cached
-without further splitting. Reusing an aggregate rejection only repeats that
-bisection and never assigns the aggregate outcome to its leaves. A spawn,
-interruption, workspace, or cleanup failure applies to the batch as
-infrastructure evidence, is not bisected, and is not cached. Acceptance proves
-that two independently extracted declaration types can form compatible
-declarations in that context; it does not prove that both source declarations
-survived preprocessing. Only an accepted pair is rewritten to the first
-canonical declaration type and allowed to form a declaration composite.
+A spawn, interruption, workspace, or cleanup failure is infrastructure evidence
+and is not cached. Acceptance proves that two independently extracted declaration
+types can form compatible declarations in that context; it does not prove that
+both source declarations survived preprocessing. Only an accepted pair is
+rewritten to the first canonical declaration type and allowed to form a
+declaration composite.
 
 One otherwise-incompatible pair is also queued when both ordinary declarations
 have the same preprocessor source identity, line, and column *and* a dedicated

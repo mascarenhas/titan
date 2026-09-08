@@ -185,14 +185,13 @@ Probes use the same effective native configuration as generated modules:
 
 They do not use `cc` by name, guess a host from `uname`, change warnings, link,
 or execute a binary. `AR`, `RANLIB`, and link-only `TITAN_EXTRA_LIBS` are not
-probe inputs. The profile and cache key include every effective input that can
-change the compilation answer.
+probe inputs.
 
-The probe layer first compiles a baseline translation unit containing the exact
-ordered header preamble but no candidate expression. If that fails, the foreign
-import/toolchain is broken and the checker reports the captured compiler
-diagnostic as an infrastructure error. It must not misreport every candidate as
-an incompatible type.
+The probe layer first validates a baseline translation unit containing the
+exact ordered header preamble but no candidate expression. A compiler rejection
+reports the captured header-context diagnostic; an unavailable or interrupted
+compiler reports an infrastructure failure. Neither is an incompatible-candidate
+verdict.
 
 Use the same warning-clean external probe function declaration/definition in
 the baseline and candidate; the baseline body contains only `(void)0`, while
@@ -377,7 +376,7 @@ compiled-module ABI bump.
 
 All conversion questions preserve the checker's existing direction:
 `expected` is the destination type and `found` is the source expression type.
-Probe cache keys and diagnostics use that order.
+Probe source and diagnostics use that order.
 
 Do not call libuv's convention "handle inheritance" in normative
 documentation. In C, `uv_tcp_t *` is not implicitly compatible with
@@ -960,7 +959,7 @@ dependencies also invalidate correctly.
 
 The resolver/driver owns one lazy `cprobe.Service` for the entire public
 `titanc` invocation, including all source dependencies. It owns the toolchain
-profile, runner, baseline/result caches, and cleanup. Each checked source module
+profile, runner, source-result cache, and cleanup. Each checked source module
 gets a `cprobe.ModuleContext` containing its source directory and the exact
 ordered include descriptors collected during that module's foreign-import
 pass. Candidate checks begin only after that pass, so probes never borrow a
@@ -980,37 +979,12 @@ error, and interrupted/exceptional exits.
 
 ### 8.2 Service and cache state
 
-One service contains:
-
-```lua
-{
-    compiler_argv = ...,
-    language_mode = ...,
-    cppflags = ...,
-    cflags = ...,
-    include_dirs = ...,
-    profile = ...,
-    baseline_cache = ...,
-    result_cache = ...,
-    verbose = ...,
-}
-```
-
-The service profile is derived once per effective toolchain. The baseline cache is
-keyed by ordered include descriptors and source/include context. The result
-cache key includes:
-
-- probe kind and direction;
-- exact rendered source/destination declarations;
-- operator spelling and operand conversions where applicable;
-- ordered foreign header preamble;
-- language mode;
-- complete compiler argv and effective compile flags;
-- include roots or resolved quote-header paths;
-- arithmetic-profile identity.
-
-Cache both successful and rejected probes. A baseline infrastructure failure is
-cached separately from a valid negative candidate.
+A service holds the configured compiler arguments, flags, include directories,
+target profile, runner, verbosity, and source-result cache. Probe-result
+memoization follows the
+[source-only cache plan](source-only-probe-cache.md): the complete unpreprocessed
+C source supplies the sole key, and both acceptance and rejection are reused.
+Infrastructure failures remain retryable.
 
 ### 8.3 Header fidelity
 
@@ -1684,13 +1658,12 @@ Work:
    - headers and source-relative quote imports;
    - baseline failure versus negative candidate;
    - success/failure caching;
-   - cache-key changes after flags/header/toolchain changes;
    - cleanup on success, rejection, spawn error, and interruption;
    - quiet default and complete `-v` evidence.
 9. Add one real-compiler success and one real-compiler rejection integration
    test using a tiny private header.
-10. Reset the service when driver C configuration changes; prove two configured
-   compiler identities never share cache results.
+10. Reset the service's execution configuration when driver C configuration
+    changes.
 11. Prove `-v` is set before the first probe and service cleanup runs on every
    public success/error exit.
 
@@ -1867,7 +1840,7 @@ The matrix tests include every accepted row and exclusion, plus:
 - incomplete/void/function-pointer restrictions;
 - left-to-right effects with each operand evaluated once;
 - result type assertions;
-- probe cache hit and negative-cache behavior.
+- cached acceptance and rejection.
 
 Exit criterion: focused compiled fixtures demonstrate C values/semantics while
 equivalent all-Titan expressions retain Titan behavior.
@@ -2424,8 +2397,6 @@ The feature is done only when all of the following are true:
   Later direct/dependency redefinitions and `#undef` are reflected even at an
   earlier closure initializer; an active unsupported object macro is terminal
   rather than falling back to a physical field.
-- A repeated exact probe compiles once per session; changed toolchain/header/
-  flags produce a distinct result.
 - Probe baseline failures and candidate rejections have distinct diagnostics.
 - Every named file-scope tag-only complete struct/union without a real
   same-name typedef is usable as `c.NAME` in type syntax and generates exact

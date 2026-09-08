@@ -448,8 +448,8 @@ describe("foreign functions (checker)", function()
                             changed_modtype = changed_modtype,
                             first_alias = first_alias,
                             second_alias = second_alias,
-                            first_header_key = first_context.header_key,
-                            second_header_key = second_context.header_key,
+                            first_source_key = first_context.baseline_key,
+                            second_source_key = second_context.baseline_key,
                         }
                     end)
                     cdriver.process_file = original_process_file
@@ -459,10 +459,10 @@ describe("foreign functions (checker)", function()
                     assert.is_table(result.modtype)
                     assert.is_table(result.changed_modtype)
                     assert.is_false(parsed_companion)
-                    assert.is_string(result.first_header_key)
-                    assert.is_string(result.second_header_key)
-                    assert.not_equal(result.first_header_key,
-                        result.second_header_key)
+                    assert.is_string(result.first_source_key)
+                    assert.is_string(result.second_source_key)
+                    assert.equal(result.first_source_key,
+                        result.second_source_key)
                     assert.equal("Type.Integer",
                         ast[3].block.stats[1].exps[1]._type._tag)
                     assert.is_true(ast[1]._foreign_header_for_check)
@@ -475,17 +475,14 @@ describe("foreign functions (checker)", function()
                     assert.is_true(inputs[provider_header])
                     assert.is_true(inputs[consumer_header])
                     assert.is_nil(inputs[companion])
-                    local first_generated =
-                        result.first_alias.c_header_dependencies[1]
-                    local second_generated =
-                        result.second_alias.c_header_dependencies[1]
-                    assert.equal(provider_header .. ".titan.h",
-                        first_generated.path)
-                    assert.is_false(first_generated.restat)
-                    assert.match("^c%-header%-generated%-v1:sha256:[0-9a-f]+$",
-                        first_generated.identity)
-                    assert.not_equal(first_generated.identity,
-                        second_generated.identity)
+                    assert.same(result.first_alias.c_header_dependencies,
+                        result.second_alias.c_header_dependencies)
+                    for _, input in ipairs(
+                            result.first_alias.c_header_dependencies) do
+                        assert.not_equal(companion, input.path)
+                        assert.not_equal(provider_header .. ".titan.h",
+                            input.path)
+                    end
                 end)
             end)
         end)
@@ -586,7 +583,57 @@ describe("foreign functions (checker)", function()
         assert.truthy(exercised, result)
     end)
 
-    it("stabilizes nested generated header identities across resolvers",
+    it("retains forced headers for contextual C without foreign imports",
+    function()
+        with_header("#define FFI_CONTEXTUAL_FORCED_INPUT 1\n", function(header)
+            local previous_cppflags = driver.EXTRA_CPPFLAGS
+            local configured = {}
+            for _, flag in ipairs(previous_cppflags or {}) do
+                configured[#configured + 1] = flag
+            end
+            configured[#configured + 1] = "-include"
+            configured[#configured + 1] = header
+            driver.EXTRA_CPPFLAGS = configured
+
+            local context = driver.new_resolver_context()
+            local configured_ok, configuration_error =
+                driver.configure_foreign_c(context)
+            local exercised, result = xpcall(function()
+                assert.truthy(configured_ok, configuration_error)
+                local ok, err, ast = h.run_checker([[
+                    foreign function reinterpret(pointer: *int): *double
+                        return pointer as *double
+                    end
+                ]], context)
+                assert.truthy(ok, err)
+                assert.equal("Ast.TopLevelForeignFunc", ast[1]._tag)
+                local saw_header, saw_search = false, false
+                for _, input in ipairs(ast._c_header_dependencies or {}) do
+                    assert.is_string(input.identity)
+                    saw_header = saw_header or
+                        (input.kind == "file" and input.path == header)
+                    saw_search = saw_search or
+                        (input.kind == "search" and input.path == header)
+                end
+                assert.is_true(saw_header)
+                assert.is_true(saw_search)
+            end, debug.traceback)
+
+            local closed, close_error = driver.close_resolver_context(context)
+            driver.EXTRA_CPPFLAGS = previous_cppflags
+            local restore_context = driver.new_resolver_context()
+            local restored, restore_error =
+                driver.configure_foreign_c(restore_context)
+            local restore_closed, restore_close_error =
+                driver.close_resolver_context(restore_context)
+            assert.truthy(closed, close_error)
+            assert.truthy(restored, restore_error)
+            assert.truthy(restore_closed, restore_close_error)
+            assert.truthy(exercised, result)
+        end)
+    end)
+
+    it("keeps nested generated include spellings stable across resolvers",
     function()
         local base = os.tmpname()
         os.remove(base)
@@ -641,8 +688,6 @@ describe("foreign functions (checker)", function()
                 local import = driver.imported.root.ast[1]
                 local include = import._source_foreign_include
                 assert.is_table(include)
-                local generated = include.c_header_dependencies[1]
-                assert.is_table(generated)
                 local service = assert(driver.get_probe_service(context))
                 local module_context, context_error =
                     service:module_context({
@@ -652,8 +697,7 @@ describe("foreign functions (checker)", function()
                 assert.truthy(module_context, context_error)
                 return {
                     physical = import._foreign_header,
-                    identity = generated.identity,
-                    header_key = module_context.header_key,
+                    source_key = module_context.baseline_key,
                     diagnostic_aliases =
                         module_context.probe_diagnostic_aliases,
                 }
@@ -671,10 +715,8 @@ describe("foreign functions (checker)", function()
         local first = analyze()
         local second = analyze()
         assert.not_equal(first.physical, second.physical)
-        assert.match("^c%-header%-generated%-v1:sha256:[0-9a-f]+$",
-            first.identity)
-        assert.equal(first.identity, second.identity)
-        assert.equal(first.header_key, second.header_key)
+        assert.is_string(first.source_key)
+        assert.equal(first.source_key, second.source_key)
         assert.equal(2, #first.diagnostic_aliases)
         assert.equal(2, #second.diagnostic_aliases)
         for index = 1, 2 do
@@ -689,7 +731,8 @@ describe("foreign functions (checker)", function()
         end
     end)
 
-    it("ignores malformed transitive generated-header aliases", function()
+    it("ignores malformed transitive generated-header diagnostic aliases",
+    function()
         local modast = {
             {
                 _tag = "Ast.TopLevelForeignFunc",
@@ -701,8 +744,6 @@ describe("foreign functions (checker)", function()
                 _tag = "Ast.TopLevelImport",
                 _source_import = true,
                 _foreign_header_probe_identity = "dependency.titan.h",
-                _source_foreign_generated_identity =
-                    "c-header-generated-v1:sha256:dependency",
                 _foreign_header = false,
                 _source_c_context = {
                     diagnostic_aliases = {

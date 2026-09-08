@@ -1581,29 +1581,12 @@ function apply_source_foreign_headers(ast, st, errors)
                     local source_context = node._source_c_context
                     if type(source_context) ~= "table"
                        or type(source_context.header_inputs) ~= "table"
-                       or type(source_context.generated_header_aliases) ~= "table"
                        or type(source_context.diagnostic_aliases) ~= "table"
                        or type(source_context.macro_changes) ~= "table"
                        or type(source_context.macro_definitions) ~= "table" then
                         err = "source module did not provide its C header context"
                     else
-                        local generated_identity, identity_error =
-                            cprobe.source_foreign_generated_identity(
-                                filename,
-                                source_context.generated_header_aliases,
-                                strategy)
-                        local dependencies = {}
-                        local searches = {}
-                        if not generated_identity then
-                            err = "could not identify generated source header: " ..
-                                tostring(identity_error or "no identity")
-                        else
-                            dependencies[1] = {
-                                kind = "file",
-                                path = filename,
-                                identity = generated_identity,
-                            }
-                        end
+                        local dependencies, searches = {}, {}
                         for _, input in ipairs(source_context.header_inputs) do
                             local destination = input.kind == "file"
                                 and dependencies
@@ -1652,14 +1635,6 @@ function apply_source_foreign_headers(ast, st, errors)
                     node.modname, tostring(err))
             else
                 node._source_foreign_include = include
-                local generated = include.c_header_dependencies
-                    and include.c_header_dependencies[1]
-                if generated and generated.restat == false
-                   and generated.path ==
-                       node._foreign_header_probe_identity then
-                    node._source_foreign_generated_identity =
-                        generated.identity
-                end
                 st.foreign_includes[#st.foreign_includes + 1] = include
                 st.foreign_includes_version =
                     st.foreign_includes_version + 1

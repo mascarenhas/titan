@@ -178,16 +178,15 @@ Lua process that runs Titan for its integer sizes or signedness.
 The driver builds one profile from the configured compiler's predefined macros
 and the active prefix's `luaconf.h`, then injects it into `cprobe.Service`. The
 direct-checker fallback performs the same acquisition before constructing its
-private service. The service validates and owns a copy and keys its caches by
-that profile. It records:
+private service. The service validates and owns a copy for target-C reasoning.
+It records:
 
 * `CHAR_BIT`, primitive storage widths, signedness, rank, precision, minima,
   and maxima;
 * `FLT_RADIX` plus the mantissa precision, maximum exponent/range, and
   precedence of `float`, `double`, and `long double`;
 * the actual `lua_Integer` and `lua_Number` spellings/types and their
-  corresponding numeric traits;
-* a stable identity used in resolver-local probe cache keys.
+  corresponding numeric traits.
 
 The same effective compiler prefix and target-selecting flags used for
 generated objects feed macro discovery. `TITAN_EXTRA_CFLAGS`, architecture
@@ -212,7 +211,7 @@ proven.
 created `Service` belongs to the resolver for a complete public `titanc`
 invocation, including source dependencies. It contains the effective compiler
 argv, language/compile/CPP flags, ordered include directories, target profile,
-runner, private workspace, baseline cache, result cache, and verbose state.
+runner, private workspace, source-result cache, and verbose state.
 
 Each checked Titan module obtains a `ModuleContext` after its ordered
 foreign-import pass. That context contains its source directory and exact
@@ -234,38 +233,27 @@ providers to prove lifecycle and cleanup without depending on a real compiler.
 
 Angle headers keep their angle spelling. A source-relative quoted header is
 rendered as its resolved absolute quoted path before the probe source moves
-under `/tmp`. An explicit source import is the exception to exposing that physical
-spelling: its generated checking header deliberately has a unique randomized
-sibling name. The checker synthesizes its descriptor from the producer's
-already checked real-header inputs and complete macro context instead of sending that
-compiler-generated file through `cdriver`. It then replaces the physical
-spelling in the probe context with a private hash-named wrapper derived from the
-logical module and eventual public-header path. The probe includes the stable
-wrapper name, and the wrapper includes the unique physical header by its
-absolute quoted spelling. Thus nested quoted includes still begin at the
-physical header's directory, while the rendered probe text and every descriptor
-field used by `header_context_key` remain stable across rebuilds. When one
-generated header includes another resolver-owned companion, its identity
-stream replaces that randomized spelling with the dependency's public path and
-stable generated identity; real byte changes still propagate into the outer
-digest. One service
-rejects conflicting bindings for the same wrapper identity. The forwarding
-wrapper is necessarily one additional C preprocessor include level; extension
-macros such as `__INCLUDE_LEVEL__` can observe that level even though ordinary
-quoted-header origin is preserved.
+under `/tmp`. An explicit source import has a unique physical checking header.
+The checker synthesizes its descriptor from the producer's already checked
+real-header inputs and complete macro context instead of sending that generated
+file through `cdriver` again. A private forwarding include gives the probe a
+stable spelling derived from the eventual public-header path. The wrapper
+includes the physical header by its absolute quoted spelling,
+so nested quoted includes still begin at the physical header's directory.
+One service rejects conflicting bindings for the same wrapper. The additional
+preprocessor include level is visible to extensions such as `__INCLUDE_LEVEL__`.
 
-Alias construction fails closed unless both the physical descriptor and public
-identity are absolute and the physical include is quoted. The persistent cache
-lookup occurs before Titan creates the probe workspace or materializes any
-wrappers. On a miss, wrappers live only in that private
-workspace and are removed when the resolver closes; a wrapper-write failure is
-infrastructure failure and cannot publish a result. `cpreamble.fixed_includes`
-supplies the same preceding standard, Lua, and Titan headers used by generated
-module C. Ordered duplicate behavior within the foreign-header block, fixed
-include directories, language mode, parsed compiler command, and target flags
-therefore match generated compilation.
+Wrapper construction requires absolute physical and public paths and a quoted
+physical include. A persistent cache hit needs no probe workspace. On a miss,
+wrappers live in the private workspace until the resolver closes; a write
+failure is infrastructure failure and cannot publish a result.
+`cpreamble.fixed_includes` supplies the same preceding standard, Lua, and Titan
+headers used by generated module C. The foreign-header block, include
+directories, language mode, parsed compiler command, and target flags therefore
+match generated compilation. They configure execution; they do not add cache
+identity beyond the literal text emitted into the probe.
 
-Every candidate probe first compiles a baseline translation unit. In
+Each uncached candidate first validates a baseline translation unit. In
 addition, every module with at least one successful foreign import validates
 the complete ordered foreign-header preamble once immediately after the import
 pass. The one-header case catches illegal repeated declarations that the
@@ -283,8 +271,8 @@ The preprocessor's final object-like definition set is an unordered map. When
 macro names with `util.bytewise_less`; ordinary Lua string ordering is
 locale-dependent, and direct table traversal is randomized between processes.
 This canonicalizes only map-origin macro projections, not syntactic C
-source declarations, and keeps otherwise identical declaration-batch probe C
-byte-for-byte stable across compiler processes.
+source declarations, and gives macro-derived declarations deterministic order
+across compiler processes.
 
 Ordinary redeclarations are compared from their isolated TypeLists, but their
 shared canonical composite is not committed until the final baseline and that
@@ -292,25 +280,22 @@ pair's compatibility probe succeed. The pure declaration relation resolves
 typedefs, normalizes declaration-only qualification, adjusts array/function
 parameters, and recognizes an incomplete/known array pair as compatible.
 Structurally matching anonymous aggregates are only conditional candidates.
-Every queued exact or conditional repeat then contributes two `extern`
-declarations of one probe-private synthetic identifier. The checker constructs
-dependency-safe waves in source order: only the first remaining occurrence of
-one ordinary name is eligible, and a type-graph read after an earlier possible
-composite write starts a later wave. Accepted composites are therefore formed
-before the next dependent pair is rendered. Within one wave, identical rendered
-pairs are deduplicated and every distinct pair receives its own identifier and
-nested C block scope, preventing one candidate's file-scope tag from changing
-another candidate. All uncached pairs in that wave share one compiler
-invocation on the ordinary success path. A rejected group is recursively
-bisected to recover pair-specific verdicts and diagnostics; an infrastructure
-failure is neither bisected nor cached. Compiler acceptance proves that two
-extracted types can form compatible declarations in that foreign-header
-context; it is not evidence that both declarations occurred. After acceptance,
-the merger forms any known-bound array composite in a declaration-owned deep
+Every queued exact or conditional repeat is checked in source order. Each
+probe contains two `extern` declarations of one private synthetic identifier
+and receives its own compiler verdict and diagnostics. A source-cache hit can
+supply that verdict. An accepted pair immediately forms its canonical composite
+before the next pair is rendered; an infrastructure failure supplies no
+compatibility verdict. Compiler acceptance proves that the two extracted types
+can form compatible declarations in that foreign-header context; it is not
+evidence that both declarations occurred.
+
+The merger forms any known-bound array composite in a declaration-owned deep
 view. Later probes structurally expand only typedefs marked as private
-declaration-owned array views, so a bound completed in an earlier wave is not
-hidden again behind the source header's still-incomplete typedef spelling;
-ordinary typedefs retain their source names.
+declaration-owned array views, so a previously completed bound is visible even
+when the source header's typedef spelling remains incomplete. Ordinary typedefs
+retain their source names. For example, `a[]`, then `a[3]`, then `a[4]` first
+completes the bound to three and then checks the conflicting bound against that
+completed type.
 
 There is one narrow source-provenance exception. If isolated compatibility
 fails, matching preprocessor source identity, line, and column make the pair a
@@ -343,111 +328,45 @@ a macro-suppressed repeat. In particular, a suppressed isolated
 composite view. There is no general portable C99 occurrence probe; such APIs
 require one umbrella header imported once.
 
-Cache identities length-prefix every component. The unchanged toolchain key
-contains the parsed compiler argv, compile flags, language mode and optional
-language flag, CPP/C flags, ordered include flags and paths, target-profile
-identity, compile mode, and forced-header manifest. The version-2 module header
-context contains `source_dir`, that forced-header manifest, and, for every
-ordered include, its original and resolved spellings, kind, name, rendered
-spelling, and every dependency/search kind, path, identity, and restat flag.
-Candidate semantic keys then add the
-probe kind and direction, exact rendered declarations, or operator
-spelling/operand conversions as applicable.
-
 ### Analysis-local and persistent semantic results
 
-One explicit `cdriver` analysis shares completed baseline and candidate
-verdicts across its short-lived resolver services, partitioned by the exact I/O
-provider and unchanged toolchain key. Service-local and analysis-local tables
-admit only completed baseline successes and completed candidate successes or
-compiler rejections. They are indexed by the raw semantic key and are consulted
-before persistent source hashing or filesystem lookup. Infrastructure failures
-are always retried. A new analysis has fresh mutable result tables; only the
-persistent cache described below crosses that boundary.
+The cache is source-to-result memoization. Render the complete C probe, then
+compute `SHA256(source)` over those exact bytes before preprocessing. That
+same digest indexes service-local memory, analysis-local memory, and disk.
+Literal include directives participate; the included files' contents do not.
+Compiler commands, flags, target profiles, source-directory metadata, and
+semantic descriptors do not add anything to the key. Generated helper names
+must likewise be independent of those external inputs.
 
-After a memory miss, Titan derives the same version-3 persistent digest used by
-the success-only cache before #108. Its length-prefixed fields are
-`persistent_success_version = 3`, the complete toolchain key, the forced-header
-manifest, the semantic key, and the full probe C source. The source is included
-directly in that one digest input rather than separately hashed under a new
-domain. No further identity layers are applied. The raw compiler and flag
-spelling already belongs to the unchanged toolchain key. The optional
-`TITAN_PROBE_CACHE_IDENTITY` namespace remains the explicit caller-controlled
-partition for any additional policy.
+A result records acceptance or a completed compiler rejection with its exit
+status and stable diagnostics. A baseline is an ordinary source-keyed probe and
+uses the same result path as a candidate. Each uncached candidate is compiled
+individually, so a rejection already belongs to the exact question asked.
+Infrastructure failures, including unavailable or interrupted compilers,
+workspace failures, and cleanup failures, remain retryable.
 
-The same digest names two deliberately different representations. A successful
-probe uses the existing empty `<digest>.success` marker; presence is the entire
-diagnostic-free positive verdict, so old markers and their stat-only fast path
-remain valid. A deterministic compiler rejection uses a bounded, checksummed
-`<digest>.negative` sibling containing the key digest, ordinary nonzero child
-exit status, and exact stable diagnostic bytes. Lookup checks the positive
-marker before reading a negative record. Generated private source/object paths
-and source-foreign checking-header aliases are normalized before a negative is
-returned or persisted. A negative record with an unknown format or outcome,
-invalid status, wrong key, bad checksum, truncation, trailing bytes, or
-excessive size fails open as a miss.
+The persistent directory is `<prefix>/var/cache/titan-probes/1`, selected by a
+nonempty `TITAN_PREFIX` or otherwise the installed prefix recovered from
+`package.cpath`. Format 1 has one bounded record at `<digest>.result` for either
+outcome. Readers reject malformed, truncated, trailing, or oversized data and
+treat cache I/O failures as misses. Private source/object paths in diagnostics
+are normalized before storing or returning them. Oversized diagnostics may be
+reused in memory but are not persisted.
 
-This identity is intentionally a practical cache boundary, not a perfect model
-of every input which could affect a C compiler. In particular, Titan does not
-hash the compiler executable or interrogate it for a version solely for the
-cache. The compilation of Titan's final generated C remains authoritative and
-will report any incompatible cached assumption. The optional cache namespace
-lets an embedding separate policies when desired without making speculative
-partitions part of every lookup.
+Both outcomes are published by complete-file replacement. Publication failure
+does not change the compiler verdict. Within one service or analysis, the
+first completed result for a source wins; a lookup that yields rechecks memory
+before using a disk result or launching a compiler. Independent processes need
+no cache lock because readers see complete records and invalid data is a miss.
 
-Outside an explicit `process_analysis`, a service validates and hashes its
-forced-header input set once, and each module context validates and hashes its
-deduplicated ordinary-header input set once. Every later logical probe,
-positive-marker hit, and negative-record hit reuses that immutable snapshot.
-With `process_analysis`, the compiler client already owns a coherent snapshot
-and its publication-time validation, so the probe service performs no local
-header restats. Neither mode adds a post-compiler restat: a header change which
-races a single physical invocation is intentionally outside this approximate
-cache boundary, and final generated-C compilation remains authoritative.
-
-After an ordinary compiler invocation and artifact cleanup, a successful
-declaration batch retains the existing batch success-marker behavior. A
-rejected batch is stored under that exact historical batch source and key, then
-Titan bisects it because the aggregate proves only that at least one member
-failed. A cached aggregate rejection follows the same bisection path; only a
-compiler-rejected singleton becomes an individual negative verdict. Baseline
-rejection, spawn failure, exit 126/127, signal/interruption, malformed or
-contradictory runner data, failed initial snapshot validation, workspace
-failure, and cleanup failure publish no negative. Oversized diagnostics remain
-valid in-memory answers but are not persisted.
-
-Positive publication keeps the existing empty-marker write. Negative
-publication uses the compiler-I/O strategy's complete-file sibling-write and
-rename operation. Cache lookup, directory creation, decoding, and publication
-failures never change the compiler verdict. Negative reads enforce a hard
-record-size bound both before and after the file read, covering replacement
-between stat and read. The optional `read_file(path, max_bytes)` strategy form
-reads at most one byte beyond the bound, allowing the decoder to reject a
-record which grew after its stat without allocating the replacement in full.
-
-Within one service/analysis, publishing a completed result updates memory
-without yielding and the first completed result is authoritative. A lookup
-which suspends while reading a negative record checks those in-memory
-authorities again after resuming, so it cannot overwrite a sibling Task's newer
-answer or launch a duplicate compiler. Equal concurrent negative publishers
-may both attempt the durable write. Independent processes do not take a cache
-lock: each publishes a complete key-bound negative record by replacement,
-readers see only a complete old or new file, and invalid/corrupt records fail
-open. A failed write counts as an existing publication only when the complete
-record already on disk decodes to the same rejection.
-
-The default directory is
-`<prefix>/var/cache/titan-probes/<ABI>`, using nonempty `TITAN_PREFIX` before the
-supported prefix recovered from `package.cpath`. Stable local rebuilds normally
-reuse that directory, which is also cached in CI. A nonempty
-`TITAN_PROBE_CACHE_IDENTITY` selects a hashed subdirectory so either environment
-can separate build policies without placing arbitrary text in a pathname.
-
-Compiler specs which deliberately reuse paths for different synthetic header
-worlds run with `TITAN_PROBE_CACHE_DISABLE=1`; that test-only switch leaves
-production caching enabled for the preceding build. The optional identity
-namespace is deliberate additional partitioning for policy outside the
-unchanged key.
+The cache deliberately does not detect changes to headers or compiler policy.
+A programmer who suspects stale acceptance or rejection clears the directory
+or uses `TITAN_PROBE_CACHE_DISABLE=1` to bypass persistent reuse. Final generated
+C is compiled normally. Header preprocessing and analysis snapshot validation
+retain their own dependency tracking independently of this result cache.
+Service-local and analysis-local memory remain enabled when persistent reuse
+is disabled. Compiler specs that reuse header pathnames for different fixtures
+disable persistent reuse for this reason.
 
 An embedding may give `cprobe.Service` a
 `persistent_cache_trace(stage, hit, key, path)` callback. Titan invokes it once
@@ -459,10 +378,10 @@ adapts this to the resolver-level callback documented below.
 
 Two optional structured observers provide terminal accounting without source
 or command retention. `semantic_trace(event)` emits one logical result per
-request with its digest, probe kind, header identity, semantic outcome, cache
+request with its source digest, probe kind, header label, semantic outcome, cache
 tier (`service`, `analysis`, `persistent`, or `compiler`), repeat flag, and
 publication outcome. `execution_trace(event)` emits one event per physical
-compiler launch with an execution digest, single/batch kind, header identity,
+compiler launch with its source digest, probe kind, header label,
 outcome, persistent-lookup/publication state, and optional nonnegative child
 wall time supplied by the compiler-I/O strategy. Observer exceptions are
 ignored and neither stream writes to stdout.

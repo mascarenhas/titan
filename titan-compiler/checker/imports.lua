@@ -773,8 +773,6 @@ function makemoduletype(modname, modast, st)
         for name, definition in pairs(macro_environment) do
             macro_definitions[name] = definition
         end
-        local generated_header_aliases = {}
-        local seen_generated_headers = {}
         local diagnostic_aliases = {}
         local seen_diagnostic_aliases = {}
         local function add_diagnostic_alias(physical_path, public_path)
@@ -794,15 +792,7 @@ function makemoduletype(modname, modast, st)
             local public_header = node._tag == "Ast.TopLevelImport"
                 and node._source_import
                 and node._foreign_header_probe_identity or nil
-            local identity = node._source_foreign_generated_identity
-            if type(public_header) == "string"
-               and type(identity) == "string"
-               and not seen_generated_headers[public_header] then
-                seen_generated_headers[public_header] = true
-                generated_header_aliases[#generated_header_aliases + 1] = {
-                    public_header = public_header,
-                    identity = identity,
-                }
+            if type(public_header) == "string" then
                 add_diagnostic_alias(node._foreign_header, public_header)
                 local nested = node._source_c_context and
                     node._source_c_context.diagnostic_aliases or {}
@@ -814,12 +804,11 @@ function makemoduletype(modname, modast, st)
         end
         -- Source-only compiler metadata.  The callable descriptors already
         -- live in `source_members`; this context carries only the generated
-        -- companion's transitive real-header inputs, nested generated-header
-        -- identities, and final macro environment plus changed-name delta.
+        -- companion's transitive real-header inputs, diagnostic path aliases,
+        -- and final macro environment plus changed-name delta.
         -- Binary metadata validation rejects this field.
         modtype._source_c_context = {
             header_inputs = header_inputs,
-            generated_header_aliases = generated_header_aliases,
             diagnostic_aliases = diagnostic_aliases,
             macro_changes = macro_changes,
             macro_definitions = macro_definitions,

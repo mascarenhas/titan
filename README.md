@@ -105,9 +105,8 @@ Titan's version identities are deliberately separate. `TITAN_VERSION` is the
 compiler and standard-library semantic version, currently `0.6.0`; its derived
 major/minor library version, `0.6`, owns installed library and compiler-data
 paths. `TITAN_ABI_VERSION` is the independent monotonic compiled-module
-compatibility marker, currently `2`, and also scopes persistent native-probe
-caches. This reset assumes a fresh installation and provides no migration or
-compatibility aliases for earlier Titan installations.
+compatibility marker, currently `2`. This reset assumes a fresh installation
+and provides no migration or compatibility aliases for earlier Titan installations.
 
 The installed files used to compile Titan code include:
 
@@ -394,34 +393,16 @@ binary path, a semicolon-separated list of paths. By default this is the
 current directory plus `<root>/lib/titan/0.6`, where `<root>` is recovered
 from `package.cpath`; override it with `TITAN_PATH_0_6` or `TITAN_PATH`.
 
-Successful C-FFI compiler probes retain the existing empty
-`<digest>.success` markers under `<prefix>/var/cache/titan-probes/2`.
-Deterministic compiler rejections use bounded, checksummed sibling
-`<digest>.negative` records so they can preserve the ordinary exit status and
-stable diagnostic bytes. Both forms use the same unchanged cache digest. The
-toolchain portion includes the parsed compiler argv, compile flags, language
-mode and flag, CPP/C flags, ordered include flags and paths, target-profile
-identity, compile mode, and forced-header manifest. The version-2 module header
-context includes its source directory, the forced-header manifest, and every
-ordered include descriptor's original, resolved, kind, name, rendered spelling,
-and file/search inputs. The
-version-3 persistent digest then covers that toolchain identity, forced-header
-manifest, semantic probe key, and the complete probe C source.
+Titan caches C-FFI probe results by their complete, unpreprocessed C source.
+Both successful and rejected probes are remembered. The cache does not track
+compiler options or header changes; clear `<prefix>/var/cache/titan-probes/1`
+if results appear stale, or set `TITAN_PROBE_CACHE_DISABLE=1` to bypass
+persistent reuse. Generated C is compiled normally.
 
-This identity remains an intentionally practical cache boundary rather than a
-complete model of a C compiler installation: it does not hash the compiler
-executable or attempt to capture every possible external policy input. The
-later compilation of Titan's generated C remains authoritative. Infrastructure
-failures are never persisted. A nonempty `TITAN_PREFIX` selects the cache
-prefix, otherwise Titan recovers the installed prefix from `package.cpath`.
-`TITAN_PROBE_CACHE_IDENTITY` optionally selects an additional hashed namespace.
-Stable local rebuilds reuse the same prefix cache just like CI builds. Unique
-source-foreign checking headers are hidden behind stable private probe wrappers,
-preserving nested quoted-include origin without making a safety nonce part of
-the key. Macro-derived declarations use deterministic bytewise name order, and
-every rejected declaration batch is cached under its exact batch key before it
-is bisected. An aggregate rejection is only evidence that some member failed;
-an individual negative verdict is recorded only for a rejected singleton.
+A nonempty `TITAN_PREFIX` selects the cache prefix; otherwise Titan recovers
+the installed prefix from `package.cpath`. See the
+[FFI probe cache](doc/language/c-ffi-expressions.md#compiled-probe-cache)
+for details.
 
 Compiled dependency lookup probes component-prefix providers. For logical
 `a.b.c`, the default first performs a complete shared pass at `a.so`,

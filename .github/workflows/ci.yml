@@ -204,19 +204,14 @@ jobs:
           "$PREFIX/bin/lua" -v
           "$PREFIX/bin/luarocks" --version
 
-      - name: Select the regular Linux C-probe cache namespace
-        run: |
-          echo "TITAN_PROBE_CACHE_IDENTITY=gha-v3:linux-regular-v1:${{ runner.os }}:${{ runner.arch }}:abi-${TITAN_ABI_VERSION}" >> "$GITHUB_ENV"
-
-      - name: Restore regular Linux C-probe success markers
+      - name: Restore regular Linux C-probe results
         id: regular-probe-cache
         uses: ubicloud/cache/restore@v4
         with:
-          path: .lua/var/cache/titan-probes/${{ env.TITAN_ABI_VERSION }}
-          key: titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-linux-regular-v1-test-linux-stdlib-${{ github.sha }}
+          path: .lua/var/cache/titan-probes/1
+          key: titan-probes-1-${{ runner.os }}-${{ runner.arch }}-test-linux-stdlib-${{ github.sha }}
           restore-keys: |
-            titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-linux-regular-v1-test-linux-stdlib-
-            titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-linux-regular-v1-
+            titan-probes-1-${{ runner.os }}-${{ runner.arch }}-test-linux-stdlib-
 
       - name: Build and install the rock
         # The dependency cache may contain the preceding commit's installed
@@ -312,10 +307,10 @@ jobs:
         # runner.
         run: bash spec/support/ci_libuv_mode_smoke.sh bundled
 
-      - name: Save regular Linux C-probe success markers
+      - name: Save regular Linux C-probe results
         uses: ubicloud/cache/save@v4
         with:
-          path: .lua/var/cache/titan-probes/${{ env.TITAN_ABI_VERSION }}
+          path: .lua/var/cache/titan-probes/1
           key: ${{ steps.regular-probe-cache.outputs.cache-primary-key }}
 
       # The prepared artifact was packed before the source-mode smoke, so this
@@ -545,18 +540,13 @@ jobs:
       - name: Verify vendored Lua is on PATH
         run: lua -v
 
-      - name: Select the macOS C-probe cache namespace
-        run: |
-          echo "TITAN_PROBE_CACHE_IDENTITY=gha-v3:macos-full-v1:${{ runner.os }}:${{ runner.arch }}:abi-${TITAN_ABI_VERSION}" >> "$GITHUB_ENV"
-
-      - name: Restore macOS C-probe success markers
+      - name: Restore macOS C-probe results
         uses: ubicloud/cache@v4
         with:
-          path: .lua/var/cache/titan-probes/${{ env.TITAN_ABI_VERSION }}
-          key: titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-macos-full-v1-test-macos-${{ github.sha }}
+          path: .lua/var/cache/titan-probes/1
+          key: titan-probes-1-${{ runner.os }}-${{ runner.arch }}-test-macos-${{ github.sha }}
           restore-keys: |
-            titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-macos-full-v1-test-macos-
-            titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-macos-full-v1-
+            titan-probes-1-${{ runner.os }}-${{ runner.arch }}-test-macos-
 
       # Build and install the rock so the `titan` Lua support module (ltitanlib.c,
       # required by one coder spec via `require 'titan'`) is on the Lua path.
@@ -844,18 +834,13 @@ jobs:
             "$PREFIX/bin/luarocks" install busted 2.3.0-1
           echo "$PREFIX/bin" >> "$GITHUB_PATH"
 
-      - name: Select the sanitizer C-probe cache namespace
-        run: |
-          echo "TITAN_PROBE_CACHE_IDENTITY=gha-v3:linux-asan-ubsan-v1:${{ runner.os }}:${{ runner.arch }}:abi-${TITAN_ABI_VERSION}" >> "$GITHUB_ENV"
-
-      - name: Restore sanitizer C-probe success markers
+      - name: Restore sanitizer C-probe results
         uses: ubicloud/cache@v4
         with:
-          path: .lua/var/cache/titan-probes/${{ env.TITAN_ABI_VERSION }}
-          key: titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-linux-asan-ubsan-v1-sanitizer-${{ github.sha }}
+          path: .lua/var/cache/titan-probes/1
+          key: titan-probes-1-${{ runner.os }}-${{ runner.arch }}-sanitizer-${{ github.sha }}
           restore-keys: |
-            titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-linux-asan-ubsan-v1-sanitizer-
-            titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-linux-asan-ubsan-v1-
+            titan-probes-1-${{ runner.os }}-${{ runner.arch }}-sanitizer-
 
       - name: Build sanitizer-enabled Titan artifacts
         run: |

@@ -108,6 +108,21 @@ Titan keyword; it does not make a reserved spelling available for an ordinary
 Titan variable, declaration, record field, union variant, or member. Named C
 parameter labels use the analogous contextual rule before `=` in a named call.
 
+## Compiled probe cache
+
+Titan uses small C compilations to check foreign headers, declarations,
+conversions, and operators. It remembers both successful and rejected probes
+by SHA-256 of the complete C source before preprocessing. Include directives
+count as text; included header contents and compiler options do not affect the
+key.
+
+The format-1 cache lives at `<prefix>/var/cache/titan-probes/1`. A nonempty
+`TITAN_PREFIX` selects the prefix; otherwise Titan uses its installed prefix.
+If a header or compiler configuration changes and results appear stale, clear
+that directory or set `TITAN_PROBE_CACHE_DISABLE=1` to bypass persistent reuse.
+This applies to cached rejections as well as acceptance. Titan still compiles
+the final generated C normally.
+
 ## Contextual object-pointer conversions
 
 C libraries often expose related opaque structures as different pointer types

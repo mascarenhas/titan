@@ -147,9 +147,9 @@ describe("compiled-module ABI version", function()
         assert.equal(1, count_plain(
             workflow, 'TITAN_ABI_VERSION: "2"'))
         local cache_abi = "abi-${{ env.TITAN_ABI_VERSION }}"
-        assert.equal(13, count_plain(workflow, cache_abi))
+        assert.equal(4, count_plain(workflow, cache_abi))
         assert.equal(4, count_plain(workflow,
-            ".lua/var/cache/titan-probes/${{ env.TITAN_ABI_VERSION }}"))
+            ".lua/var/cache/titan-probes/1"))
         assert.truthy(workflow:find(
             "Prepare the standalone prefix", 1, true))
         assert.truthy(workflow:find(

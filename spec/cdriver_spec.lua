@@ -777,92 +777,30 @@ describe("C FFI cdriver", function()
             os.remove(header)
         end)
 
-        describe("analysis-owned probe caches", function()
-            it("shares exact toolchain caches across callers", function()
+        describe("analysis-owned probe cache", function()
+            it("shares source results per provider and analysis", function()
                 local compiler_io = require "titan-compiler.io"
                 local strategy = compiler_io.new_sync()
                 local analysis = cdriver.new_process_analysis()
-
-                local baseline_cache, result_cache =
-                    cdriver.process_analysis_probe_caches(
-                        analysis, strategy, "toolchain-one")
-                assert.is_table(baseline_cache)
-                assert.is_table(result_cache)
-                assert.not_equal(baseline_cache, result_cache)
-                baseline_cache.baseline = { status = "success" }
-                result_cache.candidate = {
-                    status = "compiler_rejection",
-                }
-
-                local repeated_baselines, repeated_results =
-                    cdriver.process_analysis_probe_caches(
-                        analysis, strategy, "toolchain-one")
-                assert.equal(baseline_cache, repeated_baselines)
-                assert.equal(result_cache, repeated_results)
-                assert.equal("success",
-                    repeated_baselines.baseline.status)
-                assert.equal("compiler_rejection",
-                    repeated_results.candidate.status)
+                local results = assert(cdriver.process_analysis_probe_cache(analysis, strategy))
+                results.source_digest = { outcome = "compiler_rejection" }
+                assert.equal(results, cdriver.process_analysis_probe_cache(analysis, strategy))
+                assert.not_equal(results, cdriver.process_analysis_probe_cache(
+                    analysis, compiler_io.new_sync()))
+                assert.not_equal(results, cdriver.process_analysis_probe_cache(
+                    cdriver.new_process_analysis(), strategy))
             end)
 
-            it("isolates providers, toolchains, and analyses", function()
+            it("validates the analysis and I/O provider", function()
                 local compiler_io = require "titan-compiler.io"
-                local first_strategy = compiler_io.new_sync()
-                local second_strategy = compiler_io.new_sync()
-                local first_analysis = cdriver.new_process_analysis()
-                local second_analysis = cdriver.new_process_analysis()
-
-                local baseline_cache, result_cache =
-                    cdriver.process_analysis_probe_caches(
-                        first_analysis, first_strategy, "toolchain-one")
-                local other_toolchain_baselines, other_toolchain_results =
-                    cdriver.process_analysis_probe_caches(
-                        first_analysis, first_strategy, "toolchain-two")
-                local other_provider_baselines, other_provider_results =
-                    cdriver.process_analysis_probe_caches(
-                        first_analysis, second_strategy, "toolchain-one")
-                local other_analysis_baselines, other_analysis_results =
-                    cdriver.process_analysis_probe_caches(
-                        second_analysis, first_strategy, "toolchain-one")
-
-                assert.not_equal(baseline_cache, other_toolchain_baselines)
-                assert.not_equal(result_cache, other_toolchain_results)
-                assert.not_equal(baseline_cache, other_provider_baselines)
-                assert.not_equal(result_cache, other_provider_results)
-                assert.not_equal(baseline_cache, other_analysis_baselines)
-                assert.not_equal(result_cache, other_analysis_results)
-            end)
-
-            it("validates the authority, provider, and exact key", function()
-                local compiler_io = require "titan-compiler.io"
-                local strategy = compiler_io.new_sync()
-                local analysis = cdriver.new_process_analysis()
-
-                local missing, err =
-                    cdriver.process_analysis_probe_caches(
-                        {}, strategy, "toolchain")
+                local missing, err = cdriver.process_analysis_probe_cache(
+                    {}, compiler_io.new_sync())
                 assert.is_nil(missing)
-                assert.equal(
-                    "process_analysis is not a cdriver analysis", err)
-
-                missing, err = cdriver.process_analysis_probe_caches(
-                    analysis, {}, "toolchain")
+                assert.equal("process_analysis is not a cdriver analysis", err)
+                missing, err = cdriver.process_analysis_probe_cache(
+                    cdriver.new_process_analysis(), {})
                 assert.is_nil(missing)
                 assert.matches("invalid compiler I/O strategy", err, 1, true)
-
-                for _, key in ipairs({ false, 17, {} }) do
-                    missing, err = cdriver.process_analysis_probe_caches(
-                        analysis, strategy, key)
-                    assert.is_nil(missing)
-                    assert.equal(
-                        "C probe toolchain key must be a nonempty string",
-                        err)
-                end
-                missing, err = cdriver.process_analysis_probe_caches(
-                    analysis, strategy, "")
-                assert.is_nil(missing)
-                assert.equal(
-                    "C probe toolchain key must be a nonempty string", err)
             end)
         end)
 
@@ -1201,14 +1139,14 @@ typedef TITAN_CACHE_CONFIG_TYPE titan_cache_config_type;
             }
             local analysis = cdriver.new_process_analysis()
 
-            local first = assert_process_file(header, {
+            local first, first_include = assert_process_file(header, {
                 compiler = base.compiler,
                 language_mode = base.language_mode,
                 compiler_include_dirs = base.compiler_include_dirs,
                 cppflags = { "-DTITAN_CACHE_CONFIG_TYPE=int" },
                 process_analysis = analysis,
             })
-            local second = assert_process_file(header, {
+            local second, second_include = assert_process_file(header, {
                 compiler = base.compiler,
                 language_mode = base.language_mode,
                 compiler_include_dirs = base.compiler_include_dirs,
@@ -1218,7 +1156,7 @@ typedef TITAN_CACHE_CONFIG_TYPE titan_cache_config_type;
             assert.same({ "int" }, first.titan_cache_config_type.def)
             assert.same({ "long" }, second.titan_cache_config_type.def)
 
-            local repeated = assert_process_file(header, {
+            local repeated, repeated_include = assert_process_file(header, {
                 compiler = base.compiler,
                 language_mode = base.language_mode,
                 compiler_include_dirs = base.compiler_include_dirs,
@@ -1226,6 +1164,12 @@ typedef TITAN_CACHE_CONFIG_TYPE titan_cache_config_type;
                 process_analysis = analysis,
             })
             assert.same({ "int" }, repeated.titan_cache_config_type.def)
+            -- Converted FFI graphs use this parser-owned identity even when
+            -- compiled probes deliberately reuse source across flag changes.
+            assert.not_equal(first_include.c_header_graph_key,
+                second_include.c_header_graph_key)
+            assert.equal(first_include.c_header_graph_key,
+                repeated_include.c_header_graph_key)
             local stats = cdriver.process_cache_stats()
             assert.equal(3, stats.lookups)
             assert.equal(1, stats.hits)
@@ -2260,6 +2204,8 @@ typedef float cached_selection;
             local second, second_include =
                 assert_process_file("imported.h", options)
             assert.same({ "long" }, second.titan_forced_value.def)
+            assert.not_equal(first_include.c_header_graph_key,
+                second_include.c_header_graph_key)
             assert.not_equal(
                 first_include.c_header_dependencies[1].identity,
                 second_include.c_header_dependencies[1].identity)

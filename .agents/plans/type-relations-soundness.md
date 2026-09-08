@@ -2283,7 +2283,7 @@ Treat this as a clean ABI cutover, not compatibility machinery:
 
 - update `TITAN_ABI_VERSION` and the Array ABI rationale in
   `titan-runtime/titan.h` and `titan-compiler/driver.lua`;
-- update generated compatibility metadata and ABI-keyed probe/cache namespaces;
+- update generated compatibility metadata;
 - keep compiler/stdlib release `TITAN_VERSION` and library path
   `TITAN_LIBRARY_VERSION` independent of this ABI-only transition;
 - update Makefile, generated shims, installer validation/rollback, and workflow

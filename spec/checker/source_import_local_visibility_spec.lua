@@ -488,7 +488,7 @@ describe("source-import local visibility (checker)", function()
             "full range fits in lua_Integer", 1, true), err)
     end)
 
-    it("retains supplemental C probe inputs on the consumer AST", function()
+    it("retains source-private C header dependencies on the consumer AST", function()
         local header = os.tmpname() .. "-source-probe-inputs.h"
         local file = assert(io.open(header, "wb"))
         assert(file:write([[
@@ -498,9 +498,8 @@ describe("source-import local visibility (checker)", function()
         ]]))
         assert(file:close())
 
-        -- Exercise a real retained forced-header observation. The normal
-        -- configuration deliberately has no such inputs after probe-key
-        -- construction stopped rescanning Titan's fixed C preamble.
+        -- Forced includes belong to the parsed header dependency closure and
+        -- must follow the source-private types into the consumer.
         local forced_header = os.tmpname() .. "-source-probe-forced.h"
         local forced_file = assert(io.open(forced_header, "wb"))
         assert(forced_file:write(
@@ -546,7 +545,6 @@ describe("source-import local visibility (checker)", function()
             })
             assert.truthy(ok, err)
 
-            local service = assert(driver.get_probe_service(context))
             local consumer_ast =
                 imported.source_probe_input_consumer.ast
             local provider_ast =
@@ -570,19 +568,13 @@ describe("source-import local visibility (checker)", function()
             assert.equal(provider_inputs[header_key],
                 consumer_inputs[header_key])
 
-            local saw_forced_file = false
-            local saw_forced_search = false
-            for _, input in ipairs(service.forced_header_inputs) do
-                if input.restat ~= false then
-                    assert.equal(input.identity,
-                        consumer_inputs[input.kind .. "\0" .. input.path])
-                    saw_forced_file = saw_forced_file or input.kind == "file"
-                    saw_forced_search =
-                        saw_forced_search or input.kind == "search"
-                end
+            assert.is_string(provider_inputs["file\0" .. forced_header])
+            local saw_search = false
+            for key, identity in pairs(provider_inputs) do
+                assert.equal(identity, consumer_inputs[key])
+                saw_search = saw_search or key:sub(1, 7) == "search\0"
             end
-            assert.is_true(saw_forced_file)
-            assert.is_true(saw_forced_search)
+            assert.is_true(saw_search)
             return true
         end, debug.traceback)
 

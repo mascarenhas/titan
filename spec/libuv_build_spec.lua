@@ -4104,33 +4104,29 @@ done
             assert.equal(2, count_literal(workflow,
                 "uses: ubicloud/cache/save@v4"), workflow)
             assert.equal(4, count_literal(workflow,
-                "path: .lua/var/cache/titan-probes/" ..
-                "${{ env.TITAN_ABI_VERSION }}"), workflow)
-            assert.equal(3, count_literal(workflow,
-                "TITAN_PROBE_CACHE_IDENTITY=gha-v3:"), workflow)
+                "path: .lua/var/cache/titan-probes/1"), workflow)
+            assert.falsy(workflow:find("TITAN_PROBE_CACHE_IDENTITY", 1, true))
             assert.equal(3, count_literal(workflow,
                 "TITAN_PREFIX: ${{ github.workspace }}/.lua"), workflow)
-            assert.falsy(workflow:find(
-                "ci_probe_cache_identity.sh", 1, true), workflow)
-            assert.truthy(stdlib_job:find("linux-regular-v1", 1, true))
-            assert.falsy(compiler_job:find("linux-regular-v1", 1, true))
-            assert.falsy(sanitizer_job:find("linux-regular-v1", 1, true))
+            assert.truthy(stdlib_job:find("-test-linux-stdlib-", 1, true))
+            assert.falsy(compiler_job:find("-test-linux-stdlib-", 1, true))
+            assert.falsy(sanitizer_job:find("-test-linux-stdlib-", 1, true))
             assert.truthy(sanitizer_job:find(
-                "linux-asan-ubsan-v1", 1, true))
-            assert.truthy(macos_job:find("macos-full-v1", 1, true))
+                "-sanitizer-", 1, true))
+            assert.truthy(macos_job:find("-test-macos-", 1, true))
             assert.equal(3, count_literal(workflow,
                 "-${{ github.sha }}"), workflow)
             assert.equal(3, count_literal(workflow,
-                "          key: titan-probe-success-v1-"), workflow)
+                "          key: titan-probes-1-"), workflow)
 
             local regular_cache_step = named_step(
-                stdlib_job, "Restore regular Linux C-probe success markers")
+                stdlib_job, "Restore regular Linux C-probe results")
             assert.falsy(regular_cache_step:find(
                 "-test-linux-compiler-", 1, true))
             assert.truthy(regular_cache_step:find(
                 "-test-linux-stdlib-", 1, true))
             local regular_cache_index = assert(stdlib_job:find(
-                "- name: Restore regular Linux C-probe success markers", 1, true))
+                "- name: Restore regular Linux C-probe results", 1, true))
             assert.truthy(regular_cache_step:find(
                 "id: regular-probe-cache", 1, true))
             assert.truthy(regular_cache_step:find(
@@ -4150,10 +4146,10 @@ done
                 "- name: Smoke-test bundled libuv source image",
                 tests_index, true))
             local regular_save_index = assert(stdlib_job:find(
-                "- name: Save regular Linux C-probe success markers",
+                "- name: Save regular Linux C-probe results",
                 bundled_index, true))
             local regular_save_step = named_step(
-                stdlib_job, "Save regular Linux C-probe success markers")
+                stdlib_job, "Save regular Linux C-probe results")
             assert.truthy(regular_save_step:find(
                 "uses: ubicloud/cache/save@v4", 1, true))
             assert.truthy(regular_save_step:find(
@@ -4200,7 +4196,7 @@ done
                 compiler_unpack_index, true))
             assert.is_true(compiler_unpack_index < compiler_tests_index)
             assert.falsy(compiler_job:find(
-                "C-probe success markers", 1, true))
+                "C-probe results", 1, true))
             assert.truthy(read_file(
                 "spec/support/ci_test_groups.sh"):find(
                 "TITAN_PROBE_CACHE_DISABLE=1", 1, true))
@@ -4259,7 +4255,7 @@ done
             assert.equal(1, count_literal(macos_job,
                 "luarocks test --prepare"), macos_job)
             local macos_cache_index = assert(macos_job:find(
-                "- name: Restore macOS C-probe success markers", 1, true))
+                "- name: Restore macOS C-probe results", 1, true))
             local macos_build_index = assert(macos_job:find(
                 "- name: Build and install the rock", macos_cache_index,
                 true))
@@ -4269,7 +4265,7 @@ done
             assert.is_true(macos_cache_index < macos_build_index)
             assert.is_true(macos_build_index < macos_tests_index)
             local sanitizer_cache_index = assert(sanitizer_job:find(
-                "- name: Restore sanitizer C-probe success markers", 1, true))
+                "- name: Restore sanitizer C-probe results", 1, true))
             local sanitizer_build_index = assert(sanitizer_job:find(
                 "- name: Build sanitizer-enabled Titan artifacts",
                 sanitizer_cache_index, true))
@@ -4468,7 +4464,7 @@ done
                     stress_count = stress_count + 1
                 end
             end
-            assert.equal(8, stress_count)
+            assert.equal(7, stress_count)
 
             assert.equal(1, count_literal(sanitizer_job,
                     "name: sanitizer (ubuntu-24.04, ASan+UBSan)"),

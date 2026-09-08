@@ -8,4 +8,3 @@ spec/coder/coder_spec.lua
 spec/coder/flexible_returns_spec.lua
 spec/coder/type_relations_soundness_spec.lua
 spec/coder/unions_spec.lua
-spec/cprobe_spec.lua

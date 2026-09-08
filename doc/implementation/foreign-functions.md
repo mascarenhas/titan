@@ -188,11 +188,11 @@ compiler-default and configured `-D` macros are part of that environment even
 though the header itself did not change them. The
 consumer synthesizes the generated-companion include descriptor from those
 facts; it does not preprocess, parse, or convert the resolver-owned temporary
-header through `cdriver` a second time. Nested randomized checking-header paths
-are canonicalized to the dependency's public path and stable generated identity
-before the companion contributes to a probe-cache key. The authoritative C probe baseline still
-includes the physical companion, so its declarations and emitted include order
-are checked by the same C compiler that will compile the module. This keeps
+header through `cdriver` a second time. Probes reach the physical companion
+through a private forwarding include with stable public-header spelling. The
+probe cache hashes only the resulting unpreprocessed source, without reading
+header contents for its key. The baseline checks the companion's declarations
+and emitted include order using the same C compiler that will compile the module. This keeps
 macro projections and contextual probes aligned with the emitted translation
 unit without treating compiler output as a new foreign API. As elsewhere in the trusted C FFI, deliberately
 configuration-dependent cross-translation-unit ABI declarations remain the C
@@ -312,13 +312,11 @@ boundary, converts the completed checking path to an absolute pathname, and only
 then returns it in the trusted source loader result. A consumer can immediately
 process the completed header in the exact header/probe
 context described above, even when final object compilation will sort the
-consumer before the producer. The C registrar reads that unique physical file,
-but probe rendering uses a hash-named wrapper keyed by the logical producer and
-its eventual public companion path. The wrapper contains an absolute quoted
-include of the physical file, preserving that file's nested quoted-include
-origin without placing its randomized name in probe text or header-context
-identity. It is materialized only after a persistent-cache miss inside the
-probe service's private workspace.
+consumer before the producer. Probe rendering uses a private wrapper whose
+stable spelling comes from the eventual public companion path. Its absolute
+quoted include lets the C compiler read the unique physical checking file while
+preserving nested quoted-include origin. It is materialized only on a cache miss
+inside the probe service's private workspace.
 
 These files belong to the resolver context. `close_resolver_context` removes
 every recorded temporary and closes the shared C-probe service on ordinary,

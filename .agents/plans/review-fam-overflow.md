@@ -149,10 +149,7 @@ extern char titan_probe[
 
 The production cprobe baseline has already established that the ordered header
 context compiles.  A true predicate gives a one-element array; a false predicate
-gives the required C99 diagnostic for a negative array bound.  The existing
-cprobe result cache automatically keys the exact rendered declaration together
-with header context, toolchain flags, and target-profile identity.  Repeated
-identical `(T, field, count)` checks are therefore free after the first result.
+gives the required C99 diagnostic for a negative array bound.
 
 The minimal implementation can build this sentinel in the checker using the
 shared `cdeclarator` and the existing compatibility API; that changes no

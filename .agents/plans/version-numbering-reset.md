@@ -6,7 +6,7 @@ Separate Titan's compiled-module ABI identity from the compiler and standard-
 library release version before the public release:
 
 - `TITAN_ABI_VERSION` is the monotonic ABI integer `2` and is used only for
-  compatibility markers and ABI-sensitive cache namespaces.
+  compatibility markers and native-build cache namespaces.
 - `TITAN_VERSION` is the semantic release version `0.6.0`.
 - the release's derived major/minor component, `0.6`, owns installed library
   and compiler-data paths, the installed runtime SDK archive, and the versioned
@@ -27,11 +27,9 @@ not retain historical Titan release or ABI numbers.
    the installed runtime SDK archive, generated Lua C-path configuration, and
    versioned environment overrides use the major/minor library version, never
    the ABI. The SDK archive is `lib/titan/0.6/libtitan.a`.
-4. Persistent C-probe success caches remain ABI-scoped because their reusable
-   native contract follows ABI compatibility rather than patch releases.
-5. The LuaRocks package is versioned for the semantic release and its filename,
+4. The LuaRocks package is versioned for the semantic release and its filename,
    manifest expectations, cache inputs, and source-rock tests advance together.
-6. No compatibility aliases, old-path cleanup, migrations, symlinks, or
+5. No compatibility aliases, old-path cleanup, migrations, symlinks, or
    parallel legacy namespaces are introduced.
 
 ## Implementation

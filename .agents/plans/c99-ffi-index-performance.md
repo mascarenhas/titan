@@ -359,7 +359,7 @@ compiler ownership and the production trace sink is non-reentrant. An invariant
 or cancellation which raises rather than returning may omit terminal
 best-effort telemetry because that complete analysis is discarded.
 
-Persistent C-probe marker reuse has a separate scalar trace hook. The C-probe
+Persistent C-probe result reuse has a separate scalar trace hook. The C-probe
 service reports `(stage, hit, key, path)` once per enabled lookup without
 enabling verbose evidence or retaining probe sources; the resolver adapts it to
 `(module_name, stage, hit, key, path)` using the currently checked source
@@ -375,7 +375,7 @@ server profile.
   roots by module/physical file with call counts.
 - [x] Add focused header miss/hit/failure, sink-isolation, generated-identity,
   nested-module, and checkpoint-order regressions.
-- [x] Trace persistent C-probe marker hits and misses with source-module
+- [x] Trace persistent C-probe result hits and misses with source-module
   attribution, scalar-only payloads, and sink-failure isolation.
 - [x] Rebuild the isolated vscode-titan compiler/server and capture the complete
   Titan-repository trace-level cold-index breakdown.
@@ -399,10 +399,7 @@ The largest attributed source rows were `titan.uv` at 18.335s over 28 calls
 (17.824s first call, 0.511s all 27 reuses), `titan.http` at 11.898s, and
 `titan.ssl` at 7.057s. The largest header rows were `titan/ffi.h` at 19.879s,
 `openssl/ssl.h` at 15.635s, `openssl/x509v3.h` at 12.827s,
-`openssl/pem.h` at 12.057s, and `uv.h` at 8.924s. The freshly rebuilt success-
-only persistent probe cache recorded 10 hits and 1,075 misses across 1,085
-requests. That result exposed the deterministic negative-result cache work now
-tracked separately as Titan issue #108. An unchanged hover/definition batch
+`openssl/pem.h` at 12.057s, and `uv.h` at 8.924s. An unchanged hover/definition batch
 after readiness took 14.600ms wall and 10ms server CPU and emitted zero
 indexing-status notifications.
 

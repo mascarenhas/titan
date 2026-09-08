@@ -67,7 +67,6 @@ function new_direct_probe_service()
         toolchain = toolchain,
         verbose = foreign_c_options.verbose == true,
         cache_directory = foreign_c_options.probe_cache_directory,
-        cache_identity = foreign_c_options.probe_cache_identity,
     }
     -- Ordinary compiler/checker use must retain the compiler I/O strategy as
     -- the runner authority so asynchronous ownership remains with the caller.
@@ -153,33 +152,59 @@ function ensure_probe_service(st)
     return service
 end
 
-local function remember_probe_header_inputs(st, probe)
-    if type(probe.header_inputs) ~= "table" then return true end
-
-    -- A source-only C type can add an origin include solely to this probe
-    -- context, without adding anything to st.foreign_includes. Retain the
-    -- context's complete fixed-plus-supplemental closure for the compiler
-    -- manifest and the language server's final pre-publication restat.
-    st.probe_header_inputs = st.probe_header_inputs or {}
-    st.probe_header_input_identities =
-        st.probe_header_input_identities or {}
-    for _, input in ipairs(probe.header_inputs) do
-        if input.restat ~= false then
-            local key = input.kind .. "\0" .. input.path
-            local previous = st.probe_header_input_identities[key]
-            if previous and previous ~= input.identity then
-                return nil, "conflicting C header input identity for '" ..
-                    input.path .. "'"
-            elseif not previous then
-                st.probe_header_input_identities[key] = input.identity
-                st.probe_header_inputs[#st.probe_header_inputs + 1] = {
-                    kind = input.kind,
-                    path = input.path,
-                    identity = input.identity,
-                }
+-- Header parsing owns these dependency identities. Keep the immutable input
+-- closure for source importers and language-server invalidation independently
+-- of the compile-only probe cache.
+function collect_foreign_header_inputs(includes, supplemental_includes)
+    local result, seen = {}, {}
+    for _, group in ipairs({ includes or {}, supplemental_includes or {} }) do
+        for _, include in ipairs(group) do
+            for _, inputs in ipairs({
+                include.c_header_dependencies or {},
+                include.c_header_search_inputs or {},
+            }) do
+                for _, input in ipairs(inputs) do
+                    if input.restat ~= false then
+                        local key = input.kind .. "\0" .. input.path
+                        local previous = seen[key]
+                        if previous and previous ~= input.identity then
+                            return nil,
+                                "conflicting C header input identity for '" ..
+                                input.path .. "'"
+                        elseif not previous then
+                            seen[key] = input.identity
+                            result[#result + 1] = {
+                                kind = input.kind,
+                                path = input.path,
+                                identity = input.identity,
+                            }
+                        end
+                    end
+                end
             end
         end
     end
+    return result
+end
+
+local function remember_forced_foreign_headers(st, service)
+    if st.forced_foreign_headers then return true end
+    local options, err = service:cdriver_process_options()
+    if not options then return nil, err end
+    local inputs
+    inputs, err = cdriver.forced_header_inputs(options)
+    if not inputs then return nil, err end
+
+    -- A module using only contextual C types may have no parsed foreign
+    -- include. Explicit -include/-imacros files still belong to its source
+    -- dependency snapshot, independently of any compiled-probe cache entry.
+    local include = {
+        c_header_dependencies = inputs.c_header_dependencies,
+        c_header_search_inputs = inputs.c_header_search_inputs,
+    }
+    st.forced_foreign_headers = include
+    st.supplemental_foreign_includes[
+        #st.supplemental_foreign_includes + 1] = include
     return true
 end
 
@@ -207,6 +232,13 @@ function ensure_module_probe(st)
         return nil, st.module_probe_error
     end
 
+    local remembered
+    remembered, err = remember_forced_foreign_headers(st, service)
+    if not remembered then
+        st.module_probe_error = err
+        st.module_probe_error_includes_version = includes_version
+        return nil, err
+    end
     local module_probe
     module_probe, err = service:module_context({
         module = st.modname,
@@ -216,13 +248,6 @@ function ensure_module_probe(st)
     if not module_probe then
         st.module_probe_error = err or
             "could not create the module C probe context"
-        st.module_probe_error_includes_version = includes_version
-        return nil, st.module_probe_error
-    end
-    local remembered
-    remembered, err = remember_probe_header_inputs(st, module_probe)
-    if not remembered then
-        st.module_probe_error = err
         st.module_probe_error_includes_version = includes_version
         return nil, st.module_probe_error
     end
@@ -273,6 +298,9 @@ function checker._probe_for_c_types(st, probed_types)
 
     local service, err = ensure_probe_service(st)
     if not service then return nil, err end
+    local remembered
+    remembered, err = remember_forced_foreign_headers(st, service)
+    if not remembered then return nil, err end
     local includes = {}
     for _, include in ipairs(st.foreign_includes or {}) do
         includes[#includes + 1] = include
@@ -287,9 +315,12 @@ function checker._probe_for_c_types(st, probed_types)
         includes = includes,
     })
     if not probe then return nil, err end
-    local remembered
-    remembered, err = remember_probe_header_inputs(st, probe)
-    if not remembered then return nil, err end
+    -- These origin headers can be needed only by a source-private C type.
+    -- Retain their parsed dependencies even without a written foreign import.
+    for _, key in ipairs(keys) do
+        st.supplemental_foreign_includes[
+            #st.supplemental_foreign_includes + 1] = supplemental[key]
+    end
     st.c_type_probes[cache_key] = probe
     return probe
 end
@@ -745,98 +776,10 @@ function restore_rejected_foreign_type_registries(st, pending)
     end
 end
 
--- A successful redeclaration can complete an unknown array bound or upgrade
--- an old-style function inside the first declaration-owned type graph. Later
--- probes must see those mutations exactly as the former sequential loop did.
--- Track every type node whose spelling a later probe may read, and every node
--- an earlier composite merge may write, so independently named declarations
--- can still share one safe probe wave without assuming their graphs are
--- disjoint.
-foreign_redeclaration_batch = {}
-
-function foreign_redeclaration_batch.collect_reads(typ, reads, seen)
-    if type(typ) ~= "table" or seen[typ] then return end
-    seen[typ] = true
-    reads[typ] = true
-
-    local tag = typ._tag
-    if tag == "Type.CTypedef" then
-        -- Ordinary aliases retain their typedef spelling. A declaration-owned
-        -- array view is deliberately expanded by cprobe so a completed bound
-        -- is visible to the next wave; follow only that private target.
-        if typ._declaration_array_view then
-            foreign_redeclaration_batch.collect_reads(
-                typ.target, reads, seen)
-        end
-        return
-    elseif tag == "Type.CPointer" then
-        foreign_redeclaration_batch.collect_reads(typ.pointee, reads, seen)
-    elseif tag == "Type.CArray" then
-        foreign_redeclaration_batch.collect_reads(typ.elem, reads, seen)
-    elseif tag == "Type.CFunction" then
-        for _, param in ipairs(typ.params or {}) do
-            foreign_redeclaration_batch.collect_reads(param, reads, seen)
-        end
-        foreign_redeclaration_batch.collect_reads(typ.ret, reads, seen)
-    end
-end
-
-function foreign_redeclaration_batch.collect_writes(typ, writes, seen)
-    if type(typ) ~= "table" or seen[typ] then return end
-    seen[typ] = true
-
-    local tag = typ._tag
-    if tag == "Type.CTypedef" then
-        if typ._declaration_array_view then
-            foreign_redeclaration_batch.collect_writes(
-                typ.target, writes, seen)
-        end
-    elseif tag == "Type.CPointer" then
-        foreign_redeclaration_batch.collect_writes(
-            typ.pointee, writes, seen)
-    elseif tag == "Type.CArray" then
-        writes[typ] = true
-        foreign_redeclaration_batch.collect_writes(typ.elem, writes, seen)
-    elseif tag == "Type.CFunction" then
-        writes[typ] = true
-        for _, param in ipairs(typ.params or {}) do
-            foreign_redeclaration_batch.collect_writes(
-                param, writes, seen)
-        end
-        foreign_redeclaration_batch.collect_writes(typ.ret, writes, seen)
-    end
-end
-
-function foreign_redeclaration_batch.reads_prior_write(
-        declaration, prior_writes)
-    local reads = {}
-    foreign_redeclaration_batch.collect_reads(
-        declaration.previous.type, reads, {})
-    foreign_redeclaration_batch.collect_reads(
-        declaration.current, reads, {})
-    for node in pairs(reads) do
-        if prior_writes[node] then return true end
-    end
-    return false
-end
-
-function foreign_redeclaration_batch.add_writes(declaration, writes)
-    foreign_redeclaration_batch.collect_writes(
-        declaration.previous.type, writes, {})
-    -- Canonicalizing two typedef declarations redirects the later private
-    -- alias object to the accepted first target. A distinct ordinary name in
-    -- that header can retain this exact alias root, so keep it behind the
-    -- typedef's wave even though its eventual C spelling remains the alias.
-    if declaration.current._tag == "Type.CTypedef"
-       and declaration.previous.type._tag == "Type.CTypedef" then
-        writes[declaration.current] = true
-    end
-end
-
 -- Production probe methods can cross the compiler I/O strategy and suspend a
 -- Titan Task. Invoke those methods directly so a cancellation raised while
 -- resuming through Lua is not mistaken for an ordinary probe failure. Keep
--- the protected compatibility boundary only for injected legacy probes.
+-- the protected boundary only for injected probe implementations.
 local function invoke_module_probe(module_probe, method, ...)
     if getmetatable(module_probe) == cprobe.ModuleContext then
         return true, method(module_probe, ...)
@@ -844,76 +787,28 @@ local function invoke_module_probe(module_probe, method, ...)
     return pcall(method, module_probe, ...)
 end
 
-function foreign_redeclaration_batch.validate_candidates(
-        module_probe, candidates)
-    local compatibilities = {}
-    if #candidates == 0 then return compatibilities end
-
-    if type(module_probe.validate_declaration_compatibilities)
-        == "function" then
-        local ok, validated = invoke_module_probe(
-            module_probe,
-            module_probe.validate_declaration_compatibilities,
-            candidates)
-        if ok and type(validated) == "table" then
-            for index = 1, #candidates do
-                compatibilities[index] =
-                    type(validated[index]) == "table"
-                    and validated[index] or {
-                        status = "infrastructure_failure",
-                        message =
-                            "the C declaration compatibility batch "
-                            .. "returned no result for a candidate",
-                    }
-            end
-        else
-            local message = ok
-                and "the C declaration compatibility batch returned "
-                    .. "no result"
-                or "C declaration compatibility batch validation "
-                    .. "failed: " .. tostring(validated)
-            for index = 1, #candidates do
-                compatibilities[index] = {
-                    status = "infrastructure_failure",
-                    message = message,
-                }
-            end
-        end
-        return compatibilities
+function validate_foreign_declaration_compatibility(
+        module_probe, left_type, right_type,
+        left_declaration, right_declaration)
+    local method = module_probe.validate_declaration_compatibility
+    if type(method) ~= "function" then
+        return {
+            status = "infrastructure_failure",
+            message =
+                "the C probe service cannot validate a declaration pair",
+        }
     end
-
-    -- Keep compatibility with injected probe implementations that predate
-    -- batching. Production cprobe exposes the plural method.
-    for index, candidate in ipairs(candidates) do
-        if type(module_probe.validate_declaration_compatibility)
-            ~= "function" then
-            compatibilities[index] = {
-                status = "infrastructure_failure",
-                message =
-                    "the C probe service cannot validate a declaration pair",
-            }
-        else
-            local ok, validated = invoke_module_probe(
-                module_probe,
-                module_probe.validate_declaration_compatibility,
-                candidate.left_type, candidate.right_type,
-                candidate.left_declaration,
-                candidate.right_declaration)
-            if ok and type(validated) == "table" then
-                compatibilities[index] = validated
-            else
-                compatibilities[index] = {
-                    status = "infrastructure_failure",
-                    message = ok
-                        and "the C declaration compatibility probe "
-                            .. "returned no result"
-                        or "C declaration compatibility validation "
-                            .. "failed: " .. tostring(validated),
-                }
-            end
-        end
-    end
-    return compatibilities
+    local ok, validated = invoke_module_probe(
+        module_probe, method, left_type, right_type,
+        left_declaration, right_declaration)
+    if ok and type(validated) == "table" then return validated end
+    return {
+        status = "infrastructure_failure",
+        message = ok
+            and "the C declaration compatibility probe returned no result"
+            or "C declaration compatibility validation failed: "
+                .. tostring(validated),
+    }
 end
 
 function finalize_foreign_redeclarations(st, errors)
@@ -958,94 +853,27 @@ function finalize_foreign_redeclarations(st, errors)
     end
 
     if result.status == "success" then
-        local compatibilities = {}
-        local completed = {}
-        local remaining = #pending
-
-        while remaining > 0 do
-            local wave = {}
-            local seen_names = {}
-            local prior_writes = {}
-
-            -- Select the largest safe wave in source order. Only the first
-            -- remaining occurrence of one ordinary name is eligible. The
-            -- graph barrier additionally protects future or injected cases
-            -- where two names retain one mutable declaration-owned node.
-            for pending_index, declaration in ipairs(pending) do
-                if not completed[pending_index] then
-                    local first_for_name = not seen_names[declaration.name]
-                    seen_names[declaration.name] = true
-                    if first_for_name
-                       and not foreign_redeclaration_batch.reads_prior_write(
-                            declaration, prior_writes) then
-                        wave[#wave + 1] = {
-                            pending_index = pending_index,
-                            declaration = declaration,
-                        }
-                    end
-                    -- Include writes from skipped earlier declarations too:
-                    -- selecting a later reader ahead of such a declaration
-                    -- would also invert the former sequential semantics.
-                    foreign_redeclaration_batch.add_writes(
-                        declaration, prior_writes)
-                end
-            end
-
-            assert(#wave > 0,
-                "foreign redeclaration probe wave made no progress")
-            local candidates = {}
-            local candidate_wave_indexes = {}
-            for wave_index, item in ipairs(wave) do
-                local declaration = item.declaration
-                if declaration.compatibility == "source-repeat" then
-                    -- Rendering two synthetic declarations would invent two
-                    -- prototype scopes for a prototype-local tag, even when
-                    -- the ordered headers emitted this one physical
-                    -- declaration only once. The successful baseline above
-                    -- is the authoritative proof for an exact source repeat.
-                    compatibilities[item.pending_index] = {
-                        status = "success",
-                    }
-                else
-                    candidates[#candidates + 1] = {
-                        left_type = declaration.previous.type,
-                        right_type = declaration.current,
-                        left_declaration =
-                            declaration.previous.declaration,
-                        right_declaration = declaration.declaration,
-                    }
-                    candidate_wave_indexes[#candidates] = wave_index
-                end
-            end
-
-            local validated =
-                foreign_redeclaration_batch.validate_candidates(
-                module_probe, candidates)
-            for candidate_index, wave_index in
-                ipairs(candidate_wave_indexes) do
-                compatibilities[wave[wave_index].pending_index] =
-                    validated[candidate_index]
-            end
-
-            -- Form accepted composites before constructing the next wave.
-            -- This preserves the historical []/[3] then [3]/[4] probe chain
-            -- instead of speculatively rendering both against [].
-            for _, item in ipairs(wave) do
-                local pending_index = item.pending_index
-                local compatibility = compatibilities[pending_index]
-                completed[pending_index] = true
-                remaining = remaining - 1
-                if compatibility.status == "success" then
-                    canonicalize_foreign_redeclaration(
-                        st, item.declaration)
-                end
-            end
-        end
-
         local rejected = {}
-        for pending_index, declaration in ipairs(pending) do
-            local compatibility = compatibilities[pending_index]
-            if compatibility.status ~= "success" then
+        for _, declaration in ipairs(pending) do
+            local compatibility
+            if declaration.compatibility == "source-repeat" then
+                -- An exact source repeat emitted only one declaration in the
+                -- ordered headers. Synthetic duplicates would invent two
+                -- prototype scopes, so the baseline already proves this case.
+                compatibility = { status = "success" }
+            else
+                compatibility = validate_foreign_declaration_compatibility(
+                    module_probe, declaration.previous.type,
+                    declaration.current, declaration.previous.declaration,
+                    declaration.declaration)
+            end
+
+            if compatibility.status == "success" then
+                -- Complete each declaration before rendering the next one:
+                -- []/[3] must be followed by [3]/[4], not another [] probe.
+                -- This also preserves redirected typedef and function roots.
+                canonicalize_foreign_redeclaration(st, declaration)
+            else
                 rejected[#rejected + 1] = declaration
                 report_foreign_redeclaration_failure(
                     declaration, errors, compatibility)

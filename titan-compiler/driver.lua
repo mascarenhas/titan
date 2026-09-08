@@ -214,11 +214,10 @@ local function root_join(root, suffix)
     return root .. "/" .. suffix
 end
 
-function driver.probe_cache_directory(cpath, override, abi)
+function driver.probe_cache_directory(cpath, override)
     local root = driver.resolve_installation_root(cpath, override)
     if not root then return nil end
-    return root_join(root, "var/cache/titan-probes/" ..
-        tostring(abi or driver.TITAN_ABI_VERSION))
+    return root_join(root, "var/cache/titan-probes/1")
 end
 
 function driver.installed_paths(root)
@@ -315,10 +314,7 @@ local preliminary_probe_root = probe_prefix and
     normalize_absolute_path(probe_prefix) or driver.TITAN_ROOT
 driver.PROBE_CACHE_DIRECTORY = not probe_cache_disabled and
     preliminary_probe_root and root_join(preliminary_probe_root,
-        "var/cache/titan-probes/" .. driver.TITAN_ABI_VERSION) or nil
-local probe_cache_identity = os.getenv("TITAN_PROBE_CACHE_IDENTITY")
-if probe_cache_identity == "" then probe_cache_identity = nil end
-driver.PROBE_CACHE_IDENTITY = probe_cache_identity
+        "var/cache/titan-probes/1") or nil
 local configured_titan_bin_path =
     os.getenv("TITAN_PATH" .. driver.TITAN_LIBRARY_VERSION_SUFFIX)
     or os.getenv("TITAN_PATH")
@@ -395,7 +391,7 @@ function driver.initialize_layout(context)
         cache_root, cache_error = normalize_root(cache_root, context.io)
         if not cache_root then return nil, cache_error end
         driver.PROBE_CACHE_DIRECTORY = root_join(cache_root,
-            "var/cache/titan-probes/" .. driver.TITAN_ABI_VERSION)
+            "var/cache/titan-probes/1")
     else
         driver.PROBE_CACHE_DIRECTORY = nil
     end
@@ -538,7 +534,6 @@ function driver.configure_foreign_c(context)
         compiler_include_dirs = driver.foreign_include_dirs(),
         toolchain = toolchain,
         probe_cache_directory = driver.PROBE_CACHE_DIRECTORY,
-        probe_cache_identity = driver.PROBE_CACHE_IDENTITY,
     }
     if toolchain then options.language_flag = false end
 
@@ -1221,7 +1216,6 @@ function driver.get_probe_service(context)
         toolchain = toolchain,
         verbose = context.probe_verbose,
         cache_directory = driver.PROBE_CACHE_DIRECTORY,
-        cache_identity = driver.PROBE_CACHE_IDENTITY,
     })
     if not service then
         context.probe_service_error = err
