@@ -16,14 +16,8 @@ local compiler_io = require "titan-compiler.io"
 
 local default_io = compiler_io.new_sync()
 
--- Diagnostics are part of a semantic probe verdict and must round-trip
--- exactly. Avoid allowing an unexpectedly large compiler stream to turn the
--- persistent cache into an unbounded data sink: such a result is still valid
--- for the caller and analysis-local reuse, but is deliberately not persisted.
-local MAX_PERSISTENT_DIAGNOSTIC_BYTES =
-    cprobe_cache.MAX_DIAGNOSTIC_BYTES
-local MAX_PERSISTENT_RECORD_BYTES =
-    MAX_PERSISTENT_DIAGNOSTIC_BYTES + 256
+-- Keep disk reads bounded even if a file changes between stat and read.
+local MAX_PERSISTENT_RECORD_BYTES = cprobe_cache.MAX_RECORD_BYTES
 
 local Service = {}
 Service.__index = Service
@@ -97,46 +91,14 @@ local function append_all(destination, source)
     end
 end
 
--- Length-prefix every component. Unlike delimiter-only concatenation this is
--- collision-free even when a compiler argument or pathname contains the
--- delimiter, a newline, or an empty string.
-local function encode_sequence(values)
-    local encoded = {}
-    for index, value in ipairs(values) do
-        value = tostring(value)
-        encoded[index] = #value .. ":" .. value
-    end
-    return table.concat(encoded)
+-- Each source is an independent translation unit. Role names are fixed so
+-- neither toolchain nor header metadata is hidden in the source cache key.
+local function probe_identifier(role)
+    return "titan_probe_" .. role
 end
 
-local function keyed_fields(fields)
-    local flattened = { "titan-cprobe-key-v1" }
-    for _, field in ipairs(fields) do
-        flattened[#flattened + 1] = field[1]
-        flattened[#flattened + 1] = field[2] or ""
-    end
-    return encode_sequence(flattened)
-end
-
--- Probe declarations need an identifier, but ordinary fixed names can be
--- captured by an imported macro or collide with a header declaration. Use a
--- short context-derived spelling instead. The role keeps names distinct inside
--- one probe source, and avoiding C's reserved-identifier namespace keeps
--- `-Wreserved-identifier` configurations usable.
-local function probe_identifier(role, context_key)
-    local hash = 0
-    local text = tostring(context_key)
-    for index = 1, #text do
-        hash = (hash * 131 + text:byte(index)) % 2147483629
-    end
-    return ("titan_probe_%s_%08x"):format(role, hash)
-end
-
--- Telemetry needs a useful description of a module's foreign-header context,
--- but it must neither repeat the full recursive manifest nor perform more
--- filesystem work. Render only the already-normalized top-level import
--- spellings, escape them to bounded ASCII, and keep this label out of every
--- semantic key.
+-- Observers receive a bounded label of the ordered include spellings.
+-- Labels are for diagnostics only and never affect source or cache lookup.
 local TRACE_HEADER_SPELLING_BYTES = 48
 local TRACE_HEADER_LABEL_INCLUDES = 3
 local TRACE_HEADER_LABEL_BYTES = 192
@@ -236,52 +198,6 @@ local function angle_header_name(name)
     return "<" .. name .. ">"
 end
 
-local function normalize_header_inputs(value, expected_kind, source_dir, cwd,
-                                       subject)
-    if value == nil then return {} end
-    if type(value) ~= "table" then
-        return nil, subject .. " must be an ordered array"
-    end
-    local result = {}
-    for index = 1, #value do
-        local input = value[index]
-        if type(input) ~= "table" then
-            return nil, subject .. " entry " .. index .. " must be a table"
-        end
-        local kind = input.kind
-        local path = input.path
-        local identity = input.identity
-        local restat = input.restat
-        if kind ~= expected_kind then
-            return nil, subject .. " entry " .. index .. " must have kind '" ..
-                expected_kind .. "'"
-        elseif type(path) ~= "string" or path == "" or
-               path:find("\0", 1, true) then
-            return nil, subject .. " entry " .. index ..
-                " must have a nonempty NUL-free path"
-        elseif type(identity) ~= "string" or identity == "" then
-            return nil, subject .. " entry " .. index ..
-                " must have a nonempty identity"
-        elseif restat ~= nil and type(restat) ~= "boolean" then
-            return nil, subject .. " entry " .. index ..
-                " restat flag must be boolean"
-        end
-        result[index] = {
-            kind = kind,
-            path = absolute_path(path, cwd or source_dir),
-            identity = identity,
-            restat = restat ~= false,
-        }
-    end
-    for key in pairs(value) do
-        if type(key) ~= "number" or key < 1 or key > #value
-        or key % 1 ~= 0 then
-            return nil, subject .. " must be a dense ordered array"
-        end
-    end
-    return result
-end
-
 local function normalize_diagnostic_aliases(value, subject)
     if value == nil then return {} end
     if type(value) ~= "table" then
@@ -315,9 +231,6 @@ local function normalize_diagnostic_aliases(value, subject)
 end
 
 local function normalize_include_descriptor(descriptor, source_dir, cwd)
-    local identity_complete = type(descriptor) == "table" and
-        descriptor.c_header_dependencies ~= nil and
-        descriptor.c_header_search_inputs ~= nil
     if type(descriptor) == "string" then
         descriptor = {
             original = descriptor,
@@ -335,14 +248,6 @@ local function normalize_include_descriptor(descriptor, source_dir, cwd)
     local original = descriptor.original or name
     local resolved = descriptor.resolved
     local probe_wrapper = descriptor.probe_wrapper
-    local header_dependencies, dependency_error = normalize_header_inputs(
-        descriptor.c_header_dependencies, "file", source_dir, cwd,
-        "C header dependencies")
-    if not header_dependencies then return nil, dependency_error end
-    local header_search_inputs, search_error = normalize_header_inputs(
-        descriptor.c_header_search_inputs, "search", source_dir, cwd,
-        "C header search inputs")
-    if not header_search_inputs then return nil, search_error end
     if kind ~= "angle" and kind ~= "quote" then
         return nil, "C include descriptor kind must be 'angle' or 'quote'"
     elseif type(name) ~= "string" or name == "" then
@@ -403,9 +308,8 @@ local function normalize_include_descriptor(descriptor, source_dir, cwd)
                 public_path = wrapper_public,
                 diagnostic_aliases = diagnostic_aliases,
             },
-            c_header_dependencies = header_dependencies,
-            c_header_search_inputs = header_search_inputs,
-            _c_header_identity_complete = identity_complete,
+            c_header_dependencies = descriptor.c_header_dependencies,
+            c_header_search_inputs = descriptor.c_header_search_inputs,
         }
     elseif kind == "quote" then
         -- cdriver descriptors are resolved relative to the importing process,
@@ -432,10 +336,9 @@ local function normalize_include_descriptor(descriptor, source_dir, cwd)
         include_kind = kind,
         include_name = name,
         rendered = rendered,
-        c_header_dependencies = header_dependencies,
-        c_header_search_inputs = header_search_inputs,
+        c_header_dependencies = descriptor.c_header_dependencies,
+        c_header_search_inputs = descriptor.c_header_search_inputs,
         c_header_graph_key = descriptor.c_header_graph_key,
-        _c_header_identity_complete = identity_complete,
     }
 end
 
@@ -456,12 +359,7 @@ local function source_foreign_include_alias(
            public_header:sub(1, 1) ~= "/" then
         return nil, "source-foreign probe alias requires an absolute public header path"
     end
-    local identity = keyed_fields({
-        { "alias_version", "source-foreign-v1" },
-        { "module", modname },
-        { "public_header", public_header },
-    })
-    local name = "titan-source-foreign-" .. sha256.hex(identity) .. ".h"
+    local name = "titan-source-foreign-" .. sha256.hex(public_header) .. ".h"
     local rendered, rendered_error = quote_header_name(name)
     if not rendered then return nil, rendered_error end
     local diagnostic_aliases, diagnostic_alias_error =
@@ -469,44 +367,6 @@ local function source_foreign_include_alias(
             transitive_diagnostic_aliases,
             "source-foreign transitive diagnostic aliases")
     if not diagnostic_aliases then return nil, diagnostic_alias_error end
-    local function stable_generated_identity(value)
-        -- New direct-file identities also retain lstat ownership. A resolver's
-        -- generated regular file still has a stable content-only logical
-        -- identity, while physical user headers retain both identities.
-        local v2_digest, link, followed = value:match(
-            "^c%-header%-file%-v2:sha256:([0-9a-f]+);lstat=([^;]+);stat=([^;]+)$")
-        if v2_digest and #v2_digest == 64 and link == followed
-           and link:match("^file:%d+:%-?%d+:%-?%d+$") then
-            return "c-header-file-v1:sha256:" .. v2_digest
-        end
-        local digest, kind, mode, device, inode = value:match(
-            "^c%-header%-file%-v1:sha256:([0-9a-f]+);" ..
-            "stat=([^:;]+):([^:;]+):([^:;]+):([^:;]+)$")
-        if digest and #digest == 64 and kind == "file" and
-           mode:match("^%d+$") and device:match("^%-?%d+$") and
-           inode:match("^%-?%d+$") then
-            return "c-header-file-v1:sha256:" .. digest
-        end
-        return value
-    end
-    local header_dependencies = {}
-    for index, dependency in ipairs(
-            descriptor.c_header_dependencies or {}) do
-        local copy = deep_copy(dependency)
-        if copy.kind == "file" and copy.path == descriptor.resolved then
-            -- The resolver-owned sibling contains the exact generated bytes
-            -- included by the authoritative C probe compiler. Give those
-            -- bytes the stable public-header logical path for probe-cache
-            -- identity, but do not ask a language-server client to stat a
-            -- file which this analysis did not publish. Titan source stamps
-            -- cover regeneration; physical nested C headers remain
-            -- independently restattable.
-            copy.path = public_header
-            copy.identity = stable_generated_identity(copy.identity)
-            copy.restat = false
-        end
-        header_dependencies[index] = copy
-    end
     return {
         original = modname,
         resolved = public_header,
@@ -520,133 +380,9 @@ local function source_foreign_include_alias(
             public_path = public_header,
             diagnostic_aliases = diagnostic_aliases,
         },
-        c_header_dependencies = header_dependencies,
-        c_header_search_inputs =
-            deep_copy(descriptor.c_header_search_inputs or {}),
-        _c_header_identity_complete =
-            descriptor._c_header_identity_complete == true,
+        c_header_dependencies = descriptor.c_header_dependencies,
+        c_header_search_inputs = descriptor.c_header_search_inputs,
     }
-end
-
-local generated_c_escape_bytes = {
-    ["a"] = 7,
-    ["b"] = 8,
-    ["f"] = 12,
-    ["n"] = 10,
-    ["r"] = 13,
-    ["t"] = 9,
-    ["v"] = 11,
-    ["\\"] = 92,
-    ['"'] = 34,
-}
-
--- Generated source-foreign headers spell source dependencies with the
--- compiler's C string-literal encoder. Decode only that closed spelling so a
--- resolver-random physical sibling can be replaced in the identity stream by
--- its public path and the already established identity of its generated
--- contents. The canonicalized bytes are hashed only; they are never compiled.
-local function decode_generated_include(line)
-    local encoded = line:match('^#include%s+"(.*)"%s*$')
-    if not encoded then return nil end
-    local decoded = {}
-    local index = 1
-    while index <= #encoded do
-        local byte = encoded:byte(index)
-        if byte ~= 92 then
-            decoded[#decoded + 1] = string.char(byte)
-            index = index + 1
-        else
-            local escaped = encoded:sub(index + 1, index + 1)
-            if escaped:match("^[0-7]$") then
-                local octal = encoded:sub(index + 1, index + 3)
-                if #octal ~= 3 or not octal:match("^[0-7][0-7][0-7]$") then
-                    return nil
-                end
-                decoded[#decoded + 1] = string.char(tonumber(octal, 8))
-                index = index + 4
-            else
-                local escaped_byte = generated_c_escape_bytes[escaped]
-                if not escaped_byte then return nil end
-                decoded[#decoded + 1] = string.char(escaped_byte)
-                index = index + 2
-            end
-        end
-    end
-    return table.concat(decoded)
-end
-
-local function canonicalize_generated_header(contents, aliases)
-    local normalized = {}
-    for index, alias in ipairs(aliases or {}) do
-        if type(alias) ~= "table"
-           or type(alias.public_header) ~= "string"
-           or alias.public_header:sub(1, 1) ~= "/"
-           or type(alias.identity) ~= "string"
-           or alias.identity == "" then
-            return nil, "generated source header alias " .. index ..
-                " is invalid"
-        end
-        normalized[index] = {
-            prefix = alias.public_header .. ".check.tmp.",
-            canonical = "#titan-source-foreign-include-v1:" .. sha256.hex(
-                keyed_fields({
-                    { "public_header", alias.public_header },
-                    { "generated_identity", alias.identity },
-                })),
-        }
-    end
-    for key in pairs(aliases or {}) do
-        if type(key) ~= "number" or key < 1 or key > #(aliases or {})
-           or key % 1 ~= 0 then
-            return nil, "generated source header aliases must be a dense array"
-        end
-    end
-
-    local output = {}
-    local offset = 1
-    while offset <= #contents do
-        local newline = contents:find("\n", offset, true)
-        local line = newline and contents:sub(offset, newline - 1)
-            or contents:sub(offset)
-        local include = decode_generated_include(line)
-        if include then
-            for _, alias in ipairs(normalized) do
-                if include:sub(1, #alias.prefix) == alias.prefix then
-                    local suffix = include:sub(#alias.prefix + 1)
-                    if suffix ~= "" and not suffix:find("/", 1, true) then
-                        line = alias.canonical
-                        break
-                    end
-                end
-            end
-        end
-        output[#output + 1] = line
-        if not newline then break end
-        output[#output + 1] = "\n"
-        offset = newline + 1
-    end
-    if #contents == 0 then return "" end
-    return table.concat(output)
-end
-
--- Hash the exact generated companion after replacing only compiler-owned
--- nested checking-header spellings with stable transitive identities. This
--- keeps ordinary byte changes authoritative while ensuring that a fresh
--- resolver's random temporary basenames cannot poison persistent probe keys.
-function cprobe.source_foreign_generated_identity(
-        filename, aliases, strategy)
-    strategy = strategy or default_io
-    if type(filename) ~= "string" or filename == "" then
-        return nil, "generated source header filename must be nonempty"
-    elseif type(aliases) ~= "table" then
-        return nil, "generated source header aliases must be a table"
-    end
-    local contents, read_error = strategy:read_file(filename)
-    if not contents then return nil, read_error end
-    local canonical, canonical_error =
-        canonicalize_generated_header(contents, aliases)
-    if not canonical then return nil, canonical_error end
-    return "c-header-generated-v1:sha256:" .. sha256.hex(canonical)
 end
 
 local function normalize_include_dirs(value)
@@ -701,106 +437,6 @@ local function normalize_include_dirs(value)
     return result
 end
 
-local function include_dirs_key(include_dirs)
-    local fields = {}
-    for index, include in ipairs(include_dirs) do
-        fields[#fields + 1] = { "include_flag_" .. index, include.flag }
-        fields[#fields + 1] = { "include_path_" .. index, include.path }
-    end
-    return keyed_fields(fields)
-end
-
-local function header_context_key(
-        source_dir, includes, forced_header_manifest)
-    local fields = {
-        { "header_context_version", "2" },
-        { "source_dir", source_dir },
-        { "forced_headers", forced_header_manifest or "" },
-    }
-    for index, include in ipairs(includes) do
-        local prefix = "header_" .. index .. "_"
-        fields[#fields + 1] = { prefix .. "original", include.original }
-        fields[#fields + 1] = { prefix .. "resolved", include.resolved }
-        fields[#fields + 1] = { prefix .. "kind", include.include_kind }
-        fields[#fields + 1] = { prefix .. "name", include.include_name }
-        fields[#fields + 1] = { prefix .. "rendered", include.rendered }
-        for dependency_index, dependency in ipairs(
-                include.c_header_dependencies or {}) do
-            local dependency_prefix = prefix .. "dependency_" ..
-                dependency_index .. "_"
-            fields[#fields + 1] = {
-                dependency_prefix .. "kind", dependency.kind }
-            fields[#fields + 1] = {
-                dependency_prefix .. "path", dependency.path }
-            fields[#fields + 1] = {
-                dependency_prefix .. "identity", dependency.identity }
-            fields[#fields + 1] = {
-                dependency_prefix .. "restat",
-                dependency.restat and "true" or "false" }
-        end
-        for search_index, search in ipairs(
-                include.c_header_search_inputs or {}) do
-            local search_prefix = prefix .. "search_" .. search_index .. "_"
-            fields[#fields + 1] = {
-                search_prefix .. "kind", search.kind }
-            fields[#fields + 1] = {
-                search_prefix .. "path", search.path }
-            fields[#fields + 1] = {
-                search_prefix .. "identity", search.identity }
-            fields[#fields + 1] = {
-                search_prefix .. "restat",
-                search.restat and "true" or "false" }
-        end
-    end
-    -- Header closures can contain thousands of files and failed include-search
-    -- candidates. Keep the exact ordered manifest as the hash input, but never
-    -- embed that unbounded string in every baseline/candidate cache key. Those
-    -- keys are retained for the lifetime of a compiler service, so carrying
-    -- the manifest directly makes memory and hashing work multiplicative in
-    -- (header inputs x semantic probes).
-    return "titan-cprobe-header-context-v2:sha256:" ..
-        sha256.hex(keyed_fields(fields))
-end
-
-local function collect_header_inputs(includes, additional_inputs)
-    local result = {}
-    local seen = {}
-    local function append(input)
-        if input.restat == false then return true end
-        local key = input.kind .. "\0" .. input.path
-        local previous = seen[key]
-        if previous and previous ~= input.identity then
-            return nil, "conflicting C header input identity for '" ..
-                input.path .. "'"
-        elseif not previous then
-            seen[key] = input.identity
-            result[#result + 1] = {
-                kind = input.kind,
-                path = input.path,
-                identity = input.identity,
-            }
-        end
-        return true
-    end
-    for _, input in ipairs(additional_inputs or {}) do
-        local ok, err = append(input)
-        if not ok then return nil, err end
-    end
-    for _, include in ipairs(includes or {}) do
-        for _, dependency in ipairs(
-                include.c_header_dependencies or {}) do
-            local ok, err = append(dependency)
-            if not ok then return nil, err end
-        end
-        for _, search in ipairs(
-                include.c_header_search_inputs or {}) do
-            local ok, err = append(search)
-            if not ok then return nil, err end
-        end
-    end
-    return result
-end
-
 local function render_header_preamble(includes)
     local lines = { cpreamble.fixed_prefix }
     if #includes > 0 then lines[#lines + 1] = "" end
@@ -821,7 +457,7 @@ end
 
 local function render_baseline_source(module_context)
     local lines = {}
-    local name = probe_identifier("b", module_context.header_key)
+    local name = probe_identifier("b")
     local probe_declaration =
         cdeclarator.render_declaration(probe_function_type, name)
     append_preamble(lines, module_context.header_preamble)
@@ -875,76 +511,17 @@ local function render_declaration_compatibility_source(
         left_declaration, right_declaration)
     local rendered = render_declaration_compatibility_pair(
         left_type, right_type, left_declaration, right_declaration,
-        probe_identifier("d", module_context.header_key))
+        probe_identifier("d"))
     local lines = {}
     append_preamble(lines, module_context.header_preamble)
-    lines[#lines + 1] =
-        "extern " .. rendered.left_declaration .. ";"
-    lines[#lines + 1] =
-        "extern " .. rendered.right_declaration .. ";"
-    lines[#lines + 1] = ""
-    return table.concat(lines, "\n"), rendered
-end
-
-local function render_declaration_compatibility_batch_source(
-        module_context, entries)
-    local lines = {}
-    append_preamble(lines, module_context.header_preamble)
-
-    if #entries == 1 then
-        local entry = entries[1]
-        local rendered = render_declaration_compatibility_pair(
-            entry.left_type, entry.right_type,
-            entry.left_declaration, entry.right_declaration,
-            probe_identifier("d", module_context.header_key))
-        lines[#lines + 1] = "#if defined(__clang__)"
-        lines[#lines + 1] = "# pragma clang diagnostic push"
-        lines[#lines + 1] =
-            "# pragma clang diagnostic ignored \"-Wunused-variable\""
-        lines[#lines + 1] = "#elif defined(__GNUC__)"
-        lines[#lines + 1] = "# pragma GCC diagnostic push"
-        lines[#lines + 1] =
-            "# pragma GCC diagnostic ignored \"-Wunused-variable\""
-        lines[#lines + 1] = "# if __GNUC__ >= 13"
-        lines[#lines + 1] =
-            "#  pragma GCC diagnostic ignored \"-Wenum-int-mismatch\""
-        lines[#lines + 1] = "# endif"
-        lines[#lines + 1] = "#endif"
-        lines[#lines + 1] =
-            "extern " .. rendered.left_declaration .. ";"
-        lines[#lines + 1] =
-            "extern " .. rendered.right_declaration .. ";"
-        lines[#lines + 1] = "#if defined(__clang__)"
-        lines[#lines + 1] = "# pragma clang diagnostic pop"
-        lines[#lines + 1] = "#elif defined(__GNUC__)"
-        lines[#lines + 1] = "# pragma GCC diagnostic pop"
-        lines[#lines + 1] = "#endif"
-        lines[#lines + 1] = ""
-        return table.concat(lines, "\n")
-    end
-
-    -- Ordinary identifiers have separate block scopes below, but every
-    -- block-scope extern still denotes an external-linkage C identifier. Keep
-    -- the pair spellings distinct just as the former flat batch did.
-    local wrapper = probe_identifier("db", module_context.header_key)
-    lines[#lines + 1] = "void " .. wrapper .. "(void);"
-    lines[#lines + 1] = "void " .. wrapper .. "(void)"
-    lines[#lines + 1] = "{"
-
-    -- The block-scope extern declarations are intentional probe machinery.
-    -- Do not let an opt-in warning about nested externs turn otherwise valid
-    -- pairs into compiler rejections; preserve other configured diagnostics
-    -- and remain ordinary C99 on non-GNU-compatible compilers.
+    -- These are synthetic declarations. Enum/carrier compatibility is a C
+    -- type question, even when GCC warns about spelling the compatible pair.
     lines[#lines + 1] = "#if defined(__clang__)"
     lines[#lines + 1] = "# pragma clang diagnostic push"
-    lines[#lines + 1] =
-        "# pragma clang diagnostic ignored \"-Wnested-externs\""
     lines[#lines + 1] =
         "# pragma clang diagnostic ignored \"-Wunused-variable\""
     lines[#lines + 1] = "#elif defined(__GNUC__)"
     lines[#lines + 1] = "# pragma GCC diagnostic push"
-    lines[#lines + 1] =
-        "# pragma GCC diagnostic ignored \"-Wnested-externs\""
     lines[#lines + 1] =
         "# pragma GCC diagnostic ignored \"-Wunused-variable\""
     lines[#lines + 1] = "# if __GNUC__ >= 13"
@@ -952,39 +529,24 @@ local function render_declaration_compatibility_batch_source(
         "#  pragma GCC diagnostic ignored \"-Wenum-int-mismatch\""
     lines[#lines + 1] = "# endif"
     lines[#lines + 1] = "#endif"
-
-    for index, entry in ipairs(entries) do
-        -- A C tag introduced by a file-scope object declaration remains
-        -- visible to every later declaration in that translation unit. Give
-        -- each pair its own nested block so one candidate cannot seed a tag
-        -- that changes another candidate's prototype-scope identity.
-        local role = "d" .. tostring(index)
-        local rendered = render_declaration_compatibility_pair(
-            entry.left_type, entry.right_type,
-            entry.left_declaration, entry.right_declaration,
-            probe_identifier(role, module_context.header_key))
-        lines[#lines + 1] = "    {"
-        lines[#lines + 1] =
-            "        extern " .. rendered.left_declaration .. ";"
-        lines[#lines + 1] =
-            "        extern " .. rendered.right_declaration .. ";"
-        lines[#lines + 1] = "    }"
-    end
+    lines[#lines + 1] =
+        "extern " .. rendered.left_declaration .. ";"
+    lines[#lines + 1] =
+        "extern " .. rendered.right_declaration .. ";"
     lines[#lines + 1] = "#if defined(__clang__)"
     lines[#lines + 1] = "# pragma clang diagnostic pop"
     lines[#lines + 1] = "#elif defined(__GNUC__)"
     lines[#lines + 1] = "# pragma GCC diagnostic pop"
     lines[#lines + 1] = "#endif"
-    lines[#lines + 1] = "}"
     lines[#lines + 1] = ""
-    return table.concat(lines, "\n")
+    return table.concat(lines, "\n"), rendered
 end
 
 local function prepare_pointer_probe(module_context, source_type, target_type)
     local source_name =
-        probe_identifier("s", module_context.header_key)
+        probe_identifier("s")
     local target_name =
-        probe_identifier("t", module_context.header_key)
+        probe_identifier("t")
     local source_declaration =
         cdeclarator.render_declaration(source_type, source_name)
     local target_declaration =
@@ -1006,7 +568,7 @@ end
 local function render_prepared_pointer_source(module_context, prepared)
     local rendered = prepared.rendered
     local function_name =
-        probe_identifier("f", module_context.header_key)
+        probe_identifier("f")
     local probe_declaration =
         cdeclarator.render_declaration(probe_function_type, function_name)
 
@@ -1092,8 +654,8 @@ local function prepare_operator_probe(module_context, trait)
             .. tostring(trait.cop) .. "'", 2)
     end
 
-    local lhs_name = probe_identifier("l", module_context.header_key)
-    local rhs_name = probe_identifier("r", module_context.header_key)
+    local lhs_name = probe_identifier("l")
+    local rhs_name = probe_identifier("r")
     local lhs_decl, lhs_exp, lhs = render_operator_operand(
         "lhs", lhs_name,
         trait.lhs_source, trait.lhs_target, trait.lhs_null)
@@ -1130,7 +692,7 @@ end
 
 local function render_prepared_operator_source(module_context, prepared)
     local rendered = prepared.rendered
-    local function_name = probe_identifier("o", module_context.header_key)
+    local function_name = probe_identifier("o")
     local probe_declaration =
         cdeclarator.render_declaration(probe_function_type, function_name)
     local lines = {}
@@ -1511,562 +1073,6 @@ function Service:_emit(event)
     end
 end
 
-function Service:_persistent_success_location(source, key)
-    if not self.cache_directory then return nil end
-    -- v1 named markers by source alone. v2 accepted a caller-supplied semantic
-    -- key, but did not independently bind the service's forced-header state.
-    -- v3 includes the authoritative toolchain and forced-header manifest, so
-    -- old markers are guaranteed misses even for internal callers that reuse
-    -- an otherwise identical semantic key.
-    local digest = sha256.hex(keyed_fields({
-        { "persistent_success_version", "3" },
-        { "toolchain", self.toolchain_key },
-        { "forced_headers", self.forced_header_manifest },
-        { "semantic_key", key or "" },
-        { "source", source },
-    }))
-    return path_join(self.cache_directory, digest .. ".success"), digest
-end
-
--- Retain the internal inspection hook used by focused tests and embeddings;
--- the probe kind is deliberately absent from the original v3 cache identity.
-function Service:_semantic_result_location(_probe_kind, source, key)
-    return self:_persistent_success_location(source, key)
-end
-
-local function persistent_negative_path(success_path, cache_directory, digest)
-    if not success_path or not cache_directory then return nil end
-    return path_join(cache_directory, digest .. ".negative")
-end
-
-function Service:_header_input_stable(input, description)
-    if input.restat == false then return true end
-    local key = input.kind .. "\0" .. input.path
-    if self.validated_header_inputs[key] == input.identity then return true end
-    local identity, err =
-        cdriver.header_input_identity(input.kind, input.path, self.io)
-    if not identity then
-        return nil, "could not restat " .. description .. " '" ..
-            input.path .. "': " .. tostring(err)
-    elseif identity ~= input.identity then
-        return nil, description .. " changed: " .. input.path
-    end
-    self.validated_header_inputs[key] = identity
-    return true
-end
-
-function Service:_forced_header_inputs_stable(_force)
-    -- A process analysis is the compiler client's coherent filesystem snapshot
-    -- and validates inputs at its publication boundary. Ordinary compiler
-    -- services validate each observed input once. Re-reading and hashing the
-    -- complete closure around every probe made build cost proportional to
-    -- (probe count x header bytes); generated-C compilation remains the final
-    -- authority if a header changes later in the same short-lived invocation.
-    if self.process_analysis ~= nil then return true end
-    if self.forced_header_inputs_validated then return true end
-    for _, input in ipairs(self.forced_header_inputs or {}) do
-        local stable, err = self:_header_input_stable(
-            input, "forced C header input")
-        if not stable then return nil, err end
-    end
-    self.forced_header_inputs_validated = true
-    return true
-end
-
-function ModuleContext:_header_inputs_stable(_force)
-    if self.service.process_analysis ~= nil then return true end
-    if self.header_inputs_validated then return true end
-    local stable, stability_error =
-        self.service:_forced_header_inputs_stable()
-    if not stable then return nil, stability_error end
-    local forced = {}
-    for _, input in ipairs(self.service.forced_header_inputs or {}) do
-        forced[input.kind .. "\0" .. input.path] = input.identity
-    end
-    for _, input in ipairs(self.header_inputs or {}) do
-        local forced_identity = forced[input.kind .. "\0" .. input.path]
-        if forced_identity ~= input.identity then
-            stable, stability_error = self.service:_header_input_stable(
-                input, "C header input")
-            if not stable then return nil, stability_error end
-        end
-    end
-    self.header_inputs_validated = true
-    return true
-end
-
-local function invalidate_run_for_header_change(run, diagnostic)
-    -- Retain a completed spawn as telemetry, but normalize every pre-launch
-    -- invalidation to an explicit false.
-    run.started = run.started == true
-    run.ok = false
-    run.reason = "header_inputs"
-    run.classification = "infrastructure_failure"
-    run.diagnostic = tostring(diagnostic)
-    return run
-end
-
--- Optional structured telemetry for compiler clients. Keep this separate from
--- verbose evidence: a cache-only observer must not retain probe sources or
--- commands, and it must never fall back to printing on stdout. The sink is
--- best-effort because observability cannot change a compiler verdict.
-function Service:_trace_persistent_cache(
-        stage, hit, digest, path, module_name)
-    local sink = self.persistent_cache_trace
-    if not sink then return end
-    pcall(sink, tostring(stage), hit == true, tostring(digest),
-        tostring(path), tostring(module_name or ""))
-end
-
-local function copy_semantic_result(result)
-    return {
-        outcome = result.outcome,
-        exit_status = result.exit_status,
-        diagnostic = result.diagnostic,
-        key_digest = result.key_digest,
-        cache_path = result.cache_path,
-        source = result.source,
-    }
-end
-
-local function same_semantic_result(left, right)
-    return left and right and left.outcome == right.outcome and
-        left.exit_status == right.exit_status and
-        left.diagnostic == right.diagnostic
-end
-
-function Service:_read_persistent_result(
-        stage, probe_kind, source, key, module_name, path, digest)
-    if digest == nil then
-        path, digest = self:_persistent_success_location(source, key)
-    end
-    if not path then return nil, nil, digest, "disabled" end
-
-    local success_attributes, success_stat_error = self.io:stat(path)
-    if success_attributes and success_attributes.kind == "file" then
-        self:_trace_persistent_cache(stage, true, digest, path, module_name)
-        return {
-            outcome = "success",
-            exit_status = 0,
-            diagnostic = "",
-        }, path, digest, "hit"
-    elseif success_attributes ~= nil then
-        -- Only ordinary absence permits consulting the negative sibling. An
-        -- existing non-file positive slot is a contradictory/corrupt cache
-        -- state, so fail open instead of allowing a stale negative to win.
-        self:_trace_persistent_cache(stage, false, digest, path, module_name)
-        return nil, path, digest, "invalid"
-    elseif success_stat_error ~= nil then
-        -- The historical positive marker is authoritative. An I/O failure is
-        -- not evidence that it is absent, so never let a stale sibling
-        -- negative override an unreadable positive path.
-        self:_trace_persistent_cache(stage, false, digest, path, module_name)
-        return nil, path, digest, "io_error"
-    end
-
-    local negative_path = persistent_negative_path(
-        path, self.cache_directory, digest)
-    local attributes, stat_error = self.io:stat(negative_path)
-    if not attributes then
-        self:_trace_persistent_cache(
-            stage, false, digest, path, module_name)
-        return nil, path, digest,
-            stat_error ~= nil and "io_error" or "miss"
-    elseif attributes.kind ~= "file" then
-        self:_trace_persistent_cache(
-            stage, false, digest, negative_path, module_name)
-        return nil, path, digest, "invalid"
-    elseif type(attributes.size) ~= "number" or attributes.size < 0 or
-           attributes.size > MAX_PERSISTENT_RECORD_BYTES then
-        self:_trace_persistent_cache(
-            stage, false, digest, negative_path, module_name)
-        return nil, path, digest, "invalid"
-    end
-
-    local encoded, read_error = self.io:read_file(
-        negative_path, MAX_PERSISTENT_RECORD_BYTES)
-    if not encoded then
-        self:_trace_persistent_cache(
-            stage, false, digest, negative_path, module_name)
-        return nil, path, digest, read_error and "io_error" or "invalid"
-    elseif type(encoded) ~= "string" or
-           #encoded > MAX_PERSISTENT_RECORD_BYTES then
-        -- The file can be atomically replaced after stat and before read, and a
-        -- custom I/O strategy can report stale metadata. Keep the actual bytes
-        -- under the same hard bound as the pre-read size check.
-        self:_trace_persistent_cache(
-            stage, false, digest, negative_path, module_name)
-        return nil, path, digest, "invalid"
-    end
-    local decoded = cprobe_cache.decode(encoded, digest)
-    if not decoded or decoded.outcome ~= "compiler_rejection" then
-        self:_trace_persistent_cache(
-            stage, false, digest, negative_path, module_name)
-        return nil, path, digest, "invalid"
-    end
-    self:_trace_persistent_cache(
-        stage, true, digest, negative_path, module_name)
-    return decoded, negative_path, digest, "hit"
-end
-
-function Service:_semantic_cache_tables(cache_name)
-    if cache_name == "baseline" then
-        return self.baseline_cache, self.analysis_baseline_cache
-    end
-    return self.result_cache, self.analysis_result_cache
-end
-
-function Service:_lookup_memory_semantic_result(cache_name, key)
-    local service_cache, analysis_cache =
-        self:_semantic_cache_tables(cache_name)
-    local cached = service_cache[key]
-    if cached then
-        return copy_semantic_result(cached), "service",
-            cached.key_digest, cached.cache_path
-    end
-    cached = analysis_cache and analysis_cache[key]
-    if cached then
-        service_cache[key] = copy_semantic_result(cached)
-        return copy_semantic_result(cached), "analysis",
-            cached.key_digest, cached.cache_path
-    end
-    return nil
-end
-
-local semantic_trace_key
-
--- Declaration batches retain their historical batch cache identity on disk,
--- while the checker has always memoized each independently meaningful pair by
--- its leaf semantic key. Install that completed leaf verdict in memory only;
--- persistent publication remains exclusively under the exact batch key/source
--- which the compiler actually checked.
-function Service:_remember_memory_semantic_result(
-        cache_name, key, result, digest, path)
-    local service_cache, analysis_cache =
-        self:_semantic_cache_tables(cache_name)
-    local existing = analysis_cache and analysis_cache[key]
-    local tier = existing and "analysis" or nil
-    if not existing then
-        existing = service_cache[key]
-        if existing then tier = "service" end
-    end
-    if existing then
-        return copy_semantic_result(existing), tier, true
-    end
-
-    local stored = copy_semantic_result(result)
-    stored.key_digest = digest
-    stored.cache_path = path
-    service_cache[key] = copy_semantic_result(stored)
-    if analysis_cache then
-        analysis_cache[key] = copy_semantic_result(stored)
-    end
-    return stored, nil, false
-end
-
-function Service:_lookup_semantic_result(
-        cache_name, stage, probe_kind, source, key, module_name)
-    local cached, tier, digest, path =
-        self:_lookup_memory_semantic_result(cache_name, key)
-    if cached then
-        if digest == nil then digest = semantic_trace_key(self, key) end
-        return cached, tier, digest, path, "memory"
-    end
-    local service_cache, analysis_cache =
-        self:_semantic_cache_tables(cache_name)
-
-    local path, digest = self:_persistent_success_location(source, key)
-    if digest == nil then digest = semantic_trace_key(self, key) end
-    local persistent, persistent_path, persistent_digest, lookup =
-        self:_read_persistent_result(
-            stage, probe_kind, source, key, module_name, path, digest)
-    -- Persistent stat/read/telemetry can yield even on a miss. A sibling Task
-    -- may have completed and published the same semantic request while this
-    -- lookup was waiting; that first in-analysis result stays authoritative
-    -- and avoids a duplicate compiler launch.
-    local winner = analysis_cache and analysis_cache[key]
-    local winner_tier = winner and "analysis" or nil
-    if not winner then
-        winner = service_cache[key]
-        if winner then winner_tier = "service" end
-    end
-    if winner then
-        service_cache[key] = copy_semantic_result(winner)
-        return copy_semantic_result(winner), winner_tier,
-            winner.key_digest or persistent_digest,
-            winner.cache_path or persistent_path, "memory"
-    end
-    if persistent then
-        persistent.key_digest = persistent_digest
-        persistent.cache_path = persistent_path
-        persistent.source = source
-        service_cache[key] = copy_semantic_result(persistent)
-        if analysis_cache then
-            analysis_cache[key] = copy_semantic_result(persistent)
-        end
-        return copy_semantic_result(persistent), "persistent",
-            persistent_digest, persistent_path, lookup
-    end
-    return nil, nil, persistent_digest, persistent_path, lookup
-end
-
-function Service:_publish_semantic_result(
-        cache_name, probe_kind, source, key, result, persistent_safe,
-        path, digest)
-    if digest == nil then
-        path, digest = self:_persistent_success_location(source, key)
-        if digest == nil then digest = semantic_trace_key(self, key) end
-    end
-    local result_path = result.outcome == "compiler_rejection" and
-        persistent_negative_path(path, self.cache_directory, digest) or path
-    local service_cache, analysis_cache =
-        self:_semantic_cache_tables(cache_name)
-    local existing = analysis_cache and analysis_cache[key]
-    local existing_tier = existing and "analysis" or nil
-    if not existing then
-        existing = service_cache[key]
-        if existing then existing_tier = "service" end
-    end
-    if existing then
-        if same_semantic_result(existing, result) then
-            -- An equal publisher may have observed the request before the
-            -- first publisher installed memory, then arrived while that first
-            -- Task is suspended in its atomic write. Continue to the durable
-            -- write: the payload is byte-identical, and either Task can become
-            -- the one which commits it.
-        else
-            -- Lua table publication does not yield. The first completed
-            -- semantic result in one Service/analysis is authoritative even
-            -- when compiler Tasks interleave; a nondeterministic conflicting
-            -- runner cannot overwrite what later lookups observe.
-            return "conflict", digest, existing.cache_path or result_path,
-                copy_semantic_result(existing), existing_tier
-        end
-    else
-        result.key_digest = digest
-        result.cache_path = result_path
-        result.source = result.source or source
-        service_cache[key] = copy_semantic_result(result)
-        if analysis_cache then
-            analysis_cache[key] = copy_semantic_result(result)
-        end
-    end
-
-    if not result_path then return "disabled", digest, nil end
-    if persistent_safe == false then
-        return "unstable_diagnostic", digest, result_path
-    end
-    -- The historical positive cache is a presence-only empty marker. Preserve
-    -- that fast path for the overwhelmingly common diagnostic-free success,
-    -- but do not discard a successful compiler warning across processes.
-    if result.outcome == "success" and result.diagnostic ~= "" then
-        return "diagnostic_not_persisted", digest, result_path
-    end
-    if not ensure_directory(self.cache_directory, self.io) then
-        return "failed", digest, result_path
-    end
-    if result.outcome == "success" then
-        local written = self.io:write_file(result_path, "")
-        if written then return "published", digest, result_path end
-        local attributes = self.io:stat(result_path)
-        if attributes and attributes.kind == "file" then
-            return "existing", digest, result_path
-        end
-        return "failed", digest, result_path
-    end
-    if #result.diagnostic > MAX_PERSISTENT_DIAGNOSTIC_BYTES then
-        return "too_large", digest, result_path
-    end
-    local encoded = cprobe_cache.encode({
-        key_digest = digest,
-        outcome = result.outcome,
-        exit_status = result.exit_status,
-        diagnostic = result.diagnostic,
-    })
-    if not encoded then
-        return "failed", digest, result_path
-    end
-
-    -- write_file atomically replaces through a sibling rename. Independent
-    -- compiler processes may race, but a deterministic compiler produces the
-    -- same key-bound payload in both; if a provider reports a failed write,
-    -- accept only an already-present byte-equivalent semantic record.
-    local written = self.io:write_file(result_path, encoded)
-    if not written then
-        local existing = self.io:read_file(
-            result_path, MAX_PERSISTENT_RECORD_BYTES)
-        local decoded = existing and cprobe_cache.decode(existing, digest)
-        if same_semantic_result(decoded, result) then
-            return "existing", digest, result_path
-        end
-        return "failed", digest, result_path
-    end
-    return "published", digest, result_path
-end
-
-function Service:_trace_semantic(event)
-    local sink = self.semantic_trace
-    if not sink then return end
-    local digest = tostring(event.key_digest or "")
-    local requests = (self.semantic_requests[digest] or 0) + 1
-    self.semantic_requests[digest] = requests
-    pcall(sink, {
-        event = "semantic_result",
-        key = digest,
-        probe_kind = tostring(event.probe_kind or ""),
-        header_identity = tostring(event.header_identity or ""),
-        header_label = tostring(event.header_label or ""),
-        outcome = tostring(event.outcome or "infrastructure_failure"),
-        cache_tier = tostring(event.cache_tier or "compiler"),
-        repeated = requests > 1,
-        publication = tostring(event.publication or "not_applicable"),
-        module = tostring(event.module or ""),
-    })
-end
-
-semantic_trace_key = function(service, key)
-    if not service.semantic_trace then return nil end
-    local digest = service.semantic_trace_keys[key]
-    if digest then return digest end
-    digest = sha256.hex(keyed_fields({
-        { "semantic_trace_key", key },
-    }))
-    service.semantic_trace_keys[key] = digest
-    return digest
-end
-
-function Service:_trace_infrastructure(
-        probe_kind, header_identity, detail, module_name, header_label)
-    self.infrastructure_requests =
-        (self.infrastructure_requests or 0) + 1
-    local digest = sha256.hex(keyed_fields({
-        { "terminal_domain", "titan-cprobe-infrastructure-terminal-v1" },
-        { "toolchain", self.toolchain_key or "" },
-        { "forced_headers", self.forced_header_manifest or "" },
-        { "probe_kind", probe_kind or "" },
-        { "header_identity", header_identity or "" },
-        { "detail_sha256", sha256.hex(tostring(detail or "")) },
-        -- Early infrastructure paths have no completed semantic source/key.
-        -- Give each logical request a private scalar identity rather than
-        -- hashing raw source/type data or falsely grouping unrelated failures.
-        { "request_sequence", tostring(self.infrastructure_requests) },
-    }))
-    self:_trace_semantic({
-        key_digest = digest,
-        probe_kind = probe_kind,
-        header_identity = header_identity,
-        header_label = header_label,
-        outcome = "infrastructure_failure",
-        cache_tier = "compiler",
-        module = module_name,
-    })
-    return digest
-end
-
-function Service:_trace_execution(run, event)
-    local sink = self.execution_trace
-    if not sink or type(run.execution_digest) ~= "string" then return end
-    pcall(sink, {
-        event = "compiler_execution",
-        key = tostring(run.execution_digest or ""),
-        probe_kind = tostring(event.probe_kind or ""),
-        batch_kind = tostring(event.batch_kind or "single"),
-        header_identity = tostring(event.header_identity or ""),
-        header_label = tostring(event.header_label or ""),
-        outcome = tostring(run.classification or
-            "infrastructure_failure"),
-        started = run.started == true,
-        persistent_lookup = tostring(event.persistent_lookup or
-            "not_applicable"),
-        publication = tostring(event.publication or "not_applicable"),
-        wall_ms = finite_nonnegative_number(run.wall_ms) and
-            run.wall_ms or nil,
-        module = tostring(event.module or ""),
-    })
-end
-
--- Module ownership is immutable on each probe context. Keep it on the event
--- path rather than in resolver-global dynamic state: compiler I/O may yield,
--- so multiple module Tasks can interleave through one shared Service.
-function ModuleContext:_lookup_semantic_result(
-        cache_name, stage, probe_kind, source, key)
-    return self.service:_lookup_semantic_result(
-        cache_name, stage, probe_kind, source, key, self.module_name)
-end
-
-function ModuleContext:_trace_infrastructure(probe_kind, detail)
-    return self.service:_trace_infrastructure(
-        probe_kind, self.header_key, detail, self.module_name,
-        self.header_label)
-end
-
-function ModuleContext:_trace_semantic(event)
-    event.module = self.module_name
-    event.header_label = self.header_label
-    return self.service:_trace_semantic(event)
-end
-
-function ModuleContext:_trace_execution(run, event)
-    event.module = self.module_name
-    event.header_label = self.header_label
-    return self.service:_trace_execution(run, event)
-end
-
-local function semantic_run(result, source, tier, path)
-    return {
-        started = true,
-        ok = result.outcome == "success",
-        interrupted = false,
-        status = result.exit_status,
-        diagnostic = result.diagnostic,
-        source = source,
-        cached = true,
-        cache_tier = tier,
-        persistent_cached = tier == "persistent",
-        cache_path = path,
-        classification = result.outcome,
-    }
-end
-
-local function semantic_result_from_run(run)
-    if run.classification ~= "success" and
-       run.classification ~= "compiler_rejection" then
-        return nil
-    end
-    return {
-        outcome = run.classification,
-        exit_status = run.status,
-        diagnostic = run.diagnostic or "",
-        source = run.source,
-    }
-end
-
--- Publish one completed semantic execution and return the result that this
--- caller must expose. Another Task can have observed the same miss, completed
--- first, and installed a different verdict while this Task was compiling. In
--- that case the first in-analysis result is authoritative for both later
--- lookups and the losing in-flight caller; the latter is reconstructed exactly
--- like a cache hit. The caller must still trace the original physical run.
-local function publish_semantic_run(
-        service, cache_name, probe_kind, source, key, run,
-        persistent_safe, path, digest)
-    local cacheable = semantic_result_from_run(run)
-    if not cacheable or run.cleanup_error then
-        return run, "not_applicable", digest, path
-    end
-    local publication, published_digest, published_path,
-        winner, winner_tier = service:_publish_semantic_result(
-            cache_name, probe_kind, source, key, cacheable,
-            persistent_safe, path, digest)
-    run.cache_path = published_path
-    if winner then
-        return semantic_run(
-            winner, source, winner_tier or "service", published_path),
-            publication, published_digest, published_path
-    end
-    return run, publication, published_digest, published_path
-end
-
 function Service:_ensure_workspace()
     if self.workspace then return self.workspace end
     if self.closed then return nil, "probe service is closed" end
@@ -2255,7 +1261,7 @@ local function normalize_private_diagnostic(
     local persistent_safe = true
     local mappings = {}
     local mapping_by_path = {}
-    local function add_mapping(physical_path, public_path, keyed_for_persistence)
+    local function add_mapping(physical_path, public_path)
         if type(physical_path) ~= "string" or physical_path == "" or
            type(public_path) ~= "string" then
             return
@@ -2275,7 +1281,6 @@ local function normalize_private_diagnostic(
             physical_path = physical_path,
             public_path = public_path,
             leaf = physical_path:match("([^/]+)$"),
-            keyed_for_persistence = keyed_for_persistence ~= false,
         }
         mapping_by_path[physical_path] = mapping
         mappings[#mappings + 1] = mapping
@@ -2283,11 +1288,10 @@ local function normalize_private_diagnostic(
     add_mapping(source_path, "<titan-cprobe-source>")
     add_mapping(object_path, "<titan-cprobe-object>")
     for _, alias in ipairs(aliases or {}) do
-        add_mapping(alias.physical_path, alias.public_path,
-            alias.keyed_for_persistence)
+        add_mapping(alias.physical_path, alias.public_path)
         if alias.wrapper_name then
             add_mapping(path_join(workspace_root, alias.wrapper_name),
-                alias.public_path, alias.keyed_for_persistence)
+                alias.public_path)
         end
     end
 
@@ -2307,9 +1311,6 @@ local function normalize_private_diagnostic(
                     last = last,
                     replacement = mapping.public_path,
                 }
-                if not mapping.keyed_for_persistence then
-                    persistent_safe = false
-                end
             else
                 -- Whitespace and punctuation are valid POSIX pathname bytes;
                 -- an unstructured occurrence may be a suffix of a different
@@ -2371,8 +1372,8 @@ local function normalize_private_diagnostic(
 
     -- Some compiler wrappers report only basenames. Replacing those globally
     -- would corrupt unrelated diagnostic text, while retaining them in a
-    -- persistent payload would make the same semantic key depend on this
-    -- Service's sequence number. Inspect the original bytes so a stable public
+    -- persistent payload would leave a stale temporary filename. Inspect the
+    -- original bytes so a stable public
     -- replacement which happens to share that basename is not rejected.
     for _, mapping in ipairs(mappings) do
         local leaf = mapping.leaf
@@ -2425,13 +1426,6 @@ function Service:_execute_source(
     if self.closed then
         return infrastructure_run(stage, "closed", {
             diagnostic = "probe service is closed",
-            source = source,
-        })
-    end
-    local stable, stability_error = self:_forced_header_inputs_stable()
-    if not stable then
-        return infrastructure_run(stage, "header_inputs", {
-            diagnostic = stability_error,
             source = source,
         })
     end
@@ -2517,17 +1511,7 @@ function Service:_execute_source(
         source_path = source_path,
         object_path = self.syntax_only and nil or object_path,
     }
-    local execution_digest
-    if self.execution_trace then
-        execution_digest = sha256.hex(keyed_fields({
-            { "execution_domain", "titan-cprobe-execution-v1" },
-            { "toolchain", self.toolchain_key },
-            { "stage", stage },
-            { "label", probe_label or "" },
-            { "key", key or "" },
-            { "source_sha256", sha256.hex(source) },
-        }))
-    end
+    local execution_digest = key
     local run
     local call_ok, raw_result, secondary
     if self.runner_is_strategy then
@@ -2617,1284 +1601,342 @@ function Service:_execute_source(
     return run
 end
 
--- Retain the publication checkpoint after a physical launch. Header inputs
--- are validated once per service/context snapshot, so this call is normally
--- an O(1) memo hit rather than a second closure read. The final generated-C
--- compile remains authoritative if the filesystem changes later in the same
--- short-lived invocation.
-function ModuleContext:_execute_source(stage, source, key, probe_label)
-    local run = self.service:_execute_source(
-        stage, source, key, probe_label, self.probe_wrappers,
-        self.probe_diagnostic_aliases)
-    local stable, stability_error = self:_header_inputs_stable(true)
-    if not stable then
-        invalidate_run_for_header_change(run, stability_error)
-    end
-    return run
+-- All memory and disk reuse answers the same question: has this exact raw C
+-- source already completed? Environment changes deliberately do not invalidate
+-- either outcome. Removing the cache is the programmer's refresh mechanism.
+function Service:_cache_location(source)
+    local key = sha256.hex(source)
+    return self.cache_directory and
+        path_join(self.cache_directory, key .. ".result") or nil, key
 end
 
--- Low-level embedding/test hook for one independently meaningful probe source.
--- Production semantic probes use the leaf-specific paths below so declaration
--- batches can never publish an over-broad negative verdict.
-function Service:_run_source(stage, source, key, probe_label, wrappers)
-    if self.closed then
-        self:_trace_infrastructure("raw_source", "", "closed")
-        return infrastructure_run(stage, "closed", {
-            started = false,
-            ok = false,
-            interrupted = false,
-            diagnostic = "probe service is closed",
-            source = source,
-        })
+function Service:_memory_result(key)
+    local result = self.result_cache[key]
+    if result then return result, "service" end
+    result = self.analysis_result_cache and self.analysis_result_cache[key]
+    if result then
+        self.result_cache[key] = result
+        return result, "analysis"
     end
-    local semantic, tier, digest, path, lookup =
-        self:_lookup_semantic_result(
-            "result", stage, "raw_source", source, key)
-    if semantic then
-        local stable, stability_error = self:_forced_header_inputs_stable()
-        if not stable then
-            self:_trace_infrastructure(
-                "raw_source", "", "header_inputs")
-            return infrastructure_run(stage, "header_inputs", {
-                diagnostic = stability_error,
-                source = source,
-            })
-        end
-        local run = semantic_run(semantic, source, tier, path)
-        self:_trace_semantic({
-            key_digest = digest,
-            probe_kind = "raw_source",
-            outcome = semantic.outcome,
-            cache_tier = tier,
-        })
-        return run
-    end
+end
 
-    local execution_run = self:_execute_source(
-        stage, source, key, probe_label, wrappers)
-    local stable, stability_error = self:_forced_header_inputs_stable(true)
-    if not stable then
-        invalidate_run_for_header_change(execution_run, stability_error)
+function Service:_lookup_result(key, path, stage, module_name)
+    local result, tier = self:_memory_result(key)
+    if result then return result, tier, "memory" end
+    if not path then return nil, nil, "disabled" end
+    local attributes, stat_error = self.io:stat(path)
+    local lookup = stat_error and "io_error" or "miss"
+    if attributes then
+        lookup = "invalid"
+        if attributes.kind == "file" and
+           type(attributes.size) == "number" and attributes.size >= 0 and
+           attributes.size <= MAX_PERSISTENT_RECORD_BYTES then
+            local encoded, read_error = self.io:read_file(
+                path, MAX_PERSISTENT_RECORD_BYTES)
+            result = encoded and cprobe_cache.decode(encoded) or nil
+            lookup = result and "hit" or read_error and "io_error" or "invalid"
+        end
     end
-    local run, publication = publish_semantic_run(
-        self, "result", "raw_source", source, key, execution_run,
-        execution_run.diagnostic_persistent_safe, path, digest)
-    self:_trace_execution(execution_run, {
-        probe_kind = "raw_source",
-        persistent_lookup = lookup,
-        publication = publication,
-    })
-    self:_trace_semantic({
-        key_digest = digest,
-        probe_kind = "raw_source",
+    if self.persistent_cache_trace then
+        pcall(self.persistent_cache_trace, stage, result ~= nil,
+            key, path, module_name or "")
+    end
+    -- I/O can suspend while another request completes. Reuse that completed
+    -- in-analysis result before installing what this disk read observed.
+    local remembered, remembered_tier = self:_memory_result(key)
+    if remembered then return remembered, remembered_tier, lookup end
+    if result then
+        self.result_cache[key] = result
+        if self.analysis_result_cache then
+            self.analysis_result_cache[key] = result
+        end
+        return result, "persistent", lookup
+    end
+    return nil, nil, lookup
+end
+
+local function semantic_run(result, source, tier, path)
+    return {
+        started = true,
+        ok = result.outcome == "success",
+        interrupted = false,
+        status = result.exit_status,
+        diagnostic = result.diagnostic,
+        source = source,
+        cached = true,
+        cache_tier = tier,
+        persistent_cached = tier == "persistent",
+        cache_path = path,
+        classification = result.outcome,
+    }
+end
+
+function Service:_publish_result(key, path, run)
+    run.cache_path = path
+    if run.classification ~= "success" and
+       run.classification ~= "compiler_rejection" then
+        return run, "not_applicable"
+    end
+    local remembered, tier = self:_memory_result(key)
+    if remembered then
+        return semantic_run(remembered, run.source, tier, path), "existing"
+    end
+    local result = {
+        outcome = run.classification,
+        exit_status = run.status,
+        diagnostic = run.diagnostic or "",
+    }
+    self.result_cache[key] = result
+    if self.analysis_result_cache then
+        self.analysis_result_cache[key] = result
+    end
+    if not path then return run, "disabled" end
+    if run.diagnostic_persistent_safe == false then
+        return run, "unstable_diagnostic"
+    end
+    local encoded = cprobe_cache.encode(result)
+    if not encoded then return run, "too_large" end
+    if not ensure_directory(self.cache_directory, self.io) then
+        return run, "failed"
+    end
+    -- The I/O strategy replaces through a private sibling and atomic rename.
+    -- A failed cache write never changes the completed compiler result.
+    local written = self.io:write_file(path, encoded)
+    return run, written and "published" or "failed"
+end
+
+function Service:_trace_semantic(key, kind, context, run, publication)
+    if not self.semantic_trace then return end
+    local count = 1
+    if key ~= "" then
+        count = (self.semantic_requests[key] or 0) + 1
+        self.semantic_requests[key] = count
+    end
+    pcall(self.semantic_trace, {
+        event = "semantic_result",
+        key = key,
+        probe_kind = kind,
+        header_identity = context and context.baseline_key or "",
+        header_label = context and context.header_label or "",
+        module = context and context.module_name or "",
         outcome = run.classification,
         cache_tier = run.cache_tier or "compiler",
-        publication = publication,
+        repeated = count > 1,
+        publication = publication or "not_applicable",
     })
+end
+
+function Service:_trace_execution(key, kind, context, run, lookup, publication)
+    if not self.execution_trace or not run.execution_digest then return end
+    pcall(self.execution_trace, {
+        event = "compiler_execution",
+        key = key,
+        probe_kind = kind,
+        batch_kind = "single",
+        header_identity = context and context.baseline_key or "",
+        header_label = context and context.header_label or "",
+        module = context and context.module_name or "",
+        outcome = run.classification,
+        started = run.started == true,
+        persistent_lookup = lookup,
+        publication = publication,
+        wall_ms = run.wall_ms,
+    })
+end
+
+-- One source, one lookup, one compiler invocation, one result. Candidate
+-- misses first establish whether the shared header preamble itself compiles.
+function Service:_run_source(stage, source, kind, context)
+    kind = kind or "raw_source"
+    local path, key = self:_cache_location(source)
+    if self.closed then
+        local run = infrastructure_run(stage, "closed", {
+            diagnostic = "probe service is closed", source = source,
+        })
+        run.key = key
+        self:_trace_semantic(key, kind, context, run)
+        return run
+    end
+    local semantic, tier, lookup = self:_lookup_result(
+        key, path, stage, context and context.module_name)
+    self:_emit({ kind = "cache", cache = stage,
+        hit = semantic ~= nil, key = key })
+    if semantic then
+        local run = semantic_run(semantic, source, tier, path)
+        run.baseline_cached = true
+        run.key = key
+        self:_trace_semantic(key, kind, context, run)
+        return run
+    end
+    local baseline
+    if context and stage == "candidate" then
+        baseline = context:validate_baseline()
+        if baseline.status ~= "success" then
+            local run = {
+                classification = "infrastructure_failure",
+                ok = false, stage = "baseline",
+                reason = baseline.status == "rejected" and "baseline" or baseline.reason,
+                status = baseline.exit_status,
+                source = baseline.source,
+                diagnostic = baseline.diagnostic,
+                source_path = baseline.source_path,
+                object_path = baseline.object_path,
+                argv = baseline.argv, command = baseline.command,
+                cleanup_error = baseline.cleanup_error,
+                baseline_cached = baseline.cached,
+                interrupted = baseline.interrupted,
+                started = baseline.started,
+            }
+            run.key = key
+            self:_trace_semantic(key, kind, context, run)
+            return run
+        end
+    end
+    local execution = self:_execute_source(stage, source, key,
+        kind:gsub("_", "-"), context and context.probe_wrappers,
+        context and context.probe_diagnostic_aliases)
+    local run, publication = self:_publish_result(key, path, execution)
+    run.key = key
+    if baseline then run.baseline_cached = baseline.cached end
+    self:_trace_execution(key, kind, context, execution, lookup, publication)
+    self:_trace_semantic(key, kind, context, run, publication)
     return run
 end
 
-local function infrastructure_message(stage, run)
-    local summary = first_diagnostic_line(run.diagnostic)
-    local message
-    if run.cleanup_error or run.reason == "workspace"
-    or run.reason == "command" then
-        message =
-            "cannot validate C conversion because the probe infrastructure failed"
-    elseif stage == "baseline" and run.started ~= false
-    and not run.interrupted and not run.cleanup_error then
-        message =
-            "cannot validate C conversion because the foreign header baseline failed"
-    elseif run.interrupted then
-        message =
-            "cannot validate C conversion because the configured compiler was interrupted"
-    elseif run.started == false and run.source_path then
-        message =
-            "cannot validate C conversion because the configured compiler/toolchain could not be started"
-    else
-        message =
-            "cannot validate C conversion because the probe infrastructure failed"
-    end
-    if summary ~= "" then message = message .. ": " .. summary end
-    return message
-end
-
-function Service:_ensure_baseline(module_context)
-    local stable, stability_error = module_context:_header_inputs_stable()
-    if not stable then
-        module_context:_trace_infrastructure(
-            "header_baseline", "header_inputs")
-        return infrastructure_run("baseline", "header_inputs", {
-            started = false,
-            ok = false,
-            interrupted = false,
-            reason = "header_inputs",
-            diagnostic = stability_error,
-        })
-    end
-    local key = module_context.baseline_key
-    local semantic, tier, digest, path, lookup =
-        self:_lookup_memory_semantic_result("baseline", key)
-    local source
-    if semantic then
-        if digest == nil then digest = semantic_trace_key(self, key) end
-        source = semantic.source or render_baseline_source(module_context)
-        lookup = "memory"
-    else
-        source = render_baseline_source(module_context)
-        semantic, tier, digest, path, lookup =
-            module_context:_lookup_semantic_result(
-                "baseline", "baseline", "header_baseline", source, key)
-    end
-    self:_emit({
-        kind = "cache",
-        cache = "baseline",
-        hit = semantic ~= nil,
-        key = key,
-    })
-    stable, stability_error = module_context:_header_inputs_stable()
-    if not stable then
-        module_context:_trace_infrastructure(
-            "header_baseline", "header_inputs")
-        return infrastructure_run("baseline", "header_inputs", {
-            started = false,
-            ok = false,
-            interrupted = false,
-            reason = "header_inputs",
-            diagnostic = stability_error,
-            source = source,
-        })
-    end
-    -- A baseline rejection is never semantic authority: it means the header
-    -- environment itself is unusable, so candidate results cannot be
-    -- interpreted. Ignore even a valid key-bound record with that outcome and
-    -- retry the compiler. New code publishes successful baselines only.
-    if semantic and semantic.outcome ~= "success" then
-        self.baseline_cache[key] = nil
-        if self.analysis_baseline_cache then
-            self.analysis_baseline_cache[key] = nil
-        end
-        semantic = nil
-    end
-    if semantic then
-        local run = semantic_run(semantic, source, tier, path)
-        local result = {
-            status = "success",
-            ok = true,
-            accepted = true,
-            stage = "baseline",
-            key = key,
-            cached = true,
-            persistent_cached = tier == "persistent",
-            cache_tier = tier,
-            diagnostic = run.diagnostic,
-            summary = first_diagnostic_line(run.diagnostic),
-            source = source,
-            exit_status = run.status,
-            started = true,
-            interrupted = false,
-            cleanup_error = false,
-        }
-        module_context:_trace_semantic({
-            key_digest = digest,
-            probe_kind = "header_baseline",
-            header_identity = module_context.header_key,
-            outcome = "success",
-            cache_tier = tier,
-        })
-        return result
-    end
-
-    local execution_run = module_context:_execute_source(
-        "baseline", source, key, nil)
-    local run = execution_run
-    local publication = "not_applicable"
-    -- Baseline rejection is not reusable authority, so only a successful
-    -- execution participates in publication. If another Task won that race,
-    -- use its already-published baseline verdict for this caller.
-    if run.classification == "success" and not run.cleanup_error then
-        run, publication = publish_semantic_run(
-            self, "baseline", "header_baseline", source, key, run,
-            run.diagnostic_persistent_safe, path, digest)
-    end
-    local result
-    if run.classification == "success" then
-        result = {
-            status = "success",
-            ok = true,
-            accepted = true,
-            stage = "baseline",
-            key = key,
-            cached = run.cached == true,
-            persistent_cached = run.persistent_cached == true,
-            cache_tier = run.cache_tier or "compiler",
-            diagnostic = run.diagnostic,
-            summary = first_diagnostic_line(run.diagnostic),
-            command = run.command,
-            argv = run.argv,
-            source = run.source or source,
-            source_path = run.source_path,
-            exit_status = run.status,
-            started = true,
-            interrupted = false,
-            cleanup_error = false,
-        }
-    else
-        result = infrastructure_run(
-            "baseline", run.reason or "baseline", run)
-        result.key = key
-        result.cached = run.cached == true
-        result.persistent_cached = run.persistent_cached == true
-        result.cache_tier = run.cache_tier or "compiler"
-        result.message = infrastructure_message("baseline", run)
-    end
-    module_context:_trace_execution(execution_run, {
-        probe_kind = "header_baseline",
-        header_identity = module_context.header_key,
-        persistent_lookup = lookup,
-        publication = publication,
-    })
-    module_context:_trace_semantic({
-        key_digest = digest,
-        probe_kind = "header_baseline",
-        header_identity = module_context.header_key,
-        -- A rejected baseline is not reusable semantic evidence for candidate
-        -- requests. The physical execution trace retains the child rejection;
-        -- the logical terminal event must match the retryable public result.
-        outcome = result.status,
+local function probe_result(context, kind, stage, source, run, rejection)
+    local status = run.classification == "success" and "success"
+        or run.classification == "compiler_rejection" and "rejected"
+        or "infrastructure_failure"
+    local result = {
+        kind = kind, status = status,
+        ok = status == "success",
+        accepted = status == "success",
+        stage = run.stage or stage,
+        reason = run.reason or (status == "rejected" and "compiler_rejection" or nil),
+        key = run.key or "", baseline_key = context.baseline_key,
+        cached = run.cached == true,
+        persistent_cached = run.persistent_cached == true,
         cache_tier = run.cache_tier or "compiler",
-        publication = publication,
-    })
+        cache_path = run.cache_path,
+        baseline_cached = run.baseline_cached,
+        diagnostic = run.diagnostic or "",
+        summary = first_diagnostic_line(run.diagnostic),
+        source = run.source or source,
+        command = run.command, argv = run.argv,
+        source_path = run.source_path, object_path = run.object_path,
+        exit_status = type(run.status) == "number" and run.status or nil,
+        started = run.started == true,
+        interrupted = run.interrupted == true,
+        cleanup_error = run.cleanup_error == true,
+        run_reason = run.reason,
+        compiler_classification = run.classification,
+        classification = run.classification,
+    }
+    if status == "infrastructure_failure" then result.accepted = nil end
+    if status == "rejected" then
+        result.message = "configured C compiler rejected " .. rejection
+    elseif status == "infrastructure_failure" then
+        if run.cleanup_error or run.reason == "workspace" or run.reason == "command" then
+            result.message = "cannot validate C semantics because the probe infrastructure failed"
+        elseif run.interrupted then
+            result.message = "cannot validate C semantics because the configured compiler was interrupted"
+        elseif run.started == false and run.source_path then
+            result.message = "cannot validate C semantics because the configured compiler/toolchain could not be started"
+        elseif run.stage == "baseline" and run.reason == "baseline" then
+            result.message = "cannot validate C semantics because the foreign header baseline failed"
+        else
+            result.message = "cannot validate C semantics because the probe infrastructure failed"
+        end
+    end
+    if result.message and result.summary ~= "" then
+        result.message = result.message .. ": " .. result.summary
+    end
     return result
 end
 
 function ModuleContext:validate_baseline()
-    local service = self.service
-    if service.closed then
-        self:_trace_infrastructure("header_baseline", "closed")
-        return {
-            status = "infrastructure_failure",
-            ok = false,
-            accepted = nil,
-            stage = "service",
-            reason = "closed",
-            diagnostic = "probe service is closed",
-            summary = "probe service is closed",
-            message =
-                "cannot validate the final ordered C headers because "
-                .. "the probe service is closed",
-        }
+    local source = self.baseline_source
+    local run = self.service:_run_source(
+        "baseline", source, "header_baseline", self)
+    return probe_result(self, "header_baseline", "baseline", source, run,
+        "the final ordered foreign header context")
+end
+
+function ModuleContext:_candidate(kind, render_source, ...)
+    if self.service.closed then
+        local run = { classification = "infrastructure_failure", stage = "service",
+            reason = "closed", diagnostic = "probe service is closed" }
+        self.service:_trace_semantic("", kind, self, run)
+        return probe_result(self, kind, "service", "", run, "")
     end
-
-    local result = service:_ensure_baseline(self)
-    if result.status == "success" then return result end
-
-    -- `_ensure_baseline` deliberately presents a broken header preamble as
-    -- infrastructure to candidate conversion/operator probes: those probes
-    -- cannot interpret a candidate rejection unless the baseline compiles.
-    -- The checker asks a different question here. A completed, uninterrupted
-    -- compiler rejection is the authoritative semantic answer for the final
-    -- ordered foreign-header context.
-    if result.compiler_classification == "compiler_rejection" then
-        result.status = "rejected"
-        result.ok = false
-        result.accepted = false
-        result.stage = "baseline"
-        result.reason = "compiler_rejection"
-        result.message =
-            "configured C compiler rejected the final ordered foreign "
-            .. "header context"
-        if result.summary and result.summary ~= "" then
-            result.message = result.message .. ": " .. result.summary
+    local ok, source, rendered = pcall(render_source, self, ...)
+    if not ok then
+        local diagnostic = tostring(source)
+        local result = probe_result(self, kind, "source", "", {
+            classification = "infrastructure_failure", reason = "render",
+            diagnostic = diagnostic,
+        }, "")
+        if kind == "declaration_compatibility" then
+            result.status, result.accepted = "rejected", false
+            result.reason = "unrenderable_declaration"
+            result.message = "cannot prove C declaration compatibility because "
+                .. "the exact declaration pair cannot be rendered: "
+                .. result.summary
         end
-    else
-        result.message =
-            "cannot validate the final ordered C headers because "
-            .. "the probe infrastructure failed"
-        if result.summary and result.summary ~= "" then
-            result.message = result.message .. ": " .. result.summary
-        end
-    end
-    return result
-end
-
-local function declaration_compatibility_result_key(
-        service, module_context, rendered)
-    return keyed_fields({
-        { "toolchain", service.toolchain_key },
-        { "headers", module_context.header_key },
-        { "probe_kind", "declaration_compatibility" },
-        { "left_declaration", rendered.left_declaration },
-        { "right_declaration", rendered.right_declaration },
-    })
-end
-
-local function closed_declaration_compatibility_result()
-    return {
-        status = "infrastructure_failure",
-        ok = false,
-        accepted = nil,
-        stage = "service",
-        reason = "closed",
-        diagnostic = "probe service is closed",
-        summary = "probe service is closed",
-        message =
-            "cannot validate C declaration compatibility because "
-            .. "the probe service is closed",
-    }
-end
-
-local function changed_header_input_result(diagnostic)
-    diagnostic = tostring(diagnostic)
-    return {
-        status = "infrastructure_failure",
-        ok = false,
-        accepted = nil,
-        stage = "service",
-        reason = "header_inputs",
-        diagnostic = diagnostic,
-        summary = first_diagnostic_line(diagnostic),
-        message = "cannot validate C semantics because the configured " ..
-            "header inputs changed: " ..
-            first_diagnostic_line(diagnostic),
-    }
-end
-
-local function unrenderable_declaration_compatibility_result(diagnostic)
-    diagnostic = tostring(diagnostic)
-    return {
-        status = "rejected",
-        ok = false,
-        accepted = false,
-        stage = "source",
-        reason = "unrenderable_declaration",
-        diagnostic = diagnostic,
-        summary = first_diagnostic_line(diagnostic),
-        message =
-            "cannot prove C declaration compatibility because the "
-            .. "exact declaration pair cannot be rendered: "
-            .. first_diagnostic_line(diagnostic),
-    }
-end
-
-local function baseline_declaration_compatibility_result(
-        module_context, entry, baseline)
-    return {
-        status = "infrastructure_failure",
-        ok = false,
-        accepted = nil,
-        stage = "baseline",
-        kind = "declaration_compatibility",
-        key = entry.key,
-        baseline_key = module_context.baseline_key,
-        cached = false,
-        baseline_cached = baseline.cached,
-        left_declaration = entry.rendered.left_declaration,
-        right_declaration = entry.rendered.right_declaration,
-        diagnostic = baseline.diagnostic,
-        summary = baseline.summary,
-        message = baseline.message
-            and baseline.message:gsub(
-                "cannot validate C conversion",
-                "cannot validate C declaration compatibility", 1)
-            or "cannot validate C declaration compatibility because "
-                .. "the foreign header baseline failed",
-        command = baseline.command,
-        argv = baseline.argv,
-        source = baseline.source,
-        source_path = baseline.source_path,
-        exit_status = baseline.exit_status,
-        interrupted = baseline.interrupted,
-    }
-end
-
-local function declaration_compatibility_candidate_result(
-        module_context, entry, run, baseline_cached)
-    local result = {
-        kind = "declaration_compatibility",
-        key = entry.key,
-        baseline_key = module_context.baseline_key,
-        cached = run.cached == true,
-        persistent_cached = run.persistent_cached == true,
-        cache_tier = run.cache_tier or "compiler",
-        baseline_cached = baseline_cached,
-        left_declaration = entry.rendered.left_declaration,
-        right_declaration = entry.rendered.right_declaration,
-        diagnostic = run.diagnostic,
-        summary = first_diagnostic_line(run.diagnostic),
-        command = run.command,
-        argv = run.argv,
-        -- Keep the exact program compiled for this verdict aligned with its
-        -- diagnostic, command, and temporary pathname. Lua strings are shared
-        -- immutable values, so caching this one batch source under each pair
-        -- key does not copy its bytes per result.
-        source = run.source,
-        source_path = run.source_path,
-        object_path = run.object_path,
-        exit_status = run.status,
-        interrupted = run.interrupted == true,
-    }
-
-    if run.classification == "infrastructure_failure" then
-        result.status = "infrastructure_failure"
-        result.ok = false
-        result.accepted = nil
-        result.stage = "candidate"
-        result.reason = run.cleanup_error and "cleanup"
-            or run.interrupted and "interrupted"
-            or run.reason or "spawn"
-        result.message = infrastructure_message("candidate", run):gsub(
-            "cannot validate C conversion",
-            "cannot validate C declaration compatibility", 1)
-    elseif run.classification == "compiler_rejection" then
-        result.status = "rejected"
-        result.ok = false
-        result.accepted = false
-        result.stage = "candidate"
-        result.reason = "compiler_rejection"
-        result.message =
-            "configured C compiler rejected the declaration compatibility "
-            .. "candidate"
-        if result.summary ~= "" then
-            result.message = result.message .. ": " .. result.summary
-        end
-    elseif run.classification == "success" then
-        result.status = "success"
-        result.ok = true
-        result.accepted = true
-        result.stage = "candidate"
-    else
-        error("unknown normalized C probe classification '" ..
-            tostring(run.classification) .. "'")
-    end
-    return result
-end
-
-local function declaration_compatibility_batch_key(
-        service, module_context, entries)
-    local fields = {
-        { "toolchain", service.toolchain_key },
-        { "headers", module_context.header_key },
-        { "probe_kind", "declaration_compatibility_batch" },
-    }
-    for index, entry in ipairs(entries) do
-        fields[#fields + 1] = {
-            "candidate_" .. tostring(index), entry.key,
-        }
-    end
-    return keyed_fields(fields)
-end
-
-local function copy_entry_slice(entries, first, last)
-    local out = {}
-    for index = first, last do
-        out[#out + 1] = entries[index]
-    end
-    return out
-end
-
--- Compile a group once on the ordinary success path. A compiler rejection says
--- only that at least one pair in the group failed, so cache that exact batch
--- evidence under its historical source/key and recursively bisect until every
--- rejected leaf has the same singleton evidence the historical API produced.
--- Spawn/interruption/workspace failures are not semantic evidence and therefore
--- apply to the whole group without bisection or caching.
-local function validate_declaration_compatibility_batch(
-        module_context, entries, baseline, resolved, resolved_meta)
-    local service = module_context.service
-    local source = render_declaration_compatibility_batch_source(
-        module_context, entries)
-    local key = declaration_compatibility_batch_key(
-        service, module_context, entries)
-    local semantic, tier, digest, path, lookup =
-        module_context:_lookup_semantic_result(
-            "result", "candidate", "declaration_compatibility_batch",
-            source, key)
-    local run
-    local execution_run
-    if semantic then
-        run = semantic_run(semantic, semantic.source or source, tier, path)
-    else
-        execution_run = module_context:_execute_source(
-            "candidate", source, key,
-            "declaration-compatibility-batch")
-        run = execution_run
-    end
-
-    local publication = "not_applicable"
-    if execution_run and
-       ((run.classification == "success" and
-         (#entries == 1 or run.diagnostic == "")) or
-        run.classification == "compiler_rejection") then
-        run, publication, digest, path = publish_semantic_run(
-            service, "result", "declaration_compatibility_batch",
-            source, key, run, run.diagnostic_persistent_safe,
-            path, digest)
-    end
-
-    if run.classification == "infrastructure_failure" then
-        for _, entry in ipairs(entries) do
-            resolved[entry.key] =
-                declaration_compatibility_candidate_result(
-                    module_context, entry, run, baseline.cached)
-            resolved_meta[entry.key] = {
-                digest = digest,
-                trace_digest = entry.trace_digest,
-                cache_tier = run.cache_tier or "compiler",
-                publication = "not_applicable",
-            }
-        end
-        if execution_run then
-            module_context:_trace_execution(execution_run, {
-                probe_kind = "declaration_compatibility",
-                batch_kind = #entries == 1 and "single" or "batch",
-                header_identity = module_context.header_key,
-                persistent_lookup = lookup or "miss",
-            })
-        end
-        return
-    elseif run.classification == "success" and
-           #entries > 1 and run.diagnostic ~= "" then
-        -- A successful batch can still carry warnings. The batch diagnostic
-        -- is not the exact diagnostic of any one leaf, so refine to singleton
-        -- executions before publishing those payloads.
-        if execution_run then
-            module_context:_trace_execution(execution_run, {
-                probe_kind = "declaration_compatibility",
-                batch_kind = "batch",
-                header_identity = module_context.header_key,
-                persistent_lookup = lookup or "miss",
-                publication = "not_applicable",
-            })
-        end
-        local middle = math.floor(#entries / 2)
-        validate_declaration_compatibility_batch(
-            module_context, copy_entry_slice(entries, 1, middle),
-            baseline, resolved, resolved_meta)
-        validate_declaration_compatibility_batch(
-            module_context, copy_entry_slice(entries, middle + 1, #entries),
-            baseline, resolved, resolved_meta)
-        return
-    elseif run.classification == "success" or
-           (run.classification == "compiler_rejection" and #entries == 1) then
-        for _, entry in ipairs(entries) do
-            local leaf_semantic = assert(semantic_result_from_run(run))
-            local remembered, remembered_tier, existed =
-                service:_remember_memory_semantic_result(
-                    "result", entry.key, leaf_semantic, digest, path)
-            local authoritative_run = run
-            if existed then
-                authoritative_run = semantic_run(
-                    remembered, remembered.source or source,
-                    remembered_tier, remembered.cache_path)
-            end
-            local result = declaration_compatibility_candidate_result(
-                module_context, entry, authoritative_run, baseline.cached)
-            resolved[entry.key] = result
-            resolved_meta[entry.key] = {
-                digest = digest,
-                trace_digest = entry.trace_digest,
-                cache_tier = authoritative_run.cache_tier or "compiler",
-                publication = publication,
-            }
-        end
-        if execution_run then
-            module_context:_trace_execution(execution_run, {
-                probe_kind = "declaration_compatibility",
-                batch_kind = #entries == 1 and "single" or "batch",
-                header_identity = module_context.header_key,
-                persistent_lookup = lookup or "miss",
-                publication = publication,
-            })
-        end
-        return
-    end
-
-    -- This batch rejection proves only that at least one leaf is invalid. Its
-    -- exact aggregate evidence was published above; consume it only by taking
-    -- this same bisection path, never by assigning it to an individual leaf.
-    if execution_run then
-        module_context:_trace_execution(execution_run, {
-            probe_kind = "declaration_compatibility",
-            batch_kind = "batch",
-            header_identity = module_context.header_key,
-            persistent_lookup = lookup or "miss",
-            publication = publication,
+        self.service:_trace_semantic("", kind, self, {
+            classification = "infrastructure_failure",
         })
+        return result
     end
-
-    local middle = math.floor(#entries / 2)
-    validate_declaration_compatibility_batch(
-        module_context, copy_entry_slice(entries, 1, middle),
-        baseline, resolved, resolved_meta)
-    validate_declaration_compatibility_batch(
-        module_context, copy_entry_slice(entries, middle + 1, #entries),
-        baseline, resolved, resolved_meta)
-end
-
-function ModuleContext:validate_declaration_compatibilities(candidates)
-    if type(candidates) ~= "table" then
-        error("C declaration compatibility candidates must be an array", 2)
+    local rejection = kind == "declaration_compatibility"
+        and "the declaration compatibility candidate"
+        or kind == "unsafe_object_pointer"
+        and "conversion from '" .. rendered.source_type .. "' to '"
+            .. rendered.target_type .. "'"
+        or rendered.kind .. " operator expression '" .. rendered.expression .. "'"
+    local run = self.service:_run_source("candidate", source, kind, self)
+    local result = probe_result(self, kind, "candidate", source, run, rejection)
+    for name, value in pairs(rendered) do result[name] = value end
+    if kind == "c_operator" then
+        result.operator_kind = rendered.kind
+        result.operator = rendered.cop
+        result.rendered = rendered
+        result.kind = kind
     end
-    local service = self.service
-    local results = {}
-    if service.closed then
-        for index = 1, #candidates do
-            results[index] = closed_declaration_compatibility_result()
-            self:_trace_infrastructure(
-                "declaration_compatibility", "closed")
-        end
-        return results
-    end
-    local stable, stability_error = self:_header_inputs_stable()
-    if not stable then
-        for index = 1, #candidates do
-            results[index] = changed_header_input_result(stability_error)
-            self:_trace_infrastructure(
-                "declaration_compatibility", "header_inputs")
-        end
-        return results
-    end
-
-    local entries = {}
-    local pending_by_key = {}
-    local cached_semantic_events = {}
-    for index, candidate in ipairs(candidates) do
-        local left_type = candidate.left_type or candidate[1]
-        local right_type = candidate.right_type or candidate[2]
-        local left_declaration = candidate.left_declaration or candidate[3]
-        local right_declaration = candidate.right_declaration or candidate[4]
-        local rendered_ok, rendered = pcall(
-            render_declaration_compatibility_pair,
-            left_type, right_type, left_declaration, right_declaration,
-            probe_identifier("d", self.header_key))
-        if not rendered_ok then
-            results[index] =
-                unrenderable_declaration_compatibility_result(rendered)
-            self:_trace_infrastructure(
-                "declaration_compatibility",
-                "unrenderable_declaration:" .. tostring(rendered))
-        else
-            local key = declaration_compatibility_result_key(
-                service, self, rendered)
-            local pending = pending_by_key[key]
-            if pending then
-                service:_emit({
-                    kind = "cache",
-                    cache = "candidate",
-                    hit = true,
-                    pending = true,
-                    key = key,
-                })
-                pending.indexes[#pending.indexes + 1] = index
-            else
-                local semantic, tier, digest, path =
-                    service:_lookup_memory_semantic_result("result", key)
-                local entry = {
-                    key = key,
-                    trace_digest = semantic_trace_key(service, key),
-                    rendered = rendered,
-                    left_type = left_type,
-                    right_type = right_type,
-                    left_declaration = left_declaration,
-                    right_declaration = right_declaration,
-                    indexes = { index },
-                }
-                if semantic then
-                    entry.source = semantic.source or
-                        render_declaration_compatibility_batch_source(
-                            self, { entry })
-                end
-                -- Durable lookup is intentionally deferred to
-                -- validate_declaration_compatibility_batch, where the exact
-                -- historical batch source and batch key are both available.
-                service:_emit({
-                    kind = "cache",
-                    cache = "candidate",
-                    hit = semantic ~= nil,
-                    key = key,
-                })
-                if semantic then
-                    local run = semantic_run(
-                        semantic, semantic.source or entry.source, tier, path)
-                    results[index] =
-                        declaration_compatibility_candidate_result(
-                            self, entry, run, true)
-                    cached_semantic_events[#cached_semantic_events + 1] = {
-                        key_digest = entry.trace_digest or digest,
-                        probe_kind = "declaration_compatibility",
-                        header_identity = self.header_key,
-                        outcome = semantic.outcome,
-                        cache_tier = tier,
-                    }
-                else
-                    entries[#entries + 1] = entry
-                    pending_by_key[key] = entry
-                end
-            end
-        end
-    end
-
-    -- A header may change while persistent or analysis records are being read.
-    -- Do not return any earlier hit from this vector under a stale context.
-    stable, stability_error = self:_header_inputs_stable()
-    if not stable then
-        for index = 1, #candidates do
-            if not results[index] or
-               results[index].reason ~= "unrenderable_declaration" then
-                results[index] = changed_header_input_result(stability_error)
-                self:_trace_infrastructure(
-                    "declaration_compatibility", "header_inputs")
-            end
-        end
-        return results
-    end
-    for _, event in ipairs(cached_semantic_events) do
-        self:_trace_semantic(event)
-    end
-
-    if #entries == 0 then return results end
-
-    local baseline = service:_ensure_baseline(self)
-    local resolved = {}
-    local resolved_meta = {}
-    if baseline.status ~= "success" then
-        for _, entry in ipairs(entries) do
-            resolved[entry.key] = baseline_declaration_compatibility_result(
-                self, entry, baseline)
-            resolved_meta[entry.key] = {
-                digest = entry.digest,
-                trace_digest = entry.trace_digest,
-                cache_tier = "compiler",
-                publication = "not_applicable",
-            }
-        end
-    else
-        validate_declaration_compatibility_batch(
-            self, entries, baseline, resolved, resolved_meta)
-    end
-
-    for _, entry in ipairs(entries) do
-        local result = resolved[entry.key]
-        local meta = resolved_meta[entry.key]
-        for occurrence, index in ipairs(entry.indexes) do
-            results[index] = deep_copy(result)
-            if occurrence > 1 and result.status ~= "infrastructure_failure" then
-                results[index].cached = true
-            end
-            local outcome = result.status == "success" and "success"
-                or result.status == "rejected" and "compiler_rejection"
-                or "infrastructure_failure"
-            self:_trace_semantic({
-                key_digest = meta.trace_digest or meta.digest,
-                probe_kind = "declaration_compatibility",
-                header_identity = self.header_key,
-                outcome = outcome,
-                cache_tier = occurrence > 1
-                    and result.status ~= "infrastructure_failure"
-                    and "service"
-                    or meta.cache_tier,
-                publication = occurrence == 1 and meta.publication
-                    or "not_applicable",
-            })
-        end
-    end
-    return results
+    return result
 end
 
 function ModuleContext:validate_declaration_compatibility(
         left_type, right_type, left_declaration, right_declaration)
-    return self:validate_declaration_compatibilities({ {
-        left_type = left_type,
-        right_type = right_type,
-        left_declaration = left_declaration,
-        right_declaration = right_declaration,
-    } })[1]
+    return self:_candidate("declaration_compatibility",
+        render_declaration_compatibility_source,
+        left_type, right_type, left_declaration, right_declaration)
 end
 
-local function pointer_result_key(service, module_context, rendered)
-    return keyed_fields({
-        { "toolchain", service.toolchain_key },
-        { "headers", module_context.header_key },
-        { "probe_kind", "unsafe_object_pointer" },
-        { "direction", "source_to_target" },
-        { "source_type", rendered.source_type },
-        { "source_declaration", rendered.source_declaration },
-        { "target_type", rendered.target_type },
-        { "target_declaration", rendered.target_declaration },
-    })
+function ModuleContext:validate_declaration_compatibilities(candidates)
+    local results = {}
+    for index, candidate in ipairs(candidates) do
+        results[index] = self:validate_declaration_compatibility(
+            candidate.left_type, candidate.right_type,
+            candidate.left_declaration, candidate.right_declaration)
+    end
+    return results
 end
 
 function ModuleContext:probe_unsafe_object_pointer(source_type, target_type)
-    local service = self.service
-    if service.closed then
-        self:_trace_infrastructure("unsafe_object_pointer", "closed")
-        return {
-            status = "infrastructure_failure",
-            ok = false,
-            accepted = nil,
-            stage = "service",
-            reason = "closed",
-            diagnostic = "probe service is closed",
-            summary = "probe service is closed",
-            message =
-                "cannot validate C conversion because the probe service is closed",
-        }
-    end
-    local stable, stability_error = self:_header_inputs_stable()
-    if not stable then
-        self:_trace_infrastructure(
-            "unsafe_object_pointer", "header_inputs")
-        return changed_header_input_result(stability_error)
-    end
-
-    local prepared_ok, prepared = pcall(
-        prepare_pointer_probe, self, source_type, target_type)
-    if not prepared_ok then
-        self:_trace_infrastructure(
-            "unsafe_object_pointer", "render:" .. tostring(prepared))
-        return {
-            status = "infrastructure_failure",
-            ok = false,
-            accepted = nil,
-            stage = "source",
-            reason = "render",
-            diagnostic = tostring(prepared),
-            summary = first_diagnostic_line(tostring(prepared)),
-            message =
-                "cannot validate C conversion because probe source generation failed: " ..
-                first_diagnostic_line(tostring(prepared)),
-        }
-    end
-
-    local rendered = prepared.rendered
-    local key = pointer_result_key(service, self, rendered)
-    local semantic, tier, digest, path, lookup =
-        service:_lookup_memory_semantic_result("result", key)
-    local source = semantic and semantic.source or nil
-    if source == nil then
-        local source_ok
-        source_ok, source = pcall(
-            render_prepared_pointer_source, self, prepared)
-        if not source_ok then
-            self:_trace_infrastructure(
-                "unsafe_object_pointer", "render:" .. tostring(source))
-            return {
-                status = "infrastructure_failure",
-                ok = false,
-                accepted = nil,
-                stage = "source",
-                reason = "render",
-                diagnostic = tostring(source),
-                summary = first_diagnostic_line(tostring(source)),
-                message =
-                    "cannot validate C conversion because probe source generation failed: " ..
-                    first_diagnostic_line(tostring(source)),
-            }
-        end
-    end
-    if semantic then
-        if digest == nil then digest = semantic_trace_key(service, key) end
-        lookup = "memory"
-    else
-        semantic, tier, digest, path, lookup =
-            self:_lookup_semantic_result(
-                "result", "candidate", "unsafe_object_pointer", source, key)
-        if semantic and semantic.source ~= nil then
-            source = semantic.source
-        end
-    end
-    service:_emit({
-        kind = "cache",
-        cache = "candidate",
-        hit = semantic ~= nil,
-        key = key,
-    })
-    stable, stability_error = self:_header_inputs_stable()
-    if not stable then
-        self:_trace_infrastructure(
-            "unsafe_object_pointer", "header_inputs")
-        return changed_header_input_result(stability_error)
-    end
-    local run
-    local execution_run
-    local baseline
-    if semantic then
-        run = semantic_run(semantic, source, tier, path)
-        baseline = { cached = true }
-    else
-        baseline = service:_ensure_baseline(self)
-        if baseline.status ~= "success" then
-            local failed = {
-            status = "infrastructure_failure",
-            ok = false,
-            accepted = nil,
-            stage = "baseline",
-            kind = "unsafe_object_pointer",
-            key = key,
-            baseline_key = self.baseline_key,
-            cached = false,
-            baseline_cached = baseline.cached,
-            source_type = rendered.source_type,
-            target_type = rendered.target_type,
-            diagnostic = baseline.diagnostic,
-            summary = baseline.summary,
-            message = baseline.message,
-            command = baseline.command,
-            argv = baseline.argv,
-            source = baseline.source,
-            source_path = baseline.source_path,
-            exit_status = baseline.exit_status,
-            interrupted = baseline.interrupted,
-        }
-            self:_trace_semantic({
-                key_digest = digest,
-                probe_kind = "unsafe_object_pointer",
-                header_identity = self.header_key,
-                outcome = "infrastructure_failure",
-                cache_tier = "compiler",
-            })
-            return failed
-        end
-
-        run = self:_execute_source(
-            "candidate", source, key, nil)
-        execution_run = run
-    end
-    local publication = "not_applicable"
-    if execution_run then
-        run, publication = publish_semantic_run(
-            service, "result", "unsafe_object_pointer", source, key, run,
-            run.diagnostic_persistent_safe, path, digest)
-        self:_trace_execution(execution_run, {
-            probe_kind = "unsafe_object_pointer",
-            header_identity = self.header_key,
-            persistent_lookup = lookup,
-            publication = publication,
-        })
-    end
-    local result = {
-        kind = "unsafe_object_pointer",
-        key = key,
-        baseline_key = self.baseline_key,
-        cached = run.cached == true,
-        persistent_cached = run.persistent_cached == true,
-        cache_tier = run.cache_tier or "compiler",
-        baseline_cached = baseline.cached,
-        source_type = rendered.source_type,
-        target_type = rendered.target_type,
-        source_declaration = rendered.source_declaration,
-        target_declaration = rendered.target_declaration,
-        diagnostic = run.diagnostic,
-        summary = first_diagnostic_line(run.diagnostic),
-        command = run.command,
-        argv = run.argv,
-        source = source,
-        source_path = run.source_path,
-        object_path = run.object_path,
-        exit_status = run.status,
-        interrupted = run.interrupted == true,
-    }
-
-    if run.classification == "infrastructure_failure" then
-        result.status = "infrastructure_failure"
-        result.ok = false
-        result.accepted = nil
-        result.stage = "candidate"
-        result.reason = run.cleanup_error and "cleanup"
-            or run.interrupted and "interrupted"
-            or run.reason or "spawn"
-        result.message = infrastructure_message("candidate", run)
-    elseif run.classification == "compiler_rejection" then
-        result.status = "rejected"
-        result.ok = false
-        result.accepted = false
-        result.stage = "candidate"
-        result.reason = "compiler_rejection"
-        result.message =
-            "configured C compiler rejected conversion from '" ..
-            rendered.source_type .. "' to '" .. rendered.target_type .. "'"
-        if result.summary ~= "" then
-            result.message = result.message .. ": " .. result.summary
-        end
-    elseif run.classification == "success" then
-        result.status = "success"
-        result.ok = true
-        result.accepted = true
-        result.stage = "candidate"
-    else
-        error("unknown normalized C probe classification '" ..
-            tostring(run.classification) .. "'")
-    end
-    self:_trace_semantic({
-        key_digest = digest,
-        probe_kind = "unsafe_object_pointer",
-        header_identity = self.header_key,
-        outcome = run.classification,
-        cache_tier = run.cache_tier or tier or "compiler",
-        publication = publication,
-    })
-    return result
-end
-
-ModuleContext.unsafe_object_pointer =
-    ModuleContext.probe_unsafe_object_pointer
-
-local function operator_result_key(service, module_context, rendered)
-    local lhs = rendered.lhs
-    local rhs = rendered.rhs or {
-        source_type = "",
-        source_declaration = "",
-        target_type = "",
-        null = false,
-    }
-    return keyed_fields({
-        { "toolchain", service.toolchain_key },
-        { "headers", module_context.header_key },
-        { "probe_kind", "c_operator" },
-        { "operator_kind", rendered.kind },
-        { "operator_spelling", rendered.cop },
-        { "operator_expression", rendered.expression },
-        { "lhs_source_type", lhs.source_type },
-        { "lhs_source_declaration", lhs.source_declaration },
-        { "lhs_target_type", lhs.target_type },
-        { "lhs_null", tostring(lhs.null) },
-        { "lhs_decay", tostring(rendered.lhs_decay) },
-        { "rhs_source_type", rhs.source_type },
-        { "rhs_source_declaration", rhs.source_declaration },
-        { "rhs_target_type", rhs.target_type },
-        { "rhs_null", tostring(rhs.null) },
-        { "rhs_decay", tostring(rendered.rhs_decay) },
-        { "result_type", rendered.result_type },
-    })
+    return self:_candidate("unsafe_object_pointer", render_pointer_source,
+        source_type, target_type)
 end
 
 function ModuleContext:probe_operator(trait)
-    local service = self.service
-    if service.closed then
-        self:_trace_infrastructure("c_operator", "closed")
-        return {
-            status = "infrastructure_failure",
-            ok = false,
-            accepted = nil,
-            stage = "service",
-            reason = "closed",
-            diagnostic = "probe service is closed",
-            summary = "probe service is closed",
-            message =
-                "cannot validate C operator because the probe service is closed",
-        }
-    end
-    local stable, stability_error = self:_header_inputs_stable()
-    if not stable then
-        self:_trace_infrastructure("c_operator", "header_inputs")
-        return changed_header_input_result(stability_error)
-    end
-
-    local prepared_ok, prepared = pcall(
-        prepare_operator_probe, self, trait)
-    if not prepared_ok then
-        self:_trace_infrastructure(
-            "c_operator", "render:" .. tostring(prepared))
-        return {
-            status = "infrastructure_failure",
-            ok = false,
-            accepted = nil,
-            stage = "source",
-            reason = "render",
-            diagnostic = tostring(prepared),
-            summary = first_diagnostic_line(tostring(prepared)),
-            message =
-                "cannot validate C operator because probe source generation failed: "
-                .. first_diagnostic_line(tostring(prepared)),
-        }
-    end
-
-    local rendered = prepared.rendered
-    local key = operator_result_key(service, self, rendered)
-    local semantic, tier, digest, path, lookup =
-        service:_lookup_memory_semantic_result("result", key)
-    local source = semantic and semantic.source or nil
-    if source == nil then
-        local source_ok
-        source_ok, source = pcall(
-            render_prepared_operator_source, self, prepared)
-        if not source_ok then
-            self:_trace_infrastructure(
-                "c_operator", "render:" .. tostring(source))
-            return {
-                status = "infrastructure_failure",
-                ok = false,
-                accepted = nil,
-                stage = "source",
-                reason = "render",
-                diagnostic = tostring(source),
-                summary = first_diagnostic_line(tostring(source)),
-                message =
-                    "cannot validate C operator because probe source generation failed: "
-                    .. first_diagnostic_line(tostring(source)),
-            }
-        end
-    end
-    if semantic then
-        if digest == nil then digest = semantic_trace_key(service, key) end
-        lookup = "memory"
-    else
-        semantic, tier, digest, path, lookup =
-            self:_lookup_semantic_result(
-                "result", "candidate", "c_operator", source, key)
-        if semantic and semantic.source ~= nil then
-            source = semantic.source
-        end
-    end
-    service:_emit({
-        kind = "cache",
-        cache = "candidate",
-        hit = semantic ~= nil,
-        key = key,
-    })
-    stable, stability_error = self:_header_inputs_stable()
-    if not stable then
-        self:_trace_infrastructure("c_operator", "header_inputs")
-        return changed_header_input_result(stability_error)
-    end
-    local run
-    local execution_run
-    local baseline
-    if semantic then
-        run = semantic_run(semantic, source, tier, path)
-        baseline = { cached = true }
-    else
-        baseline = service:_ensure_baseline(self)
-        if baseline.status ~= "success" then
-            local failed = {
-            status = "infrastructure_failure",
-            ok = false,
-            accepted = nil,
-            stage = "baseline",
-            kind = "c_operator",
-            key = key,
-            baseline_key = self.baseline_key,
-            cached = false,
-            baseline_cached = baseline.cached,
-            operator_kind = rendered.kind,
-            operator = rendered.cop,
-            expression = rendered.expression,
-            diagnostic = baseline.diagnostic,
-            summary = baseline.summary,
-            message = baseline.message
-                and baseline.message:gsub(
-                    "cannot validate C conversion",
-                    "cannot validate C operator", 1)
-                or "cannot validate C operator because the foreign "
-                    .. "header baseline failed",
-            command = baseline.command,
-            argv = baseline.argv,
-            source = baseline.source,
-            source_path = baseline.source_path,
-            exit_status = baseline.exit_status,
-            interrupted = baseline.interrupted,
-        }
-            self:_trace_semantic({
-                key_digest = digest,
-                probe_kind = "c_operator",
-                header_identity = self.header_key,
-                outcome = "infrastructure_failure",
-                cache_tier = "compiler",
-            })
-            return failed
-        end
-
-        run = self:_execute_source(
-            "candidate", source, key, "c-operator")
-        execution_run = run
-    end
-    local publication = "not_applicable"
-    if execution_run then
-        run, publication = publish_semantic_run(
-            service, "result", "c_operator", source, key, run,
-            run.diagnostic_persistent_safe, path, digest)
-        self:_trace_execution(execution_run, {
-            probe_kind = "c_operator",
-            header_identity = self.header_key,
-            persistent_lookup = lookup,
-            publication = publication,
-        })
-    end
-    local result = {
-        kind = "c_operator",
-        key = key,
-        baseline_key = self.baseline_key,
-        cached = run.cached == true,
-        persistent_cached = run.persistent_cached == true,
-        cache_tier = run.cache_tier or "compiler",
-        baseline_cached = baseline.cached,
-        operator_kind = rendered.kind,
-        operator = rendered.cop,
-        expression = rendered.expression,
-        rendered = rendered,
-        diagnostic = run.diagnostic,
-        summary = first_diagnostic_line(run.diagnostic),
-        command = run.command,
-        argv = run.argv,
-        source = source,
-        source_path = run.source_path,
-        object_path = run.object_path,
-        exit_status = run.status,
-        interrupted = run.interrupted == true,
-    }
-
-    if run.classification == "infrastructure_failure" then
-        result.status = "infrastructure_failure"
-        result.ok = false
-        result.accepted = nil
-        result.stage = "candidate"
-        result.reason = run.cleanup_error and "cleanup"
-            or run.interrupted and "interrupted"
-            or run.reason or "spawn"
-        result.message =
-            infrastructure_message("candidate", run):gsub(
-                "cannot validate C conversion",
-                "cannot validate C operator", 1)
-    elseif run.classification == "compiler_rejection" then
-        result.status = "rejected"
-        result.ok = false
-        result.accepted = false
-        result.stage = "candidate"
-        result.reason = "compiler_rejection"
-        result.message =
-            "configured C compiler rejected "
-            .. rendered.kind .. " operator expression '"
-            .. rendered.expression .. "'"
-        if result.summary ~= "" then
-            result.message = result.message .. ": " .. result.summary
-        end
-    elseif run.classification == "success" then
-        result.status = "success"
-        result.ok = true
-        result.accepted = true
-        result.stage = "candidate"
-    else
-        error("unknown normalized C probe classification '" ..
-            tostring(run.classification) .. "'")
-    end
-    self:_trace_semantic({
-        key_digest = digest,
-        probe_kind = "c_operator",
-        header_identity = self.header_key,
-        outcome = run.classification,
-        cache_tier = run.cache_tier or tier or "compiler",
-        publication = publication,
-    })
-    return result
+    return self:_candidate("c_operator", render_operator_source, trait)
 end
 
+ModuleContext.unsafe_object_pointer = ModuleContext.probe_unsafe_object_pointer
 ModuleContext.c_operator = ModuleContext.probe_operator
 
 function Service:module_context(options)
     if self.closed then return nil, "probe service is closed" end
-    local stable, stability_error = self:_forced_header_inputs_stable()
-    if not stable then return nil, stability_error end
     options = options or {}
     if type(options) ~= "table" then
         return nil, "module probe context options must be a table"
@@ -3933,12 +1975,6 @@ function Service:module_context(options)
         if not include then
             return nil, "invalid C include descriptor " .. index .. ": " .. err
         end
-        if (self.process_analysis ~= nil or self.cache_directory ~= nil) and
-           not include._c_header_identity_complete then
-            return nil, "invalid C include descriptor " .. index ..
-                ": analysis or persistent C-probe reuse requires explicit " ..
-                "c_header_dependencies and c_header_search_inputs"
-        end
         includes[index] = include
     end
     for key in pairs(raw_includes) do
@@ -3964,13 +2000,11 @@ function Service:module_context(options)
                 wrapper_name = wrapper.name,
                 physical_path = wrapper.physical_path,
                 public_path = wrapper.public_path,
-                keyed_for_persistence = true,
             }
             for _, alias in ipairs(wrapper.diagnostic_aliases or {}) do
                 probe_diagnostic_aliases[#probe_diagnostic_aliases + 1] = {
                     physical_path = alias.physical_path,
                     public_path = alias.public_path,
-                    keyed_for_persistence = false,
                 }
             end
         end
@@ -3979,11 +2013,6 @@ function Service:module_context(options)
         self.probe_wrapper_bindings[name] = contents
     end
 
-    local header_key = header_context_key(
-        source_dir, includes, self.forced_header_manifest)
-    local header_inputs, inputs_error = collect_header_inputs(
-        includes, self.forced_header_inputs)
-    if not header_inputs then return nil, inputs_error end
     local context = setmetatable({
         service = self,
         module_name = module_name,
@@ -3992,15 +2021,10 @@ function Service:module_context(options)
         header_preamble = render_header_preamble(includes),
         probe_wrappers = probe_wrappers,
         probe_diagnostic_aliases = probe_diagnostic_aliases,
-        header_inputs = header_inputs,
-        header_key = header_key,
         header_label = trace_header_label(includes),
-        baseline_key = keyed_fields({
-            { "toolchain", self.toolchain_key },
-            { "headers", header_key },
-            { "probe_kind", "baseline" },
-        }),
     }, ModuleContext)
+    context.baseline_source = render_baseline_source(context)
+    context.baseline_key = sha256.hex(context.baseline_source)
     return context
 end
 
@@ -4290,72 +2314,7 @@ function cprobe.new_service(options)
         if cache_directory ~= "/" then
             cache_directory = cache_directory:gsub("/+$", "")
         end
-        local cache_identity = option(
-            options, toolchain, "cache_identity", nil)
-        if cache_identity == "" then cache_identity = nil end
-        if cache_identity ~= nil then
-            if type(cache_identity) ~= "string" then
-                return nil, "cache_identity must be a string"
-            end
-            cache_directory = path_join(cache_directory,
-                "namespace-" .. sha256.hex(cache_identity))
-        end
     end
-
-    local fields = {
-        { "compiler_argv", encode_sequence(compiler_argv) },
-        { "compile_flags", encode_sequence(compile_flags) },
-        { "language_mode", language_mode },
-        { "language_flag", language_flag or "" },
-        { "cppflags", encode_sequence(cppflags) },
-        { "cflags", encode_sequence(cflags) },
-        { "include_dirs", include_dirs_key(include_dirs) },
-        { "profile_identity", profile_identity },
-        { "compile_mode", syntax_only and "syntax-only" or "object" },
-    }
-
-    local effective_preprocessor_flags = copy_array(compile_flags)
-    append_all(effective_preprocessor_flags, cppflags)
-    if language_flag then
-        effective_preprocessor_flags[#effective_preprocessor_flags + 1] =
-            language_flag
-    end
-    append_all(effective_preprocessor_flags, cflags)
-    for _, include in ipairs(include_dirs) do
-        effective_preprocessor_flags[#effective_preprocessor_flags + 1] =
-            include.flag
-        effective_preprocessor_flags[#effective_preprocessor_flags + 1] =
-            include.path
-    end
-    local forced_headers
-    forced_headers, err = cdriver.forced_header_inputs({
-        io = strategy,
-        compiler = compiler_argv,
-        language_mode = language_mode,
-        language_flag = false,
-        compile_flags = effective_preprocessor_flags,
-        cppflags = {},
-        compiler_include_dirs = {},
-    })
-    if not forced_headers then
-        return nil, "invalid forced C header configuration: " .. tostring(err)
-    end
-
-    local forced_header_inputs = {}
-    append_all(forced_header_inputs,
-        forced_headers.c_header_dependencies)
-    append_all(forced_header_inputs,
-        forced_headers.c_header_search_inputs)
-    local forced_header_manifest =
-        "titan-cprobe-forced-header-context-v2:sha256:" .. sha256.hex(
-            keyed_fields({
-                { "forced_header_context_version", "2" },
-                { "manifest", forced_headers.manifest },
-            }))
-
-    fields[#fields + 1] = {
-        "forced_header_manifest", forced_header_manifest,
-    }
 
     local verbose = options.verbose
     local verbose_sink = options.verbose_sink
@@ -4393,16 +2352,11 @@ function cprobe.new_service(options)
         return nil, "temp_provider must be callable"
     end
 
-    local toolchain_key = keyed_fields(fields)
-    local analysis_baseline_cache
     local analysis_result_cache
     if process_analysis ~= nil then
-        analysis_baseline_cache, analysis_result_cache =
-            cdriver.process_analysis_probe_caches(
-                process_analysis, strategy, toolchain_key)
-        if not analysis_baseline_cache then
-            return nil, analysis_result_cache
-        end
+        analysis_result_cache, err = cdriver.process_analysis_probe_cache(
+            process_analysis, strategy)
+        if not analysis_result_cache then return nil, err end
     end
 
     local service = setmetatable({
@@ -4420,18 +2374,9 @@ function cprobe.new_service(options)
         cppflags = cppflags,
         cflags = cflags,
         include_dirs = include_dirs,
-        forced_header_dependencies =
-            forced_headers.c_header_dependencies,
-        forced_header_search_inputs =
-            forced_headers.c_header_search_inputs,
-        forced_header_inputs = forced_header_inputs,
-        forced_header_manifest = forced_header_manifest,
-        validated_header_inputs = {},
-        forced_header_inputs_validated = false,
         profile = profile,
         profile_identity = profile_identity,
         syntax_only = syntax_only,
-        toolchain_key = toolchain_key,
         runner = runner,
         runner_is_strategy = runner_is_strategy,
         temp_provider = temp_provider,
@@ -4440,12 +2385,9 @@ function cprobe.new_service(options)
         verbose = verbose,
         verbose_sink = verbose_sink,
         evidence = {},
-        baseline_cache = {},
         result_cache = {},
-        analysis_baseline_cache = analysis_baseline_cache,
         analysis_result_cache = analysis_result_cache,
         semantic_requests = {},
-        semantic_trace_keys = {},
         probe_wrapper_bindings = {},
         materialized_probe_wrappers = {},
         sequence = 0,
@@ -4456,7 +2398,6 @@ function cprobe.new_service(options)
 end
 
 cprobe.source_foreign_include_alias = source_foreign_include_alias
-cprobe.collect_header_inputs = collect_header_inputs
 
 function cprobe.normalize_include_descriptor(descriptor, options)
     options = options or {}

@@ -1081,9 +1081,9 @@ value-first; when an ordinary member collides with a type spelling, type
 pseudo-members are rejected with a collision-specific diagnostic instead of
 stealing the real function/variable.
 
-The checker also receives the resolver's `cprobe.Service`. Rich probe results
-remain session-scoped, while production services may reuse an exact-probe-text
-successful marker from the configured prefix cache. After all foreign imports
+The checker also receives the resolver's `cprobe.Service`. The complete raw C
+probe source keys acceptance or rejection in memory and in the configured
+prefix cache. After all foreign imports
 establish a module's ordered header context,
 contextual object-pointer conversions and C operators ask that service to
 compile their exact `cdeclarator` spelling. The checker records complete

@@ -473,7 +473,10 @@ describe("compatible C declarations across foreign imports", function()
             local context, service =
                 new_context_configured_probe_service({
                     runner = function(argv, metadata)
-                        calls[#calls + 1] = metadata
+                        if metadata.stage == "baseline" or
+                           metadata.source:find("titan_probe_d%[") then
+                            calls[#calls + 1] = metadata
+                        end
                         return require("c-parser.cdriver")
                             .capture_command(argv)
                     end,
@@ -531,7 +534,10 @@ describe("compatible C declarations across foreign imports", function()
             local context, service =
                 new_context_configured_probe_service({
                     runner = function(argv, metadata)
-                        calls[#calls + 1] = metadata
+                        if metadata.stage == "baseline" or
+                           metadata.source:find("titan_probe_d%[") then
+                            calls[#calls + 1] = metadata
+                        end
                         return require("c-parser.cdriver")
                             .capture_command(argv)
                     end,
@@ -556,13 +562,13 @@ describe("compatible C declarations across foreign imports", function()
             assert.matches("%[3%]", calls[3].source)
             assert.matches("%[4%]", calls[3].source)
             assert.not_matches(
-                "extern ffi_wave_array_alias titan_probe_d%d*_",
+                "extern ffi_wave_array_alias titan_probe_d",
                 calls[3].source)
             close_context_configured_probe_service(context, service)
         end)
     end)
 
-    it("defers a distinct name that retains a redirected typedef root",
+    it("redirects a typedef before checking the next distinct name",
     function()
         local guarded = [[
             #ifndef TITAN_FFI_SHARED_WAVE_ALIAS
@@ -577,7 +583,10 @@ describe("compatible C declarations across foreign imports", function()
             local context, service =
                 new_context_configured_probe_service({
                     runner = function(argv, metadata)
-                        calls[#calls + 1] = metadata
+                        if metadata.stage == "baseline" or
+                           metadata.source:find("extern ffi_shared_wave_alias ") then
+                            calls[#calls + 1] = metadata
+                        end
                         return require("c-parser.cdriver")
                             .capture_command(argv)
                     end,
@@ -595,10 +604,10 @@ describe("compatible C declarations across foreign imports", function()
             assert.equal(3, #calls)
             assert.equal("baseline", calls[1].stage)
             assert.matches(
-                "extern ffi_shared_wave_alias titan_probe_d%d*_%x+",
+                "extern ffi_shared_wave_alias titan_probe_d",
                 calls[2].source)
             assert.matches(
-                "extern ffi_shared_wave_alias %*titan_probe_d%d*_%x+",
+                "extern ffi_shared_wave_alias %*titan_probe_d",
                 calls[3].source)
 
             local first_alias = ast[1]._type.type_members
@@ -1611,23 +1620,26 @@ describe("compatible C declarations across foreign imports", function()
         end)
     end)
 
-    it("submits all checker redeclarations in one successful probe batch",
+    it("checks distinct redeclarations in source order",
     function()
         with_headers({
             [[
-                extern int ffi_batch_integer(int value);
-                extern long ffi_batch_long(long value);
+                extern int ffi_order_integer(int value);
+                extern long ffi_order_long(long value);
             ]],
             [[
-                extern int ffi_batch_integer(int value);
-                extern long ffi_batch_long(long value);
+                extern int ffi_order_integer(int value);
+                extern long ffi_order_long(long value);
             ]],
         }, function(first_header, second_header)
             local calls = {}
             local context, service =
                 new_context_configured_probe_service({
                     runner = function(_, metadata)
-                        calls[#calls + 1] = metadata
+                        if metadata.stage == "baseline" or
+                           metadata.source:find("titan_probe_d%(") then
+                            calls[#calls + 1] = metadata
+                        end
                         return {
                             started = true,
                             ok = true,
@@ -1647,18 +1659,21 @@ describe("compatible C declarations across foreign imports", function()
                         function() return service end,
                 })
             assert.equal(0, #errors)
-            assert.equal(2, #calls)
+            assert.equal(3, #calls)
             assert.equal("baseline", calls[1].stage)
             assert.equal("candidate", calls[2].stage)
+            assert.equal("candidate", calls[3].stage)
+            assert.not_equal(calls[2].source, calls[3].source)
+            assert.matches("extern int titan_probe_d%(int%)",
+                calls[2].source)
+            assert.matches("extern long titan_probe_d%(long%)",
+                calls[3].source)
             for _, name in ipairs({
-                "ffi_batch_integer", "ffi_batch_long",
+                "ffi_order_integer", "ffi_order_long",
             }) do
                 assert.equal(
                     ast[1]._type.members[name].type,
                     ast[2]._type.members[name].type)
-                assert.matches(
-                    "titan_probe_d%d+_%x+",
-                    calls[2].source)
             end
             close_context_configured_probe_service(context, service)
         end)
@@ -1710,8 +1725,8 @@ describe("compatible C declarations across foreign imports", function()
     it("propagates production compatibility exceptions through the checker",
     function()
         with_headers({
-            "extern int ffi_production_batch_exception(int value);",
-            "extern int ffi_production_batch_exception(int value);",
+            "extern int ffi_production_pair_exception(int value);",
+            "extern int ffi_production_pair_exception(int value);",
         }, function(first_header, second_header)
             local context = driver.new_resolver_context()
             local service, service_error =
@@ -1728,7 +1743,7 @@ describe("compatible C declarations across foreign imports", function()
                 module_probe.validate_baseline = function()
                     return { status = "success" }
                 end
-                module_probe.validate_declaration_compatibilities =
+                module_probe.validate_declaration_compatibility =
                     function()
                         error(cancellation, 0)
                     end
@@ -1802,7 +1817,7 @@ describe("compatible C declarations across foreign imports", function()
             end)
     end)
 
-    it("normalizes plural and legacy injected probe failures", function()
+    it("normalizes injected declaration probe failures", function()
         with_headers({
             "extern int ffi_injected_probe(int value);",
             "extern int ffi_injected_probe(int value);",
@@ -1813,35 +1828,21 @@ describe("compatible C declarations across foreign imports", function()
 
             local scenarios = {
                 {
-                    expected = "batch returned no result for a candidate",
-                    plural = function() return {} end,
-                },
-                {
-                    expected = "batch returned no result",
-                    plural = function() return nil end,
-                },
-                {
-                    expected = "batch validation failed: injected plural",
-                    plural = function()
-                        error("injected plural", 0)
-                    end,
-                },
-                {
                     expected = "cannot validate a declaration pair",
                 },
                 {
-                    legacy = function()
+                    probe = function()
                         return { status = "success" }
                     end,
                 },
                 {
                     expected = "probe returned no result",
-                    legacy = function() return nil end,
+                    probe = function() return nil end,
                 },
                 {
-                    expected = "validation failed: injected legacy",
-                    legacy = function()
-                        error("injected legacy", 0)
+                    expected = "validation failed: injected probe",
+                    probe = function()
+                        error("injected probe", 0)
                     end,
                 },
             }
@@ -1854,13 +1855,12 @@ describe("compatible C declarations across foreign imports", function()
             }
             for _, scenario in ipairs(scenarios) do
                 local module_probe = {
-                    validate_declaration_compatibilities = scenario.plural,
-                    validate_declaration_compatibility = scenario.legacy,
+                    validate_declaration_compatibility = scenario.probe,
                 }
-                local results =
-                    checker_core.foreign_redeclaration_batch
-                        .validate_candidates(module_probe, { candidate })
-                local result = assert(results[1])
+                local result =
+                    checker_core.validate_foreign_declaration_compatibility(
+                        module_probe, candidate.left_type, candidate.right_type,
+                        candidate.left_declaration, candidate.right_declaration)
                 if scenario.expected then
                     assert.equal("infrastructure_failure", result.status)
                     assert.matches(
@@ -1883,8 +1883,8 @@ describe("compatible C declarations across foreign imports", function()
                         validate_baseline = function()
                             return { status = "success" }
                         end,
-                        validate_declaration_compatibilities =
-                            function() return {} end,
+                        validate_declaration_compatibility =
+                            function() return nil end,
                     }
                 end,
             }
@@ -1895,7 +1895,7 @@ describe("compatible C declarations across foreign imports", function()
                     probe_service_provider = function() return service end,
                 })
             assert.matches(
-                "batch returned no result for a candidate",
+                "probe returned no result",
                 table.concat(errors, "\n"), 1, true)
             close_context_configured_probe_service(
                 context, profile_service)

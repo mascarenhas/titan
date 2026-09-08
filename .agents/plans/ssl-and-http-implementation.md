@@ -192,7 +192,7 @@ decisions.
 - Add focused build/package tests for pins, checksums, exact archive members,
   native-symbol privacy, bundled/system OpenSSL, source-rock inventory,
   provider counts, migration, rollback, static consumers, direct OpenSSL
-  imports, and batched FFI compatibility probes.
+  imports.
 - Update Linux CI caches, dependency preparation, module snapshots, production
   smokes, and one sanitizer TLS/HTTP boundary. Do not dispatch macOS CI for this
   PR.

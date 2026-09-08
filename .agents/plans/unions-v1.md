@@ -126,7 +126,7 @@ providers fail before their type metadata is decoded.
 
 Linux preparation creates `$PREFIX/bin/lua`, runs `make lua` and `make
 luarocks`, configures Lua's compiled `package.cpath`, and clears only known
-Titan-owned active-install state before `luarocks make`. Dependency and probe
+Titan-owned active-install state before `luarocks make`. Native dependency
 caches remain keyed by `TITAN_ABI_VERSION`; install/search paths use
 `TITAN_LIBRARY_VERSION`. Do not add a multi-version build path.
 

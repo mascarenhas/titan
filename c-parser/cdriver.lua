@@ -101,7 +101,7 @@ local function process_analysis_provider(analysis, strategy)
     if not provider then
         provider = {
             process_entries = {},
-            probe_toolchains = {},
+            probe_results = {},
         }
         analysis.providers[strategy] = provider
     end
@@ -116,34 +116,17 @@ local function process_analysis_entries(options, strategy)
     return provider.process_entries
 end
 
--- Return the analysis-owned semantic probe caches for one exact compiler I/O
--- provider and toolchain identity. cdriver owns only the branded authority and
--- its partitions: cprobe remains responsible for publishing exclusively
--- completed baseline successes and completed semantic success/rejection
--- results, never infrastructure failures.
-function cdriver.process_analysis_probe_caches(
-        analysis, strategy, toolchain_key)
-    local valid, validation_error = pcall(
-        compiler_io.validate, strategy, 3)
+-- Probe results are keyed only by source digest. An analysis shares one
+-- table per I/O provider; toolchain and header state do not partition it.
+function cdriver.process_analysis_probe_cache(analysis, strategy)
+    local valid, validation_error = pcall(compiler_io.validate, strategy, 3)
     if not valid then
         return nil, "invalid compiler I/O strategy: " ..
             tostring(validation_error)
     end
-    if type(toolchain_key) ~= "string" or toolchain_key == "" then
-        return nil, "C probe toolchain key must be a nonempty string"
-    end
-
     local provider, err = process_analysis_provider(analysis, strategy)
     if provider == false then return nil, err end
-    local caches = provider.probe_toolchains[toolchain_key]
-    if not caches then
-        caches = {
-            baseline_cache = {},
-            result_cache = {},
-        }
-        provider.probe_toolchains[toolchain_key] = caches
-    end
-    return caches.baseline_cache, caches.result_cache
+    return provider.probe_results
 end
 
 local function process_cache_for(strategy)
@@ -576,10 +559,8 @@ function cdriver.preprocessor_cache_identity(options)
     return context.preprocessor_configuration_key
 end
 
--- Inspect the forced preprocessing headers without parsing a module header.
--- cprobe uses this exact context to key compiler probes and to expose the
--- same restattable file/search inputs even before cdriver sees a foreign
--- import.
+-- Collect forced-header dependencies even when no foreign import occurs.
+-- These inputs belong to the parsed-header/analysis snapshot, not probe keys.
 function cdriver.forced_header_inputs(options)
     options = normalize_options(options)
     local config, err = preprocessor_options(options)

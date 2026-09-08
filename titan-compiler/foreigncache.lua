@@ -44,8 +44,11 @@ function foreigncache.key(st, imports, prepared)
     add("titan-ffi-conversion-v1")
     add(st.modname)
     add(st.source_dir or "")
-    if not add(st.probe_service.toolchain_key)
-       or not add(st.probe_service.profile_identity) then return nil end
+    -- Each parsed include's graph key below already binds the exact compiler
+    -- argv, effective flags, language mode, include roots and forced headers.
+    -- Converted types additionally depend on the target profile; compiled
+    -- probe-cache metadata is neither an owner nor an input of this graph.
+    if not add(st.probe_service.profile_identity) then return nil end
     for _, node in ipairs(imports) do
         local item = prepared[node]
         local include = item and item.ftypes and item.include

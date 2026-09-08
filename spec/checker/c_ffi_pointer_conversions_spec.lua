@@ -152,9 +152,9 @@ describe("contextual unsafe C object-pointer conversions", function()
             assert.equal(2, #calls)
             assert.equal("baseline", calls[1].stage)
             assert.equal("candidate", calls[2].stage)
-            assert.match("extern ffi_source %*titan_probe_s_%x+;",
+            assert.match("extern ffi_source %*titan_probe_s;",
                 calls[2].source)
-            assert.match("ffi_target %*titan_probe_t_%x+",
+            assert.match("ffi_target %*titan_probe_t",
                 calls[2].source)
         end)
     end)
@@ -257,17 +257,26 @@ describe("contextual unsafe C object-pointer conversions", function()
                 ): boolean
                     return source == target
                 end
+
+                local function convert(source: *c.ffi_source): *c.ffi_target
+                    return source
+                end
             ]])
             assert.truthy(ok, err)
-            assert.equal(2, #calls)
-            assert.equal(0, #collect_conversions(ast))
+            assert.equal(3, #calls)
+            local conversions = collect_conversions(ast)
+            assert.equal(1, #conversions)
+            local conversion = conversions[1]._c_conversion
+            assert.equal("unsafe_object_pointer", conversion.kind)
+            assert.equal(calls[3].key, conversion.probe_key)
 
             local operators = collect_marked(ast, "_c_operator")
             assert.equal(1, #operators)
             local trait = operators[1]._c_operator
             assert.equal(trait.lhs_target, trait.rhs_target)
             assert.equal(calls[2].key, trait.probe_key)
-            assert.truthy(calls[2].key:find("c_operator", 1, true))
+            assert.not_equal(calls[2].source, calls[3].source)
+            assert.not_equal(trait.probe_key, conversion.probe_key)
         end)
     end)
 
@@ -682,66 +691,20 @@ describe("contextual unsafe C object-pointer conversions", function()
                 end
                 joined = table.concat(joined, "\n")
                 assert.match(
-                    "extern ffi_tcp %*titan_probe_s_%x+;",
+                    "extern ffi_tcp %*titan_probe_s;",
                     joined)
                 assert.match(
-                    "ffi_handle %*titan_probe_t_%x+", joined)
+                    "ffi_handle %*titan_probe_t", joined)
                 assert.match(
-                    "extern ffi_pipe %*titan_probe_s_%x+;",
+                    "extern ffi_pipe %*titan_probe_s;",
                     joined)
                 assert.match(
-                    "ffi_stream %*titan_probe_t_%x+", joined)
+                    "ffi_stream %*titan_probe_t", joined)
                 assert.match(
-                    "extern ffi_fs %*titan_probe_s_%x+;",
+                    "extern ffi_fs %*titan_probe_s;",
                     joined)
                 assert.match(
-                    "ffi_request %*titan_probe_t_%x+", joined)
-        end)
-    end)
-
-    it("rejects conflicting identities for one retained probe input",
-    function()
-        with_header(declarations, function(header)
-            local context_calls = 0
-            local service = {
-                profile = test_profile(),
-                cdriver_process_options = test_process_options,
-                module_context = function()
-                    context_calls = context_calls + 1
-                    return {
-                        header_inputs = {
-                            {
-                                kind = "file",
-                                path = "/stable/probe-input.h",
-                                identity = "first identity",
-                            },
-                            {
-                                kind = "file",
-                                path = "/stable/probe-input.h",
-                                identity = "second identity",
-                            },
-                        },
-                    }
-                end,
-            }
-            local code = 'local c = foreign import "' .. header .. [["
-                local function convert(
-                    p: *c.ffi_source
-                ): *c.ffi_target
-                    return p
-                end
-            ]]
-            local ast = assert(h.parse(code))
-            local _, errors = checker.check(
-                "test", ast, code, "test.titan", nil, {
-                    probe_service_provider = function() return service end,
-                })
-
-            assert.equal(1, context_calls)
-            assert.match(
-                "conflicting C header input identity for " ..
-                    "'/stable/probe-input.h'",
-                table.concat(errors, "\n"), 1, true)
+                    "ffi_request %*titan_probe_t", joined)
         end)
     end)
 

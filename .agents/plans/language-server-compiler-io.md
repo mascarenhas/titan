@@ -96,8 +96,7 @@ contract without blocking or spawning helper processes.
   existence.
 - Route C compiler discovery/probes through strategy argv capture. Preserve
   `LANG=C`, `LC_ALL=C`, merged-output policy, exact exit/signal normalization,
-  cancellation cleanup, persistent-probe cache publication rules, and the
-  pre/post input identity checks.
+  cancellation cleanup, and complete-file cache publication.
 - Let `staticmetadata.scan_archive` obtain its bounded byte input through the
   strategy. Build/publication-only streaming verification may retain the
   synchronous default because it is not reachable from language-server

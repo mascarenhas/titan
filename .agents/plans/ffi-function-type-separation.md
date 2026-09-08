@@ -65,7 +65,7 @@ Replace `c_function_as_function_type` and other temporary `Type.Function` projec
 
 - Make `types.callable_adjustment`, `consistent`, gradual guards, and callable serialization reason only about `Type.Function`; remove the defensive C-vararg special case.
 - Simplify `Type.Function` equality to Titan/Lua callable shape. Keep C signature equality entirely in `Type.CFunction`/C declaration compatibility.
-- Update C-origin/include traversal, `cprobe`, redeclaration batching, declaration-array views, and composite merging to traverse `Type.CFunction` directly instead of unwrapping `_c_function`.
+- Update C-origin/include traversal, `cprobe`, declaration-array views, and composite merging to traverse `Type.CFunction` directly instead of unwrapping `_c_function`.
 - Ensure no generic relation turns `Type.CFunction` into `Type.Function` or vice versa. Direct function-to-pointer decay stays a checker-owned contextual action.
 
 ## Tests

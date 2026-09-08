@@ -437,18 +437,26 @@ evidence and never writes to stdout.
 `options.c_probe_semantic_trace` is an optional best-effort callback receiving
 one bounded event table for every logical probe request. Its scalar fields are
 `event = "semantic_result"`, `module`, `key`, `probe_kind`,
-`header_identity`, `outcome`, `cache_tier`, `repeated`, and `publication`.
+`header_identity`, `header_label`, `outcome`, `cache_tier`, `repeated`, and
+`publication`.
+`key` is SHA-256 of the requested raw probe source, or empty when an early
+infrastructure failure prevents rendering it. `header_identity` is
+SHA-256 of its raw baseline source and serves only as an observation label.
+`header_label` is a bounded display of the literal top-level include spellings.
 Cache tiers are `service`, `analysis`, `persistent`, or `compiler`; outcomes
 are `success`, `compiler_rejection`, or `infrastructure_failure`. The event
 contains no source, command, argv, diagnostic, or filesystem path.
 
 `options.c_probe_execution_trace` similarly receives one event per physical C
 compiler launch. Its fields are `event = "compiler_execution"`, `module`,
-`key`, `probe_kind`, `batch_kind`, `header_identity`, `outcome`,
-`persistent_lookup`, `publication`, and optional `wall_ms`. The I/O strategy
-may supply finite nonnegative child wall milliseconds in its normalized
-`run` result; process CPU is never substituted. Both structured callbacks are
-protected and may not change compilation when they fail.
+`key`, `probe_kind`, `batch_kind`, `header_identity`, `header_label`, `outcome`,
+`started`, `persistent_lookup`, `publication`, and optional `wall_ms`. The service always
+reports `batch_kind = "single"`: each compiler invocation checks one probe.
+`key` and `header_identity` have the same source-digest meanings as in the
+semantic event. The I/O strategy may supply finite nonnegative child wall
+milliseconds in its normalized `run` result; process CPU is never substituted.
+Both structured callbacks are protected and may not change compilation when
+they fail.
 
 The following is the complete normative strategy contract for language-server
 API 3. Signatures use Lua multiple-return notation. Every table that crosses
@@ -918,31 +926,25 @@ all `-imacros` operands first, then all `-include` operands, stable within each
 class. In a joined spelling an initial `=` is part of the filename, matching
 the compiler (`-include=file` requests the literal name `=file`). Relative
 operands consult the process cwd and then the complete ordered quote/system
-search. Their exact bytes, transitive closure, and all winning and earlier
-candidate states partition the preprocessor macro cache, the compiler-probe
-toolchain key, version-2 module header context, and version-3 persistent digest.
-The probe identity retains the parsed compiler and raw ordered flag/include
-configuration, target profile, compile mode, forced-header manifest, source
-directory, ordered raw/rendered header descriptors and file/search inputs,
-semantic key, and complete probe source. Successful probes use the existing
-empty `.success` marker; deterministic compiler rejections use a bounded,
-checksummed `.negative` sibling under the same digest.
+search. Their exact bytes, transitive closure, and all winning and earlier candidate states partition the
+preprocessor macro cache. This dependency tracking belongs to C header parsing.
 
-The in-memory raw semantic key is consulted before rendering or hashing the
-complete probe source. Outside an explicit `process_analysis`, forced inputs
-are validated and hashed once per service and ordinary inputs once per module
-context; repeated probes and persistent hits reuse that snapshot without a
-post-compiler restat. Inside one coherent analysis the probe service performs
-zero local header restats because the semantic client owns snapshot validation
-and the publication boundary. A header change which races one physical compiler
-invocation is deliberately approximate; compilation of the final generated C
-remains authoritative.
+Compiled C probes use only SHA-256 of their complete unpreprocessed source as
+the cache key. Include directives count as literal text; forced-header
+contents, toolchain options, target profiles, and header search state do not.
+Memory and disk reuse acceptance and rejection under that same key. Format 1
+stores one bounded result with diagnostics at
+`<prefix>/var/cache/titan-probes/1/<digest>.result`. Clear that directory or set
+`TITAN_PROBE_CACHE_DISABLE=1` to bypass persistent reuse if external changes make
+results stale. Generated C is compiled normally. See
+[compiled probe caching](c-ffi-expressions.md#analysis-local-and-persistent-semantic-results)
+for record and failure handling.
 
 Response-file arguments (`@file`) and opaque preprocessor forwarding through
 `-Wp,` or `-Xpreprocessor` are rejected in this path: Titan cannot safely
 discover a forced-header closure hidden inside those encodings. Missing or
-unreadable forced headers are likewise configuration failures and never create
-a reusable compiler-probe success.
+unreadable forced headers are likewise configuration failures during header
+processing.
 
 A standalone entrypoint is therefore compiled to its own `.o` with both
 extra compile flag sets, then linked in a separate command that contains
@@ -1297,8 +1299,8 @@ bootstrap. The canonical installed artifacts are
 `<root>/share/titan/0.6/src/titan/test.titan`. SDK and stdlib artifacts remain
 direct files outside the rock manifest and are not removed by
 `luarocks remove`. Earlier Titan installations are neither migration sources
-nor active-layout predecessors. Linux CI keys restored native-probe state by
-ABI, rebuilds the active `0.6` rock and direct shims, and asserts that the
+nor active-layout predecessors. Linux CI rebuilds the active `0.6` rock and
+direct shims, and asserts that the
 resulting interpreter uses the `0.6` library path. This does not waive the
 ordinary manually dispatched full macOS pre-merge suite.
 
@@ -1637,7 +1639,7 @@ the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 | `options.extra_ffi_include_dirs` | semantic clients / `driver.new_resolver_context` | `{}` | Analysis-local include roots appended to a fresh foreign-C probe descriptor without process-global reconfiguration. |
 | `options.c_probe_cache_trace` | semantic clients / `driver.new_resolver_context` | `nil` | Best-effort scalar `(module_name, stage, hit, key, path)` observer for persistent semantic-result lookups; it neither enables verbose evidence nor writes to stdout. |
 | `options.c_probe_semantic_trace` | semantic clients / `driver.new_resolver_context` | `nil` | Best-effort bounded event-table observer for one logical terminal result per probe request, including outcome, cache tier, repeat, and publication state. |
-| `options.c_probe_execution_trace` | semantic clients / `driver.new_resolver_context` | `nil` | Best-effort bounded event-table observer for physical compiler launches, including batch kind, outcome, cache/publication state, and optional child wall milliseconds. |
+| `options.c_probe_execution_trace` | semantic clients / `driver.new_resolver_context` | `nil` | Best-effort bounded event-table observer for physical compiler launches, including source digest, outcome, cache/publication state, and optional child wall milliseconds. |
 | `titan._loadlib` | `ltitanlib.c` / `driver.lua` | internal `RTLD_LAZY` + `RTLD_LOCAL` loader | Maps DSO candidates lazily for callable ABI/type interface recovery without initializing them or globalizing their symbols; archive candidates are parsed in-process instead. |
 | `titan._loadlibglobal` | `ltitanlib.c` / generated shims | internal canonical-path `RTLD_LAZY` + `RTLD_GLOBAL` loader | Maps or promotes a Lua-selected provider in a separate per-state cache and returns the requested logical `luaopen_*` entry. |
 | `Type.Module.file` | `types.lua`, `driver.lua`, `coder.lua` | exact logical `.so` path for a DSO claim, overwritten after dynamic lookup | Transient selected relative DSO used by generated handle imports; deliberately omitted from serialized interfaces and never populated with an archive path. |

@@ -516,17 +516,17 @@ describe("compiler installation discovery", function()
                 nil, "./discarded/../normalized//"))
     end)
 
-    it("derives the ABI-owned probe cache from an explicit prefix first",
+    it("derives the format-1 probe cache from an explicit prefix first",
        function()
         local cpath = "/installed/lib/lua/5.5/?.so"
-        assert.equal("/explicit/var/cache/titan-probes/2",
-            driver.probe_cache_directory(cpath, "/explicit", "2"))
-        assert.equal("/installed/var/cache/titan-probes/2",
-            driver.probe_cache_directory(cpath, "", "2"))
-        assert.equal("/var/cache/titan-probes/2",
+        assert.equal("/explicit/var/cache/titan-probes/1",
+            driver.probe_cache_directory(cpath, "/explicit"))
+        assert.equal("/installed/var/cache/titan-probes/1",
+            driver.probe_cache_directory(cpath, ""))
+        assert.equal("/var/cache/titan-probes/1",
             driver.probe_cache_directory(
-                "/lib/lua/5.5/?.so", nil, "2"))
-        assert.is_nil(driver.probe_cache_directory(nil, nil, "2"))
+                "/lib/lua/5.5/?.so", nil))
+        assert.is_nil(driver.probe_cache_directory(nil, nil))
     end)
 
     it("honors the test-only persistent-probe-cache disable switch",
@@ -543,7 +543,7 @@ assert(driver.PROBE_CACHE_DIRECTORY == nil)
         assert.is_true(os.execute(command))
     end)
 
-    it("uses the ABI version for initialized persistent probe caches",
+    it("uses format 1 for initialized persistent probe caches",
        function()
         local module_name = "titan-compiler.driver"
         local loaded_driver = package.loaded[module_name]
@@ -561,7 +561,7 @@ assert(driver.PROBE_CACHE_DIRECTORY == nil)
         package.loaded[module_name] = loaded_driver
         assert.truthy(loaded, value)
 
-        local expected = "/explicit/var/cache/titan-probes/2"
+        local expected = "/explicit/var/cache/titan-probes/1"
         assert.equal(expected, value.PROBE_CACHE_DIRECTORY)
         local context = value.new_resolver_context()
         assert.equal(expected, value.PROBE_CACHE_DIRECTORY)
