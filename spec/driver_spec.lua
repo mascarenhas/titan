@@ -2356,17 +2356,16 @@ describe("compiler module loader", function()
         driver.serialize_source_interface = function()
             return nil, "forced source-interface failure"
         end
-        local called, ok, _, errors = pcall(loader, name)
+        local called, ok, err = pcall(loader, name)
         driver.serialize_source_interface = serialize
 
-        assert.truthy(called, tostring(ok))
-        assert.truthy(ok)
-        assert.equal(1, #errors)
+        assert.truthy(called)
+        assert.falsy(ok)
         assert.equal(
             "could not serialize source interface for module '" .. name ..
                 "': forced source-interface failure",
-            errors[1])
-        assert.is_nil(driver.imported[name].source_manifest)
+            err)
+        assert.is_nil(driver.imported[name])
         assert.is_true(driver.close_loader(loader))
     end)
 

@@ -1,4 +1,5 @@
 extra_ffi_include_dirs = {
+  "lua-5.5.1/src",
   "vendor/lpeglabel",
   "llhttp-release-v9.4.3/include",
   "sqlite-autoconf-3530400",
