@@ -103,7 +103,7 @@ cprobe.new_service = function(options)
 end
 
 local header = assert(arg[1], "missing test header")
-local code = 'local c = foreign import "' .. header .. '"\n'
+local code = "foreign import \"" .. header .. '"\n'
 local ast, parse_error =
     parser.parse("direct_checker_profile.titan", code)
 assert(ast, parse_error)
@@ -114,7 +114,7 @@ cprobe.new_service = original_new_service
 cdriver.target_profile_inputs = original_target_profile_inputs
 
 assert(#errors == 0, table.concat(errors, "\n"))
-local constant = assert(ast[1]._type.members.TITAN_PROFILE_VALUE)
+local constant = assert(ast._ffi_namespace._type.members.TITAN_PROFILE_VALUE)
 assert(constant.type.spelling == "unsigned int",
     tostring(constant.type.spelling))
 assert(constant.type.bits == 32, tostring(constant.type.bits))

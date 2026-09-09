@@ -191,7 +191,7 @@ change them only when their own compatibility rules require it.
   tree must never cross one of those boundaries. Keep Linux dependency builds
   in the job that consumes their warm tree, and keep both production-mode
   smokes in the producer instead of rebuilding them in a consumer. The
-  prefix-owned `var/cache/titan-probes/1` directory is the deliberate
+  prefix-owned `var/cache/titan-probes/2` directory is the deliberate
   exception to that full-tree transfer: exclude it from the tar and snapshot it
   independently in the regular producer, sanitizer, and macOS jobs with
   `ubicloud/cache@v4`. The regular producer uses explicit restore/save actions
@@ -365,8 +365,8 @@ change them only when their own compatibility rules require it.
 - **clang-format.** Ordinary Linux and macOS builds do not invoke or require a
   formatter. `titanc --pretty-print` opts in: the `CLANG_FORMAT` command defaults
   to `clang-format`, is parsed into argv only in that mode, and receives Titan's
-  fixed explicit style with include sorting disabled for every generated `.c`
-  and `.titan.h` stage. It never discovers a project's `.clang-format`; `-v`
+  fixed explicit style with include sorting disabled for every generated `.c`,
+  `.ffi.h`, and `.titan.h` stage. It never discovers a project's `.clang-format`; `-v`
   prints the safely quoted formatter command only when it is executed. Every
   mode still removes blank physical lines immediately after `#line` directives.
 - **C toolchain**: `CC` (default `cc`) for compilation and for the C FFI's
@@ -931,8 +931,8 @@ independently for each real source file → one dense AST → one
 `--pretty-print` is selected, and then invokes the parsed `CC` command with each
 argument shell-quoted. An opted-in formatter failure retains the raw or
 partially formatted C for diagnosis but prevents native compilation. Generated
-source-foreign `.titan.h` companions use the same boundary in a sibling stage
-before publication. Folder descriptors are temporary loader
+`.ffi.h` and source-foreign `.titan.h` companions use the same boundary in
+sibling stages before publication. Folder descriptors are temporary loader
 metadata, not AST nodes or namespaces. In no-main mode, `titanc` derives the
 longest common dotted provider from the deduplicated requested roots, rejects
 unrelated roots,
@@ -985,12 +985,11 @@ private edges are not serialized ABI or runtime input and must stay outside the
 coder's erased-boundary traversal.
 
 During each `TopLevelVar`, `symtab.initializer_order` hides the current/later
-module variables and later Titan/foreign imports; foreign type/name histories
-recover the last C declaration visible at that frontier, while
-`foreign_definition_visible` uses a canonical struct/union owner's
-`_definition_order` to hide completion performed by a later header. Every other
-declaration kind sees all imports, nominal owners, aliases, and callables regardless
-of relative placement. Body checking and the coder still traverse the unchanged
+module variables and later ordinary Titan import aliases. The reserved `ffi`
+namespace has already been populated from the complete ordered module C
+environment; its names, macros, and complete aggregates are visible throughout
+the module. Every other declaration kind sees all imports, nominal owners,
+aliases, and callables regardless of relative placement. Body checking and the coder still traverse the unchanged
 AST order, as does `makemoduletype`.
 
 - Every ordinary type-directed target sink asks
@@ -1397,7 +1396,7 @@ substitution, recursive; error on missing keys). Key facts:
   or a 0-user-value `Udata0` holding the raw non-GC C scalar inline via
   `getudatamem` (no tagging, no barrier). Boxes are module-internal (never
   cross a module boundary), so the representation is not part of the ABI.
-- The driver normalizes every compiler-generated `.c` and `.titan.h` stage
+- The driver normalizes every compiler-generated `.c`, `.ffi.h`, and `.titan.h` stage
   before compilation, probing, or publication. `--pretty-print` additionally
   applies a fixed `clang-format` style with include sorting disabled, because
   generated header and preamble include order is intentional; never delegate the
@@ -1457,27 +1456,51 @@ substitution, recursive; error on missing keys). Key facts:
 
 ### C FFI (`c-parser/`, `foreigntypes.lua`)
 
-`foreign import "header.h"` invokes a pure-Lua C toolchain: `cpp.lua` (full hand-written preprocessor; asks the configured `CC -std=c99` plus parsed `TITAN_EXTRA_CPPFLAGS` for system include paths and predefined macros), `c99.lua` (relabel C99 grammar; module-global typedef table, not reentrant), `ctypes.lua`/`cdefines.lua` (build a TypeList), and `cdriver.lua` (include resolution plus C type extraction). The checker passes the importing Titan source directory and the shared toolchain configuration to `cdriver`, which emits quoted `#include "..."` syntax only when the header is found by the quoted-include rules relative to that source; otherwise generated C uses angle brackets. `cdriver` also exposes `titan-runtime/titan/ffi.h` for the trusted Titan/Lua boundary. Portable C primitive types instead use Titan's contextual surface spellings; only header-independent graphs built from those primitives, pointers, foreign function pointers, and `owned` storage are exportable. Contextual conversions and C operators use one resolver-owned `cprobe.Service`.
-Its compile-only probes use the generated objects' configured compiler, flags,
-include ordering, and target arithmetic profile. Cache identity is only
-SHA-256 of the complete raw, unpreprocessed probe C source. Literal include
-spelling participates; header contents, compiler configuration, target profile,
-and semantic metadata do not. Memory and disk use the same digest. Format 1
-stores one bounded acceptance/rejection record with diagnostics at
-`<prefix>/var/cache/titan-probes/1/<digest>.result`. Publish complete files by atomic
-replacement; malformed records and cache I/O failures are misses. Completed
-compiler rejections are reusable, while infrastructure failures remain
-retryable. Users clear the cache when external inputs change or bypass
-persistent reuse with `TITAN_PROBE_CACHE_DISABLE=1`; final generated-C
-compilation remains authoritative.
+`foreign import "header.h"` is an unbound top-level directive. The reserved
+`ffi` namespace contains the module's final C types and values and cannot be
+shadowed, stored, passed, or exported. The old bound import syntax is rejected.
+Every source module owns `A.ffi.h`, containing explicit `.titan` dependency FFI
+headers in dependency declaration order, then local directives in combined AST
+order. For folder modules that means main first, then bytewise-sorted
+contributors. Ordinary imports contribute no C environment.
 
-Compile each uncached candidate individually. Process ordinary redeclarations
-in source order and apply each accepted composite before rendering the next
-pair. An explicit source import retains its unique physical checking header;
-a stable private-workspace forwarding include preserves quoted-header origin.
-Keep header parsing and analysis snapshot validation separate from probe-result
-memoization. Within one analysis the first completed source result wins across
-yielding Tasks.
+`cdriver.process_module` preprocesses and parses the actual combined `A.ffi.h`
+once using `cpp.lua`, `c99.lua`, `ctypes.lua`, and `cdefines.lua`; header guards,
+macro state, redeclarations, and C scopes determine the final TypeList. Author
+quoted headers resolve under the canonical source directory and use normalized
+absolute spelling. Generated checking trees contain the real `.ffi.h` files
+with a deterministic content-derived identity and no forwarding wrappers or
+filesystem identity tricks. Dependency C headers are transitive; direct private
+Titan visibility still requires a written explicit `.titan` edge.
+
+A module defining foreign functions also gets `A.titan.h` for their C
+declarations and eligible inline bodies. Generated `A.c` includes `A.ffi.h`
+before `A.titan.h` when present. Both generated paths are
+compiler-owned, guarded, staged before publication, and source-only artifacts.
+Final generated-C compilation diagnoses C namespace conflicts that can arise
+when additional consumer headers affect an imported source declaration.
+
+Portable C primitives use Titan's contextual spellings; only recursively
+header-independent primitive, pointer, foreign-function-pointer, and owned
+graphs are exportable. Contextual conversions and C operators use one
+resolver-owned `cprobe.Service` with the configured compiler, flags, include
+ordering, and target profile. Probes include the fixed generated-C runtime
+prefix followed by the current module's combined `.ffi.h`.
+
+Probe identity is only SHA-256 of complete raw unpreprocessed C source. Literal
+include spelling participates; real author-header contents, compiler policy,
+target profiles, and semantic metadata do not. The generated bundle's identity
+appears in a comment beside its stable logical include in the raw probe.
+Memory and disk use the same source
+digest. Format 2 stores a bounded acceptance/rejection record with diagnostics
+and optional typed enum selection at
+`<prefix>/var/cache/titan-probes/2/<digest>.result`. Publish complete files by
+atomic replacement. Malformed records and I/O failures are misses; completed
+rejections and valid zero/multiple enum matches are reusable, while
+infrastructure failures are retryable. Users clear the cache for stale external
+inputs or set `TITAN_PROBE_CACHE_DISABLE=1` to bypass persistent reuse. Keep
+header/analysis validation separate. Within one analysis, the first completed
+source result wins across yielding Tasks.
 
 Recognized existing object-like integer/accessor expressions and fully expanded
 outer casts to C integer, floating, object-pointer, or function-pointer types
@@ -1486,8 +1509,7 @@ The bounded accessor path includes typed dereferences such as the common
 `errno` expansion; it is not general support for arbitrary call-containing
 expressions. A pure dotted identifier replacement becomes a lazily resolved
 field projection, again emitted by public spelling. Generated C hoists all
-foreign headers, so checker lookup replays their raw definitions,
-redefinitions, dependency rescans, and undefinitions into one final module
+foreign headers through `A.ffi.h`, so checker lookup uses the final combined
 macro environment, even for earlier closure initializers. Because C
 preprocessing precedes field lookup, a live projection wins over a same-named
 physical field, and an invalid path or active unsupported object macro is
@@ -1498,30 +1520,23 @@ The preprocessor's final object-like definition set is an unordered map:
 `util.bytewise_less` order. Do not use process-random `pairs` order or
 locale-sensitive ordinary string sorting there, so macro-derived declarations
 retain deterministic order across compiler processes.
-Declaration extraction still preprocesses each foreign header independently,
-while probes and generated C see the cumulative ordered header block, so
-conditional macro coupling and later changes to scalar macros typed by an
-earlier import belong behind one umbrella header imported once.
+Declaration extraction and macro classification use the same final combined
+C environment; an earlier header can control later conditional declarations.
 
-`foreigntypes.convert` maps C declarations to the `Type.C*` family (`CVoid`, `CInteger`, `CFloat`, `CPointer`, `CArray`, `CStruct`, `CUnion`, `CFunction`, `CTypedef`, `CModule`, and owned storage wrappers). C imports are namespaces, not first-class values: the checker represents them as `Type.CModule` (renamed from the prototype's foreign-module type), typedef-qualified names such as `c.T` may be used in local annotations, and `types.serialize` rejects any exported function/method/variable type that mentions a C FFI type. An eligible named file-scope tag-only `struct T` or `union T` is published as the base-name Titan type `c.T`, but remains its canonical `CStruct`/`CUnion` and generates exact tag spelling; do not invent a `CTypedef`, header alias, or ordinary C identifier. A real same-name typedef always wins. C aggregate fields, C array indexing, `#` on static arrays and counted owned buffers, and explicit C vararg calls are implemented; C array indexing is 0-based, bounds-checked for `CArray` and counted `COwned`, and null-checked but otherwise unchecked for raw `CPointer`. Object-pointer conversions, C arithmetic, relational/equality, bitwise, and shift operators, C promotions, and mixed Titan/C operands follow the target profile plus the contextual probe policy; they do not reuse Titan's Lua-semantics operator helpers. Titan's `and`/`or`/`not` remain excluded from C-mode operators.
+`foreigntypes.convert` maps C declarations to the `Type.C*` family (`CVoid`, `CInteger`, `CFloat`, `CPointer`, `CArray`, `CStruct`, `CUnion`, `CFunction`, `CTypedef`, `CModule`, and owned storage wrappers). C imports are namespaces, not first-class values: the checker represents them as `Type.CModule` (renamed from the prototype's foreign-module type), typedef-qualified names such as `ffi.T` may be used in local annotations, and `types.serialize` rejects any exported function/method/variable type that mentions a C FFI type. An eligible named file-scope tag-only `struct T` or `union T` is published as the base-name Titan type `ffi.T`, but remains its canonical `CStruct`/`CUnion` and generates exact tag spelling; do not invent a `CTypedef`, header alias, or ordinary C identifier. A real same-name typedef always wins. C aggregate fields, C array indexing, `#` on static arrays and counted owned buffers, and explicit C vararg calls are implemented; C array indexing is 0-based, bounds-checked for `CArray` and counted `COwned`, and null-checked but otherwise unchecked for raw `CPointer`. Object-pointer conversions, C arithmetic, relational/equality, bitwise, and shift operators, C promotions, and mixed Titan/C operands follow the target profile plus the contextual probe policy; they do not reuse Titan's Lua-semantics operator helpers. Titan's `and`/`or`/`not` remain excluded from C-mode operators.
 
 Source modules remain ordinary separate C translation units compiled with the
-same configured compiler and flags. Generated C includes every header directly
-foreign-imported by that module plus normalized origin headers reached from C
-types whose declarations codegen actually renders. Retained typedefs and
-aggregates stop at their own spelling; `owned` values render as `Udata *` and do
-not collect payload origins until a real payload cast/access. C operator and
-unsafe-pointer probes use the same direct-plus-rendered-origin rule. Do not
-propagate a blanket source-module header or preprocessing closure, compare
-cross-TU macro/layout/attribute state, or give header order semantic meaning.
-Direct and supplemental quoted headers must both use the same normalized
-`include.rendered` spelling.
+same configured compiler and flags. An explicit `.titan` import brings the
+producer's generated `.ffi.h` chain into the consumer's combined C environment.
+Do not reconstruct supplemental origin lists from used types or restore
+per-header namespace snapshots. Header order has normal C preprocessing
+meaning and is shared by declaration extraction, probes, and generated C.
 
 A C enum is nominal and is never lowered through the parser's provisional
 `int`. On first value use, the configured compiler must select an ordinary
 carrier whose complete range fits `lua_Integer`; unused unsafe enums remain
 inert. Probe the exact use surface (retaining an outer typedef) in the
-consumer's direct-plus-rendered-origin context; never let one alias/module
+consumer's combined `.ffi.h` context; never let one alias/module
 context cache certification for another. Every enumerator expression, including
 one from a tagged enum, is checked independently through exact
 `__typeof__((NAME))` spelling for an ordinary carrier and exact value range, and
@@ -1534,6 +1549,13 @@ enum objects use an exact unqualified, nonpromoting value spelling while every
 object declarator from one anonymous enum retains the same canonical owner; an
 unspellable prototype enum fails closed even below a pointer. Signed/unsigned
 `__int128` are not candidates and Titan has no wide-enum integer lowering.
+Select the carrier with one object-producing question over all range-eligible
+ordinary integer candidates, not one compile per candidate. The exact enum
+object is declared once; the payload records match count and carrier ID/sum in
+a dedicated ELF/Mach-O section. Read it with the bounded object reader without
+linking or executing target code. Invalid/missing payloads are retryable and
+uncached; zero or multiple matches are typed completed answers. Preserve the
+independent exact enumerator value-range checks.
 
 Exact C integer and floating values stay in their raw C representation until a
 checker-owned conversion or boxing plan reaches a real Titan/Lua carrier
@@ -1698,7 +1720,7 @@ are intentionally absent. The combinators do not cancel unfinished inputs.
 Runtime cleanup discovers handles exclusively with `uv_walk` and closes them
 with `uv_close`. A `uv_file` is a process descriptor, crosses Runtime sessions,
 and is never registered for shutdown. `titan.uv` keeps it as a source-local
-alias to `libuv.uv_file`; the high-level `fs.File` facade owns the raw
+alias to `ffi.uv_file`; the high-level `fs.File` facade owns the raw
 descriptor, its closed sentinel, and delimiter excess. It marks the sentinel
 before an accepted close can suspend, restores it only on a pre-commit failure,
 and reloads the field for every short-write submission so a concurrent close

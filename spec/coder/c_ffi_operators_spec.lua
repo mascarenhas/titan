@@ -200,38 +200,38 @@ describe("C FFI operator code generation", function()
             static int ffi_get_log(void) { return ffi_log; }
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function arithmetic(): integer
-                    return (c.ffi_neg() / c.ffi_three()) as integer
-                        + (c.ffi_neg() % c.ffi_three()) as integer
-                        + (-c.ffi_three()) as integer
+                    return (ffi.ffi_neg() / ffi.ffi_three()) as integer
+                        + (ffi.ffi_neg() % ffi.ffi_three()) as integer
+                        + (-ffi.ffi_three()) as integer
                 end
 
                 function bitwise(): integer
                     local mixed =
-                        (c.ffi_bits() & c.ffi_mask())
-                        | (~c.ffi_mask())
-                    return ((mixed ~ c.ffi_bits())
-                        >> c.ffi_one()) as integer
-                        + (c.ffi_one() << c.ffi_one()) as integer
+                        (ffi.ffi_bits() & ffi.ffi_mask())
+                        | (~ffi.ffi_mask())
+                    return ((mixed ~ ffi.ffi_bits())
+                        >> ffi.ffi_one()) as integer
+                        + (ffi.ffi_one() << ffi.ffi_one()) as integer
                 end
 
                 function comparisons(): boolean
-                    return c.ffi_max() ~= c.ffi_one()
-                        and c.ffi_end() - c.ffi_begin() == 3
-                        and c.ffi_null() == nil
-                        and c.ffi_left_pointer()
-                            == c.ffi_right_pointer()
-                        and c.ffi_get_callback()
-                            == c.ffi_get_callback()
+                    return ffi.ffi_max() ~= ffi.ffi_one()
+                        and ffi.ffi_end() - ffi.ffi_begin() == 3
+                        and ffi.ffi_null() == nil
+                        and ffi.ffi_left_pointer()
+                            == ffi.ffi_right_pointer()
+                        and ffi.ffi_get_callback()
+                            == ffi.ffi_get_callback()
                 end
 
                 function evaluation_order(): integer
-                    c.ffi_reset_log()
-                    local sum = c.ffi_first() + c.ffi_second()
+                    ffi.ffi_reset_log()
+                    local sum = ffi.ffi_first() + ffi.ffi_second()
                     return (sum as integer) * 100
-                        + (c.ffi_get_log() as integer)
+                        + (ffi.ffi_get_log() as integer)
                 end
             ]], [[
                 assert(test.arithmetic() == -6)
@@ -246,7 +246,7 @@ describe("C FFI operator code generation", function()
     function()
         with_header(declarations, function(header)
             local source = [[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local nil_effects: integer = 0
 
@@ -256,92 +256,92 @@ describe("C FFI operator code generation", function()
                 end
 
                 function trunc_division(): integer
-                    return (c.ffi_neg_seven() / c.ffi_three()) as integer
+                    return (ffi.ffi_neg_seven() / ffi.ffi_three()) as integer
                 end
 
                 function unary_minus(): integer
-                    return (-c.ffi_three()) as integer
+                    return (-ffi.ffi_three()) as integer
                 end
 
                 function unary_complement(): integer
-                    return (~c.ffi_bits_low()) as integer
+                    return (~ffi.ffi_bits_low()) as integer
                 end
 
                 function signed_remainder(): integer
-                    return (c.ffi_neg_seven() % c.ffi_three()) as integer
+                    return (ffi.ffi_neg_seven() % ffi.ffi_three()) as integer
                 end
 
                 function unsigned_wrap(): boolean
-                    return c.ffi_uint_max() + c.ffi_uint_one()
-                        == c.ffi_uint_zero()
+                    return ffi.ffi_uint_max() + ffi.ffi_uint_one()
+                        == ffi.ffi_uint_zero()
                 end
 
                 function mixed_small(offset: integer): integer
-                    return (c.ffi_uchar_max() + offset) as integer
+                    return (ffi.ffi_uchar_max() + offset) as integer
                 end
 
                 function exceeds_uint(length: integer): boolean
-                    return length > c.FFI_UINT_MAX
+                    return length > ffi.FFI_UINT_MAX
                 end
 
                 function floating_half(): float
-                    return (c.ffi_float_one() / 2.0) as float
+                    return (ffi.ffi_float_one() / 2.0) as float
                 end
 
                 function bitwise(): integer
-                    return ((c.ffi_bits_a() & c.ffi_bits_b())
-                        | c.ffi_bits_low()) as integer
+                    return ((ffi.ffi_bits_a() & ffi.ffi_bits_b())
+                        | ffi.ffi_bits_low()) as integer
                 end
 
                 function xor_value(): integer
-                    return (c.ffi_bits_a() ~ c.ffi_bits_b()) as integer
+                    return (ffi.ffi_bits_a() ~ ffi.ffi_bits_b()) as integer
                 end
 
                 function shifted(): integer
-                    return (c.ffi_uchar_one()
-                        << c.ffi_ulong_three()) as integer
+                    return (ffi.ffi_uchar_one()
+                        << ffi.ffi_ulong_three()) as integer
                 end
 
                 function shifted_right(): integer
-                    return (c.ffi_bits_a()
-                        >> c.ffi_uchar_one()) as integer
+                    return (ffi.ffi_bits_a()
+                        >> ffi.ffi_uchar_one()) as integer
                 end
 
                 function not_equal(): boolean
-                    return c.ffi_uint_max() ~= c.ffi_uint_zero()
+                    return ffi.ffi_uint_max() ~= ffi.ffi_uint_zero()
                 end
 
                 function array_value(): integer
-                    return c.ffi_read_int(c.ffi_values + 2) as integer
+                    return ffi.ffi_read_int(ffi.ffi_values + 2) as integer
                 end
 
                 function pointer_difference(): integer
-                    return c.ffi_end() - c.ffi_begin()
+                    return ffi.ffi_end() - ffi.ffi_begin()
                 end
 
                 function pointer_nil(): boolean
-                    return c.ffi_null() == nil
+                    return ffi.ffi_null() == nil
                 end
 
                 function unrelated_pointer_equality(): boolean
-                    return c.ffi_as_item() == c.ffi_as_other()
+                    return ffi.ffi_as_item() == ffi.ffi_as_other()
                 end
 
                 function function_pointer_equality(): boolean
-                    return c.ffi_callback_a() == c.ffi_callback_b()
+                    return ffi.ffi_callback_a() == ffi.ffi_callback_b()
                 end
 
                 function evaluation_order(): integer
-                    c.ffi_reset_log()
-                    local sum = c.ffi_left() + c.ffi_right()
+                    ffi.ffi_reset_log()
+                    local sum = ffi.ffi_left() + ffi.ffi_right()
                     return (sum as integer) * 100
-                        + (c.ffi_get_log() as integer)
+                        + (ffi.ffi_get_log() as integer)
                 end
 
                 function effectful_nil_equality(): integer
                     nil_effects = 0
                     local equal =
-                        c.ffi_begin() == effectful_nil()
+                        ffi.ffi_begin() == effectful_nil()
                     if equal then
                         return -1
                     end
@@ -419,18 +419,18 @@ describe("C FFI operator code generation", function()
     function()
         with_header(declarations, function(header)
             local source = [[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function checked_sizeof(): integer
-                    return c.ffi_item.sizeof
+                    return ffi.ffi_item.sizeof
                 end
 
                 function checked_alignof(): integer
-                    return c.ffi_item.alignof
+                    return ffi.ffi_item.alignof
                 end
 
                 function checked_difference(): integer
-                    return c.ffi_end() - c.ffi_begin()
+                    return ffi.ffi_end() - ffi.ffi_begin()
                 end
             ]]
             local csrc = generate_with_profile(

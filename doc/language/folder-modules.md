@@ -96,10 +96,12 @@ context-typed record constructor may precede the written owner declaration,
 even across contributors.
 
 Module-variable declarations retain the one order-sensitive frontier. For
-each such declaration, the combined order decides which imports and earlier
-module variables are visible; records, unions, aliases, and callable declarations are
-visible module-wide. Thus an import in a later contributor is *not* available
-to a module variable in the main source.
+each such declaration, the combined order decides which ordinary Titan imports
+and earlier module variables are visible; records, unions, aliases, and callable
+declarations are visible module-wide. Thus an ordinary import alias in a later
+contributor is *not* available to a module variable in the main source. Foreign
+directives instead form one combined C environment in main-then-contributor
+order; all final `ffi` declarations are available throughout the module.
 
 The combined order also decides which declaration is earlier for duplicate
 diagnostics, orders serialized interface members and run-time module slots,

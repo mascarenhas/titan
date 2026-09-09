@@ -53,24 +53,11 @@ function coder._foreign_include_line(include)
         "foreign include has no normalized spelling")
 end
 
--- C declarations rendered while generating one module report the origin
--- headers of their named FFI components. coder.generate installs the collector;
--- direct unit helpers can still render declarations with no active collector.
-function coder._record_c_type_use(typ)
-    local collect = coder._ffi_include_collector
-    if not collect then return end
-    for _, include in ipairs(types.c_ffi_includes(typ)) do
-        collect(include, false)
-    end
-end
-
 function coder._render_c_type_name(typ)
-    coder._record_c_type_use(typ)
     return cdeclarator.render_type_name(typ)
 end
 
 function coder._render_c_declaration(typ, name)
-    coder._record_c_type_use(typ)
     return cdeclarator.render_declaration(typ, name)
 end
 

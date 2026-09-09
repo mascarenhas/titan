@@ -778,8 +778,7 @@ describe("unions (end-to-end)", function()
     it("covers representative union payload storage and case loads once",
         function()
             local csrc = h.compile_and_read_c([[
-            local ffi =
-                foreign import "spec/fixtures/c_tvalue_soundness.h"
+            foreign import "spec/fixtures/c_tvalue_soundness.h"
 
             local type Owner = owned ffi.titan_spec_tvalue_int[]
 
@@ -874,8 +873,8 @@ describe("unions (end-to-end)", function()
     it("round-trips the full payload matrix across full and minor GC #stress",
         function()
             local csrc = h.compile_and_read_c([[
-            local ffi = foreign import "titan/ffi.h"
-            local lua = foreign import "lua.h"
+            foreign import "titan/ffi.h"
+            foreign import "lua.h"
 
             local type Owner = owned int[]
 
@@ -907,27 +906,27 @@ describe("unions (end-to-end)", function()
 
             local function select_gc(generational: boolean)
                 if generational then
-                    lua.lua_gc(L, lua.LUA_GCGEN)
+                    ffi.lua_gc(L, ffi.LUA_GCGEN)
                 else
-                    lua.lua_gc(L, lua.LUA_GCINC)
+                    ffi.lua_gc(L, ffi.LUA_GCINC)
                 end
-                lua.lua_gc(L, lua.LUA_GCCOLLECT)
+                ffi.lua_gc(L, ffi.LUA_GCCOLLECT)
             end
 
             local function collect_after_store(generational: boolean)
                 if generational then
                     -- In generational mode these are minor collections. Do
                     -- not let this proof collapse to "switch mode, full GC".
-                    lua.lua_gc(
-                        L, lua.LUA_GCSTEP, 0 as lua.lua_Integer)
-                    lua.lua_gc(
-                        L, lua.LUA_GCSTEP, 0 as lua.lua_Integer)
-                    lua.lua_gc(
-                        L, lua.LUA_GCSTEP, 0 as lua.lua_Integer)
-                    lua.lua_gc(
-                        L, lua.LUA_GCSTEP, 0 as lua.lua_Integer)
+                    ffi.lua_gc(
+                        L, ffi.LUA_GCSTEP, 0 as ffi.lua_Integer)
+                    ffi.lua_gc(
+                        L, ffi.LUA_GCSTEP, 0 as ffi.lua_Integer)
+                    ffi.lua_gc(
+                        L, ffi.LUA_GCSTEP, 0 as ffi.lua_Integer)
+                    ffi.lua_gc(
+                        L, ffi.LUA_GCSTEP, 0 as ffi.lua_Integer)
                 else
-                    lua.lua_gc(L, lua.LUA_GCCOLLECT)
+                    ffi.lua_gc(L, ffi.LUA_GCCOLLECT)
                 end
             end
 
@@ -1110,7 +1109,7 @@ describe("unions (end-to-end)", function()
 
                 -- Validate every initial union payload store and make the
                 -- union/Array owners old before the fresh element stores.
-                lua.lua_gc(L, lua.LUA_GCCOLLECT)
+                ffi.lua_gc(L, ffi.LUA_GCCOLLECT)
                 install_fresh_array_elements(array, maybe_array)
                 collect_after_store(generational)
 
@@ -1132,7 +1131,7 @@ describe("unions (end-to-end)", function()
                     + payload_value(raw)
                     + payload_value(udata)
 
-                lua.lua_gc(L, lua.LUA_GCINC)
+                ffi.lua_gc(L, ffi.LUA_GCINC)
                 return result
             end
 
@@ -1146,7 +1145,7 @@ describe("unions (end-to-end)", function()
                 when maybe_array: maybe then
                     result = not maybe
                 end
-                lua.lua_gc(L, lua.LUA_GCINC)
+                ffi.lua_gc(L, ffi.LUA_GCINC)
                 return result
             end
         ]])

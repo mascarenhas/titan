@@ -29,7 +29,7 @@ end
 
 local function cleanup()
     for _, path in ipairs({
-        "test.c", "test.o", "test.so", "test.a", "test.titan.h",
+        "test.c", "test.o", "test.so", "test.a", "test.titan.h", "test.ffi.h",
     }) do
         os.remove(path)
     end
@@ -39,7 +39,7 @@ end
 describe("source-defined foreign functions", function()
     after_each(cleanup)
 
-    it("emits one reserved companion header and the UCN entry family", function()
+    it("emits both reserved module headers and the UCN entry family", function()
         with_header([[
             #ifdef TITAN_TEST_FOREIGN_HEADER_SEEN
             #error foreign header included twice in one translation unit
@@ -52,25 +52,25 @@ describe("source-defined foreign functions", function()
             }
         ]], function(header)
             local csrc = h.compile_and_read_c([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                foreign function add_one(input: c.ffi_int): c.ffi_int
+                foreign function add_one(input: ffi.ffi_int): ffi.ffi_int
                     return input + 1
                 end
 
-                foreign function choose(input: c.ffi_int): c.ffi_int
+                foreign function choose(input: ffi.ffi_int): ffi.ffi_int
                     if input then return input else return 7 end
                 end
 
-                foreign function choose_or(input: c.ffi_int): c.ffi_int
+                foreign function choose_or(input: ffi.ffi_int): ffi.ffi_int
                     if input then return input end
                     return 8
                 end
 
-                foreign function accumulate(limit: c.ffi_int): c.ffi_int
+                foreign function accumulate(limit: ffi.ffi_int): ffi.ffi_int
                     local total = 0
-                    if limit then total = c.ffi_apply(add_one, total) end
-                    for index = 1 as c.ffi_int, limit do
+                    if limit then total = ffi.ffi_apply(add_one, total) end
+                    for index = 1 as ffi.ffi_int, limit do
                         total = total + index
                     end
                     return total + choose(0) + choose_or(0)
@@ -86,7 +86,7 @@ describe("source-defined foreign functions", function()
                 end
 
                 function exercise(input: integer): integer
-                    return (c.ffi_apply(add_one, input as c.ffi_int)
+                    return (ffi.ffi_apply(add_one, input as ffi.ffi_int)
                         as integer) + hidden(accumulate(3) as integer)
                 end
             ]])
@@ -101,6 +101,13 @@ describe("source-defined foreign functions", function()
             assert.truthy(generated:find("TITAN_SOURCE_LOCAL ffi_int " .. accumulate,
                 1, true))
             assert.truthy(csrc:find('/test.titan.h"', 1, true))
+            local ffi_include = assert(csrc:find('/test.ffi.h"', 1, true))
+            local titan_include = assert(csrc:find('/test.titan.h"', 1, true))
+            assert.is_true(ffi_include < titan_include)
+            local ffi_contents = read_file("test.ffi.h")
+            assert.truthy(ffi_contents:find(header, 1, true))
+            assert.truthy(generated:find('/test.ffi.h"', 1, true))
+            assert.falsy(generated:find(header, 1, true))
             assert.truthy(csrc:find("test_\\u2133_hidden_titan", 1, true))
             assert.falsy(csrc:find("titan_source_", 1, true))
 
@@ -185,74 +192,74 @@ describe("source-defined foreign functions", function()
             }
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                foreign function raw(limit: c.ffi_int): c.ffi_int
+                foreign function raw(limit: ffi.ffi_int): ffi.ffi_int
                     local total = 0
-                    local pointer: *c.ffi_int = nil
+                    local pointer: *ffi.ffi_int = nil
                     if pointer then total = 100 end
-                    if limit then total = total + c.ffi_next() end
+                    if limit then total = total + ffi.ffi_next() end
                     while total < limit do total = total + 1 end
                     repeat total = total - 1 until total == limit - 1
                     return total
                 end
 
-                foreign function sequence(): c.ffi_int
-                    c.ffi_reset_trace()
+                foreign function sequence(): ffi.ffi_int
+                    ffi.ffi_reset_trace()
                     local first, second =
-                        c.ffi_value(1, 3), c.ffi_value(2, 4)
-                    c.ffi_target(3, 0)[0], c.ffi_target(4, 1)[0] =
-                        c.ffi_value(5, first), c.ffi_value(6, second)
-                    return c.ffi_trace_value()
-                        + c.ffi_slot(0) + c.ffi_slot(1)
+                        ffi.ffi_value(1, 3), ffi.ffi_value(2, 4)
+                    ffi.ffi_target(3, 0)[0], ffi.ffi_target(4, 1)[0] =
+                        ffi.ffi_value(5, first), ffi.ffi_value(6, second)
+                    return ffi.ffi_trace_value()
+                        + ffi.ffi_slot(0) + ffi.ffi_slot(1)
                 end
 
-                foreign function prepared_pointer_target(): c.ffi_int
-                    local holder = c.ffi_first_slot()
-                    holder.pointer[0] = c.ffi_retarget(holder)
-                    return c.ffi_slot(0) * 10 + c.ffi_slot(1)
+                foreign function prepared_pointer_target(): ffi.ffi_int
+                    local holder = ffi.ffi_first_slot()
+                    holder.pointer[0] = ffi.ffi_retarget(holder)
+                    return ffi.ffi_slot(0) * 10 + ffi.ffi_slot(1)
                 end
 
-                foreign function prepared_index_target(): c.ffi_int
-                    local holder = c.ffi_first_slot()
-                    holder.pointer[holder.index] = c.ffi_reindex(holder)
-                    return c.ffi_slot(0) * 10 + c.ffi_slot(1)
+                foreign function prepared_index_target(): ffi.ffi_int
+                    local holder = ffi.ffi_first_slot()
+                    holder.pointer[holder.index] = ffi.ffi_reindex(holder)
+                    return ffi.ffi_slot(0) * 10 + ffi.ffi_slot(1)
                 end
 
-                foreign function prepared_indirect_callee(): c.ffi_int
-                    local holder = c.ffi_callback_holder_new()
-                    return holder.callback(c.ffi_retarget_callback(holder))
+                foreign function prepared_indirect_callee(): ffi.ffi_int
+                    local holder = ffi.ffi_callback_holder_new()
+                    return holder.callback(ffi.ffi_retarget_callback(holder))
                 end
 
                 foreign function roundtrip_pointer(
-                    pointer: c.ffi_void_pointer
-                ): c.ffi_int
-                    local callback = pointer as c.ffi_unary_callback
+                    pointer: ffi.ffi_void_pointer
+                ): ffi.ffi_int
+                    local callback = pointer as ffi.ffi_unary_callback
                     return callback(1)
                 end
 
                 foreign function named(
-                    left: c.ffi_int,
-                    right: c.ffi_int
-                ): c.ffi_int
+                    left: ffi.ffi_int,
+                    right: ffi.ffi_int
+                ): ffi.ffi_int
                     return left * 10 + right
                 end
 
-                foreign function raw_forms(callback: c.ffi_callback): c.ffi_int
-                    local negative: c.ffi_int = -1
+                foreign function raw_forms(callback: ffi.ffi_callback): ffi.ffi_int
+                    local negative: ffi.ffi_int = -1
                     local computed = callback(2, 5)
-                    local selected: c.ffi_callback = named
+                    local selected: ffi.ffi_callback = named
                     local selected_value = selected(1, 2)
-                    local holder = c.ffi_holder()
+                    local holder = ffi.ffi_holder()
                     holder.pointer[holder.index] = 6
                     return named { right = computed, left = negative }
-                        + c.ffi_literals(true, 2.5, "x")
+                        + ffi.ffi_literals(true, 2.5, "x")
                         + holder.pointer[holder.index] + selected_value
                 end
 
                 function exercise(): integer
                     return (raw(4) as integer) * 10
-                        + (c.ffi_counter_value() as integer)
+                        + (ffi.ffi_counter_value() as integer)
                 end
 
                 function sequencing(): integer
@@ -274,7 +281,7 @@ describe("source-defined foreign functions", function()
 
                 function roundtrip(): integer
                     local pointer =
-                        c.ffi_get_callback() as c.ffi_void_pointer
+                        ffi.ffi_get_callback() as ffi.ffi_void_pointer
                     return roundtrip_pointer(pointer) as integer
                 end
             ]], [[
@@ -293,10 +300,10 @@ describe("source-defined foreign functions", function()
             typedef double ffi_double;
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                foreign function float_loops(): c.ffi_double
-                    local total: c.ffi_double = 0.0
+                foreign function float_loops(): ffi.ffi_double
+                    local total: ffi.ffi_double = 0.0
                     for up = 0.0, 1.0, 0.25 do
                         total = total + up
                     end
@@ -331,16 +338,16 @@ describe("source-defined foreign functions", function()
             }
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 foreign function outputs(): int
-                    local item: *c.ffi_item = nil
+                    local item: *ffi.ffi_item = nil
                     local text: const *char = nil
-                    c.ffi_outputs(item, text)
+                    ffi.ffi_outputs(item, text)
                     local erased: *void = item
                     if erased ~= item then return -1 end
-                    if c.ffi_layout(c.ffi_item.sizeof,
-                                    c.ffi_item.alignof) == 0 then return -2 end
+                    if ffi.ffi_layout(ffi.ffi_item.sizeof,
+                                    ffi.ffi_item.alignof) == 0 then return -2 end
                     return item.value + (text[0] as int)
                 end
 
@@ -349,9 +356,9 @@ describe("source-defined foreign functions", function()
                 end
 
                 function ordinary_result(): integer
-                    local item: *c.ffi_item = nil
+                    local item: *ffi.ffi_item = nil
                     local text: const *char = nil
-                    c.ffi_outputs(item, text)
+                    ffi.ffi_outputs(item, text)
                     return item.value + (text[0] as integer)
                 end
             ]], [[
@@ -372,21 +379,21 @@ describe("source-defined foreign functions", function()
             static int ffi_observed(void) { return ffi_trace; }
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 foreign function select_arm(selected: int): int
-                    c.ffi_clear()
+                    ffi.ffi_clear()
                     local result: int = 0
-                    if c.ffi_condition(1, selected) then
+                    if ffi.ffi_condition(1, selected) then
                         result = 10
-                    elseif c.ffi_condition(2, selected) then
+                    elseif ffi.ffi_condition(2, selected) then
                         result = 20
-                    elseif c.ffi_condition(3, selected) then
+                    elseif ffi.ffi_condition(3, selected) then
                         result = 30
                     else
                         result = 40
                     end
-                    return c.ffi_observed() * 100 + result
+                    return ffi.ffi_observed() * 100 + result
                 end
 
                 function result(selected: integer): integer
@@ -410,26 +417,26 @@ describe("source-defined foreign functions", function()
             static int ffi_current(void) { return ffi_value; }
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 foreign function add(amount: int)
-                    c.ffi_add(amount)
+                    ffi.ffi_add(amount)
                 end
 
                 foreign function add_result(amount: int): int
-                    return c.ffi_add(amount)
+                    return ffi.ffi_add(amount)
                 end
 
                 function exercise(): integer
-                    c.ffi_reset()
+                    ffi.ffi_reset()
                     defer add(20)
                     add(1)
                     add_result(2)
-                    return c.ffi_current()
+                    return ffi.ffi_current()
                 end
 
                 function current(): integer
-                    return c.ffi_current()
+                    return ffi.ffi_current()
                 end
             ]], [[
                 assert(test.exercise() == 3)
@@ -450,22 +457,22 @@ describe("source-defined foreign functions", function()
             }
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 local type Pointer = *void
 
                 foreign function call_pointer(): *Pointer
-                    return c.ffi_pointer_source() as *Pointer
+                    return ffi.ffi_pointer_source() as *Pointer
                 end
 
                 foreign function local_pointer(): int
-                    local raw = c.ffi_pointer_source()
-                    c.ffi_pointer_sink(raw as *Pointer)
-                    if raw ~= c.ffi_pointer_source() then return -1 end
-                    return c.ffi_written()
+                    local raw = ffi.ffi_pointer_source()
+                    ffi.ffi_pointer_sink(raw as *Pointer)
+                    if raw ~= ffi.ffi_pointer_source() then return -1 end
+                    return ffi.ffi_written()
                 end
 
                 function result(): integer
-                    if call_pointer() ~= c.ffi_pointer_source() then return -2 end
+                    if call_pointer() ~= ffi.ffi_pointer_source() then return -2 end
                     return local_pointer()
                 end
             ]], [[

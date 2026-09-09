@@ -96,33 +96,27 @@ into the importing module's lexical scope.
 
 ## Foreign declarations
 
-An explicit-source-visible declaration may contain a C FFI type even though its
-consumer did not write the corresponding `foreign import`. Each generated C
-translation unit includes its own direct foreign-import headers plus the
-normalized origin headers of C types for which that unit actually emits
-declarations. For those ordinary values the rule remains use-driven: an unused
-source dependency does not contribute a blanket header closure. Quoted origins
-use the same normalized spelling in producer and consumer, so path-sensitive
-declarations such as `sizeof(__FILE__)` agree.
+An explicit-source-visible declaration may contain a C FFI type even when its
+consumer does not repeat the producer's foreign directives. Every source
+module generates `A.ffi.h`. An explicit `.titan` import includes the dependency's
+`.ffi.h` in the consumer's combined C environment, before the consumer's direct
+foreign directives. This C header chain is transitive and follows actual C
+include guards, macro state, and declaration scopes.
 
-A producer that defines `foreign function` declarations additionally generates
-one source-adjacent `*.titan.h`. Every explicit source importer includes that
-companion, which contains the prototypes/eligible inline definitions and the C
-headers required to render them. The consumer checker reuses the producer's
-already established real-header and complete macro context before checking declarations
-and bodies, while its authoritative C probe still includes the same companion.
-The compiler therefore does not reinterpret its generated temporary as a new C
-foreign import. Temporary companions make recursive checking possible; the
-compiler rewrites them to final paths and removes them from the resolver context
-afterward.
+A producer defining foreign functions also generates `A.titan.h` for its C
+prototypes and eligible inline bodies. Generated C includes its own `.ffi.h`
+first, then its `.titan.h` when present and the needed explicit-source Titan
+headers. Resolver-owned checking trees contain the actual generated headers;
+final compilation uses their source-adjacent counterparts.
 
-Neither mechanism exposes the producer's `foreign import` alias or grants Titan
-visibility transitively. A generated C header is declaration plumbing;
-`alias.member` still needs a written explicit-source capability, and a binary
-provider carries no companion permission. Source modules remain ordinary C
-translation units compiled with the same configured compiler and flags. Import
-an umbrella header directly when unrelated declarations depend on a particular
-include or macro order.
+The consumer's reserved `ffi` namespace comes from parsing its combined
+`.ffi.h`. Private Titan names still require a direct written `.titan` import:
+`alias.member` remains governed by the explicit-source capability even when a
+C declaration arrives through a transitive header. Ordinary and binary imports
+grant no C-environment inheritance or private Titan permission. Each source
+module still compiles as an ordinary separate C translation unit. If a
+consumer's additional headers make an imported declaration incompatible, final
+C compilation may report the conflict.
 
 ## Binary imports and Lua
 

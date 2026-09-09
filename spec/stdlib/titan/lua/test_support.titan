@@ -2,8 +2,8 @@ local test = import "test"
 local runtime_test = import "support.runtime.titan"
 local async = import "async"
 local fs = import "fs"
-local lua = foreign import "lua.h"
-local ffi = foreign import "titan/ffi.h"
+foreign import "lua.h"
+foreign import "titan/ffi.h"
 
 local type CheckedAction = () -> ()
 local type PackageSearcher = (string) -> (value, value)
@@ -62,13 +62,13 @@ local function temporary_file(_: test.Context,
 end
 
 local function lua_package_table(): {string: value}
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  if lua.lua_checkstack(L, 1) == 0 then
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then
     raise "cannot reserve Lua stack for native package lookup"
   end
-  lua.lua_getglobal(L, "package")
-  if lua.lua_type(L, -1) ~= lua.LUA_TTABLE then
+  ffi.lua_getglobal(L, "package")
+  if ffi.lua_type(L, -1) ~= ffi.LUA_TTABLE then
     raise "global 'package' is not a table"
   end
   local raw_package: value = ffi.lua_totvalue(L, -1)

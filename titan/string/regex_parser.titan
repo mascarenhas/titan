@@ -500,7 +500,7 @@ local function regex_decimal(source: string, expression: string,
       raise "internal regular-expression decimal is invalid"
     end
     local digit = (digit_position as integer) - 1
-    local maximum = lua.LUA_MAXINTEGER as integer
+    local maximum = ffi.LUA_MAXINTEGER as integer
     if result > (maximum - digit) // 10 then
       raise_regex_diagnostic(
         "bad_quantifier", "repeat bound is too large",

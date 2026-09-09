@@ -1,6 +1,6 @@
-local luac = foreign import "lua.h"
-local ffi = foreign import "titan/ffi.h"
-local lobject = foreign import "lobject.h"
+foreign import "lua.h"
+foreign import "titan/ffi.h"
+foreign import "lobject.h"
 local iteration = import "iteration"
 local lua = import "lua"
 local str = import "string"
@@ -19,7 +19,7 @@ end
 
 record RecordValue
   -- val keeps this borrowed receiver alive.
-  local const udata: *lobject.Udata
+  local const udata: *ffi.Udata
   const n_fields: integer
   -- record value for use as receiver in method calls
   const val: value
@@ -36,7 +36,7 @@ record UnionValue
 end
 
 record InterfaceValue
-  local const udata: *lobject.Udata
+  local const udata: *ffi.Udata
   const n_fields: integer
   const val: value -- the interface wrapper, receiver for method calls
   const wrapped: value -- underlying record/union
@@ -134,7 +134,7 @@ record RecordType
 end
 
 record UnionType
-  local const payload_reader: foreign (*lua_State, *lobject.Udata, *ffi.TValue) -> ()
+  local const payload_reader: foreign (*lua_State, *ffi.Udata, *ffi.TValue) -> ()
   const name: string
   const variants: const { VariantType }
   const statics: const { StaticFunctionType }
@@ -150,7 +150,7 @@ end
 record FieldType
   -- Module ownership and accessor identity are captured once during hydration.
   local const module: value
-  local const accessor: foreign (*lua_State, *lobject.Udata, *lobject.Udata, *ffi.TValue, int) -> ()
+  local const accessor: foreign (*lua_State, *ffi.Udata, *ffi.Udata, *ffi.TValue, int) -> ()
   const name: string
   const index: integer
   const descriptor: Type
@@ -379,13 +379,13 @@ end
 local METATABLE_BY_NAME: { string: { value: value } } = {}
 
 local function init_metatable_by_name()
-  local top = luac.lua_gettop(L)
-  defer luac.lua_settop(L, top)
-  if luac.lua_checkstack(L, 1) == 0 then
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then
     raise "cannot reserve stack for the nominal registry"
   end
-  local t = luac.lua_getfield(L, luac.LUA_REGISTRYINDEX, ffi.TITAN_METATABLES_KEY)
-  if t ~= luac.LUA_TTABLE then
+  local t = ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_METATABLES_KEY)
+  if t ~= ffi.LUA_TTABLE then
     raise "Titan metatable by name registry is not a table"
   end
   METATABLE_BY_NAME = ffi.lua_totvalue(L, -1) as value
@@ -513,7 +513,7 @@ local function init_hydration_env()
   hydration_env["Field"] = function(fqtn: string, name: string, typ: Type, index: integer, isconst: boolean): FieldType
     return {
       module = active_module,
-      accessor = active_membermap[name] as foreign (*lua_State, *lobject.Udata, *lobject.Udata, *ffi.TValue, int) -> (),
+      accessor = active_membermap[name] as foreign (*lua_State, *ffi.Udata, *ffi.Udata, *ffi.TValue, int) -> (),
       name = name,
       index = index,
       descriptor = typ,
@@ -587,7 +587,7 @@ local function init_hydration_env()
        functions: value, 
        methods: value): Type
     return Type.is_union({
-      payload_reader = active_payload_reader as foreign (*lua_State, *lobject.Udata, *ffi.TValue) -> (),
+      payload_reader = active_payload_reader as foreign (*lua_State, *ffi.Udata, *ffi.TValue) -> (),
       name = name,
       variants = to_array(cast_metadata_optional<{integer: VariantType}>(variants)),
       statics = to_sorted_array(cast_metadata_optional<{string: StaticFunctionType}>(functions)),
@@ -805,7 +805,7 @@ function find_nominal(name: string): NominalType?
   return nom
 end
 
-local function is_titan_closure(cl: *lobject.CClosure): boolean
+local function is_titan_closure(cl: *ffi.CClosure): boolean
   if cl.nupvalues < 5 then
     return false
   end
@@ -820,14 +820,14 @@ end
 local function inspect_function(v: value): Value
   local tv: ffi.TValue = v
   if ffi.lmacro_ttisLclosure(tv) ~= 0 then
-    local top = luac.lua_gettop(L)
-    defer luac.lua_settop(L, top)
-    if luac.lua_checkstack(L, 1) == 0 then
+    local top = ffi.lua_gettop(L)
+    defer ffi.lua_settop(L, top)
+    if ffi.lua_checkstack(L, 1) == 0 then
       raise "cannot reserve stack for Lua function inspection"
     end
-    local ar: owned *luac.lua_Debug = luac.lua_Debug.new()
+    local ar: owned *ffi.lua_Debug = ffi.lua_Debug.new()
     ffi.lua_pushtvalue(L, tv)
-    if luac.lua_getinfo(L, ">Su", ar) == 0 then
+    if ffi.lua_getinfo(L, ">Su", ar) == 0 then
       raise "could not get Lua function info"
     end
     local src = ""
@@ -853,7 +853,7 @@ local function inspect_function(v: value): Value
       descriptor = desc
     })
   elseif ffi.lmacro_ttisCclosure(tv) ~= 0 then
-    local cl: *lobject.CClosure = ffi.lmacro_clCvalue(tv)
+    local cl: *ffi.CClosure = ffi.lmacro_clCvalue(tv)
     if is_titan_closure(cl) then
       local upvalues = cl.upvalue as *ffi.TValue
       local native_entry = ffi.lmacro_pvalue(upvalues[2])
@@ -927,7 +927,7 @@ local function init_brand_handlers()
     when is_union: desc then
       local tv: ffi.TValue = v
       local u = ffi.lmacro_uvalue(tv)
-      local uv_ptr = u.uv as *lobject.UValue
+      local uv_ptr = u.uv as *ffi.UValue
       local tag: integer = 0
       local tag_val: value = uv_ptr[0].uv
       if tag_val is integer then
@@ -952,7 +952,7 @@ local function init_brand_handlers()
     when is_interface: desc then
       local tv: ffi.TValue = v
       local u = ffi.lmacro_uvalue(tv)
-      local uv_ptr = u.uv as *lobject.UValue
+      local uv_ptr = u.uv as *ffi.UValue
       local wrapped = uv_ptr[1].uv
       return Value.is_interface({
         udata = u,
@@ -976,7 +976,7 @@ local function init_brand_handlers()
     when is_owned_foreign_array: arr_t then
       local count: integer = 0
       if (u.nuvalue as integer) > 0 then
-        local uv_ptr = u.uv as *lobject.UValue
+        local uv_ptr = u.uv as *ffi.UValue
         local count_val: value = uv_ptr[0].uv
         if count_val is integer then
           count = count_val as integer
@@ -1004,7 +1004,7 @@ end
 
 local function inspect_userdata(v: value): Value
   local tv: ffi.TValue = v
-  local ud: *lobject.Udata = ffi.lmacro_uvalue(tv)
+  local ud: *ffi.Udata = ffi.lmacro_uvalue(tv)
   local mt = ud.metatable
   if mt == nil then
     return Value.is_lua_userdata({ val = v })
@@ -1041,7 +1041,7 @@ local function init_tag_handlers()
 
   tag_handlers[4] = function(v: value): Value
     local tv: ffi.TValue = v
-    if ffi.lmacro_ttypetag(tv) == lobject.LUA_VNUMINT then
+    if ffi.lmacro_ttypetag(tv) == ffi.LUA_VNUMINT then
       return Value.is_integer(v as integer)
     else
       return Value.is_float(v as float)

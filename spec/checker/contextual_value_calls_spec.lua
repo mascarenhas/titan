@@ -631,10 +631,10 @@ describe("contextual calls through value (typechecker)", function()
     function()
         with_header("typedef int *phase_c_iptr;\n", function(header)
             local errs = h.check_errs([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function use(f: value): nil
-                    local xs: {c.phase_c_iptr} = { f() }
+                    local xs: {ffi.phase_c_iptr} = { f() }
                     return nil
                 end
             ]])
@@ -655,17 +655,17 @@ describe("contextual calls through value (typechecker)", function()
             extern int phase_c_sum(int first, ...);
         ]], function(header)
             local errs = h.check_errs([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function use(f: value): nil
-                    c.phase_c_add(1)
-                    c.phase_c_add(1, 2, 3)
-                    c.phase_c_sum(1, f())
+                    ffi.phase_c_add(1)
+                    ffi.phase_c_add(1, 2, 3)
+                    ffi.phase_c_sum(1, f())
                     return nil
                 end
 
                 function valid(f: value): integer
-                    return c.phase_c_add(f())
+                    return ffi.phase_c_add(f())
                 end
             ]])
             local all = table.concat(errs, "\n")

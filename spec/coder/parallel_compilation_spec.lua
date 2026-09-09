@@ -171,6 +171,18 @@ local function checked_requests(leaves)
     return requests
 end
 
+local function requests_with_headers()
+    local requests = checked_requests()
+    local names, imported = {}, {}
+    for _, request in ipairs(requests) do
+        names[#names + 1] = request.modname
+        imported[request.modname] = request.mod
+    end
+    local ok, err = driver.prepare_foreign_headers(names, imported, false)
+    assert.truthy(ok, err)
+    return requests
+end
+
 local function configure_counting_compiler(
         diagnostics, failing_module, expected, mode)
     driver.CC = shell_command({
@@ -600,6 +612,7 @@ describe("parallel generated-C compilation", function()
 
     it("reaps an active batch when creating a later log fails", function()
         configure_counting_compiler(nil, nil, 3)
+        local requests = requests_with_headers()
         local temporary_logs = {}
         local calls = 0
         os.tmpname = function()
@@ -610,7 +623,7 @@ describe("parallel generated-C compilation", function()
             return path
         end
 
-        local results = driver.compile_modules(checked_requests(), 4, false)
+        local results = driver.compile_modules(requests, 4, false)
         os.tmpname = previous_tmpname
         local failed = 0
         for _, result in ipairs(results) do
@@ -632,6 +645,7 @@ describe("parallel generated-C compilation", function()
 
     it("cleans the first log when creating the second log fails", function()
         configure_counting_compiler(nil, nil, 3)
+        local requests = requests_with_headers()
         local temporary_logs = {}
         local calls = 0
         os.tmpname = function()
@@ -642,7 +656,7 @@ describe("parallel generated-C compilation", function()
             return path
         end
 
-        local results = driver.compile_modules(checked_requests(), 4, false)
+        local results = driver.compile_modules(requests, 4, false)
         os.tmpname = previous_tmpname
         assert.falsy(results[1].ok)
         assert.truthy(tostring(results[1].err):find(
@@ -727,6 +741,7 @@ describe("parallel generated-C compilation", function()
 
     it("prints only commands whose parallel launch is attempted", function()
         configure_counting_compiler(nil, nil, 3)
+        local requests = requests_with_headers()
         local temporary_logs = {}
         local calls = 0
         os.tmpname = function()
@@ -745,7 +760,7 @@ describe("parallel generated-C compilation", function()
             flush = function() return true end,
         }
 
-        local results = driver.compile_modules(checked_requests(), 4, true)
+        local results = driver.compile_modules(requests, 4, true)
         os.tmpname = previous_tmpname
         io.stdout = previous_stdout
         assert.falsy(results[1].ok)

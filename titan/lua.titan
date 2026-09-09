@@ -1,7 +1,7 @@
-local lua = foreign import "lua.h"
-local lual = foreign import "lauxlib.h"
-local cstddef = foreign import "stddef.h"
-local ffi = foreign import "titan/ffi.h"
+foreign import "lua.h"
+foreign import "lauxlib.h"
+foreign import "stddef.h"
+foreign import "titan/ffi.h"
 
 local async = import "async"
 local fs = import "fs"
@@ -18,23 +18,23 @@ local type Loader = (string, value) -> value
 local loading: {string: boolean} = {}
 
 local function global_value(name: string): value
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  if lua.lua_checkstack(L, 1) == 0 then
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then
     raise "cannot reserve Lua stack for global lookup"
   end
-  lua.lua_getglobal(L, name)
+  ffi.lua_getglobal(L, name)
   return ffi.lua_totvalue(L, -1)
 end
 
 local function registry_map(name: string): {string: value}
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  if lua.lua_checkstack(L, 1) == 0 then
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then
     raise "cannot reserve Lua stack for registry lookup"
   end
-  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, name)
-  if lua.lua_type(L, -1) ~= lua.LUA_TTABLE then
+  ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, name)
+  if ffi.lua_type(L, -1) ~= ffi.LUA_TTABLE then
     raise "Lua registry entry '" .. name .. "' is not a table"
   end
   local result: value = ffi.lua_totvalue(L, -1)
@@ -42,28 +42,28 @@ local function registry_map(name: string): {string: value}
 end
 
 local function is_lua_function(candidate: value): boolean
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  if lua.lua_checkstack(L, 1) == 0 then
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then
     raise "cannot reserve Lua stack for function test"
   end
   ffi.lua_pushtvalue(L, candidate)
-  return lua.lua_type(L, -1) == lua.LUA_TFUNCTION
+  return ffi.lua_type(L, -1) == ffi.LUA_TFUNCTION
 end
 
 function load(chunk: string, name: string?, env: value):
     (...: value) -> (...: value)
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  if lua.lua_checkstack(L, 2) == 0 then
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 2) == 0 then
     raise "cannot reserve Lua stack for chunk loading"
   end
 
   local chunkname = chunk
   if name then chunkname = name as string end
-  local status = lual.luaL_loadbufferx(
-    L, chunk, #chunk as cstddef.size_t, chunkname, nil)
-  if status ~= lua.LUA_OK then
+  local status = ffi.luaL_loadbufferx(
+    L, chunk, #chunk as ffi.size_t, chunkname, nil)
+  if status ~= ffi.LUA_OK then
     local failure: value = ffi.lua_totvalue(L, -1)
     raise failure
   end
@@ -73,10 +73,10 @@ function load(chunk: string, name: string?, env: value):
   -- Lua's loader.
   if env ~= nil then
     ffi.lua_pushtvalue(L, env)
-    if not lua.lua_setupvalue(L, -2, 1) then
+    if not ffi.lua_setupvalue(L, -2, 1) then
       -- A binary chunk may not expose a first upvalue. lua_setupvalue leaves the
       -- supplied value on the stack in that case.
-      lua.lua_settop(L, -2)
+      ffi.lua_settop(L, -2)
     end
   end
 
@@ -212,7 +212,7 @@ local function find_loader(modname: string,
 end
 
 function require(modname: string): value
-  local loaded = registry_map(lual.LUA_LOADED_TABLE as string)
+  local loaded = registry_map(ffi.LUA_LOADED_TABLE as string)
   local cached: value = loaded[modname]
   if cached then return cached end
 

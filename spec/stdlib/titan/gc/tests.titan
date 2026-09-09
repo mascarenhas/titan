@@ -1,7 +1,7 @@
 local test = import "test"
 local gclib = import "gc"
 local support = import "support.common.titan"
-local lua_api = foreign import "lua.h"
+foreign import "lua.h"
 
 local record FinalizableProbe
   marker: integer
@@ -17,18 +17,18 @@ local type ModeSelector = () -> boolean
 
 local function finalizable_stack_delta<T>(candidate: T,
                                           callback: (T) -> ()): integer
-  local top = lua_api.lua_gettop(L)
+  local top = ffi.lua_gettop(L)
   gclib.finalizable<T>(candidate, callback)
-  return lua_api.lua_gettop(L) - top
+  return ffi.lua_gettop(L) - top
 end
 
 local function rejected_stack_delta<T>(candidate: T,
                                        callback: (T) -> ()): integer
-  local top = lua_api.lua_gettop(L)
+  local top = ffi.lua_gettop(L)
   do
     gclib.finalizable<T>(candidate, callback)
   catch
-    return lua_api.lua_gettop(L) - top
+    return ffi.lua_gettop(L) - top
   end
   return 1000000
 end

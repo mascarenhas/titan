@@ -1,7 +1,7 @@
-local lua = foreign import "lua.h"
-local ffi = foreign import "titan/ffi.h"
-local cstring = foreign import "string.h"
-local private_lpeg = foreign import "titan_lpeglabel.h"
+foreign import "lua.h"
+foreign import "titan/ffi.h"
+foreign import "string.h"
+foreign import "titan_lpeglabel.h"
 local gc = import "gc"
 
 -- LPegLabel 1.6.2-1 uses 16-bit tree offsets and keeps ten slots in

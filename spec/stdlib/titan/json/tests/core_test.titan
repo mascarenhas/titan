@@ -1,4 +1,4 @@
-local core_locale = foreign import "locale.h"
+foreign import "locale.h"
 
 local function core_error(action: () -> (), code: string): json.Error
   local failure = expect_json_error(action)
@@ -96,23 +96,23 @@ function test_core_float_range_tags_and_round_trips(_context: test.Context)
 end
 
 function test_core_locale_independent_numbers(_context: test.Context)
-  local original = core_locale.setlocale(core_locale.LC_NUMERIC, nil) as string
-  defer core_locale.setlocale(core_locale.LC_NUMERIC, original)
+  local original = ffi.setlocale(ffi.LC_NUMERIC, nil) as string
+  defer ffi.setlocale(ffi.LC_NUMERIC, original)
   local candidates: {string} = {"de_DE.UTF-8", "fr_FR.UTF-8", "pt_BR.UTF-8",
     "de_DE.utf8", "fr_FR.utf8", "French_France.1252"}
   local changed = false
   for index = 1, #candidates do
-    if core_locale.setlocale(core_locale.LC_NUMERIC, candidates[index]) ~= nil then
-      local point = core_locale.localeconv().decimal_point as string
+    if ffi.setlocale(ffi.LC_NUMERIC, candidates[index]) ~= nil then
+      local point = ffi.localeconv().decimal_point as string
       if point ~= "." then changed = true; break end
     end
   end
   if not changed then test.skip("no alternate numeric locale installed") end
-  local before = core_locale.setlocale(core_locale.LC_NUMERIC, nil) as string
+  local before = ffi.setlocale(ffi.LC_NUMERIC, nil) as string
   test.assert(json.encode(1234.5) == "1234.5")
   test.assert(json.decode("1234.5", reflect.Type.is_float()) == 1234.5)
   core_integer("9007199254740993.0", 9007199254740993)
-  test.assert((core_locale.setlocale(core_locale.LC_NUMERIC, nil) as string) == before,
+  test.assert((ffi.setlocale(ffi.LC_NUMERIC, nil) as string) == before,
               "JSON changed the process numeric locale")
 end
 

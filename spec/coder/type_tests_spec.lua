@@ -199,29 +199,29 @@ describe("type-test expressions (code generator)", function()
             }
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function is_c_integer(v: value): boolean
-                    return v is c.test_integer
+                    return v is ffi.test_integer
                 end
                 function is_c_float(v: value): boolean
-                    return v is c.test_float
+                    return v is ffi.test_float
                 end
                 function is_c_pointer(v: value): boolean
-                    return v is c.test_pointer
+                    return v is ffi.test_pointer
                 end
                 function as_c_pointer(v: value): boolean
-                    local pointer = v as c.test_pointer
+                    local pointer = v as ffi.test_pointer
                     return pointer ~= nil
                 end
                 function is_c_userdata(v: value): boolean
-                    return v is *c.Udata
+                    return v is *ffi.Udata
                 end
                 function is_c_tvalue(v: value): boolean
-                    return v is c.TValue
+                    return v is ffi.TValue
                 end
                 function has_string(present: integer): boolean
-                    return c.test_maybe_string(present as c.test_integer)
+                    return ffi.test_maybe_string(present as ffi.test_integer)
                         is string
                 end
             ]], [[
@@ -282,14 +282,14 @@ describe("type-test expressions (code generator)", function()
             }
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function is_pair(): boolean
-                    return c.test_pair_value() is c.test_pair
+                    return ffi.test_pair_value() is ffi.test_pair
                 end
 
                 function is_number(): boolean
-                    return c.test_number_value() is c.test_number
+                    return ffi.test_number_value() is ffi.test_number
                 end
             ]], [[
                 assert(test.is_pair())

@@ -168,14 +168,14 @@ describe("optional function parameters", function()
             extern int ffi_add(int a, int b);
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function run(): integer
-                    return c.ffi_add(1)
+                    return ffi.ffi_add(1)
                 end
             ]])
             assert.falsy(ok)
-            assert.match("function 'c.ffi_add' called with 1 arguments but expects 2", err)
+            assert.match("function 'ffi.ffi_add' called with 1 arguments but expects 2", err)
         end)
     end)
 end)

@@ -430,8 +430,10 @@ choice, not additional visibility boundaries. Do not use contributor basename
 order as an implicit dependency mechanism. Although the compiler combines
 contributors deterministically, function and nominal declarations are
 order-independent, while module-variable initializers have a deliberate
-earlier-import/earlier-variable frontier. Put imports and prerequisite module
-variables before a module variable that needs them.
+earlier-Titan-import/earlier-variable frontier. Put ordinary Titan imports and
+prerequisite module variables before a module variable that needs them. Foreign
+directives establish the complete `ffi` environment in combined module order;
+order those directives for the required C preprocessing behavior.
 
 ## Use canonical Titan imports and qualified Lua loads
 

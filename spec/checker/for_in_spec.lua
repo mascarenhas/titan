@@ -331,10 +331,10 @@ describe("generic for loops (typechecker)", function()
             static void ffi_close(void) {}
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function run(): nil
-                    for p: c.ffi_int_ptr in c.ffi_next, nil, nil, c.ffi_close do
+                    for p: ffi.ffi_int_ptr in ffi.ffi_next, nil, nil, ffi.ffi_close do
                     end
                     return nil
                 end

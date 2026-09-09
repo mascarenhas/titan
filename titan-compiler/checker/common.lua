@@ -489,9 +489,11 @@ function named_parameter_declaration(declaration, index, name)
         local parameter = declaration.params and declaration.params[index]
         return parameter and (parameter._decl or parameter) or nil
     elseif tag == "Type.ModuleMember" then
-        return callable_parameter_descriptor(
+        local parameter = callable_parameter_descriptor(
             "module", declaration.modname, declaration.name, index, name,
             declaration.islocal)
+        parameter._foreign_namespace = declaration._foreign_namespace
+        return parameter
     elseif tag == "Type.Method" or tag == "Type.StaticMethod" then
         local field = record_constructor_parameter(declaration, index, name)
         if field then return field end

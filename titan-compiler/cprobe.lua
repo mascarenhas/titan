@@ -11,13 +11,27 @@ local csemantics = require "titan-compiler.csemantics"
 local cpreamble = require "titan-compiler.cpreamble"
 local types = require "titan-compiler.types"
 local sha256 = require "titan-compiler.sha256"
+local staticmetadata = require "titan-compiler.staticmetadata"
 local cdriver = require "c-parser.cdriver"
 local compiler_io = require "titan-compiler.io"
+local ffiheaders = require "titan-compiler.ffiheaders"
 
 local default_io = compiler_io.new_sync()
 
 -- Keep disk reads bounded even if a file changes between stat and read.
 local MAX_PERSISTENT_RECORD_BYTES = cprobe_cache.MAX_RECORD_BYTES
+local MAX_SELECTION_OBJECT_BYTES = 16 * 1024 * 1024
+local ENUM_PAYLOAD_PREFIX = "TITENUM\0\1\12"
+local ENUM_PAYLOAD_BYTES = 12
+local ENUM_SECTION = { elf = ".titan.cprobe", macho_segment = "__DATA",
+    macho_section = "__titancprobe" }
+
+-- IDs are a persistent query protocol, not positions in an eligibility list.
+cprobe.enum_carrier_names = {
+    "char", "signed char", "unsigned char", "short", "unsigned short",
+    "int", "unsigned int", "long", "unsigned long", "long long",
+    "unsigned long long",
+}
 
 local Service = {}
 Service.__index = Service
@@ -198,38 +212,6 @@ local function angle_header_name(name)
     return "<" .. name .. ">"
 end
 
-local function normalize_diagnostic_aliases(value, subject)
-    if value == nil then return {} end
-    if type(value) ~= "table" then
-        return nil, subject .. " must be an ordered array"
-    end
-    local aliases = {}
-    for index = 1, #value do
-        local alias = value[index]
-        local physical = type(alias) == "table" and
-            alias.physical_path or nil
-        local public = type(alias) == "table" and alias.public_path or nil
-        if type(physical) ~= "string" or physical:sub(1, 1) ~= "/" or
-           physical:find("\0", 1, true) or
-           type(public) ~= "string" or public:sub(1, 1) ~= "/" or
-           public:find("\0", 1, true) then
-            return nil, subject .. " entry " .. index ..
-                " must contain absolute NUL-free physical_path and public_path"
-        end
-        aliases[index] = {
-            physical_path = physical,
-            public_path = public,
-        }
-    end
-    for key in pairs(value) do
-        if type(key) ~= "number" or key < 1 or key > #value or
-           key % 1 ~= 0 then
-            return nil, subject .. " must be a dense ordered array"
-        end
-    end
-    return aliases
-end
-
 local function normalize_include_descriptor(descriptor, source_dir, cwd)
     if type(descriptor) == "string" then
         descriptor = {
@@ -247,7 +229,7 @@ local function normalize_include_descriptor(descriptor, source_dir, cwd)
         or descriptor.original
     local original = descriptor.original or name
     local resolved = descriptor.resolved
-    local probe_wrapper = descriptor.probe_wrapper
+    local generated_header = descriptor.generated_header
     if kind ~= "angle" and kind ~= "quote" then
         return nil, "C include descriptor kind must be 'angle' or 'quote'"
     elseif type(name) ~= "string" or name == "" then
@@ -260,56 +242,20 @@ local function normalize_include_descriptor(descriptor, source_dir, cwd)
 
     local rendered
     local effective_resolved = resolved or ""
-    if probe_wrapper ~= nil then
-        local wrapper_digest = type(name) == "string" and name:match(
-            "^titan%-source%-foreign%-([0-9a-f]+)%.h$")
-        local wrapper_physical = type(probe_wrapper) == "table" and
-            probe_wrapper.physical_path or nil
-        local wrapper_public = type(probe_wrapper) == "table" and
-            probe_wrapper.public_path or nil
-        local diagnostic_aliases, diagnostic_alias_error =
-            normalize_diagnostic_aliases(
-                type(probe_wrapper) == "table" and
-                    probe_wrapper.diagnostic_aliases or nil,
-                "private probe-header diagnostic aliases")
-        if not diagnostic_aliases then
-            return nil, diagnostic_alias_error
-        end
-        local physical_rendered = type(wrapper_physical) == "string" and
-            quote_header_name(wrapper_physical) or nil
-        if kind ~= "quote" or type(probe_wrapper) ~= "table" or
-           type(probe_wrapper.name) ~= "string" or
-           probe_wrapper.name ~= name or not wrapper_digest or
-           #wrapper_digest ~= 64 or
-           type(probe_wrapper.contents) ~= "string" or
-           type(wrapper_physical) ~= "string" or
-           wrapper_physical:sub(1, 1) ~= "/" or
-           type(wrapper_public) ~= "string" or
-           wrapper_public:sub(1, 1) ~= "/" or
-           wrapper_public ~= resolved or
-           probe_wrapper.contents ~=
-               "#include " .. tostring(physical_rendered) .. "\n" or
-           type(resolved) ~= "string" or resolved == "" then
-            return nil, "invalid private probe-header wrapper descriptor"
-        end
+    if generated_header ~= nil then
+        -- Generated plans are immutable compiler-owned data. Normalization
+        -- changes the include spelling, not the plan or its existing digest.
         local err
-        rendered, err = quote_header_name(name)
+        rendered, err = quote_header_name(generated_header.logical_name)
         if not rendered then return nil, err end
         return {
-            original = original,
-            resolved = resolved,
-            include_kind = kind,
-            include_name = name,
-            rendered = rendered,
-            probe_wrapper = {
-                name = probe_wrapper.name,
-                contents = probe_wrapper.contents,
-                physical_path = wrapper_physical,
-                public_path = wrapper_public,
-                diagnostic_aliases = diagnostic_aliases,
-            },
+            original = generated_header.logical_name,
+            resolved = generated_header.identity, include_kind = "quote",
+            include_name = generated_header.logical_name,
+            rendered = rendered, generated_header = generated_header,
             c_header_dependencies = descriptor.c_header_dependencies,
             c_header_search_inputs = descriptor.c_header_search_inputs,
+            c_header_graph_key = descriptor.c_header_graph_key,
         }
     elseif kind == "quote" then
         -- cdriver descriptors are resolved relative to the importing process,
@@ -339,49 +285,6 @@ local function normalize_include_descriptor(descriptor, source_dir, cwd)
         c_header_dependencies = descriptor.c_header_dependencies,
         c_header_search_inputs = descriptor.c_header_search_inputs,
         c_header_graph_key = descriptor.c_header_graph_key,
-    }
-end
-
-local function source_foreign_include_alias(
-        descriptor, modname, public_header, transitive_diagnostic_aliases)
-    if type(descriptor) ~= "table" or
-       type(descriptor.rendered) ~= "string" or
-       descriptor.rendered == "" then
-        return nil, "source-foreign probe alias requires a normalized include"
-    elseif descriptor.include_kind ~= "quote" or
-           type(descriptor.resolved) ~= "string" or
-           descriptor.resolved:sub(1, 1) ~= "/" or
-           descriptor.rendered ~= quote_header_name(descriptor.resolved) then
-        return nil, "source-foreign probe alias requires an absolute quoted physical include"
-    elseif type(modname) ~= "string" or modname == "" then
-        return nil, "source-foreign probe alias requires a module name"
-    elseif type(public_header) ~= "string" or
-           public_header:sub(1, 1) ~= "/" then
-        return nil, "source-foreign probe alias requires an absolute public header path"
-    end
-    local name = "titan-source-foreign-" .. sha256.hex(public_header) .. ".h"
-    local rendered, rendered_error = quote_header_name(name)
-    if not rendered then return nil, rendered_error end
-    local diagnostic_aliases, diagnostic_alias_error =
-        normalize_diagnostic_aliases(
-            transitive_diagnostic_aliases,
-            "source-foreign transitive diagnostic aliases")
-    if not diagnostic_aliases then return nil, diagnostic_alias_error end
-    return {
-        original = modname,
-        resolved = public_header,
-        include_kind = "quote",
-        include_name = name,
-        rendered = rendered,
-        probe_wrapper = {
-            name = name,
-            contents = "#include " .. descriptor.rendered .. "\n",
-            physical_path = descriptor.resolved,
-            public_path = public_header,
-            diagnostic_aliases = diagnostic_aliases,
-        },
-        c_header_dependencies = descriptor.c_header_dependencies,
-        c_header_search_inputs = descriptor.c_header_search_inputs,
     }
 end
 
@@ -441,6 +344,12 @@ local function render_header_preamble(includes)
     local lines = { cpreamble.fixed_prefix }
     if #includes > 0 then lines[#lines + 1] = "" end
     for _, include in ipairs(includes) do
+        if include.generated_header then
+            -- The generated bundle is program input. Bind its exact ordered
+            -- contents/origins in the raw source, independently of its private
+            -- location. External authored header changes retain manual clearing.
+            lines[#lines + 1] = "/* Titan C environment: " .. include.generated_header.digest .. " */"
+        end
         lines[#lines + 1] = "#include " .. include.rendered
     end
     lines[#lines + 1] = ""
@@ -540,6 +449,93 @@ local function render_declaration_compatibility_source(
     lines[#lines + 1] = "#endif"
     lines[#lines + 1] = ""
     return table.concat(lines, "\n"), rendered
+end
+
+local function enum_selection_question(eligible_ids)
+    if type(eligible_ids) ~= "table" then
+        error("enum carrier IDs must be a dense ordered array", 2)
+    end
+    local ids, seen = {}, {}
+    for index, id in ipairs(eligible_ids) do
+        if math.type(id) ~= "integer" or not cprobe.enum_carrier_names[id]
+           or seen[id] then
+            error("enum carrier IDs must be distinct stable IDs in 1..11", 2)
+        end
+        ids[index], seen[id] = id, true
+    end
+    for key in pairs(eligible_ids) do
+        if math.type(key) ~= "integer" or key < 1 or key > #ids then
+            error("enum carrier IDs must be a dense ordered array", 2)
+        end
+    end
+    -- Validate a returned count/sum against this exact eligibility question,
+    -- including multiple matches. No target arithmetic is evaluated in Lua.
+    local sums = { [0] = { [0] = true } }
+    for index, id in ipairs(ids) do
+        for count = index, 1, -1 do
+            sums[count] = sums[count] or {}
+            for sum in pairs(sums[count - 1]) do
+                sums[count][sum + id] = true
+            end
+        end
+    end
+    local function valid_result(result)
+        if result.outcome == "compiler_rejection" then
+            return result.selection == nil
+        end
+        local selection = result.selection
+        return cprobe_cache.valid_selection(selection) and
+            sums[selection.match_count] ~= nil and
+            sums[selection.match_count][selection.carrier_id] == true
+    end
+    return { ids = ids, valid_result = valid_result }
+end
+
+local function render_enum_selection_source(context, declaration_type, question)
+    local name = probe_identifier("d")
+    local declaration = cdeclarator.render_declaration(
+        declaration_type, name, {}, expand_probe_declaration_typedef)
+    local lines = {}
+    append_preamble(lines, context.header_preamble)
+    lines[#lines + 1] = "extern " .. declaration .. ";"
+    local matches, selected = { "0" }, { "0" }
+    for _, id in ipairs(question.ids) do
+        local match = "__builtin_types_compatible_p(__typeof__(&" .. name ..
+            "), " .. cprobe.enum_carrier_names[id] .. " *)"
+        matches[#matches + 1] = match
+        selected[#selected + 1] = "(" .. id .. " * " .. match .. ")"
+    end
+    lines[#lines + 1] = "#if defined(__APPLE__)"
+    lines[#lines + 1] =
+        "__attribute__((used, aligned(1), section(\"__DATA,__titancprobe\")))"
+    lines[#lines + 1] = "#else"
+    lines[#lines + 1] =
+        "__attribute__((used, aligned(1), section(\".titan.cprobe\")))"
+    lines[#lines + 1] = "#endif"
+    lines[#lines + 1] = "static const unsigned char " ..
+        probe_identifier("enum_result") .. "[] = {"
+    lines[#lines + 1] = "    84, 73, 84, 69, 78, 85, 77, 0, 1, 12,"
+    lines[#lines + 1] = "    " .. table.concat(matches, " + ") .. ","
+    lines[#lines + 1] = "    " .. table.concat(selected, " + ")
+    lines[#lines + 1] = "};"
+    lines[#lines + 1] = ""
+    return table.concat(lines, "\n")
+end
+
+local function decode_enum_selection_object(bytes, origin, question)
+    local payload, err = staticmetadata.read_object_section(
+        bytes, origin, ENUM_SECTION, ENUM_PAYLOAD_BYTES)
+    if not payload then return nil, err end
+    if #payload ~= ENUM_PAYLOAD_BYTES or
+       payload:sub(1, #ENUM_PAYLOAD_PREFIX) ~= ENUM_PAYLOAD_PREFIX then
+        return nil, "invalid enum selection payload magic, version or length"
+    end
+    local selection = { kind = "enum_carrier",
+        match_count = payload:byte(11), carrier_id = payload:byte(12) }
+    if not question.valid_result({ outcome = "success", selection = selection }) then
+        return nil, "enum selection payload does not answer its eligible carrier question"
+    end
+    return selection
 end
 
 local function prepare_pointer_probe(module_context, source_type, target_type)
@@ -1073,8 +1069,7 @@ function Service:_emit(event)
     end
 end
 
-function Service:_ensure_workspace()
-    if self.workspace then return self.workspace end
+function Service:_create_workspace()
     if self.closed then return nil, "probe service is closed" end
 
     local provider = self.temp_provider
@@ -1103,8 +1098,36 @@ function Service:_ensure_workspace()
     elseif workspace.root:find("\0", 1, true) then
         return nil, "temporary workspace root path contains a NUL byte"
     end
-    self.workspace = workspace
     return workspace
+end
+
+function Service:_ensure_workspace()
+    if self.workspace then return self.workspace end
+    local workspace, err = self:_create_workspace()
+    if workspace then self.workspace = workspace end
+    return workspace, err
+end
+
+function Service:_ensure_generated_workspace(header)
+    self.generated_workspaces = self.generated_workspaces or {}
+    local entry = self.generated_workspaces[header.digest]
+    if not entry then
+        local workspace, err = self:_create_workspace()
+        if not workspace then return nil, err end
+        entry = {
+            workspace = workspace,
+            owner = { io = self.io, source_ffi_header_bundle = workspace.root,
+                source_ffi_header_directories = {} },
+        }
+        -- Own the directory before staging any dependency can suspend.
+        self.generated_workspaces[header.digest] = entry
+    end
+    if not entry.header then
+        local current, err = ffiheaders.materialize(entry.owner, header)
+        if not current then return nil, err end
+        entry.header = current
+    end
+    return entry.workspace, nil, entry.header
 end
 
 local function call_workspace(workspace, method, ...)
@@ -1130,23 +1153,7 @@ local function call_workspace(workspace, method, ...)
     return true
 end
 
-function Service:_materialize_probe_wrappers(workspace, wrappers)
-    if not wrappers then return true end
-    local names = {}
-    for name in pairs(wrappers) do names[#names + 1] = name end
-    table.sort(names)
-    for _, name in ipairs(names) do
-        if not self.materialized_probe_wrappers[name] then
-            local wrote, err = call_workspace(
-                workspace, "write", name, wrappers[name])
-            if not wrote then return nil, err end
-            self.materialized_probe_wrappers[name] = true
-        end
-    end
-    return true
-end
-
-function Service:_compile_argv(source_path, object_path)
+function Service:_compile_argv(source_path, object_path, object_result)
     local argv = copy_array(self.compiler_argv)
     append_all(argv, self.compile_flags)
     append_all(argv, self.cppflags)
@@ -1158,7 +1165,7 @@ function Service:_compile_argv(source_path, object_path)
         argv[#argv + 1] = include.flag
         argv[#argv + 1] = include.path
     end
-    if self.syntax_only then
+    if self.syntax_only and not object_result then
         argv[#argv + 1] = "-fsyntax-only"
         argv[#argv + 1] = source_path
     else
@@ -1289,10 +1296,6 @@ local function normalize_private_diagnostic(
     add_mapping(object_path, "<titan-cprobe-object>")
     for _, alias in ipairs(aliases or {}) do
         add_mapping(alias.physical_path, alias.public_path)
-        if alias.wrapper_name then
-            add_mapping(path_join(workspace_root, alias.wrapper_name),
-                alias.public_path)
-        end
     end
 
     -- Classify every candidate against the original diagnostic, then splice
@@ -1422,28 +1425,36 @@ local function normalize_private_diagnostic(
 end
 
 function Service:_execute_source(
-        stage, source, key, probe_label, wrappers, diagnostic_aliases)
+        stage, source, key, probe_label, question, generated_header)
     if self.closed then
         return infrastructure_run(stage, "closed", {
             diagnostic = "probe service is closed",
             source = source,
         })
     end
-    local workspace, workspace_error = self:_ensure_workspace()
+    local workspace, workspace_error, staged_header
+    if generated_header then
+        workspace, workspace_error, staged_header = self:_ensure_generated_workspace(generated_header)
+    else
+        workspace, workspace_error = self:_ensure_workspace()
+    end
     if not workspace then
         return infrastructure_run(stage, "workspace",
             { diagnostic = workspace_error, source = source })
     end
-    local wrappers_ok, wrappers_error =
-        self:_materialize_probe_wrappers(workspace, wrappers)
-    if not wrappers_ok then
-        return infrastructure_run(stage, "workspace", {
-            diagnostic = "could not prepare private probe-header wrapper: " ..
-                tostring(wrappers_error),
-            source = source,
-        })
+    local diagnostic_aliases
+    if staged_header then
+        local aliases = {}
+        local seen = {}
+        local function add(header)
+            if seen[header] then return end
+            seen[header] = true
+            aliases[#aliases + 1] = { physical_path = header.filename, public_path = header.identity }
+            for _, dependency in ipairs(header.dependencies) do add(dependency) end
+        end
+        add(staged_header)
+        diagnostic_aliases = aliases
     end
-
     self.sequence = self.sequence + 1
     local label = stage == "baseline" and "baseline"
         or probe_label or "unsafe-object-pointer"
@@ -1452,6 +1463,8 @@ function Service:_execute_source(
     local object_name = stem .. ".o"
     local source_path = path_join(workspace.root, source_name)
     local object_path = path_join(workspace.root, object_name)
+    local syntax_only = self.syntax_only and not question
+    local reported_object_path = not syntax_only and object_path or nil
 
     local wrote, write_error =
         call_workspace(workspace, "write", source_name, source)
@@ -1467,11 +1480,11 @@ function Service:_execute_source(
                 diagnostic_aliases),
             source = source,
             source_path = source_path,
-            object_path = self.syntax_only and nil or object_path,
+            object_path = reported_object_path,
         })
     end
 
-    local argv = self:_compile_argv(source_path, object_path)
+    local argv = self:_compile_argv(source_path, object_path, question ~= nil)
     local command, command_error = command_string(argv)
     if not command then
         call_workspace(workspace, "remove", source_name)
@@ -1483,7 +1496,7 @@ function Service:_execute_source(
             argv = argv,
             source = source,
             source_path = source_path,
-            object_path = self.syntax_only and nil or object_path,
+            object_path = reported_object_path,
         })
     end
 
@@ -1509,7 +1522,7 @@ function Service:_execute_source(
         command = command,
         source = source,
         source_path = source_path,
-        object_path = self.syntax_only and nil or object_path,
+        object_path = reported_object_path,
     }
     local execution_digest = key
     local run
@@ -1537,6 +1550,32 @@ function Service:_execute_source(
     else
         run = normalize_custom_runner_result(raw_result, secondary)
     end
+    if question and run.classification == "success" then
+        local attributes, read_error = self.io:stat(object_path)
+        local bytes
+        if attributes and attributes.kind == "file" and
+           type(attributes.size) == "number" and attributes.size >= 0 and
+           attributes.size <= MAX_SELECTION_OBJECT_BYTES then
+            bytes, read_error = self.io:read_file(
+                object_path, MAX_SELECTION_OBJECT_BYTES)
+        else
+            read_error = read_error or "missing, non-file or oversized enum query object"
+        end
+        local selection
+        if type(bytes) == "string" and #bytes <= MAX_SELECTION_OBJECT_BYTES then
+            selection, read_error = decode_enum_selection_object(
+                bytes, object_path, question)
+        end
+        if selection then
+            run.selection = selection
+        else
+            run.ok = false
+            run.classification = "infrastructure_failure"
+            run.reason = "result_extraction"
+            run.diagnostic = "could not extract enum selection result: " ..
+                tostring(read_error or "invalid or oversized object bytes")
+        end
+    end
     local diagnostic_persistent_safe
     run.diagnostic, diagnostic_persistent_safe = normalize_private_diagnostic(
         run.diagnostic, source_path, object_path, workspace.root,
@@ -1547,7 +1586,7 @@ function Service:_execute_source(
     run.command = command
     run.source = source
     run.source_path = source_path
-    run.object_path = self.syntax_only and nil or object_path
+    run.object_path = reported_object_path
 
     self:_emit({
         kind = "result",
@@ -1567,7 +1606,7 @@ function Service:_execute_source(
         cleanup_errors[#cleanup_errors + 1] =
             source_name .. ": " .. source_remove_error
     end
-    if not self.syntax_only then
+    if not syntax_only then
         local object_removed, object_remove_error =
             call_workspace(workspace, "remove", object_name)
         if not object_removed then
@@ -1584,6 +1623,7 @@ function Service:_execute_source(
     })
     if #cleanup_errors > 0 then
         run.ok = false
+        run.selection = nil
         run.reason = "cleanup"
         run.classification = "infrastructure_failure"
         run.diagnostic = "could not clean probe artifacts: " ..
@@ -1610,18 +1650,24 @@ function Service:_cache_location(source)
         path_join(self.cache_directory, key .. ".result") or nil, key
 end
 
-function Service:_memory_result(key)
+function Service:_memory_result(key, question)
     local result = self.result_cache[key]
+    if result and question and not question.valid_result(result) then
+        self.result_cache[key], result = nil, nil
+    end
     if result then return result, "service" end
     result = self.analysis_result_cache and self.analysis_result_cache[key]
+    if result and question and not question.valid_result(result) then
+        self.analysis_result_cache[key], result = nil, nil
+    end
     if result then
         self.result_cache[key] = result
         return result, "analysis"
     end
 end
 
-function Service:_lookup_result(key, path, stage, module_name)
-    local result, tier = self:_memory_result(key)
+function Service:_lookup_result(key, path, stage, module_name, question)
+    local result, tier = self:_memory_result(key, question)
     if result then return result, tier, "memory" end
     if not path then return nil, nil, "disabled" end
     local attributes, stat_error = self.io:stat(path)
@@ -1634,6 +1680,9 @@ function Service:_lookup_result(key, path, stage, module_name)
             local encoded, read_error = self.io:read_file(
                 path, MAX_PERSISTENT_RECORD_BYTES)
             result = encoded and cprobe_cache.decode(encoded) or nil
+            if result and question and not question.valid_result(result) then
+                result = nil
+            end
             lookup = result and "hit" or read_error and "io_error" or "invalid"
         end
     end
@@ -1643,7 +1692,7 @@ function Service:_lookup_result(key, path, stage, module_name)
     end
     -- I/O can suspend while another request completes. Reuse that completed
     -- in-analysis result before installing what this disk read observed.
-    local remembered, remembered_tier = self:_memory_result(key)
+    local remembered, remembered_tier = self:_memory_result(key, question)
     if remembered then return remembered, remembered_tier, lookup end
     if result then
         self.result_cache[key] = result
@@ -1668,16 +1717,17 @@ local function semantic_run(result, source, tier, path)
         persistent_cached = tier == "persistent",
         cache_path = path,
         classification = result.outcome,
+        selection = deep_copy(result.selection),
     }
 end
 
-function Service:_publish_result(key, path, run)
+function Service:_publish_result(key, path, run, question)
     run.cache_path = path
     if run.classification ~= "success" and
        run.classification ~= "compiler_rejection" then
         return run, "not_applicable"
     end
-    local remembered, tier = self:_memory_result(key)
+    local remembered, tier = self:_memory_result(key, question)
     if remembered then
         return semantic_run(remembered, run.source, tier, path), "existing"
     end
@@ -1685,6 +1735,7 @@ function Service:_publish_result(key, path, run)
         outcome = run.classification,
         exit_status = run.status,
         diagnostic = run.diagnostic or "",
+        selection = deep_copy(run.selection),
     }
     self.result_cache[key] = result
     if self.analysis_result_cache then
@@ -1746,7 +1797,7 @@ end
 
 -- One source, one lookup, one compiler invocation, one result. Candidate
 -- misses first establish whether the shared header preamble itself compiles.
-function Service:_run_source(stage, source, kind, context)
+function Service:_run_source(stage, source, kind, context, question)
     kind = kind or "raw_source"
     local path, key = self:_cache_location(source)
     if self.closed then
@@ -1758,7 +1809,7 @@ function Service:_run_source(stage, source, kind, context)
         return run
     end
     local semantic, tier, lookup = self:_lookup_result(
-        key, path, stage, context and context.module_name)
+        key, path, stage, context and context.module_name, question)
     self:_emit({ kind = "cache", cache = stage,
         hit = semantic ~= nil, key = key })
     if semantic then
@@ -1793,9 +1844,8 @@ function Service:_run_source(stage, source, kind, context)
         end
     end
     local execution = self:_execute_source(stage, source, key,
-        kind:gsub("_", "-"), context and context.probe_wrappers,
-        context and context.probe_diagnostic_aliases)
-    local run, publication = self:_publish_result(key, path, execution)
+        kind:gsub("_", "-"), question, context and context.generated_header)
+    local run, publication = self:_publish_result(key, path, execution, question)
     run.key = key
     if baseline then run.baseline_cached = baseline.cached end
     self:_trace_execution(key, kind, context, execution, lookup, publication)
@@ -1831,6 +1881,7 @@ local function probe_result(context, kind, stage, source, run, rejection)
         run_reason = run.reason,
         compiler_classification = run.classification,
         classification = run.classification,
+        selection = deep_copy(run.selection),
     }
     if status == "infrastructure_failure" then result.accepted = nil end
     if status == "rejected" then
@@ -1923,6 +1974,25 @@ function ModuleContext:validate_declaration_compatibilities(candidates)
     return results
 end
 
+function ModuleContext:select_enum_carrier(declaration_type, eligible_ids)
+    local ok, question = pcall(enum_selection_question, eligible_ids)
+    local source
+    if ok then
+        ok, source = pcall(render_enum_selection_source,
+            self, declaration_type, question)
+    end
+    if not ok then
+        return probe_result(self, "enum_carrier", "source", "", {
+            classification = "infrastructure_failure", reason = "render",
+            diagnostic = tostring(source or question),
+        }, "the enum carrier query")
+    end
+    local run = self.service:_run_source(
+        "candidate", source, "enum_carrier", self, question)
+    return probe_result(self, "enum_carrier", "candidate", source, run,
+        "the enum carrier query")
+end
+
 function ModuleContext:probe_unsafe_object_pointer(source_type, target_type)
     return self:_candidate("unsafe_object_pointer", render_pointer_source,
         source_type, target_type)
@@ -1984,43 +2054,22 @@ function Service:module_context(options)
         end
     end
 
-    local probe_wrappers = {}
-    local probe_diagnostic_aliases = {}
+    local generated_header
     for _, include in ipairs(includes) do
-        local wrapper = include.probe_wrapper
-        if wrapper then
-            local existing = probe_wrappers[wrapper.name] or
-                self.probe_wrapper_bindings[wrapper.name]
-            if existing and existing ~= wrapper.contents then
-                return nil, "conflicting private probe-header wrapper '" ..
-                    wrapper.name .. "'"
+        if include.generated_header then
+            if generated_header and generated_header.digest ~= include.generated_header.digest then
+                return nil, "a C probe context requires one generated module environment"
             end
-            probe_wrappers[wrapper.name] = wrapper.contents
-            probe_diagnostic_aliases[#probe_diagnostic_aliases + 1] = {
-                wrapper_name = wrapper.name,
-                physical_path = wrapper.physical_path,
-                public_path = wrapper.public_path,
-            }
-            for _, alias in ipairs(wrapper.diagnostic_aliases or {}) do
-                probe_diagnostic_aliases[#probe_diagnostic_aliases + 1] = {
-                    physical_path = alias.physical_path,
-                    public_path = alias.public_path,
-                }
-            end
+            generated_header = include.generated_header
         end
     end
-    for name, contents in pairs(probe_wrappers) do
-        self.probe_wrapper_bindings[name] = contents
-    end
-
     local context = setmetatable({
         service = self,
         module_name = module_name,
         source_dir = source_dir,
         includes = includes,
         header_preamble = render_header_preamble(includes),
-        probe_wrappers = probe_wrappers,
-        probe_diagnostic_aliases = probe_diagnostic_aliases,
+        generated_header = generated_header,
         header_label = trace_header_label(includes),
     }, ModuleContext)
     context.baseline_source = render_baseline_source(context)
@@ -2068,27 +2117,24 @@ function Service:probe_operator(module_context, trait)
 end
 
 function Service:close()
-    if self.closed and not self.workspace then
+    if self.closed and not self.workspace and not next(self.generated_workspaces or {}) then
         if self.close_error then return nil, self.close_error end
         return true
     end
     self.closed = true
-    if not self.workspace then return true end
+    local bundle_error
+    for digest, entry in pairs(self.generated_workspaces or {}) do
+        local closed, err = ffiheaders.close(entry.owner)
+        if closed then closed, err = call_workspace(entry.workspace, "cleanup") end
+        if closed then self.generated_workspaces[digest] = nil
+        elseif not bundle_error then bundle_error = err end
+    end
+    if not self.workspace then
+        if bundle_error then return nil, bundle_error end
+        return true
+    end
 
     local workspace = self.workspace
-    local wrapper_names = {}
-    for name in pairs(self.materialized_probe_wrappers) do
-        wrapper_names[#wrapper_names + 1] = name
-    end
-    table.sort(wrapper_names)
-    local wrapper_error
-    for _, name in ipairs(wrapper_names) do
-        local removed, remove_error =
-            call_workspace(workspace, "remove", name)
-        if not removed and not wrapper_error then
-            wrapper_error = remove_error
-        end
-    end
     local cleaned, cleanup_error =
         call_workspace(workspace, "cleanup")
     -- A strategy-owned cancellation raises out of call_workspace before these
@@ -2096,8 +2142,7 @@ function Service:close()
     -- retry the exact workspace. Ordinary custom-provider failures retain the
     -- historical terminal close_error behavior.
     self.workspace = nil
-    self.materialized_probe_wrappers = {}
-    local close_error = wrapper_error
+    local close_error = bundle_error
     if not cleaned and not close_error then close_error = cleanup_error end
     self:_emit({
         kind = "cleanup",
@@ -2390,16 +2435,12 @@ function cprobe.new_service(options)
         result_cache = {},
         analysis_result_cache = analysis_result_cache,
         semantic_requests = {},
-        probe_wrapper_bindings = {},
-        materialized_probe_wrappers = {},
         sequence = 0,
         workspace = nil,
         closed = false,
     }, Service)
     return service
 end
-
-cprobe.source_foreign_include_alias = source_foreign_include_alias
 
 function cprobe.normalize_include_descriptor(descriptor, options)
     options = options or {}

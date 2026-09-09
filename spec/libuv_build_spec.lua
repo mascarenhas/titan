@@ -100,20 +100,20 @@ local UV_FOREIGN_CALLBACKS = {
         name = "uv_signal_cb",
         source = "titan/uv/os.titan",
         slot = 1,
-        call = "entry(L, module, callback, owner, signum as lua.lua_Integer)"
+        call = "entry(L, module, callback, owner, signum as ffi.lua_Integer)"
     },
     {
         name = "uv_process_exit_cb",
         source = "titan/uv/process.titan",
         slot = 1,
         call = "entry(L, module, callback, owner, " ..
-            "exit_status as lua.lua_Integer, term_signal as lua.lua_Integer)"
+            "exit_status as ffi.lua_Integer, term_signal as ffi.lua_Integer)"
     },
     {
         name = "uv_write_cb",
         source = "titan/uv/runtime.titan",
         slot = 1,
-        call = "entry(L, module, callback, owner, status as lua.lua_Integer)"
+        call = "entry(L, module, callback, owner, status as ffi.lua_Integer)"
     },
     {
         name = "uv_alloc_cb",
@@ -126,7 +126,7 @@ local UV_FOREIGN_CALLBACKS = {
         name = "uv_read_cb",
         source = "titan/uv/runtime.titan",
         slot = 2,
-        call = "entry(L, module, callback, owner, nread as lua.lua_Integer)"
+        call = "entry(L, module, callback, owner, nread as ffi.lua_Integer)"
     },
     {
         name = "uv_close_cb",
@@ -151,26 +151,26 @@ local UV_FOREIGN_CALLBACKS = {
         name = "uv_getaddrinfo_cb",
         source = "titan/uv/tcp.titan",
         slot = 1,
-        call = "entry(L, module, callback, owner, status as lua.lua_Integer, " ..
+        call = "entry(L, module, callback, owner, status as ffi.lua_Integer, " ..
             "result as *void)"
     },
     {
         name = "uv_connect_cb",
         source = "titan/uv/tcp.titan",
         slot = 1,
-        call = "entry(L, module, callback, owner, status as lua.lua_Integer)"
+        call = "entry(L, module, callback, owner, status as ffi.lua_Integer)"
     },
     {
         name = "uv_shutdown_cb",
         source = "titan/uv/tcp.titan",
         slot = 1,
-        call = "entry(L, module, callback, owner, status as lua.lua_Integer)"
+        call = "entry(L, module, callback, owner, status as ffi.lua_Integer)"
     },
     {
         name = "uv_connection_cb",
         source = "titan/uv/tcp.titan",
         slot = 3,
-        call = "entry(L, module, callback, owner, status as lua.lua_Integer)"
+        call = "entry(L, module, callback, owner, status as ffi.lua_Integer)"
     },
     {
         name = "uv_work_cb",
@@ -181,7 +181,7 @@ local UV_FOREIGN_CALLBACKS = {
         name = "uv_after_work_cb",
         source = "titan/uv/work.titan",
         slot = 2,
-        call = "entry(L, module, callback, owner, status as lua.lua_Integer)"
+        call = "entry(L, module, callback, owner, status as ffi.lua_Integer)"
     },
 }
 local FS_FOREIGN_CALLBACKS = {
@@ -194,7 +194,7 @@ local FS_FOREIGN_CALLBACKS = {
         name = "fs_watcher_event_cb",
         slot = 1,
         call = "entry(L, module, callback, owner, filename, " ..
-            "events as lua.lua_Integer, status as lua.lua_Integer)"
+            "events as ffi.lua_Integer, status as ffi.lua_Integer)"
     },
 }
 local FS_DIRECT_LIBUV_CALLS = {
@@ -722,10 +722,10 @@ describe("libuv Makefile configuration", function()
         local uv = read_file(UV_MAIN_SOURCE)
         for _, contract in ipairs({
             "local current = Sigaction.new()",
-            "csignal.sigaction(csignal.SIGPIPE, nil, current)",
-            "if current.sa_handler ~= csignal.SIG_DFL then return 0 end",
-            "current.sa_handler = csignal.SIG_IGN",
-            "csignal.sigaction(csignal.SIGPIPE, current, nil)",
+            "ffi.sigaction(ffi.SIGPIPE, nil, current)",
+            "if current.sa_handler ~= ffi.SIG_DFL then return 0 end",
+            "current.sa_handler = ffi.SIG_IGN",
+            "ffi.sigaction(ffi.SIGPIPE, current, nil)",
         }) do
             assert.truthy(uv:find(contract, 1, true), contract)
         end
@@ -1016,7 +1016,7 @@ int main(void) {
             assert.truthy(body:find("owner.uv[2].uv", 1, true), body)
             assert.falsy(body:find(
                 "titan_ffi_pushudata", 1, true), body)
-            assert.truthy(body:find("lua.lua_settop(L, top)", 1, true), body)
+            assert.truthy(body:find("ffi.lua_settop(L, top)", 1, true), body)
             local call = callback.no_data and
                 "entry(L, module, callback, owner)" or
                 "entry(L, module, callback, owner, data, length)"
@@ -1032,13 +1032,13 @@ int main(void) {
         assert.truthy(native:find(
             "ffi.lua_pushtvalue(L, input)", 1, true), native)
         assert.truthy(native:find(
-            "lua.lua_checkstack(L, lua.LUA_MINSTACK)", 1, true), native)
+            "ffi.lua_checkstack(L, ffi.LUA_MINSTACK)", 1, true), native)
         assert.truthy(native:find(
-            "llhttp.llhttp_execute(", 1, true), native)
+            "ffi.llhttp_execute(", 1, true), native)
         assert.truthy(native:find(
-            "llhttp.llhttp_finish(", 1, true), native)
+            "ffi.llhttp_finish(", 1, true), native)
         assert.truthy(native:find(
-            "llhttp.llhttp_get_error_pos(", 1, true), native)
+            "ffi.llhttp_get_error_pos(", 1, true), native)
     end)
 
     it("defines the exact libuv callbacks in generated Titan code",
@@ -1068,7 +1068,7 @@ int main(void) {
                 local body = source:sub(first, last):gsub("%s+", " ")
                 if callback.worker then
                     for _, contract in ipairs({
-                        "libuv.uv_req_get_data",
+                        "ffi.uv_req_get_data",
                         "carrier[1] as WorkFunction",
                         "local arg = carrier[2]",
                         "f(arg)",
@@ -1077,7 +1077,7 @@ int main(void) {
                     end
                     for _, forbidden in ipairs({
                         "carrier[0]", "owner.uv", "callback.upvalue",
-                        "libuv.uv_loop_get_data", "lua.", "ffi.",
+                        "ffi.uv_loop_get_data", "ffi.lua_", "ffi.titan_ffi_",
                     }) do
                         assert.falsy(body:find(forbidden, 1, true), body)
                     end
@@ -1089,13 +1089,13 @@ int main(void) {
                     assert.truthy(body:find(
                         "callback.upvalue[2]", 1, true), body)
                     assert.truthy(body:find(
-                        "libuv.uv_loop_get_data", 1, true), body)
+                        "ffi.uv_loop_get_data", 1, true), body)
                     assert.falsy(body:find(
                         "titan_ffi_pushudata", 1, true), body)
                     assert.truthy(body:find(
                         callback.call, 1, true), body)
                     assert.truthy(body:find(
-                        "lua.lua_settop(L, top)", 1, true), body)
+                        "ffi.lua_settop(L, top)", 1, true), body)
                 end
             end
             local expected = {}
@@ -1207,9 +1207,9 @@ int main(void) {
                 "owner.uv[" .. callback.slot .. "].uv", 1, true), body)
             assert.truthy(body:find("callback.upvalue[0]", 1, true), body)
             assert.truthy(body:find("callback.upvalue[2]", 1, true), body)
-            assert.truthy(body:find("libuv.uv_loop_get_data", 1, true), body)
+            assert.truthy(body:find("ffi.uv_loop_get_data", 1, true), body)
             assert.truthy(body:find(callback.call, 1, true), body)
-            assert.truthy(body:find("lua.lua_settop(L, top)", 1, true), body)
+            assert.truthy(body:find("ffi.lua_settop(L, top)", 1, true), body)
         end
         assert.same(expected, declarations)
         local _, condition_wakes = source:gsub(
@@ -1261,7 +1261,7 @@ int main(void) {
                 'local resume_token = uv.ResumeToken.new("fs.realpath")',
                 "local cancel_action = function ()",
                 "defer cancel_action()",
-                "local status = libuv.uv_fs_realpath(",
+                "local status = ffi.uv_fs_realpath(",
                 "uv.suspend(resume_token, cancel_action)")
             assert.equal(1, count_plain(realpath, "uv.suspend("), realpath)
             assert.falsy(realpath:find("while ", 1, true), realpath)
@@ -1369,12 +1369,59 @@ int main(void) {
             }, stdlib_source_files())
         end)
 
+    it("cleans every standard module C environment header", function()
+        local root = make_temp_dir()
+        local tested, ok, output = pcall(function()
+            local fragment = root .. "/inventory.mk"
+            write_file(fragment, ".PHONY: __titan_header_inventory\n" ..
+                "__titan_header_inventory:\n\t@printf '%s\\n' " ..
+                "$(STDLIB_GENERATED_FOREIGN_HEADERS)\n")
+            -- Keep the query independent of inherited jobserver descriptors
+            -- and use a Makefile fragment supported by macOS's older Make.
+            return run_argv({
+                "env", "-u", "MAKEFLAGS", "-u", "MFLAGS",
+                "make", "--no-print-directory", "-s", "MAKE=false",
+                "-f", "Makefile", "-f", fragment,
+                "__titan_header_inventory",
+            })
+        end)
+        remove_tree(root)
+        assert.truthy(tested, ok)
+        assert.truthy(ok, output)
+        local expected = {}
+        for _, module in ipairs(STDLIB_MODULES) do
+            local stem = "titan/" .. module
+            if not file_exists(stem .. ".titan") then
+                stem = stem .. "/" .. module
+            end
+            assert.truthy(file_exists(stem .. ".titan"), stem)
+            expected[#expected + 1] = stem .. ".ffi.h"
+        end
+        for _, header in ipairs({
+            "titan/coroutine.titan.h", "titan/fs.titan.h",
+            "titan/uv/uv.titan.h", "titan/http/http.titan.h",
+            "titan/sqlite3/sqlite3.titan.h", "titan/json/json.titan.h",
+        }) do
+            expected[#expected + 1] = header
+        end
+        local actual = {}
+        for header in output:gmatch("[^\r\n]+") do
+            actual[#actual + 1] = header
+        end
+        table.sort(expected)
+        table.sort(actual)
+        assert.same(expected, actual)
+        local makefile = read_file("Makefile")
+        assert.truthy(makefile:find(
+            "rm -f $(STDLIB_GENERATED_FOREIGN_HEADERS)", 1, true))
+    end)
+
     it("keeps titan.gc as the sole stdlib lua_setmetatable owner",
         function()
             local callers = {}
             for _, source in ipairs(stdlib_source_files()) do
                 if read_file(source):find(
-                        "lua.lua_setmetatable", 1, true) then
+                        "ffi.lua_setmetatable", 1, true) then
                     callers[#callers + 1] = source
                 end
             end
@@ -1478,14 +1525,14 @@ int main(void) {
             "\nlocal function close_handle(", close_start, true))
         local close_body = runtime_source:sub(close_start, close_stop - 1)
         local closing = assert(close_body:find(
-            "libuv.uv_is_closing(handle)", 1, true))
+            "ffi.uv_is_closing(handle)", 1, true))
         local root = assert(close_body:find(
             "root_handle(runtime, owner)", 1, true))
         local unroot = assert(close_body:find(
             "unroot_handle(runtime, owner.root_index)", 1, true))
         local complete = assert(close_body:find("completion()", 1, true))
         local submit = assert(close_body:find(
-            "libuv.uv_close(handle, uv_close_cb)", 1, true))
+            "ffi.uv_close(handle, uv_close_cb)", 1, true))
         assert.is_true(closing < root)
         assert.is_true(unroot < complete)
         assert.is_true(complete < submit)
@@ -1539,7 +1586,7 @@ int main(void) {
         assert.truthy(ssl:find(
             "private_key_data = fs.read_file", 1, true), ssl)
         assert.truthy(ssl:find(
-                "local default_client_context: *openssl.SSL_CTX", 1, true),
+                "local default_client_context: *ffi.SSL_CTX", 1, true),
             ssl)
         assert.truthy(ssl:find(
             "local default_client_context_owner: " ..
@@ -1554,10 +1601,10 @@ int main(void) {
         assert.falsy(ssl:find(
             "as DefaultClientContextOwner", 1, true), ssl)
         assert.truthy(ssl:find(
-                "openssl.SSL_CTX_set_default_verify_paths(context)", 1, true),
+                "ffi.SSL_CTX_set_default_verify_paths(context)", 1, true),
             ssl)
         assert.truthy(ssl:find(
-            "openssl.SSL_CTX_up_ref(context)", 1, true), ssl)
+            "ffi.SSL_CTX_up_ref(context)", 1, true), ssl)
         for _, retired in ipairs({
             "SSL_CTX_load_verify_locations",
             "SSL_CTX_use_certificate_chain_file",
@@ -2727,9 +2774,9 @@ it("checks installed Lua headers with the direct checkout checker", function()
     local parser = require "titan-compiler.parser"
     local checker = require "titan-compiler.checker"
     local source = [[
-        local lua = foreign import "lua.h"
-        local function stack_size(state: *lua.lua_State): integer
-            return lua.lua_gettop(state) as integer
+        foreign import "lua.h"
+        local function stack_size(state: *ffi.lua_State): integer
+            return ffi.lua_gettop(state) as integer
         end
     ]]
     local ast = assert(parser.parse("installed_header.titan", source))
@@ -3925,21 +3972,23 @@ done
                 "\n  test%-linux%-stdlib:(.-)" ..
                 "\n  test%-linux%-compiler:"))
             local compiler_job = assert(workflow:match(
-                "\n  test%-linux%-compiler:(.-)\n  # macOS"))
+                "\n  test%-linux%-compiler:(.-)\n  compiler%-coverage:"))
+            local coverage_job = assert(workflow:match(
+                "\n  compiler%-coverage:(.-)\n  # macOS"))
             local macos_job = assert(workflow:match(
                 "\n  test%-macos:(.-)\n  sanitizer:"))
             local sanitizer_job = assert(workflow:match(
                 "\n  sanitizer:(.*)"))
 
-            assert.equal(3, count_literal(workflow,
+            assert.equal(4, count_literal(workflow,
                 "if: github.event_name == 'push'"), workflow)
             assert.equal(1, count_literal(workflow,
                 "if: github.event_name == 'workflow_dispatch'"), workflow)
-            assert.equal(4, count_literal(workflow, "\n    runs-on:"),
+            assert.equal(5, count_literal(workflow, "\n    runs-on:"),
                 workflow)
             for _, job_name in ipairs({
-                "test-linux-stdlib", "test-linux-compiler", "test-macos",
-                "sanitizer",
+                "test-linux-stdlib", "test-linux-compiler", "compiler-coverage",
+                "test-macos", "sanitizer",
             }) do
                 assert.equal(1, count_literal(workflow,
                     "\n  " .. job_name .. ":"), job_name)
@@ -4104,7 +4153,7 @@ done
             assert.equal(2, count_literal(workflow,
                 "uses: ubicloud/cache/save@v4"), workflow)
             assert.equal(4, count_literal(workflow,
-                "path: .lua/var/cache/titan-probes/1"), workflow)
+                "path: .lua/var/cache/titan-probes/2"), workflow)
             assert.falsy(workflow:find("TITAN_PROBE_CACHE_IDENTITY", 1, true))
             assert.equal(3, count_literal(workflow,
                 "TITAN_PREFIX: ${{ github.workspace }}/.lua"), workflow)
@@ -4117,7 +4166,7 @@ done
             assert.equal(3, count_literal(workflow,
                 "-${{ github.sha }}"), workflow)
             assert.equal(3, count_literal(workflow,
-                "          key: titan-probes-1-"), workflow)
+                "          key: titan-probes-2-"), workflow)
 
             local regular_cache_step = named_step(
                 stdlib_job, "Restore regular Linux C-probe results")
@@ -4167,8 +4216,13 @@ done
             assert.is_true(system_index < upload_index, stdlib_job)
 
             assert.equal(1, count_literal(compiler_job,
-                    "name: compiler/language (ubuntu-24.04, LuaCov)"),
+                    "name: compiler/language shards ${{ matrix.shard-pair }} " ..
+                    "(ubuntu-24.04, LuaCov)"),
                 compiler_job)
+            assert.equal(1, count_literal(compiler_job,
+                'shard-pair: ["1-2", "3-4"]'), compiler_job)
+            assert.equal(1, count_literal(compiler_job,
+                "fail-fast: false"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
                 "needs: test-linux-stdlib"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
@@ -4181,6 +4235,9 @@ done
                 "name: titan-linux-prepared.tar.gz"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
                 "ci_parallel_compiler_tests.sh"), compiler_job)
+            assert.truthy(compiler_job:find(
+                'ci_parallel_compiler_tests.sh "${{ matrix.shard-pair }}"',
+                1, true), compiler_job)
             assert.falsy(compiler_job:find(
                 "ci_test_groups.sh compiler", 1, true), compiler_job)
             assert.equal(1, count_literal(compiler_job,
@@ -4191,10 +4248,28 @@ done
                 "- name: Restore prepared Linux tree and environment",
                 1, true))
             local compiler_tests_index = assert(compiler_job:find(
-                "- name: Run four isolated compiler shards with covered " ..
+                "- name: Run two isolated compiler shards with covered " ..
                 "and stress invocations",
                 compiler_unpack_index, true))
             assert.is_true(compiler_unpack_index < compiler_tests_index)
+            local compiler_upload_index = assert(compiler_job:find(
+                "- name: Upload compiler pair coverage",
+                compiler_tests_index, true))
+            assert.is_true(compiler_tests_index < compiler_upload_index)
+            local compiler_upload = named_step(
+                compiler_job, "Upload compiler pair coverage")
+            for _, required in ipairs({
+                "actions/upload-artifact@v7",
+                "name: titan-compiler-coverage-${{ matrix.shard-pair }}",
+                "path: luacov.stats.out",
+                "if-no-files-found: error",
+                "overwrite: true",
+            }) do
+                assert.truthy(compiler_upload:find(required, 1, true), required)
+            end
+            assert.falsy(compiler_job:find("continue-on-error", 1, true))
+            assert.falsy(compiler_job:find("id-token: write", 1, true))
+            assert.falsy(compiler_job:find("codecov/codecov-action", 1, true))
             assert.falsy(compiler_job:find(
                 "C-probe results", 1, true))
             assert.truthy(read_file(
@@ -4217,7 +4292,33 @@ done
             end
             assert.equal(3, count_literal(workflow,
                 "TITAN_PROBE_CACHE_DISABLE=1"), workflow)
-            assert_codecov_job(compiler_job, "compiler")
+            assert.equal(1, count_literal(coverage_job,
+                "needs: test-linux-compiler"), coverage_job)
+            assert.equal(1, count_literal(coverage_job,
+                "runs-on: ubicloud-standard-2"), coverage_job)
+            assert.equal(1, count_literal(coverage_job,
+                "name: titan-linux-prepared.tar.gz"), coverage_job)
+            assert.equal(2, count_literal(coverage_job,
+                "actions/download-artifact@v8"), coverage_job)
+            assert.truthy(coverage_job:find(
+                "pattern: titan-compiler-coverage-*", 1, true))
+            assert.truthy(coverage_job:find(
+                "merge_luacov_stats.lua luacov.stats.out", 1, true))
+            for _, pair in ipairs({ "1-2", "3-4" }) do
+                assert.equal(1, count_literal(coverage_job,
+                    "titan-compiler-coverage-" .. pair ..
+                    "/luacov.stats.out"), coverage_job)
+            end
+            local coverage_merge_index = assert(coverage_job:find(
+                "- name: Merge all four compiler shards", 1, true))
+            local coverage_report_index = assert(coverage_job:find(
+                "- name: Generate compiler coverage report",
+                coverage_merge_index, true))
+            assert.is_true(coverage_merge_index < coverage_report_index)
+            assert.falsy(coverage_job:find("always()", 1, true))
+            assert.falsy(coverage_job:find("continue-on-error", 1, true))
+            assert.falsy(coverage_job:find("ci_test_groups.sh", 1, true))
+            assert_codecov_job(coverage_job, "compiler")
 
             assert.equal(1, count_literal(macos_job,
                 "if: github.event_name == 'workflow_dispatch'"), macos_job)
@@ -4401,6 +4502,10 @@ done
             assert.equal(2, count_literal(parallel_compiler,
                 "xargs -r -n1 -P2"), parallel_compiler)
             for _, required in ipairs({
+                'shards=(1 2 3 4)',
+                '1-2) shards=(1 2)',
+                '3-4) shards=(3 4)',
+                'for shard in "${shards[@]}"',
                 'mktemp -d "$runner_temp/titan-compiler-workers.XXXXXX"',
                 'tar --exclude="./.lua" --exclude="./.git"',
                 'cd "$worker" || exit 1',
@@ -4446,7 +4551,7 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 30, 31, 30, 29 }, shard_counts)
+            assert.same({ 26, 32, 30, 32 }, shard_counts)
             assert.equal(120, assigned_count)
 
             local stress_partition = read_file(
@@ -4792,6 +4897,7 @@ done
                     "spec", "future", "future/deep",
                     "future/deep/suite.dSYM",
                     "test_runner_future_case", ".titan-tests",
+                    "examples", "testfiles", "authored",
                 }) do
                     assert.truthy(lfs.mkdir(root .. "/" .. directory))
                 end
@@ -4811,7 +4917,33 @@ done
                     ["test_runner_future_case/source.titan"] =
                     "interrupted fixture\n",
                     [".titan-tests/keep"] = "owned output\n",
+                    ["spec/authored.ffi.h"] = "author written header\n",
+                    ["spec/empty.ffi.h"] = "",
+                    ["examples/authored.titan.h"] = "author written header\n",
+                    ["testfiles/authored.ffi.h"] = "author written header\n",
+                    ["authored/keep__test_support.ffi.h"] =
+                    "author written header\n",
+                    ["other.ffi.h"] =
+                    "/* Generated by Titan: module C declaration environment. */\n",
                 }
+                local generated_headers = {
+                    ["spec/generated_fixture.ffi.h"] = "ffi",
+                    ["spec/generated_fixture.titan.h"] = "foreign",
+                    ["spec/generated with spaces.ffi.h"] = "ffi",
+                    ["examples/generated.ffi.h"] = "ffi",
+                    ["testfiles/generated.ffi.h"] = "ffi",
+                    ["future/deep/suite__test_support.ffi.h"] = "ffi",
+                    ["future/deep/suite__test_runner.ffi.h"] = "ffi",
+                    ["future/deep/suite__test_entrypoint.ffi.h"] = "ffi",
+                    ["future/deep/suite__test_support.titan.h"] = "foreign",
+                    ["test.ffi.h"] = "ffi",
+                    ["test.titan.h"] = "foreign",
+                }
+                for path, kind in pairs(generated_headers) do
+                    files[path] = kind == "ffi" and
+                        "/* Generated by Titan: module C declaration environment. */\n" or
+                        "/* Generated by Titan: source foreign function interface. */\n"
+                end
                 for path, contents in pairs(files) do
                     write_file(root .. "/" .. path, contents)
                 end
@@ -4836,6 +4968,17 @@ done
                     "test_runner_future_case/source.titan",
                 }) do
                     assert.falsy(file_exists(root .. "/" .. removed), removed)
+                end
+                for path in pairs(generated_headers) do
+                    assert.falsy(file_exists(root .. "/" .. path), path)
+                end
+                for _, path in ipairs({
+                    "spec/authored.ffi.h", "spec/empty.ffi.h",
+                    "examples/authored.titan.h", "testfiles/authored.ffi.h",
+                    "authored/keep__test_support.ffi.h", "other.ffi.h",
+                }) do
+                    assert.equal(files[path], read_file(root .. "/" .. path),
+                        path)
                 end
                 assert.is_nil(lfs.attributes(root .. "/future"))
                 assert.is_nil(lfs.attributes(

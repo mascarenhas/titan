@@ -1087,14 +1087,14 @@ describe("closures over foreign-typed boxes (end-to-end)", function()
             }
         ]], function(header)
             run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function make(present: integer): (integer) -> boolean
-                    local file = c.ffi_open(present)
+                    local file = ffi.ffi_open(present)
                     return function(next: integer): boolean
                         local was_open = false
                         if file then was_open = true end
-                        file = c.ffi_open(next)
+                        file = ffi.ffi_open(next)
                         return was_open
                     end
                 end
@@ -1116,16 +1116,16 @@ describe("closures over foreign-typed boxes (end-to-end)", function()
         -- exercising a NULL round-trip under generational GC churn.
         local ok, err = h.generate_modules({
             foo = [[
-                local stdio = foreign import "stdio.h"
+                foreign import "stdio.h"
                 function make(name: string): (string) -> integer
-                    local f = stdio.fopen(name, "r")   -- f: FILE* foreign pointer, boxed
+                    local f = ffi.fopen(name, "r")   -- f: FILE* foreign pointer, boxed
                     return function (next: string): integer
                         local opened = 0
                         if f then
                             opened = 1
-                            stdio.fclose(f)
+                            ffi.fclose(f)
                         end
-                        f = stdio.fopen(next, "r")     -- reassign the boxed pointer
+                        f = ffi.fopen(next, "r")     -- reassign the boxed pointer
                         return opened
                     end
                 end
@@ -1164,12 +1164,12 @@ describe("closures over foreign-typed boxes (end-to-end)", function()
             }
         ]], function(header)
             run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function make(): () -> boolean
-                    local number = c.ffi_next_number()
+                    local number = ffi.ffi_next_number()
                     return function(): boolean
-                        local next_number = c.ffi_next_number()
+                        local next_number = ffi.ffi_next_number()
                         local same = number == next_number
                         number = next_number
                         return same
@@ -1195,12 +1195,12 @@ describe("closures over foreign-typed boxes (end-to-end)", function()
         -- generational GC churn.
         local ok, err = h.generate_modules({
             foo = [[
-                local string_h = foreign import "string.h"
+                foreign import "string.h"
                 function make(s: string): (string) -> boolean
-                    local n = string_h.strlen(s)   -- n: size_t scalar typedef, boxed
+                    local n = ffi.strlen(s)   -- n: size_t scalar typedef, boxed
                     return function (next: string): boolean
-                        local same = (n == string_h.strlen(next))   -- read boxed size_t
-                        n = string_h.strlen(next)                    -- reassign boxed size_t
+                        local same = (n == ffi.strlen(next))   -- read boxed size_t
+                        n = ffi.strlen(next)                    -- reassign boxed size_t
                         return same
                     end
                 end

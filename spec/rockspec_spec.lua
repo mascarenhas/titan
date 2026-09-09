@@ -220,15 +220,13 @@ describe("standalone-prefix source installation", function()
         if workspace then remove_tree(workspace); workspace = nil end
     end)
 
-    it("maps every checker and coder slice into the compiler rock",
+    it("maps every compiler Lua module into the compiler rock",
     function()
         local rockspec = read_file("titan-0.6.0-1.rockspec")
         assert.match('version%s*=%s*"0%.6%.0%-1"', rockspec)
-        for _, path in ipairs(COMPILER_SLICE_PATHS) do
-            local module = "titan-compiler." ..
-                path:gsub("/", "."):gsub("%.lua$", "")
-            local mapping = string.format('["%s"] = "titan-compiler/%s"',
-                module, path)
+        for _, path in ipairs(source_inventory.lua_files("titan-compiler")) do
+            local module = path:gsub("/", "."):gsub("%.lua$", "")
+            local mapping = string.format('["%s"] = "%s"', module, path)
             assert.truthy(rockspec:find(mapping, 1, true), mapping)
         end
     end)
@@ -272,7 +270,7 @@ describe("standalone-prefix source installation", function()
             "/share/lua/5.5/titan-compiler/pretty.lua")
         for _, module in ipairs({
             "cdeclarator.lua", "cpreamble.lua", "cprobe.lua",
-            "cprobe_cache.lua",
+            "cprobe_cache.lua", "ffiheaders.lua",
             "csemantics.lua", "io.lua", "sha256.lua", "test_runner.lua",
             "version.lua",
         }) do
@@ -419,7 +417,7 @@ describe("standalone-prefix source installation", function()
             '["staticmetadata.lua"]', 1, true), manifest)
         for _, module in ipairs({
             "cdeclarator.lua", "cpreamble.lua", "cprobe.lua",
-            "cprobe_cache.lua",
+            "cprobe_cache.lua", "ffiheaders.lua",
             "csemantics.lua", "io.lua", "sha256.lua", "test_runner.lua",
             "version.lua",
         }) do
@@ -709,6 +707,7 @@ describe("standalone-prefix source installation", function()
             "doc/language/standard-library-json.md",
             "doc/implementation/json-library.md",
             "titan-compiler/test_runner.lua",
+            "titan-compiler/ffiheaders.lua",
             "LICENSES/lpeglabel-LICENSE",
             "LICENSES/lpeg-LICENSE",
             "LICENSES/lpeg-patterns-LICENSE",
@@ -1141,20 +1140,20 @@ int titan_uv_provider_probe(void) {
 }
 ]])
         write_file(workspace .. "/direct_uv.titan", [[
-local probe = foreign import "provider_probe.h"
+foreign import "provider_probe.h"
 local uv = import "uv"
 
 function check(): boolean
   local marker = uv.Error.new(nil, "")
-  return (probe.titan_uv_provider_probe() as integer) == 0 and
+  return (ffi.titan_uv_provider_probe() as integer) == 0 and
          marker.traceback == ""
 end
 ]])
         write_file(workspace .. "/lua_direct_uv.titan", [[
-local probe = foreign import "provider_probe.h"
+foreign import "provider_probe.h"
 
 function check(): boolean
-  return (probe.titan_uv_provider_probe() as integer) == 0
+  return (ffi.titan_uv_provider_probe() as integer) == 0
 end
 ]])
 

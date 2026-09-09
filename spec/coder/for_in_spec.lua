@@ -578,25 +578,25 @@ describe("generic for loops", function()
             }
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function sum(): integer
-                    c.ffi_reset()
+                    ffi.ffi_reset()
                     local total = 0
-                    for p: c.ffi_int_ptr in c.ffi_next, nil, nil, c.ffi_close do
+                    for p: ffi.ffi_int_ptr in ffi.ffi_next, nil, nil, ffi.ffi_close do
                         total = total + (p[0] as integer)
                     end
-                    return total + (c.ffi_closed as integer)
+                    return total + (ffi.ffi_closed as integer)
                 end
 
                 function pointer_sum(): integer
-                    c.ffi_reset()
+                    ffi.ffi_reset()
                     local total = 0
-                    for p: c.ffi_int_ptr in c.ffi_next_pointer, nil, nil,
-                            c.ffi_close_pointer do
+                    for p: ffi.ffi_int_ptr in ffi.ffi_next_pointer, nil, nil,
+                            ffi.ffi_close_pointer do
                         total = total + (p[0] as integer)
                     end
-                    return total + (c.ffi_closed as integer)
+                    return total + (ffi.ffi_closed as integer)
                 end
             ]], [[
                 assert(test.sum() == 24)

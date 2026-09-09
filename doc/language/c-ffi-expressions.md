@@ -34,19 +34,19 @@ typedef struct Point Row[2];
 ```
 
 ```lua
-local geometry = foreign import "geometry.h"
+foreign import "geometry.h"
 
-local function x_of(point: geometry.Point): integer
+local function x_of(point: ffi.Point): integer
     return point.x as integer
 end
 
-local function clear(cell: geometry.Cell)
+local function clear(cell: ffi.Cell)
     cell.integer_value = 0
 end
 ```
 
-`geometry.Point` above denotes the real C type spelled `struct Point`, and
-`geometry.Cell` denotes `union Cell`. Titan does not invent C typedefs for
+`ffi.Point` above denotes the real C type spelled `struct Point`, and
+`ffi.Cell` denotes `union Cell`. Titan does not invent C typedefs for
 these names. Generated declarations, casts, and probes retain the exact
 `struct` or `union` spelling required by the header.
 
@@ -82,17 +82,17 @@ The ordinary value namespace remains separate. A header may legally declare
 both `struct stat` and a function named `stat`, and Titan supports both:
 
 ```lua
-local c = foreign import "sys/stat.h"
+foreign import "sys/stat.h"
 
-local function inspect(path: string, info: *c.stat): integer
-    return c.stat(path, info)
+local function inspect(path: string, info: *ffi.stat): integer
+    return ffi.stat(path, info)
 end
 ```
 
 An ordinary value wins when a dotted expression is ambiguous. Consequently,
-type pseudo-members such as `c.stat.new()`, `c.stat.new_array(n)`,
-`c.stat.sizeof`, or `c.stat.alignof` are unavailable when the ordinary member
-`c.stat` collides with the type name; the checker reports that collision
+type pseudo-members such as `ffi.stat.new()`, `ffi.stat.new_array(n)`,
+`ffi.stat.sizeof`, or `ffi.stat.alignof` are unavailable when the ordinary member
+`ffi.stat` collides with the type name; the checker reports that collision
 specifically. Fields named `new`, `new_array`, or `alignof` on an actual
 aggregate value are ordinary C fields and remain usable (`sizeof` itself is a
 C keyword and cannot name a field).
@@ -101,8 +101,8 @@ C keyword and cannot name a field).
 
 Member and qualified-type lookup after a foreign namespace or C receiver uses
 a contextual raw C identifier. A legal C spelling such as `when`, `type`,
-`repeat`, or `interface` is therefore available as `c.when`, `c.type`,
-`object.repeat`, or `c.interface` when the imported declarations provide it.
+`repeat`, or `interface` is therefore available as `ffi.when`, `ffi.type`,
+`object.repeat`, or `ffi.interface` when the imported declarations provide it.
 This contextual rule continues to apply when a spelling is a current or future
 Titan keyword; it does not make a reserved spelling available for an ordinary
 Titan variable, declaration, record field, union variant, or member. Named C
@@ -110,18 +110,29 @@ parameter labels use the analogous contextual rule before `=` in a named call.
 
 ## Compiled probe cache
 
-Titan uses small C compilations to check foreign headers, declarations,
-conversions, and operators. It remembers both successful and rejected probes
+Titan uses small C compilations to check foreign header baselines, enum
+carriers, conversions, operators, and layout predicates. It remembers results
 by SHA-256 of the complete C source before preprocessing. Include directives
-count as text; included header contents and compiler options do not affect the
-key.
+count as text; authored header contents and compiler options do not affect the
+key. A generated module-header query includes its stable logical header name
+and a source-visible digest of the generated header bundle, so changes to the
+module's own include plan change the query source.
 
-The format-1 cache lives at `<prefix>/var/cache/titan-probes/1`. A nonempty
+The format-2 cache lives at `<prefix>/var/cache/titan-probes/2`. A nonempty
 `TITAN_PREFIX` selects the prefix; otherwise Titan uses its installed prefix.
-If a header or compiler configuration changes and results appear stale, clear
-that directory or set `TITAN_PROBE_CACHE_DISABLE=1` to bypass persistent reuse.
-This applies to cached rejections as well as acceptance. Titan still compiles
-the final generated C normally.
+It stores both completed compiler acceptance/rejection and typed enum-selection
+answers. One enum query compares all eligible integer carriers in one
+compilation and reads the chosen stable carrier ID from the object file;
+target code is never executed. Valid no-match and multiple-match answers are
+also deterministic results. Enumerator value-range checking remains separate.
+
+Malformed records and cache I/O failures are misses. A missing or malformed
+enum object result, unavailable/interrupted compiler, or temporary-file/read/
+cleanup failure remains retryable. If an authored header or compiler
+configuration changes and results appear stale, clear that directory or set
+`TITAN_PROBE_CACHE_DISABLE=1` to bypass persistent reuse. This applies to cached
+rejections as well as acceptance. Titan still compiles final generated C
+normally.
 
 ## Contextual object-pointer conversions
 
@@ -134,16 +145,16 @@ Titan admits such conversions only in a context that already supplies the
 destination C pointer type:
 
 ```lua
-local function close_tcp(tcp: *uv.uv_tcp_t)
-    uv.uv_close(tcp, nil)                 -- parameter supplies *uv_handle_t
+local function close_tcp(tcp: *ffi.uv_tcp_t)
+    ffi.uv_close(tcp, nil)                 -- parameter supplies *uv_handle_t
 end
 
-local function as_handle(tcp: *uv.uv_tcp_t): *uv.uv_handle_t
+local function as_handle(tcp: *ffi.uv_tcp_t): *ffi.uv_handle_t
     return tcp                            -- return type supplies the target
 end
 
-local function explicit(tcp: *uv.uv_tcp_t): *uv.uv_handle_t
-    return tcp as *uv.uv_handle_t
+local function explicit(tcp: *ffi.uv_tcp_t): *ffi.uv_handle_t
+    return tcp as *ffi.uv_handle_t
 end
 ```
 
@@ -152,10 +163,9 @@ arguments, C function-pointer calls, returns, explicit casts, and typed C
 variadic arguments. The configured C compiler validates the exact directional
 cast using the fixed standard/Lua/Titan header prefix, ordered foreign-header
 block, and target/toolchain inputs selected for generated compilation.
-Independent declaration extraction does not include the fixed prefix or
-cumulative earlier-import macro state; headers whose declarations depend on
-either need the
-[umbrella-header discipline described in the FFI limitations](ffi.md#current-limitations).
+The module's `.ffi.h` supplies the same ordered authored/source-import header
+chain used to build its `ffi` namespace. Direct source imports inherit that C
+environment; probes do not rebuild it from individual types' origin headers.
 A compiler rejection is a Titan type error; a broken header or toolchain probe
 is reported as a probe failure, not as an incompatible conversion.
 
@@ -179,15 +189,15 @@ Source-written owned C storage participates in the same destination-directed
 pointer adjustment:
 
 ```lua
-local c = foreign import "geometry.h"
+foreign import "geometry.h"
 
 local function use_owned()
-    local point: owned *c.Point = c.Point.new()
-    local points: owned c.Point[] = c.Point.new_array(8)
-    local mutable: *c.Point = point
-    local immutable: const *c.Point = points
-    c.read_point(point)
-    c.read_point(points)
+    local point: owned *ffi.Point = ffi.Point.new()
+    local points: owned ffi.Point[] = ffi.Point.new_array(8)
+    local mutable: *ffi.Point = point
+    local immutable: const *ffi.Point = points
+    ffi.read_point(point)
+    ffi.read_point(points)
 end
 ```
 
@@ -245,7 +255,7 @@ target is a pointer-to-pointer type; it does not implicitly take an address.
 
 An ordinary mutable local may omit its initializer only with an explicit type
 whose representation admits nil. A C object or function pointer is in that
-domain, so `local p: *c.Point` starts as `NULL`. C structures, unions, fixed
+domain, so `local p: *ffi.Point` starts as `NULL`. C structures, unions, fixed
 arrays, numeric scalars, and enums do not admit nil and still require an
 initializer. Use `.new()` or `.new_array(...)` to ask for zeroed aggregate
 storage explicitly.
@@ -282,11 +292,11 @@ For `T.new_array(count)`, a positive source integer literal can select fixed
 automatic storage:
 
 ```titan
-local inferred = c.Point.new_array(4)       -- c.Point[4]
-local exact: c.Point[4] = c.Point.new_array(4)
-local view: c.Point[] = c.Point.new_array(4) -- borrowed pointer
-local ptr: *c.Point = c.Point.new_array(4)   -- borrowed pointer
-local owner: owned c.Point[] = c.Point.new_array(count)
+local inferred = ffi.Point.new_array(4)       -- ffi.Point[4]
+local exact: ffi.Point[4] = ffi.Point.new_array(4)
+local view: ffi.Point[] = ffi.Point.new_array(4) -- borrowed pointer
+local ptr: *ffi.Point = ffi.Point.new_array(4)   -- borrowed pointer
+local owner: owned ffi.Point[] = ffi.Point.new_array(count)
 ```
 
 An explicitly written fixed extent must be positive and equal the literal
@@ -298,7 +308,7 @@ or `T[]` gets hidden owned backing instead. An explicit `owned T[]` always
 wins. `T[]` is an uncounted pointer view: `#view` is unavailable and indexing
 has raw-pointer semantics.
 
-The source spellings `c.T[N]` and `c.T[]` are available only as the written
+The source spellings `ffi.T[N]` and `ffi.T[]` are available only as the written
 target of an initialized direct allocation local. A fixed array is 0-based,
 `#array` is its fixed extent, and direct indexing is checked against that
 extent. It decays to an element pointer in pointer contexts. A whole C array is
@@ -321,9 +331,9 @@ If a complete C structure `T` ends in `E field[]`, allocate one extended object
 with `T.new(count)`:
 
 ```titan
-local packet = c.Packet.new(8)                 -- literal automatic extent
-local owner: owned *c.Packet = c.Packet.new(n) -- dynamic owned extent
-local pointer: *c.Packet = c.Packet.new(n)     -- hidden owner backing
+local packet = ffi.Packet.new(8)                 -- literal automatic extent
+local owner: owned *ffi.Packet = ffi.Packet.new(n) -- dynamic owned extent
+local pointer: *ffi.Packet = ffi.Packet.new(n)     -- hidden owner backing
 ```
 
 `T.new()` has the wrong arity and `T.new_array(...)` is unavailable for a FAM
@@ -373,15 +383,15 @@ extern int host_spawn(const struct ProcessOptions *options);
 Titan can construct the options in automatic storage and pass its address:
 
 ```lua
-local host = foreign import "process_fixture.h"
+foreign import "process_fixture.h"
 
 local function spawn(file: string): integer
-    local options = host.ProcessOptions.new()
+    local options = ffi.ProcessOptions.new()
     options.file = file
     options.on_exit =
-        host.host_report_exit as host.process_exit_callback
+        ffi.host_report_exit as ffi.process_exit_callback
     options.data = nil
-    return host.host_spawn(options) as integer
+    return ffi.host_spawn(options) as integer
 end
 ```
 
@@ -486,18 +496,18 @@ Top-level enum constants and supported object-like macros are direct members of
 the foreign module:
 
 ```lua
-local uv = foreign import "uv.h"
-local signal = foreign import "signal.h"
+foreign import "uv.h"
+foreign import "signal.h"
 
 local function imported_constants(): integer
-    local cancelled = uv.UV_ECANCELED
-    local readable = uv.UV_READABLE
+    local cancelled = ffi.UV_ECANCELED
+    local readable = ffi.UV_READABLE
     return (cancelled as integer) + (readable as integer)
 end
 
 local function signal_handlers_differ(): boolean
-    local ignored_handler = signal.SIG_IGN
-    return ignored_handler ~= signal.SIG_DFL
+    local ignored_handler = ffi.SIG_IGN
+    return ignored_handler ~= ffi.SIG_DFL
 end
 ```
 
@@ -540,10 +550,10 @@ public name, matching preprocessing before C field lookup. Source continues to
 use and generated C continues to emit the public spelling:
 
 ```lua
-local c = foreign import "header.h"
+foreign import "header.h"
 
 local function set_public_member(): integer
-    local item: c.Record
+    local item: ffi.Record
     item.public_member = 1
     return item.public_member as integer
 end
@@ -567,15 +577,10 @@ enum exception.
 Function-like macros remain unavailable as foreign members. Other object-like
 forms beyond recognized existing integer/accessor expressions, fully expanded
 outer casts to supported scalar types, and pure dotted field projections are
-not generally supported. Declaration extraction still preprocesses each
-imported header independently, so a macro whose meaning depends on state
-established by another import remains subject to the
-[umbrella-header discipline described in the FFI limitations](ffi.md#current-limitations).
-Ordinary field-macro definitions, dependency rescans, and undefinitions are
-replayed into a final module environment. Conditional macro behavior whose
-result itself depends on an earlier import, and later changes to a scalar macro
-whose type was inferred in an earlier import, still require one umbrella
-header.
+not generally supported. All imported headers are now preprocessed in one
+ordered module environment. Conditional declarations and supported scalar
+macros therefore observe earlier headers, and later definitions or undefinitions
+determine the final `ffi` members and projected-field behavior.
 
 ## Related chapters
 

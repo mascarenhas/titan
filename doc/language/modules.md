@@ -20,7 +20,7 @@ by one root `do ... end` [module initialization block](#module-initialization-bl
 A declaration is one of:
 
 * an **import**: `local m = import "modname"`;
-* a **foreign import**: `local h = foreign import "header.h"` (see
+* a **foreign import** directive: `foreign import "header.h"` (see
   [the C FFI](ffi.md));
 * a **module variable** declaration: `[local] name [: type] = exp` or
   `[local] const name [: type] [= exp]`;
@@ -106,12 +106,13 @@ than that sequence, with one deliberate frontier for module variables:
   end
   ```
 
-* **A module-variable declaration sees only earlier imports and module
-  variables.** Imports and foreign imports are processed in logical order, but
-  their aliases are available regardless of placement to every declaration
-  other than a module variable. At each module-variable declaration, its type
-  annotation and initializer see only import aliases and module variables that
-  occur earlier in the logical order. They still see every record, union,
+* **A module-variable declaration sees only earlier ordinary Titan imports and
+  module variables.** Ordinary import aliases are available regardless of
+  placement to other declarations. At each module-variable declaration, its
+  type annotation and initializer see only those aliases and module variables
+  that occur earlier in the logical order. The reserved `ffi` namespace already
+  contains the complete ordered module C environment, including declarations
+  and macros from foreign directives written later. They still see every record, union,
   Interface, type alias, ordinary function, method, nominal function, and
   synthesized constructor, wherever those declarations occur. This visibility
   does not make a non-constant

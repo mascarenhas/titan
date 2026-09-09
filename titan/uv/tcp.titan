@@ -1,4 +1,4 @@
-local type AddressList = owned libuv.sockaddr_storage[]
+local type AddressList = owned ffi.sockaddr_storage[]
 
 -- Each record below is the ordinary argument bundle for one callback-taking
 -- libuv call. A Task yields one Call, its dispatcher submits that operation,
@@ -38,82 +38,82 @@ end
 -- The foreign callback reads the callback from field 2. Everything after it
 -- is the exact state owned by that callback-taking libuv operation.
 local record uv_getaddrinfo_t
-  local native: owned *libuv.uv_getaddrinfo_t
+  local native: owned *ffi.uv_getaddrinfo_t
   local callback: (uv_getaddrinfo_t, integer,
                    *void) -> ()
 end
 
 local record uv_connect_t
-  local native: owned *libuv.uv_connect_t
+  local native: owned *ffi.uv_connect_t
   local callback: (uv_connect_t, integer) -> ()
 end
 
 local record uv_shutdown_t
-  local native: owned *libuv.uv_shutdown_t
+  local native: owned *ffi.uv_shutdown_t
   local callback: (uv_shutdown_t, integer) -> ()
 end
 
-foreign function uv_getaddrinfo_cb(req: *libuv.uv_getaddrinfo_t,
+foreign function uv_getaddrinfo_cb(req: *ffi.uv_getaddrinfo_t,
                                    status: int,
-                                   result: *libuv.addrinfo)
-  local owner = libuv.uv_req_get_data(
-      req as *libuv.uv_req_t) as *ffi.Udata
+                                   result: *ffi.addrinfo)
+  local owner = ffi.uv_req_get_data(
+      req as *ffi.uv_req_t) as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
-  local L = libuv.uv_loop_get_data(req.loop) as *lua.lua_State
+  local L = ffi.uv_loop_get_data(req.loop) as *ffi.lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
       callback.upvalue[2]) as UvIntegerPointerCallbackEntry
-  local top = lua.lua_gettop(L)
-  entry(L, module, callback, owner, status as lua.lua_Integer,
+  local top = ffi.lua_gettop(L)
+  entry(L, module, callback, owner, status as ffi.lua_Integer,
         result as *void)
-  lua.lua_settop(L, top)
+  ffi.lua_settop(L, top)
 end
 
-foreign function uv_connect_cb(req: *libuv.uv_connect_t,
+foreign function uv_connect_cb(req: *ffi.uv_connect_t,
                                status: int)
-  local owner = libuv.uv_req_get_data(
-      req as *libuv.uv_req_t) as *ffi.Udata
+  local owner = ffi.uv_req_get_data(
+      req as *ffi.uv_req_t) as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
-  local handle = req.handle as *libuv.uv_handle_t
-  local loop = libuv.uv_handle_get_loop(handle)
-  local L = libuv.uv_loop_get_data(loop) as *lua.lua_State
+  local handle = req.handle as *ffi.uv_handle_t
+  local loop = ffi.uv_handle_get_loop(handle)
+  local L = ffi.uv_loop_get_data(loop) as *ffi.lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
       callback.upvalue[2]) as UvIntegerCallbackEntry
-  local top = lua.lua_gettop(L)
-  entry(L, module, callback, owner, status as lua.lua_Integer)
-  lua.lua_settop(L, top)
+  local top = ffi.lua_gettop(L)
+  entry(L, module, callback, owner, status as ffi.lua_Integer)
+  ffi.lua_settop(L, top)
 end
 
-foreign function uv_shutdown_cb(req: *libuv.uv_shutdown_t,
+foreign function uv_shutdown_cb(req: *ffi.uv_shutdown_t,
                                 status: int)
-  local owner = libuv.uv_req_get_data(
-      req as *libuv.uv_req_t) as *ffi.Udata
+  local owner = ffi.uv_req_get_data(
+      req as *ffi.uv_req_t) as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
-  local handle = req.handle as *libuv.uv_handle_t
-  local loop = libuv.uv_handle_get_loop(handle)
-  local L = libuv.uv_loop_get_data(loop) as *lua.lua_State
+  local handle = req.handle as *ffi.uv_handle_t
+  local loop = ffi.uv_handle_get_loop(handle)
+  local L = ffi.uv_loop_get_data(loop) as *ffi.lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
       callback.upvalue[2]) as UvIntegerCallbackEntry
-  local top = lua.lua_gettop(L)
-  entry(L, module, callback, owner, status as lua.lua_Integer)
-  lua.lua_settop(L, top)
+  local top = ffi.lua_gettop(L)
+  entry(L, module, callback, owner, status as ffi.lua_Integer)
+  ffi.lua_settop(L, top)
 end
 
-foreign function uv_connection_cb(server: *libuv.uv_stream_t,
+foreign function uv_connection_cb(server: *ffi.uv_stream_t,
                                    status: int)
-  local handle = server as *libuv.uv_handle_t
-  local owner = libuv.uv_handle_get_data(handle) as *ffi.Udata
+  local handle = server as *ffi.uv_handle_t
+  local owner = ffi.uv_handle_get_data(handle) as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[3].uv)
-  local loop = libuv.uv_handle_get_loop(handle)
-  local L = libuv.uv_loop_get_data(loop) as *lua.lua_State
+  local loop = ffi.uv_handle_get_loop(handle)
+  local L = ffi.uv_loop_get_data(loop) as *ffi.lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
       callback.upvalue[2]) as UvIntegerCallbackEntry
-  local top = lua.lua_gettop(L)
-  entry(L, module, callback, owner, status as lua.lua_Integer)
-  lua.lua_settop(L, top)
+  local top = ffi.lua_gettop(L)
+  entry(L, module, callback, owner, status as ffi.lua_Integer)
+  ffi.lua_settop(L, top)
 end
 
 local record TcpConnectionState
@@ -142,8 +142,8 @@ end
 -- The foreign callbacks read alloc, read, and connection closures from fields
 -- 2, 3, and 4. Libuv, not Titan, tracks and orders concurrent write requests.
 local record uv_tcp_t
-  local native: owned *libuv.uv_tcp_t
-  local alloc_callback: (uv_tcp_t, libuv.size_t,
+  local native: owned *ffi.uv_tcp_t
+  local alloc_callback: (uv_tcp_t, ffi.size_t,
                          *void) -> ()
   local read_callback: (uv_tcp_t, integer) -> ()
   local connection_callback: (uv_tcp_t, integer) -> ()
@@ -152,14 +152,14 @@ local record uv_tcp_t
   local root_index: integer
 end
 
-local function tcp_stream(tcp: uv_tcp_t): *libuv.uv_stream_t
-  local native: *libuv.uv_tcp_t = tcp.native
-  return native as *libuv.uv_stream_t
+local function tcp_stream(tcp: uv_tcp_t): *ffi.uv_stream_t
+  local native: *ffi.uv_tcp_t = tcp.native
+  return native as *ffi.uv_stream_t
 end
 
-local function tcp_handle(tcp: uv_tcp_t): *libuv.uv_handle_t
-  local native: *libuv.uv_tcp_t = tcp.native
-  return native as *libuv.uv_handle_t
+local function tcp_handle(tcp: uv_tcp_t): *ffi.uv_handle_t
+  local native: *ffi.uv_tcp_t = tcp.native
+  return native as *ffi.uv_handle_t
 end
 
 local function connection_state(tcp: uv_tcp_t): TcpConnectionState
@@ -210,17 +210,17 @@ local function service_text(port: integer): string
   return bytes_string(bytes, length)
 end
 
-local function usable_address(entry: *libuv.addrinfo): boolean
+local function usable_address(entry: *ffi.addrinfo): boolean
   return entry.ai_addr ~= nil and
-      (entry.ai_family == libuv.AF_INET or
-       entry.ai_family == libuv.AF_INET6) and
-      entry.ai_addrlen <= libuv.sockaddr_storage.sizeof
+      (entry.ai_family == ffi.AF_INET or
+       entry.ai_family == ffi.AF_INET6) and
+      entry.ai_addrlen <= ffi.sockaddr_storage.sizeof
 end
 
 -- The addrinfo chain belongs to libuv only until the getaddrinfo callback
 -- returns. Copy each usable sockaddr into normalized GC-owned storage before
 -- uv_freeaddrinfo releases that chain.
-local function copy_addresses(first: *libuv.addrinfo): AddressList
+local function copy_addresses(first: *ffi.addrinfo): AddressList
   local count = 0
   local entry = first
   while entry ~= nil do
@@ -228,14 +228,14 @@ local function copy_addresses(first: *libuv.addrinfo): AddressList
     entry = entry.ai_next
   end
 
-  local addresses = libuv.sockaddr_storage.new_array(count)
-  local destination: *libuv.sockaddr_storage = addresses
+  local addresses = ffi.sockaddr_storage.new_array(count)
+  local destination: *ffi.sockaddr_storage = addresses
   local index = 0
   entry = first
   while entry ~= nil do
     if usable_address(entry) then
-      cstring.memcpy(destination + index, entry.ai_addr,
-                     entry.ai_addrlen as cstring.size_t)
+      ffi.memcpy(destination + index, entry.ai_addr,
+                     entry.ai_addrlen as ffi.size_t)
       index = index + 1
     end
     entry = entry.ai_next
@@ -244,9 +244,9 @@ local function copy_addresses(first: *libuv.addrinfo): AddressList
 end
 
 local function address_at(addresses: AddressList,
-                          index: integer): const *libuv.sockaddr
-  local data: *libuv.sockaddr_storage = addresses
-  return (data + index - 1) as const *libuv.sockaddr
+                          index: integer): const *ffi.sockaddr
+  local data: *ffi.sockaddr_storage = addresses
+  return (data + index - 1) as const *ffi.sockaddr
 end
 
 local function take_chunk(tcp: uv_tcp_t): string
@@ -309,7 +309,7 @@ local function validate_tcp(tcp: uv_tcp_t, operation: string)
   if tcp.runtime ~= task.runtime then
     raise "TCP resource belongs to a different async Runtime"
   end
-  if libuv.uv_is_closing(tcp_handle(tcp)) ~= 0 then
+  if ffi.uv_is_closing(tcp_handle(tcp)) ~= 0 then
     raise "cannot " .. operation .. " a closed TCP resource"
   end
 end
@@ -324,7 +324,7 @@ local function new_server_role(): TcpRole
 end
 
 local function new_tcp(runtime: Runtime, role: TcpRole): uv_tcp_t
-  local native: owned *libuv.uv_tcp_t = libuv.uv_tcp_t.new()
+  local native: owned *ffi.uv_tcp_t = ffi.uv_tcp_t.new()
   local tcp: uv_tcp_t = {
     native = native,
     alloc_callback = tcp_alloc_dispatch,
@@ -334,27 +334,27 @@ local function new_tcp(runtime: Runtime, role: TcpRole): uv_tcp_t
     role = role,
     root_index = 0,
   }
-  local exact_native: *libuv.uv_tcp_t = native
+  local exact_native: *ffi.uv_tcp_t = native
   tcp.root_index = root_handle(runtime, tcp)
-  local status = libuv.uv_tcp_init(runtime.loop, exact_native)
+  local status = ffi.uv_tcp_init(runtime.loop, exact_native)
   if status < 0 then
     unroot_handle(runtime, tcp.root_index)
     tcp.root_index = 0
     raise make_error(status, "net.tcp.init")
   end
-  libuv.uv_handle_set_data(exact_native as *libuv.uv_handle_t,
+  ffi.uv_handle_set_data(exact_native as *ffi.uv_handle_t,
                            tcp as *void)
   return tcp
 end
 
 local function start_tcp_read(tcp: uv_tcp_t): integer
-  return libuv.uv_read_start(
+  return ffi.uv_read_start(
       tcp_stream(tcp), uv_alloc_cb,
       uv_read_cb)
 end
 
 local function begin_tcp_close(tcp: uv_tcp_t, closer: Task?): boolean
-  if libuv.uv_is_closing(tcp_handle(tcp)) ~= 0 then return false end
+  if ffi.uv_is_closing(tcp_handle(tcp)) ~= 0 then return false end
 
   if closer then
     local waiter? = current_waiter(tcp)
@@ -363,7 +363,7 @@ local function begin_tcp_close(tcp: uv_tcp_t, closer: Task?): boolean
       when server then
         wake_task_next_turn(
             waiter as Task, true,
-            make_error(libuv.UV_ECANCELED, "net.accept"))
+            make_error(ffi.UV_ECANCELED, "net.accept"))
       when connection then
         wake_task_next_turn(waiter as Task, false, nil)
       end
@@ -394,17 +394,17 @@ end
 
 local function complete_getaddrinfo(task: Task, status: integer,
                                     pointer: *void)
-  local result = pointer as *libuv.addrinfo
+  local result = pointer as *ffi.addrinfo
   local addresses: AddressList? = nil
   local failure: value = nil
   do
-    defer libuv.uv_freeaddrinfo(result)
+    defer ffi.uv_freeaddrinfo(result)
     if status < 0 then
       failure = make_error(status, "net.resolve")
     else
       addresses = copy_addresses(result)
       if #(addresses as AddressList) == 0 then
-        failure = make_error(libuv.UV_EADDRNOTAVAIL,
+        failure = make_error(ffi.UV_EADDRNOTAVAIL,
                              "net.resolve")
       end
     end
@@ -421,10 +421,10 @@ catch
   fail_task_at_callback_boundary(task, error, traceback)
 end
 
-local function tcp_alloc_dispatch(tcp: uv_tcp_t, size: libuv.size_t,
+local function tcp_alloc_dispatch(tcp: uv_tcp_t, size: ffi.size_t,
                                   pointer: *void)
   local state = connection_state(tcp)
-  local descriptor = pointer as *libuv.uv_buf_t
+  local descriptor = pointer as *ffi.uv_buf_t
   do
     local bytes = char.new_array(size as integer)
     state.buffer = bytes
@@ -448,7 +448,7 @@ local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
   state.buffer = nil
 
   if not buffer and state.read_error ~= nil then
-    libuv.uv_read_stop(tcp_stream(tcp))
+    ffi.uv_read_stop(tcp_stream(tcp))
     local failure = state.read_error
     if not resume_waiter(tcp, true, failure) then
       report_task_error(failure, "")
@@ -459,8 +459,8 @@ local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
 
   if result == 0 then return end
   if result < 0 then
-    libuv.uv_read_stop(tcp_stream(tcp))
-    if result == libuv.UV_EOF then
+    ffi.uv_read_stop(tcp_stream(tcp))
+    if result == ffi.UV_EOF then
       state.eof = true
       resume_waiter(tcp, false, nil)
     else
@@ -476,7 +476,7 @@ local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
       state.chunks[#state.chunks + 1] = chunk
   end
 catch
-  libuv.uv_read_stop(tcp_stream(tcp))
+  ffi.uv_read_stop(tcp_stream(tcp))
   connection_state(tcp).read_error = error
   if not resume_waiter(tcp, true, error) then
     report_task_error(error, traceback)
@@ -491,7 +491,7 @@ local function tcp_connection_dispatch(server: uv_tcp_t, status: integer)
     check_status(status, "net.accept")
     client = new_tcp(server.runtime, new_connection_role())
     local accepted = client as uv_tcp_t
-    check_status(libuv.uv_accept(tcp_stream(server), tcp_stream(accepted)),
+    check_status(ffi.uv_accept(tcp_stream(server), tcp_stream(accepted)),
                  "net.accept")
     if not resume_waiter(server, false, accepted) then
       local state = server_state(server)
@@ -511,25 +511,25 @@ catch
 end
 
 local function GetaddrinfoCall:dispatch(task: Task): Immediate?
-  local native: owned *libuv.uv_getaddrinfo_t =
-      libuv.uv_getaddrinfo_t.new()
-  local request: *libuv.uv_getaddrinfo_t = native
-  local hints = libuv.addrinfo.new()
-  hints.ai_family = libuv.AF_UNSPEC
-  hints.ai_socktype = libuv.SOCK_STREAM
-  hints.ai_protocol = libuv.IPPROTO_TCP
-  hints.ai_flags = libuv.AI_NUMERICSERV
+  local native: owned *ffi.uv_getaddrinfo_t =
+      ffi.uv_getaddrinfo_t.new()
+  local request: *ffi.uv_getaddrinfo_t = native
+  local hints = ffi.addrinfo.new()
+  hints.ai_family = ffi.AF_UNSPEC
+  hints.ai_socktype = ffi.SOCK_STREAM
+  hints.ai_protocol = ffi.IPPROTO_TCP
+  hints.ai_flags = ffi.AI_NUMERICSERV
   local callback = function (_owner: uv_getaddrinfo_t, status: integer,
                              pointer: *void)
     complete_getaddrinfo(task, status, pointer)
   end
   local owner = uv_getaddrinfo_t.new(native, callback)
   task.pending = owner
-  libuv.uv_req_set_data(request as *libuv.uv_req_t,
+  ffi.uv_req_set_data(request as *ffi.uv_req_t,
                         owner as *void)
   local node = self.node as const *char
   local service = self.service as const *char
-  local status = libuv.uv_getaddrinfo {
+  local status = ffi.uv_getaddrinfo {
     loop = task.runtime.loop,
     req = request,
     getaddrinfo_cb = uv_getaddrinfo_cb,
@@ -541,17 +541,17 @@ local function GetaddrinfoCall:dispatch(task: Task): Immediate?
 end
 
 local function TcpConnectCall:dispatch(task: Task): Immediate?
-  local native: owned *libuv.uv_connect_t = libuv.uv_connect_t.new()
-  local request: *libuv.uv_connect_t = native
+  local native: owned *ffi.uv_connect_t = ffi.uv_connect_t.new()
+  local request: *ffi.uv_connect_t = native
   local callback = function (_owner: uv_connect_t, status: integer)
     complete_status(task, status, "net.connect")
   end
   local owner = uv_connect_t.new(native, callback)
   task.pending = owner
-  libuv.uv_req_set_data(request as *libuv.uv_req_t,
+  ffi.uv_req_set_data(request as *ffi.uv_req_t,
                         owner as *void)
-  local handle: *libuv.uv_tcp_t = self.tcp.native
-  local status = libuv.uv_tcp_connect {
+  local handle: *ffi.uv_tcp_t = self.tcp.native
+  local status = ffi.uv_tcp_connect {
     req = request,
     handle = handle,
     addr = address_at(self.addresses, self.address_index),
@@ -580,7 +580,7 @@ local function TcpReadCall:dispatch(task: Task): Immediate?
     end
   end
   local status = start_tcp_read(tcp)
-  if status < 0 and status ~= libuv.UV_EALREADY then
+  if status < 0 and status ~= ffi.UV_EALREADY then
     return immediate_error(status, "net.read.start")
   end
 
@@ -595,16 +595,16 @@ local function TcpWriteCall:dispatch(task: Task): Immediate?
 end
 
 local function TcpShutdownCall:dispatch(task: Task): Immediate?
-  local native: owned *libuv.uv_shutdown_t = libuv.uv_shutdown_t.new()
-  local request: *libuv.uv_shutdown_t = native
+  local native: owned *ffi.uv_shutdown_t = ffi.uv_shutdown_t.new()
+  local request: *ffi.uv_shutdown_t = native
   local callback = function (_owner: uv_shutdown_t, status: integer)
     complete_status(task, status, "net.shutdown")
   end
   local owner = uv_shutdown_t.new(native, callback)
   task.pending = owner
-  libuv.uv_req_set_data(request as *libuv.uv_req_t,
+  ffi.uv_req_set_data(request as *ffi.uv_req_t,
                         owner as *void)
-  local status = libuv.uv_shutdown(
+  local status = ffi.uv_shutdown(
       request, tcp_stream(self.tcp), uv_shutdown_cb)
   return submitted(task, status, "net.shutdown")
 end
@@ -642,7 +642,7 @@ end
 local function resolve_addresses(host: string,
                                  port: integer): AddressList
   if contains_nul(host) then
-    raise make_error(libuv.UV_EINVAL, "net.resolve")
+    raise make_error(ffi.UV_EINVAL, "net.resolve")
   end
   return await(Call.getaddrinfo(
       GetaddrinfoCall.new(host, service_text(port)))) as AddressList
@@ -680,7 +680,7 @@ local function net_connect(host: string, port: integer): uv_tcp_t
   end
 
   if last_failure ~= nil then raise last_failure end
-  raise make_error(libuv.UV_EADDRNOTAVAIL, "net.connect")
+  raise make_error(ffi.UV_EADDRNOTAVAIL, "net.connect")
 end
 
 local function net_listen(host: string, port: integer,
@@ -694,16 +694,16 @@ local function net_listen(host: string, port: integer,
   accepting_work(task.runtime, "listen on TCP")
   local addresses = resolve_addresses(host, port)
   local last_status: int =
-      libuv.UV_EADDRNOTAVAIL as int
+      ffi.UV_EADDRNOTAVAIL as int
 
   local address_index = 1
   while address_index <= #addresses do
     local tcp = new_tcp(task.runtime, new_server_role())
-    local native: *libuv.uv_tcp_t = tcp.native
-    local status = libuv.uv_tcp_bind(
+    local native: *ffi.uv_tcp_t = tcp.native
+    local status = ffi.uv_tcp_bind(
         native, address_at(addresses, address_index), 0)
     if status >= 0 then
-      status = libuv.uv_listen(
+      status = ffi.uv_listen(
           tcp_stream(tcp), backlog as int,
           uv_connection_cb)
     end
@@ -718,7 +718,7 @@ end
 
 local function net_read(tcp: uv_tcp_t): string?
   require_connection(tcp, "read from")
-  if libuv.uv_is_closing(tcp_handle(tcp)) ~= 0 then return nil end
+  if ffi.uv_is_closing(tcp_handle(tcp)) ~= 0 then return nil end
   validate_tcp(tcp, "read from")
   return await(Call.tcp_read(TcpReadCall.new(tcp))) as string?
 end
@@ -726,7 +726,7 @@ end
 local function net_write(tcp: uv_tcp_t, data: string)
   require_connection(tcp, "write to")
   validate_tcp(tcp, "write to")
-  if libuv.uv_is_writable(tcp_stream(tcp)) == 0 then
+  if ffi.uv_is_writable(tcp_stream(tcp)) == 0 then
     raise "cannot write after Connection shutdown"
   end
   if #data == 0 then return end
@@ -737,7 +737,7 @@ end
 local function net_shutdown(tcp: uv_tcp_t)
   require_connection(tcp, "shut down")
   validate_tcp(tcp, "shut down")
-  if libuv.uv_is_writable(tcp_stream(tcp)) == 0 then return end
+  if ffi.uv_is_writable(tcp_stream(tcp)) == 0 then return end
   await(Call.tcp_shutdown(TcpShutdownCall.new(tcp)))
 end
 
@@ -749,11 +749,11 @@ local function net_accept(server: uv_tcp_t): uv_tcp_t
 end
 
 local function net_close(tcp: uv_tcp_t)
-  if libuv.uv_is_closing(tcp_handle(tcp)) ~= 0 then return end
+  if ffi.uv_is_closing(tcp_handle(tcp)) ~= 0 then return end
   validate_tcp(tcp, "close")
   await(Call.tcp_close(TcpCloseCall.new(tcp)))
 end
 
 local function net_is_closed(tcp: uv_tcp_t): boolean
-  return libuv.uv_is_closing(tcp_handle(tcp)) ~= 0
+  return ffi.uv_is_closing(tcp_handle(tcp)) ~= 0
 end

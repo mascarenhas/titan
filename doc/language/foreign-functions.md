@@ -5,17 +5,17 @@ useful for callbacks and other small native entry points that would otherwise
 need a hand-written C trampoline.
 
 ```titan
-local c = foreign import "callback_api.h"
+foreign import "callback_api.h"
 
-foreign function compare(left: *c.Item,
-                         right: *c.Item): c.int
-  if left.key < right.key then return -1 as c.int end
-  if left.key > right.key then return 1 as c.int end
-  return 0 as c.int
+foreign function compare(left: *ffi.Item,
+                         right: *ffi.Item): ffi.int
+  if left.key < right.key then return -1 as ffi.int end
+  if left.key > right.key then return 1 as ffi.int end
+  return 0 as ffi.int
 end
 
-local function sort(items: *c.Item, count: c.size_t)
-  c.sort_items(items, count, compare)
+local function sort(items: *ffi.Item, count: ffi.size_t)
+  ffi.sort_items(items, count, compare)
 end
 ```
 
@@ -44,8 +44,8 @@ end
 Omit the result annotation for a C `void` function:
 
 ```titan
-foreign function notify(item: *c.Item)
-  c.mark_notified(item)
+foreign function notify(item: *ffi.Item)
+  ffi.mark_notified(item)
 end
 ```
 
@@ -78,8 +78,8 @@ denotes a pointer to a C function taking `P1, P2` and returning `R`. Use `()`
 for a C `void` result:
 
 ```titan
-local type Compare = foreign (*c.Item, *c.Item) -> c.int
-local type Notify = foreign (*c.Item) -> ()
+local type Compare = foreign (*ffi.Item, *ffi.Item) -> ffi.int
+local type Notify = foreign (*ffi.Item) -> ()
 ```
 
 The type is already a pointer. Consequently, `*foreign (...) -> ...` means a
@@ -90,7 +90,7 @@ used where an exactly compatible foreign function-pointer type is expected:
 
 ```titan
 local callback: Compare = compare
-c.install_compare(compare)
+ffi.install_compare(compare)
 ```
 
 It is not a Titan function value. It cannot inhabit `(P...) -> R`, cross through
@@ -108,7 +108,7 @@ alias:
 local bridge = import "internal.bridge.titan"
 
 local function install()
-  c.install_callback(bridge.callback)
+  ffi.install_callback(bridge.callback)
 end
 ```
 
@@ -119,9 +119,10 @@ public Titan interface; compiled metadata contains no foreign function.
 Physical co-residence in one provider and static linking do not change that
 rule, and Lua cannot see foreign functions through `require`.
 
-The imported module's C-import alias is not re-exported. The compiler carries
-only the generated C declarations and exact origin headers required to compile
-the explicit-source consumer. See
+The source dependency's generated `.ffi.h` joins the consumer's C environment,
+and its `.titan.h` supplies foreign-function declarations. C header inheritance
+is transitive, but private Titan names remain available only through the direct
+explicit source-import alias. See
 [Visibility through explicit source imports](source-import-visibility.md).
 
 ## Body subset
@@ -172,7 +173,7 @@ Literals in a foreign body are C values:
 | `nil` | contextual `NULL` for a pointer or function pointer |
 
 An untyped `local p = nil` has no pointee type and is rejected; write an
-annotation such as `local p: *c.Item = nil`.
+annotation such as `local p: *ffi.Item = nil`.
 
 `T.sizeof` and `T.alignof` keep the configured C `size_t` type inside a
 foreign body. They can be passed directly to `malloc`/`calloc` or stored in a
@@ -208,35 +209,36 @@ A foreign function that explicitly calls a Lua API capable of longjmp must obey
 that API's C contract. The compiler does not turn such a call into `raise` and
 cannot run a Titan `defer` while it unwinds.
 
-## Generated header
+## Generated headers
 
-A source module containing a foreign function owns one compiler-generated,
-source-adjacent header with the reserved suffix `.titan.h`:
+Every source module owns a compiler-generated, source-adjacent `.ffi.h` with
+its ordered C environment. A module defining foreign functions also owns a
+`.titan.h` with their declarations and eligible inline bodies:
 
-| Module source | Generated header |
-| --- | --- |
-| flat `foo/bar.titan` | `foo/bar.titan.h` |
-| folder main `foo/bar/bar.titan` | `foo/bar/bar.titan.h` |
+| Module source | C environment | Foreign-function declarations |
+| --- | --- | --- |
+| flat `foo/bar.titan` | `foo/bar.ffi.h` | `foo/bar.titan.h` |
+| folder main `foo/bar/bar.titan` | `foo/bar/bar.ffi.h` | `foo/bar/bar.titan.h` |
 
-A folder contributor produces no separate header. With `--tree`, the header is
-beside the selected external canonical source just like generated C and object
-files.
+A folder contributor produces no separate headers. With `--tree`, the headers
+are beside the selected external canonical source, like generated C and objects.
 
-The compiler prepares all needed headers before compiling any source object, so
-a consumer may sort before its producer. A header contains the relevant C
-includes, generated headers for explicit source dependencies, every foreign
-prototype, and eligible inline bodies. Generated C includes its own companion
-header.
+The compiler prepares all needed headers before compiling any source object.
+`.ffi.h` includes explicit source dependencies' `.ffi.h` files first, then
+local foreign directives in module order. `.titan.h` includes its own `.ffi.h`
+and needed source dependencies' `.titan.h` declarations before emitting all
+foreign prototypes and then all eligible inline bodies. Generated C includes
+its `.ffi.h` before its `.titan.h` when present.
 
-The `.titan.h` path is compiler-owned. Titan refuses to overwrite a file that
-does not carry its generated banner, replaces a prior generated header, and
-removes a stale generated header when the module no longer defines foreign
-functions. Do not use that reserved path for an author-written header.
+Both paths are compiler-owned. Titan refuses to overwrite an unowned path,
+replaces a prior generated header only after staging succeeds, and removes a
+stale owned `.titan.h` when the module no longer defines foreign functions.
+Do not use either reserved path for an author-written header.
 
-The header is not a binary interface. It is not placed in `.titan.meta`, a
-provider archive, an installed SDK, a Lua shim, or a standard-library
-publication transaction. A binary consumer cannot recover or name the foreign
-functions it declared.
+These headers are source-build artifacts, not binary interfaces. They are not
+placed in `.titan.meta`, provider archives, installed SDKs, Lua shims, or
+standard-library publication transactions. A binary consumer cannot recover or
+name the foreign functions they declare.
 
 ### Inline subset and function identity
 

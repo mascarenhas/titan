@@ -39,9 +39,10 @@ local function test_profile()
     return profile
 end
 
-local function test_process_options()
+local function test_process_options(service)
     return {
         compiler = os.getenv("CC") or "cc",
+        io = service and service.io,
         language_mode = "c99",
         compile_flags = {},
         cppflags = {},
@@ -86,7 +87,7 @@ local function fake_check(header, body, answer, options)
             }
         end,
     }))
-    local code = 'local c = foreign import "' .. header .. '"\n' .. body
+    local code = "foreign import \"" .. header .. '"\n' .. body
     local ast, parse_error = h.parse(code)
     assert(ast, parse_error)
     local _, errors = checker.check(
@@ -137,13 +138,13 @@ describe("contextual unsafe C object-pointer conversions", function()
         with_header(declarations, function(header)
             local ok, err, _, calls = fake_check(header, [[
                 local function convert(
-                    p: *c.ffi_source,
-                    accept: c.ffi_accept_fn
-                ): *c.ffi_target
-                    local q: *c.ffi_target = p
+                    p: *ffi.ffi_source,
+                    accept: ffi.ffi_accept_fn
+                ): *ffi.ffi_target
+                    local q: *ffi.ffi_target = p
                     q = p
-                    c.ffi_take(p)
-                    c.ffi_take_named { value = p }
+                    ffi.ffi_take(p)
+                    ffi.ffi_take_named { value = p }
                     accept(p)
                     return p
                 end
@@ -162,9 +163,9 @@ describe("contextual unsafe C object-pointer conversions", function()
     it("adjusts every value in a typed multi-local declaration", function()
         with_header(declarations, function(header)
             local ok, err, ast, calls = fake_check(header, [[
-                local function convert(p: *c.ffi_source)
-                    local first: *c.ffi_target,
-                          second: *c.ffi_target = p, p
+                local function convert(p: *ffi.ffi_source)
+                    local first: *ffi.ffi_target,
+                          second: *ffi.ffi_target = p, p
                 end
             ]])
             assert.truthy(ok, err)
@@ -188,8 +189,8 @@ describe("contextual unsafe C object-pointer conversions", function()
             } ffi_holder;
         ]], function(header)
             local ok, err, ast, calls = fake_check(header, [[
-                local function convert(p: *c.ffi_source)
-                    local holder = c.ffi_holder.new()
+                local function convert(p: *ffi.ffi_source)
+                    local holder = ffi.ffi_holder.new()
                     holder.pointer = p
                 end
             ]])
@@ -210,8 +211,8 @@ describe("contextual unsafe C object-pointer conversions", function()
         with_header(declarations, function(header)
             local ok, err, ast, calls = fake_check(header, [[
                 local function nil_arguments()
-                    c.ffi_take_named {}
-                    c.ffi_take_named { value = nil }
+                    ffi.ffi_take_named {}
+                    ffi.ffi_take_named { value = nil }
                 end
             ]])
             assert.truthy(ok, err)
@@ -231,8 +232,8 @@ describe("contextual unsafe C object-pointer conversions", function()
             extern void ffi_variadic_target(ffi_target *value, ...);
         ]], function(header)
             local ok, err, ast, calls = fake_check(header, [[
-                local function convert(p: *c.ffi_source)
-                    c.ffi_variadic_target(p)
+                local function convert(p: *ffi.ffi_source)
+                    ffi.ffi_variadic_target(p)
                 end
             ]])
             assert.truthy(ok, err)
@@ -252,13 +253,13 @@ describe("contextual unsafe C object-pointer conversions", function()
         with_header(declarations, function(header)
             local ok, err, ast, calls = fake_check(header, [[
                 local function equal(
-                    source: *c.ffi_source,
-                    target: *c.ffi_target
+                    source: *ffi.ffi_source,
+                    target: *ffi.ffi_target
                 ): boolean
                     return source == target
                 end
 
-                local function convert(source: *c.ffi_source): *c.ffi_target
+                local function convert(source: *ffi.ffi_source): *ffi.ffi_target
                     return source
                 end
             ]])
@@ -287,10 +288,10 @@ describe("contextual unsafe C object-pointer conversions", function()
         ]], function(header)
             local ok, err, ast, calls = fake_check(header, [[
                 local function iterate(
-                    next_value: c.ffi_next_fn,
-                    state: *c.ffi_source
+                    next_value: ffi.ffi_next_fn,
+                    state: *ffi.ffi_source
                 )
-                    for item: c.ffi_target_ptr in next_value, state do
+                    for item: ffi.ffi_target_ptr in next_value, state do
                     end
                 end
             ]])
@@ -310,14 +311,14 @@ describe("contextual unsafe C object-pointer conversions", function()
         with_header(declarations, function(header)
             local ok, err, _, calls = fake_check(header, [[
                 local function forward(
-                    p: *c.ffi_source
-                ): *c.ffi_target
+                    p: *ffi.ffi_source
+                ): *ffi.ffi_target
                     return p
                 end
 
                 local function reverse(
-                    p: *c.ffi_target
-                ): *c.ffi_source
+                    p: *ffi.ffi_target
+                ): *ffi.ffi_source
                     return p
                 end
             ]])
@@ -338,15 +339,15 @@ describe("contextual unsafe C object-pointer conversions", function()
             extern const ffi_source **ffi_const_nested(void);
         ]], function(header)
             local ok, err = fake_check(header, [[
-                local function add(p: *c.ffi_source)
-                    c.ffi_take_volatile(p)
+                local function add(p: *ffi.ffi_source)
+                    ffi.ffi_take_volatile(p)
                 end
             ]])
             assert.truthy(ok, err)
 
             ok, err = fake_check(header, [[
                 local function remove_volatile()
-                    c.ffi_take(c.ffi_volatile_source())
+                    ffi.ffi_take(ffi.ffi_volatile_source())
                 end
             ]])
             assert.falsy(ok)
@@ -355,7 +356,7 @@ describe("contextual unsafe C object-pointer conversions", function()
 
             ok, err = fake_check(header, [[
                 local function remove_nested_const()
-                    c.ffi_take_pointer_pointer(c.ffi_const_nested())
+                    ffi.ffi_take_pointer_pointer(ffi.ffi_const_nested())
                 end
             ]])
             assert.falsy(ok)
@@ -366,8 +367,8 @@ describe("contextual unsafe C object-pointer conversions", function()
     it("rejects object/function category crossings before probing", function()
         with_header(declarations, function(header)
             local ok, err, _, calls = fake_check(header, [[
-                local function bad(p: *c.ffi_source)
-                    c.ffi_take_callback(p)
+                local function bad(p: *ffi.ffi_source)
+                    ffi.ffi_take_callback(p)
                 end
             ]])
             assert.falsy(ok)
@@ -383,8 +384,8 @@ describe("contextual unsafe C object-pointer conversions", function()
         with_header(declarations, function(header)
             local ok, err = fake_check(header, [[
                 local function bad(
-                    p: *c.ffi_source
-                ): *c.ffi_target
+                    p: *ffi.ffi_source
+                ): *ffi.ffi_target
                     return p
                 end
             ]], "reject")
@@ -399,10 +400,10 @@ describe("contextual unsafe C object-pointer conversions", function()
             extern ffi_source invalid_incomplete_array[2];
         ]], function(header)
             local ok, err = h.run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 local function bad(
-                    p: *c.ffi_source
-                ): *c.ffi_target
+                    p: *ffi.ffi_source
+                ): *ffi.ffi_target
                     return p
                 end
             ]])
@@ -418,8 +419,8 @@ describe("contextual unsafe C object-pointer conversions", function()
         ]], function(header)
             local ok, err, ast = fake_check(header, [[
                 local function use_local()
-                    local object: c.ffi_source = c.ffi_make_source()
-                    c.ffi_take(object)
+                    local object: ffi.ffi_source = ffi.ffi_make_source()
+                    ffi.ffi_take(object)
                 end
             ]])
             assert.truthy(ok, err)
@@ -446,8 +447,8 @@ describe("contextual unsafe C object-pointer conversions", function()
             extern ffi_source ffi_make_source(void);
         ]], function(header)
             local ok, err = fake_check(header, [[
-                local function bad(): *c.ffi_source
-                    return c.ffi_make_source() as *c.ffi_source
+                local function bad(): *ffi.ffi_source
+                    return ffi.ffi_make_source() as *ffi.ffi_source
                 end
             ]])
             assert.falsy(ok)
@@ -472,32 +473,32 @@ describe("contextual unsafe C object-pointer conversions", function()
             extern void ffi_mutate_ints(int *items);
         ]], function(header)
             local ok, err = h.run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function accepted()
-                    const box: c.ffi_box = c.ffi_make_box()
-                    c.ffi_observe_box(box)
+                    const box: ffi.ffi_box = ffi.ffi_make_box()
+                    ffi.ffi_observe_box(box)
                     box.pointer[0] = 7
 
-                    const items: c.ffi_int[2] =
-                        c.ffi_int.new_array(2)
-                    c.ffi_observe_ints(items)
+                    const items: ffi.ffi_int[2] =
+                        ffi.ffi_int.new_array(2)
+                    ffi.ffi_observe_ints(items)
                 end
             ]])
             assert.truthy(ok, err)
 
             ok, err = h.run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function rejected()
-                    const box: c.ffi_box = c.ffi_make_box()
+                    const box: ffi.ffi_box = ffi.ffi_make_box()
                     box.field = 1
-                    c.ffi_mutate_box(box)
+                    ffi.ffi_mutate_box(box)
 
-                    const items: c.ffi_int[2] =
-                        c.ffi_int.new_array(2)
+                    const items: ffi.ffi_int[2] =
+                        ffi.ffi_int.new_array(2)
                     items[0] = 1
-                    c.ffi_mutate_ints(items)
+                    ffi.ffi_mutate_ints(items)
                 end
             ]])
             assert.falsy(ok)
@@ -529,19 +530,19 @@ describe("contextual unsafe C object-pointer conversions", function()
         ]], function(header)
             local ok, err = fake_check(header, [[
                 local function accepted()
-                    c.ffi_take_const(c.ffi_const_values)
-                    c.ffi_take_volatile(c.ffi_volatile_values)
-                    c.ffi_take_const(
-                        c.ffi_typedef_const_values)
-                    c.ffi_take_volatile(
-                        c.ffi_typedef_volatile_values)
+                    ffi.ffi_take_const(ffi.ffi_const_values)
+                    ffi.ffi_take_volatile(ffi.ffi_volatile_values)
+                    ffi.ffi_take_const(
+                        ffi.ffi_typedef_const_values)
+                    ffi.ffi_take_volatile(
+                        ffi.ffi_typedef_volatile_values)
                 end
             ]])
             assert.truthy(ok, err)
 
             ok, err = fake_check(header, [[
                 local function bad_const()
-                    c.ffi_take(c.ffi_const_values)
+                    ffi.ffi_take(ffi.ffi_const_values)
                 end
             ]])
             assert.falsy(ok)
@@ -549,7 +550,7 @@ describe("contextual unsafe C object-pointer conversions", function()
 
             ok, err = fake_check(header, [[
                 local function bad_volatile()
-                    c.ffi_take(c.ffi_volatile_values)
+                    ffi.ffi_take(ffi.ffi_volatile_values)
                 end
             ]])
             assert.falsy(ok)
@@ -557,7 +558,7 @@ describe("contextual unsafe C object-pointer conversions", function()
 
             ok, err = fake_check(header, [[
                 local function bad_typedef_const()
-                    c.ffi_take(c.ffi_typedef_const_values)
+                    ffi.ffi_take(ffi.ffi_typedef_const_values)
                 end
             ]])
             assert.falsy(ok)
@@ -565,7 +566,7 @@ describe("contextual unsafe C object-pointer conversions", function()
 
             ok, err = fake_check(header, [[
                 local function bad_typedef_volatile()
-                    c.ffi_take(c.ffi_typedef_volatile_values)
+                    ffi.ffi_take(ffi.ffi_typedef_volatile_values)
                 end
             ]])
             assert.falsy(ok)
@@ -580,9 +581,9 @@ describe("contextual unsafe C object-pointer conversions", function()
         ]], function(header)
             local ok, err, ast, calls = fake_check(header, [[
                 local function arrays()
-                    c.ffi_take(c.ffi_sources)
-                    local local_sources = c.ffi_source.new_array(2)
-                    c.ffi_take(local_sources)
+                    ffi.ffi_take(ffi.ffi_sources)
+                    local local_sources = ffi.ffi_source.new_array(2)
+                    ffi.ffi_take(local_sources)
                 end
             ]])
             assert.truthy(ok, err)
@@ -603,16 +604,16 @@ describe("contextual unsafe C object-pointer conversions", function()
         ]], function(header)
             local ok, err, ast, calls = fake_check(header, [[
                 local function explicit(
-                    pointer: *c.ffi_source
-                ): *c.ffi_target
-                    return pointer as *c.ffi_target
+                    pointer: *ffi.ffi_source
+                ): *ffi.ffi_target
+                    return pointer as *ffi.ffi_target
                 end
 
                 local function typed_vararg(
-                    pointer: *c.ffi_source
+                    pointer: *ffi.ffi_source
                 )
-                    c.ffi_variadic(
-                        1, pointer as *c.ffi_target)
+                    ffi.ffi_variadic(
+                        1, pointer as *ffi.ffi_target)
                 end
             ]])
             assert.truthy(ok, err)
@@ -666,21 +667,21 @@ describe("contextual unsafe C object-pointer conversions", function()
         ]], function(header)
                 local ok, err, _, calls = fake_check(header, [[
                     local function prefixes(
-                        tcp: *c.ffi_tcp,
-                        pipe: *c.ffi_pipe,
-                        fs: *c.ffi_fs
+                        tcp: *ffi.ffi_tcp,
+                        pipe: *ffi.ffi_pipe,
+                        fs: *ffi.ffi_fs
                     ): integer
-                        local handle: *c.ffi_handle = tcp
-                        local stream: *c.ffi_stream = pipe
-                        local request: *c.ffi_request = fs
+                        local handle: *ffi.ffi_handle = tcp
+                        local stream: *ffi.ffi_stream = pipe
+                        local request: *ffi.ffi_request = fs
                         return 0
                     end
 
                     local function direct()
-                        local tcp = c.ffi_tcp.new()
-                        local request = c.ffi_fs.new()
-                        c.ffi_close(tcp, nil)
-                        c.ffi_cancel(request)
+                        local tcp = ffi.ffi_tcp.new()
+                        local request = ffi.ffi_fs.new()
+                        ffi.ffi_close(tcp, nil)
+                        ffi.ffi_cancel(request)
                     end
                 ]])
                 assert.truthy(ok, err)
@@ -716,9 +717,11 @@ describe("contextual unsafe C object-pointer conversions", function()
             cprobe.new_service = function()
                 return {
                     profile = test_profile(),
+                io = require("titan-compiler.io").new_sync(),
                     cdriver_process_options = test_process_options,
                     module_context = function()
                         return {
+                            validate_baseline = function() return { status = "success" } end,
                             probe_unsafe_object_pointer = function()
                                 error("injected probe failure")
                             end,
@@ -731,10 +734,10 @@ describe("contextual unsafe C object-pointer conversions", function()
                 }
             end
 
-            local code = 'local c = foreign import "' .. header .. [["
+            local code = "foreign import \"" .. header .. [["
                 local function convert(
-                    p: *c.ffi_source
-                ): *c.ffi_target
+                    p: *ffi.ffi_source
+                ): *ffi.ffi_target
                     return p
                 end
             ]]
@@ -763,6 +766,7 @@ describe("contextual unsafe C object-pointer conversions", function()
             local probe_calls = 0
             local service = {
                 profile = test_profile(),
+                io = require("titan-compiler.io").new_sync(),
                 cdriver_process_options = test_process_options,
                 module_context = function()
                     return {
@@ -792,16 +796,16 @@ describe("contextual unsafe C object-pointer conversions", function()
                 return service
             end
 
-            local code = 'local c = foreign import "' .. header .. [["
+            local code = "foreign import \"" .. header .. [["
                 local function forward(
-                    p: *c.ffi_source
-                ): *c.ffi_target
+                    p: *ffi.ffi_source
+                ): *ffi.ffi_target
                     return p
                 end
 
                 local function reverse(
-                    p: *c.ffi_target
-                ): *c.ffi_source
+                    p: *ffi.ffi_target
+                ): *ffi.ffi_source
                     return p
                 end
             ]]

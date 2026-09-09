@@ -1,6 +1,6 @@
 -- Native-test access to the host shell through Lua's standard os/io library.
 local common = import "support.common.titan"
-local cstdlib = foreign import "stdlib.h"
+foreign import "stdlib.h"
 
 local type Renderer = ({string}) -> string
 local type Executor = ({string}) -> (boolean?, string, integer)
@@ -71,5 +71,5 @@ local function capture(argv: {string}): (string, string, integer)
 end
 
 local function system(argv: {string}): integer
-  return cstdlib.system(renderer_function()(argv))
+  return ffi.system(renderer_function()(argv))
 end

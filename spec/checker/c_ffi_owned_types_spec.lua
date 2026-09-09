@@ -67,7 +67,7 @@ local declarations = [[
 
 local function check_with_header(header, body)
     return h.run_checker(
-        'local c = foreign import "' .. header .. '"\n' .. body,
+        "foreign import \"" .. header .. '"\n' .. body,
         probe_session)
 end
 
@@ -92,8 +92,8 @@ describe("source-written owned C types", function()
             }
         ]], function(header)
             local ok, err, ast = check_with_header(header, [[
-                local type Item = owned *c.ffi_item
-                local type Items = owned c.ffi_item[]
+                local type Item = owned *ffi.ffi_item
+                local type Items = owned ffi.ffi_item[]
                 local type Transform = (Item) -> Item
 
                 record PublicHolder
@@ -103,15 +103,15 @@ describe("source-written owned C types", function()
                 end
 
                 local function use_locally(): integer
-                    local one: Item = c.ffi_item.new()
-                    local many: Items = c.ffi_item.new_array(3)
+                    local one: Item = ffi.ffi_item.new()
+                    local many: Items = ffi.ffi_item.new_array(3)
                     local transform: Transform =
                         function(item: Item): Item
                             item.number = 17
                             return item
                         end
                     local holder = PublicHolder.new(one, many, transform)
-                    return c.ffi_read(holder.transform(holder.item))
+                    return ffi.ffi_read(holder.transform(holder.item))
                         + #holder.items
                 end
             ]])
@@ -121,11 +121,11 @@ describe("source-written owned C types", function()
             local items_alias = ast[3]._type
             assert.equal("Type.COwned", item_alias._tag)
             assert.is_false(item_alias.count)
-            assert.equal(string.format("owned *test.%s.ffi_item", header),
+            assert.equal("owned *test.ffi.ffi_item",
                 types.tostring(item_alias))
             assert.equal("Type.COwned", items_alias._tag)
             assert.is_true(items_alias.count)
-            assert.equal(string.format("owned test.%s.ffi_item[]", header),
+            assert.equal("owned test.ffi.ffi_item[]",
                 types.tostring(items_alias))
         end)
     end)
@@ -135,31 +135,31 @@ describe("source-written owned C types", function()
         with_header(declarations, function(header)
             local ok, err = check_with_header(header, [[
                 local function accepted(): integer
-                    local item: owned *c.ffi_item = c.ffi_item.new()
-                    local items: owned c.ffi_item[] =
-                        c.ffi_item.new_array(2)
-                    local slot: owned *c.ffi_item_pointer =
-                        c.ffi_item_pointer.new()
-                    local mutable: *c.ffi_item = item
-                    local immutable: const *c.ffi_item = item
-                    local erased: *c.ffi_void = item
-                    local optional: owned *c.ffi_item? = item
-                    c.ffi_write(item)
-                    c.ffi_write(items)
-                    c.ffi_write(optional as owned *c.ffi_item)
-                    return c.ffi_read(mutable)
-                        + c.ffi_read(immutable)
-                        + c.ffi_present(erased)
-                        + c.ffi_pointer_present(slot)
+                    local item: owned *ffi.ffi_item = ffi.ffi_item.new()
+                    local items: owned ffi.ffi_item[] =
+                        ffi.ffi_item.new_array(2)
+                    local slot: owned *ffi.ffi_item_pointer =
+                        ffi.ffi_item_pointer.new()
+                    local mutable: *ffi.ffi_item = item
+                    local immutable: const *ffi.ffi_item = item
+                    local erased: *ffi.ffi_void = item
+                    local optional: owned *ffi.ffi_item? = item
+                    ffi.ffi_write(item)
+                    ffi.ffi_write(items)
+                    ffi.ffi_write(optional as owned *ffi.ffi_item)
+                    return ffi.ffi_read(mutable)
+                        + ffi.ffi_read(immutable)
+                        + ffi.ffi_present(erased)
+                        + ffi.ffi_pointer_present(slot)
                 end
             ]])
             assert.truthy(ok, err)
 
             ok, err = check_with_header(header, [[
                 local function bad()
-                    local item: owned *c.ffi_const_item =
-                        c.ffi_const_item.new()
-                    local mutable: *c.ffi_item = item
+                    local item: owned *ffi.ffi_const_item =
+                        ffi.ffi_const_item.new()
+                    local mutable: *ffi.ffi_item = item
                 end
             ]])
             assert.falsy(ok)
@@ -167,9 +167,9 @@ describe("source-written owned C types", function()
 
             ok, err = check_with_header(header, [[
                 local function bad()
-                    local item: owned *c.ffi_const_item =
-                        c.ffi_const_item.new()
-                    local erased: *c.ffi_void = item
+                    local item: owned *ffi.ffi_const_item =
+                        ffi.ffi_const_item.new()
+                    local erased: *ffi.ffi_void = item
                 end
             ]])
             assert.falsy(ok)
@@ -177,9 +177,9 @@ describe("source-written owned C types", function()
 
             ok, err = check_with_header(header, [[
                 local function bad()
-                    local item: owned *c.ffi_item? =
-                        c.ffi_item.new()
-                    c.ffi_write(item)
+                    local item: owned *ffi.ffi_item? =
+                        ffi.ffi_item.new()
+                    ffi.ffi_write(item)
                 end
             ]])
             assert.falsy(ok)
@@ -187,11 +187,11 @@ describe("source-written owned C types", function()
 
             ok, err = check_with_header(header, [[
                 local function accepted()
-                    local item: owned *c.ffi_const_item =
-                        c.ffi_const_item.new()
-                    local immutable: const *c.ffi_item = item
-                    local erased: const *c.ffi_void = item
-                    c.ffi_present(erased)
+                    local item: owned *ffi.ffi_const_item =
+                        ffi.ffi_const_item.new()
+                    local immutable: const *ffi.ffi_item = item
+                    local erased: const *ffi.ffi_void = item
+                    ffi.ffi_present(erased)
                 end
             ]])
             assert.truthy(ok, err)
@@ -202,8 +202,8 @@ describe("source-written owned C types", function()
     function()
         with_header(declarations, function(header)
             local ok, err, ast = check_with_header(header, [[
-                local type Item = owned *c.ffi_item
-                local type Items = owned c.ffi_item[]
+                local type Item = owned *ffi.ffi_item
+                local type Items = owned ffi.ffi_item[]
 
                 local function accepted(
                     item: Item?,
@@ -232,21 +232,21 @@ describe("source-written owned C types", function()
         with_header(declarations, function(header)
             local ok, err = check_with_header(header, [[
                 local function accepted(): integer
-                    local plain: owned c.ffi_char[] =
-                        c.ffi_char.new_array(3)
-                    local signed: owned c.ffi_signed_char[] =
-                        c.ffi_signed_char.new_array(3)
-                    local unsigned: owned c.ffi_unsigned_char[] =
-                        c.ffi_unsigned_char.new_array(3)
-                    local alias: owned c.ffi_byte[] =
-                        c.ffi_byte.new_array(3)
+                    local plain: owned ffi.ffi_char[] =
+                        ffi.ffi_char.new_array(3)
+                    local signed: owned ffi.ffi_signed_char[] =
+                        ffi.ffi_signed_char.new_array(3)
+                    local unsigned: owned ffi.ffi_unsigned_char[] =
+                        ffi.ffi_unsigned_char.new_array(3)
+                    local alias: owned ffi.ffi_byte[] =
+                        ffi.ffi_byte.new_array(3)
                     local a = plain as string
                     local b = signed as string
                     local cs = unsigned as string
                     local d = alias as string
                     local predicate = plain is string
                     local temporary =
-                        c.ffi_char.new_array(0) as string
+                        ffi.ffi_char.new_array(0) as string
                     local result = #a + #b + #cs + #d + #temporary
                     if predicate then
                         result = result + 1
@@ -257,8 +257,8 @@ describe("source-written owned C types", function()
             assert.truthy(ok, err)
 
             for _, declaration in ipairs({
-                "local text = c.ffi_char.new() as string",
-                "local text = c.ffi_int.new_array(2) as string",
+                "local text = ffi.ffi_char.new() as string",
+                "local text = ffi.ffi_int.new_array(2) as string",
             }) do
                 ok, err = check_with_header(header,
                     "local function bad()\n" .. declaration .. "\nend")
@@ -272,7 +272,7 @@ describe("source-written owned C types", function()
     function()
         with_header(declarations, function(header)
             local ok, err = check_with_header(header, [[
-                local type Item = owned *c.ffi_item
+                local type Item = owned *ffi.ffi_item
                 local type Items = {Item}
                 local type ByName = {string: Item}
                 local type Transform = (Item) -> Item
@@ -310,26 +310,26 @@ describe("source-written owned C types", function()
                     owners: {Owner},
                     by_name: {string: Owner},
                     callback: () -> (),
-                    c_callback: c.ffi_callback_pointer
+                    c_callback: ffi.ffi_callback_pointer
                 ): boolean
-                    local raw: *c.ffi_void =
-                        owner as *c.ffi_void
-                    local named: c.ffi_void_pointer =
-                        owner as c.ffi_void_pointer
-                    local readonly: const *c.ffi_void =
-                        owner as const *c.ffi_void
+                    local raw: *ffi.ffi_void =
+                        owner as *ffi.ffi_void
+                    local named: ffi.ffi_void_pointer =
+                        owner as ffi.ffi_void_pointer
+                    local readonly: const *ffi.ffi_void =
+                        owner as const *ffi.ffi_void
                     local array_pointer =
-                        owners as c.ffi_void_pointer
+                        owners as ffi.ffi_void_pointer
                     local map_pointer =
-                        by_name as c.ffi_void_pointer
+                        by_name as ffi.ffi_void_pointer
                     local function_pointer =
-                        callback as c.ffi_void_pointer
+                        callback as ffi.ffi_void_pointer
                     local c_function_pointer =
-                        c_callback as c.ffi_void_pointer
-                    return owner is c.ffi_void_pointer and
-                        owners is c.ffi_void_pointer and
-                        by_name is c.ffi_void_pointer and
-                        callback is c.ffi_void_pointer
+                        c_callback as ffi.ffi_void_pointer
+                    return owner is ffi.ffi_void_pointer and
+                        owners is ffi.ffi_void_pointer and
+                        by_name is ffi.ffi_void_pointer and
+                        callback is ffi.ffi_void_pointer
                 end
             ]])
             assert.truthy(ok, err)
@@ -337,7 +337,7 @@ describe("source-written owned C types", function()
             ok, err = check_with_header(header, [[
                 local record Owner end
                 local function bad(owner: Owner)
-                    local raw: c.ffi_void_pointer = owner
+                    local raw: ffi.ffi_void_pointer = owner
                 end
             ]])
             assert.falsy(ok)
@@ -346,17 +346,17 @@ describe("source-written owned C types", function()
             ok, err = check_with_header(header, [[
                 local record Owner end
                 local function bad(owner: Owner)
-                    local raw = owner as *c.ffi_item
+                    local raw = owner as *ffi.ffi_item
                 end
             ]])
             assert.falsy(ok)
             assert.match("cannot cast", err)
 
             for _, declaration in ipairs({
-                "local raw: c.ffi_void_pointer = owner",
-                "local raw: c.ffi_void_pointer = owners",
-                "local raw: c.ffi_void_pointer = by_name",
-                "local raw: c.ffi_void_pointer = callback",
+                "local raw: ffi.ffi_void_pointer = owner",
+                "local raw: ffi.ffi_void_pointer = owners",
+                "local raw: ffi.ffi_void_pointer = by_name",
+                "local raw: ffi.ffi_void_pointer = callback",
             }) do
                 ok, err = check_with_header(header, [[
                     local record Owner end
@@ -377,7 +377,7 @@ describe("source-written owned C types", function()
                 local record Owner end
                 local function bad(owner: Owner?)
                     local pointer =
-                        owner as c.ffi_void_pointer
+                        owner as ffi.ffi_void_pointer
                 end
             ]])
             assert.falsy(ok)
@@ -389,9 +389,9 @@ describe("source-written owned C types", function()
     function()
         with_header(declarations, function(header)
             for _, typename in ipairs({
-                "c.ffi_item",
-                "c.ffi_cell",
-                "c.ffi_row",
+                "ffi.ffi_item",
+                "ffi.ffi_cell",
+                "ffi.ffi_row",
             }) do
                 local ok, err = check_with_header(header,
                     "local item: " .. typename .. "? = nil\n")
@@ -405,9 +405,9 @@ describe("source-written owned C types", function()
     it("admits optional C function pointers as boxed values", function()
         with_header(declarations, function(header)
             local ok, err = check_with_header(header, [[
-                local callback: c.ffi_callback_pointer? = nil
-                local function box(pointer: c.ffi_callback_pointer): value
-                    local optional: c.ffi_callback_pointer? = pointer
+                local callback: ffi.ffi_callback_pointer? = nil
+                local function box(pointer: ffi.ffi_callback_pointer): value
+                    local optional: ffi.ffi_callback_pointer? = pointer
                     return optional
                 end
             ]])
@@ -420,9 +420,9 @@ describe("source-written owned C types", function()
         with_header(declarations, function(header)
             local ok, err = check_with_header(header, [[
                 local function bad()
-                    local item: owned *c.ffi_item? =
-                        c.ffi_item.new()
-                    local pointer: *c.ffi_item? = item
+                    local item: owned *ffi.ffi_item? =
+                        ffi.ffi_item.new()
+                    local pointer: *ffi.ffi_item? = item
                 end
             ]])
             assert.falsy(ok)
@@ -430,11 +430,11 @@ describe("source-written owned C types", function()
 
             ok, err = check_with_header(header, [[
                 local function accepted()
-                    local item: owned *c.ffi_item? =
-                        c.ffi_item.new()
-                    local pointer: *c.ffi_item =
-                        item as owned *c.ffi_item
-                    c.ffi_write(pointer)
+                    local item: owned *ffi.ffi_item? =
+                        ffi.ffi_item.new()
+                    local pointer: *ffi.ffi_item =
+                        item as owned *ffi.ffi_item
+                    ffi.ffi_write(pointer)
                 end
             ]])
             assert.truthy(ok, err)
@@ -445,7 +445,7 @@ describe("source-written owned C types", function()
     function()
         with_header(declarations, function(header)
             local ok, err = check_with_header(header, [[
-                local type Item = owned *c.ffi_item
+                local type Item = owned *ffi.ffi_item
                 local type Items = {Item}
                 local type Bad = owned *Items
             ]])
@@ -453,7 +453,7 @@ describe("source-written owned C types", function()
             assert.match("C FFI object type", err)
 
             ok, err = check_with_header(header, [[
-                local type Item = owned *c.ffi_item
+                local type Item = owned *ffi.ffi_item
                 local type Bad = *Item
             ]])
             assert.falsy(ok)
@@ -467,10 +467,10 @@ describe("source-written owned C types", function()
         with_header(declarations, function(header)
             local ok, err, ast = check_with_header(header, [[
                 local function allocations(count: integer)
-                    local automatic = c.ffi_flexible.new(4)
-                    local owner: owned *c.ffi_flexible =
-                        c.ffi_flexible.new(count)
-                    local dynamic = c.ffi_flexible.new(count)
+                    local automatic = ffi.ffi_flexible.new(4)
+                    local owner: owned *ffi.ffi_flexible =
+                        ffi.ffi_flexible.new(count)
+                    local dynamic = ffi.ffi_flexible.new(count)
 
                     automatic.bytes[3] = 1
                     owner.bytes[0] = 2
@@ -512,7 +512,7 @@ describe("source-written owned C types", function()
         with_header(declarations, function(header)
             local ok, err = check_with_header(header, [[
                 local function bad()
-                    local item = c.ffi_wide_flexible.new(4611686018427387904)
+                    local item = ffi.ffi_wide_flexible.new(4611686018427387904)
                 end
             ]])
             assert.falsy(ok)
@@ -521,8 +521,8 @@ describe("source-written owned C types", function()
 
             ok, err = check_with_header(header, [[
                 local function keep_owned()
-                    local item: owned *c.ffi_flexible =
-                        c.ffi_flexible.new(4611686018427387904)
+                    local item: owned *ffi.ffi_flexible =
+                        ffi.ffi_flexible.new(4611686018427387904)
                 end
             ]])
             assert.truthy(ok, err)
@@ -535,36 +535,36 @@ describe("source-written owned C types", function()
             local rejected = {
                 {
                     [[local function bad()
-                          local item = c.ffi_flexible.new()
+                          local item = ffi.ffi_flexible.new()
                       end]],
                     "expects 1",
                 },
                 {
                     [[local function bad()
-                          local items = c.ffi_flexible.new_array(2)
+                          local items = ffi.ffi_flexible.new_array(2)
                       end]],
                     "'.new_array' is unavailable.*flexible array member",
                 },
                 {
                     [[local function bad(count: integer)
-                          local item: c.ffi_flexible =
-                              c.ffi_flexible.new(count)
+                          local item: ffi.ffi_flexible =
+                              ffi.ffi_flexible.new(count)
                       end]],
                     "types in declaration",
                 },
                 {
                     [[local function bad(count: integer)
-                          local owner: owned *c.ffi_flexible =
-                              c.ffi_flexible.new(count)
-                          local raw: *c.ffi_flexible = owner
+                          local owner: owned *ffi.ffi_flexible =
+                              ffi.ffi_flexible.new(count)
+                          local raw: *ffi.ffi_flexible = owner
                           local length = #raw.bytes
                       end]],
                     "trying to take the length",
                 },
                 {
                     [[local function bad(count: integer)
-                          local raw: *c.ffi_flexible =
-                              c.ffi_flexible.new(count)
+                          local raw: *ffi.ffi_flexible =
+                              ffi.ffi_flexible.new(count)
                           local length = #raw.bytes
                       end]],
                     "trying to take the length",
@@ -586,22 +586,22 @@ describe("source-written owned C types", function()
         },
         {
             name = "void",
-            declaration = "local item: owned *c.ffi_void = nil",
+            declaration = "local item: owned *ffi.ffi_void = nil",
             diagnostic = "void",
         },
         {
             name = "incomplete aggregates",
-            declaration = "local item: owned *c.ffi_incomplete = nil",
+            declaration = "local item: owned *ffi.ffi_incomplete = nil",
             diagnostic = "incomplete",
         },
         {
             name = "C array typedefs",
-            declaration = "local item: owned *c.ffi_row = nil",
+            declaration = "local item: owned *ffi.ffi_row = nil",
             diagnostic = "array typedef",
         },
         {
             name = "nested owners",
-            declaration = "local item: owned *owned *c.ffi_item = nil",
+            declaration = "local item: owned *owned *ffi.ffi_item = nil",
             diagnostic = "owned",
         },
     }) do
@@ -617,16 +617,16 @@ describe("source-written owned C types", function()
     end
 
     for _, public_shape in ipairs({
-        "type Public = owned *c.ffi_item",
-        "type Public = owned *c.ffi_item?",
-        "type Public = {owned *c.ffi_item}",
-        "type Public = {string: owned *c.ffi_item}",
-        "type Public = (owned *c.ffi_item) -> owned *c.ffi_item",
-        "local type Private = owned *c.ffi_item\n"
+        "type Public = owned *ffi.ffi_item",
+        "type Public = owned *ffi.ffi_item?",
+        "type Public = {owned *ffi.ffi_item}",
+        "type Public = {string: owned *ffi.ffi_item}",
+        "type Public = (owned *ffi.ffi_item) -> owned *ffi.ffi_item",
+        "local type Private = owned *ffi.ffi_item\n"
             .. "type Public = Private",
-        "state: owned *c.ffi_item = c.ffi_item.new()",
-        "function expose(item: owned *c.ffi_item): integer return 0 end",
-        "record Public item: owned *c.ffi_item end",
+        "state: owned *ffi.ffi_item = ffi.ffi_item.new()",
+        "function expose(item: owned *ffi.ffi_item): integer return 0 end",
+        "record Public item: owned *ffi.ffi_item end",
     }) do
         it("rejects an exported owner composed as " .. public_shape,
         function()

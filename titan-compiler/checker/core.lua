@@ -20,6 +20,8 @@ foreigntypes = require "titan-compiler.foreigntypes"
 
 foreigncache = require "titan-compiler.foreigncache"
 
+ffiheaders = require "titan-compiler.ffiheaders"
+
 cdriver = require("c-parser.cdriver")
 
 cdefines = require("c-parser.cdefines")

@@ -1,13 +1,13 @@
 
-local stdio = foreign import "stdio.h"
-local SDL = foreign import "SDL2/SDL.h"
-local stdlib = foreign import "stdlib.h"
+foreign import "stdio.h"
+foreign import "SDL2/SDL.h"
+foreign import "stdlib.h"
 
 function quit(sdlquit: boolean, msg: string)
-    stdio.printf(msg .. ": %s\n", SDL.SDL_GetError())
+    ffi.printf(msg .. ": %s\n", ffi.SDL_GetError())
     if sdlquit then
-        SDL.SDL_Quit()
+        ffi.SDL_Quit()
     end
-    stdlib.exit(1)
+    ffi.exit(1)
 end
 

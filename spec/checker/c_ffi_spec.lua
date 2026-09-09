@@ -111,11 +111,11 @@ describe("C FFI type checking", function()
             extern int ffi_oldstyle();
         ]], function(header)
             local ok, err, ast = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
             ]])
             assert.truthy(ok, err)
 
-            local cmod = ast[1]._type
+            local cmod = ast._ffi_namespace._type
             assert.equal("Type.CModule", cmod._tag)
             assert.same({ "count", "path" },
                 cmod.members.ffi_named.paramnames)
@@ -140,13 +140,13 @@ describe("C FFI type checking", function()
             }
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local function read(h: c.ffi_keyword_holder): c.type
+                local function read(h: ffi.ffi_keyword_holder): ffi.type
                     return h.when + h.interface
-                        + c.when {
-                            interface = c.interface,
-                            repeat = c.repeat,
+                        + ffi.when {
+                            interface = ffi.interface,
+                            repeat = ffi.repeat,
                         }
                 end
             ]])
@@ -247,9 +247,9 @@ describe("C FFI type checking", function()
             typedef struct lua_State lua_State;
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local function current_state(): *c.lua_State
+                local function current_state(): *ffi.lua_State
                     return L
                 end
             ]])
@@ -267,14 +267,14 @@ describe("C FFI type checking", function()
             static int ffi_uv_eio(void) { return UV_EIO; }
         ]], function(header)
             local ok, err = run_checker([[
-                local libuv = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function is_io(): boolean
-                    local status = libuv.ffi_uv_eio()
-                    return (status as integer) == (libuv.UV_EIO as integer)
-                        and (status as integer) ~= (libuv.UV_EOF as integer)
+                    local status = ffi.ffi_uv_eio()
+                    return (status as integer) == (ffi.UV_EIO as integer)
+                        and (status as integer) ~= (ffi.UV_EOF as integer)
                         and (status as integer)
-                            ~= (libuv.UV_ECANCELED as integer)
+                            ~= (ffi.UV_ECANCELED as integer)
                 end
             ]])
             assert.truthy(ok, err)
@@ -292,11 +292,11 @@ describe("C FFI type checking", function()
                 extern ffi_alias ffi_redeclared(ffi_alias value);
             ]], function(header2)
                 local ok, err = run_checker([[
-                    local c1 = foreign import "]] .. header1 .. [["
-                    local c2 = foreign import "]] .. header2 .. [["
+                    foreign import "]] .. header1 .. [["
+                    foreign import "]] .. header2 .. [["
 
-                    local function f(x: c2.ffi_alias): c1.ffi_alias
-                        return c1.ffi_redeclared(x)
+                    local function f(x: ffi.ffi_alias): ffi.ffi_alias
+                        return ffi.ffi_redeclared(x)
                     end
                 ]])
                 assert.truthy(ok, err)
@@ -311,27 +311,27 @@ describe("C FFI type checking", function()
             extern int ffi_value_seen(TValue value);
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function echo(x: value): value
-                    local raw: c.TValue = x
-                    return c.ffi_value_echo(raw)
+                    local raw: ffi.TValue = x
+                    return ffi.ffi_value_echo(raw)
                 end
 
-                local function raw(x: value): c.TValue
+                local function raw(x: value): ffi.TValue
                     return x
                 end
 
-                local function back(x: c.TValue): value
+                local function back(x: ffi.TValue): value
                     return x
                 end
 
                 local function implicit_value(): value
-                    return c.ffi_value_echo(42)
+                    return ffi.ffi_value_echo(42)
                 end
 
                 local function seen(f: (value) -> value): integer
-                    return c.ffi_value_seen(f)
+                    return ffi.ffi_value_seen(f)
                 end
             ]])
             assert.truthy(ok, err)
@@ -345,13 +345,13 @@ describe("C FFI type checking", function()
             extern void ffi_accept_value(TValue value);
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local function entry(func: (value) -> value, co: *c.ffi_coro)
+                local function entry(func: (value) -> value, co: *ffi.ffi_coro)
                 end
 
                 local function store_entry()
-                    c.ffi_accept_value(entry)
+                    ffi.ffi_accept_value(entry)
                 end
             ]])
             assert.truthy(ok, err)
@@ -363,9 +363,9 @@ describe("C FFI type checking", function()
             typedef struct ffi_not_lua_value { int x; } TValue;
         ]], function(header)
             local ok = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local function bad(v: value): c.TValue
+                local function bad(v: value): ffi.TValue
                     return v
                 end
             ]])
@@ -381,35 +381,35 @@ describe("C FFI type checking", function()
             extern TValue ffi_value_array[2];
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function has_pointer(v: value): integer
-                    local raw: c.TValue = v
-                    local p: const *c.TValue = raw
-                    return (c.ffi_value_pointer(raw) as integer)
-                        + (c.ffi_value_pointer(p) as integer)
-                        + (c.ffi_void_pointer(raw) as integer)
+                    local raw: ffi.TValue = v
+                    local p: const *ffi.TValue = raw
+                    return (ffi.ffi_value_pointer(raw) as integer)
+                        + (ffi.ffi_value_pointer(p) as integer)
+                        + (ffi.ffi_void_pointer(raw) as integer)
                 end
 
                 function array_entry(): value
-                    return c.ffi_value_array[0]
+                    return ffi.ffi_value_array[0]
                 end
             ]])
             assert.truthy(ok, err)
 
             ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 local function bad(v: value): integer
-                    return c.ffi_value_pointer(v)
+                    return ffi.ffi_value_pointer(v)
                 end
             ]])
             assert.falsy(ok)
             assert.match("do not match", err)
 
             ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 local function bad(v: value): integer
-                    return c.ffi_void_pointer(v)
+                    return ffi.ffi_void_pointer(v)
                 end
             ]])
             assert.falsy(ok)
@@ -422,22 +422,22 @@ describe("C FFI type checking", function()
             extern struct TValue ffi_struct_value_array[2];
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local function has_pointer(p: const *c.TValue): integer
-                    return c.ffi_struct_value_pointer(p)
+                local function has_pointer(p: const *ffi.TValue): integer
+                    return ffi.ffi_struct_value_pointer(p)
                 end
 
                 function array_entry(): value
-                    return c.ffi_struct_value_array[0]
+                    return ffi.ffi_struct_value_array[0]
                 end
             ]])
             assert.truthy(ok, err)
 
             ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 local function bad(v: value): integer
-                    return c.ffi_struct_value_pointer(v)
+                    return ffi.ffi_struct_value_pointer(v)
                 end
             ]])
             assert.falsy(ok)
@@ -452,10 +452,10 @@ describe("C FFI type checking", function()
             extern int ffi_has_state(ffi_lua_state state);
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(): integer
-                    return c.ffi_has_state(L)
+                    return ffi.ffi_has_state(L)
                 end
             ]])
             assert.truthy(ok, err)
@@ -468,10 +468,10 @@ describe("C FFI type checking", function()
             extern int ffi_has_state(struct lua_State *state);
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(): integer
-                    return c.ffi_has_state(L)
+                    return ffi.ffi_has_state(L)
                 end
             ]])
             assert.truthy(ok, err)
@@ -484,10 +484,10 @@ describe("C FFI type checking", function()
             extern int ffi_has_state(struct lua_State *state);
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(): integer
-                    return c.ffi_has_state(L)
+                    return ffi.ffi_has_state(L)
                 end
             ]])
             assert.truthy(ok, err)
@@ -501,10 +501,10 @@ describe("C FFI type checking", function()
             extern int ffi_has_module(ffi_module_state module);
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(): integer
-                    return c.ffi_has_module(M)
+                    return ffi.ffi_has_module(M)
                 end
             ]])
             assert.truthy(ok, err)
@@ -517,10 +517,10 @@ describe("C FFI type checking", function()
             extern int ffi_has_module(struct Udata *module);
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(): integer
-                    return c.ffi_has_module(M)
+                    return ffi.ffi_has_module(M)
                 end
             ]])
             assert.truthy(ok, err)
@@ -530,9 +530,9 @@ describe("C FFI type checking", function()
     it("allows imported C typedefs in local type annotations", function()
         with_header("typedef int ffi_count;\n", function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local function id(x: c.ffi_count): c.ffi_count
+                local function id(x: ffi.ffi_count): ffi.ffi_count
                     return x
                 end
             ]])
@@ -547,12 +547,12 @@ describe("C FFI type checking", function()
             typedef int ffi_int;
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(i: integer): integer
-                    local owner = c.ffi_int.new_array(3)
-                    return (c.ffi_values[i] as integer)
-                        + (c.ffi_ptr[0] as integer)
+                    local owner = ffi.ffi_int.new_array(3)
+                    return (ffi.ffi_values[i] as integer)
+                        + (ffi.ffi_ptr[0] as integer)
                         + (owner[1] as integer)
                 end
             ]])
@@ -566,11 +566,11 @@ describe("C FFI type checking", function()
             typedef int ffi_int;
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(): integer
-                    local owner = c.ffi_int.new_array(3)
-                    return #c.ffi_values + #owner
+                    local owner = ffi.ffi_int.new_array(3)
+                    return #ffi.ffi_values + #owner
                 end
             ]])
             assert.truthy(ok, err)
@@ -582,20 +582,20 @@ describe("C FFI type checking", function()
             extern int ffi_values[UNKNOWN + 1];
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(i: integer): integer
-                    return c.ffi_values[i] as integer
+                    return ffi.ffi_values[i] as integer
                 end
             ]])
             assert.falsy(ok)
             assert.match("unknown length", err)
 
             ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(): integer
-                    return #c.ffi_values
+                    return #ffi.ffi_values
                 end
             ]])
             assert.falsy(ok)
@@ -609,20 +609,20 @@ describe("C FFI type checking", function()
             typedef int ffi_int;
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(): integer
-                    return #c.ffi_ptr
+                    return #ffi.ffi_ptr
                 end
             ]])
             assert.falsy(ok)
             assert.match("trying to take the length", err)
 
             ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(): integer
-                    local owner = c.ffi_int.new()
+                    local owner = ffi.ffi_int.new()
                     return #owner
                 end
             ]])
@@ -638,10 +638,10 @@ describe("C FFI type checking", function()
             extern ffi_b ffi_value;
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(): integer
-                    return c.ffi_value.y as integer
+                    return ffi.ffi_value.y as integer
                 end
             ]])
             assert.truthy(ok, err)
@@ -655,11 +655,11 @@ describe("C FFI type checking", function()
             extern ffi_point *ffi_origin_ptr;
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(): integer
-                    return (c.ffi_origin.x as integer)
-                        + (c.ffi_origin_ptr.y as integer)
+                    return (ffi.ffi_origin.x as integer)
+                        + (ffi.ffi_origin_ptr.y as integer)
                 end
             ]])
             assert.truthy(ok, err)
@@ -678,25 +678,25 @@ describe("C FFI type checking", function()
             extern ffi_payload ffi_make_payload(void);
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function from_return(): integer
-                    c.ffi_make_outer().inner.x = 1
+                    ffi.ffi_make_outer().inner.x = 1
                     return 0
                 end
 
                 local function from_cast(): integer
-                    (c.ffi_make_outer() as c.ffi_outer).inner.x = 2
+                    (ffi.ffi_make_outer() as ffi.ffi_outer).inner.x = 2
                     return 0
                 end
 
                 local function array_from_return(): integer
-                    c.ffi_make_outer().values[0] = 3
+                    ffi.ffi_make_outer().values[0] = 3
                     return 0
                 end
 
                 local function union_from_return(): integer
-                    c.ffi_make_payload().x = 4
+                    ffi.ffi_make_payload().x = 4
                     return 0
                 end
             ]])
@@ -729,26 +729,26 @@ describe("C FFI type checking", function()
             extern ffi_outer *ffi_make_pointer(void);
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function update(): integer
-                    local aggregate: c.ffi_outer = c.ffi_make_outer()
-                    local owner = c.ffi_outer.new()
+                    local aggregate: ffi.ffi_outer = ffi.ffi_make_outer()
+                    local owner = ffi.ffi_outer.new()
 
-                    c.ffi_global.inner.x = 1
-                    c.ffi_global.values[0] = 2
-                    c.ffi_array[0].inner.x = 3
-                    c.ffi_array[1].values[0] = 4
-                    c.ffi_pointer.inner.x = 5
-                    c.ffi_pointer.values[0] = 6
-                    c.ffi_make_pointer().inner.x = 7
+                    ffi.ffi_global.inner.x = 1
+                    ffi.ffi_global.values[0] = 2
+                    ffi.ffi_array[0].inner.x = 3
+                    ffi.ffi_array[1].values[0] = 4
+                    ffi.ffi_pointer.inner.x = 5
+                    ffi.ffi_pointer.values[0] = 6
+                    ffi.ffi_make_pointer().inner.x = 7
                     owner.inner.x = 8
                     owner.values[0] = 9
                     aggregate.inner.x = 10
                     aggregate.values[0] = 11
-                    c.ffi_outer.new().inner.x = 12
-                    c.ffi_make_outer().pointer_field.x = 13
-                    c.ffi_make_outer().pointer_array[0].x = 14
+                    ffi.ffi_outer.new().inner.x = 12
+                    ffi.ffi_make_outer().pointer_field.x = 13
+                    ffi.ffi_make_outer().pointer_array[0].x = 14
                     return 0
                 end
             ]])
@@ -764,14 +764,14 @@ describe("C FFI type checking", function()
             extern ffi_node *ffi_node_ptr;
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local function next_node(): c.ffi_node_ref
-                    return c.ffi_node_ptr.next
+                local function next_node(): ffi.ffi_node_ref
+                    return ffi.ffi_node_ptr.next
                 end
 
                 function f(): integer
-                    return (c.ffi_node_ptr.x as integer)
+                    return (ffi.ffi_node_ptr.x as integer)
                         + (next_node().x as integer)
                 end
             ]])
@@ -782,13 +782,13 @@ describe("C FFI type checking", function()
     it("types dotted field macros through objects and pointers", function()
         with_header(FIELD_PROJECTION_HEADER, function(header)
             local ok, err, ast = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function projected_fields(): integer
-                    local left = c.ffi_projection_left_value.projected
-                    c.ffi_projection_left_value.projected = 19
-                    local right = c.ffi_projection_right_ptr.projected
-                    c.ffi_projection_right_ptr.projected = 23
+                    local left = ffi.ffi_projection_left_value.projected
+                    ffi.ffi_projection_left_value.projected = 19
+                    local right = ffi.ffi_projection_right_ptr.projected
+                    ffi.ffi_projection_right_ptr.projected = 23
                     return (left as integer) + (right as integer)
                 end
             ]])
@@ -840,11 +840,11 @@ describe("C FFI type checking", function()
                 #define projected nested.leaf
             ]], function(macro_header)
                 local ok, err = run_checker([[
-                    local base = foreign import "]] .. base_header .. [["
+                    foreign import "]] .. base_header .. [["
                     local reader = function(): integer
-                        return base.ffi_final_value.projected as integer
+                        return ffi.ffi_final_value.projected as integer
                     end
-                    local macros = foreign import "]] .. macro_header .. [["
+                    foreign import "]] .. macro_header .. [["
 
                     function read_projected(): integer
                         return reader()
@@ -877,15 +877,12 @@ describe("C FFI type checking", function()
                     #undef projected
                 ]], function(undef_header)
                     local ok, err = run_checker([[
-                        local base =
-                            foreign import "]] .. base_header .. [["
-                        local macros =
-                            foreign import "]] .. macro_header .. [["
+                        foreign import "]] .. base_header .. [["
+                        foreign import "]] .. macro_header .. [["
                         local reader = function(): integer
-                            return base.ffi_undef_value.projected as integer
+                            return ffi.ffi_undef_value.projected as integer
                         end
-                        local without_macro =
-                            foreign import "]] .. undef_header .. [["
+                        foreign import "]] .. undef_header .. [["
 
                         function read_physical(): integer
                             return reader()
@@ -909,11 +906,11 @@ describe("C FFI type checking", function()
                 #define projected 42
             ]], function(macro_header)
                 local ok, err = run_checker([[
-                    local base = foreign import "]] .. base_header .. [["
-                    local macros = foreign import "]] .. macro_header .. [["
+                    foreign import "]] .. base_header .. [["
+                    foreign import "]] .. macro_header .. [["
 
                     function read_physical(): integer
-                        return base.ffi_unsupported_value.projected as integer
+                        return ffi.ffi_unsupported_value.projected as integer
                     end
                 ]])
                 assert.falsy(ok)
@@ -929,10 +926,10 @@ describe("C FFI type checking", function()
     function()
         with_header(FIELD_PROJECTION_HEADER, function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function invalid_projection(): integer
-                    return c.ffi_projection_bad_value.projected as integer
+                    return ffi.ffi_projection_bad_value.projected as integer
                 end
             ]])
             assert.falsy(ok)
@@ -950,21 +947,21 @@ describe("C FFI type checking", function()
     function()
         with_header(CAST_MACRO_HEADER, function(header)
             local ok, err, ast = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function use_cast_macros(): integer
-                    local typedef_callback: c.ffi_macro_callback =
-                        c.FFI_TYPEDEF_CALLBACK
-                    local direct_callback: c.ffi_macro_callback =
-                        c.FFI_DIRECT_CALLBACK
-                    local count: c.ffi_macro_long = c.FFI_CAST_INT
-                    local fraction: c.ffi_macro_double = c.FFI_CAST_DOUBLE
-                    local pointer: c.ffi_macro_int_ptr = c.FFI_CAST_POINTER
+                    local typedef_callback: ffi.ffi_macro_callback =
+                        ffi.FFI_TYPEDEF_CALLBACK
+                    local direct_callback: ffi.ffi_macro_callback =
+                        ffi.FFI_DIRECT_CALLBACK
+                    local count: ffi.ffi_macro_long = ffi.FFI_CAST_INT
+                    local fraction: ffi.ffi_macro_double = ffi.FFI_CAST_DOUBLE
+                    local pointer: ffi.ffi_macro_int_ptr = ffi.FFI_CAST_POINTER
 
                     if typedef_callback ~= direct_callback
-                       and count == c.FFI_CAST_INT
+                       and count == ffi.FFI_CAST_INT
                        and fraction < 2.0
-                       and pointer == c.FFI_CAST_POINTER then
+                       and pointer == ffi.FFI_CAST_POINTER then
                         return (typedef_callback(1) as integer)
                             + (direct_callback(1) as integer)
                             + (pointer[0] as integer)
@@ -974,7 +971,7 @@ describe("C FFI type checking", function()
             ]])
             assert.truthy(ok, err)
 
-            local members = ast[1]._type.members
+            local members = ast._ffi_namespace._type.members
             local typedef_callback =
                 assert(members.FFI_TYPEDEF_CALLBACK).type
             assert.equal("Type.CTypedef", typedef_callback._tag)
@@ -1011,11 +1008,11 @@ describe("C FFI type checking", function()
     it("imports real POSIX signal disposition macros as function pointers",
     function()
         local ok, err, ast = run_checker([[
-            local signal = foreign import "signal.h"
+            foreign import "signal.h"
 
             function signal_dispositions_differ(): boolean
-                local default_handler = signal.SIG_DFL
-                local ignored_handler = signal.SIG_IGN
+                local default_handler = ffi.SIG_DFL
+                local ignored_handler = ffi.SIG_IGN
                 return default_handler ~= ignored_handler
             end
         ]])
@@ -1028,7 +1025,7 @@ describe("C FFI type checking", function()
             return typ
         end
 
-        local members = ast[1]._type.members
+        local members = ast._ffi_namespace._type.members
         local default_handler =
             resolved(assert(members.SIG_DFL).type)
         local ignored_handler =
@@ -1044,15 +1041,15 @@ describe("C FFI type checking", function()
     it("imports the real POSIX errno accessor macro as an integer expression",
     function()
         local ok, err, ast = run_checker([[
-            local cerrno = foreign import "errno.h"
+            foreign import "errno.h"
 
             function current_errno(): integer
-                return cerrno.errno
+                return ffi.errno
             end
         ]])
         assert.truthy(ok, err)
 
-        local errno_type = assert(ast[1]._type.members.errno).type
+        local errno_type = assert(ast._ffi_namespace._type.members.errno).type
         assert.equal("Type.CInteger", errno_type._tag)
         assert.equal("int", errno_type.spelling)
     end)
@@ -1066,11 +1063,11 @@ describe("C FFI type checking", function()
                 struct ffi_split { int x; };
             ]], function(definition_header)
                 local ok, err = run_checker([[
-                    local forward = foreign import "]] .. forward_header .. [["
-                    local definition = foreign import "]] .. definition_header .. [["
+                    foreign import "]] .. forward_header .. [["
+                    foreign import "]] .. definition_header .. [["
 
                     function f(): integer
-                        return forward.ffi_split_ptr.x as integer
+                        return ffi.ffi_split_ptr.x as integer
                     end
                 ]])
                 assert.truthy(ok, err)
@@ -1085,11 +1082,11 @@ describe("C FFI type checking", function()
             extern int slen(char s[]);
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(): integer
-                    local xs = c.ffi_int.new_array(4)
-                    return (c.sum4(xs) as integer) + (c.slen("abc") as integer)
+                    local xs = ffi.ffi_int.new_array(4)
+                    return (ffi.sum4(xs) as integer) + (ffi.slen("abc") as integer)
                 end
             ]])
             assert.truthy(ok, err)
@@ -1103,10 +1100,10 @@ describe("C FFI type checking", function()
             extern int sum(int *xs);
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(): integer
-                    return c.sum(c.ffi_values) as integer
+                    return ffi.sum(ffi.ffi_values) as integer
                 end
             ]])
             assert.truthy(ok, err)
@@ -1115,7 +1112,7 @@ describe("C FFI type checking", function()
 
     it("offers new and new_array pseudo-functions on primitive C types", function()
         local ok, err = run_checker([[
-            local ffi = foreign import "titan/ffi.h"
+            foreign import "titan/ffi.h"
 
             function f(): integer
                 local one = int.new()
@@ -1128,7 +1125,7 @@ describe("C FFI type checking", function()
 
     it("allows owned C allocation in sound top-level initializers", function()
         local ok, err = run_checker([[
-            local ffi = foreign import "titan/ffi.h"
+            foreign import "titan/ffi.h"
 
             local one = int.new()
             local many = int.new_array(8)
@@ -1144,7 +1141,7 @@ describe("C FFI type checking", function()
 
     it("rejects top-level C allocation counts that read module state", function()
         local ok, err = run_checker([[
-            local ffi = foreign import "titan/ffi.h"
+            foreign import "titan/ffi.h"
 
             count = 8
             local many = int.new_array(count)
@@ -1159,10 +1156,10 @@ describe("C FFI type checking", function()
             typedef struct ffi_record { int value; } ffi_record;
         ]], function(header)
             local ok, err, ast = run_checker([[
-            local c = foreign import "]] .. header .. [["
+            foreign import "]] .. header .. [["
 
             function f(): integer
-                return c.ffi_int.sizeof + c.ffi_record.alignof
+                return ffi.ffi_int.sizeof + ffi.ffi_record.alignof
             end
             ]])
             assert.truthy(ok, err)
@@ -1194,9 +1191,9 @@ describe("C FFI type checking", function()
             typedef void ffi_void;
         ]], function(header)
             local errors = check_errs([[
-            local c = foreign import "]] .. header .. [["
+            foreign import "]] .. header .. [["
 
-            local function accepted(p: const *c.ffi_int): const *c.ffi_void
+            local function accepted(p: const *ffi.ffi_int): const *ffi.ffi_void
                 return p
             end
 
@@ -1216,21 +1213,21 @@ describe("C FFI type checking", function()
             extern int ffi_has_const_ptr(const void *p);
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(v: value): integer
-                    local x: c.ffi_int = 41 as c.ffi_int
-                    local p: const *c.ffi_int = x
-                    return (c.ffi_read_const_int(x) as integer)
-                        + (c.ffi_read_const_int(p) as integer)
+                    local x: ffi.ffi_int = 41 as ffi.ffi_int
+                    local p: const *ffi.ffi_int = x
+                    return (ffi.ffi_read_const_int(x) as integer)
+                        + (ffi.ffi_read_const_int(p) as integer)
                 end
             ]])
             assert.truthy(ok, err)
 
             ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 local function bad(v: value): integer
-                    return c.ffi_has_const_ptr(v)
+                    return ffi.ffi_has_const_ptr(v)
                 end
             ]])
             assert.falsy(ok)
@@ -1248,60 +1245,60 @@ describe("C FFI type checking", function()
             extern int ffi_read_const_void(const void *p);
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(v: value): integer
-                    local x: c.ffi_int = 0 as c.ffi_int
-                    local raw: c.TValue = v
-                    return (c.ffi_write_int(x) as integer)
-                        + (c.ffi_write_void(x) as integer)
-                        + (c.ffi_write_void(raw) as integer)
+                    local x: ffi.ffi_int = 0 as ffi.ffi_int
+                    local raw: ffi.TValue = v
+                    return (ffi.ffi_write_int(x) as integer)
+                        + (ffi.ffi_write_void(x) as integer)
+                        + (ffi.ffi_write_void(raw) as integer)
                 end
             ]])
             assert.truthy(ok, err)
 
             ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function bad(): integer
-                    return c.ffi_write_int(0 as c.ffi_int) as integer
+                    return ffi.ffi_write_int(0 as ffi.ffi_int) as integer
                 end
             ]])
             assert.falsy(ok)
             assert.match("argument 1 of call", err)
 
             ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function bad(): integer
-                    local x: c.ffi_int = 1 as c.ffi_int
-                    local cp: const *c.ffi_int = x
-                    return c.ffi_write_int(cp) as integer
+                    local x: ffi.ffi_int = 1 as ffi.ffi_int
+                    local cp: const *ffi.ffi_int = x
+                    return ffi.ffi_write_int(cp) as integer
                 end
             ]])
             assert.falsy(ok)
             assert.match("argument 1 of call", err)
 
             ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function bad(): integer
-                    local x: c.ffi_int = 1 as c.ffi_int
-                    local cp: const *c.ffi_int = x
-                    return c.ffi_write_void(cp) as integer
+                    local x: ffi.ffi_int = 1 as ffi.ffi_int
+                    local cp: const *ffi.ffi_int = x
+                    return ffi.ffi_write_void(cp) as integer
                 end
             ]])
             assert.falsy(ok)
             assert.match("argument 1 of call", err)
 
             ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function good(): integer
-                    local x: c.ffi_int = 1 as c.ffi_int
-                    local p: *c.ffi_int = x
-                    return (c.ffi_read_const_int(p) as integer)
-                        + (c.ffi_read_const_void(p) as integer)
+                    local x: ffi.ffi_int = 1 as ffi.ffi_int
+                    local p: *ffi.ffi_int = x
+                    return (ffi.ffi_read_const_int(p) as integer)
+                        + (ffi.ffi_read_const_void(p) as integer)
                 end
             ]])
             assert.truthy(ok, err)
@@ -1315,16 +1312,16 @@ describe("C FFI type checking", function()
             typedef struct ffi_incomplete ffi_incomplete;
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function bad_void()
-                    local v = c.ffi_void.new()
+                    local v = ffi.ffi_void.new()
                 end
                 function bad_array()
-                    local a = c.ffi_array.new()
+                    local a = ffi.ffi_array.new()
                 end
                 function bad_incomplete()
-                    local p = c.ffi_incomplete.new()
+                    local p = ffi.ffi_incomplete.new()
                 end
             ]])
             assert.falsy(ok)
@@ -1342,11 +1339,11 @@ describe("C FFI type checking", function()
             } ffi_packet;
         ]], function(header)
             local prefix = [[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
             ]]
             local ok, err = run_checker(prefix .. [[
                 function accepted()
-                    local packet = c.ffi_packet.new(3)
+                    local packet = ffi.ffi_packet.new(3)
                     packet.data[2] = 1
                     local count = #packet.data
                 end
@@ -1355,7 +1352,7 @@ describe("C FFI type checking", function()
 
             ok, err = run_checker(prefix .. [[
                 function bad()
-                    local packet = c.ffi_packet.new()
+                    local packet = ffi.ffi_packet.new()
                 end
             ]])
             assert.falsy(ok)
@@ -1363,7 +1360,7 @@ describe("C FFI type checking", function()
 
             ok, err = run_checker(prefix .. [[
                 function bad()
-                    local packets = c.ffi_packet.new_array(2)
+                    local packets = ffi.ffi_packet.new_array(2)
                 end
             ]])
             assert.falsy(ok)
@@ -1371,7 +1368,7 @@ describe("C FFI type checking", function()
         end)
     end)
 
-    it("keeps later C definitions behind the module-variable frontier",
+    it("makes the complete C environment available to module initializers",
        function()
         with_header([[
             typedef struct ffi_split ffi_split;
@@ -1381,36 +1378,34 @@ describe("C FFI type checking", function()
                 struct ffi_split { int x; };
             ]], function(definition_header)
                 local prefix = [[
-                    local forward = foreign import "]] ..
+                    foreign import "]] ..
                     forward_header .. [["
                 ]]
                 local definition = [[
-                    local definition = foreign import "]] ..
+                    foreign import "]] ..
                     definition_header .. [["
                 ]]
 
                 local ok, err = run_checker(prefix .. [[
-                    local owner = forward.ffi_split.new()
+                    local owner = ffi.ffi_split.new()
                 ]] .. definition)
-                assert.falsy(ok)
-                assert.match("cannot allocate incomplete C struct", err)
+                assert.truthy(ok, err)
 
                 ok, err = run_checker(prefix .. [[
                     local read = function(): integer
-                        return forward.ffi_split_ptr.x as integer
+                        return ffi.ffi_split_ptr.x as integer
                     end
                 ]] .. definition)
-                assert.falsy(ok)
-                assert.match("field 'x' not found in C type", err)
+                assert.truthy(ok, err)
 
                 ok, err = run_checker(prefix .. definition .. [[
-                    local owner = forward.ffi_split.new()
+                    local owner = ffi.ffi_split.new()
                 ]])
                 assert.truthy(ok, err)
 
                 ok, err = run_checker(prefix .. [[
                     function read(): integer
-                        local owner = forward.ffi_split.new()
+                        local owner = ffi.ffi_split.new()
                         return owner.x as integer
                     end
                 ]] .. definition)
@@ -1428,20 +1423,20 @@ describe("C FFI type checking", function()
             extern ffi_packet ffi_pkt;
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(): integer
-                    return c.ffi_pkt.data[0] as integer
+                    return ffi.ffi_pkt.data[0] as integer
                 end
             ]])
             assert.falsy(ok)
             assert.match("unknown length", err)
 
             ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(): integer
-                    return #c.ffi_pkt.data
+                    return #ffi.ffi_pkt.data
                 end
             ]])
             assert.falsy(ok)
@@ -1452,9 +1447,9 @@ describe("C FFI type checking", function()
     it("keeps C value members out of the C type namespace", function()
         with_header("extern int ffi_value;\n", function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local function f(x: c.ffi_value): integer
+                local function f(x: ffi.ffi_value): integer
                     return 1
                 end
             ]])
@@ -1469,10 +1464,10 @@ describe("C FFI type checking", function()
             typedef void *ffi_vptr;
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local function f(p: c.ffi_iptr): c.ffi_vptr
-                    return p as c.ffi_vptr
+                local function f(p: ffi.ffi_iptr): ffi.ffi_vptr
+                    return p as ffi.ffi_vptr
                 end
             ]])
             assert.truthy(ok, err)
@@ -1485,14 +1480,14 @@ describe("C FFI type checking", function()
             typedef void *ffi_vptr;
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local function explicit(p: c.ffi_vptr): c.ffi_iptr
-                    return p as c.ffi_iptr
+                local function explicit(p: ffi.ffi_vptr): ffi.ffi_iptr
+                    return p as ffi.ffi_iptr
                 end
 
-                local function implicit(p: c.ffi_vptr): c.ffi_iptr
-                    local q: c.ffi_iptr = p
+                local function implicit(p: ffi.ffi_vptr): ffi.ffi_iptr
+                    local q: ffi.ffi_iptr = p
                     return q
                 end
             ]])
@@ -1507,21 +1502,21 @@ describe("C FFI type checking", function()
             extern int call_callback(ffi_callback cb, int x);
         ]], function(header)
             local ok, err, tree = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local function call_local(cb: c.ffi_callback): integer
+                local function call_local(cb: ffi.ffi_callback): integer
                     return cb(3) as integer
                 end
 
                 function f(): integer
-                    local cb: c.ffi_callback = c.ffi_add1
-                    return (c.call_callback(c.ffi_add1, 2) as integer)
-                        + (c.call_callback(cb, 4) as integer)
+                    local cb: ffi.ffi_callback = ffi.ffi_add1
+                    return (ffi.call_callback(ffi.ffi_add1, 2) as integer)
+                        + (ffi.call_callback(cb, 4) as integer)
                         + call_local(cb)
                 end
             ]])
             assert.truthy(ok, err)
-            local members = tree[1]._type.members
+            local members = tree._ffi_namespace._type.members
             assert.equal("Type.CFunction", members.ffi_add1.type._tag)
             assert.equal("Type.CFunction", members.call_callback.type._tag)
             local callback = types.resolve_c_typedef(
@@ -1568,7 +1563,7 @@ describe("C FFI type checking", function()
     it("rejects direct C declarations in every Titan value context", function()
         with_header("extern int ffi_call(int value);\n", function(header)
             local prefix =
-                'local c = foreign import "' .. header .. '"\n'
+                "foreign import \"" .. header .. '"\n'
             local function assert_rejected(source)
                 local ok, err = run_checker(prefix .. source)
                 assert.falsy(ok)
@@ -1578,10 +1573,10 @@ describe("C FFI type checking", function()
             end
 
             for _, body in ipairs({
-                "local f = c.ffi_call",
-                "local f: (integer) -> integer = c.ffi_call",
-                "local v: value = c.ffi_call",
-                "local fs: {(integer) -> integer} = { c.ffi_call }",
+                "local f = ffi.ffi_call",
+                "local f: (integer) -> integer = ffi.ffi_call",
+                "local v: value = ffi.ffi_call",
+                "local fs: {(integer) -> integer} = { ffi.ffi_call }",
             }) do
                 assert_rejected(
                     "function run(): nil\n" .. body ..
@@ -1593,13 +1588,13 @@ describe("C FFI type checking", function()
                     return nil
                 end
                 function run(): nil
-                    take(c.ffi_call)
+                    take(ffi.ffi_call)
                     return nil
                 end
             ]])
             assert_rejected([[
                 local function produce(): value
-                    return c.ffi_call
+                    return ffi.ffi_call
                 end
                 function run(): nil
                     produce()
@@ -1611,7 +1606,7 @@ describe("C FFI type checking", function()
 
     it("keeps C allocation pseudo-members out of callable values", function()
         local ok, err = run_checker([[
-            local ffi = foreign import "titan/ffi.h"
+            foreign import "titan/ffi.h"
 
             function run(): value
                 return int.new_array
@@ -1630,14 +1625,14 @@ describe("C FFI type checking", function()
             typedef int (*ffi_callback)(int, int);
         ]], function(header)
             local errs = check_errs([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local function use(cb: c.ffi_callback): nil
+                local function use(cb: ffi.ffi_callback): nil
                     cb(1)
                     cb(1, 2, 3)
-                    local one = c.ffi_int.new(1)
-                    local many = c.ffi_int.new_array()
-                    local too_many = c.ffi_int.new_array(1, 2)
+                    local one = ffi.ffi_int.new(1)
+                    local many = ffi.ffi_int.new_array()
+                    local too_many = ffi.ffi_int.new_array(1, 2)
                     return nil
                 end
             ]])
@@ -1662,10 +1657,10 @@ describe("C FFI type checking", function()
             extern double call_callback(ffi_callback cb, double x);
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(): float
-                    return c.call_callback(c.ffi_add1, 2.0) as float
+                    return ffi.call_callback(ffi.ffi_add1, 2.0) as float
                 end
             ]])
             assert.falsy(ok)
@@ -1679,23 +1674,23 @@ describe("C FFI type checking", function()
             typedef void *ffi_vptr;
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local function box(cb: c.ffi_callback): value
+                local function box(cb: ffi.ffi_callback): value
                     return cb
                 end
-                local function written_box(cb: c.ffi_callback): value
+                local function written_box(cb: ffi.ffi_callback): value
                     return cb as value
                 end
-                local function recover(raw: value): c.ffi_callback
-                    return raw as c.ffi_callback
+                local function recover(raw: value): ffi.ffi_callback
+                    return raw as ffi.ffi_callback
                 end
             ]])
             assert.truthy(ok, err)
 
             ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
-                local function recover(raw: value): c.ffi_callback
+                foreign import "]] .. header .. [["
+                local function recover(raw: value): ffi.ffi_callback
                     return raw
                 end
             ]])
@@ -1703,18 +1698,18 @@ describe("C FFI type checking", function()
             assert.match("types in return do not match", err)
 
             ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local function f(cb: c.ffi_callback): c.ffi_vptr
-                    return cb as c.ffi_vptr
+                local function f(cb: ffi.ffi_callback): ffi.ffi_vptr
+                    return cb as ffi.ffi_vptr
                 end
             ]])
             assert.truthy(ok, err)
 
             ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local function f(cb: c.ffi_callback): c.ffi_vptr
+                local function f(cb: ffi.ffi_callback): ffi.ffi_vptr
                     return cb
                 end
             ]])
@@ -1726,9 +1721,9 @@ describe("C FFI type checking", function()
     it("rejects C pointer types as Titan variadic parameter elements", function()
         with_header("typedef int *ffi_iptr;\n", function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local function f(...: c.ffi_iptr)
+                local function f(...: ffi.ffi_iptr)
                 end
             ]])
             assert.falsy(ok)
@@ -1742,11 +1737,11 @@ describe("C FFI type checking", function()
             typedef enum ffi_result { FFI_OK = 0, FFI_FAIL = 7 } ffi_result;
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(): integer
-                    local result: c.ffi_result = c.FFI_FAIL as c.ffi_result
-                    return (c.FFI_A as integer) + (result as integer)
+                    local result: ffi.ffi_result = ffi.FFI_FAIL as ffi.ffi_result
+                    return (ffi.FFI_A as integer) + (result as integer)
                 end
             ]])
             assert.truthy(ok, err)
@@ -1782,54 +1777,54 @@ describe("C FFI type checking", function()
             }
         ]], function(header)
             local accepted_ok, accepted_err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function safe(): integer
-                    return c.ffi_safe_take(c.FFI_SAFE_HIGH) as integer
+                    return ffi.ffi_safe_take(ffi.FFI_SAFE_HIGH) as integer
                 end
 
                 local function wide_zero(): integer
-                    return c.FFI_WIDE_ZERO as integer
+                    return ffi.FFI_WIDE_ZERO as integer
                 end
 
                 local function named_zero(): integer
-                    return c.FFI_NAMED_WIDE_ZERO as integer
+                    return ffi.FFI_NAMED_WIDE_ZERO as integer
                 end
 
                 local function object_value(): integer
-                    return c.ffi_enum_object as integer
+                    return ffi.ffi_enum_object as integer
                 end
 
                 local function address_only(): integer
-                    local callback: c.ffi_wide_callback = c.ffi_wide_result
-                    local returned_callback = c.ffi_wide_pointer()
+                    local callback: ffi.ffi_wide_callback = ffi.ffi_wide_result
+                    local returned_callback = ffi.ffi_wide_pointer()
                     return 1
                 end
             ]])
             assert.truthy(accepted_ok, accepted_err)
 
             local rejected_ok, rejected_err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function high(): integer
-                    return c.FFI_WIDE_HIGH as integer
+                    return ffi.FFI_WIDE_HIGH as integer
                 end
 
                 local function named_high(): integer
-                    return c.FFI_NAMED_WIDE_HIGH as integer
+                    return ffi.FFI_NAMED_WIDE_HIGH as integer
                 end
 
                 local function wide_value(): integer
-                    return c.ffi_wide_take(c.FFI_WIDE_ZERO) as integer
+                    return ffi.ffi_wide_take(ffi.FFI_WIDE_ZERO) as integer
                 end
 
                 local function address_call(): integer
-                    local callback: c.ffi_wide_callback = c.ffi_wide_result
+                    local callback: ffi.ffi_wide_callback = ffi.ffi_wide_result
                     return callback() as integer
                 end
 
                 local function pointer_call(): integer
-                    local callback = c.ffi_wide_pointer()
+                    local callback = ffi.ffi_wide_pointer()
                     return callback() as integer
                 end
             ]])
@@ -1870,9 +1865,9 @@ describe("C FFI type checking", function()
             }
         ]], function(header)
             local pointer_ok, pointer_err = run_checker([[
-                local c = foreign import "]] .. header .. [["
-                local type Wide = c.ffi_pointer_wide_enum
-                local type DirectWidePointer = *c.ffi_pointer_wide_enum
+                foreign import "]] .. header .. [["
+                local type Wide = ffi.ffi_pointer_wide_enum
+                local type DirectWidePointer = *ffi.ffi_pointer_wide_enum
                 local type AliasWidePointer = *Wide
                 local type OptionalWide = Wide?
                 local type ArrayWide = {Wide}
@@ -1882,8 +1877,8 @@ describe("C FFI type checking", function()
             assert.truthy(pointer_ok, pointer_err)
 
             local unused_alias_ok, unused_alias_err = run_checker([[
-                local c = foreign import "]] .. header .. [["
-                local type UnusedWide = c.ffi_pointer_wide_enum
+                foreign import "]] .. header .. [["
+                local type UnusedWide = ffi.ffi_pointer_wide_enum
                 function f(): integer return 1 end
             ]])
             assert.truthy(unused_alias_ok, unused_alias_err)
@@ -1892,7 +1887,7 @@ describe("C FFI type checking", function()
                 [[
                     local type Composite = {Wide}
                     function f(): integer
-                        local items: Composite = { c.FFI_PTR_ZERO }
+                        local items: Composite = { ffi.FFI_PTR_ZERO }
                         return #items
                     end
                 ]],
@@ -1900,15 +1895,15 @@ describe("C FFI type checking", function()
                     local type Composite = {string: Wide}
                     function f(): integer
                         local items: Composite = {
-                            ["item"] = c.FFI_PTR_ZERO,
+                            ["item"] = ffi.FFI_PTR_ZERO,
                         }
                         return 1
                     end
                 ]],
             }) do
                 local composite_ok, composite_err = run_checker(
-                    "local c = foreign import " .. string.format("%q", header)
-                    .. "\nlocal type Wide = c.ffi_pointer_wide_enum\n"
+                    "foreign import " .. string.format("%q", header)
+                    .. "\nlocal type Wide = ffi.ffi_pointer_wide_enum\n"
                     .. composite)
                 assert.falsy(composite_ok)
                 assert.truthy(composite_err:find(
@@ -1917,8 +1912,8 @@ describe("C FFI type checking", function()
             end
 
             local option_value_ok, option_value_err = run_checker([[
-                local c = foreign import "]] .. header .. [["
-                local type Wide = c.ffi_pointer_wide_enum
+                foreign import "]] .. header .. [["
+                local type Wide = ffi.ffi_pointer_wide_enum
                 local type OptionalWide = Wide?
                 function f(): integer
                     local item: OptionalWide = nil
@@ -1930,10 +1925,10 @@ describe("C FFI type checking", function()
                 "full range fits in lua_Integer", 1, true), option_value_err)
 
             local alias_value_ok, alias_value_err = run_checker([[
-                local c = foreign import "]] .. header .. [["
-                local type Wide = c.ffi_pointer_wide_enum
+                foreign import "]] .. header .. [["
+                local type Wide = ffi.ffi_pointer_wide_enum
                 function f(): integer
-                    local item: Wide = c.FFI_PTR_ZERO
+                    local item: Wide = ffi.FFI_PTR_ZERO
                     return item as integer
                 end
             ]])
@@ -1942,9 +1937,9 @@ describe("C FFI type checking", function()
                 "full range fits in lua_Integer", 1, true), alias_value_err)
 
             local direct_ok, direct_err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 function f(): integer
-                    return c.ffi_prototype_pointer(nil) as integer
+                    return ffi.ffi_prototype_pointer(nil) as integer
                 end
             ]])
             assert.falsy(direct_ok)
@@ -1952,9 +1947,9 @@ describe("C FFI type checking", function()
                 "has no usable declaration spelling", 1, true), direct_err)
 
             local callback_ok, callback_err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 function f(): integer
-                    local callback = c.ffi_get_prototype_callback()
+                    local callback = ffi.ffi_get_prototype_callback()
                     return callback(nil) as integer
                 end
             ]])
@@ -1963,9 +1958,9 @@ describe("C FFI type checking", function()
                 "has no usable declaration spelling", 1, true), callback_err)
 
             local owner_ok, owner_err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 function f(): integer
-                    return c.ffi_take_b(c.FFI_OWNER_A) as integer
+                    return ffi.ffi_take_b(ffi.FFI_OWNER_A) as integer
                 end
             ]])
             assert.falsy(owner_ok)
@@ -1973,9 +1968,9 @@ describe("C FFI type checking", function()
                 "types in argument 1", 1, true), owner_err)
 
             local integer_ok, integer_err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 function f(): integer
-                    return c.ffi_take_int(c.FFI_OWNER_A) as integer
+                    return ffi.ffi_take_int(ffi.FFI_OWNER_A) as integer
                 end
             ]])
             assert.falsy(integer_ok)
@@ -2004,12 +1999,12 @@ describe("C FFI type checking", function()
                 }
             ]], function(definition_header)
                 local ok, err = run_checker([[
-                    local prior = foreign import "]] .. forward_header .. [["
-                    local complete = foreign import "]] .. definition_header .. [["
+                    foreign import "]] .. forward_header .. [["
+                    foreign import "]] .. definition_header .. [["
                     function f(): integer
-                        local item: prior.ffi_forward_enum =
-                            complete.FFI_FORWARD_ONE
-                        return complete.ffi_forward_take(item) as integer
+                        local item: ffi.ffi_forward_enum =
+                            ffi.FFI_FORWARD_ONE
+                        return ffi.ffi_forward_take(item) as integer
                     end
                 ]])
                 assert.truthy(ok, err)
@@ -2033,19 +2028,19 @@ describe("C FFI type checking", function()
                 #define ffi_context_tag ffi_context_shadow
             ]], function(shadow_header)
                 local typedef_ok, typedef_err = run_checker([[
-                    local c = foreign import "]] .. enum_header .. [["
-                    local shadow = foreign import "]] .. shadow_header .. [["
+                    foreign import "]] .. enum_header .. [["
+                    foreign import "]] .. shadow_header .. [["
                     function f(): integer
-                        return c.ffi_context_typedef_value() as integer
+                        return ffi.ffi_context_typedef_value() as integer
                     end
                 ]])
                 assert.truthy(typedef_ok, typedef_err)
 
                 local tag_ok, tag_err = run_checker([[
-                    local c = foreign import "]] .. enum_header .. [["
-                    local shadow = foreign import "]] .. shadow_header .. [["
+                    foreign import "]] .. enum_header .. [["
+                    foreign import "]] .. shadow_header .. [["
                     function f(): integer
-                        return c.ffi_context_tag_value() as integer
+                        return ffi.ffi_context_tag_value() as integer
                     end
                 ]])
                 assert.falsy(tag_ok)
@@ -2059,15 +2054,15 @@ describe("C FFI type checking", function()
         with_header("extern int ffi_conflict;\n", function(header1)
             with_header("extern double ffi_conflict;\n", function(header2)
                 local ok, err = run_checker([[
-                    local c1 = foreign import "]] .. header1 .. [["
-                    local c2 = foreign import "]] .. header2 .. [["
+                    foreign import "]] .. header1 .. [["
+                    foreign import "]] .. header2 .. [["
 
                     function f(): integer
                         return 0
                     end
                 ]])
                 assert.falsy(ok)
-                assert.match("conflicting C declaration", err)
+                assert.match("final ordered C header context is invalid", err)
             end)
         end)
     end)
@@ -2090,12 +2085,12 @@ describe("C FFI type checking", function()
                 #define FFI_ULLONG_MAX 18446744073709551615ULL
             ]], function(header2)
                 local ok, err = run_checker([[
-                    local c1 = foreign import "]] .. header1 .. [["
-                    local c2 = foreign import "]] .. header2 .. [["
+                    foreign import "]] .. header1 .. [["
+                    foreign import "]] .. header2 .. [["
 
                     local function limits(): integer
-                        return (c1.FFI_LONG_MAX as integer) +
-                               (c2.FFI_LLONG_MIN as integer)
+                        return (ffi.FFI_LONG_MAX as integer) +
+                               (ffi.FFI_LLONG_MIN as integer)
                     end
                 ]])
                 assert.truthy(ok, err)
@@ -2109,20 +2104,20 @@ describe("C FFI type checking", function()
             extern ffi_arr ffi_values;
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(): value
-                    return c.ffi_values as value
+                    return ffi.ffi_values as value
                 end
             ]])
             assert.falsy(ok)
             assert.match("cannot cast '.-ffi_arr' to 'value'", err)
 
             ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(v: value): integer
-                    local xs = v as c.ffi_arr
+                    local xs = v as ffi.ffi_arr
                     return xs[0] as integer
                 end
             ]])
@@ -2137,20 +2132,20 @@ describe("C FFI type checking", function()
             extern ffi_point ffi_origin;
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(): value
-                    return c.ffi_origin as value
+                    return ffi.ffi_origin as value
                 end
             ]])
             assert.falsy(ok)
             assert.match("cannot cast '.-ffi_point' to 'value'", err)
 
             ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function f(v: value): integer
-                    local p = v as c.ffi_point
+                    local p = v as ffi.ffi_point
                     return p.x as integer
                 end
             ]])
@@ -2162,23 +2157,23 @@ describe("C FFI type checking", function()
     it("does not treat C modules as first-class values", function()
         with_header("extern int ffi_value;\n", function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function f(): value
-                    return c
+                    return ffi
                 end
             ]])
             assert.falsy(ok)
-            assert.match("trying to access module 'c' as a first%-class value", err)
+            assert.match("trying to access module 'ffi' as a first%-class value", err)
         end)
     end)
 
     it("rejects exported functions that mention C FFI types", function()
         with_header("typedef int ffi_count;\n", function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                function f(x: c.ffi_count): integer
+                function f(x: ffi.ffi_count): integer
                     return 1
                 end
             ]])
@@ -2191,9 +2186,9 @@ describe("C FFI type checking", function()
         with_header("typedef int ffi_count;\n", function(header)
             local ok, err = run_checker_modules({
                 a = [[
-                    local c = foreign import "]] .. header .. [["
+                    foreign import "]] .. header .. [["
 
-                    function f(x: c.ffi_count): integer
+                    function f(x: ffi.ffi_count): integer
                         return 1
                     end
                 ]],
@@ -2209,10 +2204,10 @@ describe("C FFI type checking", function()
     it("rejects record fields that mention C FFI types", function()
         with_header("typedef int ffi_count;\n", function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 record R
-                    x: c.ffi_count
+                    x: ffi.ffi_count
                 end
             ]])
             assert.falsy(ok)
@@ -2223,13 +2218,13 @@ describe("C FFI type checking", function()
     it("allows C FFI types in local record fields", function()
         with_header("typedef struct ffi_handle ffi_handle;\n", function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 record Handle
-                    local pointer: *c.ffi_handle
+                    local pointer: *ffi.ffi_handle
                 end
 
-                local function use(pointer: *c.ffi_handle): Handle
+                local function use(pointer: *ffi.ffi_handle): Handle
                     return Handle.new(pointer)
                 end
             ]])
@@ -2252,20 +2247,20 @@ describe("C FFI type checking", function()
             -- parser; the direct Type.CFunction predicate branch is covered
             -- in types_spec.lua.
             local errs = check_errs([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local record RecordSlots
-                    structure: c.ffi_struct
-                    aggregate: c.ffi_union
-                    values: c.ffi_values
-                    callback: c.ffi_callback
+                    structure: ffi.ffi_struct
+                    aggregate: ffi.ffi_union
+                    values: ffi.ffi_values
+                    callback: ffi.ffi_callback
                 end
 
                 local union UnionSlots
-                    structure: c.ffi_struct
-                    aggregate: c.ffi_union
-                    values: c.ffi_values
-                    callback: c.ffi_callback
+                    structure: ffi.ffi_struct
+                    aggregate: ffi.ffi_union
+                    values: ffi.ffi_values
+                    callback: ffi.ffi_callback
                 end
             ]])
             assert.same(6, #errs)
@@ -2293,25 +2288,25 @@ describe("C FFI type checking", function()
             typedef struct Udata Udata;
         ]], function(header)
             local ok, err, _, modtype = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 record Slots
-                    local count: c.ffi_count
-                    local handle: *c.ffi_handle
-                    local raw: c.TValue
-                    local userdata: *c.Udata
-                    local owner: owned *c.ffi_handle
-                    local callback: c.ffi_callback
+                    local count: ffi.ffi_count
+                    local handle: *ffi.ffi_handle
+                    local raw: ffi.TValue
+                    local userdata: *ffi.Udata
+                    local owner: owned *ffi.ffi_handle
+                    local callback: ffi.ffi_callback
                 end
 
                 union Message
                     visible: integer
-                    local count: c.ffi_count
-                    local handle: *c.ffi_handle
-                    local raw: c.TValue
-                    local userdata: *c.Udata
-                    local owner: owned *c.ffi_handle
-                    local callback: c.ffi_callback
+                    local count: ffi.ffi_count
+                    local handle: *ffi.ffi_handle
+                    local raw: ffi.TValue
+                    local userdata: *ffi.Udata
+                    local owner: owned *ffi.ffi_handle
+                    local callback: ffi.ffi_callback
                 end
             ]])
             assert.truthy(ok, err)
@@ -2328,10 +2323,10 @@ describe("C FFI type checking", function()
     it("rejects C FFI types exposed by public union variants", function()
         with_header("typedef int ffi_count;\n", function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 union Message
-                    count: c.ffi_count
+                    count: ffi.ffi_count
                 end
             ]])
             assert.falsy(ok)
@@ -2342,9 +2337,9 @@ describe("C FFI type checking", function()
     it("rejects exported legacy C struct types without crashing", function()
         with_header("typedef struct ffi_point { int x; } ffi_point;\n", function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                function f(x: c.ffi_point): integer
+                function f(x: ffi.ffi_point): integer
                     return 1
                 end
             ]])

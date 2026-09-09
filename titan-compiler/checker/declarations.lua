@@ -575,7 +575,7 @@ function toplevel_name(node)
     if tag == "Ast.TopLevelImport" then
         return node.localname
     elseif tag == "Ast.TopLevelForeignImport" then
-        return node.localname
+        return nil
     elseif tag == "Ast.TopLevelVar" then
         return node.decl.name
     elseif tag == "Ast.TopLevelTypeAlias"
@@ -598,35 +598,123 @@ function toplevel_name(node)
     end
 end
 
--- Resolve and interpret headers separately from downstream conversion when a
--- persistence transport needs the complete ordered import identity first.
--- Non-cached ordinary compilation retains its existing one-pass handler.
-function prepare_foreign_import(node, st)
-    local ftypes, err, include, strategy, process_options
-    if foreign_c_config_error then
-        err = foreign_c_config_error
-    else
-        local service
-        service, err = ensure_probe_service(st)
-        if service then
-            local options
-            options, err = service:cdriver_process_options()
-            if options then
-                process_options, strategy = options, options.io
-                options.source_dir = st.source_dir
-                ftypes, err, include = cdriver.process_file(node.headername, options)
-            end
+-- One namespace is established from the real ordered module header. Foreign
+-- directives carry include metadata only; they do not bind ordinary symbols.
+function check_foreign_environment(module_ast, st, errors)
+    local namespace = {
+        _tag = "Checker.ForeignNamespace", name = "ffi", _builtin = true,
+        _type = types.CModule("ffi", {}, {}),
+    }
+    st.ffi_namespace, module_ast._ffi_namespace = namespace, namespace
+    st:add_symbol("ffi", namespace)
+    local nodes, names, has_source = {}, {}, false
+    for _, node in ipairs(module_ast) do
+        if not node._ignore and node._tag == "Ast.TopLevelForeignImport" then
+            nodes[#nodes + 1], names[#names + 1] = node, node.headername
+        elseif not node._ignore and node._tag == "Ast.TopLevelImport"
+               and node._source_import then
+            has_source = true
         end
     end
-    if ftypes then
-        local normalized
-        normalized, err = cprobe.normalize_include_descriptor(include, {
-            source_dir = st.source_dir, io = strategy,
-        })
-        if normalized then include = normalized else ftypes = nil end
+    local loc = nodes[1] and nodes[1].loc or module_ast[1] and module_ast[1].loc
+        or { filename = st.filename, line = 1, col = 1 }
+    local service, options, err
+    if #nodes > 0 or has_source then
+        if foreign_c_config_error then err = foreign_c_config_error
+        else
+            service, err = ensure_probe_service(st)
+            if service then options, err = service:cdriver_process_options() end
+        end
+        if options then
+            options.source_dir = st.source_dir
+            local includes
+            includes, err = cdriver.resolve_includes(names, options)
+            if includes then
+                for index, node in ipairs(nodes) do
+                    node._include, err = cprobe.normalize_include_descriptor(includes[index], {
+                        source_dir = st.source_dir, io = options.io,
+                    })
+                    if not node._include then break end
+                end
+            end
+        end
+        if err then checker.typeerror(errors, loc, "%s", err); return end
     end
-    return { ftypes = ftypes, err = err, include = include,
-        process_options = process_options }
+
+    local header
+    if st.prepare_ffi_header then
+        header, err = st.prepare_ffi_header(module_ast)
+    elseif options then
+        st.ffi_header_owner = { io = options.io }
+        header, err = ffiheaders.prepare(st.ffi_header_owner, st.modname,
+            module_ast, st.filename or (st.modname:gsub("[.]", "/") .. ".titan"))
+    end
+    if err then checker.typeerror(errors, loc, "%s", err); return end
+    if not options then return end
+    if not header then
+        checker.typeerror(errors, loc, "cannot prepare the module C environment")
+        return
+    end
+    module_ast._ffi_header = header
+    local ftypes, include
+    ftypes, err, include = cdriver.process_module(header, options)
+    if not ftypes then checker.typeerror(errors, loc, "%s", err); return end
+    include, err = cprobe.normalize_include_descriptor(include, {
+        source_dir = st.source_dir, io = options.io,
+    })
+    if not include then checker.typeerror(errors, loc, "%s", err); return end
+    namespace._include = include
+    st.last_foreign_import_node = { loc = loc, headername = "ffi" }
+    st.foreign_includes, st.foreign_includes_version = { include }, 1
+    local conversion_key = st.cache_adapter and foreigncache.key(st, namespace)
+    if conversion_key and foreigncache.restore(st, namespace, conversion_key) then
+        cdriver.emit_process_phase(options, "ffi", include,
+            "downstream_ffi_conversion", "cache_hit", cdriver.process_phase_clock(options))
+    else
+        local started = cdriver.process_phase_clock(options)
+        st:apply_foreign_macro_changes(ftypes.macro_changes, ftypes.macro_definitions)
+        local members, type_members = {}, {}
+        for _, item in ipairs(ftypes) do
+            local name, ftype = item.name, item.type
+            local decl, conversion_error, declaration = foreigntypes.convert(st, ftype, name, include)
+            if decl then
+                types.mark_c_ffi_include(decl, include)
+                if is_foreign_type_declaration(ftype) then
+                    type_members[name] = decl
+                    st:add_foreign_type(name, decl)
+                else
+                    local paramnames = ftype.type == "function"
+                        and copy_foreign_paramnames(ftype.paramnames) or false
+                    local member = types.ModuleMember("ffi", name, decl, paramnames)
+                    member._foreign_namespace = true
+                    member._c_origin_header = declaration and declaration.origin_header or include
+                    members[name] = member
+                end
+                if is_foreign_ordinary_identifier(name, ftype) then
+                    st:add_foreign_name(name, {
+                        header = "ffi", type = decl, declaration = declaration,
+                        import_node = namespace,
+                    })
+                end
+            elseif conversion_error and conversion_error:match("^conflicting C tag kinds") then
+                checker.typeerror(errors, loc, "%s", conversion_error)
+            end
+        end
+        for name, metadata in pairs(ftypes.file_scope_tags or {}) do
+            if (metadata.kind == "struct" or metadata.kind == "union")
+               and not (ftypes.typedef_names and ftypes.typedef_names[name]) then
+                type_members[name] = st:find_foreign_type(metadata.raw_key)
+            end
+        end
+        namespace._type = types.CModule("ffi", members, type_members)
+        cdriver.emit_process_phase(options, "ffi", include,
+            "downstream_ffi_conversion", "complete", started)
+        if conversion_key and #errors == 0 then
+            foreigncache.store(st, conversion_key,
+                foreigncache.encode(st, namespace, conversion_key), namespace)
+        end
+    end
+    validate_foreign_environment(st, errors)
 end
 
 -- Typecheck the toplevel node
@@ -646,21 +734,14 @@ toplevel_visitor = util.make_visitor({
                 and import_info.kind == "source"
                 and modtype._source == true
             if node._source_import then
-                for _, member in ipairs(modtype.source_members or {}) do
-                    if member._foreign_source then
-                        node._foreign_header = import_info.foreign_header
-                        node._foreign_header_for_check =
-                            import_info.foreign_header_for_check == true
-                        node._foreign_header_probe_identity =
-                            import_info.foreign_header_probe_identity
-                        node._source_c_context = modtype._source_c_context
-                        break
-                    end
-                end
-                -- Visibility is direct. C headers are not inherited as a
-                -- context: each source-only C type retains its own origin
-                -- header, and code generation adds that header only when it
-                -- renders a declaration using the type.
+                node._ffi_header_descriptor = import_info.ffi_header_descriptor
+                node._ffi_header = import_info.checking_ffi_header or import_info.ffi_header
+                node._ffi_header_probe_identity = import_info.ffi_header
+                node._foreign_header = import_info.foreign_header
+                node._foreign_header_for_check = import_info.foreign_header_for_check == true
+                node._foreign_header_probe_identity = import_info.foreign_header_probe_identity
+                -- Titan private visibility remains direct; only C header edges
+                -- inherit transitively through the generated environment.
                 st.source_imports[node.modname] =
                     st.source_imports[node.modname] or node
             end
@@ -674,164 +755,8 @@ toplevel_visitor = util.make_visitor({
         end
     end,
 
-    ["Ast.TopLevelForeignImport"] = function(node, st, errors)
-        local name = node.headername
-        local prepared = st.prepared_foreign_imports
-            and st.prepared_foreign_imports[node] or prepare_foreign_import(node, st)
-        if st.defer_foreign_conversion then
-            st.prepared_foreign_imports[node] = prepared
-            return
-        end
-        local ftypes, err, include, process_options = prepared.ftypes,
-            prepared.err, prepared.include, prepared.process_options
-        if ftypes then
-            node._include = include
-            st.last_foreign_import_node = node
-            st.foreign_includes[#st.foreign_includes + 1] = include
-            st.foreign_includes_version = st.foreign_includes_version + 1
-            st.module_probe = nil
-            st.module_probe_error = nil
-            st.module_probe_includes_version = nil
-            st.module_probe_error_includes_version = nil
-            st:apply_foreign_macro_changes(
-                ftypes.macro_changes, ftypes.macro_definitions)
-            local members = {}
-            local type_members = {}
-            local ordinary_declarations = {}
-            local ordinary_order = {}
-            local conversion_started =
-                cdriver.process_phase_clock(process_options)
-            for _, item in ipairs(ftypes) do
-                local fname = item.name
-                local ftype = item.type
-                local decl, conversion_error, declaration =
-                    foreigntypes.convert(st, ftype, fname, include)
-                if decl then
-                    types.mark_c_ffi_include(decl, include)
-                    local ordinary
-                    if is_foreign_ordinary_identifier(fname, ftype) then
-                        ordinary = {
-                            header = name,
-                            type = decl,
-                            declaration = declaration,
-                            import_node = node,
-                        }
-                        if not ordinary_declarations[fname] then
-                            ordinary_order[#ordinary_order + 1] = fname
-                        end
-                        ordinary_declarations[fname] = ordinary
-                    end
-                    local type_declaration =
-                        is_foreign_type_declaration(ftype)
-                    if type_declaration then
-                        type_members[fname] = decl
-                        st:add_foreign_type(fname, decl)
-                    else
-                        local paramnames = ftype.type == "function"
-                            and copy_foreign_paramnames(ftype.paramnames)
-                            or false
-                        local member = types.ModuleMember(
-                            name, fname, decl, paramnames)
-                        member._c_origin_header = declaration
-                            and declaration.origin_header or include
-                        members[fname] = member
-                        if ordinary and ftype.type == "function" then
-                            ordinary.paramnames_state =
-                                ftype.paramnames_state
-                                or (ftype.paramnames == false
-                                    and "unknown" or "complete")
-                            ordinary.paramnames =
-                                copy_foreign_paramnames(ftype.paramnames)
-                            ordinary.paramname_members = { member }
-                        end
-                    end
-                    if ordinary then
-                        ordinary.type_declaration = type_declaration
-                    end
-                elseif conversion_error
-                       and conversion_error:match(
-                           "^conflicting C tag kinds") then
-                    checker.typeerror(errors, node.loc,
-                        "%s", conversion_error)
-                end
-                -- else: the member uses an unsupported C type; skip it so the
-                -- rest of the header still imports. Referencing a skipped
-                -- member is then a clean "not a member" error, never a crash.
-            end
-            cdriver.emit_process_phase(
-                process_options, name, include,
-                "downstream_ffi_conversion", "complete",
-                conversion_started)
-            -- The registrar can expose several source forms for one ordinary
-            -- name within a single independently parsed header (notably stdio
-            -- object declarations plus macro projections). Compare only the
-            -- final member that this import publishes, and compare it with the
-            -- final member from earlier import occurrences.
-            for _, fname in ipairs(ordinary_order) do
-                local current = ordinary_declarations[fname]
-                local previous = st:find_foreign_name(fname)
-                local pending
-                if previous then
-                    local isolated_compatibility =
-                        foreigntypes.declaration_compatibility(
-                            previous.type, current.type,
-                            previous.declaration, current.declaration)
-                    local compatibility = isolated_compatibility
-                    if not isolated_compatibility
-                       and same_foreign_declaration_source(
-                            previous.declaration,
-                            current.declaration)
-                       and foreigntypes
-                            .prototype_tag_reextraction_compatibility(
-                                previous.type, current.type,
-                                previous.declaration,
-                                current.declaration) then
-                        compatibility = "source-repeat"
-                    end
-                    if compatibility then
-                        pending = queue_foreign_redeclaration(
-                            st, node, fname, previous, current,
-                            compatibility)
-                    else
-                        checker.typeerror(errors, node.loc,
-                            "conflicting C declaration for '%s' in foreign import '%s'; "
-                            .. "previous declaration from '%s' has type %s, new declaration has type %s",
-                            fname, name, previous.header,
-                            types.tostring(previous.type),
-                            types.tostring(current.type))
-                    end
-                else
-                    st:add_foreign_name(fname, current)
-                end
-                bind_pending_foreign_slot(
-                    pending, members, type_members,
-                    current.type_declaration)
-            end
-            -- Named file-scope struct/union tags are projected into this
-            -- import's Titan type namespace under their base spelling only
-            -- when no real syntactic typedef reserves that name. The alias is
-            -- the canonical CStruct/CUnion itself: no fake C typedef or global
-            -- bare foreign name is manufactured.
-            for tagname, metadata in pairs(ftypes.file_scope_tags or {}) do
-                if (metadata.kind == "struct"
-                    or metadata.kind == "union")
-                   and not (ftypes.typedef_names
-                            and ftypes.typedef_names[tagname]) then
-                    local tagtype =
-                        st:find_foreign_type(metadata.raw_key)
-                    if tagtype then
-                        type_members[tagname] = tagtype
-                    end
-                end
-            end
-
-            local modtype = types.CModule(name, members, type_members)
-            node._type = modtype
-        else
-            node._type = types.Nil()
-            checker.typeerror(errors, node.loc, err)
-        end
-        st:add_symbol(node.localname, node)
+    ["Ast.TopLevelForeignImport"] = function()
+        -- Unbound directives are collected by check_foreign_environment.
     end,
 
     ["Ast.TopLevelVar"] = function(node, st, errors)
@@ -1562,96 +1487,6 @@ function collect_nominal_constructors(ast)
     return constructors
 end
 
-function apply_source_foreign_headers(ast, st, errors)
-    local seen = {}
-    for _, node in ipairs(ast) do
-        local filename = node._tag == "Ast.TopLevelImport"
-            and node._source_import and node._foreign_header_for_check
-            and node._foreign_header or nil
-        if filename and not seen[filename] then
-            seen[filename] = true
-            local service, err = ensure_probe_service(st)
-            local include
-            local strategy
-            if service then
-                local options
-                options, err = service:cdriver_process_options()
-                if options then
-                    strategy = options.io
-                    local source_context = node._source_c_context
-                    if type(source_context) ~= "table"
-                       or type(source_context.header_inputs) ~= "table"
-                       or type(source_context.diagnostic_aliases) ~= "table"
-                       or type(source_context.macro_changes) ~= "table"
-                       or type(source_context.macro_definitions) ~= "table" then
-                        err = "source module did not provide its C header context"
-                    else
-                        local dependencies, searches = {}, {}
-                        for _, input in ipairs(source_context.header_inputs) do
-                            local destination = input.kind == "file"
-                                and dependencies
-                                or input.kind == "search" and searches
-                                or nil
-                            if not destination then
-                                err = "source module has an invalid C header input"
-                                break
-                            end
-                            destination[#destination + 1] = {
-                                kind = input.kind,
-                                path = input.path,
-                                identity = input.identity,
-                                observation = cdriver.copy_header_observation(input.observation),
-                            }
-                        end
-                        if not err then
-                            include = {
-                                original = filename,
-                                resolved = filename,
-                                include_kind = "quote",
-                                include_name = filename,
-                                c_header_dependencies = dependencies,
-                                c_header_search_inputs = searches,
-                            }
-                        end
-                    end
-                end
-            end
-            if include then
-                local normalized
-                normalized, err = cprobe.normalize_include_descriptor(include, {
-                    source_dir = st.source_dir,
-                    io = strategy,
-                })
-                if normalized and node._foreign_header_probe_identity then
-                    normalized, err = cprobe.source_foreign_include_alias(
-                        normalized, node.modname,
-                        node._foreign_header_probe_identity,
-                        node._source_c_context.diagnostic_aliases)
-                end
-                include = normalized
-            end
-            if not include then
-                checker.typeerror(errors, node.loc,
-                    "could not process source foreign header for module '%s': %s",
-                    node.modname, tostring(err))
-            else
-                node._source_foreign_include = include
-                st.foreign_includes[#st.foreign_includes + 1] = include
-                st.foreign_includes_version =
-                    st.foreign_includes_version + 1
-                st.module_probe = nil
-                st.module_probe_error = nil
-                st.module_probe_includes_version = nil
-                st.module_probe_error_includes_version = nil
-                local source_context = node._source_c_context
-                st:apply_foreign_macro_changes(
-                    source_context.macro_changes,
-                    source_context.macro_definitions)
-            end
-        end
-    end
-end
-
 function visit_toplevel(node, st, errors, loader)
     st.current_toplevel_order = node._toplevel_order
     toplevel_visitor(node, st, errors, loader)
@@ -1668,53 +1503,12 @@ function checktoplevel(ast, st, errors, loader)
     reserve_toplevel_names(ast, st)
     local constructors = collect_nominal_constructors(ast)
 
-    local foreign_imports = {}
-    if st.cache_adapter then
-        st.prepared_foreign_imports = {}
-        st.defer_foreign_conversion = true
-    end
-
     for _, node in ipairs(ast) do
-        if not node._ignore and
-           (node._tag == "Ast.TopLevelImport" or
-            node._tag == "Ast.TopLevelForeignImport") then
-            if node._tag == "Ast.TopLevelForeignImport" then
-                foreign_imports[#foreign_imports + 1] = node
-            end
+        if not node._ignore and node._tag == "Ast.TopLevelImport" then
             visit_toplevel(node, st, errors, loader)
         end
     end
-    local conversion_key, conversion_payload
-    if st.cache_adapter then
-        st.defer_foreign_conversion = nil
-        conversion_key = foreigncache.key(st, foreign_imports, st.prepared_foreign_imports)
-        local restored = conversion_key and #errors == 0
-            and foreigncache.restore(st, foreign_imports, conversion_key)
-        if restored then
-            for _, node in ipairs(foreign_imports) do
-                local prepared = st.prepared_foreign_imports[node]
-                local started = cdriver.process_phase_clock(prepared.process_options)
-                cdriver.emit_process_phase(prepared.process_options,
-                    node.headername, node._include,
-                    "downstream_ffi_conversion", "cache_hit", started)
-            end
-        else
-            for _, node in ipairs(foreign_imports) do visit_toplevel(node, st, errors, loader) end
-            if conversion_key and #errors == 0 and st.cache_adapter.put then
-                conversion_payload = foreigncache.encode(st, foreign_imports, conversion_key)
-            end
-        end
-        st.prepared_foreign_imports = nil
-    end
-    -- Generated C places direct-source foreign headers after this module's
-    -- direct C imports. Replay those headers in the same order before checking
-    -- aliases, declarations, initializers, or bodies so macro projections and
-    -- contextual probes see exactly the environment the C compiler will see.
-    apply_source_foreign_headers(ast, st, errors)
-    finalize_foreign_redeclarations(st, errors)
-    if conversion_payload and #errors == 0 then
-        foreigncache.store(st, conversion_key, conversion_payload, foreign_imports)
-    end
+    check_foreign_environment(ast, st, errors)
     -- Structural constraints cannot be decided until every nominal method
     -- signature has populated its canonical owner descriptor. Keep every
     -- signature-time application deferrable across aliases, owners, top-level

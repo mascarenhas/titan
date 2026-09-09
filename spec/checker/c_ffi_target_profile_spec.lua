@@ -315,7 +315,7 @@ describe("direct-checker target profiles", function()
 
         local ok, failure = xpcall(function()
             local code =
-                'local c = foreign import "' .. header .. '"\n'
+                "foreign import \"" .. header .. '"\n'
             local ast, parse_error =
                 parser.parse("injected_profile.titan", code)
             assert(ast, parse_error)
@@ -327,7 +327,7 @@ describe("direct-checker target profiles", function()
                 })
             assert.equal(0, #errors, table.concat(errors, "\n"))
             local selected =
-                assert(ast[1]._type.members.TITAN_SELECTED_VALUE)
+                assert(ast._ffi_namespace._type.members.TITAN_SELECTED_VALUE)
             assert.equal("unsigned int", selected.type.spelling)
             assert.equal(32, selected.type.bits)
         end, debug.traceback)

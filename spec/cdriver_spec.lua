@@ -2,6 +2,8 @@ local lfs = require "lfs"
 
 local cdriver = require "c-parser.cdriver"
 local compiler_io = require "titan-compiler.io"
+local ffiheaders = require "titan-compiler.ffiheaders"
+local cprobe = require "titan-compiler.cprobe"
 
 local function write_file(filename, contents)
     local previous = lfs.attributes(filename, "modification")
@@ -56,6 +58,222 @@ local function semantic_inputs(inputs)
     end
     return copy
 end
+
+describe("generated module C header inputs", function()
+    local files, directories, owners
+    before_each(function() files, directories, owners = {}, {}, {} end)
+    after_each(function()
+        for _, owner in ipairs(owners) do assert.is_true(ffiheaders.close(owner)) end
+        remove_tree(files, directories)
+    end)
+    local function directory(parent, name)
+        local path = parent and mkdir(parent, name) or tmp_dir()
+        directories[#directories + 1] = path
+        return path
+    end
+    local function file(path, contents)
+        files[#files + 1] = path
+        write_file(path, contents)
+        return path
+    end
+    local function owner(strategy)
+        local value = { io = strategy or compiler_io.new_sync() }
+        owners[#owners + 1] = value
+        return value
+    end
+    local function prepare(state, modname, sourcef, names, options)
+        local ast = {}
+        local includes = assert(cdriver.resolve_includes(names, options))
+        for _, include in ipairs(includes) do
+            ast[#ast + 1] = { _tag = "Ast.TopLevelForeignImport", _include = assert(
+                cprobe.normalize_include_descriptor(include,
+                    { io = state.io, source_dir = options.source_dir })) }
+        end
+        return assert(ffiheaders.prepare(state, modname, ast, sourcef))
+    end
+    local function copy(value)
+        local result = {}
+        for key, field in pairs(value) do result[key] = field end
+        return result
+    end
+
+    it("reports the stable module header when preprocessing fails", function()
+        local root = directory()
+        file(root .. "/broken.h", '#include "missing-dependency.h"\n')
+        local state = owner()
+        local options = { io = state.io, source_dir = root }
+        local header = prepare(state, "broken", root .. "/broken.titan", { "broken.h" }, options)
+        local result, err = cdriver.process_module(header, options)
+        assert.is_nil(result)
+        assert.matches(header.identity, err, 1, true)
+        assert.falsy(err:find(header.bundle_root, 1, true))
+        assert.matches("missing-dependency.h:file not found", err, 1, true)
+    end)
+
+    it("rejects an initial lookup that changed before a completed-graph hit", function()
+        local root = directory()
+        local first, second = directory(root, "first"), directory(root, "second")
+        file(second .. "/chosen.h", "typedef int selected_type;\n")
+        local state = owner()
+        local options = { io = state.io, source_dir = first,
+            compiler = { "cc" }, compiler_include_dirs = { second } }
+        local header = prepare(state, "module", first .. "/module.titan",
+            { "chosen.h" }, options)
+        local initial, initial_error = cdriver.process_module(header, options)
+        assert.truthy(initial, initial_error)
+        assert.same({ "int" }, initial.selected_type.def)
+        local before = cdriver.process_cache_stats(state.io)
+        file(first .. "/chosen.h", "typedef double selected_type;\n")
+        local stale, stale_error = cdriver.process_module(header, options)
+        assert.is_nil(stale)
+        assert.matches("changed after module header resolution", stale_error, 1, true)
+        assert.equal(before.hits, cdriver.process_cache_stats(state.io).hits)
+        local refreshed = prepare(state, "module", first .. "/module.titan",
+            { "chosen.h" }, options)
+        local current, current_error = cdriver.process_module(refreshed, options)
+        assert.truthy(current, current_error)
+        assert.same({ "double" }, current.selected_type.def)
+        assert.not_equal(header.digest, refreshed.digest)
+    end)
+
+    it("reuses owned generated trees while tracking saved C header changes", function()
+        local root = directory()
+        local path = file(root .. "/stable.h", "typedef int stable_type;\n")
+        local state = owner()
+        local options = { io = state.io, compiler = { "cc" },
+            compiler_include_dirs = {}, source_dir = root }
+        local dependency = prepare(state, "shared.base", root .. "/base.titan",
+            { path }, options)
+        local header = assert(ffiheaders.prepare(state, "app.main", {
+            { _tag = "Ast.TopLevelImport", _source_import = true,
+                _ffi_header_descriptor = dependency },
+        }, root .. "/main.titan"))
+        local original_read, generated_reads = state.io.read_file, 0
+        function state.io:read_file(filename)
+            if filename == header.filename or filename == dependency.filename then
+                generated_reads = generated_reads + 1
+            end
+            return original_read(self, filename)
+        end
+        local initial, initial_error = cdriver.process_module(header, options)
+        assert.truthy(initial, initial_error)
+        assert.same({ "int" }, initial.stable_type.def)
+        assert.is_true(generated_reads > 0)
+        local before = cdriver.process_cache_stats(state.io)
+
+        generated_reads = 0
+        local reused, reuse_error = cdriver.process_module(header, options)
+        assert.truthy(reused, reuse_error)
+        assert.same({ "int" }, reused.stable_type.def)
+        assert.equal(0, generated_reads)
+        assert.equal(before.hits + 1, cdriver.process_cache_stats(state.io).hits)
+
+        write_file(path, "typedef double stable_type;\n")
+        local changed, change_error = cdriver.process_module(header, options)
+        assert.truthy(changed, change_error)
+        assert.same({ "double" }, changed.stable_type.def)
+        assert.is_true(generated_reads > 0)
+        assert.equal(before.misses + 1, cdriver.process_cache_stats(state.io).misses)
+    end)
+
+    it("keeps nested generated includes out of persistent header observations", function()
+        local root = directory()
+        local path = file(root .. "/stable.h", "typedef int stable_type;\n")
+        local state, stored = owner(), {}
+        local options = { io = state.io, compiler = { "cc" },
+            compiler_include_dirs = {}, source_dir = root,
+            cache_adapter = {
+                get = function() return nil end,
+                put = function(_, _, _, inputs)
+                    stored[#stored + 1] = inputs
+                    return true
+                end,
+            },
+        }
+        local leaf = prepare(state, "titan.test", root .. "/test.titan", { path }, options)
+        local function source(header)
+            return { _tag = "Ast.TopLevelImport", _source_import = true,
+                _ffi_header_descriptor = header }
+        end
+        local support = assert(ffiheaders.prepare(state, "support.runtime", {
+            source(leaf),
+        }, root .. "/runtime.titan"))
+        local header = assert(ffiheaders.prepare(state, "app.main", {
+            source(support),
+        }, root .. "/main.titan"))
+        local result, err, include = cdriver.process_module(header, options)
+        assert.truthy(result, err)
+        assert.same({ "int" }, result.stable_type.def)
+        assert.is_true(#stored > 0)
+        stored[#stored + 1] = include.c_header_dependencies
+        stored[#stored + 1] = include.c_header_search_inputs
+        local found_authored = false
+        for _, inputs in ipairs(stored) do
+            for _, input in ipairs(inputs) do
+                assert.falsy(input.path:find(header.bundle_root, 1, true))
+                if input.kind == "file" and input.path == path then found_authored = true end
+            end
+        end
+        assert.is_true(found_authored)
+
+        assert.is_true(ffiheaders.close(state))
+        local driver = require "titan-compiler.driver"
+        local current, current_error, changed = driver.restat_c_header_dependencies(
+            include.c_header_dependencies, { io = state.io })
+        assert.truthy(current, current_error)
+        assert.is_false(changed)
+        write_file(path, "typedef double stable_type;\n")
+        current, current_error, changed = driver.restat_c_header_dependencies(
+            include.c_header_dependencies, { io = state.io })
+        assert.truthy(current, current_error)
+        assert.is_true(changed)
+    end)
+
+    it("reopens persisted graphs with fresh bundles and no temporary observations", function()
+        local root = directory()
+        local path = file(root .. "/stable.h", "typedef int stable_type;\n")
+        local payloads = {}
+        local adapter = {
+            get = function(kind, key) return payloads[kind .. "\0" .. key] end,
+            put = function(kind, key, payload)
+                payloads[kind .. "\0" .. key] = payload
+                return true
+            end,
+        }
+        local first_owner = owner()
+        local first_options = { io = first_owner.io, compiler = { "cc" },
+            compiler_include_dirs = {}, source_dir = root, cache_adapter = adapter }
+        local first_header = prepare(first_owner, "module", root .. "/module.titan",
+            { path }, first_options)
+        local first, first_error, first_include = cdriver.process_module(first_header, first_options)
+        assert.truthy(first, first_error)
+        local old_root = first_header.bundle_root
+        assert.is_true(ffiheaders.close(first_owner))
+        assert.is_nil(lfs.symlinkattributes(old_root))
+        assert.is_not_nil(next(payloads))
+        for _, payload in pairs(payloads) do assert.falsy(payload:find(old_root, 1, true)) end
+
+        local second_owner = owner()
+        local second_options = copy(first_options)
+        second_options.io = second_owner.io
+        local second_header = prepare(second_owner, "module", root .. "/module.titan",
+            { path }, second_options)
+        assert.not_equal(first_header.filename, second_header.filename)
+        assert.equal(first_header.digest, second_header.digest)
+        local second, second_error, second_include = cdriver.process_module(second_header, second_options)
+        assert.truthy(second, second_error)
+        assert.same({ "int" }, second.stable_type.def)
+        assert.not_equal(first.stable_type, second.stable_type)
+        assert.equal(first_include.c_header_graph_key, second_include.c_header_graph_key)
+        assert.equal(1, cdriver.process_cache_stats(second_owner.io).hits)
+        for _, field in ipairs({ "c_header_dependencies", "c_header_search_inputs" }) do
+            for _, input in ipairs(second_include[field]) do
+                assert.falsy(input.path:find(old_root, 1, true))
+                assert.falsy(input.path:find(second_header.bundle_root, 1, true))
+            end
+        end
+    end)
+end)
 
 describe("mtime-first C header validation", function()
     local cpp = require "c-parser.cpp"
@@ -269,9 +487,20 @@ describe("completed C header payload transport", function()
         assert.equal('"a + b"', cpp.expand_macro("TITAN_VALUE", restored.macro_definitions))
         assert.not_equal(first.node, restored.node)
         assert.matches("titan-cdriver-process-v2:sha256:", include.c_header_graph_key, 1, true)
-        restored.node.def[1] = "mutated"
         local clean = assert_process_file(path, options)
-        assert.not_equal("mutated", clean.node.def[1])
+        assert.equal(restored, clean)
+    end)
+
+    it("keeps cached macro types unchanged when another header dereferences a literal", function()
+        local first_path = header('#define TEXT "text"\n')
+        local second_path = header('#define FIRST *"text"\n')
+        local first = assert_process_file(first_path)
+        assert.same({ "const", "char", "*" }, first.TEXT.type)
+        local second = assert_process_file(second_path)
+        assert.same({ "const", "char" }, second.FIRST.type)
+        local reused = assert_process_file(first_path)
+        assert.equal(first, reused)
+        assert.same({ "const", "char", "*" }, reused.TEXT.type)
     end)
 
     it("trusts the saved physical input when its mtime is preserved", function()
@@ -550,6 +779,21 @@ describe("completed C header payload transport", function()
         }
         assert_process_file(path, options)
         assert.equal(3, matches)
+    end)
+
+    it("rebuilds a successfully decoded graph from another compiler ABI", function()
+        local cpp = require "c-parser.cpp"
+        local path = header("typedef int current_abi_type;\n")
+        local options = { cache_adapter = adapter }
+        assert_process_file(path, options)
+        for key, payload in pairs(payloads) do
+            local entry = assert(cpp.decode_graph(payload))
+            entry.abi = "another-abi"
+            payloads[key] = assert(cpp.encode_graph(entry))
+        end
+        cdriver.clear_process_cache()
+        assert_process_file(path, options)
+        assert.equal(2, matches)
     end)
 
     it("does not publish through a read-only adapter", function()
@@ -1227,7 +1471,7 @@ describe("C FFI cdriver", function()
             end)
         end)
 
-        it("returns isolated graphs without reparsing an unchanged header",
+        it("shares read-only graphs without reparsing an unchanged header",
         function()
             cdriver.clear_process_cache()
             local c99 = require "c-parser.c99"
@@ -1247,14 +1491,11 @@ extern titan_cdriver_cache_type titan_cdriver_cache_value;
                 local first, first_include, first_context =
                     assert_process_file(header)
                 assert.equal(1, matches)
-                first.titan_cdriver_cache_type.def[1] = "long"
-                first.macro_definitions.TITAN_CDRIVER_CACHE_CONSTANT[1] = "23"
-
                 local second, second_include, second_context =
                     assert_process_file(header)
                 assert.equal(1, matches)
-                assert.not_equal(first, second)
-                assert.not_equal(
+                assert.equal(first, second)
+                assert.equal(
                     first.titan_cdriver_cache_type,
                     second.titan_cdriver_cache_type)
                 assert.same(
@@ -1268,9 +1509,9 @@ extern titan_cdriver_cache_type titan_cdriver_cache_value;
                 assert.equal(second_include.c_header_search_inputs,
                     second_context.c_header_search_inputs)
 
-                second.titan_cdriver_cache_type.def[1] = "double"
                 local third = assert_process_file(header)
                 assert.equal(1, matches)
+                assert.equal(first, third)
                 assert.same({ "int" }, third.titan_cdriver_cache_type.def)
 
                 local stats = cdriver.process_cache_stats()
@@ -1289,7 +1530,7 @@ extern titan_cdriver_cache_type titan_cdriver_cache_value;
             assert.truthy(ok, err)
         end)
 
-        it("preserves macro token spelling across completed-cache clones",
+        it("preserves macro token spelling in shared completed graphs",
         function()
             cdriver.clear_process_cache()
             local cpp = require "c-parser.cpp"
@@ -1312,7 +1553,7 @@ extern titan_cdriver_cache_type titan_cdriver_cache_value;
             os.remove(header)
         end)
 
-        it("validates and clones once for each explicit analysis",
+        it("validates once per analysis and shares the parsed graph",
         function()
             cdriver.clear_process_cache()
             local original_identity = cdriver.revalidate_header_input
@@ -1350,7 +1591,6 @@ extern titan_cdriver_cache_type titan_cdriver_cache_value;
                 assert.equal(first, repeated)
                 assert.equal(first, repeated_again)
 
-                first.titan_analysis_cache_type.def[1] = "long"
                 local second_options = {
                     compiler_include_dirs = {},
                     process_analysis = cdriver.new_process_analysis(),
@@ -1358,18 +1598,18 @@ extern titan_cdriver_cache_type titan_cdriver_cache_value;
                 }
                 local second = assert_process_file(header, second_options)
                 assert.is_true(identity_reads > after_first)
-                assert.not_equal(first, second)
+                assert.equal(first, second)
                 assert.same(
                     { "int" }, second.titan_analysis_cache_type.def)
 
                 local ordinary = assert_process_file(header, base)
-                assert.not_equal(second, ordinary)
+                assert.equal(second, ordinary)
                 assert.same(
                     { "int" }, ordinary.titan_analysis_cache_type.def)
                 assert.equal(2, phases["hit_validation:current"])
                 assert.equal(2, phases["hit_validation:analysis_reuse"])
-                assert.equal(2, phases["graph_clone:hit"])
-                assert.equal(2, phases["graph_clone:analysis_reuse"])
+                assert.is_nil(phases["graph_clone:hit"])
+                assert.is_nil(phases["graph_clone:analysis_reuse"])
             end)
             cdriver.revalidate_header_input = original_identity
             os.remove(header)
@@ -2944,9 +3184,9 @@ typedef double compiler_selection;
                             driver.foreign_include_dirs())
 
                         local code = [[
-                            local alt = foreign import "alternate_lua_path.h"
+                            foreign import "alternate_lua_path.h"
                             function size(): integer
-                                return alt.alternate_lua_path_marker.sizeof
+                                return ffi.alternate_lua_path_marker.sizeof
                                     as integer
                             end
                         ]]

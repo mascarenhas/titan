@@ -64,6 +64,11 @@ end
 -- `char`, `long`, and so on must continue to lex as NAME.
 local contextual_identifier_rest =
     lpeg.P("_") + lpeg.R("AZ", "az", "09")
+-- ffi is a reserved binding root, while field/member spellings remain NAME.
+local ffi_word = lpeg.P("ffi") * -contextual_identifier_rest
+defs.BINDNAME = -ffi_word * lexer.NAME
+    + #ffi_word * lpeg.T("ReservedFFI")
+
 local function contextual_type_word(word)
     return lpeg.C(lpeg.P(word)) * -contextual_identifier_rest
 end
@@ -1138,9 +1143,10 @@ function defs.typealiasdecl(pos, islocal, name_loc, name, type)
         ast.TopLevelTypeAlias(pos, islocal, name, type), name_loc)
 end
 
-function defs.foreignimportdecl(pos, name_loc, localname, headername)
-    return with_name_loc(
-        ast.TopLevelForeignImport(pos, localname, headername), name_loc)
+function defs.foreignimportdecl(pos, header_loc, headername)
+    local node = ast.TopLevelForeignImport(pos, headername)
+    node._header_loc = header_loc
+    return node
 end
 
 function defs.typename(pos, name, typeargs)
@@ -1594,17 +1600,17 @@ local grammar = re.compile([[
                            LPAREN^LParPList paramlist RPAREN^RParPList
                            rettypeopt block P END^EndFunc)       -> staticdecl
 
-    toplevelfunc    <- (P  localopt FUNCTION P NAME^NameFunc
+    toplevelfunc    <- (P  localopt FUNCTION P BINDNAME^NameFunc
                            typeparamsopt
                            LPAREN^LParPList paramlist RPAREN^RParPList
                            rettypeopt block P END^EndFunc)       -> toplevelfuncdecl
 
-    foreignfunc     <- (P  &(FOREIGN FUNCTION) FOREIGN FUNCTION P NAME^NameFunc
+    foreignfunc     <- (P  &(FOREIGN FUNCTION) FOREIGN FUNCTION P BINDNAME^NameFunc
                            (LT %{GenericForeignFunc})?
                            LPAREN^LParPList paramlist RPAREN^RParPList
                            rettypeopt block P END^EndFunc)       -> foreignfuncdecl
 
-    topleveltype    <- (P  localopt TYPE P NAME^NameTypeAlias
+    topleveltype    <- (P  localopt TYPE P BINDNAME^NameTypeAlias
                            (LT %{GenericTypeAlias})?
                            ASSIGN^AssignTypeAlias
                            type^TypeTypeAlias)                   -> typealiasdecl
@@ -1617,12 +1623,12 @@ local grammar = re.compile([[
                            !(IMPORT / (FOREIGN IMPORT))
                            exp^ExpVarDec)                        -> toplevelvardecl
 
-    toplevelrecord  <- (P  localopt RECORD P NAME^NameRecord
+    toplevelrecord  <- (P  localopt RECORD P BINDNAME^NameRecord
                            typeparamsopt
                            recordfields^FieldRecord
                            P END^EndRecord)                      -> recorddecl
 
-    toplevelunion   <- (P  localopt UNION P NAME^NameUnion
+    toplevelunion   <- (P  localopt UNION P BINDNAME^NameUnion
                            typeparamsopt
                            unionvariants^VariantUnion
                            P END^EndUnion)                       -> uniondecl
@@ -1632,7 +1638,7 @@ local grammar = re.compile([[
     -- ordinary `local NAME = ...` alternatives get a chance to claim it.
     toplevelinterface
                     <- (P  (LOCAL INTERFACE %{LocalInterface} / INTERFACE)
-                           P NAME^NameInterface
+                           P BINDNAME^NameInterface
                            typeparamsopt
                            interfacemembers
                            (P END
@@ -1673,19 +1679,20 @@ local grammar = re.compile([[
                           => checklist) / %{ListTooLong})
                        GENERICGT^RAngleTypeParams
 
-    typeparam       <- (P  NAME
+    typeparam       <- (P  BINDNAME
                            ((COLON namedtype^TypeParamConstraint)? -> opt))
                                                                   -> typeparamdecl
 
-    import          <- (P  LOCAL P NAME^NameImport ASSIGN^AssignImport
+    import          <- (P  LOCAL P BINDNAME^NameImport ASSIGN^AssignImport
                           !FOREIGN IMPORT^ImportImport
                           (LPAREN STRINGLIT^StringLParImport RPAREN^RParImport /
                           STRINGLIT^StringImport))               -> importdecl
 
-    foreign         <- (P  LOCAL P NAME^NameImport ASSIGN^AssignImport
-                           &(FOREIGN IMPORT) FOREIGN IMPORT^ImportImport
-                          (LPAREN STRINGLIT^StringLParImport RPAREN^RParImport /
-                           STRINGLIT^StringImport))              -> foreignimportdecl
+    foreign         <- ((P FOREIGN IMPORT^ImportImport
+                          (LPAREN P STRINGLIT^StringLParImport RPAREN^RParImport /
+                           P STRINGLIT^StringImport))            -> foreignimportdecl)
+                     / (LOCAL NAME ASSIGN &(FOREIGN IMPORT)
+                           %{BoundForeignImport})
 
     moduleinit      <- (P DO block P END^EndBlock) -> moduleinit -- marks StatBlock/StatTry
 
@@ -1715,7 +1722,7 @@ local grammar = re.compile([[
                               (COMMA varargparam)? / varargparam)? |}
                         => checklist) / %{ListTooLong}           -- produces {Decl}
 
-    param           <- (P  NAME COLON^ParamSemicolon
+    param           <- (P  BINDNAME COLON^ParamSemicolon
                            type^TypeDecl)                        -> typeddecl
 
     -- Lambda parameters: the type annotation is optional, and a trailing `...`
@@ -1724,18 +1731,18 @@ local grammar = re.compile([[
                               (COMMA lambdavarargparam)? / lambdavarargparam)? |}
                         => checklist) / %{ListTooLong}           -- produces {Decl}
 
-    lambdaparam     <- (P  NAME COLON type^TypeDecl)             -> typeddecl
-                     / (P  NAME)                                 -> inferreddecl
+    lambdaparam     <- (P  BINDNAME COLON type^TypeDecl)             -> typeddecl
+                     / (P  BINDNAME)                                 -> inferreddecl
 
     funcexp         <- (P  FUNCTION (LT %{GenericLambda})?
                            LPAREN^LParPList lambdaparamlist
                            RPAREN^RParPList lambdarettypeopt
                            block P END^EndFunc)                  -> funcexp
 
-    decl            <- (P  NAME COLON type^TypeDecl)             -> typeddecl
-                     / (P  NAME OPT COLON type^TypeDecl)         -> optiondecl
-                     / (P  NAME OPT)                             -> optiondecl
-                     / (P  NAME)                                 -> inferreddecl
+    decl            <- (P  BINDNAME COLON type^TypeDecl)             -> typeddecl
+                     / (P  BINDNAME OPT COLON type^TypeDecl)         -> optiondecl
+                     / (P  BINDNAME OPT)                             -> optiondecl
+                     / (P  BINDNAME)                                 -> inferreddecl
 
     decllist        <- {| decl (COMMA decl^DeclParList)* |}      -- produces {Decl}
 
@@ -1751,11 +1758,11 @@ local grammar = re.compile([[
                             ((localcarrayextent)? -> opt)
                             RBRACKET^RBracketCArray)              -> TypeCArray
 
-    localdecl       <- (P  NAME COLON
+    localdecl       <- (P  BINDNAME COLON
                             (localcarraytype / type)^TypeDecl)     -> typeddecl
-                     / (P  NAME OPT COLON type^TypeDecl)          -> optiondecl
-                     / (P  NAME OPT)                              -> optiondecl
-                     / (P  NAME)                                  -> inferreddecl
+                     / (P  BINDNAME OPT COLON type^TypeDecl)          -> optiondecl
+                     / (P  BINDNAME OPT)                              -> optiondecl
+                     / (P  BINDNAME)                                  -> inferreddecl
 
     localdecllist   <- {| localdecl
                             (COMMA localdecl^DeclLocal)* |}
@@ -2071,7 +2078,7 @@ local grammar = re.compile([[
                            casebindingopt
                            THEN^ThenCase block)                  -> casearm
 
-    casebindingopt  <- (((COLON P NAME^NameCaseBinding)
+    casebindingopt  <- (((COLON P BINDNAME^NameCaseBinding)
                                                         -> casebinding)?) -> opt
 
     returnstat      <- (P  RETURN (explist? -> listopt) SEMICOLON?)      -> StatReturn
@@ -2443,6 +2450,7 @@ local grammar = re.compile([[
 
     NUMBER          <- %NUMBER SKIP*
     STRINGLIT       <- %STRINGLIT SKIP*
+    BINDNAME        <- %BINDNAME SKIP*
     NAME            <- %NAME SKIP*
     CNAME           <- %CNAME SKIP*
     NAMEDLABEL      <- %NAMEDLABEL SKIP*

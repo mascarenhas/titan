@@ -1,12 +1,12 @@
-local lua = foreign import "lua.h"
-local lual = foreign import "lauxlib.h"
-local ffi = foreign import "titan/ffi.h"
+foreign import "lua.h"
+foreign import "lauxlib.h"
+foreign import "titan/ffi.h"
 
 local function bootstrap_hook_is_installed(): boolean
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)
-  return lua.lua_type(L, -1) == lua.LUA_TFUNCTION
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)
+  return ffi.lua_type(L, -1) == ffi.LUA_TFUNCTION
 end
 
 function main(arguments: {string}): integer
@@ -20,12 +20,12 @@ function main(arguments: {string}): integer
 end
 
 do
-  local status = lual.luaL_loadstring(L, [==[
+  local status = ffi.luaL_loadstring(L, [==[
     return function(_main, _arguments)
       error("synthetic bootstrap invoked")
     end
   ]==])
   if status ~= 0 then raise "could not load synthetic bootstrap" end
-  lua.lua_callk(L, 0, 1, 0, nil)
-  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)
+  ffi.lua_callk(L, 0, 1, 0, nil)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)
 end

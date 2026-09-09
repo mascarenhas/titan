@@ -508,10 +508,10 @@ describe("bound method references (obj:m)", function()
     it("rejects a foreign (C) method reference", function()
         with_header("extern double ffi_abs(double value);\n", function(header)
             assert_type_error(
-                "trying to access module 'm' as a first%-class value", [[
-                    local m = foreign import "]] .. header .. [["
+                "trying to access module 'ffi' as a first%-class value", [[
+                    foreign import "]] .. header .. [["
                     function use()
-                        local f = m:ffi_abs
+                        local f = ffi:ffi_abs
                     end
                 ]])
         end)

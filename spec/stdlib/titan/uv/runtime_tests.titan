@@ -5,7 +5,7 @@ local command = import "support.command.titan"
 local fs = import "fs"
 local system = import "os"
 local timer = import "timer"
-local stdio_probe = foreign import "uv_stdio_probe.h"
+foreign import "uv_stdio_probe.h"
 
 local retained_shutdown_file: fs.File? = nil
 local retained_shutdown_ticker: timer.Ticker? = nil
@@ -207,7 +207,7 @@ local stdio_probe_active = false
 
 local function restore_stdio_probe()
   if stdio_probe_active then
-    stdio_probe.titan_uv_test_stdio_finish(0)
+    ffi.titan_uv_test_stdio_finish(0)
     stdio_probe_active = false
   end
 end
@@ -220,8 +220,8 @@ local function assert_stdio_fixture(workspace: string, mode: string,
                                     pipe_hint: string?,
                                     stderr_fragment: boolean?)
   local result_path = workspace .. "/" .. mode .. ".result"
-  if stdio_probe.titan_uv_test_stdio_setup(parent_mode) ~= 0 then
-    raise stdio_probe.titan_uv_test_stdio_failure() as string
+  if ffi.titan_uv_test_stdio_setup(parent_mode) ~= 0 then
+    raise ffi.titan_uv_test_stdio_failure() as string
   end
   stdio_probe_active = true
   local status = 0
@@ -239,14 +239,14 @@ local function assert_stdio_fixture(workspace: string, mode: string,
     arguments[#arguments + 1] = result_path
     status = command.system(arguments)
     finish_status =
-      stdio_probe.titan_uv_test_stdio_finish(nonblocking_mask)
+      ffi.titan_uv_test_stdio_finish(nonblocking_mask)
     stdio_probe_active = false
-    captured_stdout = stdio_probe.titan_uv_test_stdio_output(1) as string
-    captured_stderr = stdio_probe.titan_uv_test_stdio_output(2) as string
+    captured_stdout = ffi.titan_uv_test_stdio_output(1) as string
+    captured_stderr = ffi.titan_uv_test_stdio_output(2) as string
   end
   local report = fs.read_file(result_path)
   defer fs.unlink(result_path)
-  local probe_failure = stdio_probe.titan_uv_test_stdio_failure() as string
+  local probe_failure = ffi.titan_uv_test_stdio_failure() as string
   local stderr_matches = captured_stderr == expected_stderr
   if stderr_fragment then
     stderr_matches = common.contains(captured_stderr, expected_stderr)
@@ -266,7 +266,7 @@ function test_parent_pipe_stdio_classification_and_transfer(
   with_stdio_fixture(function (workspace: string)
     assert_stdio_fixture(
       workspace, "pipes", "parent-pipes-ok",
-      stdio_probe.TITAN_UV_TEST_STDIO_PIPE_ALL, 7,
+      ffi.TITAN_UV_TEST_STDIO_PIPE_ALL, 7,
       "pipe-stdout", "pipe-stderr")
   end)
 end
@@ -276,7 +276,7 @@ function test_parent_stream_inheritance_uses_prepared_handles(
   with_stdio_fixture(function (workspace: string)
     assert_stdio_fixture(
       workspace, "inherit", "parent-inheritance-ok",
-      stdio_probe.TITAN_UV_TEST_STDIO_PIPE_ALL, 0, "", "")
+      ffi.TITAN_UV_TEST_STDIO_PIPE_ALL, 0, "", "")
   end)
 end
 
@@ -285,7 +285,7 @@ function test_parent_pty_stdio_classification_and_transfer(
   with_stdio_fixture(function (workspace: string)
     assert_stdio_fixture(
       workspace, "tty", "parent-tty-ok",
-      stdio_probe.TITAN_UV_TEST_STDIO_TTY_SLAVE, 0, "tty-output", "")
+      ffi.TITAN_UV_TEST_STDIO_TTY_SLAVE, 0, "tty-output", "")
   end)
 end
 
@@ -294,7 +294,7 @@ function test_parent_regular_file_stdio_rejection_does_not_leak(
   with_stdio_fixture(function (workspace: string)
     assert_stdio_fixture(
       workspace, "file", "parent-file-rejected",
-      stdio_probe.TITAN_UV_TEST_STDIO_FILE_STDOUT, 0, "", "")
+      ffi.TITAN_UV_TEST_STDIO_FILE_STDOUT, 0, "", "")
   end)
 end
 
@@ -303,7 +303,7 @@ function test_parent_socket_stdio_rejection_does_not_leak(
   with_stdio_fixture(function (workspace: string)
     assert_stdio_fixture(
       workspace, "socket", "parent-socket-rejected",
-      stdio_probe.TITAN_UV_TEST_STDIO_SOCKET_STDOUT, 0, "", "")
+      ffi.TITAN_UV_TEST_STDIO_SOCKET_STDOUT, 0, "", "")
   end)
 end
 
@@ -312,7 +312,7 @@ function test_parent_unix_stream_stdio_classification_and_transfer(
   with_stdio_fixture(function (workspace: string)
     assert_stdio_fixture(
       workspace, "pipes", "parent-pipes-ok",
-      stdio_probe.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL, 7,
+      ffi.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL, 7,
       "pipe-stdout", "pipe-stderr")
   end)
 end
@@ -321,16 +321,16 @@ function test_parent_stdio_hints_preserve_known_descriptor_kinds(
     _context: test.Context)
   with_stdio_fixture(function (workspace: string)
     assert_stdio_fixture(workspace, "pipes", "parent-pipes-ok",
-      stdio_probe.TITAN_UV_TEST_STDIO_PIPE_ALL, 7,
+      ffi.TITAN_UV_TEST_STDIO_PIPE_ALL, 7,
       "pipe-stdout", "pipe-stderr", "invalid")
     assert_stdio_fixture(workspace, "tty", "parent-tty-ok",
-      stdio_probe.TITAN_UV_TEST_STDIO_TTY_SLAVE, 0, "tty-output", "", "1")
+      ffi.TITAN_UV_TEST_STDIO_TTY_SLAVE, 0, "tty-output", "", "1")
     assert_stdio_fixture(workspace, "file", "parent-file-rejected",
-      stdio_probe.TITAN_UV_TEST_STDIO_FILE_STDOUT, 0, "", "", "1")
+      ffi.TITAN_UV_TEST_STDIO_FILE_STDOUT, 0, "", "", "1")
     local modes = {
-      stdio_probe.TITAN_UV_TEST_STDIO_SOCKET_STDOUT,
-      stdio_probe.TITAN_UV_TEST_STDIO_INET_DATAGRAM_STDOUT,
-      stdio_probe.TITAN_UV_TEST_STDIO_UNIX_DATAGRAM_STDOUT,
+      ffi.TITAN_UV_TEST_STDIO_SOCKET_STDOUT,
+      ffi.TITAN_UV_TEST_STDIO_INET_DATAGRAM_STDOUT,
+      ffi.TITAN_UV_TEST_STDIO_UNIX_DATAGRAM_STDOUT,
     }
     for index = 1, #modes do
       assert_stdio_fixture(workspace, "socket", "parent-socket-rejected",
@@ -343,17 +343,17 @@ function test_parent_closed_stdio_reports_ebadf_without_leaking(
     _context: test.Context)
   with_stdio_fixture(function (workspace: string)
     assert_stdio_fixture(workspace, "closed", "parent-closed-rejected",
-      stdio_probe.TITAN_UV_TEST_STDIO_PIPE_ALL, 0, "", "", "1")
+      ffi.TITAN_UV_TEST_STDIO_PIPE_ALL, 0, "", "", "1")
   end)
 end
 
 function test_parent_denied_unix_stdio_uses_only_valid_per_fd_pipe_hints(
     _context: test.Context)
-  if stdio_probe.titan_uv_test_stdio_metadata_denial_supported() == 0 then
+  if ffi.titan_uv_test_stdio_metadata_denial_supported() == 0 then
     test.skip("stdio metadata denial requires Linux x86_64 or aarch64")
   end
   with_stdio_fixture(function (workspace: string)
-    local sockets = stdio_probe.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL
+    local sockets = ffi.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL
     assert_stdio_fixture(workspace, "denied-pipes", "parent-pipes-ok",
       sockets, 7, "pipe-stdout", "pipe-stderr", "0,1,2")
     assert_stdio_fixture(workspace, "denied-pipes-access", "parent-pipes-ok",
@@ -376,30 +376,30 @@ end
 
 function test_parent_partial_metadata_denial_preserves_socket_contradictions(
     _context: test.Context)
-  if stdio_probe.titan_uv_test_stdio_metadata_denial_supported() == 0 then
+  if ffi.titan_uv_test_stdio_metadata_denial_supported() == 0 then
     test.skip("stdio metadata denial requires Linux x86_64 or aarch64")
   end
   with_stdio_fixture(function (workspace: string)
-    local sockets = stdio_probe.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL
+    local sockets = ffi.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL
     assert_stdio_fixture(workspace, "deny-name-stdout", "parent-stdout-ok",
       sockets, 2, "pipe-stdout", "", "1")
     assert_stdio_fixture(workspace, "deny-type-stdout", "parent-stdout-ok",
       sockets, 2, "pipe-stdout", "", "1")
     assert_stdio_fixture(workspace, "deny-name-reject", "parent-contradiction-rejected",
-      stdio_probe.TITAN_UV_TEST_STDIO_UNIX_DATAGRAM_STDOUT, 0, "", "", "1")
+      ffi.TITAN_UV_TEST_STDIO_UNIX_DATAGRAM_STDOUT, 0, "", "", "1")
     assert_stdio_fixture(workspace, "deny-type-reject", "parent-contradiction-rejected",
-      stdio_probe.TITAN_UV_TEST_STDIO_SOCKET_STDOUT, 0, "", "", "1")
+      ffi.TITAN_UV_TEST_STDIO_SOCKET_STDOUT, 0, "", "", "1")
   end)
 end
 
 function test_parent_stdio_denial_renders_operation_error_fields(
     _context: test.Context)
-  if stdio_probe.titan_uv_test_stdio_metadata_denial_supported() == 0 then
+  if ffi.titan_uv_test_stdio_metadata_denial_supported() == 0 then
     test.skip("stdio metadata denial requires Linux x86_64 or aarch64")
   end
   with_stdio_fixture(function (workspace: string)
     assert_stdio_fixture(workspace, "denied-diagnostic", "parent-denied-diagnostic",
-      stdio_probe.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL, 0, "",
+      ffi.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL, 0, "",
       "uncaught error in async Task: stdio.parent.kind: EPERM (-1): fd 1: getsockname",
       nil, true)
   end)

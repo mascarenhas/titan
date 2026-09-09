@@ -237,6 +237,7 @@ if main_module then
             output = mod.native_output or mod.filename,
             foreign_header = header and header.managed
                 and header.filename or nil,
+            ffi_header = header and header.ffi_header and header.ffi_header.filename or nil,
         }
     end
     local program_output = test_program_output or

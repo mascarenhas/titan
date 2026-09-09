@@ -948,7 +948,7 @@ describe("Array, Map, and vararg spread expressions (code generator)", function(
             }
         ]], function(header)
             run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 local evaluations: integer = 0
 
                 local function pair(): {integer}
@@ -963,29 +963,29 @@ describe("Array, Map, and vararg spread expressions (code generator)", function(
 
                 function direct(): integer
                     evaluations = 0
-                    local result = c.ffi_spread_join(...pair()) as integer
+                    local result = ffi.ffi_spread_join(...pair()) as integer
                     return result * 10 + evaluations
                 end
 
                 function pointer(): integer
                     evaluations = 0
-                    local fn: c.ffi_spread_binary = c.ffi_spread_choose()
+                    local fn: ffi.ffi_spread_binary = ffi.ffi_spread_choose()
                     local result = fn(...pair()) as integer
                     return result * 10 + evaluations
                 end
 
                 function allocation(): integer
                     evaluations = 0
-                    local values: owned c.ffi_spread_int[] =
-                        c.ffi_spread_int.new_array(...count())
+                    local values: owned ffi.ffi_spread_int[] =
+                        ffi.ffi_spread_int.new_array(...count())
                     return #values * 10 + evaluations
                 end
 
                 function mutated_automatic(): integer
                     evaluations = 0
-                    local box = c.ffi_spread_box.new()
+                    local box = ffi.ffi_spread_box.new()
                     do
-                        c.ffi_spread_fill(box, ...pair())
+                        ffi.ffi_spread_fill(box, ...pair())
                         raise "observe through spill"
                     catch
                         return (box.value as integer) * 10 + evaluations

@@ -160,9 +160,9 @@ local function regex_backreference_capture(
   if length < 0 or length > #subject - position + 1 then return false end
   if length > 0 then
     local bytes = subject as const *char
-    if cstring.memcmp(
+    if ffi.memcmp(
         bytes + position - 1, bytes + group_first - 1,
-        length as cstring.size_t) ~= 0 then
+        length as ffi.size_t) ~= 0 then
       return false
     end
   end

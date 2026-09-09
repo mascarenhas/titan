@@ -1,18 +1,18 @@
-local lua = foreign import "lua.h"
-local ffi = foreign import "titan/ffi.h"
+foreign import "lua.h"
+foreign import "titan/ffi.h"
 
 -- Mirror Lua's next while keeping every temporary Lua-stack value rooted until
 -- it has been copied into Titan's traced generic result representation.
 function next<K, V>(map: {K: V}, key: K?): (K?, V?)
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  if lua.lua_checkstack(L, 3) == 0 then
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 3) == 0 then
     raise "cannot reserve Lua stack for map iteration"
   end
 
   ffi.lua_pushtvalue(L, map)
   ffi.lua_pushtvalue(L, key)
-  if lua.lua_next(L, -2) == 0 then
+  if ffi.lua_next(L, -2) == 0 then
     return nil, nil
   end
 

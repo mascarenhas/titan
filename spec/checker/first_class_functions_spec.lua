@@ -83,9 +83,9 @@ describe("first-class function values (typechecker)", function()
     it("rejects a foreign (C) function used as a value", function()
         with_header("extern double ffi_sqrt(double value);\n", function(header)
             local errs = check_errs([[
-                local m = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 function g(): value
-                    return m.ffi_sqrt
+                    return ffi.ffi_sqrt
                 end
             ]])
             assert.truthy(#errs >= 1)

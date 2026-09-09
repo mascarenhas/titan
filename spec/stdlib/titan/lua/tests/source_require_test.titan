@@ -125,7 +125,7 @@ function test_lua_source_open_cancellation_is_retryable(
   runtime_test.run(function ()
     local root = lua_support.temporary_directory(context)
     local fifo = root .. "/source.fifo"
-    test.assert(cstat.mkfifo(fifo, 384) == 0,
+    test.assert(ffi.mkfifo(fifo, 384) == 0,
                 "could not create source-search FIFO")
     runtime_test.cleanup(function () fs.unlink(fifo) end)
 

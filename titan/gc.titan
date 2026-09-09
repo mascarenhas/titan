@@ -1,6 +1,6 @@
-local lua = foreign import "lua.h"
-local cstddef = foreign import "stddef.h"
-local ffi = foreign import "titan/ffi.h"
+foreign import "lua.h"
+foreign import "stddef.h"
+foreign import "titan/ffi.h"
 
 local function require_gc_result(result: int): integer
   if result < 0 then
@@ -10,25 +10,25 @@ local function require_gc_result(result: int): integer
 end
 
 local function set_weak_mode(map: {value: value}, mode: string)
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  if lua.lua_checkstack(L, 4) == 0 then
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 4) == 0 then
     raise "cannot reserve Lua stack for weak-map configuration"
   end
 
   ffi.lua_pushtvalue(L, map)
-  if lua.lua_getmetatable(L, -1) == 0 then
+  if ffi.lua_getmetatable(L, -1) == 0 then
     local metatable: {string: value} = {
       ["__mode"] = mode,
     }
     ffi.lua_pushtvalue(L, metatable)
-    lua.lua_setmetatable(L, -2)
+    ffi.lua_setmetatable(L, -2)
   else
     -- Preserve the exact existing metatable and change only its raw __mode
     -- field. Raw assignment cannot invoke a metatable-of-metatable callback.
     ffi.lua_pushtvalue(L, "__mode")
     ffi.lua_pushtvalue(L, mode)
-    lua.lua_rawset(L, -3)
+    ffi.lua_rawset(L, -3)
   end
 end
 
@@ -41,20 +41,20 @@ function ephemeron(map: {value: value})
 end
 
 function finalizable<T>(v: T, f: (T) -> ()): ()
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  if lua.lua_checkstack(L, 4) == 0 then
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 4) == 0 then
     raise "cannot reserve Lua stack for finalizer configuration"
   end
 
   ffi.lua_pushtvalue(L, v)
-  local value_type = lua.lua_type(L, -1)
-  if value_type ~= lua.LUA_TTABLE and
-     value_type ~= lua.LUA_TUSERDATA then
+  local value_type = ffi.lua_type(L, -1)
+  if value_type ~= ffi.LUA_TTABLE and
+     value_type ~= ffi.LUA_TUSERDATA then
     raise "gc.finalizable expects a table or full userdata"
   end
 
-  if lua.lua_getmetatable(L, -1) == 0 then
+  if ffi.lua_getmetatable(L, -1) == 0 then
     local metatable: {string: value} = {
       ["__gc"] = f,
     }
@@ -65,26 +65,26 @@ function finalizable<T>(v: T, f: (T) -> ()): ()
     -- makes Lua mark an already-created value as finalizable.
     ffi.lua_pushtvalue(L, "__gc")
     ffi.lua_pushtvalue(L, f)
-    lua.lua_rawset(L, -3)
+    ffi.lua_rawset(L, -3)
   end
-  lua.lua_setmetatable(L, -2)
+  ffi.lua_setmetatable(L, -2)
 end
 
 function pause()
-  require_gc_result(lua.lua_gc(L, lua.LUA_GCSTOP))
+  require_gc_result(ffi.lua_gc(L, ffi.LUA_GCSTOP))
 end
 
 function resume()
-  require_gc_result(lua.lua_gc(L, lua.LUA_GCRESTART))
+  require_gc_result(ffi.lua_gc(L, ffi.LUA_GCRESTART))
 end
 
 function paused(): boolean
   return require_gc_result(
-    lua.lua_gc(L, lua.LUA_GCISRUNNING)) == 0
+    ffi.lua_gc(L, ffi.LUA_GCISRUNNING)) == 0
 end
 
 function collect()
-  require_gc_result(lua.lua_gc(L, lua.LUA_GCCOLLECT))
+  require_gc_result(ffi.lua_gc(L, ffi.LUA_GCCOLLECT))
 end
 
 function step(size: integer?): boolean
@@ -93,25 +93,25 @@ function step(size: integer?): boolean
   if amount < 0 then
     raise "garbage collector step size must be non-negative"
   end
-  return require_gc_result(lua.lua_gc(
-    L, lua.LUA_GCSTEP, amount as cstddef.size_t)) ~= 0
+  return require_gc_result(ffi.lua_gc(
+    L, ffi.LUA_GCSTEP, amount as ffi.size_t)) ~= 0
 end
 
 function incremental(): boolean
   return require_gc_result(
-    lua.lua_gc(L, lua.LUA_GCINC)) == lua.LUA_GCINC
+    ffi.lua_gc(L, ffi.LUA_GCINC)) == ffi.LUA_GCINC
 end
 
 function generational(): boolean
   return require_gc_result(
-    lua.lua_gc(L, lua.LUA_GCGEN)) == lua.LUA_GCGEN
+    ffi.lua_gc(L, ffi.LUA_GCGEN)) == ffi.LUA_GCGEN
 end
 
 function count(): integer
   local kilobytes = require_gc_result(
-    lua.lua_gc(L, lua.LUA_GCCOUNT))
+    ffi.lua_gc(L, ffi.LUA_GCCOUNT))
   local remaining_bytes = require_gc_result(
-    lua.lua_gc(L, lua.LUA_GCCOUNTB))
+    ffi.lua_gc(L, ffi.LUA_GCCOUNTB))
   return kilobytes * 1024 + remaining_bytes
 end
 
@@ -125,30 +125,30 @@ local function parameter(which: int,
     end
     configured = supplied as int
   end
-  return require_gc_result(lua.lua_gc(
-    L, lua.LUA_GCPARAM, which, configured))
+  return require_gc_result(ffi.lua_gc(
+    L, ffi.LUA_GCPARAM, which, configured))
 end
 
 function minormul(setting: integer?): integer
-  return parameter(lua.LUA_GCPMINORMUL, setting)
+  return parameter(ffi.LUA_GCPMINORMUL, setting)
 end
 
 function majorminor(setting: integer?): integer
-  return parameter(lua.LUA_GCPMAJORMINOR, setting)
+  return parameter(ffi.LUA_GCPMAJORMINOR, setting)
 end
 
 function minormajor(setting: integer?): integer
-  return parameter(lua.LUA_GCPMINORMAJOR, setting)
+  return parameter(ffi.LUA_GCPMINORMAJOR, setting)
 end
 
 function pause_percent(setting: integer?): integer
-  return parameter(lua.LUA_GCPPAUSE, setting)
+  return parameter(ffi.LUA_GCPPAUSE, setting)
 end
 
 function stepmul(setting: integer?): integer
-  return parameter(lua.LUA_GCPSTEPMUL, setting)
+  return parameter(ffi.LUA_GCPSTEPMUL, setting)
 end
 
 function stepsize(setting: integer?): integer
-  return parameter(lua.LUA_GCPSTEPSIZE, setting)
+  return parameter(ffi.LUA_GCPSTEPSIZE, setting)
 end

@@ -1,8 +1,8 @@
 local test = import "test"
-local cstring = foreign import "string.h"
+foreign import "string.h"
 
 local function contains(subject: string, fragment: string): boolean
-  return cstring.strstr(subject, fragment) ~= nil
+  return ffi.strstr(subject, fragment) ~= nil
 end
 
 local function caught_string(failure: value): string

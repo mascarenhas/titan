@@ -12,31 +12,31 @@ end
 -- after-work callback. The raw carrier separately gives the worker a C-only
 -- view that contains no TValue fields.
 local record WorkOwner
-  local request: owned *libuv.uv_work_t
+  local request: owned *ffi.uv_work_t
   local carrier: owned WorkPointer[]
   local callback: (WorkOwner, integer) -> ()
 end
 
-foreign function uv_work_cb(req: *libuv.uv_work_t)
-  local carrier = libuv.uv_req_get_data(
-      req as *libuv.uv_req_t) as *WorkPointer
+foreign function uv_work_cb(req: *ffi.uv_work_t)
+  local carrier = ffi.uv_req_get_data(
+      req as *ffi.uv_req_t) as *WorkPointer
   local f = carrier[1] as WorkFunction
   local arg = carrier[2]
   f(arg)
 end
 
-foreign function uv_after_work_cb(req: *libuv.uv_work_t, status: int)
-  local carrier = libuv.uv_req_get_data(
-      req as *libuv.uv_req_t) as *WorkPointer
+foreign function uv_after_work_cb(req: *ffi.uv_work_t, status: int)
+  local carrier = ffi.uv_req_get_data(
+      req as *ffi.uv_req_t) as *WorkPointer
   local owner = carrier[0] as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[2].uv)
-  local L = libuv.uv_loop_get_data(req.loop) as *lua.lua_State
+  local L = ffi.uv_loop_get_data(req.loop) as *ffi.lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
       callback.upvalue[2]) as UvIntegerCallbackEntry
-  local top = lua.lua_gettop(L)
-  entry(L, module, callback, owner, status as lua.lua_Integer)
-  lua.lua_settop(L, top)
+  local top = ffi.lua_gettop(L)
+  entry(L, module, callback, owner, status as ffi.lua_Integer)
+  ffi.lua_settop(L, top)
 end
 
 local function complete_work(task: Task, status: integer)
@@ -52,19 +52,19 @@ end
 
 local function WorkCall:dispatch(task: Task): Immediate?
   accepting_work(task.runtime, "async.run_foreign")
-  local native: owned *libuv.uv_work_t = libuv.uv_work_t.new()
+  local native: owned *ffi.uv_work_t = ffi.uv_work_t.new()
   local callback = function (_owner: WorkOwner, status: integer)
     complete_work(task, status)
   end
   local owner = WorkOwner.new(native, self.carrier, callback)
-  local request: *libuv.uv_work_t = native
+  local request: *ffi.uv_work_t = native
 
   self.carrier[0] = owner as WorkPointer
-  libuv.uv_req_set_data(
-      request as *libuv.uv_req_t, self.carrier as WorkPointer)
+  ffi.uv_req_set_data(
+      request as *ffi.uv_req_t, self.carrier as WorkPointer)
   task.pending = owner
 
-  local status = libuv.uv_queue_work(
+  local status = ffi.uv_queue_work(
       task.runtime.loop, request, uv_work_cb, uv_after_work_cb)
   if status == 0 then return nil end
   task.pending = nil

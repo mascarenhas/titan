@@ -39,7 +39,7 @@ best-effort declaration conversion:
 
 Collecting this metadata first makes alias publication independent of
 declaration order. A real `typedef Item` always reserves the Titan spelling
-`module.Item`; a tag-only fallback never shadows it merely because the tag was
+`ffi.Item`; a tag-only fallback never shadows it merely because the tag was
 converted first.
 
 For an eligible named `struct` or `union` with no same-name real typedef, the
@@ -67,55 +67,37 @@ the coder simply emits the stored spelling unchanged.
 ### One tag namespace per C scope
 
 C shares one tag namespace among `struct`, `union`, and `enum` within a scope.
-The registrar diagnoses a different-kind reuse inside one parsed header.
-Across foreign imports, the checker-owned module registry performs the same
-check and reports both headers/provenances. Same-kind declarations reuse one
-canonical `Type.CStruct`/`Type.CUnion`; a later definition completes that
-object in place.
+The registrar sees the complete ordered module header translation unit. Include
+guards and macro state determine which declarations enter that unit; different
+kind reuse is diagnosed in its actual C scope. Same-kind declarations reuse one
+canonical `Type.CStruct`/`Type.CUnion`, and a definition completes that owner.
 
-Prototype tags require more care. A parameter declaration can introduce a tag
-whose scope ends with that prototype, but the isolated header parser cannot
-know whether a tag from an earlier `foreign import` is already visible.
-`ctypes.lua` gives each prototype a stable scope identity and preserves
-unresolved tag-reference metadata. During `foreigntypes` conversion:
+A parameter declaration can introduce a prototype-local tag. `ctypes.lua`
+retains the prototype scope identity and binds a reference to an already visible
+file-scope tag when appropriate. A later file-scope tag stays distinct from an
+earlier prototype-local tag. Aggregate-member callback declarators likewise
+retain their own prototype scopes. The checker does not reconcile independent
+header snapshots or equate these tags by spelling.
 
-1. an already visible module-wide file tag of the same kind wins;
-2. otherwise the reference interns a prototype-local owner under that scope
-   identity;
-3. repeated references in the same prototype reuse that local owner;
-4. a later file-scope tag with the same spelling remains distinct.
+### Complete-object sinks
 
-Aggregate-member callback declarators also receive their proper prototype
-scope; their aliases do not leak into the surrounding header scope.
-
-### Frontiers and complete-object sinks
-
-Forward completion does not make a later definition retroactively visible to a
-module-variable initializer. The canonical owner records `_definition_order`,
-and `symtab.foreign_definition_visible` compares that order with the current
-initializer frontier.
+The module's complete C environment is established before module-variable
+initializers, signatures, and bodies are checked. A definition from any of its
+ordered headers is therefore available throughout `ffi`; ordinary Titan import
+aliases and variables retain their existing initializer frontiers.
 
 The checker centralizes the complete-C-object predicate and applies it wherever
-layout is required:
-
-* by-value parameters and results;
-* module variables and initialized locals;
-* constructor-initialized automatic locals;
-* by-value casts;
-* fixed-array elements;
-* allocation;
-* `sizeof` and `alignof`;
-* aggregate field access.
-
-Typedefs and array elements are resolved recursively. Pointers to incomplete
-objects remain valid. Flexible-array-member structs are complete for
-`sizeof`/`alignof` and have the dedicated scalar `T.new(count)` allocation
-path; they remain ineligible for `T.new_array`.
+layout is required: by-value parameters/results/locals/casts, automatic object
+construction, fixed-array elements, allocation, `sizeof`/`alignof`, and aggregate
+field access. Typedefs and array elements are resolved recursively. Pointers to
+incomplete objects remain valid. Flexible-array-member structs are complete for
+`sizeof`/`alignof` and have the dedicated scalar `T.new(count)` allocation path;
+they remain ineligible for `T.new_array`.
 
 ### Dual type/value lookup
 
 `Type.CModule` has separate `members` and `type_members`. Type syntax
-`c.stat` consults the type table. Expression lookup is value-first so a legal C
+`ffi.stat` consults the type table. Expression lookup is value-first so a legal C
 function or variable named `stat` is not stolen by `struct stat`.
 
 When only a type exists, expression lookup may synthesize a
@@ -213,10 +195,10 @@ invocation, including source dependencies. It contains the effective compiler
 argv, language/compile/CPP flags, ordered include directories, target profile,
 runner, private workspace, source-result cache, and verbose state.
 
-Each checked Titan module obtains a `ModuleContext` after its ordered
-foreign-import pass. That context contains its source directory and exact
-include descriptors. Candidate probes never borrow another module's header
-preamble.
+Each checked Titan module obtains a `ModuleContext` for its generated
+`A.ffi.h`. That descriptor carries the ordered explicit-source dependency
+headers followed by the module's direct foreign directives. Candidate probes
+use this combined environment for the current consumer.
 
 `titanc`, the filesystem loader, table loader, and child compiler paths thread
 the service through `checker.check`. A direct external `checker.check` without
@@ -231,102 +213,42 @@ providers to prove lifecycle and cleanup without depending on a real compiler.
 
 ### Header and toolchain fidelity
 
-Angle headers keep their angle spelling. A source-relative quoted header is
-rendered as its resolved absolute quoted path before the probe source moves
-under `/tmp`. An explicit source import has a unique physical checking header.
-The checker synthesizes its descriptor from the producer's already checked
-real-header inputs and complete macro context instead of sending that generated
-file through `cdriver` again. A private forwarding include gives the probe a
-stable spelling derived from the eventual public-header path. The wrapper
-includes the physical header by its absolute quoted spelling,
-so nested quoted includes still begin at the physical header's directory.
-One service rejects conflicting bindings for the same wrapper. The additional
-preprocessor include level is visible to extensions such as `__INCLUDE_LEVEL__`.
+`titan-compiler/ffiheaders.lua` renders each module's `A.ffi.h` with explicit
+source dependencies first and local foreign directives afterward. Folder
+modules use the canonical main's directives followed by contributors in
+bytewise filename order. The C driver preprocesses and parses that actual
+header once. Include guards, macro definitions and undefinitions, ordinary
+redeclarations, and C tag scopes therefore act on one ordered translation unit.
 
-Wrapper construction requires absolute physical and public paths and a quoted
-physical include. A persistent cache hit needs no probe workspace. On a miss,
-wrappers live in the private workspace until the resolver closes; a write
-failure is infrastructure failure and cannot publish a result.
-`cpreamble.fixed_includes` supplies the same preceding standard, Lua, and Titan
-headers used by generated module C. The foreign-header block, include
-directories, language mode, parsed compiler command, and target flags therefore
-match generated compilation. They configure execution; they do not add cache
-identity beyond the literal text emitted into the probe.
+Quoted author headers are resolved relative to the canonical Titan source
+directory and retain their absolute quoted spelling. Nested quoted includes
+then begin at the physical author header's directory. Angle headers keep their
+angle spelling. Recursive checking materializes a validated, deterministic
+logical tree of actual generated `.ffi.h` files; probes use that same tree.
+There is no forwarding include, symlink, or independently reconstructed
+per-type origin list.
 
-Each uncached candidate first validates a baseline translation unit. In
-addition, every module with at least one successful foreign import validates
-the complete ordered foreign-header preamble once immediately after the import
-pass. The one-header case catches illegal repeated declarations that the
-best-effort registrar may collapse before publishing its TypeList. That final
-compile checks include suppression, cumulative macro state, ordinary
-declarations, and tag definitions within the foreign-header block. A completed
-compiler rejection makes the header context invalid; a spawn, interruption,
-workspace, or cleanup failure remains infrastructure and supplies no semantic
-verdict. Candidate acceptance and rejection are both cached, and the same
-final-context baseline cache entry serves declaration, conversion, and operator
-probes.
+`cpreamble.fixed_includes` supplies the preceding standard, Lua, and Titan
+headers used by probes and generated module C. The C driver's declaration parse
+starts at `A.ffi.h`; it does not synthesize that runtime prefix. Include
+directories, language mode, parsed compiler command, and target flags are shared
+with generated compilation. They configure execution without adding separate
+probe-cache identity beyond the literal text emitted into the probe.
 
-The preprocessor's final object-like definition set is an unordered map. When
-`cdefines` projects supported definitions into the ordered TypeList, it visits
-macro names with `util.bytewise_less`; ordinary Lua string ordering is
-locale-dependent, and direct table traversal is randomized between processes.
-This canonicalizes only map-origin macro projections, not syntactic C
-source declarations, and gives macro-derived declarations deterministic order
-across compiler processes.
+Each uncached candidate first validates its baseline translation unit. The
+checker also validates the module's combined C environment after extraction,
+so the configured C compiler rejects invalid declarations that the best-effort
+parser may have accepted. A completed rejection makes the header context
+invalid. Spawn, interruption, workspace, object-read, and cleanup failures are
+infrastructure failures and supply no semantic verdict. Ordinary declaration
+compatibility follows the combined parse and the actual C compiler; no
+per-header pair probes or source-provenance exception reconcile snapshots.
 
-Ordinary redeclarations are compared from their isolated TypeLists, but their
-shared canonical composite is not committed until the final baseline and that
-pair's compatibility probe succeed. The pure declaration relation resolves
-typedefs, normalizes declaration-only qualification, adjusts array/function
-parameters, and recognizes an incomplete/known array pair as compatible.
-Structurally matching anonymous aggregates are only conditional candidates.
-Every queued exact or conditional repeat is checked in source order. Each
-probe contains two `extern` declarations of one private synthetic identifier
-and receives its own compiler verdict and diagnostics. A source-cache hit can
-supply that verdict. An accepted pair immediately forms its canonical composite
-before the next pair is rendered; an infrastructure failure supplies no
-compatibility verdict. Compiler acceptance proves that the two extracted types
-can form compatible declarations in that foreign-header context; it is not
-evidence that both declarations occurred.
-
-The merger forms any known-bound array composite in a declaration-owned deep
-view. Later probes structurally expand only typedefs marked as private
-declaration-owned array views, so a previously completed bound is visible even
-when the source header's typedef spelling remains incomplete. Ordinary typedefs
-retain their source names. For example, `a[]`, then `a[3]`, then `a[4]` first
-completes the bound to three and then checks the conflicting bound against that
-completed type.
-
-There is one narrow source-provenance exception. If isolated compatibility
-fails, matching preprocessor source identity, line, and column make the pair a
-candidate, but are not sufficient. A recursive relation must also prove that
-the complete declaration graphs are exact except for distinct canonical
-objects explicitly marked as same-spelled prototype-local structs or unions;
-their kind, completeness, layout, and bidirectional reuse topology must match
-too. Filesystem device/inode
-identity is used when available, with the resolved pathname as fallback. The
-checker then queues a `source-repeat`. A successful final header baseline
-canonicalizes it directly because rendering two synthetic function declarations
-would invent two prototype scopes for a tag that a guarded physical declaration
-emitted only once. Distinct source declarations remain nominal, macro-dependent
-changes elsewhere in the type remain conflicts, and exact or conditional
-repeats retain their pair probes.
-
-The TypeLists themselves are still produced by preprocessing each foreign
-import independently without generated C's fixed preceding standard/Lua/Titan
-headers. Probes do include that prefix. Consequently, a declaration whose
-spelling depends on macro state established by an earlier import can differ
-between the isolated checker and cumulative probe/generated-C views; one that
-depends on the fixed prefix can differ even in the first import.
-
-The baseline and pair probes do not invent a replacement cumulative TypeList
-or establish that an isolated declaration survived preprocessing. A valid
-preamble can therefore retain a unique isolated value or type binding, reject
-an isolated incompatibility that would disappear cumulatively, or canonicalize
-a macro-suppressed repeat. In particular, a suppressed isolated
-`extern int a[7]` can complete an earlier `extern int a[]` to `[7]` in Titan's
-composite view. There is no general portable C99 occurrence probe; such APIs
-require one umbrella header imported once.
+The final object-like macro definition set is an unordered map. `cdefines`
+projects its supported members into the TypeList in `util.bytewise_less` order.
+This canonicalizes map-origin projections without changing syntactic C source
+order. Macro state from an earlier header participates directly in later
+conditional preprocessing and declaration extraction.
 
 ### Analysis-local and persistent semantic results
 
@@ -334,7 +256,10 @@ The cache is source-to-result memoization. Render the complete C probe, then
 compute `SHA256(source)` over those exact bytes before preprocessing. That
 same digest indexes service-local memory, analysis-local memory, and disk.
 Literal include directives participate; the included files' contents do not.
-Compiler commands, flags, target profiles, source-directory metadata, and
+The generated header tree's digest appears as a comment in the raw probe
+source beside its stable logical include path, so a changed generated bundle
+changes that source. Author
+header content is still outside this source-only key. Compiler commands, flags, target profiles, source-directory metadata, and
 semantic descriptors do not add anything to the key. Generated helper names
 must likewise be independent of those external inputs.
 
@@ -345,11 +270,13 @@ individually, so a rejection already belongs to the exact question asked.
 Infrastructure failures, including unavailable or interrupted compilers,
 workspace failures, and cleanup failures, remain retryable.
 
-The persistent directory is `<prefix>/var/cache/titan-probes/1`, selected by a
+The persistent directory is `<prefix>/var/cache/titan-probes/2`, selected by a
 nonempty `TITAN_PREFIX` or otherwise the installed prefix recovered from
-`package.cpath`. Format 1 has one bounded record at `<digest>.result` for either
-outcome. Readers reject malformed, truncated, trailing, or oversized data and
-treat cache I/O failures as misses. Private source/object paths in diagnostics
+`package.cpath`. Format 2 has one bounded record at `<digest>.result` for either
+outcome. An accepted enum-carrier query also stores its typed selection result:
+match count and carrier identifier (the identifier sum when several match).
+Readers reject malformed, truncated, trailing, oversized, or impossible typed
+results and treat cache I/O failures as misses. Private source/object paths in diagnostics
 are normalized before storing or returning them. Oversized diagnostics may be
 reused in memory but are not persisted.
 
@@ -623,12 +550,9 @@ tokens. The generated compiler therefore performs the authoritative expansion
 under the translation unit's real header state.
 
 A separate object-macro form contains only a dotted identifier replacement,
-such as `implementation.member`. `cdriver` also retains the raw final macro
-definitions plus the names actively defined, redefined, or undefined by each
-header closure. Because generated C hoists all foreign includes, the symbol
-table seeds one module macro environment from the first import and applies
-those later mutations in source order. Field lookup expands the public token
-lazily against that final environment, so a later dependency redefinition or
+such as `implementation.member`. `cdriver` retains the raw final macro
+definitions from the combined module header. Field lookup expands the public
+token lazily against that final environment, so a later redefinition or
 `#undef` cannot leave a stale projection at an earlier initializer.
 
 When the final expansion is a pure dotted path, the checker resolves it against
@@ -648,14 +572,34 @@ existing typed dereferenced-accessor form remains supported. Function-like
 macros remain unavailable, while other object-like forms beyond recognized
 existing integer/accessor expressions, fully expanded outer casts to supported
 scalar types, and pure dotted projections are not generally supported. Macro
-classification also retains the existing independent-header limitation:
-declaration extraction does not inherit macro state from an earlier foreign
-import, even though probes and generated C see the cumulative ordered header
-block. The replayed field environment handles ordinary definitions,
-redefinitions, dependency rescans, and undefinitions, but conditional
-preprocessing whose result itself depends on an earlier import still belongs
-behind one umbrella header. The same umbrella rule applies when a later import
-changes a scalar value macro whose type was inferred in an earlier import.
+classification uses the same final macro environment as combined declaration
+extraction. A header may establish macro state used by a later directive, and a
+later definition, redefinition, or undefinition controls the final supported
+macro binding throughout the module.
+
+## Enum carrier selection
+
+One compiler query selects a carrier for an exact enum use surface. The checker
+first filters the eleven ordinary C integer candidates by complete-range
+containment in the target `lua_Integer`. The query declares that exact enum
+object once and applies `__builtin_types_compatible_p` to its pointer type and
+each eligible primitive pointer type, preserving pointee qualification.
+
+The query emits a used, byte-aligned 12-byte constant payload in `.titan.cprobe`
+(ELF) or `__DATA,__titancprobe` (Mach-O): eight magic bytes, version, payload
+length, match count, and carrier identifier sum. This is an object-producing
+compile; it does not link or execute target code. The shared bounded object
+reader locates one initialized, uncompressed, relocation-free section and
+rejects objects larger than 16 MiB before reading them. Invalid or missing
+payloads are retryable infrastructure failures and are not cached.
+
+Exactly one match selects its carrier. Zero and multiple matches are valid
+completed query answers and yield the checker's unsupported/ambiguous carrier
+diagnostic. Cache answers are checked against the exact eligible candidate set
+before reuse. Stable IDs are `char`, `signed char`, `unsigned char`, `short`,
+`unsigned short`, `int`, `unsigned int`, `long`, `unsigned long`, `long long`,
+and `unsigned long long`, numbered 1 through 11. Independent enumerator value
+range validation remains unchanged; `__int128` is not a candidate.
 
 ## Ownership map
 
@@ -667,7 +611,8 @@ changes a scalar value macro whose type was inferred in an earlier import.
 | `c-parser/cdefines.lua` | target-neutral object-macro expression/cast metadata and lazy classification against the final raw field-macro environment |
 | `titan-compiler/foreigntypes.lua` | ordered canonical C-type conversion, tag binding, target-profile macro-expression finalization, and macro cast-target conversion |
 | `titan-compiler/cdeclarator.lua` | exact C declarations/type names/parameter adjustment |
-| `titan-compiler/cpreamble.lua` | fixed generated/probe prefix around ordered foreign headers |
+| `titan-compiler/ffiheaders.lua` | deterministic module `.ffi.h` descriptors and physical checking trees |
+| `titan-compiler/cpreamble.lua` | fixed generated/probe prefix around the module C environment |
 | `titan-compiler/csemantics.lua` | target profile interpretation, C categories/promotions/result types |
 | `titan-compiler/cprobe.lua` | session/workspace/header contexts, baselines, candidate probes and caches |
 | `titan-compiler/checker.lua` | source eligibility, contextual adjustments, lazy macro-field projection, traits, completeness and mutation analysis |

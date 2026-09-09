@@ -1,6 +1,6 @@
-local lua = foreign import "lua.h"
-local lual = foreign import "lauxlib.h"
-local ffi = foreign import "titan/ffi.h"
+foreign import "lua.h"
+foreign import "lauxlib.h"
+foreign import "titan/ffi.h"
 
 local type Cleanup = () -> ()
 local type TestFunction = (Context) -> ()
@@ -157,11 +157,11 @@ end
 local function runner_error_text(failure: value): string
   local result = "<error while rendering test failure>"
   do
-    local top = lua.lua_gettop(L)
-    defer lua.lua_settop(L, top)
-    if lua.lua_checkstack(L, 2) ~= 0 then
+    local top = ffi.lua_gettop(L)
+    defer ffi.lua_settop(L, top)
+    if ffi.lua_checkstack(L, 2) ~= 0 then
       ffi.lua_pushtvalue(L, failure)
-      lual.luaL_tolstring(L, -1, nil)
+      ffi.luaL_tolstring(L, -1, nil)
       local rendered: value = ffi.lua_totvalue(L, -1)
       if rendered is string then result = rendered as string end
     end
@@ -179,27 +179,27 @@ end
 
 local function raw_lua_function(
     table_index: int, name: string): boolean
-  lua.lua_pushstring(L, name)
-  local kind = lua.lua_rawget(L, table_index)
-  lua.lua_settop(L, (lua.lua_gettop(L) - 1) as int)
-  return kind == lua.LUA_TFUNCTION
+  ffi.lua_pushstring(L, name)
+  local kind = ffi.lua_rawget(L, table_index)
+  ffi.lua_settop(L, (ffi.lua_gettop(L) - 1) as int)
+  return kind == ffi.LUA_TFUNCTION
 end
 
 local function lua_helpers_available(): boolean
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  if lua.lua_checkstack(L, 3) == 0 then
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 3) == 0 then
     raise "cannot reserve Lua stack for titan.test helper inspection"
   end
 
-  lua.lua_rawgeti(L, lua.LUA_REGISTRYINDEX,
-                  lua.LUA_RIDX_GLOBALS as lua.lua_Integer)
-  if lua.lua_type(L, -1) ~= lua.LUA_TTABLE then return false end
-  local globals_index = lua.lua_gettop(L)
+  ffi.lua_rawgeti(L, ffi.LUA_REGISTRYINDEX,
+                  ffi.LUA_RIDX_GLOBALS as ffi.lua_Integer)
+  if ffi.lua_type(L, -1) ~= ffi.LUA_TTABLE then return false end
+  local globals_index = ffi.lua_gettop(L)
 
-  lua.lua_pushstring(L, "string")
-  if lua.lua_rawget(L, globals_index) ~= lua.LUA_TTABLE then return false end
-  local string_index = lua.lua_gettop(L)
+  ffi.lua_pushstring(L, "string")
+  if ffi.lua_rawget(L, globals_index) ~= ffi.LUA_TTABLE then return false end
+  local string_index = ffi.lua_gettop(L)
   if not raw_lua_function(string_index, "gmatch") or
       not raw_lua_function(string_index, "match") or
       not raw_lua_function(string_index, "sub") or
@@ -207,14 +207,14 @@ local function lua_helpers_available(): boolean
     return false
   end
 
-  lua.lua_settop(L, globals_index)
+  ffi.lua_settop(L, globals_index)
   return raw_lua_function(globals_index, "tonumber")
 end
 
 local function load_lua_helpers(): (TraceScanner, PatternMatcher)
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  if lua.lua_checkstack(L, 3) == 0 then
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 3) == 0 then
     raise "cannot reserve Lua stack for titan.test helpers"
   end
 
@@ -256,13 +256,13 @@ return
     return string_find(subject, pattern) ~= nil
   end
 ]]
-  local status = lual.luaL_loadstring(L, source)
-  if status ~= lua.LUA_OK then
+  local status = ffi.luaL_loadstring(L, source)
+  if status ~= ffi.LUA_OK then
     local failure: value = ffi.lua_totvalue(L, -1)
     raise failure
   end
-  status = lua.lua_pcallk(L, 0, 2, 0, 0, nil)
-  if status ~= lua.LUA_OK then
+  status = ffi.lua_pcallk(L, 0, 2, 0, 0, nil)
+  if status ~= ffi.LUA_OK then
     local failure: value = ffi.lua_totvalue(L, -1)
     raise failure
   end

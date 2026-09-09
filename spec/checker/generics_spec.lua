@@ -519,10 +519,10 @@ describe("generic declarations and explicit calls", function()
 
         with_header("typedef long ffi_intptr;\n", function(header)
             assert_error("has no sound transient round trip", [[
-            local c = foreign import "]] .. header .. [["
+            foreign import "]] .. header .. [["
             local function transient_id<T>(item: T): T return item end
-            local function bad(pointer: *c.ffi_intptr): value
-                return transient_id<*c.ffi_intptr>(pointer)
+            local function bad(pointer: *ffi.ffi_intptr): value
+                return transient_id<*ffi.ffi_intptr>(pointer)
             end
             ]])
         end)
@@ -1750,7 +1750,7 @@ describe("generic declarations and explicit calls", function()
 
         with_header("typedef long ffi_intptr;\n", function(header)
             local errors = h.check_errs([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 interface Show
                     function show(): string
@@ -1763,12 +1763,12 @@ describe("generic declarations and explicit calls", function()
                 end
 
                 local function id<T>(item: T): T return item end
-                local function bad_pointer(pointer: *c.ffi_intptr)
+                local function bad_pointer(pointer: *ffi.ffi_intptr)
                     local copy = id(pointer)
                 end
 
                 local function same<T>(left: T, right: T): T return left end
-                local function bad_ordered(pointer: *c.ffi_intptr)
+                local function bad_ordered(pointer: *ffi.ffi_intptr)
                     local got = same(pointer, 42)
                 end
 
@@ -2720,15 +2720,15 @@ describe("generic declarations and explicit calls", function()
         file:close()
 
         local result = table.pack(pcall(assert_check, ([=[
-            local c = foreign import "%s"
-            local function keep<T>(callback: c.ffi_callback, item: T): T
+            foreign import "%s"
+            local function keep<T>(callback: ffi.ffi_callback, item: T): T
                 return item
             end
-            function contextual(): integer return keep(c.ffi_identity, 42) end
+            function contextual(): integer return keep(ffi.ffi_identity, 42) end
             function contextual_named(): integer
-                return keep { callback = c.ffi_identity, item = 42 }
+                return keep { callback = ffi.ffi_identity, item = 42 }
             end
-            function direct(): integer return c.ffi_add1(41) as integer end
+            function direct(): integer return ffi.ffi_add1(41) as integer end
         ]=]):format(header)))
         os.remove(header)
         assert.truthy(result[1], result[2])

@@ -222,7 +222,7 @@ describe("Titan parser", function()
             source[#source + 1] = string.format(
                 'local m%d = import "module.%d"', i, i)
             source[#source + 1] = string.format(
-                'local c%d = foreign import "header%d.h"', i, i)
+                'foreign import "header%d.h"', i)
             source[#source + 1] = string.format(
                 "record R%d item: integer end", i)
             source[#source + 1] = string.format(
@@ -6129,5 +6129,51 @@ end]])
                 end
             ]], "DeferStatement")
         end)
+    end)
+end)
+
+
+describe("unbound foreign imports", function()
+    it("retains directive ordering and exact quoted-header locations", function()
+        local tree = assert(parser.parse("ffi.titan", [[foreign import "one.h"
+foreign import("two.h")
+local function answer(): integer return ffi.VALUE end]]))
+        assert.are.equal("Ast.TopLevelForeignImport", tree[1]._tag)
+        assert.are.equal("one.h", tree[1].headername)
+        assert.is_nil(tree[1].localname)
+        assert.are.equal(1, tree[1]._header_loc.line)
+        assert.are.equal(16, tree[1]._header_loc.col)
+        assert.are.equal("two.h", tree[2].headername)
+        assert.are.equal(2, tree[2]._header_loc.line)
+        assert.are.equal(16, tree[2]._header_loc.col)
+    end)
+
+    it("rejects the retired bound import syntax", function()
+        local tree, err = parser.parse("ffi.titan", 'local c = foreign import "one.h"')
+        assert.falsy(tree)
+        assert.are.equal("BoundForeignImport", err.label)
+    end)
+
+    it("reserves ffi in every binding namespace", function()
+        for _, source in ipairs({
+            "local ffi = 1", 'local ffi = import "math"',
+            "function ffi(): () end", "type ffi = integer",
+            "record ffi n: integer end", "union ffi A end",
+            "interface ffi n: integer end", "function f(ffi: integer): () end",
+            "function f<T>(): () local ffi = 1 end",
+            "function f<ffi>(): () end",
+            "function f(): () for ffi = 1, 2 do end end",
+            "local f = function(ffi: integer): () end",
+        }) do
+            local tree, err = parser.parse("ffi.titan", source)
+            assert.falsy(tree, source)
+            assert.are.equal("ReservedFFI", err.label, source)
+        end
+    end)
+
+    it("keeps ffi valid as a member spelling and namespace use", function()
+        assert(parser.parse("ffi.titan", [[record R ffi: integer end
+function R.ffi(): integer return ffi.VALUE end
+local function use(obj: R): integer return obj.ffi end]]))
     end)
 end)

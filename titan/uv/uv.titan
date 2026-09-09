@@ -1,33 +1,33 @@
-local libuv = foreign import "uv.h"
-local lua = foreign import "lua.h"
-local lual = foreign import "lauxlib.h"
-local ffi = foreign import "titan/ffi.h"
-local cstring = foreign import "string.h"
-local cunistd = foreign import "unistd.h"
-local csignal = foreign import "signal.h"
-local cerrno = foreign import "errno.h"
-local type Sigaction = csignal.sigaction
+foreign import "uv.h"
+foreign import "lua.h"
+foreign import "lauxlib.h"
+foreign import "titan/ffi.h"
+foreign import "string.h"
+foreign import "unistd.h"
+foreign import "signal.h"
+foreign import "errno.h"
+local type Sigaction = ffi.sigaction
 local coroutine = import "coroutine"
 
 -- Exact native entries carried by the Titan closures stored in callback-owner
 -- record slots. The foreign libuv callbacks below recover and invoke these
 -- entries without changing the closure protocol.
 local type UvNoargCallbackEntry =
-  foreign (*lua.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata) -> ()
+  foreign (*ffi.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata) -> ()
 local type UvIntegerCallbackEntry =
-  foreign (*lua.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
-           lua.lua_Integer) -> ()
+  foreign (*ffi.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
+           ffi.lua_Integer) -> ()
 local type UvTwoIntegerCallbackEntry =
-  foreign (*lua.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
-           lua.lua_Integer, lua.lua_Integer) -> ()
+  foreign (*ffi.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
+           ffi.lua_Integer, ffi.lua_Integer) -> ()
 local type UvSizePointerCallbackEntry =
-  foreign (*lua.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
-           libuv.size_t, *void) -> ()
+  foreign (*ffi.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
+           ffi.size_t, *void) -> ()
 local type UvIntegerPointerCallbackEntry =
-  foreign (*lua.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
-           lua.lua_Integer, *void) -> ()
+  foreign (*ffi.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
+           ffi.lua_Integer, *void) -> ()
 local type UvPointerCallbackEntry =
-  foreign (*lua.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
+  foreign (*ffi.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
            *void) -> ()
 
 -- titan.uv is deliberately a thin callback/continuation adapter. There is one
@@ -36,7 +36,7 @@ local type UvPointerCallbackEntry =
 -- consume immediate outcomes until its next callback-bearing operation is
 -- accepted, then returns to the non-reentrant event loop.
 local UV_TAG: value = {}
-local main_thread: *lua.lua_State = nil
+local main_thread: *ffi.lua_State = nil
 local active_runtime: Runtime? = nil
 local program_args_ready = false
 
@@ -72,16 +72,16 @@ end
 -- module. uv_setup_args may replace argv, so publish the configured pointer
 -- back to the entrypoint exactly once.
 local function setup_program_args(): boolean
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGC_KEY)
-  if lua.lua_type(L, -1) == lua.LUA_TNIL then return false end
-  local argc = lua.lua_tointegerx(L, -1, nil) as int
-  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGV_KEY)
-  local argv = lua.lua_touserdata(L, -1) as **char
-  local configured = libuv.uv_setup_args(argc, argv)
-  lua.lua_pushlightuserdata(L, configured as *void)
-  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGV_KEY)
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGC_KEY)
+  if ffi.lua_type(L, -1) == ffi.LUA_TNIL then return false end
+  local argc = ffi.lua_tointegerx(L, -1, nil) as int
+  ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGV_KEY)
+  local argv = ffi.lua_touserdata(L, -1) as **char
+  local configured = ffi.uv_setup_args(argc, argv)
+  ffi.lua_pushlightuserdata(L, configured as *void)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGV_KEY)
   return true
 end
 
@@ -90,14 +90,14 @@ end
 -- change only the default Unix disposition.
 local function ignore_sigpipe_if_default(): integer
   local current = Sigaction.new()
-  if csignal.sigaction(csignal.SIGPIPE, nil, current) ~= 0 then
-    return libuv.uv_translate_sys_error(cerrno.errno)
+  if ffi.sigaction(ffi.SIGPIPE, nil, current) ~= 0 then
+    return ffi.uv_translate_sys_error(ffi.errno)
   end
-  if current.sa_handler ~= csignal.SIG_DFL then return 0 end
+  if current.sa_handler ~= ffi.SIG_DFL then return 0 end
 
-  current.sa_handler = csignal.SIG_IGN
-  if csignal.sigaction(csignal.SIGPIPE, current, nil) ~= 0 then
-    return libuv.uv_translate_sys_error(cerrno.errno)
+  current.sa_handler = ffi.SIG_IGN
+  if ffi.sigaction(ffi.SIGPIPE, current, nil) ~= 0 then
+    return ffi.uv_translate_sys_error(ffi.errno)
   end
   return 0
 end
@@ -110,5 +110,5 @@ do
   main_thread = main_thread_state()
   program_args_ready = setup_program_args()
   ffi.lua_pushtvalue(L, bootstrap)
-  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)
 end

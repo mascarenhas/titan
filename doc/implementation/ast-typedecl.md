@@ -159,7 +159,7 @@ omitted from the field lists for brevity.
 | `TopLevelRecord` | `name`, `fields`, `typeparams` | `fields` is a list of `Decl`; parser decorates `islocal` |
 | `TopLevelUnion` | `name`, `variants`, `typeparams` | `variants` is a source-order list of `UnionVariant`; parser decorates `islocal` |
 | `TopLevelImport` | `localname`, `modname`, `source_required` | `modname` is canonical; a terminal `.titan` marker is stripped and recorded separately in `source_required` |
-| `TopLevelForeignImport` | `localname`, `headername` | `local c = foreign import "x.h"` |
+| `TopLevelForeignImport` | `headername` | `foreign import "x.h"` |
 
 `TopLevelStatic` covers record and union functions. The parser creates one directly for
 `function Class.name(...)`, and also creates one from the `record` desugaring

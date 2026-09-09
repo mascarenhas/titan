@@ -3,10 +3,10 @@ local test = import "test"
 local reflect = import "reflect"
 local gc = import "gc"
 local lua = import "lua"
-local cstdlib = foreign import "stdlib.h"
-local luac = foreign import "lua.h"
-local ffi = foreign import "titan/ffi.h"
-local recursive_c = foreign import "reflection_recursive.h"
+foreign import "stdlib.h"
+foreign import "lua.h"
+foreign import "titan/ffi.h"
+foreign import "reflection_recursive.h"
 
 local function expect_failure(action: () -> ())
   local failed = false
@@ -847,10 +847,10 @@ function test_const_arrays_preserve_identity_and_values(_context: test.Context)
 end
 
 local function plain_lua_userdata(): value
-  local top = luac.lua_gettop(L)
-  defer luac.lua_settop(L, top)
-  if luac.lua_checkstack(L, 1) == 0 then raise "cannot reserve test stack" end
-  luac.lua_newuserdatauv(L, 1, 0)
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve test stack" end
+  ffi.lua_newuserdatauv(L, 1, 0)
   return ffi.lua_totvalue(L, -1)
 end
 
@@ -976,12 +976,12 @@ function test_owned_foreign_scalar_and_array_descriptors(_context: test.Context)
 end
 
 function test_owned_struct_describes_public_c_fields(_context: test.Context)
-  local owner: owned *cstdlib.div_t = cstdlib.div_t.new()
+  local owner: owned *ffi.div_t = ffi.div_t.new()
   owner.quot = 7
   owner.rem = 2
   case reflect.inspect(owner)
   when is_owned_foreign_pointer: pointer then
-    test.assert(pointer.size == cstdlib.div_t.sizeof)
+    test.assert(pointer.size == ffi.div_t.sizeof)
     case without_typedef(pointer.descriptor.pointee_descriptor)
     when is_foreign_struct: aggregate then
       test.assert(aggregate.is_complete)
@@ -1249,7 +1249,7 @@ local function foreign_pointer(descriptor: reflect.Type): reflect.ForeignPointer
 end
 
 function test_recursive_foreign_descriptors_resolve_with_retained_context(_context: test.Context)
-  local self_owner: owned *recursive_c.titan_reflect_self = recursive_c.titan_reflect_self.new()
+  local self_owner: owned *ffi.titan_reflect_self = ffi.titan_reflect_self.new()
   local self_type = foreign_struct(owned_pointee(self_owner))
   test.assert(#self_type.fields == 2)
   test.assert(self_type.fields[1].name == "marker")
@@ -1263,7 +1263,7 @@ function test_recursive_foreign_descriptors_resolve_with_retained_context(_conte
 
   -- Resolve only after another owner has created an independent hydration
   -- context. The original declaration map must remain available to the link.
-  local unrelated: owned *cstdlib.div_t = cstdlib.div_t.new()
+  local unrelated: owned *ffi.div_t = ffi.div_t.new()
   test.assert(#foreign_struct(owned_pointee(unrelated)).fields == 2)
   gc.collect()
   local resolved_self = foreign_struct(back_reference:resolve())
@@ -1275,7 +1275,7 @@ function test_recursive_foreign_descriptors_resolve_with_retained_context(_conte
   else raise "expected a foreign named descriptor"
   end
 
-  local left_owner: owned *recursive_c.titan_reflect_left = recursive_c.titan_reflect_left.new()
+  local left_owner: owned *ffi.titan_reflect_left = ffi.titan_reflect_left.new()
   local left_type = foreign_struct(owned_pointee(left_owner))
   test.assert(#left_type.fields == 1 and left_type.fields[1].name == "right")
   local right_type = foreign_struct(foreign_pointer(left_type.fields[1].descriptor).pointee_descriptor)

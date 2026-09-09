@@ -380,10 +380,10 @@ describe("Array, Map, and vararg spread expressions (typechecker)", function()
     it("rejects a foreign C array subject", function()
         with_header("extern int spread_values[4];\n", function(header)
             assert_error("spread subject", [[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function use()
-                    local item: value = ...c.spread_values
+                    local item: value = ...ffi.spread_values
                 end
             ]])
         end)
@@ -397,22 +397,22 @@ spread_int spread_fixed(spread_int left, spread_int right);
 spread_int spread_vararg(spread_int first, ...);
 ]], function(header)
             local prelude = string.format(
-                "local c = foreign import %q\n", header)
+                "foreign import %q\n", header)
             assert_type_check(prelude .. [[
                 local function finite(
-                    items: {c.spread_int}
-                ): c.spread_int
-                    return c.spread_fixed(...items)
+                    items: {ffi.spread_int}
+                ): ffi.spread_int
+                    return ffi.spread_fixed(...items)
                 end
             ]])
             assert_error("runtime%-open Titan result sequence", prelude .. [[
-                function open(items: {c.spread_int})
-                    c.spread_vararg(0, ...items)
+                function open(items: {ffi.spread_int})
+                    ffi.spread_vararg(0, ...items)
                 end
             ]])
             assert_error("runtime%-open Titan result sequence", prelude .. [[
-                function open_input(...: c.spread_int)
-                    c.spread_vararg(0, ...[2,])
+                function open_input(...: ffi.spread_int)
+                    ffi.spread_vararg(0, ...[2,])
                 end
             ]])
         end)

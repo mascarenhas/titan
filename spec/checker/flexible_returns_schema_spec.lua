@@ -97,10 +97,10 @@ describe("flexible return schemas (typechecker)", function()
             typedef ffi_int *ffi_int_ptr;
         ]], function(header)
             local errs = check_errs([[
-                local c = foreign import "]] .. header .. [["
-                function bad_pointer(): (...: c.ffi_int_ptr)
+                foreign import "]] .. header .. [["
+                function bad_pointer(): (...: ffi.ffi_int_ptr)
                 end
-                function bad_scalar(): (...: c.ffi_int)
+                function bad_scalar(): (...: ffi.ffi_int)
                 end
             ]])
             assert.truthy(#errs >= 2)
@@ -119,13 +119,13 @@ describe("flexible return schemas (typechecker)", function()
             typedef struct TValue TValue;
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local function take(...: c.TValue): nil
+                local function take(...: ffi.TValue): nil
                     return nil
                 end
 
-                local function give(): (...: c.TValue)
+                local function give(): (...: ffi.TValue)
                 end
             ]])
             assert.truthy(ok, err)
@@ -200,10 +200,10 @@ describe("flexible return schemas (typechecker)", function()
             extern ffi_int_ptr ffi_next(void);
         ]], function(header)
             local ok, err, tree = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function run(): nil
-                    for n: c.ffi_int_ptr in c.ffi_next, nil, nil do
+                    for n: ffi.ffi_int_ptr in ffi.ffi_next, nil, nil do
                     end
                     return nil
                 end

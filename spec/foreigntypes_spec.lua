@@ -40,6 +40,30 @@ local function target_profile(with_int128)
 end
 
 describe("foreign C type conversion", function()
+    it("keeps checker annotations private when parsed declarations are shared", function()
+        local cpp = require "c-parser.cpp"
+        local raw_struct = {
+            type = "struct", fields = { { name = "value", type = { "int" } } },
+        }
+        local raw_enum = { type = "enum", values = { { name = "ANSWER", value = "42" } } }
+        local raw = { raw_struct, raw_enum }
+        local before = cpp.clone_graph(raw)
+        local first, second = symtab.new(), symtab.new()
+        local left = assert(foreigntypes.convert(first, raw_struct))
+        local left_enum = assert(foreigntypes.convert(first, raw_enum))
+        left.fields[1].name = "checker_annotation"
+        left_enum.spelling = "unsigned long"
+        local right = assert(foreigntypes.convert(second, raw_struct))
+        local right_enum = assert(foreigntypes.convert(second, raw_enum))
+        assert.not_equal(left, right)
+        assert.not_equal(left_enum, right_enum)
+        assert.equal("value", right.fields[1].name)
+        assert.equal("int", right_enum.spelling)
+        assert.equal(right, assert(foreigntypes.convert(second, raw_struct)))
+        assert.equal(right_enum, assert(foreigntypes.convert(second, raw_enum)))
+        assert.same(before, raw)
+    end)
+
     it("publishes cast macros only for supported C scalar targets", function()
         local st = symtab.new()
         st.c_profile = target_profile(true)

@@ -858,6 +858,63 @@ function staticmetadata.classify_object(bytes, origin, target, options)
     end)
 end
 
+-- Read one initialized, relocation-free section without interpreting its
+-- payload as Titan module metadata. The existing object parser bounds every
+-- table and range before this accessor selects the requested bytes.
+function staticmetadata.read_object_section(bytes, origin, names, max_bytes)
+    origin = public_origin(origin)
+    return guarded(function()
+        if type(names) ~= "table" or type(names.elf) ~= "string" or
+           type(names.macho_segment) ~= "string" or
+           type(names.macho_section) ~= "string" or
+           math.type(max_bytes) ~= "integer" or max_bytes < 0 then
+            fail(origin, "invalid object section request")
+        end
+        local object = classify_object_internal(bytes, origin, nil, {})
+        local selected
+        for _, section in ipairs(object.sections) do
+            local matches = object.format == "elf"
+                and section.name == names.elf
+                or object.format == "macho"
+                and section.segname == names.macho_segment
+                and section.sectname == names.macho_section
+            if matches then
+                if selected then fail(origin, "duplicate requested object section") end
+                if section.size > max_bytes then
+                    fail(origin, "requested object section exceeds size limit")
+                end
+                if object.format == "elf" then
+                    if section.type ~= SHT_PROGBITS then
+                        fail(origin, "requested object section is not SHT_PROGBITS")
+                    end
+                    if (section.flags & SHF_COMPRESSED) ~= 0 then
+                        fail(origin, "requested object section is compressed")
+                    end
+                else
+                    if section.section_type ~= S_REGULAR then
+                        fail(origin, "requested object section is not S_REGULAR")
+                    end
+                    if section.relocation_count ~= 0 then
+                        fail(origin, "requested object section has relocations")
+                    end
+                end
+                selected = section
+            end
+        end
+        if not selected then fail(origin, "missing requested object section") end
+        if object.format == "elf" then
+            for _, section in ipairs(object.sections) do
+                if (section.type == SHT_REL or section.type == SHT_RELA)
+                   and section.info == selected.index then
+                    fail(origin, "requested object section has relocations")
+                end
+            end
+        end
+        return Reader.new(bytes, origin):slice(
+            selected.offset, selected.size, "requested object section")
+    end)
+end
+
 local function decimal_field(field, origin, what)
     local digits = field:match("^ *(%d+) *$")
     if not digits then fail(origin, "invalid decimal " .. what) end

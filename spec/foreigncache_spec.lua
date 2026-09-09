@@ -5,7 +5,7 @@ local foreigntypes = require "titan-compiler.foreigntypes"
 local cdriver = require "c-parser.cdriver"
 local cpp = require "c-parser.cpp"
 
-describe("ordered foreign conversion payloads", function()
+describe("module foreign conversion payloads", function()
     local imported, registry, original_convert, conversions
     local directory, files, directories, loaders, contexts, payloads, adapter
 
@@ -88,6 +88,20 @@ describe("ordered foreign conversion payloads", function()
         return driver.imported.cached, driver.compiler_cache_stats({ context = context })
     end
 
+    local function graph_references(mod)
+        local namespace = mod.ast._ffi_namespace
+        local current = { ["ffi-namespace"] = namespace, ["ffi-include"] = namespace._include }
+        local seen = {}
+        local function add(header)
+            if seen[header] then return end
+            seen[header] = true
+            current["ffi-header:" .. header.logical_name] = header
+            for _, dependency in ipairs(header.dependencies) do add(dependency) end
+        end
+        add(namespace._include.generated_header)
+        return current
+    end
+
     it("reopens the complete conversion graph after a body-only edit", function()
         header("cached.h", [[
             typedef struct link link;
@@ -95,21 +109,25 @@ describe("ordered foreign conversion payloads", function()
             #define TITAN_TEXT "a + b"
             enum answer { ANSWER = 42 };
             int take_link(link *input);
+            typedef struct { int values[4]; } shared_anonymous, same_anonymous;
         ]])
         local source = [[
-            local c = foreign import "cached.h"
-            function answer(): integer return c.ANSWER end
+            foreign import "cached.h"
+            function answer(): integer return ffi.ANSWER end
         ]]
         local first, stats = check(source)
         assert.is_true(conversions > 0)
         assert.equal(1, stats.conversion.stores)
         local count = conversions
-        local restored, warm = check((source:gsub("return c.ANSWER", "return c.ANSWER + 1")))
+        local restored, warm = check((source:gsub("return ffi.ANSWER", "return ffi.ANSWER + 1")))
         assert.equal(count, conversions)
         assert.equal(1, warm.conversion.hits)
-        assert.not_equal(first.ast[1]._type, restored.ast[1]._type)
-        assert.equal("Type.CModule", restored.ast[1]._type._tag)
-        assert.is_table(restored.ast[1]._type.type_members.link)
+        assert.not_equal(first.ast._ffi_namespace._type, restored.ast._ffi_namespace._type)
+        assert.equal("Type.CModule", restored.ast._ffi_namespace._type._tag)
+        assert.is_table(restored.ast._ffi_namespace._type.type_members.link)
+        local aliases = restored.ast._ffi_namespace._type.type_members
+        assert.equal(types.resolve_c_typedef(aliases.shared_anonymous),
+            types.resolve_c_typedef(aliases.same_anonymous))
     end)
 
     it("preserves cross-header completion, import rebinding and macro spacing", function()
@@ -125,25 +143,20 @@ describe("ordered foreign conversion payloads", function()
             int read_shared(struct shared *input);
         ]])
         local source = [[
-            local first = foreign import "first.h"
-            local second = foreign import "second.h"
-            foreign function identity(input: first.count): first.count return input end
-            function answer(): integer local text = first.TEXT return 42 end
+            foreign import "first.h"
+            foreign import "second.h"
+            foreign function identity(input: ffi.count): ffi.count return input end
+            function answer(): integer local text = ffi.TEXT return 42 end
         ]]
         check(source)
         local count = conversions
         local restored, stats = check(source)
         assert.equal(count, conversions)
         assert.equal(1, stats.conversion.hits)
-        local first = restored.ast[1]._type
-        assert.equal('"a + b"', cpp.expand_macro("TEXT",
-            restored.type._source_c_context.macro_definitions))
+        local first = restored.ast._ffi_namespace._type
         for key, payload in pairs(payloads) do
-            if key:sub(1, 18) == "ffi-conversion-v1\0" then
-                local snapshot = assert(cpp.decode_graph(payload, { references = {
-                    ["foreign-import:1"] = restored.ast[1],
-                    ["foreign-import:2"] = restored.ast[2],
-                } }))
+            if key:sub(1, #"ffi-conversion-v2\0") == "ffi-conversion-v2\0" then
+                local snapshot = assert(cpp.decode_graph(payload, { references = graph_references(restored) }))
                 assert.equal('"a + b"', cpp.expand_macro("TEXT",
                     snapshot.roots.foreign_macro_definitions))
             end
@@ -154,13 +167,13 @@ describe("ordered foreign conversion payloads", function()
     it("invalidates changed-mtime header changes and corrupt conversion blobs", function()
         local path = header("cached.h", "typedef int item_type;\n")
         local source = [[
-            local c = foreign import "cached.h"
+            foreign import "cached.h"
             function answer(): integer return 42 end
         ]]
         check(source)
         local count = conversions
         for key in pairs(payloads) do
-            if key:sub(1, 18) == "ffi-conversion-v1\0" then payloads[key] = "corrupt" end
+            if key:sub(1, #"ffi-conversion-v2\0") == "ffi-conversion-v2\0" then payloads[key] = "corrupt" end
         end
         local _, corrupt = check(source)
         assert.is_true(conversions > count)
@@ -174,26 +187,19 @@ describe("ordered foreign conversion payloads", function()
         assert.equal(1, changed.conversion.misses)
     end)
 
-    it("treats malformed literal observation inputs as a disposable cache miss", function()
+    it("treats malformed transported observation inputs as a disposable cache miss", function()
         header("cached.h", "typedef int item_type;\n")
-        local source = 'local c = foreign import "cached.h"\nfunction answer(): integer return 42 end'
-        local first = check(source)
-        local count, corrupted = conversions, false
-        for key, payload in pairs(payloads) do
-            if key:sub(1, 18) == "ffi-conversion-v1\0" then
-                local snapshot = assert(cpp.decode_graph(payload, {
-                    references = { ["foreign-import:1"] = first.ast[1] },
-                }))
+        local source = 'foreign import "cached.h"\nfunction answer(): integer return 42 end'
+        check(source)
+        local count, get = conversions, adapter.get
+        adapter.get = function(kind, key)
+            if kind == "ffi-conversion-v2" then
                 local malformed = {}
                 setmetatable(malformed, { __index = malformed })
-                snapshot.node_includes[1].c_header_dependencies[1] = malformed
-                payloads[key] = assert(cpp.encode_graph(snapshot, {
-                    external = { [first.ast[1]] = "foreign-import:1" },
-                }))
-                corrupted = true
+                return get(kind, key), { malformed }
             end
+            return get(kind, key)
         end
-        assert.is_true(corrupted)
         local _, stats = check(source)
         assert.is_true(conversions > count)
         assert.equal(1, stats.conversion.misses)
@@ -202,11 +208,11 @@ describe("ordered foreign conversion payloads", function()
 
     it("preserves cancellation while validating transported observation metadata", function()
         header("cached.h", "typedef int item_type;\n")
-        local source = 'local c = foreign import "cached.h"\nfunction answer(): integer return 42 end'
+        local source = "foreign import \"cached.h\"\nfunction answer(): integer return 42 end"
         check(source)
         local get, cancellation = adapter.get, {}
         adapter.get = function(kind, key)
-            if kind == "ffi-conversion-v1" then
+            if kind == "ffi-conversion-v2" then
                 local malformed = setmetatable({}, { __index = function() error(cancellation, 0) end })
                 return get(kind, key), { malformed }
             end
@@ -220,7 +226,7 @@ describe("ordered foreign conversion payloads", function()
     it("refreshes same-content touches through metadata while preserving both graphs", function()
         local path = header("cached.h", "typedef int touched_type;\n")
         local source = [[
-            local c = foreign import "cached.h"
+            foreign import "cached.h"
             function answer(): integer return 42 end
         ]]
         local metadata, refreshes = {}, {}
@@ -250,26 +256,26 @@ describe("ordered foreign conversion payloads", function()
         assert.equal(1, stats.conversion.hits)
         assert.equal(interface, assert(driver.serialize_source_interface(touched)))
         assert.same(original, payloads)
-        assert.is_true((refreshes["c-header-v1"] or 0) > 0)
-        assert.equal(1, refreshes["ffi-conversion-v1"])
+        assert.is_true((refreshes["c-header-v2"] or 0) > 0)
+        assert.equal(1, refreshes["ffi-conversion-v2"])
         local _, warm = check(source)
         assert.equal(count, conversions)
         assert.equal(0, warm.headers.file_reads)
         assert.equal(0, warm.headers.file_hashes)
-        assert.equal(1, refreshes["ffi-conversion-v1"])
+        assert.equal(1, refreshes["ffi-conversion-v2"])
     end)
 
     it("replays a fresh source-import context after its provider body changes", function()
         header("provider.h", "typedef int provider_count;\n")
         header("consumer.h", "typedef int consumer_count;\n")
         local provider = [[
-            local c = foreign import "provider.h"
-            foreign function identity(input: c.provider_count): c.provider_count
+            foreign import "provider.h"
+            foreign function identity(input: ffi.provider_count): ffi.provider_count
                 return input
             end
         ]]
         local source = [[
-            local c = foreign import "consumer.h"
+            foreign import "consumer.h"
             local provider = import "provider.titan"
             function answer(): integer
                 local current = provider.identity(42)
@@ -294,7 +300,7 @@ describe("ordered foreign conversion payloads", function()
         header("nested/outer.h", '#include "selected.h"\n')
         header("selected.h", "typedef int selected_type;\n")
         local source = [[
-            local c = foreign import "nested/outer.h"
+            foreign import "nested/outer.h"
             function answer(): integer return 42 end
         ]]
         check(source)
@@ -313,7 +319,7 @@ describe("ordered foreign conversion payloads", function()
     it("supports a read-only transport and propagates cancellation objects", function()
         header("cached.h", "typedef int item_type;\n")
         local source = [[
-            local c = foreign import "cached.h"
+            foreign import "cached.h"
             function answer(): integer return 42 end
         ]]
         check(source)
@@ -333,12 +339,12 @@ describe("ordered foreign conversion payloads", function()
     it("forwards conversion checksums and preserves hash cancellation", function()
         header("cached.h", "typedef int item_type;\n")
         local source = [[
-            local c = foreign import "cached.h"
+            foreign import "cached.h"
             function answer(): integer return 42 end
         ]]
         local hashes = 0
         adapter.sha256_binary = function(bytes)
-            if bytes:find("titan-ffi-conversion-v1", 1, true) then hashes = hashes + 1 end
+            if bytes:find("ffi-conversion-v2", 1, true) then hashes = hashes + 1 end
             return require("titan-compiler.sha256").binary(bytes)
         end
         check(source)
@@ -349,7 +355,7 @@ describe("ordered foreign conversion payloads", function()
         assert.equal(count, conversions)
         local cancelled = {}
         adapter.sha256_binary = function(bytes)
-            if bytes:find("titan-ffi-conversion-v1", 1, true) then error(cancelled, 0) end
+            if bytes:find("ffi-conversion-v2", 1, true) then error(cancelled, 0) end
             return require("titan-compiler.sha256").binary(bytes)
         end
         local ok, err = pcall(check, source)

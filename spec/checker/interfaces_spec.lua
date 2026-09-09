@@ -1238,10 +1238,10 @@ describe("interfaces (typechecker)", function()
             local ok, err
             local ran, failure = pcall(function()
                 ok, err = h.run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 interface Foreign
-                    function use(input: c.ffi_int): c.ffi_int
+                    function use(input: ffi.ffi_int): ffi.ffi_int
                 end
                 ]], session)
             end)
@@ -1258,7 +1258,7 @@ describe("interfaces (typechecker)", function()
             local session = h.new_checker_probe_session()
             local ran, failure = pcall(function()
                 local ok, err, ast = h.run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 interface DynamicC
                     function adapt(input: value): value
@@ -1268,8 +1268,8 @@ describe("interfaces (typechecker)", function()
                 end
 
                 local function Concrete:adapt(
-                    input: c.ffi_int
-                ): c.ffi_int
+                    input: ffi.ffi_int
+                ): ffi.ffi_int
                     return input
                 end
 
@@ -1290,7 +1290,7 @@ describe("interfaces (typechecker)", function()
                     adapter.results[1].operation.kind)
 
                 ok, err = h.run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 interface DynamicC
                     function adapt(input: value)
@@ -1300,7 +1300,7 @@ describe("interfaces (typechecker)", function()
                 end
 
                 local function Concrete:adapt(
-                    input: *c.ffi_int
+                    input: *ffi.ffi_int
                 )
                 end
 

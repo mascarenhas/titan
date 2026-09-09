@@ -26,6 +26,7 @@ describe("compiler module facades", function()
         assert.same({
             "external_symbols",
             "generate",
+            "generate_ffi_header",
             "generate_foreign_header",
             "interface_external_symbols",
         }, sorted_keys(coder))

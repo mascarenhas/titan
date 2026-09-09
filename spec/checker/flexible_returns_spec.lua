@@ -476,9 +476,9 @@ describe("flexible return expression-list demand (typechecker)", function()
     it("keeps explicit foreign-call arity strict", function()
         with_header("extern int ffi_add(int a, int b);\n", function(header)
             local errs = h.check_errs([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 function use(): nil
-                    c.ffi_add(1, 2, 3)
+                    ffi.ffi_add(1, 2, 3)
                     return nil
                 end
             ]])
@@ -490,11 +490,11 @@ describe("flexible return expression-list demand (typechecker)", function()
     it("reports the produced C arity after a zero-result final argument", function()
         with_header("extern int ffi_add(int a, int b);\n", function(header)
             local errs = h.check_errs([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 function zero(): ()
                 end
                 function use(): nil
-                    c.ffi_add(1, zero())
+                    ffi.ffi_add(1, zero())
                     return nil
                 end
             ]])

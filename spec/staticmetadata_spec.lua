@@ -245,6 +245,53 @@ local function macho_object(payload, options)
     return assemble(file_size, parts)
 end
 
+describe("bounded raw object sections", function()
+    local names = { elf = ".titan.cprobe", macho_segment = "__DATA",
+        macho_section = "__titancprobe" }
+    local payload = "TITENUM\0\1\12\1\6"
+    local function extract(bytes, limit)
+        return staticmetadata.read_object_section(bytes, "query.o", names, limit or 12)
+    end
+    local function elf(options)
+        options = options or {}
+        options.section_name = names.elf
+        return elf_object(payload, options)
+    end
+    local function macho(options)
+        options = options or {}
+        options.segname, options.sectname = names.macho_segment, names.macho_section
+        return macho_object(payload, options)
+    end
+
+    it("extracts exact bytes from ELF and Mach-O in either width and byte order", function()
+        for _, build in ipairs({ elf, macho }) do
+            for _, width in ipairs({ 32, 64 }) do
+                for _, endian in ipairs({ "little", "big" }) do
+                    assert.equal(payload, assert(extract(build({
+                        word_size = width, endian = endian }))))
+                end
+            end
+        end
+    end)
+
+    it("rejects missing, duplicate, oversized and relocated result sections", function()
+        for _, build in ipairs({ elf, macho }) do
+            assert.is_nil(extract(build(), 11))
+            assert.is_nil(extract(build({ duplicate = true })))
+            assert.is_nil(extract(build():sub(1, 50)))
+        end
+        assert.is_nil(extract(elf({ relocation = true })))
+        assert.is_nil(extract(macho({ relocations = 1 })))
+        assert.is_nil(extract(elf_object(payload, { section_name = ".other" })))
+        assert.is_nil(extract(macho_object(payload, { sectname = "__other" })))
+        assert.is_nil(extract(elf({ metadata_type = 8 })))
+        assert.is_nil(extract(elf({ metadata_flags = 0x800 })))
+        assert.is_nil(extract(macho({ section_type = 1 })))
+        assert.is_nil(extract("!<arch>\n"))
+        assert.is_nil(extract("not an object"))
+    end)
+end)
+
 local function ar_field(value, width)
     local text = tostring(value)
     assert(#text <= width)

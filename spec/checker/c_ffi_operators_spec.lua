@@ -91,10 +91,10 @@ describe("C FFI operator type checking", function()
             #define FFI_UNSIGNED_MAX 0xffffffffU
         ]], function(header)
             local ok, err, ast = run_checker([[
-            local limits = foreign import "]] .. header .. [["
+            foreign import "]] .. header .. [["
 
             local function exceeds_buffer_limit(length: integer): boolean
-                return length > limits.FFI_UNSIGNED_MAX
+                return length > ffi.FFI_UNSIGNED_MAX
             end
             ]])
             assert.truthy(ok, err)
@@ -112,19 +112,19 @@ describe("C FFI operator type checking", function()
     it("covers the accepted matrix with complete frozen traits", function()
         with_header(declarations, function(header)
             local ok, err, ast = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function matrix(
-                    small: c.ffi_uchar,
-                    wide: c.ffi_ulong,
-                    number: c.ffi_float,
-                    other_number: c.ffi_double,
+                    small: ffi.ffi_uchar,
+                    wide: ffi.ffi_ulong,
+                    number: ffi.ffi_float,
+                    other_number: ffi.ffi_double,
                     offset: integer,
-                    pointer: *c.ffi_item,
-                    second: const *c.ffi_item,
-                    unrelated: c.ffi_volatile_other_pointer,
-                    callback: c.ffi_callback,
-                    other_callback: c.ffi_callback
+                    pointer: *ffi.ffi_item,
+                    second: const *ffi.ffi_item,
+                    unrelated: ffi.ffi_volatile_other_pointer,
+                    callback: ffi.ffi_callback,
+                    other_callback: ffi.ffi_callback
                 )
                     local unary_minus = -small
                     local unary_bits = ~small
@@ -154,7 +154,7 @@ describe("C FFI operator type checking", function()
                     local nil_pointer = nil ~= pointer
                     local unrelated_equal = pointer == unrelated
                     local function_equal = callback == other_callback
-                    local array_decay = c.ffi_array + offset
+                    local array_decay = ffi.ffi_array + offset
                 end
             ]])
             assert.truthy(ok, err)
@@ -285,84 +285,84 @@ describe("C FFI operator type checking", function()
             local cases = {
                 {
                     body = "local result = number % wide",
-                    params = "number: c.ffi_float, wide: c.ffi_ulong",
+                    params = "number: ffi.ffi_float, wide: ffi.ffi_ulong",
                     detail = "floating remainder",
                 },
                 {
                     body = "local result = pointer * offset",
-                    params = "pointer: *c.ffi_item, offset: integer",
+                    params = "pointer: *ffi.ffi_item, offset: integer",
                     detail = "requires arithmetic operands",
                 },
                 {
                     body = "local result = pointer / offset",
-                    params = "pointer: *c.ffi_item, offset: integer",
+                    params = "pointer: *ffi.ffi_item, offset: integer",
                     detail = "requires arithmetic operands",
                 },
                 {
                     body = "local result = pointer % offset",
-                    params = "pointer: *c.ffi_item, offset: integer",
+                    params = "pointer: *ffi.ffi_item, offset: integer",
                     detail = "requires C integer operands",
                 },
                 {
                     body = "local result = pointer & offset",
-                    params = "pointer: *c.ffi_item, offset: integer",
+                    params = "pointer: *ffi.ffi_item, offset: integer",
                     detail = "requires C integer operands",
                 },
                 {
                     body = "local result = pointer | offset",
-                    params = "pointer: *c.ffi_item, offset: integer",
+                    params = "pointer: *ffi.ffi_item, offset: integer",
                     detail = "requires C integer operands",
                 },
                 {
                     body = "local result = pointer ~ offset",
-                    params = "pointer: *c.ffi_item, offset: integer",
+                    params = "pointer: *ffi.ffi_item, offset: integer",
                     detail = "requires C integer operands",
                 },
                 {
                     body = "local result = pointer << offset",
-                    params = "pointer: *c.ffi_item, offset: integer",
+                    params = "pointer: *ffi.ffi_item, offset: integer",
                     detail = "requires C integer operands",
                 },
                 {
                     body = "local result = pointer >> offset",
-                    params = "pointer: *c.ffi_item, offset: integer",
+                    params = "pointer: *ffi.ffi_item, offset: integer",
                     detail = "requires C integer operands",
                 },
                 {
                     body = "local result = pointer == offset",
-                    params = "pointer: *c.ffi_item, offset: integer",
+                    params = "pointer: *ffi.ffi_item, offset: integer",
                     detail = "pointer and nil",
                 },
                 {
                     body = "local result = pointer + offset",
-                    params = "pointer: *c.ffi_opaque, offset: integer",
+                    params = "pointer: *ffi.ffi_opaque, offset: integer",
                     detail = "incomplete or not yet visible",
                 },
                 {
                     body = "local result = pointer + offset",
-                    params = "pointer: *c.ffi_void, offset: integer",
+                    params = "pointer: *ffi.ffi_void, offset: integer",
                     detail = "complete non%-void object",
                 },
                 {
                     body = "local result = callback < callback",
-                    params = "callback: c.ffi_callback",
+                    params = "callback: ffi.ffi_callback",
                     detail = "function pointers",
                 },
                 {
                     body = "local result = left == right",
-                    params = "left: c.ffi_item, right: c.ffi_item",
+                    params = "left: ffi.ffi_item, right: ffi.ffi_item",
                     detail = "object pointers",
                 },
                 {
                     body = "local result = left + right",
-                    params = "left: c.ffi_item, right: c.ffi_item",
+                    params = "left: ffi.ffi_item, right: ffi.ffi_item",
                     detail = "arithmetic pair",
                 },
             }
 
             for _, case in ipairs(cases) do
                 local ok, err = run_checker([[
-                    local c = foreign import "]] .. header .. [["
+                    foreign import "]] .. header .. [["
                     local function rejected(]] .. case.params .. [[)
                         ]] .. case.body .. [[
                     end
@@ -378,9 +378,9 @@ describe("C FFI operator type checking", function()
     it("requires a cast before operating on a C bit-field", function()
         with_header(declarations, function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 local function rejected()
-                    local result = c.ffi_flags.bits + 1
+                    local result = ffi.ffi_flags.bits + 1
                 end
             ]])
             assert.falsy(ok)
@@ -389,12 +389,12 @@ describe("C FFI operator type checking", function()
 
             local ast
             ok, err, ast = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 local function accepted()
                     local c_value =
-                        (c.ffi_flags.bits as c.ffi_uint) + 1
+                        (ffi.ffi_flags.bits as ffi.ffi_uint) + 1
                     local titan_value =
-                        (c.ffi_flags.bits as integer) + 1
+                        (ffi.ffi_flags.bits as integer) + 1
                 end
             ]])
             assert.truthy(ok, err)
@@ -408,14 +408,14 @@ describe("C FFI operator type checking", function()
     it("leaves explicitly excluded syntax on the Titan paths", function()
         with_header(declarations, function(header)
             local ok, err, ast = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 local function accepted(
-                    pointer: *c.ffi_item,
-                    wide: c.ffi_ulong,
+                    pointer: *ffi.ffi_item,
+                    wide: ffi.ffi_ulong,
                     exponent: float
                 )
                     local truth = not pointer
-                    local length = #c.ffi_array
+                    local length = #ffi.ffi_array
                     local floor = (wide as integer) // 2
                     local power = exponent ^ 2.0
                 end
@@ -425,7 +425,7 @@ describe("C FFI operator type checking", function()
         end)
     end)
 
-    it("respects the declaration frontier for pointer completeness",
+    it("uses complete module C types in pointer initializers",
     function()
         with_two_headers([[
             typedef struct ffi_late_item ffi_late_item;
@@ -436,32 +436,32 @@ describe("C FFI operator type checking", function()
             };
         ]], function(forward_header, definition_header)
             for _, expression in ipairs({
-                "forward.ffi_late_pointer + 1",
-                "forward.ffi_late_pointer - forward.ffi_late_pointer",
+                "ffi.ffi_late_pointer + 1",
+                "ffi.ffi_late_pointer - ffi.ffi_late_pointer",
             }) do
                 local ok, err = run_checker([[
-                    local forward = foreign import "]]
+                    foreign import "]]
                         .. forward_header .. [["
                     local early = ]] .. expression .. [[
-                    local definition = foreign import "]]
+                    foreign import "]]
                         .. definition_header .. [["
                 ]])
                 assert.falsy(ok)
-                assert.match("C operator", err)
-                assert.match("incomplete or not yet visible", err)
+                assert.match("initialization must be constant", err)
+                assert.falsy(err:find("incomplete", 1, true))
             end
 
             local ok, err = run_checker([[
-                local forward = foreign import "]]
+                foreign import "]]
                     .. forward_header .. [["
-                local definition = foreign import "]]
+                foreign import "]]
                     .. definition_header .. [["
 
                 local function body_after_imports(): integer
-                    local later = forward.ffi_late_pointer + 1
+                    local later = ffi.ffi_late_pointer + 1
                     local ignored = later
-                    return forward.ffi_late_pointer -
-                        forward.ffi_late_pointer
+                    return ffi.ffi_late_pointer -
+                        ffi.ffi_late_pointer
                 end
             ]])
             assert.truthy(ok, err)

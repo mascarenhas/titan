@@ -355,14 +355,14 @@ describe("dense Array and positional integer-Map checking", function()
 
         with_header("typedef int ffi_int;\n", function(header)
             local errs = check_errs([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function noninteger_map(m: {float: string}): integer
                     return #m
                 end
 
                 local function c_integer_map(
-                    m: {c.ffi_int: string}
+                    m: {ffi.ffi_int: string}
                 ): integer
                     return #m
                 end

@@ -72,8 +72,8 @@ function test_runner.source_descriptor(program_output, source)
 end
 
 local RUNNER_IMPORTS = [=[local test = import "titan.test.titan"
-local stdio = foreign import "stdio.h"
-local cstring = foreign import "string.h"
+foreign import "stdio.h"
+foreign import "string.h"
 ]=]
 
 local RUNNER_BODY = [=[
@@ -101,7 +101,7 @@ local function copy_interval(subject: string, first: integer,
   local storage = char.new_array(count)
   local output = storage as *char
   local source = subject as const *char
-  cstring.memcpy(output, source + first - 1, count as cstring.size_t)
+  ffi.memcpy(output, source + first - 1, count as ffi.size_t)
   return storage as string
 end
 
@@ -118,14 +118,14 @@ end
 local function write(output: string)
   local bytes = output as const *unsigned char
   for index = 0, #output - 1 do
-    stdio.putchar(bytes[index] as int)
+    ffi.putchar(bytes[index] as int)
   end
 end
 
 local function writeln(output: string)
   write(output)
-  stdio.putchar(10)
-  if stdio.fflush(nil) ~= 0 then raise "cannot flush test output" end
+  ffi.putchar(10)
+  if ffi.fflush(nil) ~= 0 then raise "cannot flush test output" end
 end
 
 local function report_log(full_name: string, message: string)

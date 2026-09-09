@@ -81,6 +81,7 @@ local ARTIFACTS = {
     MODULE .. ".lua",
     APPLICATION .. "/" .. MODULE .. ".c",
     APPLICATION .. "/" .. MODULE .. ".o",
+    APPLICATION .. "/" .. MODULE .. ".ffi.h",
 }
 
 local function remove_tree(path)
@@ -163,13 +164,18 @@ describe("Titan driver generic build flags", function()
             APPLICATION .. "/" .. MODULE .. ".c", "rb"))
         local csource = generated:read("*a")
         generated:close()
+        assert.truthy(csource:find('/' .. MODULE .. '.ffi.h"', 1, true), csource)
+        local header = assert(io.open(
+            APPLICATION .. "/" .. MODULE .. ".ffi.h", "rb"))
+        local environment = header:read("*a")
+        header:close()
         local include_root = lfs.currentdir() .. "/" .. INCLUDE .. "/"
-        assert.truthy(csource:find(
+        assert.truthy(environment:find(
             '#include "' .. include_root .. 'driver_flags_config.h"',
-            1, true), csource)
-        assert.truthy(csource:find(
+            1, true), environment)
+        assert.truthy(environment:find(
             '#include "' .. include_root .. 'titan/ffi.h"',
-            1, true), csource)
+            1, true), environment)
     end)
 
     it("keeps extra C flags in compile phases and ordered LD flags in the link phase",
@@ -285,11 +291,15 @@ describe("Titan generated-source pretty-printing", function()
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         local format_lines = command_lines(output, "'true' '-i'")
-        assert.equal(1, #format_lines, output)
+        assert.equal(2, #format_lines, output)
         assert.truthy(format_lines[1]:find(
             "'--style={BasedOnStyle: LLVM, IndentWidth: 4, " ..
                 "SortIncludes: false}' '--' '" .. APPLICATION .. "/" ..
-                MODULE .. ".c'", 1, true), format_lines[1])
+                MODULE .. ".ffi.h.format.tmp.", 1, true), format_lines[1])
+        assert.truthy(format_lines[2]:find(
+            "'--style={BasedOnStyle: LLVM, IndentWidth: 4, " ..
+                "SortIncludes: false}' '--' '" .. APPLICATION .. "/" ..
+                MODULE .. ".c'", 1, true), format_lines[2])
         assert.truthy(output:find(
             "'-c' '" .. APPLICATION .. "/" .. MODULE .. ".c'", 1, true),
             output)
@@ -302,10 +312,12 @@ describe("Titan generated-source pretty-printing", function()
             tostring(code) .. ")")
         local cfile = APPLICATION .. "/" .. MODULE .. ".c"
         local ofile = APPLICATION .. "/" .. MODULE .. ".o"
-        assert.is_true(file_exists(cfile))
+        local header = APPLICATION .. "/" .. MODULE .. ".ffi.h"
+        assert.is_false(file_exists(cfile))
         assert.is_false(file_exists(ofile))
+        assert.is_false(file_exists(header))
         assert.truthy(output:find(
-            "failed to format generated file '" .. cfile .. "'", 1, true),
+            "failed to format generated file '" .. header .. ".format.tmp.", 1, true),
             output)
         assert.truthy(output:find("exit 23", 1, true), output)
         assert.falsy(output:find("'-c' '" .. cfile .. "'", 1, true),

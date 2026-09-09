@@ -391,9 +391,9 @@ describe("Titan type aliases", function()
     it("rejects exported aliases to C FFI types but permits local aliases", function()
         with_header("typedef int ffi_int;\n", function(header)
             local errors = h.check_errs([[
-                local c = foreign import "]] .. header .. [["
-                type Public = c.ffi_int
-                local type Private = c.ffi_int
+                foreign import "]] .. header .. [["
+                type Public = ffi.ffi_int
+                local type Private = ffi.ffi_int
 
                 local function keep(x: Private): Private
                     return x

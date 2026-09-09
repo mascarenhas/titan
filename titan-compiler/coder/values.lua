@@ -653,7 +653,6 @@ function coder._raw_ctype(typ --[[:table]])
 end
 
 function ctype(typ --[[:table]])
-    coder._record_c_type_use(typ)
     return coder._raw_ctype(typ)
 end
 

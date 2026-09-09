@@ -4,8 +4,8 @@
 -- Copyright (C) 1994-2026 Lua.org, PUC-Rio. MIT terms are reproduced in
 -- LICENSES/lua-LICENSE.
 
-local stdio = foreign import "stdio.h"
-local clocale = foreign import "locale.h"
+foreign import "stdio.h"
+foreign import "locale.h"
 
 local type FormatPartial = (value) -> string
 local type FormatFactory = (string, string) -> FormatPartial
@@ -38,8 +38,8 @@ local function builder_finish(builder: StringWriter): string
     local chunk = builder.chunks[index] as string
     local length = #chunk
     local source = chunk as const *char
-    cstring.memcpy(output + offset, source,
-                   length as cstring.size_t)
+    ffi.memcpy(output + offset, source,
+                   length as ffi.size_t)
     offset = offset + length
     index = index + 1
   end
@@ -51,7 +51,7 @@ local function zero_bytes(length: integer): string
   if length < 0 then raise "resulting string is too large" end
   local storage = CChar.new_array(length)
   local output = storage as *char
-  cstring.memset(output, 0, #storage as cstring.size_t)
+  ffi.memset(output, 0, #storage as ffi.size_t)
   return storage as string
 end
 
@@ -68,17 +68,17 @@ local function finish_snprintf_prefix(
     required: integer, actual: integer): string
   if actual ~= required then raise "string formatting failed" end
   local storage = CChar.new_array(required)
-  cstring.memcpy(
+  ffi.memcpy(
     storage as *char,
     scratch as const *char,
-    required as cstring.size_t)
+    required as ffi.size_t)
   return storage as string
 end
 
 local function integer_length_modifier(): string
-  if lua.lua_Integer.sizeof <= int.sizeof then
+  if ffi.lua_Integer.sizeof <= int.sizeof then
     return ""
-  elseif lua.lua_Integer.sizeof <= long.sizeof then
+  elseif ffi.lua_Integer.sizeof <= long.sizeof then
     return "l"
   else
     return "ll"
@@ -92,128 +92,128 @@ local function add_integer_length(form: string): string
 end
 
 local function render_signed(form: string,
-                             number: lua.lua_Integer): string
-  if lua.lua_Integer.sizeof <= int.sizeof then
+                             number: ffi.lua_Integer): string
+  if ffi.lua_Integer.sizeof <= int.sizeof then
     local converted = number as int
-    local required = stdio.snprintf(nil, 0, form, converted)
+    local required = ffi.snprintf(nil, 0, form, converted)
     local storage = CChar.new_array(
       snprintf_allocation_length(required))
     local output = storage as *char
-    local actual = stdio.snprintf(
-        output, #storage as cstring.size_t,
+    local actual = ffi.snprintf(
+        output, #storage as ffi.size_t,
         form, converted)
     return finish_snprintf_prefix(storage, required, actual)
-  elseif lua.lua_Integer.sizeof <= long.sizeof then
+  elseif ffi.lua_Integer.sizeof <= long.sizeof then
     local converted = number as long
-    local required = stdio.snprintf(nil, 0, form, converted)
+    local required = ffi.snprintf(nil, 0, form, converted)
     local storage = CChar.new_array(
       snprintf_allocation_length(required))
     local output = storage as *char
-    local actual = stdio.snprintf(
-        output, #storage as cstring.size_t,
+    local actual = ffi.snprintf(
+        output, #storage as ffi.size_t,
         form, converted)
     return finish_snprintf_prefix(storage, required, actual)
   else
     local converted = number as long long
-    local required = stdio.snprintf(nil, 0, form, converted)
+    local required = ffi.snprintf(nil, 0, form, converted)
     local storage = CChar.new_array(
       snprintf_allocation_length(required))
     local output = storage as *char
-    local actual = stdio.snprintf(
-        output, #storage as cstring.size_t,
+    local actual = ffi.snprintf(
+        output, #storage as ffi.size_t,
         form, converted)
     return finish_snprintf_prefix(storage, required, actual)
   end
 end
 
 local function render_unsigned(form: string,
-                               number: lua.lua_Integer): string
-  if lua.lua_Integer.sizeof <= int.sizeof then
+                               number: ffi.lua_Integer): string
+  if ffi.lua_Integer.sizeof <= int.sizeof then
     local converted = number as unsigned int
-    local required = stdio.snprintf(nil, 0, form, converted)
+    local required = ffi.snprintf(nil, 0, form, converted)
     local storage = CChar.new_array(
       snprintf_allocation_length(required))
     local output = storage as *char
-    local actual = stdio.snprintf(
-        output, #storage as cstring.size_t,
+    local actual = ffi.snprintf(
+        output, #storage as ffi.size_t,
         form, converted)
     return finish_snprintf_prefix(storage, required, actual)
-  elseif lua.lua_Integer.sizeof <= long.sizeof then
+  elseif ffi.lua_Integer.sizeof <= long.sizeof then
     local converted = number as unsigned long
-    local required = stdio.snprintf(nil, 0, form, converted)
+    local required = ffi.snprintf(nil, 0, form, converted)
     local storage = CChar.new_array(
       snprintf_allocation_length(required))
     local output = storage as *char
-    local actual = stdio.snprintf(
-        output, #storage as cstring.size_t,
+    local actual = ffi.snprintf(
+        output, #storage as ffi.size_t,
         form, converted)
     return finish_snprintf_prefix(storage, required, actual)
   else
     local converted = number as unsigned long long
-    local required = stdio.snprintf(nil, 0, form, converted)
+    local required = ffi.snprintf(nil, 0, form, converted)
     local storage = CChar.new_array(
       snprintf_allocation_length(required))
     local output = storage as *char
-    local actual = stdio.snprintf(
-        output, #storage as cstring.size_t,
+    local actual = ffi.snprintf(
+        output, #storage as ffi.size_t,
         form, converted)
     return finish_snprintf_prefix(storage, required, actual)
   end
 end
 
 local function render_character(form: string,
-                                number: lua.lua_Integer): string
+                                number: ffi.lua_Integer): string
   local converted = number as int
-  local required = stdio.snprintf(nil, 0, form, converted)
+  local required = ffi.snprintf(nil, 0, form, converted)
   local storage = CChar.new_array(
     snprintf_allocation_length(required))
   local output = storage as *char
-  local actual = stdio.snprintf(
-      output, #storage as cstring.size_t,
+  local actual = ffi.snprintf(
+      output, #storage as ffi.size_t,
       form, converted)
   return finish_snprintf_prefix(storage, required, actual)
 end
 
 local function render_number(form: string,
-                             number: lua.lua_Number): string
+                             number: ffi.lua_Number): string
   local converted = number as double
-  local required = stdio.snprintf(nil, 0, form, converted)
+  local required = ffi.snprintf(nil, 0, form, converted)
   local storage = CChar.new_array(
     snprintf_allocation_length(required))
   local output = storage as *char
-  local actual = stdio.snprintf(
-      output, #storage as cstring.size_t,
+  local actual = ffi.snprintf(
+      output, #storage as ffi.size_t,
       form, converted)
   return finish_snprintf_prefix(storage, required, actual)
 end
 
 local function render_c_string(form: string, text: string): string
-  local required = stdio.snprintf(nil, 0, form, text)
+  local required = ffi.snprintf(nil, 0, form, text)
   local storage = CChar.new_array(
     snprintf_allocation_length(required))
   local output = storage as *char
-  local actual = stdio.snprintf(
-      output, #storage as cstring.size_t,
+  local actual = ffi.snprintf(
+      output, #storage as ffi.size_t,
       form, text)
   return finish_snprintf_prefix(storage, required, actual)
 end
 
 local function render_pointer(form: string, candidate: value): string
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
   ffi.lua_pushtvalue(L, candidate)
-  local pointer = lua.lua_topointer(L, -1)
+  local pointer = ffi.lua_topointer(L, -1)
   if not pointer then
     local string_form =
       copy_interval(form, 1, #form - 1) .. "s"
     return render_c_string(string_form, "(null)")
   else
-    local required = stdio.snprintf(nil, 0, form, pointer)
+    local required = ffi.snprintf(nil, 0, form, pointer)
     local storage = CChar.new_array(
       snprintf_allocation_length(required))
     local output = storage as *char
-    local actual = stdio.snprintf(
-        output, #storage as cstring.size_t,
+    local actual = ffi.snprintf(
+        output, #storage as ffi.size_t,
         form, pointer)
     return finish_snprintf_prefix(storage, required, actual)
   end
@@ -260,9 +260,9 @@ local function decimal_escape(octet: integer,
   return storage as string
 end
 
-local function locale_neutral_hex(number: lua.lua_Number): string
+local function locale_neutral_hex(number: ffi.lua_Number): string
   local rendered = render_number("%a", number)
-  local locale = clocale.localeconv()
+  local locale = ffi.localeconv()
   local decimal = locale.decimal_point[0]
   local decimal_octet =
     (decimal as unsigned char) as integer
@@ -292,7 +292,7 @@ local function append_quoted(builder: StringWriter, text: string)
     local octet = format_byte(text, index)
     local special = octet == 34 or octet == 92 or octet == 10
     local control =
-      cctype.iscntrl(octet as int) ~= 0
+      ffi.iscntrl(octet as int) ~= 0
     if special or control then
       if index > run then
         builder_append(
@@ -303,7 +303,7 @@ local function append_quoted(builder: StringWriter, text: string)
         builder_append(builder, copy_interval(text, index, 1))
       else
         local next_is_digit = index < #text and
-          cctype.isdigit(
+          ffi.isdigit(
             format_byte(text, index + 1)
               as int) ~= 0
         builder_append(builder, "\\")
@@ -334,8 +334,8 @@ local function render_literal(candidate: value): string
   elseif candidate is float then
     if candidate is integer then
       local number =
-        (candidate as integer) as lua.lua_Integer
-      if number == lua.LUA_MININTEGER then
+        (candidate as integer) as ffi.lua_Integer
+      if number == ffi.LUA_MININTEGER then
         builder_append(builder, "0x")
         builder_append(
             builder,
@@ -349,7 +349,7 @@ local function render_literal(candidate: value): string
       end
     else
       local number =
-        (candidate as float) as lua.lua_Number
+        (candidate as float) as ffi.lua_Number
       if number > 0 and number + number == number then
         builder_append(builder, "1e9999")
       elseif number < 0 and number + number == number then
@@ -371,7 +371,7 @@ local function character_format_partial(
   return function(candidate: value): string
     return prefix ..
       render_character(
-        form, (candidate as integer) as lua.lua_Integer)
+        form, (candidate as integer) as ffi.lua_Integer)
   end
 end
 
@@ -382,7 +382,7 @@ local function signed_format_partial(
     return prefix ..
       render_signed(
         integer_form,
-        (candidate as integer) as lua.lua_Integer)
+        (candidate as integer) as ffi.lua_Integer)
   end
 end
 
@@ -393,7 +393,7 @@ local function unsigned_format_partial(
     return prefix ..
       render_unsigned(
         integer_form,
-        (candidate as integer) as lua.lua_Integer)
+        (candidate as integer) as ffi.lua_Integer)
   end
 end
 
@@ -401,7 +401,7 @@ local function number_format_partial(
     prefix: string, form: string): FormatPartial
   return function(candidate: value): string
     return prefix .. render_number(
-      form, (candidate as float) as lua.lua_Number)
+      form, (candidate as float) as ffi.lua_Number)
   end
 end
 

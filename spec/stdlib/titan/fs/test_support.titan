@@ -1,11 +1,11 @@
 -- Filesystem fixture ownership for fs.tests.
 local test = import "test"
-local cstdlib = foreign import "stdlib.h"
-local cstring = foreign import "string.h"
-local native = foreign import "fixture_support.h"
+foreign import "stdlib.h"
+foreign import "string.h"
+foreign import "fixture_support.h"
 
 local function remove_native(path: string)
-  test.assert(native.titan_spec_remove_if_present(path) == 0,
+  test.assert(ffi.titan_spec_remove_if_present(path) == 0,
               "could not remove native fixture path")
 end
 
@@ -18,11 +18,11 @@ end
 local function new_workspace(context: test.Context): string
   local pattern = "/tmp/titan-fs-test-XXXXXX"
   local storage = char.new_array(#pattern + 1)
-  cstring.memcpy(storage as *char,
+  ffi.memcpy(storage as *char,
                  pattern as const *char,
-                 #pattern as cstring.size_t)
+                 #pattern as ffi.size_t)
   storage[#pattern] = 0
-  local created = native.mkdtemp(storage as *char)
+  local created = ffi.mkdtemp(storage as *char)
   test.assert(created, "could not create native workspace")
   local root = created as string
   cleanup_path(context, root)
@@ -32,31 +32,31 @@ end
 local function make_symlink(context: test.Context,
                             target: string, link: string)
   cleanup_path(context, link)
-  local status: integer = native.symlink(target, link)
+  local status: integer = ffi.symlink(target, link)
   test.assert(status == 0, "could not create native symlink fixture")
 end
 
 local function set_fixture_environment(context: test.Context,
                                        name: string, contents: string)
-  local old_pointer = cstdlib.getenv(name)
+  local old_pointer = ffi.getenv(name)
   local old_value: string? = nil
   if old_pointer then old_value = old_pointer as string end
   context:cleanup(function ()
     local status: integer = 0
     if old_value then
-      status = native.setenv(name, old_value as string, 1)
+      status = ffi.setenv(name, old_value as string, 1)
     else
-      status = native.unsetenv(name)
+      status = ffi.unsetenv(name)
     end
     test.assert(status == 0, "could not restore native environment fixture")
   end)
-  local status: integer = native.setenv(name, contents, 1)
+  local status: integer = ffi.setenv(name, contents, 1)
   test.assert(status == 0, "could not set native environment fixture")
 end
 
 local function write_file_synchronously(path: string, contents: string)
-  local status = native.titan_spec_write_file(
-      path, contents, #contents as cstring.size_t)
+  local status = ffi.titan_spec_write_file(
+      path, contents, #contents as ffi.size_t)
   test.assert(status == 0, "could not write native fixture file")
 end
 
@@ -64,8 +64,8 @@ local function make_boundary_payload(): string
   local prefix_length = 65535
   local length = prefix_length + 6
   local storage = char.new_array(length)
-  cstring.memset(storage as *char, 120,
-                 prefix_length as cstring.size_t)
+  ffi.memset(storage as *char, 120,
+                 prefix_length as ffi.size_t)
   storage[prefix_length] = 0
   storage[prefix_length + 1] = 89
   storage[prefix_length + 2] = 116

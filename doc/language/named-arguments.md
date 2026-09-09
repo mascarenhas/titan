@@ -69,7 +69,7 @@ arguments are syntax errors. A label uses an identifier's raw spelling, so a
 Titan keyword is legal in this one position. This matters for C APIs:
 
 ```lua
-libuv.uv_timer_start {
+ffi.uv_timer_start {
     handle = timer,
     cb = callback,
     timeout = 100,

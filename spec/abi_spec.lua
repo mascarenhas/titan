@@ -1,5 +1,6 @@
 local driver = require "titan-compiler.driver"
 local cdriver = require "c-parser.cdriver"
+local cprobe_cache = require "titan-compiler.cprobe_cache"
 local staticmetadata = require "titan-compiler.staticmetadata"
 
 local function shell_command(argv)
@@ -149,7 +150,9 @@ describe("compiled-module ABI version", function()
         local cache_abi = "abi-${{ env.TITAN_ABI_VERSION }}"
         assert.equal(4, count_plain(workflow, cache_abi))
         assert.equal(4, count_plain(workflow,
-            ".lua/var/cache/titan-probes/1"))
+            ".lua/var/cache/titan-probes/" .. cprobe_cache.VERSION))
+        assert.equal(6, count_plain(workflow,
+            "titan-probes-" .. cprobe_cache.VERSION .. "-"))
         assert.truthy(workflow:find(
             "Prepare the standalone prefix", 1, true))
         assert.truthy(workflow:find(

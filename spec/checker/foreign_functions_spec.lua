@@ -1,10 +1,8 @@
 local h = require "spec.support.helpers"
 local types = require "titan-compiler.types"
 local checker = require "titan-compiler.checker"
-local checker_core = require "titan-compiler.checker.core"
 local driver = require "titan-compiler.driver"
 local cdriver = require "c-parser.cdriver"
-local cprobe = require "titan-compiler.cprobe"
 
 local probe_session
 
@@ -45,7 +43,7 @@ end
 
 local function check_with_header(header, body)
     return h.run_checker(
-        'local c = foreign import "' .. header .. '"\n' .. body,
+        "foreign import \"" .. header .. '"\n' .. body,
         probe_session)
 end
 
@@ -71,7 +69,7 @@ describe("foreign functions (checker)", function()
             local ok, err, ast, modtype = check_with_header(header, [[
                 local type EmptyCallback = foreign () -> ()
                 local type Callback =
-                    foreign (*c.ffi_item, c.ffi_int) -> c.ffi_int
+                    foreign (*ffi.ffi_item, ffi.ffi_int) -> ffi.ffi_int
                 local type HigherOrder = foreign (Callback) -> Callback
 
                 foreign function noop(): ()
@@ -80,9 +78,9 @@ describe("foreign functions (checker)", function()
 
                 foreign function invoke(
                     callback: Callback,
-                    item: *c.ffi_item,
-                    input: c.ffi_int
-                ): c.ffi_int
+                    item: *ffi.ffi_item,
+                    input: ffi.ffi_int
+                ): ffi.ffi_int
                     return callback(item, input)
                 end
             ]])
@@ -129,20 +127,20 @@ describe("foreign functions (checker)", function()
         with_header(declarations, function(header)
             local ok, err, ast = check_with_header(header, [[
                 local type Binary =
-                    foreign (c.ffi_int, c.ffi_int) -> c.ffi_int
+                    foreign (ffi.ffi_int, ffi.ffi_int) -> ffi.ffi_int
 
                 foreign function first(
-                    left: c.ffi_int,
-                    right: c.ffi_int
-                ): c.ffi_int
+                    left: ffi.ffi_int,
+                    right: ffi.ffi_int
+                ): ffi.ffi_int
                     return second { rhs = right, lhs = left }
                 end
 
                 foreign function second(
-                    lhs: c.ffi_int,
-                    rhs: c.ffi_int
-                ): c.ffi_int
-                    return c.ffi_add(lhs, rhs)
+                    lhs: ffi.ffi_int,
+                    rhs: ffi.ffi_int
+                ): ffi.ffi_int
+                    return ffi.ffi_add(lhs, rhs)
                 end
 
                 local function address(): Binary
@@ -168,15 +166,15 @@ describe("foreign functions (checker)", function()
         with_header(declarations, function(header)
             local ok, err, ast = check_with_header(header, [[
                 foreign function flow(
-                    item: *c.ffi_item,
-                    callback: c.ffi_callback,
-                    count: c.ffi_int,
-                    limit: c.ffi_double
-                ): c.ffi_int
-                    local total: c.ffi_int = 0
+                    item: *ffi.ffi_item,
+                    callback: ffi.ffi_callback,
+                    count: ffi.ffi_int,
+                    limit: ffi.ffi_double
+                ): ffi.ffi_int
+                    local total: ffi.ffi_int = 0
                     local flag = true
-                    local text: const *c.ffi_char = "ffi"
-                    local missing: *c.ffi_item = nil
+                    local text: const *ffi.ffi_char = "ffi"
+                    local missing: *ffi.ffi_item = nil
 
                     if item then total = total + 1 end
                     if callback then total = total + 1 end
@@ -192,13 +190,13 @@ describe("foreign functions (checker)", function()
                         total = total + 1
                     until item
 
-                    for i: c.ffi_int = 0, count, 1 do
+                    for i: ffi.ffi_int = 0, count, 1 do
                         total = total + i
                     end
-                    for n: c.ffi_double = 0.0, limit, 1.0 do
+                    for n: ffi.ffi_double = 0.0, limit, 1.0 do
                         if n then break end
                     end
-                    return total + c.ffi_text_present(text)
+                    return total + ffi.ffi_text_present(text)
                 end
             ]])
             assert.truthy(ok, err)
@@ -235,14 +233,14 @@ describe("foreign functions (checker)", function()
     function()
         with_header("#include <stddef.h>\n" .. declarations, function(header)
             local ok, err, ast = check_with_header(header, [[
-                foreign function layout(): c.size_t
-                    local size = c.ffi_item.sizeof
-                    local alignment = c.ffi_item.alignof
+                foreign function layout(): ffi.size_t
+                    local size = ffi.ffi_item.sizeof
+                    local alignment = ffi.ffi_item.alignof
                     return size + alignment
                 end
 
                 function ordinary_size(): integer
-                    return c.ffi_item.sizeof
+                    return ffi.ffi_item.sizeof
                 end
             ]])
             assert.truthy(ok, err)
@@ -266,9 +264,9 @@ describe("foreign functions (checker)", function()
         ]], function(header)
             local ok, err, ast = check_with_header(header, [[
                 foreign function outputs()
-                    local item: *c.ffi_item = nil
+                    local item: *ffi.ffi_item = nil
                     local text: const *char = nil
-                    c.ffi_outputs(item, text)
+                    ffi.ffi_outputs(item, text)
                     local erased: *void = item
                 end
             ]])
@@ -286,14 +284,14 @@ describe("foreign functions (checker)", function()
             assert_rejected(header, [[
                 foreign function wrong()
                     local text: const *char = nil
-                    c.ffi_mutable_text(text)
+                    ffi.ffi_mutable_text(text)
                 end
             ]], "would discard const")
             assert_rejected(header, [[
                 foreign function immutable()
-                    const item: *c.ffi_item = nil
+                    const item: *ffi.ffi_item = nil
                     local text: const *char = nil
-                    c.ffi_outputs(item, text)
+                    ffi.ffi_outputs(item, text)
                 end
             ]], "cannot take a mutable C address")
         end)
@@ -309,12 +307,12 @@ describe("foreign functions (checker)", function()
                 local type Pointer = *void
 
                 foreign function call_pointer(): *Pointer
-                    return c.ffi_pointer_source() as *Pointer
+                    return ffi.ffi_pointer_source() as *Pointer
                 end
 
                 foreign function local_pointer()
-                    local raw = c.ffi_pointer_source()
-                    c.ffi_pointer_sink(raw as *Pointer)
+                    local raw = ffi.ffi_pointer_source()
+                    ffi.ffi_pointer_sink(raw as *Pointer)
                 end
 
                 foreign function unrelated(pointer: *double): *int
@@ -329,161 +327,57 @@ describe("foreign functions (checker)", function()
         end)
     end)
 
-    it("replays source C context without parsing the generated companion",
+    it("parses one inherited C environment per module without Titan declarations",
     function()
         with_header([[
             #define FFI_REPLAY_FIELD nested.value
             typedef int ffi_replay_int;
         ]], function(provider_header)
             with_header([[
-                typedef struct ffi_replay_nested {
-                    int value;
-                } ffi_replay_nested;
-                typedef struct ffi_replay_item {
-                    ffi_replay_nested nested;
-                } ffi_replay_item;
+                typedef struct ffi_replay_nested { int value; } ffi_replay_nested;
+                typedef struct ffi_replay_item { ffi_replay_nested nested; } ffi_replay_item;
             ]], function(consumer_header)
-                local provider_code =
-                    'local c = foreign import "' .. provider_header .. [["
-                    foreign function callback(
-                        input: c.ffi_replay_int
-                    ): c.ffi_replay_int
-                        return input
-                    end
-                ]]
-                local provider_ok, provider_error, _, provider =
-                    h.run_checker(provider_code, probe_session)
-                assert.truthy(provider_ok, provider_error)
-                assert.is_table(provider._source_c_context)
-                assert.is_true(
-                    provider._source_c_context.macro_changes.FFI_REPLAY_FIELD)
-
-                with_header('#include "' .. provider_header .. '"\n',
-                function(companion)
-                    local code = [[
+                local modules = {
+                    provider = 'foreign import "' .. provider_header .. [["
+                        foreign function callback(input: ffi.ffi_replay_int): ffi.ffi_replay_int
+                            return input
+                        end
+                    ]],
+                    consumer = [[
                         local provider = import "provider.titan"
-                        local c = foreign import "]] .. consumer_header .. [["
-                        local function observed(
-                            item: *c.ffi_replay_item
-                        ): integer
+                        foreign import "]] .. consumer_header .. [["
+                        local function observed(item: *ffi.ffi_replay_item): integer
                             return item.FFI_REPLAY_FIELD
                         end
-                    ]]
-                    local ast = assert(h.parse(code))
-                    local loader = function(name)
-                        assert.equal("provider", name)
-                        return true, provider, {}, {
-                            kind = "source",
-                            foreign_header = companion,
-                            foreign_header_for_check = true,
-                            foreign_header_probe_identity =
-                                provider_header .. ".titan.h",
-                        }
-                    end
-                    local original_process_file = cdriver.process_file
-                    local original_source_foreign_include_alias =
-                        cprobe.source_foreign_include_alias
-                    local parsed_companion = false
-                    local aliases = {}
-                    cdriver.process_file = function(filename, ...)
-                        if filename == companion then
-                            parsed_companion = true
-                            error("generated companion reached cdriver")
-                        end
-                        return original_process_file(filename, ...)
-                    end
-                    cprobe.source_foreign_include_alias = function(...)
-                        local include, include_error =
-                            original_source_foreign_include_alias(...)
-                        if include then aliases[#aliases + 1] = include end
-                        return include, include_error
-                    end
-                    local exercised, result = pcall(function()
-                        local function check(checked_ast)
-                            types.registry = {}
-                            driver.imported = {}
-                            local modtype, errors = checker.check(
-                                "consumer", checked_ast, code,
-                                "consumer.titan", loader, {
-                                    probe_service_provider = function()
-                                        return driver.get_probe_service(
-                                            probe_session)
-                                    end,
-                                })
-                            assert.equal(0, #errors,
-                                table.concat(errors, "\n"))
-                            return modtype
-                        end
-
-                        local modtype = check(ast)
-                        local first_alias = aliases[#aliases]
-                        assert.is_table(first_alias)
-                        local changed = assert(io.open(companion, "a"))
-                        assert(changed:write(
-                            "/* changed generated bytes */\n"))
-                        assert(changed:close())
-                        aliases = {}
-                        local changed_ast = assert(h.parse(code))
-                        local changed_modtype = check(changed_ast)
-                        local second_alias = aliases[#aliases]
-                        assert.is_table(second_alias)
-
-                        local service = assert(
-                            driver.get_probe_service(probe_session))
-                        local first_context, first_context_error =
-                            service:module_context({
-                                source_dir = ".",
-                                includes = { first_alias },
-                            })
-                        assert.truthy(first_context, first_context_error)
-                        local second_context, second_context_error =
-                            service:module_context({
-                                source_dir = ".",
-                                includes = { second_alias },
-                            })
-                        assert.truthy(second_context, second_context_error)
-                        return {
-                            modtype = modtype,
-                            changed_ast = changed_ast,
-                            changed_modtype = changed_modtype,
-                            first_alias = first_alias,
-                            second_alias = second_alias,
-                            first_source_key = first_context.baseline_key,
-                            second_source_key = second_context.baseline_key,
-                        }
-                    end)
-                    cdriver.process_file = original_process_file
-                    cprobe.source_foreign_include_alias =
-                        original_source_foreign_include_alias
-                    assert.truthy(exercised, result)
-                    assert.is_table(result.modtype)
-                    assert.is_table(result.changed_modtype)
-                    assert.is_false(parsed_companion)
-                    assert.is_string(result.first_source_key)
-                    assert.is_string(result.second_source_key)
-                    assert.equal(result.first_source_key,
-                        result.second_source_key)
-                    assert.equal("Type.Integer",
-                        ast[3].block.stats[1].exps[1]._type._tag)
-                    assert.is_true(ast[1]._foreign_header_for_check)
-                    assert.equal(provider_header .. ".titan.h",
-                        ast[1]._foreign_header_probe_identity)
-                    local inputs = {}
-                    for _, input in ipairs(ast._c_header_dependencies) do
-                        inputs[input.path] = true
-                    end
-                    assert.is_true(inputs[provider_header])
-                    assert.is_true(inputs[consumer_header])
-                    assert.is_nil(inputs[companion])
-                    assert.same(result.first_alias.c_header_dependencies,
-                        result.second_alias.c_header_dependencies)
-                    for _, input in ipairs(
-                            result.first_alias.c_header_dependencies) do
-                        assert.not_equal(companion, input.path)
-                        assert.not_equal(provider_header .. ".titan.h",
-                            input.path)
-                    end
+                    ]],
+                }
+                local original, parsed = cdriver.process_module, {}
+                cdriver.process_module = function(header, ...)
+                    parsed[header.modname] = (parsed[header.modname] or 0) + 1
+                    assert.falsy(header.contents:find(".titan.h", 1, true))
+                    return original(header, ...)
+                end
+                local exercised, result = pcall(function()
+                    local ok, err, imported = h.run_checker_modules(
+                        modules, "consumer", { interface = "source" })
+                    assert.truthy(ok, err)
+                    return imported
                 end)
+                cdriver.process_module = original
+                assert.truthy(exercised, result)
+                assert.same({ provider = 1, consumer = 1 }, parsed)
+                local ast = result.consumer.ast
+                assert.equal("Type.Integer", ast[3].block.stats[1].exps[1]._type._tag)
+                assert.is_table(ast._ffi_namespace._type.type_members.ffi_replay_int)
+                assert.is_nil(ast._ffi_namespace._type.members.callback)
+                local inputs = {}
+                for _, input in ipairs(ast._c_header_dependencies) do
+                    inputs[input.path] = true
+                    assert.falsy(input.path:match("[.]ffi[.]h$"))
+                    assert.falsy(input.path:match("[.]titan[.]h$"))
+                end
+                assert.is_true(inputs[provider_header])
+                assert.is_true(inputs[consumer_header])
             end)
         end)
     end)
@@ -511,58 +405,24 @@ describe("foreign functions (checker)", function()
                     ffi_config_nested nested;
                 } ffi_config_item;
             ]], function(header)
-                local provider_code =
-                    'local c = foreign import "' .. header .. [["
-                    local type Item = *c.ffi_config_item
-                    local type Int = c.ffi_config_int
-                    foreign function noop(): ()
-                        return
+                local provider_code = 'foreign import "' .. header .. [["
+                    local type Item = *ffi.ffi_config_item
+                    local type Int = ffi.ffi_config_int
+                    foreign function noop(): () return end
+                ]]
+                local consumer_code = [[
+                    local provider = import "provider.titan"
+                    foreign function observed(item: provider.Item): provider.Int
+                        return item.FFI_CONFIG_FIELD
                     end
                 ]]
-                local provider_ok, provider_error, _, provider =
-                    h.run_checker(provider_code, session)
-                assert.truthy(provider_ok, provider_error)
-                assert.is_nil(
-                    provider._source_c_context.macro_changes.FFI_CONFIG_FIELD)
-                assert.is_table(
-                    provider._source_c_context.macro_definitions.FFI_CONFIG_FIELD)
-
-                with_header('#include "' .. header .. '"\n',
-                function(companion)
-                    local code = [[
-                        local provider = import "provider.titan"
-                        foreign function observed(
-                            item: provider.Item
-                        ): provider.Int
-                            return item.FFI_CONFIG_FIELD
-                        end
-                    ]]
-                    local ast = assert(h.parse(code))
-                    local loader = function(name)
-                        assert.equal("provider", name)
-                        return true, provider, {}, {
-                            kind = "source",
-                            foreign_header = companion,
-                            foreign_header_for_check = true,
-                            foreign_header_probe_identity =
-                                header .. ".titan.h",
-                        }
-                    end
-                    types.registry = {}
-                    driver.imported = {}
-                    local _, errors = checker.check(
-                        "consumer", ast, code, "consumer.titan", loader, {
-                            probe_service_provider = function()
-                                return driver.get_probe_service(session)
-                            end,
-                        })
-                    assert.equal(0, #errors, table.concat(errors, "\n"))
-                    local projected = ast[2].block.stats[1].exps[1]
-                    assert.equal("Type.CInteger",
-                        types.resolve_c_typedef(projected._type)._tag)
-                    assert.same({ "nested", "value" },
-                        projected.var._decl._macro_projection.path)
-                end)
+                local ok, err, imported = h.run_checker_modules({
+                    provider = provider_code, consumer = consumer_code,
+                }, "consumer", { interface = "source", context = session })
+                assert.truthy(ok, err)
+                local projected = imported.consumer.ast[2].block.stats[1].exps[1]
+                assert.equal("Type.CInteger", types.resolve_c_typedef(projected._type)._tag)
+                assert.same({ "nested", "value" }, projected.var._decl._macro_projection.path)
             end)
             return true
         end, debug.traceback)
@@ -685,8 +545,8 @@ describe("foreign functions (checker)", function()
                 local ok, _, errors = loader("root")
                 assert.truthy(ok)
                 assert.equal(0, #errors, table.concat(errors, "\n"))
-                local import = driver.imported.root.ast[1]
-                local include = import._source_foreign_include
+                local ast = driver.imported.root.ast
+                local include = ast._ffi_namespace._include
                 assert.is_table(include)
                 local service = assert(driver.get_probe_service(context))
                 local module_context, context_error =
@@ -696,10 +556,9 @@ describe("foreign functions (checker)", function()
                     })
                 assert.truthy(module_context, context_error)
                 return {
-                    physical = import._foreign_header,
+                    physical = ast._ffi_header.filename,
                     source_key = module_context.baseline_key,
-                    diagnostic_aliases =
-                        module_context.probe_diagnostic_aliases,
+                    header = ast._ffi_header,
                 }
             end, debug.traceback)
             local loader_closed, loader_close_error =
@@ -717,62 +576,17 @@ describe("foreign functions (checker)", function()
         assert.not_equal(first.physical, second.physical)
         assert.is_string(first.source_key)
         assert.equal(first.source_key, second.source_key)
-        assert.equal(2, #first.diagnostic_aliases)
-        assert.equal(2, #second.diagnostic_aliases)
-        for index = 1, 2 do
-            assert.is_string(first.diagnostic_aliases[index].physical_path)
-            assert.is_string(first.diagnostic_aliases[index].public_path)
-            assert.not_equal(
-                first.diagnostic_aliases[index].physical_path,
-                second.diagnostic_aliases[index].physical_path)
-            assert.equal(
-                first.diagnostic_aliases[index].public_path,
-                second.diagnostic_aliases[index].public_path)
+        local function compare(left, right)
+            assert.equal(left.contents, right.contents)
+            assert.equal(left.identity, right.identity)
+            assert.equal(left.digest, right.digest)
+            assert.not_equal(left.filename, right.filename)
+            assert.equal(#left.dependencies, #right.dependencies)
+            for index, dependency in ipairs(left.dependencies) do
+                compare(dependency, right.dependencies[index])
+            end
         end
-    end)
-
-    it("ignores malformed transitive generated-header diagnostic aliases",
-    function()
-        local modast = {
-            {
-                _tag = "Ast.TopLevelForeignFunc",
-                name = "published",
-                _type = types.Function({}, {}, false, false, false),
-                _paramnames = {},
-            },
-            {
-                _tag = "Ast.TopLevelImport",
-                _source_import = true,
-                _foreign_header_probe_identity = "dependency.titan.h",
-                _foreign_header = false,
-                _source_c_context = {
-                    diagnostic_aliases = {
-                        {
-                            physical_path = "/private/dependency.titan.h",
-                            public_path = "dependency.titan.h",
-                        },
-                        {
-                            physical_path = "/private/malformed.titan.h",
-                            public_path = false,
-                        },
-                    },
-                },
-            },
-        }
-        modast._c_header_dependencies = {}
-        local st = {
-            foreign_macro_changes = {},
-            foreign_macro_environment = function() return {} end,
-        }
-
-        local modtype = checker_core.makemoduletype(
-            "test", modast, st)
-        assert.same({
-            {
-                physical_path = "/private/dependency.titan.h",
-                public_path = "dependency.titan.h",
-            },
-        }, modtype._source_c_context.diagnostic_aliases)
+        compare(first.header, second.header)
     end)
 
     it("keeps source foreign members direct-only and out of compiled interfaces",
@@ -780,10 +594,10 @@ describe("foreign functions (checker)", function()
         with_header("typedef int ffi_int;\n", function(header)
             local quoted = string.format("%q", header)
             local modules = {
-                provider = 'local c = foreign import ' .. quoted .. [[
+                provider = "foreign import " .. quoted .. [[
                     foreign function increment(
-                        input: c.ffi_int
-                    ): c.ffi_int
+                        input: ffi.ffi_int
+                    ): ffi.ffi_int
                         return input + 1
                     end
 
@@ -791,14 +605,14 @@ describe("foreign functions (checker)", function()
                         return input + 1
                     end
                 ]],
-                consumer = 'local c = foreign import ' .. quoted .. [[
+                consumer = "foreign import " .. quoted .. [[
                     local provider = import "provider.titan"
                     local type Callback =
-                        foreign (c.ffi_int) -> c.ffi_int
+                        foreign (ffi.ffi_int) -> ffi.ffi_int
 
                     foreign function through(
-                        input: c.ffi_int
-                    ): c.ffi_int
+                        input: ffi.ffi_int
+                    ): ffi.ffi_int
                         return provider.increment(input)
                     end
 
@@ -812,14 +626,14 @@ describe("foreign functions (checker)", function()
                 modules, "consumer", { interface = "source" })
             assert.truthy(ok, err)
 
-            modules.consumer = 'local c = foreign import ' .. quoted .. [[
+            modules.consumer = "foreign import " .. quoted .. [[
                 local provider = import "provider"
                 local type Callback =
-                    foreign (c.ffi_int) -> c.ffi_int
+                    foreign (ffi.ffi_int) -> ffi.ffi_int
 
                 foreign function through(
-                    input: c.ffi_int
-                ): c.ffi_int
+                    input: ffi.ffi_int
+                ): ffi.ffi_int
                     return provider.increment(input)
                 end
 
@@ -832,29 +646,29 @@ describe("foreign functions (checker)", function()
             assert.falsy(ok)
             assert.match("member 'increment' not found", err)
 
-            modules.bridge = 'local c = foreign import ' .. quoted .. [[
+            modules.bridge = "foreign import " .. quoted .. [[
                 local provider = import "provider.titan"
                 foreign function through(
-                    input: c.ffi_int
-                ): c.ffi_int
+                    input: ffi.ffi_int
+                ): ffi.ffi_int
                     return provider.increment(input)
                 end
             ]]
-            modules.consumer = 'local c = foreign import ' .. quoted .. [[
+            modules.consumer = "foreign import " .. quoted .. [[
                 local bridge = import "bridge.titan"
                 local provider = import "provider.titan"
 
                 foreign function transitive_view(
-                    input: c.ffi_int
-                ): c.ffi_int
+                    input: ffi.ffi_int
+                ): ffi.ffi_int
                     return bridge.increment(input)
                 end
 
                 foreign function ordinary_member(
-                    input: c.ffi_int
-                ): c.ffi_int
+                    input: ffi.ffi_int
+                ): ffi.ffi_int
                     return provider.ordinary(input as integer)
-                        as c.ffi_int
+                        as ffi.ffi_int
                 end
             ]]
             ok, err = h.run_checker_modules(
@@ -877,46 +691,46 @@ describe("foreign functions (checker)", function()
                 },
                 {
                     [[foreign function bad(
-                        input: owned *c.ffi_item
+                        input: owned *ffi.ffi_item
                     ): () end]],
                     "must be a direct C FFI type",
                 },
                 {
-                    [[foreign function bad(input: c.ffi_row): () end]],
+                    [[foreign function bad(input: ffi.ffi_row): () end]],
                     "must be a direct C FFI type",
                 },
                 {
                     [[foreign function bad(
-                        input: c.ffi_incomplete
+                        input: ffi.ffi_incomplete
                     ): () end]],
                     "requires complete C struct type",
                 },
                 {
                     [[foreign function bad(
-                        ...: c.ffi_int
+                        ...: ffi.ffi_int
                     ): () end]],
                     "cannot have variadic parameters",
                 },
                 {
                     [[foreign function bad():
-                        (c.ffi_int, c.ffi_int)
+                        (ffi.ffi_int, ffi.ffi_int)
                         return 1, 2
                     end]],
                     "can return at most one value",
                 },
                 {
                     [[foreign function bad():
-                        (...: c.ffi_int)
+                        (...: ffi.ffi_int)
                     end]],
                     "cannot have flexible returns",
                 },
                 {
                     [[local type Bad =
-                        foreign (c.ffi_int, ...: c.ffi_int) -> ()]],
+                        foreign (ffi.ffi_int, ...: ffi.ffi_int) -> ()]],
                     "foreign function type cannot have variadic parameters",
                 },
                 {
-                    [[foreign function bad(): c.ffi_int end]],
+                    [[foreign function bad(): ffi.ffi_int end]],
                     "function can return nil",
                 },
             }
@@ -931,13 +745,13 @@ describe("foreign functions (checker)", function()
             local rejected = {
                 {
                     [[local function helper(): integer return 1 end
-                      foreign function bad(): c.ffi_int
+                      foreign function bad(): ffi.ffi_int
                           return helper()
                       end]],
                     "ordinary Titan declaration 'helper' is not visible",
                 },
                 {
-                    [[foreign function bad(): c.ffi_int
+                    [[foreign function bad(): ffi.ffi_int
                           local count: integer = 1
                           return 0
                       end]],
@@ -963,7 +777,7 @@ describe("foreign functions (checker)", function()
                 },
                 {
                     [[foreign function bad(): ()
-                          defer c.ffi_add(1, 2)
+                          defer ffi.ffi_add(1, 2)
                       end]],
                     "defer statements are not available",
                 },
@@ -988,12 +802,12 @@ describe("foreign functions (checker)", function()
                 },
                 {
                     [[foreign function bad(): ()
-                          local item = c.ffi_item.new()
+                          local item = ffi.ffi_item.new()
                       end]],
                     "allocation pseudo%-functions are not available",
                 },
                 {
-                    [[foreign function bad(input: c.ffi_int): c.ffi_int
+                    [[foreign function bad(input: ffi.ffi_int): ffi.ffi_int
                           local boxed = input as value
                           return input
                       end]],
@@ -1009,20 +823,20 @@ describe("foreign functions (checker)", function()
     it("diagnoses non-scalar conditions and invalid C numeric loops", function()
         with_header(declarations, function(header)
             assert_rejected(header, [[
-                foreign function bad(item: c.ffi_item): ()
+                foreign function bad(item: ffi.ffi_item): ()
                     if item then return end
                 end
             ]], "condition must have a C scalar type")
 
             assert_rejected(header, [[
-                foreign function bad(limit: c.ffi_int): ()
-                    for i: c.ffi_int = 0, limit, 0 do end
+                foreign function bad(limit: ffi.ffi_int): ()
+                    for i: ffi.ffi_int = 0, limit, 0 do end
                 end
             ]], "requires a nonzero step")
 
             assert_rejected(header, [[
-                foreign function bad(limit: c.ffi_double): ()
-                    for i: c.ffi_double = 0.0, limit, 0.0 do end
+                foreign function bad(limit: ffi.ffi_double): ()
+                    for i: ffi.ffi_double = 0.0, limit, 0.0 do end
                 end
             ]], "requires a nonzero step")
 
@@ -1039,8 +853,8 @@ describe("foreign functions (checker)", function()
             ]], "requires a nonzero step")
 
             assert_rejected(header, [[
-                foreign function bad(item: *c.ffi_item): ()
-                    for current: *c.ffi_item = item, item do end
+                foreign function bad(item: *ffi.ffi_item): ()
+                    for current: *ffi.ffi_item = item, item do end
                 end
             ]], "type of for control variable current must be integer or float")
         end)

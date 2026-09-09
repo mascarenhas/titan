@@ -3,6 +3,9 @@
 *.so
 *.dSYM/
 
+# Compiler-generated module C declaration environments
+*.ffi.h
+
 # lua source trees (downloaded from lua.org)
 /lua-5.*/
 /lua-5.*.tar.gz

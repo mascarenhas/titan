@@ -46,17 +46,17 @@ end
 
 local function native_allocation_error(operation: string)
   raise Error.new("out of memory allocating SQLite operation",
-                  sqlc.SQLITE_NOMEM, sqlc.SQLITE_NOMEM, operation)
+                  ffi.SQLITE_NOMEM, ffi.SQLITE_NOMEM, operation)
 end
 
-local function copy_input(packet: *sqlnative.TitanSqlitePacket,
+local function copy_input(packet: *ffi.TitanSqlitePacket,
                           input: string, operation: string)
   packet.input_length = #input
   packet.input = sqlite_copy_bytes(input, packet.input_length)
   if not packet.input then native_allocation_error(operation) end
 end
 
-local function copy_argument_bytes(cell: *sqlnative.TitanSqliteCell,
+local function copy_argument_bytes(cell: *ffi.TitanSqliteCell,
                                    bytes: string, operation: string)
   cell.length = #bytes
   cell.bytes = sqlite_copy_bytes(bytes, cell.length)
@@ -69,24 +69,24 @@ local function unsupported_argument(index: integer, kind: string,
                   nil, nil, operation)
 end
 
-local function bind_argument(cell: *sqlnative.TitanSqliteCell,
+local function bind_argument(cell: *ffi.TitanSqliteCell,
                              candidate: value, index: integer,
                              operation: string)
   case reflect.inspect(candidate)
   when is_nil then
-    cell.kind = sqlc.SQLITE_NULL
+    cell.kind = ffi.SQLITE_NULL
   when is_boolean: flag then
-    cell.kind = sqlc.SQLITE_INTEGER
+    cell.kind = ffi.SQLITE_INTEGER
     if flag then cell.integer_value = 1 else cell.integer_value = 0 end
   when is_integer: number then
-    cell.kind = sqlc.SQLITE_INTEGER
+    cell.kind = ffi.SQLITE_INTEGER
     cell.integer_value = number
   when is_float: number then
     if number ~= number or number == math.huge or number == -math.huge then
       raise Error.new("argument " .. index .. " must be finite",
                       nil, nil, operation)
     end
-    cell.kind = sqlc.SQLITE_FLOAT
+    cell.kind = ffi.SQLITE_FLOAT
     cell.float_value = number
   when is_string: bytes then
     if not valid_text(bytes) then
@@ -94,12 +94,12 @@ local function bind_argument(cell: *sqlnative.TitanSqliteCell,
                       " must be UTF-8 TEXT without NUL; use Blob for bytes",
                       nil, nil, operation)
     end
-    cell.kind = sqlc.SQLITE_TEXT
+    cell.kind = ffi.SQLITE_TEXT
     copy_argument_bytes(cell, bytes, operation)
   when is_record: inspected then
     if inspected.val is Blob then
       local blob: Blob = inspected.val
-      cell.kind = sqlc.SQLITE_BLOB
+      cell.kind = ffi.SQLITE_BLOB
       copy_argument_bytes(cell, blob.bytes, operation)
     else
       unsupported_argument(index, "record", operation)
@@ -120,7 +120,7 @@ local function bind_argument(cell: *sqlnative.TitanSqliteCell,
   end
 end
 
-local function Statement:bind(packet: *sqlnative.TitanSqlitePacket,
+local function Statement:bind(packet: *ffi.TitanSqlitePacket,
                               operation: string, ...: value)
   if #... ~= self.parameter_count then
     raise Error.new("expected " .. self.parameter_count .. " arguments, got " ..
@@ -128,7 +128,7 @@ local function Statement:bind(packet: *sqlnative.TitanSqlitePacket,
   end
   packet.argument_count = #...
   if #... <= 0 then return end
-  packet.arguments = sqlstdlib.calloc(#..., sqlnative.TitanSqliteCell.sizeof)
+  packet.arguments = ffi.calloc(#..., ffi.TitanSqliteCell.sizeof)
   if not packet.arguments then native_allocation_error(operation) end
   -- Preserve the vararg run itself: an Array loses its trailing nil positions.
   for index = 1, #... do
@@ -136,13 +136,13 @@ local function Statement:bind(packet: *sqlnative.TitanSqlitePacket,
   end
 end
 
-local function copy_result_bytes(cell: *sqlnative.TitanSqliteCell): string
+local function copy_result_bytes(cell: *ffi.TitanSqliteCell): string
   local bytes: owned char[] = char.new_array(cell.length)
-  if cell.length > 0 then sqlstring.memcpy(bytes, cell.bytes, cell.length) end
+  if cell.length > 0 then ffi.memcpy(bytes, cell.bytes, cell.length) end
   return bytes as string
 end
 
-local function decode_columns(packet: *sqlnative.TitanSqlitePacket): const {Column}
+local function decode_columns(packet: *ffi.TitanSqlitePacket): const {Column}
   local columns: {Column} = {}
   local count: integer = packet.column_count
   for index = 1, count do
@@ -156,20 +156,20 @@ local function decode_columns(packet: *sqlnative.TitanSqlitePacket): const {Colu
   return columns as const {Column}
 end
 
-local function decode_row(packet: *sqlnative.TitanSqlitePacket,
+local function decode_row(packet: *ffi.TitanSqlitePacket,
                            columns: const {Column}): Row
   local cells: {value} = {}
   for index = 1, #columns do
     local cell = packet.cells + (index - 1)
-    if cell.kind == sqlc.SQLITE_INTEGER then
+    if cell.kind == ffi.SQLITE_INTEGER then
       local number: integer = cell.integer_value
       cells[index] = number
-    elseif cell.kind == sqlc.SQLITE_FLOAT then
+    elseif cell.kind == ffi.SQLITE_FLOAT then
       local number: float = cell.float_value
       cells[index] = number
-    elseif cell.kind == sqlc.SQLITE_TEXT then
+    elseif cell.kind == ffi.SQLITE_TEXT then
       cells[index] = copy_result_bytes(cell)
-    elseif cell.kind == sqlc.SQLITE_BLOB then
+    elseif cell.kind == ffi.SQLITE_BLOB then
       cells[index] = Blob.new(copy_result_bytes(cell))
     end
   end
