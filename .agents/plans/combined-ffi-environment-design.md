@@ -172,5 +172,20 @@ comparison with migrated sources and compiler semantics; observer events and
 overhead also differ from the baseline, so the wall-time change is not an
 isolated causal benchmark. The interrupted earlier capture is excluded.
 
-Publication and remote CI remain tracked in the checklist, PR checks and owning
-Projects.
+The separately based server PR
+[#61](https://github.com/mascarenhas/vscode-titan/pull/61) was opened after local
+verification, followed by compiler PR
+[#156](https://github.com/mascarenhas/titan/pull/156). Both remain open and all
+three owning Project items are In review.
+
+The initial Linux runtime job exposed a test portability error: inherited Make
+jobserver flags caused a warning to enter the new exact header-inventory
+assertion. Its subprocess now clears those flags, and its inventory recipe uses
+a temporary Makefile fragment instead of requiring GNU Make 3.82's `--eval`.
+Compiler production code and the cold-capture implementation are unchanged.
+The corrected case and all 55 tests in its suite passed with stale inherited
+jobserver flags. The canonical full gate then passed again: 131 runtime/packaging,
+3,331 compiler/language, and 455 native tests, with log
+`/tmp/titan-single-ffi-full-test-ci-portability.log`.
+Final-head Linux coverage and the subsequent authorized macOS dispatch remain
+tracked in the PR checks.

@@ -1370,12 +1370,23 @@ int main(void) {
         end)
 
     it("cleans every standard module C environment header", function()
-        local ok, output = run_argv({
-            "make", "--no-print-directory", "-s", "MAKE=false",
-            "--eval=__titan_header_inventory: ; @printf '%s\\n' " ..
-                "$(STDLIB_GENERATED_FOREIGN_HEADERS)",
-            "__titan_header_inventory",
-        })
+        local root = make_temp_dir()
+        local tested, ok, output = pcall(function()
+            local fragment = root .. "/inventory.mk"
+            write_file(fragment, ".PHONY: __titan_header_inventory\n" ..
+                "__titan_header_inventory:\n\t@printf '%s\\n' " ..
+                "$(STDLIB_GENERATED_FOREIGN_HEADERS)\n")
+            -- Keep the query independent of inherited jobserver descriptors
+            -- and use a Makefile fragment supported by macOS's older Make.
+            return run_argv({
+                "env", "-u", "MAKEFLAGS", "-u", "MFLAGS",
+                "make", "--no-print-directory", "-s", "MAKE=false",
+                "-f", "Makefile", "-f", fragment,
+                "__titan_header_inventory",
+            })
+        end)
+        remove_tree(root)
+        assert.truthy(tested, ok)
         assert.truthy(ok, output)
         local expected = {}
         for _, module in ipairs(STDLIB_MODULES) do
