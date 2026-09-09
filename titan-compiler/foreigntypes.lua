@@ -1205,8 +1205,8 @@ end
 
 local function convert_declaration(st, ftype, member_name)
     if ftype.macro_expression
-       and ftype.integer_literals
-       and #ftype.integer_literals > 0
+       and (ftype.has_integer_literals
+            or ftype.integer_literals and #ftype.integer_literals > 0)
        and st.c_profile then
         local evaluated, evaluation_error =
             csemantics.evaluate_macro_expression(

@@ -49,6 +49,7 @@ describe("compiler installation discovery", function()
         assert.is_function(driver.restat_c_header_dependencies)
         assert.is_function(driver.language_server_cache_identity)
         assert.is_function(driver.encode_project_entry)
+        assert.is_function(driver.compact_project_entry)
         assert.is_function(driver.decode_project_entry)
     end)
 

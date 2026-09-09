@@ -1151,12 +1151,6 @@ local function forced_inputs(forced)
     return inputs
 end
 
-local function valid_forced_entry(entry, key)
-    return type(entry) == "table" and entry.owner == "titan-forced-preprocessor"
-       and entry.version == 1 and entry.abi == version.TITAN_ABI_VERSION
-       and entry.key == key
-end
-
 local function overlay_forced_inputs(forced, saved)
     if type(saved) ~= "table" then return end
     local inputs = forced_inputs(forced)
@@ -1188,16 +1182,6 @@ local function forced_entry_is_current(entry, config)
     return true
 end
 
-local function forced_graph_options(adapter)
-    return { sha256_binary = adapter and adapter.sha256_binary, yield = adapter and adapter.yield }
-end
-
-local function encode_forced_entry(entry, adapter)
-    return cpp.encode_graph({ owner = entry.owner, version = entry.version, key = entry.key,
-        abi = version.TITAN_ABI_VERSION, forced = entry.forced, probed = entry.probed },
-        forced_graph_options(adapter))
-end
-
 local function completed_forced_configuration(configuration)
     local config = configuration.original
     local adapter = config.cache_adapter
@@ -1214,15 +1198,6 @@ local function completed_forced_configuration(configuration)
     local cache = probe_cache_for(config.io)
     local slot = "forced|" .. key
     local candidate = cache[slot]
-    if not candidate and adapter then
-        local payload, saved = cacheadapter.get(adapter, "c-header-v2", key)
-        local decoded = payload and cpp.decode_graph(payload, forced_graph_options(adapter))
-        local ok, valid = pcall(valid_forced_entry, decoded, key)
-        if ok and valid then
-            local overlaid = pcall(overlay_forced_inputs, decoded.forced, saved)
-            if overlaid then candidate = decoded end
-        end
-    end
     while candidate do
         local before = cache[slot]
         local checked, current = pcall(forced_entry_is_current, candidate, config)
@@ -1234,15 +1209,6 @@ local function completed_forced_configuration(configuration)
             candidate = cache[slot]
         elseif current then
             cache[slot] = candidate
-            if candidate.observations_changed and adapter then
-                local inputs = forced_inputs(candidate.forced)
-                local refreshed = cacheadapter.refresh_inputs(adapter, "c-header-v2", key, inputs)
-                if refreshed == nil and adapter.put then
-                    local payload = encode_forced_entry(candidate, adapter)
-                    refreshed = payload and cacheadapter.put(adapter, "c-header-v2", key, payload, inputs)
-                end
-                if refreshed then candidate.observations_changed = nil end
-            end
             if cache[slot] == candidate then
                 return clone_graph(candidate.forced), nil, candidate.probed
             end
@@ -1253,8 +1219,9 @@ local function completed_forced_configuration(configuration)
         end
     end
 
-    -- Publish only a completed scan plus its authoritative native macro probe.
-    -- Neither failed nor in-progress contexts enter memory or disk caches.
+    -- Preprocessing another header needs this mutable token/output state, so
+    -- it remains provider-local. Persistent caches own extracted declarations
+    -- only; a fresh provider rescans forced inputs before header-cache reuse.
     local scanned
     scanned, err = scan_forced_headers(configuration.forced, base.incdirs, base.defines, cwd, config.io)
     if not scanned then return nil, err end
@@ -1271,12 +1238,6 @@ local function completed_forced_configuration(configuration)
     end
     entry.observations_changed = nil
     cache[slot] = entry
-    if adapter and adapter.put then
-        local payload = encode_forced_entry(entry, adapter)
-        if payload and cache[slot] == entry then
-            cacheadapter.put(adapter, "c-header-v2", key, payload, forced_inputs(scanned))
-        end
-    end
     return clone_graph(scanned), nil, probed
 end
 

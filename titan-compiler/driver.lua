@@ -46,6 +46,10 @@ function driver.encode_project_entry(entry, options)
     return projectcache.encode(entry, options)
 end
 
+function driver.compact_project_entry(entry, options)
+    return projectcache.compact(entry, options)
+end
+
 function driver.decode_project_entry(payload, options)
     return projectcache.decode(payload, options)
 end
@@ -814,6 +818,7 @@ function driver.new_resolver_context(options)
         header_observations = cdriver.header_observation_index(options.header_inputs),
         prefer_static = options.prefer_static == true,
         source_first = options.source_first == true,
+        analysis_only = options.analysis_only == true,
         provider_cache = {},
         contextual_types = {},
         contextual_resolutions = {},
@@ -1415,7 +1420,7 @@ end
 -- their exact C-header inputs.
 function driver.serialize_source_interface(entry)
     if type(entry) ~= "table" or entry.kind ~= "source"
-       or type(entry.ast) ~= "table"
+       or (type(entry.ast) ~= "table" and entry._analysis_manifest ~= true)
        or type(entry.type) ~= "table"
        or entry.type._tag ~= "Type.Module"
        or entry.type._source ~= true
@@ -3411,6 +3416,7 @@ function driver.prepare_source_ffi_header(context, modname, ast, sourcef)
 end
 
 local function prepare_source_checking_header(context, modname, ast)
+    if context.analysis_only then return nil end
     if not driver.ast_has_foreign_functions(ast) then return nil end
     local descriptor = assert(ast._ffi_header,
         "source foreign functions have no checking FFI header")
@@ -3546,7 +3552,7 @@ function driver.defaultloader(static_deps, options)
 
     local function validate_cached_source_entry(modname, candidate)
         if type(candidate) ~= "table" or candidate.kind ~= "source"
-           or type(candidate.ast) ~= "table"
+           or (type(candidate.ast) ~= "table" and candidate._analysis_manifest ~= true)
            or type(candidate.type) ~= "table"
            or candidate.type._tag ~= "Type.Module"
            or candidate.type._source ~= true
@@ -3562,6 +3568,10 @@ function driver.defaultloader(static_deps, options)
            or candidate.source_manifest == "" then
             return nil, "cached source entry for module '" .. modname ..
                 "' is not a complete checked source module"
+        end
+        if candidate._analysis_manifest and not context.analysis_only then
+            return nil, "cached declared manifest for module '" .. modname ..
+                "' requires an analysis-only resolver"
         end
         for dependency, present in pairs(candidate.deps) do
             if not staticmetadata.valid_module_name(dependency)
@@ -3612,11 +3622,14 @@ function driver.defaultloader(static_deps, options)
         }
     end
 
-    local cached_source_loading = {}
+    local cached_source_loading, cached_source_loaded = {}, {}
     local load_cached_source_entry
     local function load_cached_source_entry_inner(modname, active_loader)
         local candidate = cached_source_entries[modname]
+            or (driver.imported[modname] and driver.imported[modname]._analysis_manifest
+                and driver.imported[modname])
         if candidate == nil then return nil end
+        if cached_source_loaded[modname] == candidate then return candidate end
         local valid, validation_error =
             validate_cached_source_entry(modname, candidate)
         if not valid then return false, validation_error end
@@ -3625,6 +3638,49 @@ function driver.defaultloader(static_deps, options)
                 modname .. "'"
         end
         cached_source_loading[modname] = true
+
+        if candidate._analysis_manifest then
+            -- Declaration-only entries have an explicit source capability and
+            -- ordered C environment. Neither private visibility nor restoring
+            -- these headers requires an AST or a native .titan.h companion.
+            local plan = candidate.ffi_header_descriptor
+            for index, name in ipairs(candidate.source_imports) do
+                local dependency = driver.imported[name]
+                if not dependency or dependency._analysis_manifest then
+                    local loaded, load_error = load_cached_source_entry(name, active_loader)
+                    if loaded == false then cached_source_loading[modname] = nil; return false, load_error end
+                    dependency = loaded or dependency
+                end
+                if not dependency or dependency.kind ~= "source" or dependency.type._source ~= true then
+                    local ok, type_or_error, errors = active_loader(name, { kind = "source-import" })
+                    if not ok or #errors ~= 0 then
+                        cached_source_loading[modname] = nil
+                        return false, ok and table.concat(errors, "\n") or type_or_error
+                    end
+                    dependency = driver.imported[name]
+                end
+                local current = dependency and (dependency.ffi_header_descriptor
+                    or dependency.ast and dependency.ast._ffi_header)
+                if not current or not plan or not plan.dependencies[index]
+                    or current.digest ~= plan.dependencies[index].digest then
+                    cached_source_loading[modname] = nil
+                    return false, "cached source entry for module '" .. modname ..
+                        "' has a stale source C environment for '" .. name .. "'"
+                end
+            end
+            if plan then
+                local restored, restore_error = ffiheaders.materialize(context, plan)
+                if not restored then cached_source_loading[modname] = nil; return false, restore_error end
+                candidate.ffi_header_descriptor = restored
+                candidate.ffi_header, candidate.checking_ffi_header = restored.identity, restored.filename
+            end
+            candidate._cached_source_entry = true
+            driver.imported[modname] = candidate
+            context.source_modules[modname] = true
+            cached_source_loaded[modname] = candidate
+            cached_source_loading[modname] = nil
+            return candidate
+        end
 
         -- Rehydrate source-required dependency headers first. Their paths are
         -- context-owned temporaries too, and the retained import annotations
@@ -3641,7 +3697,7 @@ function driver.defaultloader(static_deps, options)
                     end
                     dependency = loaded
                 end
-                if not dependency or not dependency.ast then
+                if not dependency or (not dependency.ast and not dependency._analysis_manifest) then
                     -- External source ASTs are intentionally not retained by
                     -- language-server clients. A caller-certified cached
                     -- interface may already have been selected by an ordinary
@@ -3663,7 +3719,7 @@ function driver.defaultloader(static_deps, options)
                     end
                 end
                 if not dependency or dependency.kind ~= "source"
-                   or not dependency.ast then
+                   or (not dependency.ast and not dependency._analysis_manifest) then
                     cached_source_loading[modname] = nil
                     return false, "cached source entry for module '" ..
                         modname .. "' requires clean source dependency '" ..
@@ -3685,7 +3741,8 @@ function driver.defaultloader(static_deps, options)
                     probe_identity = normalize_absolute_path(absolute)
                 end
                 node._foreign_header_probe_identity = probe_identity
-                node._ffi_header_descriptor = dependency.ast._ffi_header
+                node._ffi_header_descriptor = dependency.ffi_header_descriptor
+                    or dependency.ast._ffi_header
                 node._ffi_header = dependency.checking_ffi_header
                 node._ffi_header_probe_identity = dependency.ffi_header
             end
@@ -3716,6 +3773,7 @@ function driver.defaultloader(static_deps, options)
         candidate._cached_source_entry = true
         driver.imported[modname] = candidate
         context.source_modules[modname] = true
+        cached_source_loaded[modname] = candidate
         cached_source_loading[modname] = nil
         return candidate
     end
@@ -4325,11 +4383,11 @@ function driver.defaultloader(static_deps, options)
             return ok, modt, errors, info
         end
 
-        -- Raw entries retain the complete annotated AST and source-private
-        -- interface required by `.titan` imports. Only caller-certified clean
-        -- modules are eligible; explicit dirty roots, source overrides, and
-        -- source-first compiler builds always check source again.
-        if not driver.imported[modname]
+        -- Analysis manifests retain the declared source interface. Fresh raw
+        -- entries remain usable by native compiler clients. Only caller-
+        -- certified clean modules are eligible; dirty roots, overrides and
+        -- source-first builds always check source again.
+        if (not driver.imported[modname] or driver.imported[modname]._analysis_manifest)
            and not context.source_first
            and source_roots[modname] ~= true
            and source_overrides[modname] == nil then
@@ -4345,9 +4403,12 @@ function driver.defaultloader(static_deps, options)
         local dirty_source_requested = source_roots[modname] == true or
             source_overrides[modname] ~= nil
         if source_preferred and driver.imported[modname] and
-           (not driver.imported[modname].ast or
+           ((not driver.imported[modname].ast and
+                (not driver.imported[modname]._analysis_manifest or context.source_first
+                    or not context.analysis_only)) or
             (dirty_source_requested and
-             driver.imported[modname]._cached_source_entry)) then
+             (driver.imported[modname]._cached_source_entry
+                or driver.imported[modname]._analysis_manifest))) then
             local candidate, candidate_err = find_source()
             if candidate_err then return false, candidate_err end
             if candidate then
@@ -4393,7 +4454,7 @@ function driver.defaultloader(static_deps, options)
                 info.foreign_header_probe_identity = probe_identity
                 info.ffi_header = mod.ffi_header
                 info.checking_ffi_header = mod.checking_ffi_header
-                info.ffi_header_descriptor = mod.ast and mod.ast._ffi_header
+                info.ffi_header_descriptor = mod.ffi_header_descriptor or mod.ast and mod.ast._ffi_header
             end
             return true, mod.type, {}, info
         end

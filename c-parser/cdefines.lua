@@ -146,6 +146,10 @@ local function integer_literal_metadata(token)
     }
 end
 
+-- Compact declaration expressions retain exact token spellings and rebuild
+-- this target-neutral information only while evaluating the expression.
+cdefines.integer_literal_metadata = integer_literal_metadata
+
 -- Annotate the parsed expression in place and return its integer literal
 -- occurrences in deterministic source/tree order. Numeric children carry the
 -- expression order; keyed child tables cover postfix/argument shapes without
@@ -365,19 +369,7 @@ end
 -- of falling back to a physical field that generated C cannot name. A
 -- function-like macro does not expand on a plain field token and is therefore
 -- outside this object-macro classifier.
-function cdefines.classify_field_macro(name, define_set)
-    local definition = define_set and define_set[name]
-    if not definition or definition.args then return nil end
-
-    local ok, text = pcall(cpp.expand_macro, name, define_set)
-    if not ok or type(text) ~= "string" then
-        return {
-            name = name,
-            replacement = "<macro expansion failed>",
-            unsupported = true,
-        }
-    end
-
+function cdefines.classify_expanded_field_macro(name, text)
     local exp = c99.match_language_expression_grammar(text .. " ")
     local path = exp and dotted_identifier_path(exp)
     if path then
@@ -392,6 +384,16 @@ function cdefines.classify_field_macro(name, define_set)
         replacement = text,
         unsupported = true,
     }
+end
+
+function cdefines.classify_field_macro(name, define_set)
+    local definition = define_set and define_set[name]
+    if not definition or definition.args then return nil end
+    local ok, text = pcall(cpp.expand_macro, name, define_set)
+    if not ok or type(text) ~= "string" then
+        return { name = name, replacement = "<macro expansion failed>", unsupported = true }
+    end
+    return cdefines.classify_expanded_field_macro(name, text)
 end
 
 local function function_alias_declaration(lst, name, exp)
@@ -518,13 +520,18 @@ function cdefines.register_defines(lst, define_set)
     for name in pairs(define_set) do names[#names + 1] = name end
     table.sort(names, util.bytewise_less)
 
+    lst.field_macro_classes = {}
     for _, name in ipairs(names) do
         local def = define_set[name]
-        if #def == 0 then
+        if def.args then
             goto continue
         end
         local text = cpp.expand_macro(name, define_set)
-        cdefines.register_define(lst, name, text, define_set)
+        -- All active object macros affect a field token, including empty and
+        -- unsupported replacements. The final translation-unit environment
+        -- is fixed here, after real ordered preprocessing and macro rescans.
+        lst.field_macro_classes[name] = cdefines.classify_expanded_field_macro(name, text)
+        if #def > 0 then cdefines.register_define(lst, name, text, define_set) end
         ::continue::
     end
 end

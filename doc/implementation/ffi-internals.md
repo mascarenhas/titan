@@ -44,8 +44,8 @@ C99 toolchain context. The stages are:
    declarations with `ctypes` in their actual C scopes.
 3. Project supported final object-like macros with `cdefines`, using bytewise
    order for entries obtained from an unordered macro map. Preserve supported
-   scalar/accessor expressions and pure dotted field projections, and retain
-   final raw definitions for lazy field lookup.
+   scalar/accessor expressions and classify every active object macro as a
+   pure dotted field projection or a terminal unsupported field token.
 4. Convert that single TypeList once through `foreigntypes.convert` into
    `ffi.members` and `ffi.type_members`. Tag-only named file-scope structs and
    unions retain their canonical tag owners; real typedefs take precedence.
@@ -593,9 +593,9 @@ representation, both the genuine-Lua and strict stack entry raise before the
 native entry is invoked, while exact compiled calls continue to use the native
 signature directly.
 
-The checker keeps final per-module C name/type maps and the final raw macro
-environment produced by the combined parse. A field projection is resolved
-against those definitions and the receiver's canonical C aggregate. Include
+The checker keeps final per-module C type maps and extracted field-macro
+classifications produced by the combined parse. A field projection is resolved
+against that classification and the receiver's canonical C aggregate. Include
 guards and C scopes decide which declarations exist; no isolated snapshots
 are merged by ordinary name, and no source-repeat/prototype-tag escape hatch
 is needed to reconcile independently parsed imports. Anonymous and
@@ -606,6 +606,36 @@ All C definitions are available to module initializers after the environment
 pass. Ordinary Titan variables and import aliases still obey their sequential
 frontiers. Real header/search dependency validation and generated-header
 ownership remain separate from source-only probe-result caching.
+
+Completed header caches retain a closed extracted-declaration contract:
+ordered CType signatures, typedef targets, recursive aggregate fields and tag
+scopes, parameter-name availability, exact array/bitfield expressions, macro
+constant types, final field-macro classifications and target-profile facts.
+Integer expression leaves retain their exact token spelling; the evaluator
+reconstructs C99 literal candidates on demand. A macro cast retains its target
+type and a scalar-cast marker, not the parsed operand. Parser bodies, ordinary
+source-location maps, raw macro environments, CPP spelling/spacing sidecars,
+and registrar bookkeeping do not survive this boundary.
+
+The `c-header-v3` byte payload uses this same read-only extracted graph. A live
+hit shares it, while a disk restore reconstructs the closed schema once after
+codec/checksum and envelope validation. Real dependencies/search observations
+still validate the input closure. Forced `-include`/`-imacros` preprocessing
+state remains local to its I/O provider because another preprocessing request
+needs its mutable macro/output context. A fresh provider rescans those forced
+inputs before reusing the extracted header payload; no complete forced
+preprocessor context is written to disk.
+
+The `ffi-conversion-v3` payload retains final `Type.CModule` members and type
+members, callable parameter spellings, reachable C types/layouts/enum carriers,
+the final C type lookup and file-tag canonical map, numeric profile, and final
+field-macro classifications. It excludes raw-CType conversion memos, old
+declaration histories, unused ordinary-name lookup state, and prototype
+conversion registries. Restore binds origins to the current combined include
+descriptor and reconstructs the final order-zero type lookup used by module
+initializers; conversion is already complete. Each projection/reconstruction
+uses one memo and cooperative work budget, without another validation walk on
+ordinary cache reuse. Old-version and malformed payloads are cache misses.
 
 ## Code Generation
 

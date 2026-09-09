@@ -175,6 +175,13 @@ generated objects feed macro discovery. `TITAN_EXTRA_CFLAGS`, architecture
 flags, and the configured SDK cannot describe a different target from the one
 used by the profile.
 
+Completed header entries preserve only the predefined names consumed by the
+profile builder and their direct alias dependencies. Replacement strings and
+function-like rejection markers suffice for that interpretation; unrelated
+macros and token sidecars remain outside the profile facts. The configured
+carrier typedefs and signed-minimum expressions retain their original types
+and exact integer token spellings.
+
 `csemantics` supplies typedef/qualification-aware classification, integer
 promotion, usual arithmetic conversion, bounded integer object-macro
 expression evaluation, array decay, complete-object checks, and symmetric
@@ -550,10 +557,13 @@ tokens. The generated compiler therefore performs the authoritative expansion
 under the translation unit's real header state.
 
 A separate object-macro form contains only a dotted identifier replacement,
-such as `implementation.member`. `cdriver` retains the raw final macro
-definitions from the combined module header. Field lookup expands the public
-token lazily against that final environment, so a later redefinition or
-`#undef` cannot leave a stale projection at an earlier initializer.
+such as `implementation.member`. `cdriver` classifies every final object macro
+after the combined module header has been preprocessed. Field lookup uses the
+saved pure path or unsupported marker and expanded spelling. A later header
+redefinition or `#undef` has already affected this final classification, so it
+cannot leave a stale projection at an earlier initializer. Empty object macros
+remain terminal unsupported tokens; function-like and undefined macros leave
+ordinary field lookup available. No raw macro environment is needed at lookup.
 
 When the final expansion is a pure dotted path, the checker resolves it against
 the expression's actual aggregate type before physical field lookup, matching
@@ -608,7 +618,8 @@ range validation remains unchanged; `__int128` is not a candidate.
 | `c-parser/cpp.lua` | preprocessing, raw/prescanned macro forms, captured compiler execution |
 | `c-parser/c99.lua` | preprocessing-token and C99 declaration grammar |
 | `c-parser/ctypes.lua` | `TypeList`, file/prototype tag metadata and scopes |
-| `c-parser/cdefines.lua` | target-neutral object-macro expression/cast metadata and lazy classification against the final raw field-macro environment |
+| `c-parser/cdefines.lua` | target-neutral object-macro expression/cast metadata and extracted classification of final field macros |
+| `titan-compiler/cdefinitioncache.lua` | closed header/FFI declaration projection and reconstruction without parser/CPP state |
 | `titan-compiler/foreigntypes.lua` | ordered canonical C-type conversion, tag binding, target-profile macro-expression finalization, and macro cast-target conversion |
 | `titan-compiler/cdeclarator.lua` | exact C declarations/type names/parameter adjustment |
 | `titan-compiler/ffiheaders.lua` | deterministic module `.ffi.h` descriptors and physical checking trees |

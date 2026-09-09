@@ -473,6 +473,51 @@ local function macro_replacement(macros, name, seen)
     return replacement
 end
 
+-- Only these predefined facts enter the target profile. Keep direct alias
+-- dependencies and function-like rejection markers, rather than retaining
+-- the complete preprocessor environment for the profile's later acquisition.
+local profile_macro_names = {
+    "__CHAR_BIT__", "__CHAR_UNSIGNED__", "__SIZEOF_BOOL__", "__SIZEOF_INT128__",
+    "__SCHAR_MAX__", "__UCHAR_MAX__", "__SIZEOF_SHORT__", "__SHRT_MAX__", "__USHRT_MAX__",
+    "__SIZEOF_INT__", "__INT_MAX__", "__UINT_MAX__", "__SIZEOF_LONG__", "__LONG_MAX__", "__ULONG_MAX__",
+    "__SIZEOF_LONG_LONG__", "__LONG_LONG_MAX__", "__ULONG_LONG_MAX__", "__ULLONG_MAX__",
+    "__FLT_RADIX__", "__SIZEOF_FLOAT__", "__FLT_MAX_EXP__", "__FLT_MANT_DIG__",
+    "__SIZEOF_DOUBLE__", "__DBL_MAX_EXP__", "__DBL_MANT_DIG__",
+    "__SIZEOF_LONG_DOUBLE__", "__LDBL_MAX_EXP__", "__LDBL_MANT_DIG__",
+}
+
+function csemantics.profile_macro_facts(macros)
+    local result, seen, pending = {}, {}, {}
+    for _, name in ipairs(profile_macro_names) do pending[#pending + 1] = name end
+    while #pending > 0 do
+        local name = table.remove(pending)
+        if not seen[name] then
+            seen[name] = true
+            local value = macros[name]
+            if type(value) == "table" and value.args ~= nil then
+                result[name] = { args = {} }
+            elseif value ~= nil then
+                local text = type(value) == "table" and table.concat(value.repl or value) or tostring(value)
+                result[name] = text
+                local alias = text:gsub("^%s+", ""):gsub("%s+$", "")
+                while alias:match("^%b()$") do
+                    alias = alias:sub(2, -2):gsub("^%s+", ""):gsub("%s+$", "")
+                end
+                if alias:match("^[_%a][_%w]*$") and macros[alias] ~= nil then pending[#pending + 1] = alias end
+            end
+        end
+    end
+    return result
+end
+
+local function expression_literal(expression)
+    if expression.integer_literal then return expression.integer_literal end
+    if expression.candidate_classes and expression.digits then return expression end
+    if expression.integer_token then
+        return require("c-parser.cdefines").integer_literal_metadata(expression.integer_token)
+    end
+end
+
 local function parse_integer_token(token, trait_name)
     token = token:gsub("^%+", "")
     local digits, radix
@@ -1872,11 +1917,7 @@ expression_integer_type = function(profile, expression)
         return nil, "invalid preserved C macro expression"
     end
 
-    local literal = expression.integer_literal
-    if not literal and expression.candidate_classes
-       and expression.digits then
-        literal = expression
-    end
+    local literal = expression_literal(expression)
     if literal then
         local result, err =
             csemantics.classify_integer_literal(profile, literal)
@@ -2091,11 +2132,7 @@ evaluate_expression = function(profile, expression)
         return nil, "invalid preserved C macro expression"
     end
 
-    local literal = expression.integer_literal
-    if not literal and expression.candidate_classes
-       and expression.digits then
-        literal = expression
-    end
+    local literal = expression_literal(expression)
     if literal then
         return csemantics.classify_integer_literal(profile, literal)
     end

@@ -469,7 +469,7 @@ describe("completed C header payload transport", function()
         return path
     end
 
-    it("reopens complete graphs without parsing and preserves macro sidecars", function()
+    it("reopens extracted definitions without parsing and preserves expanded macro spelling", function()
         local cpp = require "c-parser.cpp"
         local path = header("typedef struct node node;\nstruct node { node *next; };\n")
         local options = {
@@ -484,7 +484,7 @@ describe("completed C header payload transport", function()
         local restored, include = assert_process_file(path, options)
         assert.equal(1, matches)
         assert.equal(1, cdriver.process_cache_stats().hits)
-        assert.equal('"a + b"', cpp.expand_macro("TITAN_VALUE", restored.macro_definitions))
+        assert.equal('"a + b"', restored.field_macro_classes.TITAN_VALUE.replacement)
         assert.not_equal(first.node, restored.node)
         assert.matches("titan-cdriver-process-v2:sha256:", include.c_header_graph_key, 1, true)
         local clean = assert_process_file(path, options)
@@ -575,7 +575,7 @@ describe("completed C header payload transport", function()
     end)
 
     for _, flag in ipairs({ "-include", "-imacros" }) do
-        it("replays a completed " .. flag .. " context without forced-header reads or probes", function()
+        it("keeps " .. flag .. " preprocessing local while replaying extracted declarations", function()
             local cpp = require "c-parser.cpp"
             local forced = header("#define FORCED_TYPE int\ntypedef int forced_declaration;\n")
             local imported = header("typedef FORCED_TYPE imported_type;\n")
@@ -612,36 +612,38 @@ describe("completed C header payload transport", function()
                 original[key] = payload
                 if key:find("titan-cpp-forced-v1:", 1, true) then forced_keys = forced_keys + 1 end
             end
-            assert.equal(1, forced_keys)
+            assert.equal(0, forced_keys)
+            assert.equal(1, forced_probes)
+            assert_process_file(imported, options)
             assert.equal(1, forced_probes)
             cpp.clear_probe_cache()
             cdriver.clear_process_cache(strategy)
             assert_process_file(imported, options)
-            assert.equal(1, forced_probes)
-            assert.equal(0, cdriver.process_cache_stats(strategy).file_reads)
-            assert.equal(0, cdriver.process_cache_stats(strategy).file_hashes)
+            assert.equal(2, forced_probes)
+            assert.is_true(cdriver.process_cache_stats(strategy).file_reads > 0)
+            assert.is_true(cdriver.process_cache_stats(strategy).file_hashes > 0)
             local stamp = assert(lfs.attributes(forced, "modification"))
             assert(lfs.touch(forced, stamp + 1, stamp + 1))
             cpp.clear_probe_cache()
             cdriver.clear_process_cache(strategy)
             assert_process_file(imported, options)
-            assert.equal(1, forced_probes)
-            assert.equal(1, cdriver.process_cache_stats(strategy).file_reads)
-            assert.equal(1, cdriver.process_cache_stats(strategy).file_hashes)
-            assert.is_true(refreshes > 0)
+            assert.equal(3, forced_probes)
+            assert.is_true(cdriver.process_cache_stats(strategy).file_reads > 0)
+            assert.is_true(cdriver.process_cache_stats(strategy).file_hashes > 0)
+            assert.equal(0, refreshes)
             assert.same(original, payloads)
             cpp.clear_probe_cache()
             cdriver.clear_process_cache(strategy)
             local restored = assert_process_file(imported, options)
             assert.same({ "int" }, restored.imported_type.def)
             assert.equal(1, matches)
-            assert.equal(1, forced_probes)
-            assert.equal(0, cdriver.process_cache_stats(strategy).file_reads)
-            assert.equal(0, cdriver.process_cache_stats(strategy).file_hashes)
+            assert.equal(4, forced_probes)
+            assert.is_true(cdriver.process_cache_stats(strategy).file_reads > 0)
+            assert.is_true(cdriver.process_cache_stats(strategy).file_hashes > 0)
         end)
     end
 
-    it("keeps forced macro contexts private and cancels inside their persisted codec", function()
+    it("keeps forced macro contexts private and preserves read cancellation", function()
         local cpp = require "c-parser.cpp"
         local forced = header("#define PRIVATE_TYPE int\n")
         local strategy = compiler_io.new_sync()
@@ -652,20 +654,21 @@ describe("completed C header payload transport", function()
         local second = assert(cpp.new_context(options))
         assert.equal("int", cpp.expand_macro("PRIVATE_TYPE", second.defines))
         cpp.clear_probe_cache()
-        local calls, cancellation = 0, {}
-        adapter.yield = function()
-            calls = calls + 1
-            if calls == 2 then error(cancellation, 0) end
+        local calls, cancellation, read = 0, {}, strategy.read_file
+        function strategy:read_file(path)
+            if path == forced then calls = calls + 1; error(cancellation, 0) end
+            return read(self, path)
         end
         local ok, err = pcall(cpp.new_context, options)
         assert.is_false(ok)
         assert.equal(cancellation, err)
-        assert.equal(2, calls)
-        adapter.yield = nil
+        assert.equal(1, calls)
+        strategy.read_file = read
         assert(cpp.new_context(options))
+        assert.is_nil(next(payloads))
     end)
 
-    it("invalidates persisted forced symlink retargets and never stores missing inputs", function()
+    it("invalidates forced symlink retargets and never stores missing inputs", function()
         local cpp = require "c-parser.cpp"
         local first = header("#define LINKED_TYPE int\n")
         local second = header("#define LINKED_TYPE long\n")
@@ -690,7 +693,7 @@ describe("completed C header payload transport", function()
         assert.same(before, payloads)
     end)
 
-    it("stores no forced context until its native macro probe succeeds", function()
+    it("publishes no local forced context until its native macro probe succeeds", function()
         local cpp = require "c-parser.cpp"
         local forced = header("#define COMPLETE_CONTEXT 1\n")
         local strategy = compiler_io.new_sync()
@@ -712,7 +715,7 @@ describe("completed C header payload transport", function()
         assert.is_nil(next(payloads))
         fail = false
         assert(cpp.new_context(options))
-        assert.is_not_nil(next(payloads))
+        assert.is_nil(next(payloads))
     end)
 
     for _, mode in ipairs({ "ordinary", "nested", "include", "imacros" }) do
@@ -1500,10 +1503,10 @@ extern titan_cdriver_cache_type titan_cdriver_cache_value;
                     second.titan_cdriver_cache_type)
                 assert.same(
                     { "int" }, second.titan_cdriver_cache_type.def)
-                assert.same({ "17" },
-                    second.macro_definitions.TITAN_CDRIVER_CACHE_CONSTANT)
+                assert.equal("17",
+                    second.field_macro_classes.TITAN_CDRIVER_CACHE_CONSTANT.replacement)
                 assert.equal(
-                    second.macro_definitions, second_context.defines)
+                    second.profile_macros, second_context.defines)
                 assert.equal(second_include.c_header_dependencies,
                     second_context.c_header_dependencies)
                 assert.equal(second_include.c_header_search_inputs,
@@ -1530,7 +1533,7 @@ extern titan_cdriver_cache_type titan_cdriver_cache_value;
             assert.truthy(ok, err)
         end)
 
-        it("preserves macro token spelling in shared completed graphs",
+        it("preserves expanded macro spelling in shared extracted definitions",
         function()
             cdriver.clear_process_cache()
             local cpp = require "c-parser.cpp"
@@ -1545,10 +1548,8 @@ extern titan_cdriver_cache_type titan_cdriver_cache_value;
 
             local first = assert_process_file(header, options)
             local second = assert_process_file(header, options)
-            assert.equal('"a + b"', cpp.expand_macro(
-                "TITAN_CACHE_VALUE", first.macro_definitions))
-            assert.equal('"a + b"', cpp.expand_macro(
-                "TITAN_CACHE_VALUE", second.macro_definitions))
+            assert.equal('"a + b"', first.field_macro_classes.TITAN_CACHE_VALUE.replacement)
+            assert.equal('"a + b"', second.field_macro_classes.TITAN_CACHE_VALUE.replacement)
             assert.equal(1, cdriver.process_cache_stats().hits)
             os.remove(header)
         end)
@@ -1694,13 +1695,13 @@ extern titan_cdriver_cache_type titan_cdriver_cache_value;
             }
 
             local first = assert_process_file(header, options)
-            assert.same({ "17" },
-                first.macro_definitions.TITAN_CACHE_PROBE_MUTATION)
-            first.macro_definitions.TITAN_CACHE_PROBE_MUTATION[1] = "23"
+            assert.equal("17",
+                first.field_macro_classes.TITAN_CACHE_PROBE_MUTATION.replacement)
+            first.field_macro_classes.TITAN_CACHE_PROBE_MUTATION.replacement = "23"
             cdriver.clear_process_cache()
             local second = assert_process_file(header, options)
-            assert.same({ "17" },
-                second.macro_definitions.TITAN_CACHE_PROBE_MUTATION)
+            assert.equal("17",
+                second.field_macro_classes.TITAN_CACHE_PROBE_MUTATION.replacement)
             os.remove(header)
         end)
 
@@ -2454,7 +2455,7 @@ typedef TITAN_CACHE_CONFIG_TYPE titan_cache_config_type;
         assert.is_nil(occurrences.cdriver_macro_only_type)
     end)
 
-    it("records final field projections and every touched macro name",
+    it("records final field projections and blocked object macros without history",
     function()
         local header = tmp_header([[
             #define cdriver_projection implementation.member
@@ -2463,6 +2464,8 @@ typedef TITAN_CACHE_CONFIG_TYPE titan_cache_config_type;
             #define cdriver_replaced implementation.member
             #undef cdriver_replaced
             #define cdriver_replaced 17
+            #define cdriver_empty
+            #define cdriver_function(x) implementation.member
         ]])
 
         local ffi_types = assert_process_file(header)
@@ -2470,18 +2473,15 @@ typedef TITAN_CACHE_CONFIG_TYPE titan_cache_config_type;
 
         assert.same(
             { "implementation", "member" },
-            ffi_types.field_macro_paths.cdriver_projection.path)
-        assert.is_nil(ffi_types.field_macro_paths.cdriver_removed)
-        assert.is_nil(ffi_types.field_macro_paths.cdriver_replaced)
-        assert.is_true(ffi_types.macro_changes.cdriver_projection)
-        assert.is_true(ffi_types.macro_changes.cdriver_removed)
-        assert.is_true(ffi_types.macro_changes.cdriver_replaced)
-        assert.same(
-            { "implementation", ".", "member" },
-            ffi_types.macro_definitions.cdriver_projection)
-        assert.is_nil(ffi_types.macro_definitions.cdriver_removed)
-        assert.same({ "17" },
-            ffi_types.macro_definitions.cdriver_replaced)
+            ffi_types.field_macro_classes.cdriver_projection.path)
+        assert.is_nil(ffi_types.field_macro_classes.cdriver_removed)
+        assert.is_nil(ffi_types.field_macro_classes.cdriver_function)
+        assert.is_true(ffi_types.field_macro_classes.cdriver_replaced.unsupported)
+        assert.equal("17", ffi_types.field_macro_classes.cdriver_replaced.replacement)
+        assert.is_true(ffi_types.field_macro_classes.cdriver_empty.unsupported)
+        assert.equal("", ffi_types.field_macro_classes.cdriver_empty.replacement)
+        assert.is_nil(ffi_types.macro_changes)
+        assert.is_nil(ffi_types.macro_definitions)
     end)
 
 
@@ -3237,8 +3237,8 @@ typedef double compiler_selection;
                 }) do
                     assert.is_table(inputs.signed_minima[spelling])
                 end
-                assert.same({ "1" }, inputs.macros.__CHAR_UNSIGNED__)
-                assert.same({ "23" }, inputs.macros.TITAN_PROFILE_FLAG)
+                assert.equal("1", inputs.macros.__CHAR_UNSIGNED__)
+                assert.is_nil(inputs.macros.TITAN_PROFILE_FLAG)
                 assert.same({ root }, inputs.fixed_include_dirs)
                 assert.equal("lua.h", inputs.lua_header.original)
                 assert.equal(header, inputs.lua_header.resolved)

@@ -10,9 +10,11 @@ local compiler_io = require("titan-compiler.io")
 local sha256 = require("titan-compiler.sha256")
 local cacheadapter = require("titan-compiler.cacheadapter")
 local version = require "titan-compiler.version"
+local definitions = require "titan-compiler.cdefinitioncache"
+local csemantics = require "titan-compiler.csemantics"
 
-cdriver.HEADER_CACHE_VERSION = 2
-local HEADER_CACHE_KIND = "c-header-v2"
+cdriver.HEADER_CACHE_VERSION = 3
+local HEADER_CACHE_KIND = "c-header-v3"
 
 local SEP = package.config:sub(1, 1)
 local default_io = compiler_io.new_sync()
@@ -634,14 +636,12 @@ end
 
 local graph_weight = cpp.graph_weight
 
--- The fourth process_file result exists for target-profile acquisition. Its
--- semantic payload is the exact macro context which cdefines has already
--- attached to ffi_types. Reconstruct the I/O and observed-input conveniences
--- per caller instead of retaining flattened preprocessor output, origins,
--- include roots, current-directory stacks, or observer bookkeeping.
+-- The fourth process_file result exists for target-profile acquisition. It
+-- exposes only predefined macro facts consumed by csemantics. Reconstruct the
+-- I/O and input conveniences per caller; no CPP context survives extraction.
 local function result_context(ffi_types, strategy, dependencies, search_inputs)
     return {
-        defines = ffi_types.macro_definitions,
+        defines = ffi_types.profile_macros,
         io = strategy,
         c_header_dependencies = dependencies,
         c_header_search_inputs = search_inputs,
@@ -677,9 +677,12 @@ local function decode_header_entry(payload, key, adapter)
        or entry.abi ~= version.TITAN_ABI_VERSION or entry.key ~= key then
         return nil
     end
-    entry.version, entry.abi, entry.key = nil, nil, nil
-    entry.weight, entry.last_used = 0, 0
-    return entry
+    return {
+        ffi_types = definitions.header(entry.ffi_types, { strict = true, yield = adapter.yield }),
+        dependencies = copy_input_tail(entry.dependencies, 0),
+        search_inputs = copy_input_tail(entry.search_inputs, 0),
+        weight = 0, last_used = 0,
+    }
 end
 
 local function encode_header_entry(entry, key, adapter)
@@ -1097,64 +1100,10 @@ local function process_file_inner(filename, options)
         return nil, ("failed parsing: %s:%d:%d: %s\n%s"):format(filename, line, col, err, fragment)
     end
 
-    -- Preserve source positions through the flattened preprocessor stream for
-    -- declaration diagnostics and for recognizing one physical declaration
-    -- repeated by independent header extraction. Source identity alone never
-    -- proves that the declaration is valid in the cumulative include state;
-    -- the final ordered-header compiler baseline remains authoritative.
-    local line_starts = {}
-    local next_start = 1
-    for index, output_line in ipairs(ctx.output) do
-        line_starts[index] = next_start
-        next_start = next_start + #output_line + 1
-    end
-    local source_identities = {}
-    local function source_identity(source_file)
-        local cached = source_identities[source_file]
-        if cached ~= nil then return cached end
-        local metadata = strategy:stat(source_file)
-        cached = metadata
-            and metadata.device ~= nil
-            and metadata.inode ~= nil
-            and {
-                -- The checker compares this opaque pair only for equality.
-                -- Preserve physical identity across both symlink and hard-link
-                -- spellings without retaining the complete strategy record.
-                device = metadata.device,
-                inode = metadata.inode,
-            } or false
-        source_identities[source_file] = cached
-        return cached
-    end
-    local function source_origin(position)
-        local low, high = 1, #line_starts
-        local found = 1
-        while low <= high do
-            local middle = math.floor((low + high) / 2)
-            if line_starts[middle] <= position then
-                found = middle
-                low = middle + 1
-            else
-                high = middle - 1
-            end
-        end
-        local origin = ctx.output_origins
-            and ctx.output_origins[found]
-        if not origin then return nil end
-        local identity = source_identity(origin.file)
-        return {
-            file = origin.file,
-            line = origin.line,
-            column = position - line_starts[found] + 1,
-            device = identity and identity.device or nil,
-            inode = identity and identity.inode or nil,
-        }
-    end
-    for _, declaration in ipairs(res) do
-        declaration._declaration_provenance =
-            source_origin(declaration._source_position)
-        declaration._source_position = nil
-    end
+    -- The real module-wide header already resolves declaration order and
+    -- tag scope. Per-declaration physical-file identities were used only by
+    -- the retired independent-header compatibility path; keep no such source
+    -- map in the extracted declaration graph.
 
     local type_conversion_started = cdriver.process_phase_clock(options)
     local ffi_types, err = ctypes.register_types(res, {
@@ -1170,11 +1119,8 @@ local function process_file_inner(filename, options)
 
     local macro_conversion_started = cdriver.process_phase_clock(options)
     cdefines.register_defines(ffi_types, ctx.defines)
-    ffi_types.macro_definitions = ctx.defines
-    ffi_types.macro_changes = {}
-    for name in pairs(ctx.macro_changes or {}) do
-        ffi_types.macro_changes[name] = true
-    end
+    ffi_types.profile_macros = csemantics.profile_macro_facts(ctx.defines)
+    ffi_types = definitions.header(ffi_types, { yield = options.cache_adapter and options.cache_adapter.yield })
     cdriver.emit_process_phase(options, filename, include,
         "macro_conversion", "complete", macro_conversion_started)
 
