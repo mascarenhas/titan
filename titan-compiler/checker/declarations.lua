@@ -672,7 +672,9 @@ function check_foreign_environment(module_ast, st, errors)
             "downstream_ffi_conversion", "cache_hit", cdriver.process_phase_clock(options))
     else
         local started = cdriver.process_phase_clock(options)
-        st:apply_foreign_macro_changes(ftypes.macro_changes, ftypes.macro_definitions)
+        -- The one real module header has already established final macro
+        -- visibility. Field lookups consume its extracted classifications.
+        st.foreign_field_macro_cache = ftypes.field_macro_classes
         local members, type_members = {}, {}
         for _, item in ipairs(ftypes) do
             local name, ftype = item.name, item.type

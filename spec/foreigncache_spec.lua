@@ -56,7 +56,7 @@ describe("module foreign conversion payloads", function()
         return path
     end
 
-    local function check(source, cache, provider_source)
+    local function check(source, cache, provider_source, expected_error)
         driver.imported, types.registry = {}, {}
         cdriver.clear_process_cache()
         cpp.clear_probe_cache()
@@ -83,6 +83,11 @@ describe("module foreign conversion payloads", function()
         })
         loaders[#loaders + 1] = loader
         local ok, result, errors = loader("cached")
+        if expected_error then
+            local diagnostic = ok and table.concat(errors, "\n") or result
+            assert.matches(expected_error, diagnostic, 1, true)
+            return driver.imported.cached, driver.compiler_cache_stats({ context = context }), diagnostic
+        end
         assert.is_true(ok, result)
         assert.equal(0, #errors, table.concat(errors, "\n"))
         return driver.imported.cached, driver.compiler_cache_stats({ context = context })
@@ -102,7 +107,7 @@ describe("module foreign conversion payloads", function()
         return current
     end
 
-    it("reopens the complete conversion graph after a body-only edit", function()
+    it("reopens final C definitions after a body-only edit", function()
         header("cached.h", [[
             typedef struct link link;
             struct link { link *next; int item; };
@@ -130,7 +135,106 @@ describe("module foreign conversion payloads", function()
             types.resolve_c_typedef(aliases.same_anonymous))
     end)
 
-    it("preserves cross-header completion, import rebinding and macro spacing", function()
+    it("replays exact constants, recursive layouts, macro projections and callable names", function()
+        header("extracted.h", [[
+            typedef int word;
+            typedef struct item item;
+            struct item { item *next; struct { word value; } nested; word values[sizeof(word)]; };
+            int named(int count, const char *label);
+            extern word callback_extent[sizeof(int (*)(int [static 3]))];
+            enum small { SMALL = 7 };
+            #define HIGH (0x80000000U >> 31)
+            #define NEGATIVE (-1LL)
+            #define NOTHING ((item *)0)
+            #define PROJECT NEXT
+            #define NEXT nested.value
+            static inline word inline_body(word value) {
+                word parser_body_marker = value + 1;
+                return parser_body_marker;
+            }
+        ]])
+        local source = [[
+            foreign import "extracted.h"
+            foreign function projected(input: *ffi.item): ffi.word return input.PROJECT end
+            function answer(): integer
+                local result = ffi.named { count = 1, label = "value" }
+                return ffi.HIGH + ffi.SMALL
+            end
+        ]]
+        local first = check(source)
+        local count = conversions
+        local restored, stats = check((source:gsub('label = "value"', 'label = "changed"')))
+        assert.equal(count, conversions)
+        assert.equal(1, stats.conversion.hits)
+        local namespace = restored.ast._ffi_namespace._type
+        assert.same({ "count", "label" }, namespace.members.named.paramnames)
+        local item = types.resolve_c_typedef(namespace.type_members.item)
+        assert.equal(item, types.resolve_c_typedef(item.fields.next.type.pointee))
+        assert.equal("sizeof", item.fields.values.type.len.op)
+        assert.equal("Type.CPointer", namespace.members.NOTHING.type._tag)
+        assert.equal("unsigned int", namespace.members.HIGH.type.spelling)
+        assert.equal("long long", namespace.members.NEGATIVE.type.spelling)
+        assert.equal(first.ast._ffi_namespace._type.members.SMALL.type._c_declaration_spelling,
+            namespace.members.SMALL.type._c_declaration_spelling)
+        for _, payload in pairs(payloads) do
+            assert.is_nil(payload:find("parser_body_marker", 1, true))
+            for _, forbidden in ipairs({ "parser_body_marker", "candidate_classes", "integer_literals",
+                "macro_definitions", "macro_changes", "foreign_name_history", "converted_aggregates",
+                "raw_spelling" }) do
+                assert.is_nil(payload:find("s" .. string.pack(">I4", #forbidden) .. forbidden, 1, true), forbidden)
+            end
+        end
+    end)
+
+    it("preserves empty and unsupported field macro failures after replay", function()
+        header("fields.h", [[
+            typedef int word;
+            typedef struct { word blocked; word empty; word removed; word function_like; } item;
+            #define blocked 17
+            #define empty
+            #define removed missing.member
+            #undef removed
+            #define function_like(value) value
+        ]])
+        local source = [[
+            foreign import "fields.h"
+            foreign function observed(item: *ffi.item): ffi.word return item.removed + item.function_like end
+        ]]
+        check(source)
+        local count = conversions
+        for _, field in ipairs({ "blocked", "empty" }) do
+            local rejected = source:gsub("item%.removed %+ item%.function_like", "item." .. field)
+            local _, stats, diagnostic = check(rejected, nil, nil, "active object-like macro")
+            assert.equal(count, conversions)
+            assert.equal(1, stats.conversion.hits)
+            assert.matches("C field token '" .. field .. "'", diagnostic, 1, true)
+        end
+        local _, stats = check(source)
+        assert.equal(count, conversions)
+        assert.equal(1, stats.conversion.hits)
+    end)
+
+    it("rejects well-formed envelopes that contain obsolete checker roots", function()
+        header("closed.h", "typedef int item_type;\n")
+        local source = 'foreign import "closed.h"\nfunction answer(): integer return 42 end'
+        local first = check(source)
+        local refs = graph_references(first)
+        local external = {}
+        for name, value in pairs(refs) do external[value] = name end
+        for key, payload in pairs(payloads) do
+            if key:find("ffi-conversion-v3\0", 1, true) == 1 then
+                local snapshot = assert(cpp.decode_graph(payload, { references = refs }))
+                snapshot.converted_enums = {}
+                payloads[key] = assert(cpp.encode_graph(snapshot, { external = external }))
+            end
+        end
+        local count = conversions
+        local _, stats = check(source)
+        assert.is_true(conversions > count)
+        assert.equal(1, stats.conversion.misses)
+    end)
+
+    it("preserves cross-header completion, import rebinding and expanded macro spelling", function()
         header("first.h", [[
             typedef int count;
             typedef struct shared shared;
@@ -155,10 +259,12 @@ describe("module foreign conversion payloads", function()
         assert.equal(1, stats.conversion.hits)
         local first = restored.ast._ffi_namespace._type
         for key, payload in pairs(payloads) do
-            if key:sub(1, #"ffi-conversion-v2\0") == "ffi-conversion-v2\0" then
+            if key:sub(1, #"ffi-conversion-v3\0") == "ffi-conversion-v3\0" then
                 local snapshot = assert(cpp.decode_graph(payload, { references = graph_references(restored) }))
-                assert.equal('"a + b"', cpp.expand_macro("TEXT",
-                    snapshot.roots.foreign_macro_definitions))
+                assert.equal('"a + b"', snapshot.field_macros.TEXT.replacement)
+                assert.is_nil(snapshot.roots)
+                assert.is_nil(snapshot.converted_enums)
+                assert.is_nil(snapshot.converted_aggregates)
             end
         end
         assert.is_table(first.type_members.shared)
@@ -173,7 +279,7 @@ describe("module foreign conversion payloads", function()
         check(source)
         local count = conversions
         for key in pairs(payloads) do
-            if key:sub(1, #"ffi-conversion-v2\0") == "ffi-conversion-v2\0" then payloads[key] = "corrupt" end
+            if key:sub(1, #"ffi-conversion-v3\0") == "ffi-conversion-v3\0" then payloads[key] = "corrupt" end
         end
         local _, corrupt = check(source)
         assert.is_true(conversions > count)
@@ -193,7 +299,7 @@ describe("module foreign conversion payloads", function()
         check(source)
         local count, get = conversions, adapter.get
         adapter.get = function(kind, key)
-            if kind == "ffi-conversion-v2" then
+            if kind == "ffi-conversion-v3" then
                 local malformed = {}
                 setmetatable(malformed, { __index = malformed })
                 return get(kind, key), { malformed }
@@ -212,7 +318,7 @@ describe("module foreign conversion payloads", function()
         check(source)
         local get, cancellation = adapter.get, {}
         adapter.get = function(kind, key)
-            if kind == "ffi-conversion-v2" then
+            if kind == "ffi-conversion-v3" then
                 local malformed = setmetatable({}, { __index = function() error(cancellation, 0) end })
                 return get(kind, key), { malformed }
             end
@@ -256,13 +362,13 @@ describe("module foreign conversion payloads", function()
         assert.equal(1, stats.conversion.hits)
         assert.equal(interface, assert(driver.serialize_source_interface(touched)))
         assert.same(original, payloads)
-        assert.is_true((refreshes["c-header-v2"] or 0) > 0)
-        assert.equal(1, refreshes["ffi-conversion-v2"])
+        assert.is_true((refreshes["c-header-v3"] or 0) > 0)
+        assert.equal(1, refreshes["ffi-conversion-v3"])
         local _, warm = check(source)
         assert.equal(count, conversions)
         assert.equal(0, warm.headers.file_reads)
         assert.equal(0, warm.headers.file_hashes)
-        assert.equal(1, refreshes["ffi-conversion-v2"])
+        assert.equal(1, refreshes["ffi-conversion-v3"])
     end)
 
     it("replays a fresh source-import context after its provider body changes", function()
@@ -344,7 +450,7 @@ describe("module foreign conversion payloads", function()
         ]]
         local hashes = 0
         adapter.sha256_binary = function(bytes)
-            if bytes:find("ffi-conversion-v2", 1, true) then hashes = hashes + 1 end
+            if bytes:find("ffi-conversion-v3", 1, true) then hashes = hashes + 1 end
             return require("titan-compiler.sha256").binary(bytes)
         end
         check(source)
@@ -355,7 +461,7 @@ describe("module foreign conversion payloads", function()
         assert.equal(count, conversions)
         local cancelled = {}
         adapter.sha256_binary = function(bytes)
-            if bytes:find("ffi-conversion-v2", 1, true) then error(cancelled, 0) end
+            if bytes:find("ffi-conversion-v3", 1, true) then error(cancelled, 0) end
             return require("titan-compiler.sha256").binary(bytes)
         end
         local ok, err = pcall(check, source)

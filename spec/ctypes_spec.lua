@@ -1,6 +1,7 @@
 local cdriver = require "c-parser.cdriver"
 local c99 = require "c-parser.c99"
 local ctypes = require "c-parser.ctypes"
+local cpp = require "c-parser.cpp"
 
 local function with_header(contents, fn)
     local header = os.tmpname() .. ".h"
@@ -19,7 +20,12 @@ end
 
 local function parse_header(contents)
     return with_header(contents, function(header)
-        local ftypes, err = cdriver.process_file(header)
+        -- Registration metadata is transient. Exercise the registrar before
+        -- cdriver projects its completed extracted-definition cache entry.
+        local context = assert(cpp.new_context())
+        context = assert(cpp.parse_file(header, nil, context))
+        local parsed = assert(c99.match_language_grammar(table.concat(context.output, "\n") .. " $EOF$"))
+        local ftypes, err = ctypes.register_types(parsed, { header = header })
         assert(ftypes, err)
         return ftypes
     end)

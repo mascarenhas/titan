@@ -350,6 +350,27 @@ describe("pure C expression semantics", function()
     end)
 
     describe("target profiles and categories", function()
+        it("extracts only profile facts while preserving alias and rejection behavior", function()
+            local macros = lp64_macros()
+            macros.__INT_MAX__ = { "(", "TARGET_INT_MAX", ")" }
+            macros.TARGET_INT_MAX = { "0x7fffffff" }
+            macros.UNRELATED_HEADER_MACRO = { "large", "unused", "replacement" }
+            local facts = csemantics.profile_macro_facts(macros)
+            assert.is_nil(facts.UNRELATED_HEADER_MACRO)
+            assert.equal("0x7fffffff", facts.TARGET_INT_MAX)
+            assert.same(assert(build_lp64(macros)), assert(build_lp64(facts)))
+
+            macros.__SIZEOF_INT__ = { args = { "argument" }, repl = { "4" } }
+            local _, original_error = build_lp64(macros)
+            local _, compact_error = build_lp64(csemantics.profile_macro_facts(macros))
+            assert.equal(original_error, compact_error)
+            macros.__SIZEOF_INT__ = { "SIZE_ALIAS" }
+            macros.SIZE_ALIAS = { "__SIZEOF_INT__" }
+            _, original_error = build_lp64(macros)
+            _, compact_error = build_lp64(csemantics.profile_macro_facts(macros))
+            assert.equal(original_error, compact_error)
+        end)
+
         it("validates an injected LP64 profile without host queries", function()
             assert.is_true(csemantics.validate_profile(lp64_profile()))
             assert.is_true(csemantics.validate_profile(narrow_int_profile()))

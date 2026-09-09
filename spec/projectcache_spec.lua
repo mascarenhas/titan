@@ -4,8 +4,9 @@ local parser = require "titan-compiler.parser"
 local lfs = require "lfs"
 local sha256 = require "titan-compiler.sha256"
 local cpp = require "c-parser.cpp"
+local coder = require "titan-compiler.coder"
 
-describe("checked project payloads", function()
+describe("declared project manifests", function()
     local previous_imported, previous_registry, loaders
     before_each(function()
         previous_imported, previous_registry = driver.imported, types.registry
@@ -19,6 +20,7 @@ describe("checked project payloads", function()
     local function load_module(name, source, retained, extra_options)
         local filename = "/tmp/titan-project-cache-" .. name .. ".titan"
         local options = {
+            analysis_only = true,
             source_roots = { [name] = true },
             source_overrides = { [name] = {
                 kind = "generated", main = filename, files = { filename },
@@ -35,6 +37,26 @@ describe("checked project payloads", function()
         return driver.imported[name]
     end
 
+    local function assert_declarations_only(root)
+        local seen, queue = {}, { root }
+        local index = 1
+        while queue[index] do
+            local node = queue[index]
+            if not seen[node] then
+                seen[node] = true
+                assert.is_nil(getmetatable(node))
+                assert.is_false(type(node._tag) == "string" and node._tag:match("^Ast%.") ~= nil)
+                for key, value in pairs(node) do
+                    assert.is_not_equal("_decl", key)
+                    assert.is_not_equal("_parameter_decls", key)
+                    if type(key) == "table" then queue[#queue + 1] = key end
+                    if type(value) == "table" then queue[#queue + 1] = value end
+                end
+            end
+            index = index + 1
+        end
+    end
+
     it("hydrates a private generic source entry and reuses it on the next edit", function()
         local provider = load_module("provider", [[
             record Box<A> item: A end
@@ -46,10 +68,10 @@ describe("checked project payloads", function()
             module_name = "provider",
             project_files = { [provider.filename] = true },
         }))
-        assert.not_equal(provider.ast, restored.ast)
-        assert.equal(restored.ast[1], restored.ast[1]._decl)
+        assert.is_nil(restored.ast)
+        assert_declarations_only(restored)
         local declared = assert(driver.project_entries_registry({ provider = restored }))
-        assert.equal(restored.ast._declared_registry["provider.Box"],
+        assert.equal(restored.declared_registry["provider.Box"],
             declared["provider.Box"])
         assert.equal(1, #declared["provider.Box"].typeparams)
         types.registry = declared
@@ -70,6 +92,163 @@ describe("checked project payloads", function()
         assert.same({ consumer.filename }, parsed)
         assert.equal(restored, driver.imported.provider)
         assert.is_true(consumer.ast[1]._source_import)
+    end)
+
+    it("restores generic constraints, alias chains, local members and named parameters", function()
+        local provider = load_module("generic_surface", [[
+            interface Show<A> function render(item: A): string end
+            record Printer prefix: string end
+            function Printer:render(item: integer): string return self.prefix end
+            record Box<T> local hidden: T shown: T end
+            local function Box.make(item: T): Box<T> return Box<T>.new(item, item) end
+            local function Box:replace<V>(item: V): Box<V> return Box<V>.new(item, item) end
+            local union Choice<T> local hidden: T shown: T end
+            type Alias = Box
+            local type PrivateAlias = Alias
+            local function display<S: Show<integer>>(subject: S): string return subject:render(1) end
+        ]])
+        local restored = assert(driver.decode_project_entry(assert(driver.encode_project_entry(provider))))
+        assert_declarations_only(restored)
+        driver.imported, types.registry = {}, driver.project_entries_registry({ generic_surface = restored })
+        local parsed, parse = {}, parser.parse
+        parser.parse = function(filename, source)
+            parsed[#parsed + 1] = filename
+            return parse(filename, source)
+        end
+        local ok, consumer = pcall(load_module, "generic_surface_consumer", [[
+            local provider = import "generic_surface.titan"
+            function answer(): string
+                local box = provider.PrivateAlias<integer>.make { item = 42 }
+                local copy = box:replace<string> { item = "kept" }
+                copy.hidden = copy.shown
+                local choice = provider.Choice<string>.hidden(copy.hidden)
+                case choice
+                when hidden: item then
+                    return provider.display<provider.Printer> { subject = provider.Printer.new(item) }
+                when shown: item then return item
+                end
+            end
+        ]], { generic_surface = restored })
+        parser.parse = parse
+        assert.is_true(ok, consumer)
+        assert.same({ consumer.filename }, parsed)
+        assert.equal(restored, driver.imported.generic_surface)
+        local bad_ok, bad = pcall(load_module, "generic_constraint_failure", [[
+            local provider = import "generic_surface.titan"
+            function answer(): string return provider.display<integer>(42) end
+        ]], { generic_surface = restored })
+        assert.is_false(bad_ok)
+        assert.match("does not satisfy constraint 'generic_surface.Show<integer>'", tostring(bad), 1, true)
+    end)
+
+    it("keeps public and source aliases distinct after hydration in either import order", function()
+        local provider = load_module("alias_authority", [[
+            local function hidden(): integer return 40 end
+            function visible(): integer return 2 end
+        ]])
+        local payload = assert(driver.encode_project_entry(provider))
+        for _, imports in ipairs({
+            'local public = import "alias_authority"\nlocal source = import "alias_authority.titan"',
+            'local source = import "alias_authority.titan"\nlocal public = import "alias_authority"',
+        }) do
+            local restored = assert(driver.decode_project_entry(payload))
+            driver.imported, types.registry = {}, driver.project_entries_registry({ alias_authority = restored })
+            local ok, err = pcall(load_module, "alias_authority_consumer", imports .. [[
+                function answer(): integer return source.hidden() + public.visible() + public.hidden() end
+            ]], { alias_authority = restored })
+            assert.is_false(ok)
+            local _, count = tostring(err):gsub("member 'hidden' not found", "")
+            assert.equal(1, count, tostring(err))
+        end
+    end)
+
+    it("preserves initializer visibility frontiers with compact owner and facade entries", function()
+        local owner = load_module("frontier_owner", [[
+            record Box end
+            local function Box.secret(): integer return 42 end
+        ]])
+        local owner_manifest = assert(driver.compact_project_entry(owner))
+        local facade = load_module("frontier_facade", [[
+            local owner = import "frontier_owner"
+            type Box = owner.Box
+        ]], { frontier_owner = owner_manifest })
+        local entries = {
+            frontier_owner = assert(driver.decode_project_entry(assert(driver.encode_project_entry(owner)))),
+            frontier_facade = assert(driver.decode_project_entry(assert(driver.encode_project_entry(facade)))),
+        }
+        driver.imported, types.registry = {}, driver.project_entries_registry(entries)
+        local ok, err = pcall(load_module, "frontier_consumer", [[
+            local facade = import "frontier_facade"
+            local before: integer = facade.Box.secret()
+            local function body_declared_before_owner_import(): integer return facade.Box.secret() end
+            local owner = import "frontier_owner.titan"
+            local after: integer = facade.Box.secret()
+        ]], entries)
+        assert.is_false(ok)
+        local _, count = tostring(err):gsub("record function 'frontier_owner.Box.secret' is local", "")
+        assert.equal(1, count, tostring(err))
+        assert_declarations_only(entries.frontier_owner)
+        assert_declarations_only(entries.frontier_facade)
+    end)
+
+    it("does not grant local nominal access through a restored source facade", function()
+        local owner = load_module("private_owner", [[
+            local record Secret payload: integer end
+            local function make(): Secret return Secret.new(42) end
+        ]])
+        local facade = load_module("private_facade", [[
+            local owner = import "private_owner.titan"
+            local type Secret = owner.Secret
+            local function make(): Secret return owner.make() end
+        ]], { private_owner = assert(driver.compact_project_entry(owner)) })
+        local owner_payload, facade_payload = assert(driver.encode_project_entry(owner)),
+            assert(driver.encode_project_entry(facade))
+        for _, direct in ipairs({ false, true }) do
+            local entries = {
+                private_owner = assert(driver.decode_project_entry(owner_payload)),
+                private_facade = assert(driver.decode_project_entry(facade_payload)),
+            }
+            driver.imported, types.registry = {}, driver.project_entries_registry(entries)
+            assert.equal(entries.private_owner.declared_registry["private_owner.Secret"],
+                types.registry["private_owner.Secret"])
+            local prefix = 'local facade = import "private_facade.titan"\n'
+            if direct then prefix = prefix .. 'local owner = import "private_owner.titan"\n' end
+            local ok, result = pcall(load_module, "private_nominal_consumer", prefix .. [[
+                function answer(): integer return facade.make().payload end
+            ]], entries)
+            if direct then assert.is_true(ok, result)
+            else
+                assert.is_false(ok)
+                assert.match("record type 'private_owner.Secret' is local to module 'private_owner'",
+                    tostring(result), 1, true)
+            end
+        end
+    end)
+
+    it("projects deep recursive declaration graphs cooperatively without the Lua stack", function()
+        local entry = load_module("deep_declaration", "function answer(): integer return 42 end")
+        local first = types.Array(types.Integer(), false)
+        local tail = first
+        for _ = 1, 6000 do
+            tail.elem = types.Array(types.Integer(), false)
+            tail = tail.elem
+        end
+        tail.elem = first
+        entry.type.members.answer.type.rettypes[1] = first
+        local calls = 0
+        local payload = assert(driver.encode_project_entry(entry, { yield = function()
+            calls = calls + 1
+            if calls % 20 == 0 then collectgarbage("collect") end
+        end }))
+        assert.is_true(calls > 20)
+        local restored = assert(driver.decode_project_entry(payload))
+        local cursor = restored.type.members.answer.type.rettypes[1]
+        for _ = 1, 6001 do cursor = cursor.elem end
+        assert.equal(restored.type.members.answer.type.rettypes[1], cursor)
+        local cancelled = {}
+        local ok, err = pcall(driver.decode_project_entry, payload, { yield = function() error(cancelled, 0) end })
+        assert.is_false(ok)
+        assert.equal(cancelled, err)
     end)
 
     it("forwards checksum callbacks without swallowing cancellation objects", function()
@@ -94,7 +273,7 @@ describe("checked project payloads", function()
         assert.equal(cancelled, err)
     end)
 
-    it("transports deep cyclic annotations and CPP provenance while yielding", function()
+    it("drops source and CPP back-edges while preserving recursive declared types", function()
         local entry = load_module("graph_annotations", "function answer(): integer return 42 end")
         local context = assert(cpp.new_context())
         assert(cpp.parse_contents("/macro-sidecars.h", [[
@@ -113,28 +292,22 @@ describe("checked project payloads", function()
         local external_key = { label = "owned outside the entry" }
         root.weak_only = setmetatable({ [external_key] = "preserved" }, { __mode = "k" })
         entry.ast._annotations = root
+        entry.type.members.answer._decl = entry.ast[1]
+        entry.type.members.answer._parameter_decls = { entry.ast[1] }
+        entry.type.members.answer.type._annotations = root
         local calls = 0
-        local payload = assert(driver.encode_project_entry(entry, {
-            yield = function()
-                calls = calls + 1
-                assert.equal("owned outside the entry", external_key.label)
-                collectgarbage("collect")
-            end,
-        }))
-        assert.is_true(calls > 4)
-        local copy = assert(driver.decode_project_entry(payload)).ast._annotations
-        local retained_key = next(copy.weak_only)
-        assert.is_not_nil(retained_key)
-        assert.equal("owned outside the entry", retained_key.label)
-        assert.equal("preserved", copy.weak_only[retained_key])
-        local last = copy
-        for _ = 1, 6000 do last = last.next end
-        assert.equal(copy, last.parent)
-        assert.equal(last, copy[last])
-        assert.equal(last, copy.alias)
-        assert.equal(copy, copy.weak[last])
-        assert.equal("k", getmetatable(copy.weak).__mode)
-        assert.equal('"a + b"', cpp.expand_macro("VALUE", copy.macros))
+        local payload = assert(driver.encode_project_entry(entry, { yield = function()
+            calls = calls + 1
+            assert.equal("owned outside the entry", external_key.label)
+            collectgarbage("collect")
+        end }))
+        assert.is_true(calls > 0)
+        local copy = assert(driver.decode_project_entry(payload))
+        assert.is_nil(copy.ast)
+        assert.is_nil(copy.type.members.answer._decl)
+        assert.is_nil(copy.type.members.answer._parameter_decls)
+        assert.is_nil(copy.type.members.answer.type._annotations)
+        assert.is_nil(payload:find("owned outside the entry", 1, true))
         assert.equal('"a + b"', cpp.expand_macro("VALUE", root.macros))
         local cancellation = {}
         calls = 0
@@ -167,8 +340,7 @@ describe("checked project payloads", function()
             { kind = input.kind, path = input.path, identity = input.identity, observation = current },
         } }))
         assert.same(current, restored.c_header_dependencies[1].observation)
-        assert.same(current, restored.ast[1]._nested_header_input.observation)
-        assert.same(old, restored.ast[1]._unmatched_header_input.observation)
+        assert.is_nil(restored.ast)
         assert.same(old, entry.c_header_dependencies[1].observation)
         assert.equal(assert(driver.serialize_source_interface(entry)),
             assert(driver.serialize_source_interface(restored)))
@@ -288,11 +460,11 @@ describe("checked project payloads", function()
         assert.is_true(ok, err)
     end)
 
-    it("recreates source-private checking headers after decoding a closed resolver", function()
+    it("restores only the C declaration environment after a native resolver closes", function()
         local provider = load_module("provider", [[
             foreign import "stdint.h"
             foreign function identity(input: ffi.int32_t): ffi.int32_t return input end
-        ]])
+        ]], nil, { analysis_only = false })
         local original_header = assert(provider.checking_foreign_header)
         local original_ffi = assert(provider.checking_ffi_header)
         local original_bundle = assert(provider.ast._ffi_header.bundle_root)
@@ -309,22 +481,22 @@ describe("checked project payloads", function()
         local restored = assert(driver.decode_project_entry(payload, { module_name = "provider" }))
         assert.is_nil(restored.checking_foreign_header)
         assert.is_nil(restored.checking_ffi_header)
-        assert.is_nil(restored.ast._ffi_header.filename)
-        assert.is_nil(restored.ast._ffi_header.bundle_root)
-        assert.equal("provider.ffi.h", restored.ast._ffi_header.logical_name)
-        assert.equal(restored.ast._ffi_header,
-            restored.ast._ffi_namespace._include.generated_header)
-        local consumer = load_module("consumer", [[
+        assert.is_nil(restored.ffi_header_descriptor.filename)
+        assert.is_nil(restored.ffi_header_descriptor.bundle_root)
+        assert.equal("provider.ffi.h", restored.ffi_header_descriptor.logical_name)
+        local original_generate = coder.generate_foreign_header
+        coder.generate_foreign_header = function() error("analysis regenerated a native companion") end
+        local ok, consumer = pcall(load_module, "consumer", [[
             local provider = import "provider.titan"
             function answer(): integer
                 local current = provider.identity(42)
                 return 42
             end
         ]], { provider = restored })
-        local fresh = assert(restored.checking_foreign_header)
-        assert.not_equal(original_header, fresh)
-        assert.equal("file", lfs.attributes(fresh, "mode"))
-        assert.equal(fresh, consumer.ast[1]._foreign_header)
+        coder.generate_foreign_header = original_generate
+        assert.is_true(ok, consumer)
+        assert.is_nil(restored.checking_foreign_header)
+        assert.is_nil(consumer.ast[1]._foreign_header)
         assert.equal(restored.checking_ffi_header, consumer.ast[1]._ffi_header)
         assert.equal("file", lfs.attributes(restored.checking_ffi_header, "mode"))
     end)
@@ -361,10 +533,10 @@ describe("checked project payloads", function()
             provider = assert(driver.decode_project_entry(payloads.provider, options)),
             consumer = assert(driver.decode_project_entry(payloads.consumer, options)),
         }
-        local plan = retained.consumer.ast._ffi_header
+        local plan = retained.consumer.ffi_header_descriptor
         assert.equal("consumer.ffi.h", plan.logical_name)
         assert.equal("provider.ffi.h", plan.dependencies[1].logical_name)
-        assert.equal(retained.consumer.ast[1]._ffi_header_descriptor, plan.dependencies[1])
+        assert.same({ "provider" }, retained.consumer.source_imports)
         local original_parse, parsed = parser.parse, {}
         parser.parse = function(filename, source)
             parsed[#parsed + 1] = filename
@@ -382,8 +554,8 @@ describe("checked project payloads", function()
         assert.same({ result.filename }, parsed)
         assert.equal(retained.consumer, driver.imported.consumer)
         assert.equal(retained.provider, driver.imported.provider)
-        assert.equal(retained.provider.ast._ffi_header.digest,
-            retained.consumer.ast._ffi_header.dependencies[1].digest)
+        assert.equal(retained.provider.ffi_header_descriptor.digest,
+            retained.consumer.ffi_header_descriptor.dependencies[1].digest)
     end)
 
     it("rejects incompatible project graph and ABI envelopes", function()
@@ -415,6 +587,206 @@ describe("checked project payloads", function()
         assert.is_nil(driver.decode_project_entry(payload:sub(1, -2)))
         assert.equal(imported, driver.imported)
         assert.equal(registry, types.registry)
+    end)
+
+    it("releases the checked AST after extracting a detached declared manifest", function()
+        local weak = setmetatable({}, { __mode = "v" })
+        local function extract()
+            local entry = load_module("released", [[
+                record Box<A> item: A end
+                local function identity<A>(input: A): A
+                    local hidden = "BODY_ONLY_MANIFEST_RELEASE_SENTINEL"
+                    return input
+                end
+            ]])
+            weak.ast = entry.ast
+            weak.body = entry.ast[2].block
+            local compact = assert(driver.compact_project_entry(entry))
+            driver.imported = { released = compact }
+            types.registry = assert(driver.project_entries_registry(driver.imported))
+            return compact
+        end
+        local compact = extract()
+        for _ = 1, 3 do collectgarbage("collect") end
+        assert.is_nil(weak.ast)
+        assert.is_nil(weak.body)
+        assert_declarations_only(compact)
+        local payload = assert(driver.encode_project_entry(compact))
+        assert.is_nil(payload:find("BODY_ONLY_MANIFEST_RELEASE_SENTINEL", 1, true))
+        local restored = assert(driver.decode_project_entry(payload))
+        assert_declarations_only(restored)
+        assert.equal(restored.type.members.Box.type,
+            restored.declared_registry["released.Box"])
+        assert.equal("Type.FunctionScheme", restored.type.source_members.identity.type._tag)
+    end)
+
+    it("does not retain fresh consumer bodies through reused declaration annotations", function()
+        local function provider_manifest()
+            local entry = load_module("retained_provider", [[
+                record Box<T> item: T end
+                function Box.make(item: T): Box<T> return Box<T>.new(item) end
+                function Box:replace<U>(item: U): Box<U> return Box<U>.new(item) end
+                function identity<T>(item: T): T return item end
+                local counter: integer = 1
+                local function hidden(input: integer): integer return input + counter end
+            ]])
+            return assert(driver.compact_project_entry(entry))
+        end
+        local initial = provider_manifest()
+        local payload = assert(driver.encode_project_entry(initial))
+        for _, retained in ipairs({ initial, assert(driver.decode_project_entry(payload)) }) do
+            driver.imported = { retained_provider = retained }
+            types.registry = driver.project_entries_registry(driver.imported)
+            for index = 1, 3 do
+                local weak = setmetatable({}, { __mode = "v" })
+                local function check_consumer()
+                    local consumer = load_module("retained_consumer_" .. index, [[
+                        local public = import "retained_provider"
+                        local source = import "retained_provider.titan"
+                        record Fresh item: integer end
+                        function inspect(input: integer): integer
+                            local marker = "TRANSIENT_CONSUMER_BODY_SENTINEL"
+                            local boxed = public.Box<integer>.make { item = input }
+                            local read: (integer) -> integer = source.hidden
+                            local changed = boxed:replace<Fresh> { item = Fresh.new(boxed.item) }
+                            local captured: () -> integer = function(): integer return read(changed.item.item) + #marker end
+                            return source.identity<integer>(captured())
+                        end
+                    ]], { retained_provider = retained })
+                    weak.ast = consumer.ast
+                    for _, node in ipairs(consumer.ast) do
+                        if node._tag == "Ast.TopLevelFunc" and node.name == "inspect" then
+                            weak.body = node.block
+                        end
+                    end
+                    assert.is_table(weak.body)
+                    -- Inspect the reused object itself before any new compact
+                    -- or encode operation can filter a leaked annotation.
+                    assert.equal(retained, driver.imported.retained_provider)
+                    assert_declarations_only(retained)
+                    driver.imported = { retained_provider = retained }
+                    types.registry = driver.project_entries_registry(driver.imported)
+                end
+                check_consumer()
+                for _, loader in ipairs(loaders) do assert.is_true(driver.close_loader(loader)) end
+                for _ = 1, 3 do collectgarbage("collect") end
+                assert.is_nil(weak.ast)
+                assert.is_nil(weak.body)
+                assert_declarations_only(retained)
+            end
+            assert.is_nil(assert(driver.encode_project_entry(retained)):find(
+                "TRANSIENT_CONSUMER_BODY_SENTINEL", 1, true))
+        end
+    end)
+
+    it("checks recursive C aliases and source function pointers without native companions", function()
+        local header = os.tmpname() .. ".h"
+        local file = assert(io.open(header, "wb"))
+        assert(file:write([[
+            #ifndef TITAN_MANIFEST_C_FIXTURE
+            #define TITAN_MANIFEST_C_FIXTURE
+            #define MANIFEST_DECL_INT int
+            typedef MANIFEST_DECL_INT DeclInt;
+            typedef struct Chain { struct Chain *next; int value; int row[3]; } Chain;
+            static inline int unused_body(Chain *node) {
+                /* CPP_BODY_ONLY_MANIFEST_SENTINEL */
+                return node->value + 17;
+            }
+            #endif
+        ]]))
+        assert(file:close())
+        local generate, parse = coder.generate_foreign_header, parser.parse
+        local ok, err = pcall(function()
+            local provider = load_module("c_provider", string.format([[
+                foreign import %q
+                local type Node = ffi.Chain
+                local type Callback = foreign (*Node) -> ffi.DeclInt
+                foreign function read(node: *Node): ffi.DeclInt return node.value end
+            ]], header))
+            local payload = assert(driver.encode_project_entry(provider))
+            assert.is_nil(payload:find("CPP_BODY_ONLY_MANIFEST_SENTINEL", 1, true))
+            for _, loader in ipairs(loaders) do assert.is_true(driver.close_loader(loader)) end
+            driver.imported, types.registry = {}, {}
+            local restored = assert(driver.decode_project_entry(payload))
+            assert_declarations_only(restored)
+            local owner = types.resolve_c_typedef(restored.type.source_type_members.Node)
+            assert.is_true(owner.complete)
+            assert.equal(owner, owner.fields.next.type.pointee)
+            assert.equal(3, owner.fields.row.type.len)
+            coder.generate_foreign_header = function() error("analysis generated .titan.h") end
+            local parsed = {}
+            parser.parse = function(filename, source)
+                parsed[#parsed + 1] = filename
+                return parse(filename, source)
+            end
+            local consumer = load_module("c_consumer", [[
+                local provider = import "c_provider.titan"
+                foreign function inspect(node: *provider.Node): ffi.DeclInt
+                    local callback: provider.Callback = provider.read
+                    return callback(node) + node.row[1] + node.value
+                end
+            ]], { c_provider = restored })
+            assert.same({ consumer.filename }, parsed)
+            assert.is_nil(restored.checking_foreign_header)
+            assert.is_nil(consumer.checking_foreign_header)
+            assert_declarations_only(restored)
+            assert_declarations_only(assert(driver.compact_project_entry(consumer)))
+        end)
+        coder.generate_foreign_header, parser.parse = generate, parse
+        os.remove(header)
+        assert.is_true(ok, err)
+    end)
+
+    it("rechecks dirty roots instead of reusing a compact global import entry", function()
+        local first = load_module("dirty", "function answer(): integer return 1 end")
+        local compact = assert(driver.compact_project_entry(first))
+        driver.imported = { dirty = compact }
+        local current = load_module("dirty", 'function answer(): string return "changed" end', { dirty = compact })
+        assert.is_table(current.ast)
+        assert.not_equal(compact, current)
+        assert.equal("Type.String", current.type.members.answer.type.rettypes[1]._tag)
+    end)
+
+    it("rejects manifests as native build inputs and reparses source-first roots", function()
+        local first = load_module("native_manifest", "function answer(): integer return 1 end")
+        local compact = assert(driver.compact_project_entry(first))
+        driver.imported, types.registry = {}, {}
+        local loader = driver.defaultloader({}, { cached_source_entries = { native_manifest = compact } })
+        loaders[#loaders + 1] = loader
+        local ok, err = loader("native_manifest")
+        assert.is_false(ok)
+        assert.match("requires an analysis-only resolver", err, 1, true)
+        driver.imported = { native_manifest = compact }
+        local current = load_module("native_manifest", "function answer(): integer return 2 end",
+            { native_manifest = compact }, { source_first = true, analysis_only = false })
+        assert.is_table(current.ast)
+        assert.not_equal(compact, current)
+    end)
+
+    it("rejects unknown fields, forged source authority and stale C plans", function()
+        local first = load_module("malformed_manifest", "record Box item: integer end")
+        local payload = assert(driver.encode_project_entry(first))
+        local mutations = {
+            function(entry) entry.ast = {} end,
+            function(entry) entry._analysis_manifest = false end,
+            function(entry) entry.type.members.Box.type._decl = { _tag = "Ast.TopLevelRecord" } end,
+            function(entry) entry.type.members.Box.type.fields[1].type = { _tag = "Ast.ExpInteger" } end,
+            function(entry) entry.ffi_header_descriptor.digest = string.rep("0", 64) end,
+            function(entry) entry.ffi_header_descriptor.contents = "void secretly_retained_body(void) {}" end,
+            function(entry) entry.source_imports = { "missing" } end,
+            function(entry) entry.type.members.Box = {} end,
+        }
+        local imported, registry = driver.imported, types.registry
+        for _, mutate in ipairs(mutations) do
+            local envelope = assert(cpp.decode_graph(payload))
+            mutate(envelope.entry)
+            local result, err = driver.decode_project_entry(assert(cpp.encode_graph(envelope)))
+            assert.is_nil(result)
+            assert.is_string(err)
+            assert.equal(imported, driver.imported)
+            assert.equal(registry, types.registry)
+        end
+        assert.is_nil(driver.decode_project_entry(payload, { module_name = "somewhere_else" }))
     end)
 end)
 

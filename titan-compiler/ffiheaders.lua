@@ -41,10 +41,16 @@ function ffiheaders.relative(from, to)
     return table.concat(result, "/")
 end
 
-function ffiheaders.render(modname, ast, source_header)
+local function render_includes(modname, includes)
     assert(staticmetadata.valid_module_name(modname))
     -- Case and punctuation are significant in a logical module identity.
     local guard = "TITAN_GENERATED_FFI_" .. sha256.hex(modname):upper() .. "_H"
+    return table.concat({ ffiheaders.MARKER, "#ifndef " .. guard,
+        "#define " .. guard, "", table.concat(includes, "\n"), "",
+        "#endif /* " .. guard .. " */", "" }, "\n")
+end
+
+function ffiheaders.render(modname, ast, source_header)
     local includes = {}
     for _, node in ipairs(ast) do
         if not node._ignore and node._tag == "Ast.TopLevelImport"
@@ -63,9 +69,42 @@ function ffiheaders.render(modname, ast, source_header)
                 "foreign include has no normalized spelling")
         end
     end
-    return table.concat({ ffiheaders.MARKER, "#ifndef " .. guard,
-        "#define " .. guard, "", table.concat(includes, "\n"), "",
-        "#endif /* " .. guard .. " */", "" }, "\n")
+    return render_includes(modname, includes)
+end
+
+-- The persisted declaration environment contains include directives only.
+-- This explicit plan can be rendered without either an AST or a native
+-- source-foreign companion (which may contain inline function definitions).
+function ffiheaders.plan_contents(modname, logical_name, dependencies, direct_includes)
+    local includes = {}
+    for _, dependency in ipairs(dependencies) do
+        includes[#includes + 1] = "#include " .. quote_header(
+            ffiheaders.relative(logical_name, dependency.logical_name))
+    end
+    for _, include in ipairs(direct_includes) do
+        assert(type(include) == "string" and not include:find("[\r\n%z]"),
+            "invalid generated FFI include")
+        assert(include:match('^".*"$') or include:match("^<[^<>]+>$"),
+            "invalid generated FFI include")
+        includes[#includes + 1] = "#include " .. include
+    end
+    return render_includes(modname, includes)
+end
+
+function ffiheaders.validate_plan(descriptor)
+    assert(staticmetadata.valid_module_name(descriptor.modname),
+        "invalid generated FFI module name")
+    assert(descriptor.logical_name == descriptor.modname:gsub("[.]", "/") .. ".ffi.h",
+        "invalid generated FFI logical name")
+    assert(type(descriptor.identity) == "string" and descriptor.identity:sub(1, 1) == "/"
+        and not descriptor.identity:find("[\r\n%z]"), "invalid generated FFI identity")
+    local contents = ffiheaders.plan_contents(descriptor.modname,
+        descriptor.logical_name, descriptor.dependencies, descriptor.direct_includes)
+    assert(contents == descriptor.contents, "generated FFI contents disagree with its include plan")
+    assert(descriptor.digest == descriptor_digest(descriptor.logical_name,
+        descriptor.identity, contents, descriptor.dependencies),
+        "generated FFI digest disagrees with its include plan")
+    return true
 end
 
 function ffiheaders.remember_file(owner, filename)
@@ -163,6 +202,7 @@ local function materialize_descriptor(owner, descriptor, retained)
         bundle_root = bundle_root,
         identity = descriptor.identity,
         contents = descriptor.contents,
+        direct_includes = descriptor.direct_includes,
         dependencies = dependencies,
         search_inputs = descriptor.search_inputs,
         digest = descriptor.digest,
@@ -195,9 +235,10 @@ function ffiheaders.prepare(owner, modname, ast, sourcef)
     -- The normalized authored include retains its original lookup candidates.
     -- Preserve these runtime observations without changing raw probe identity
     -- when the chosen header and generated environment are unchanged.
-    local search_inputs = {}
+    local search_inputs, direct_includes = {}, {}
     for _, node in ipairs(ast) do
         if not node._ignore and node._tag == "Ast.TopLevelForeignImport" then
+            direct_includes[#direct_includes + 1] = node._include.rendered
             for _, input in ipairs(node._include.c_header_search_inputs or {}) do
                 search_inputs[#search_inputs + 1] = input
             end
@@ -208,6 +249,7 @@ function ffiheaders.prepare(owner, modname, ast, sourcef)
         logical_name = logical_name,
         identity = identity,
         contents = contents,
+        direct_includes = direct_includes,
         dependencies = dependencies,
         search_inputs = search_inputs,
         digest = descriptor_digest(logical_name, identity, contents, dependencies),

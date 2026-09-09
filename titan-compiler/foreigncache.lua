@@ -4,13 +4,10 @@ local cpp = require "c-parser.cpp"
 local sha256 = require "titan-compiler.sha256"
 local cacheadapter = require "titan-compiler.cacheadapter"
 local version = require "titan-compiler.version"
+local definitions = require "titan-compiler.cdefinitioncache"
+local graphcodec = require "titan-compiler.graphcodec"
 
-local foreigncache = { VERSION = 2, KIND = "ffi-conversion-v2" }
-local roots = {
-    "foreign_types", "foreign_type_history", "foreign_names",
-    "foreign_name_history", "foreign_macro_definitions", "foreign_macro_changes",
-    "foreign_field_macro_cache", "c_file_tags", "c_prototype_tags", "c_profile",
-}
+local foreigncache = { VERSION = 3, KIND = "ffi-conversion-v3" }
 local statistics = setmetatable({}, { __mode = "k" })
 
 local function counters(st)
@@ -76,7 +73,6 @@ local function references(namespace)
     local function add(value, key)
         if type(value) == "table" then external[value], current[key] = key, value end
     end
-    add(namespace, "ffi-namespace")
     add(namespace._include, "ffi-include")
     local visited = {}
     local function add_header(header)
@@ -91,19 +87,21 @@ end
 
 function foreigncache.encode(st, namespace, key)
     local snapshot = {
-        version = foreigncache.VERSION, key = key, roots = {},
+        version = foreigncache.VERSION, key = key,
         abi = version.TITAN_ABI_VERSION,
         namespace_type = namespace._type,
-        converted_enums = st._converted_c_enums,
-        converted_aggregates = st._converted_c_aggregates,
+        foreign_types = st.foreign_types,
+        field_macros = st.foreign_field_macro_cache,
+        file_tags = st.c_file_tags,
+        profile = st.c_profile,
     }
-    for _, name in ipairs(roots) do snapshot.roots[name] = st[name] end
     local external = references(namespace)
-    return cpp.encode_graph(snapshot, {
+    local options = {
         external = external,
         sha256_binary = st.cache_adapter and st.cache_adapter.sha256_binary,
         yield = st.cache_adapter and st.cache_adapter.yield,
-    })
+    }
+    return cpp.encode_graph(definitions.foreign(snapshot, options), options)
 end
 
 local function prepare_snapshot(snapshot, key, inputs, saved_inputs)
@@ -128,7 +126,7 @@ function foreigncache.restore(st, namespace, key)
     local stats = counters(st)
     if stats then stats.lookups = stats.lookups + 1 end
     local payload, saved_inputs = cacheadapter.get(st.cache_adapter, foreigncache.KIND, key)
-    local _, current = references(namespace)
+    local external, current = references(namespace)
     local decoded, snapshot = pcall(cpp.decode_graph, payload, {
         references = current,
         sha256_binary = st.cache_adapter and st.cache_adapter.sha256_binary,
@@ -147,9 +145,30 @@ function foreigncache.restore(st, namespace, key)
         if stats then stats.misses = stats.misses + 1 end
         return false
     end
-    for _, name in ipairs(roots) do st[name] = snapshot.roots[name] end
-    st._converted_c_enums = snapshot.converted_enums
-    st._converted_c_aggregates = snapshot.converted_aggregates
+    -- One reconstruction traversal establishes the closed semantic contract.
+    -- Raw CType conversion memos and prior declaration histories are not
+    -- needed after the final module-wide namespace has been converted.
+    local reconstructed, compact = pcall(definitions.foreign, snapshot, {
+        strict = true, external = external,
+        yield = st.cache_adapter and st.cache_adapter.yield,
+    })
+    if not reconstructed then
+        if type(compact) ~= "string" then error(compact, 0) end
+        if stats then stats.misses = stats.misses + 1 end
+        return false
+    end
+    snapshot = compact
+    local history = {}
+    local work = graphcodec.work({ yield = st.cache_adapter and st.cache_adapter.yield })
+    for name, declaration in pairs(snapshot.foreign_types) do
+        work()
+        history[name] = { { order = 0, decl = declaration } }
+    end
+    st.foreign_types = snapshot.foreign_types
+    st.foreign_type_history = history
+    st.foreign_field_macro_cache = snapshot.field_macros
+    st.c_file_tags = snapshot.file_tags
+    st.c_profile = snapshot.profile
     namespace._type = snapshot.namespace_type
     st:add_symbol("ffi", namespace)
     if observations_changed then
