@@ -219,6 +219,13 @@ function Encoder.new(header_inputs)
     }, Encoder)
 end
 
+-- A stable logical include alone cannot cover an omitted C aggregate layout:
+-- the generated module environment may change while keeping that spelling.
+-- Bind the compiler-owned environment digest into the manifest.
+function Encoder:generated_header(origin)
+    return origin.generated_header
+end
+
 function Encoder:require_aggregate_origin(value, tag)
     local origin = value._c_origin_header
     if type(origin) ~= "table" or type(origin.rendered) ~= "string"
@@ -252,17 +259,9 @@ function Encoder:require_aggregate_origin(value, tag)
     check_inputs(origin.c_header_search_inputs,
         tag .. " C header search inputs")
 
-    -- Source-foreign declarations are parsed through a content-addressed
-    -- generated wrapper. Its normalized spelling is already part of the
-    -- descriptor; physical headers included by it are checked above.
-    if origin.probe_wrapper ~= nil then
-        local wrapper = origin.probe_wrapper
-        if type(wrapper) ~= "table" or type(wrapper.name) ~= "string"
-           or wrapper.name == "" or type(wrapper.contents) ~= "string" then
-            fail(tag .. " has an invalid source-foreign header wrapper")
-        end
-        covered = true
-    end
+    -- The validated descriptor covers generated text; physical author headers
+    -- and include-search observations must still be covered independently above.
+    if self:generated_header(origin, tag) then covered = true end
     if not covered then
         fail(tag .. " C header origin is not covered by the source interface")
     end
@@ -346,6 +345,8 @@ function Encoder:field(value, spec, owner_tag)
            or field.rendered == "" then
             fail(label .. " has no stable rendered spelling")
         end
+        local header = self:generated_header(field, label)
+        if header then return tuple("g", atom(field.rendered), atom(header.digest)) end
         return atom(field.rendered)
     end
 end

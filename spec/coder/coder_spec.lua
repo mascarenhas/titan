@@ -201,8 +201,8 @@ describe("call sequencing regressions", function()
         -- Those roots, not tracing-only argument copies, survive later setup or
         -- callee code that replaces the values' ordinary program homes.
         run_coder([[
-            local lua = foreign import "lua.h"
-            local ffi = foreign import "titan/ffi.h"
+            foreign import "lua.h"
+            foreign import "titan/ffi.h"
 
             record R
                 id: integer
@@ -228,20 +228,20 @@ describe("call sequencing regressions", function()
             end
 
             local function install_finalizer(r: R)
-                local top = lua.lua_gettop(L)
+                local top = ffi.lua_gettop(L)
                 ffi.lua_pushtvalue(L, r as value)
-                if lua.lua_getmetatable(L, -1) == 0 then
+                if ffi.lua_getmetatable(L, -1) == 0 then
                     raise "record has no metatable"
                 end
                 ffi.lua_pushtvalue(L, mark)
-                lua.lua_setfield(L, -2, "__gc")
-                lua.lua_pushvalue(L, -1)
-                lua.lua_setmetatable(L, -3)
-                lua.lua_settop(L, top)
+                ffi.lua_setfield(L, -2, "__gc")
+                ffi.lua_pushvalue(L, -1)
+                ffi.lua_setmetatable(L, -3)
+                ffi.lua_settop(L, top)
             end
 
             local function collect()
-                lua.lua_gc(L, lua.LUA_GCCOLLECT)
+                ffi.lua_gc(L, ffi.LUA_GCCOLLECT)
             end
 
             local function consume(r: R): integer
@@ -475,57 +475,57 @@ static inline fixture_object *fixture_pointer(fixture_scalar present) {
 
         local generated, generate_error = generate_modules({
             [MODULE] = [[
-                local c = foreign import "]] .. HEADER .. [["
+                foreign import "]] .. HEADER .. [["
 
                 function echo(): value
-                    return c.fixture_value_echo("ok")
+                    return ffi.fixture_value_echo("ok")
                 end
 
                 function store(v: value): value
-                    local raw: c.TValue = nil
-                    c.fixture_value_store(raw, v)
+                    local raw: ffi.TValue = nil
+                    ffi.fixture_value_store(raw, v)
                     return raw
                 end
 
                 function seen(v: value): integer
-                    return c.fixture_value_seen(v)
+                    return ffi.fixture_value_seen(v)
                 end
 
                 function write_box(): integer
-                    local p: c.fixture_int_pointer = c.fixture_box_void()
-                    c.fixture_write_int(p, 77)
-                    return c.fixture_read_int(
-                        c.fixture_box_void() as c.fixture_int_pointer)
+                    local p: ffi.fixture_int_pointer = ffi.fixture_box_void()
+                    ffi.fixture_write_int(p, 77)
+                    return ffi.fixture_read_int(
+                        ffi.fixture_box_void() as ffi.fixture_int_pointer)
                 end
 
                 function string_first_byte(): integer
                     local text = "Titan"
-                    return c.fixture_first_byte(
-                        text as c.fixture_void_pointer) as integer
+                    return ffi.fixture_first_byte(
+                        text as ffi.fixture_void_pointer) as integer
                 end
 
                 function scalar_value(): value
-                    return c.fixture_scalar_value() as value
+                    return ffi.fixture_scalar_value() as value
                 end
 
                 function chained_value(): value
-                    return c.fixture_chain_value() as value
+                    return ffi.fixture_chain_value() as value
                 end
 
                 function global_value(): integer
-                    c.fixture_set_global(29 as c.fixture_scalar)
-                    return c.fixture_global as integer
+                    ffi.fixture_set_global(29 as ffi.fixture_scalar)
+                    return ffi.fixture_global as integer
                 end
 
                 function pointer_present(present: integer): boolean
-                    local pointer = c.fixture_pointer(
-                        present as c.fixture_scalar)
+                    local pointer = ffi.fixture_pointer(
+                        present as ffi.fixture_scalar)
                     if not pointer then return false end
                     return true
                 end
 
                 function defined_value(): integer
-                    return c.FIXTURE_CONSTANT
+                    return ffi.FIXTURE_CONSTANT
                 end
             ]],
         }, MODULE)
@@ -2218,7 +2218,7 @@ describe("Titan code generator", function()
 
         local modules = {
             [modname] = [[
-                local h = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 function fun(): integer
                     return 1
                 end
@@ -2228,14 +2228,15 @@ describe("Titan code generator", function()
             local gok, gerr = generate_modules(modules, modname)
             assert.truthy(gok, gerr)
 
-            local c = assert(io.open(modname .. ".c", "r"))
-            local csrc = c:read("*a")
-            c:close()
+            local header_file = assert(io.open(modname .. ".ffi.h", "r"))
+            local environment = header_file:read("*a")
+            header_file:close()
             local rendered = '#include "' .. require("lfs").currentdir()
                 .. "/" .. header .. '"'
-            assert.match(rendered, csrc, 1, true)
+            assert.match(rendered, environment, 1, true)
         end)
         os.remove(header)
+        os.remove(modname .. ".ffi.h")
         if not ok then error(err, 0) end
     end)
 
@@ -2271,9 +2272,9 @@ static struct titan_symlink_origin *titan_symlink_origin_get(void) {
         local modname = "ffi_symlink_origin_" .. suffix
         local modules = {
             [modname] = [[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 function selected(): integer
-                    return c.titan_symlink_origin_get().selected as integer
+                    return ffi.titan_symlink_origin_get().selected as integer
                 end
             ]],
         }
@@ -2304,9 +2305,9 @@ static struct titan_symlink_origin *titan_symlink_origin_get(void) {
 
         local modules = {
             [modname] = [[
-                local h = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 function imported_value(): integer
-                    return h.]] .. macro .. [[
+                    return ffi.]] .. macro .. [[
                 end
             ]]
         }
@@ -2314,16 +2315,17 @@ static struct titan_symlink_origin *titan_symlink_origin_get(void) {
             local gok, gerr = generate_modules(modules, modname)
             assert.truthy(gok, gerr)
 
-            local c = assert(io.open(modname .. ".c", "r"))
-            local csrc = c:read("*a")
-            c:close()
-            assert.match('#include "' .. header .. '"', csrc, 1, true)
+            local header_file = assert(io.open(modname .. ".ffi.h", "r"))
+            local environment = header_file:read("*a")
+            header_file:close()
+            assert.match('#include "' .. header .. '"', environment, 1, true)
 
             local cok, cerr = call(modname,
                 "assert(" .. modname .. ".imported_value() == " .. value .. ")")
             assert.truthy(cok, cerr)
         end)
         os.remove(header)
+        os.remove(modname .. ".ffi.h")
         if not ok then error(err, 0) end
     end
 

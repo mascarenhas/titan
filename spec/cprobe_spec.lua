@@ -6,6 +6,7 @@ local sha256 = require "titan-compiler.sha256"
 local types = require "titan-compiler.types"
 local cdriver = require "c-parser.cdriver"
 local compiler_io = require "titan-compiler.io"
+local ffiheaders = require "titan-compiler.ffiheaders"
 local lfs = require "lfs"
 
 local function cstruct(name)
@@ -1649,134 +1650,59 @@ struct titan_probe_target_s { int value; };
         assert(lfs.rmdir(cache))
     end)
 
-    it("rejects conflicting bindings for one stable probe-header wrapper",
-    function()
-        local physical = assert(cprobe.normalize_include_descriptor({
-            include_kind = "quote",
-            include_name = "/tmp/provider-check.h",
-        }, { source_dir = "." }))
-        local invalid, invalid_error = cprobe.source_foreign_include_alias(
-            {}, "provider", "/project/provider.titan.h")
-        assert.is_nil(invalid)
-        assert.matches("requires a normalized include", invalid_error)
-        local angle = assert(cprobe.normalize_include_descriptor({
-            include_kind = "angle",
-            include_name = "provider-check.h",
-        }))
-        invalid, invalid_error = cprobe.source_foreign_include_alias(
-            angle, "provider", "/project/provider.titan.h")
-        assert.is_nil(invalid)
-        assert.matches("requires an absolute quoted physical include",
-            invalid_error)
-        invalid, invalid_error = cprobe.source_foreign_include_alias(
-            physical, "", "/project/provider.titan.h")
-        assert.is_nil(invalid)
-        assert.matches("requires a module name", invalid_error)
-        invalid, invalid_error = cprobe.source_foreign_include_alias(
-            physical, "provider", "")
-        assert.is_nil(invalid)
-        assert.matches("requires an absolute public header path",
-            invalid_error)
-
-        local unsafe, unsafe_error = cprobe.normalize_include_descriptor({
-            original = "provider",
-            resolved = "/project/provider.titan.h",
-            include_kind = "quote",
-            include_name = "../outside.h",
-            probe_wrapper = {
-                name = "../outside.h",
-                contents = '#include "/tmp/provider-check.h"\n',
-            },
-        })
-        assert.is_nil(unsafe)
-        assert.matches("invalid private probe%-header wrapper descriptor",
-            unsafe_error)
-
-        local service = new_fake_service()
-        local function alias_for(physical)
-            local include = assert(cprobe.normalize_include_descriptor({
-                include_kind = "quote",
-                include_name = physical,
-            }, { source_dir = "." }))
-            return assert(cprobe.source_foreign_include_alias(
-                include, "provider", "/project/provider.titan.h"))
-        end
-        assert(service:module_context({
-            includes = { alias_for("/tmp/provider-check-one.h") },
-        }))
-        local conflicting, err = service:module_context({
-            includes = { alias_for("/tmp/provider-check-two.h") },
-        })
-        assert.is_nil(conflicting)
-        assert.matches("conflicting private probe%-header wrapper", err)
-        assert.is_true(service:close())
-    end)
-
-    it("treats probe-header wrapper creation failures as infrastructure",
+    it("normalizes generated dependency diagnostics without retaining private paths",
     function()
         local cache = temporary_directory()
-        local state, runner, ordinary_provider = fake_environment()
+        local strategy = compiler_io.new_sync()
+        local owner = { io = strategy }
+        local dependency = assert(ffiheaders.prepare(owner, "lib.dep", {},
+            "/project/lib/dep.titan"))
+        local header = assert(ffiheaders.prepare(owner, "app.consumer", {
+            { _tag = "Ast.TopLevelImport", _source_import = true,
+                _ffi_header_descriptor = dependency },
+        }, "/project/app/consumer.titan"))
+        assert.is_true(ffiheaders.close(owner))
+        local include = assert(cprobe.normalize_include_descriptor({
+            include_kind = "quote", include_name = header.logical_name,
+            resolved = header.identity, generated_header = header,
+        }))
+        local private_root, calls = nil, 0
         local service = assert(cprobe.new_service({
-            cache_directory = cache,
-            runner = runner,
-            temp_provider = function()
-                local workspace = ordinary_provider()
-                local ordinary_write = workspace.write
-                function workspace:write(name, contents)
-                    if name:match("^titan%-source%-foreign%-") then
-                        return nil, "injected wrapper failure"
-                    end
-                    return ordinary_write(self, name, contents)
-                end
-                return workspace
+            io = strategy, cache_directory = cache,
+            runner = function(_, metadata)
+                calls = calls + 1
+                private_root = assert(metadata.source_path:match("^(.*)/[^/]+$"))
+                local consumer_path = private_root .. "/app/consumer.ffi.h"
+                local dependency_path = private_root .. "/lib/dep.ffi.h"
+                assert.equal(header.contents, assert(strategy:read_file(consumer_path)))
+                assert.equal(dependency.contents, assert(strategy:read_file(dependency_path)))
+                return { started = true, ok = false, status = 1,
+                    diagnostic = "In file included from " .. consumer_path .. ":2,\n"
+                        .. dependency_path .. ":5: error: generated declaration rejected" }
             end,
         }))
-        local physical = assert(cprobe.normalize_include_descriptor({
-            include_kind = "quote",
-            include_name = "/tmp/provider-check.h",
-        }, { source_dir = "." }))
-        local alias = assert(cprobe.source_foreign_include_alias(
-            physical, "provider", "/project/provider.titan.h"))
-        local module = assert(service:module_context({ includes = { alias } }))
-        local result = module:validate_baseline()
-        assert.equal("infrastructure_failure", result.status)
-        assert.matches("private probe%-header wrapper", result.message)
-        assert.equal(0, #state.calls)
-        assert.same({}, entries(cache))
+        local context = assert(service:module_context({ includes = { include } }))
+        local result = context:validate_baseline()
+        assert.equal("rejected", result.status)
+        assert.equal(1, calls)
+        local expected = "In file included from /project/app/consumer.ffi.h:2,\n"
+            .. "/project/lib/dep.ffi.h:5: error: generated declaration rejected"
+        assert.equal(expected, result.diagnostic)
+        assert.is_nil(assert(strategy:read_file(result.cache_path)):find(private_root, 1, true))
         assert.is_true(service:close())
-        assert(lfs.rmdir(cache))
-    end)
+        assert.is_nil(lfs.attributes(private_root))
 
-    it("preserves quoted-include origin through a private wrapper", function()
-        local root = temporary_directory()
-        local origin = root .. "/origin"
-        assert(lfs.mkdir(origin))
-        local nested = origin .. "/nested.h"
-        local physical = origin .. "/provider-check.h"
-        write_file(nested, "struct titan_wrapper_origin { int member; };\n")
-        write_file(physical, '#include "nested.h"\n')
-        local include = assert(cprobe.normalize_include_descriptor({
-            include_kind = "quote",
-            include_name = physical,
-        }, { source_dir = root }))
-        local alias = assert(cprobe.source_foreign_include_alias(
-            include, "provider", root .. "/provider.titan.h"))
-        local service = assert(cprobe.new_service({
-            compiler_argv = lfs.attributes("/usr/bin/cc", "mode")
-                and { "/usr/bin/cc" } or (os.getenv("CC") or "cc"),
-            cflags = { "-Wall", "-Werror" },
+        local restored = assert(cprobe.new_service({
+            cache_directory = cache,
+            runner = function() error("persistent generated result must not compile") end,
         }))
-        local module = assert(service:module_context({
-            source_dir = root,
-            includes = { alias },
-        }))
-        local result = module:validate_baseline()
-        assert.equal("success", result.status, result.message)
-        assert.is_true(service:close())
-        assert(os.remove(physical))
-        assert(os.remove(nested))
-        assert(lfs.rmdir(origin))
-        assert(lfs.rmdir(root))
+        local replay = assert(restored:module_context({ includes = { include } })):validate_baseline()
+        assert.is_true(replay.persistent_cached)
+        assert.equal(expected, replay.diagnostic)
+        assert.is_nil(restored.generated_workspaces)
+        assert.is_true(restored:close())
+        assert(os.remove(result.cache_path))
+        assert(lfs.rmdir(cache))
     end)
 
     it("keeps a post-spawn missing baseline status retryable", function()
@@ -2636,6 +2562,368 @@ enum titan_cache_enum {
             enum_type, types.CFloat("double"))
         assert.equal("rejected", incompatible.status)
         assert.is_true(service:close())
+        remove_directory(root)
+    end)
+end)
+
+describe("whole-question enum carrier selection", function()
+    local all_ids = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }
+    local int_enum = types.CInteger("enum probe_enum", true, 3, 32)
+
+    -- A minimal ELF fixture for the service's object-read lifecycle. Exhaustive
+    -- object-format and hostile table coverage belongs to staticmetadata_spec.
+    local function object_bytes(payload)
+        local names = "\0.shstrtab\0.titan.cprobe\0"
+        local names_offset, payload_offset = 64, 64 + #names
+        local section_offset = payload_offset + #payload
+        local function section(name, kind, offset, size)
+            return string.pack("<I4I4I8I8I8I8I4I4I8I8",
+                name, kind, 0, 0, offset, size, 0, 0, 1, 0)
+        end
+        return "\127ELF\2\1\1" .. string.rep("\0", 9) ..
+            string.pack("<I2I2I4I8I8I8I4I2I2I2I2I2I2",
+                1, 62, 1, 0, 0, section_offset, 0, 64, 0, 0, 64, 3, 1) ..
+            names .. payload .. string.rep("\0", 64) ..
+            section(1, 3, names_offset, #names) ..
+            section(11, 1, payload_offset, #payload)
+    end
+    local function payload(count, id)
+        return "TITENUM\0\1\12" .. string.char(count, id)
+    end
+    local function fake_selection_service(options, response)
+        options = options or {}
+        local strategy = options.io or compiler_io.new_sync()
+        options.io = strategy
+        local state
+        local original_stat, original_read = strategy.stat, strategy.read_file
+        function strategy:stat(path)
+            local name = path:match("/([^/]+%.o)$")
+            if name and state and state.files[name] then
+                return { kind = "file", size = #state.files[name] }
+            end
+            return original_stat(self, path)
+        end
+        function strategy:read_file(path, limit)
+            local name = path:match("/([^/]+%.o)$")
+            if name and state and state.files[name] then return state.files[name] end
+            return original_read(self, path, limit)
+        end
+        local service
+        service, state = new_fake_service(options, function(index, argv, metadata, files)
+            if metadata.stage == "candidate" then
+                local bytes = response
+                if type(response) == "function" then
+                    bytes = response(index, argv, metadata, files)
+                end
+                if bytes then
+                    files.files[assert(metadata.object_path):match("/([^/]+)$")] = bytes
+                end
+            end
+            return { started = true, ok = true, status = 0, diagnostic = "" }
+        end)
+        return service, state
+    end
+    local function context(service)
+        return assert(service:module_context({}))
+    end
+
+    it("compiles one selection candidate, forces object output, and copies cache answers", function()
+        local service, state = fake_selection_service({ syntax_only = true },
+            object_bytes(payload(1, 6)))
+        local module = context(service)
+        local first = module:select_enum_carrier(int_enum, { 2, 4, 6 })
+        assert.equal("success", first.status, first.message)
+        assert.same({ kind = "enum_carrier", match_count = 1, carrier_id = 6 }, first.selection)
+        assert.equal(2, #state.calls) -- one shared baseline and one whole query
+        assert.is_nil(state.calls[1].metadata.object_path)
+        assert.is_string(state.calls[2].metadata.object_path)
+        assert.is_truthy(table.concat(state.calls[2].argv, " "):find(" -c ", 1, true))
+        assert.is_falsy(table.concat(state.calls[2].argv, " "):find("-fsyntax-only", 1, true))
+        assert.equal(sha256.hex(first.source), first.key)
+        first.selection.carrier_id = 2
+        local again = module:select_enum_carrier(int_enum, { 2, 4, 6 })
+        assert.equal("service", again.cache_tier)
+        assert.equal(6, again.selection.carrier_id)
+        assert.equal(2, #state.calls)
+        assert.same({}, state.files)
+        assert.is_true(service:close())
+    end)
+
+    it("preserves deterministic absent and multiple carrier answers", function()
+        for _, answer in ipairs({ { 0, 0 }, { 2, 13 } }) do
+            local service, state = fake_selection_service(nil,
+                object_bytes(payload(answer[1], answer[2])))
+            local module = context(service)
+            local first = module:select_enum_carrier(int_enum, { 6, 7 })
+            assert.equal("success", first.status, first.message)
+            assert.equal(answer[1], first.selection.match_count)
+            assert.equal(answer[2], first.selection.carrier_id)
+            assert.equal("service", module:select_enum_carrier(int_enum, { 6, 7 }).cache_tier)
+            assert.equal(2, #state.calls)
+            assert.is_true(service:close())
+        end
+    end)
+
+    it("retries missing, malformed and ineligible object payloads after cleanup", function()
+        for _, bytes in ipairs({ false, "not an object", object_bytes("wrong"),
+            object_bytes(payload(1, 12)), object_bytes(payload(1, 7)),
+            object_bytes(payload(2, 9)), object_bytes(payload(0, 6)) }) do
+            local service, state = fake_selection_service(nil, bytes)
+            local module = context(service)
+            for _ = 1, 2 do
+                local result = module:select_enum_carrier(int_enum, { 2, 4, 6 })
+                assert.equal("infrastructure_failure", result.status)
+                assert.equal("result_extraction", result.reason)
+                assert.is_nil(result.selection)
+                assert.same({}, state.files)
+            end
+            assert.equal(3, #state.calls) -- baseline is still safely reusable
+            assert.is_true(service:close())
+        end
+    end)
+
+    it("keeps complete question bytes as the only identity across cache tiers", function()
+        local cache = temporary_directory()
+        local analysis, strategy = cdriver.new_process_analysis(), compiler_io.new_sync()
+        local first, first_state = fake_selection_service({ io = strategy,
+            process_analysis = analysis, cache_directory = cache }, object_bytes(payload(1, 6)))
+        local result = context(first):select_enum_carrier(int_enum, all_ids)
+        assert.equal("success", result.status, result.message)
+        assert.equal(2, #first_state.calls)
+        assert.is_true(first:close())
+        local second, second_state = fake_selection_service({ io = strategy,
+            process_analysis = analysis, compiler_argv = { "other-compiler" },
+            cflags = { "-DOTHER_TARGET" } }, false)
+        local reused = context(second):select_enum_carrier(int_enum, all_ids)
+        assert.equal("analysis", reused.cache_tier)
+        assert.same(result.selection, reused.selection)
+        assert.equal(0, #second_state.calls)
+        assert.is_true(second:close())
+        local third, third_state = fake_selection_service({ cache_directory = cache },
+            object_bytes(payload(1, 6)))
+        local module = context(third)
+        local persisted = module:select_enum_carrier(int_enum, all_ids)
+        assert.equal("persistent", persisted.cache_tier)
+        assert.same(result.selection, persisted.selection)
+        assert.equal(0, #third_state.calls)
+        local changed = module:select_enum_carrier(int_enum, { 6, 7 })
+        assert.not_equal(result.source, changed.source)
+        assert.not_equal(result.key, changed.key)
+        assert.equal(1, #third_state.calls) -- persistent baseline
+        assert.is_true(third:close())
+        remove_directory(cache)
+    end)
+
+    it("treats untyped or ineligible cache answers as misses", function()
+        local cache = temporary_directory()
+        local first = fake_selection_service({ cache_directory = cache },
+            object_bytes(payload(1, 6)))
+        local result = context(first):select_enum_carrier(int_enum, { 6 })
+        assert.equal("success", result.status, result.message)
+        assert.is_true(first:close())
+        for _, selection in ipairs({ false,
+            { kind = "enum_carrier", match_count = 1, carrier_id = 7 } }) do
+            write_file(result.cache_path, assert(cprobe_cache.encode({ outcome = "success",
+                exit_status = 0, diagnostic = "", selection = selection or nil })))
+            local service, state = fake_selection_service({ cache_directory = cache },
+                object_bytes(payload(1, 6)))
+            local refreshed = context(service):select_enum_carrier(int_enum, { 6 })
+            assert.equal("success", refreshed.status, refreshed.message)
+            assert.equal(6, refreshed.selection.carrier_id)
+            assert.equal(1, #state.calls)
+            assert.is_true(service:close())
+        end
+        remove_directory(cache)
+    end)
+
+    it("keeps the first completed typed answer when query executions interleave", function()
+        local analysis, strategy = cdriver.new_process_analysis(), compiler_io.new_sync()
+        local first = fake_selection_service({ io = strategy, process_analysis = analysis },
+            function()
+                coroutine.yield("query running")
+                return object_bytes(payload(1, 6))
+            end)
+        local second = fake_selection_service({ io = strategy, process_analysis = analysis },
+            object_bytes(payload(1, 7)))
+        local first_module, second_module = context(first), context(second)
+        local worker = coroutine.create(function()
+            return first_module:select_enum_carrier(int_enum, { 6, 7 })
+        end)
+        local started, marker = coroutine.resume(worker)
+        assert.is_true(started)
+        assert.equal("query running", marker)
+        local completed = second_module:select_enum_carrier(int_enum, { 6, 7 })
+        assert.equal("success", completed.status, completed.message)
+        assert.equal(7, completed.selection.carrier_id)
+        local resumed, reused = coroutine.resume(worker)
+        assert.is_true(resumed, reused)
+        assert.equal("analysis", reused.cache_tier)
+        assert.equal(7, reused.selection.carrier_id)
+        assert.is_true(first:close())
+        assert.is_true(second:close())
+    end)
+
+    it("rejects malformed eligibility questions before launching a compiler", function()
+        for _, ids in ipairs({ { 6, 6 }, { 0 }, { 12 }, { 1.5 }, { [2] = 6 } }) do
+            local service, state = fake_selection_service(nil, false)
+            assert.equal("infrastructure_failure", context(service):select_enum_carrier(int_enum, ids).status)
+            assert.equal(0, #state.calls)
+            assert.is_true(service:close())
+        end
+    end)
+
+    it("does not publish selections after object I/O or cleanup failures", function()
+        for _, failure in ipairs({ "stat", "read", "oversized", "cleanup" }) do
+            local cache = temporary_directory()
+            local service, state = fake_selection_service({ cache_directory = cache },
+                object_bytes(payload(1, 6)))
+            local module = context(service)
+            assert.equal("success", module:validate_baseline().status)
+            local original_stat = service.io.stat
+            local original_read = service.io.read_file
+            local original_remove = service.workspace.remove
+            if failure == "stat" or failure == "oversized" then
+                function service.io:stat(path)
+                    if path:match("%.o$") then
+                        if failure == "stat" then return nil, "injected object stat failure" end
+                        return { kind = "file", size = 16 * 1024 * 1024 + 1 }
+                    end
+                    return original_stat(self, path)
+                end
+            elseif failure == "read" then
+                function service.io:read_file(path, limit)
+                    if path:match("%.o$") then
+                        assert.equal(16 * 1024 * 1024, limit)
+                        return nil, "injected object read failure"
+                    end
+                    return original_read(self, path, limit)
+                end
+            else
+                function service.workspace:remove(name)
+                    local ok, err = original_remove(self, name)
+                    if name:match("%.o$") then return nil, "injected object cleanup failure" end
+                    return ok, err
+                end
+            end
+            local failed = module:select_enum_carrier(int_enum, all_ids)
+            assert.equal("infrastructure_failure", failed.status)
+            assert.is_nil(failed.selection)
+            assert.equal(1, #entries(cache)) -- only the header baseline
+            service.io.stat, service.io.read_file = original_stat, original_read
+            service.workspace.remove = original_remove
+            local retried = module:select_enum_carrier(int_enum, all_ids)
+            assert.equal("success", retried.status, retried.message)
+            assert.equal(6, retried.selection.carrier_id)
+            assert.equal(3, #state.calls)
+            assert.same({}, state.files)
+            assert.is_true(service:close())
+            remove_directory(cache)
+        end
+    end)
+
+    it("caches compiler rejection but retries interrupted or unavailable compilers", function()
+        for _, raw in ipairs({
+            { started = true, ok = false, status = 1, diagnostic = "invalid declaration" },
+            { started = true, ok = false, interrupted = true, diagnostic = "interrupted" },
+            { started = false, ok = false, status = 127, diagnostic = "missing compiler" },
+        }) do
+            local service, state = fake_selection_service(nil, false)
+            local module = context(service)
+            assert.equal("success", module:validate_baseline().status)
+            local original = service.runner
+            service.runner = function(argv, metadata)
+                original(argv, metadata)
+                return raw
+            end
+            local first = module:select_enum_carrier(int_enum, all_ids)
+            local second = module:select_enum_carrier(int_enum, all_ids)
+            assert.is_nil(first.selection)
+            if raw.status == 1 then
+                assert.equal("rejected", first.status)
+                assert.equal("service", second.cache_tier)
+                assert.equal(2, #state.calls)
+            else
+                assert.equal("infrastructure_failure", first.status)
+                assert.equal("infrastructure_failure", second.status)
+                assert.equal(3, #state.calls)
+            end
+            assert.same({}, state.files)
+            assert.is_true(service:close())
+        end
+    end)
+
+    it("represents an empty eligible list as a deterministic absent carrier", function()
+        local service, state = fake_selection_service(nil, object_bytes(payload(0, 0)))
+        local selected = context(service):select_enum_carrier(int_enum, {})
+        assert.equal("success", selected.status, selected.message)
+        assert.equal(0, selected.selection.match_count)
+        assert.equal(2, #state.calls)
+        assert.is_true(service:close())
+    end)
+
+    it("selects real GCC and Clang carriers without linking or target execution", function()
+        local root = temporary_directory()
+        local header = root .. "/enum-query.h"
+        write_file(header, [[
+enum probe_enum { PROBE_NEGATIVE = -1, PROBE_POSITIVE = 1 };
+typedef enum probe_enum probe_alias;
+typedef const enum probe_enum qualified_probe_alias;
+enum probe_short { PROBE_SMALL = 1 };
+enum probe_wide { PROBE_WIDE = 18446744073709551615ULL };
+]])
+        local compilers = { os.getenv("CC") or "cc" }
+        for _, path in ipairs({ "/usr/bin/clang", "/home/linuxbrew/.linuxbrew/bin/clang" }) do
+            if lfs.attributes(path, "mode") == "file" then
+                compilers[#compilers + 1] = path
+                break
+            end
+        end
+        for _, compiler in ipairs(compilers) do
+            for _, short_enums in ipairs({ false, true }) do
+                local executions = {}
+                local flags = { "-Wall", "-Wextra", "-Werror" }
+                if short_enums then flags[#flags + 1] = "-fshort-enums" end
+                local service = assert(cprobe.new_service({ compiler_argv = compiler,
+                    cflags = flags, syntax_only = true,
+                    execution_trace = function(event) executions[#executions + 1] = event end }))
+                local module = assert(service:module_context({ includes = {
+                    { include_kind = "quote", include_name = header } } }))
+                local selected_id = short_enums and 2 or 6
+                for _, spelling in ipairs({ "enum probe_enum", "probe_alias", "__typeof__((PROBE_NEGATIVE))" }) do
+                    local typ = spelling == "probe_alias"
+                        and types.CTypedef(spelling, int_enum)
+                        or types.CInteger(spelling, true, 3, 32)
+                    local selected = module:select_enum_carrier(typ, all_ids)
+                    assert.equal("success", selected.status, selected.message)
+                    assert.equal(1, selected.selection.match_count)
+                    assert.equal(spelling:find("__typeof__", 1, true) and 6 or selected_id,
+                        selected.selection.carrier_id)
+                end
+                local qualified = module:select_enum_carrier(
+                    types.CInteger("qualified_probe_alias", true, 3, 32), all_ids)
+                assert.equal("success", qualified.status, qualified.message)
+                assert.equal(0, qualified.selection.match_count)
+                local absent = module:select_enum_carrier(int_enum, { 7 })
+                assert.equal("success", absent.status, absent.message)
+                assert.equal(0, absent.selection.match_count)
+                local wide = types.CInteger("enum probe_wide", false, 4, 64)
+                local full = module:select_enum_carrier(wide, all_ids)
+                assert.equal("success", full.status, full.message)
+                assert.equal(1, full.selection.match_count)
+                assert.is_true(full.selection.carrier_id == 9 or
+                    full.selection.carrier_id == 11)
+                local bounded = module:select_enum_carrier(wide,
+                    { 1, 2, 3, 4, 5, 6, 7, 8, 10 })
+                assert.equal("success", bounded.status, bounded.message)
+                assert.equal(0, bounded.selection.match_count)
+                assert.equal(8, #executions) -- baseline + seven complete questions
+                for _, event in ipairs(executions) do
+                    assert.equal("single", event.batch_kind)
+                    assert.equal("success", event.outcome)
+                end
+                assert.is_true(service:close())
+            end
+        end
         remove_directory(root)
     end)
 end)

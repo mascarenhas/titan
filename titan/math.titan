@@ -4,13 +4,13 @@
 -- https://www.lua.org/ftp/lua-5.5.1.tar.gz
 -- Copyright (C) 1994-2026 Lua.org, PUC-Rio. MIT terms are reproduced in
 -- LICENSES/lua-LICENSE.
-local cmath = foreign import "math.h"
-local cstdlib = foreign import "stdlib.h"
-local ctime = foreign import "time.h"
-local cstdint = foreign import "stdint.h"
-local cstring = foreign import "string.h"
-local clocale = foreign import "locale.h"
-local climits = foreign import "limits.h"
+foreign import "math.h"
+foreign import "stdlib.h"
+foreign import "time.h"
+foreign import "stdint.h"
+foreign import "string.h"
+foreign import "locale.h"
+foreign import "limits.h"
 
 pi: float = 3.141592653589793238462643383279502884
 huge: float = 1e999
@@ -111,8 +111,8 @@ function randomseed(first: integer?, second: integer?): (integer, integer)
     if second then raise "randomseed first component is required" end
     -- Lua promises only a weak attempt at an unpredictable default seed.  C's
     -- wall-clock and process-CPU clocks supply that weak seed without Lua APIs.
-    actual_first = (ctime.time(nil) as integer) ~
-                   (ctime.clock() as integer)
+    actual_first = (ffi.time(nil) as integer) ~
+                   (ffi.clock() as integer)
     actual_second = next_random()
   end
   set_random_seed(actual_first, actual_second)
@@ -120,29 +120,29 @@ function randomseed(first: integer?, second: integer?): (integer, integer)
 end
 
 function abs(number: float): float
-  return cmath.fabs(number) as float
+  return ffi.fabs(number) as float
 end
 
 function acos(number: float): float
-  return cmath.acos(number) as float
+  return ffi.acos(number) as float
 end
 
 function asin(number: float): float
-  return cmath.asin(number) as float
+  return ffi.asin(number) as float
 end
 
 function atan(y: float, x: float?): float
   local actual_x = 1.0
   if x then actual_x = x as float end
-  return cmath.atan2(y, actual_x) as float
+  return ffi.atan2(y, actual_x) as float
 end
 
 function ceil(number: float): float
-  return cmath.ceil(number) as float
+  return ffi.ceil(number) as float
 end
 
 function cos(number: float): float
-  return cmath.cos(number) as float
+  return ffi.cos(number) as float
 end
 
 function deg(radians: float): float
@@ -150,40 +150,40 @@ function deg(radians: float): float
 end
 
 function exp(number: float): float
-  return cmath.exp(number) as float
+  return ffi.exp(number) as float
 end
 
 function floor(number: float): float
-  return cmath.floor(number) as float
+  return ffi.floor(number) as float
 end
 
 function fmod(numerator: float, denominator: float): float
-  return cmath.fmod(numerator, denominator) as float
+  return ffi.fmod(numerator, denominator) as float
 end
 
 function frexp(number: float): (float, integer)
   local exponent: int = 0 as int
-  local mantissa = cmath.frexp(number, exponent) as float
+  local mantissa = ffi.frexp(number, exponent) as float
   return mantissa, exponent as integer
 end
 
 function ldexp(mantissa: float, exponent: integer): float
-  return cmath.ldexp(
+  return ffi.ldexp(
     mantissa, exponent as int) as float
 end
 
 function log(number: float, base: float?): float
-  if not base then return cmath.log(number) as float end
+  if not base then return ffi.log(number) as float end
   local actual_base = base as float
-  return (cmath.log(number) / cmath.log(actual_base)) as float
+  return (ffi.log(number) / ffi.log(actual_base)) as float
 end
 
 function log2(number: float): float
-  return cmath.log2(number) as float
+  return ffi.log2(number) as float
 end
 
 function log10(number: float): float
-  return cmath.log10(number) as float
+  return ffi.log10(number) as float
 end
 
 function max(first: float, ...: float): float
@@ -211,7 +211,7 @@ end
 function modf(number: float): (float, float)
   local integral: double =
     0.0 as double
-  local fractional = cmath.modf(number, integral) as float
+  local fractional = ffi.modf(number, integral) as float
   return integral as float, fractional
 end
 
@@ -220,19 +220,19 @@ function rad(degrees: float): float
 end
 
 function sin(number: float): float
-  return cmath.sin(number) as float
+  return ffi.sin(number) as float
 end
 
 function sqrt(number: float): float
-  return cmath.sqrt(number) as float
+  return ffi.sqrt(number) as float
 end
 
 function tan(number: float): float
-  return cmath.tan(number) as float
+  return ffi.tan(number) as float
 end
 
 local function byte_at(text: string, index: integer): integer
-  local bytes = text as const *cstdint.uint8_t
+  local bytes = text as const *ffi.uint8_t
   return bytes[index - 1] as integer
 end
 
@@ -332,19 +332,19 @@ local function parsed_float(text: string,
   -- Lua numerals always use '.', even when the active C locale uses another
   -- decimal-point byte.  Translate the already length-bounded, fully validated
   -- numeral before handing it to strtod.
-  if point_position == 0 then return cstdlib.strtod(text, nil) as float end
-  local convention = clocale.localeconv()
+  if point_position == 0 then return ffi.strtod(text, nil) as float end
+  local convention = ffi.localeconv()
   local decimal_point = convention.decimal_point
   if not decimal_point or decimal_point[0] == 46 then
-    return cstdlib.strtod(text, nil) as float
+    return ffi.strtod(text, nil) as float
   end
   local source = text as const *char
   local storage = char.new_array(#text + 1)
   local normalized = storage as *char
-  cstring.memcpy(normalized, source, #text as cstring.size_t)
+  ffi.memcpy(normalized, source, #text as ffi.size_t)
   normalized[point_position - 1] = decimal_point[0]
   normalized[#text] = 0
-  return cstdlib.strtod(normalized, nil) as float
+  return ffi.strtod(normalized, nil) as float
 end
 
 local function parse_numeral(text: string): value?
@@ -443,7 +443,7 @@ end
 do
   -- Foreign constants are not Titan constant expressions, so publish the
   -- target's actual limits during the module's one-time initializer.
-  maxinteger = climits.LLONG_MAX as integer
-  mininteger = climits.LLONG_MIN as integer
+  maxinteger = ffi.LLONG_MAX as integer
+  mininteger = ffi.LLONG_MIN as integer
   randomseed()
 end

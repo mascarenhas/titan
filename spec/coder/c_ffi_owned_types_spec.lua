@@ -45,14 +45,14 @@ describe("source-written owned C type code generation", function()
         ]], function(header)
             local csrc = h.with_extra_cflags({ '-DTITAN_COMPILER_TESTS' }, function ()
               return h.compile_and_read_c([[
-                local c = foreign import "]] .. header .. [["
-                local type Item = owned *c.ffi_item
-                local item: Item = c.ffi_item.new()
+                foreign import "]] .. header .. [["
+                local type Item = owned *ffi.ffi_item
+                local item: Item = ffi.ffi_item.new()
                 function ready(): boolean
                     return true
                 end
                 function make(): value
-                    local made: Item = c.ffi_item.new()
+                    local made: Item = ffi.ffi_item.new()
                     return made
                 end
               ]])
@@ -139,11 +139,11 @@ describe("source-written owned C type code generation", function()
             }
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local type Item = owned *c.ffi_item
-                local type Items = owned c.ffi_item[]
-                local type PointerSlot = owned *c.ffi_item_pointer
+                local type Item = owned *ffi.ffi_item
+                local type Items = owned ffi.ffi_item[]
+                local type PointerSlot = owned *ffi.ffi_item_pointer
 
                 record Holder
                     local item?: Item
@@ -151,25 +151,25 @@ describe("source-written owned C type code generation", function()
                 end
 
                 function exercise(): integer
-                    local one: Item = c.ffi_item.new()
-                    local many: Items = c.ffi_item.new_array(2)
+                    local one: Item = ffi.ffi_item.new()
+                    local many: Items = ffi.ffi_item.new_array(2)
                     local slot: PointerSlot =
-                        c.ffi_item_pointer.new()
-                    local mutable: *c.ffi_item = one
-                    local immutable: const *c.ffi_item = many
-                    local erased: *c.ffi_void = one
+                        ffi.ffi_item_pointer.new()
+                    local mutable: *ffi.ffi_item = one
+                    local immutable: const *ffi.ffi_item = many
+                    local erased: *ffi.ffi_void = one
 
-                    c.ffi_write(mutable, 37)
-                    c.ffi_write(
-                        (many as *c.ffi_item) + 1, 41)
-                    c.ffi_store_pointer(slot, one)
+                    ffi.ffi_write(mutable, 37)
+                    ffi.ffi_write(
+                        (many as *ffi.ffi_item) + 1, 41)
+                    ffi.ffi_store_pointer(slot, one)
 
                     local holder = Holder.new(one, many)
-                    return c.ffi_read(immutable)
-                        + c.ffi_read(
-                            (holder.items as *c.ffi_item) + 1)
-                        + c.ffi_read_pointer(slot)
-                        + c.ffi_present(erased)
+                    return ffi.ffi_read(immutable)
+                        + ffi.ffi_read(
+                            (holder.items as *ffi.ffi_item) + 1)
+                        + ffi.ffi_read_pointer(slot)
+                        + ffi.ffi_present(erased)
                         + #holder.items
                 end
             ]], [[
@@ -187,17 +187,17 @@ describe("source-written owned C type code generation", function()
             } ffi_item;
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local type Item = owned *c.ffi_item
-                local type Items = owned c.ffi_item[]
+                local type Item = owned *ffi.ffi_item
+                local type Items = owned ffi.ffi_item[]
 
                 function exercise(): integer
                     local absent_item: Item? = nil
-                    local present_item: Item? = c.ffi_item.new()
+                    local present_item: Item? = ffi.ffi_item.new()
                     local absent_items: Items? = nil
                     local present_items: Items? =
-                        c.ffi_item.new_array(2)
+                        ffi.ffi_item.new_array(2)
                     local result = 0
 
                     if not absent_item then result = result + 1 end
@@ -235,7 +235,7 @@ describe("source-written owned C type code generation", function()
             typedef int ffi_int;
         ]], function(header)
             h.run_coder([[
-            local ffi = foreign import "]] .. header .. [["
+            foreign import "]] .. header .. [["
 
             local type Chars = owned ffi.ffi_char[]
             local type SignedChars =
@@ -352,10 +352,10 @@ describe("source-written owned C type code generation", function()
             typedef char ffi_char;
         ]], function(header)
             local csrc = h.compile_and_read_c([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function temporary(size: integer): string
-                    return c.ffi_char.new_array(size) as string
+                    return ffi.ffi_char.new_array(size) as string
                 end
             ]])
 
@@ -373,8 +373,8 @@ describe("source-written owned C type code generation", function()
     it("roots temporary counted character owners while strings allocate #stress",
     function()
         local csrc = h.compile_and_read_c([[
-            local ffi = foreign import "titan/ffi.h"
-            local lua = foreign import "lua.h"
+            foreign import "titan/ffi.h"
+            foreign import "lua.h"
 
             local function temporary(size: integer): string
                 return char.new_array(size) as string
@@ -382,16 +382,16 @@ describe("source-written owned C type code generation", function()
 
             function stress(generational: boolean): integer
                 if generational then
-                    lua.lua_gc(L, lua.LUA_GCGEN, 0, 0)
+                    ffi.lua_gc(L, ffi.LUA_GCGEN, 0, 0)
                 else
-                    lua.lua_gc(L, lua.LUA_GCINC, 0, 0, 0)
+                    ffi.lua_gc(L, ffi.LUA_GCINC, 0, 0, 0)
                 end
                 local total = 0
                 local i = 1
                 while i <= 400 do
                     local bytes = temporary(i % 33)
                     total = total + #bytes
-                    lua.lua_gc(L, lua.LUA_GCCOLLECT)
+                    ffi.lua_gc(L, ffi.LUA_GCCOLLECT)
                     i = i + 1
                 end
                 return total
@@ -418,7 +418,7 @@ describe("source-written owned C type code generation", function()
             }
         ]], function(header)
             local csrc = h.compile_and_read_c([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local record Owner
                     local marker: integer
@@ -433,8 +433,8 @@ describe("source-written owned C type code generation", function()
                 end
 
                 function exercise(): integer
-                    return c.ffi_present_record(
-                        make_owner() as c.ffi_void_pointer,
+                    return ffi.ffi_present_record(
+                        make_owner() as ffi.ffi_void_pointer,
                         later_argument()) as integer
                 end
             ]])
@@ -471,8 +471,8 @@ describe("source-written owned C type code generation", function()
             }
         ]], function(header)
             local csrc = h.compile_and_read_c([[
-                local c = foreign import "]] .. header .. [["
-                local lua = foreign import "lua.h"
+                foreign import "]] .. header .. [["
+                foreign import "lua.h"
 
                 local record Owner
                     local marker: integer
@@ -486,23 +486,23 @@ describe("source-written owned C type code generation", function()
                 end
 
                 local function collect_and_reuse(): integer
-                    lua.lua_gc(L, lua.LUA_GCCOLLECT)
+                    ffi.lua_gc(L, ffi.LUA_GCCOLLECT)
                     local i = 1
                     while i <= 128 do
                         local replacement = Owner.new(0 - i)
                         i = i + 1
                     end
-                    lua.lua_gc(L, lua.LUA_GCCOLLECT)
+                    ffi.lua_gc(L, ffi.LUA_GCCOLLECT)
                     return 11
                 end
 
                 function exercise(): integer
                     made = 0
-                    local result = c.ffi_remember_record(
-                        make_owner() as c.ffi_void_pointer,
+                    local result = ffi.ffi_remember_record(
+                        make_owner() as ffi.ffi_void_pointer,
                         collect_and_reuse())
                     local raw: value =
-                        c.ffi_saved_record_udata()
+                        ffi.ffi_saved_record_udata()
                     local restored: Owner = raw
                     return result as integer
                         + restored.marker
@@ -543,7 +543,7 @@ describe("source-written owned C type code generation", function()
             }
         ]], function(header)
             local csrc = h.compile_and_read_c([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function identities(): integer
                     local values: {integer} = {17}
@@ -555,19 +555,19 @@ describe("source-written owned C type code generation", function()
                         return answer
                     end
                     local score = 0
-                    if c.ffi_same_identity(
-                        values as c.ffi_void_pointer,
-                        values as c.ffi_void_pointer) ~= 0 then
+                    if ffi.ffi_same_identity(
+                        values as ffi.ffi_void_pointer,
+                        values as ffi.ffi_void_pointer) ~= 0 then
                         score = score + 1
                     end
-                    if c.ffi_same_identity(
-                        by_name as c.ffi_void_pointer,
-                        by_name as c.ffi_void_pointer) ~= 0 then
+                    if ffi.ffi_same_identity(
+                        by_name as ffi.ffi_void_pointer,
+                        by_name as ffi.ffi_void_pointer) ~= 0 then
                         score = score + 2
                     end
-                    if c.ffi_same_identity(
-                        callback as c.ffi_void_pointer,
-                        callback as c.ffi_void_pointer) ~= 0 then
+                    if ffi.ffi_same_identity(
+                        callback as ffi.ffi_void_pointer,
+                        callback as ffi.ffi_void_pointer) ~= 0 then
                         score = score + 4
                     end
                     return score + values[1]
@@ -576,8 +576,8 @@ describe("source-written owned C type code generation", function()
 
                 function roundtrip_c_function_pointer(): integer
                     local pointer =
-                        c.ffi_get_callback() as c.ffi_void_pointer
-                    local callback = pointer as c.ffi_callback_pointer
+                        ffi.ffi_get_callback() as ffi.ffi_void_pointer
+                    local callback = pointer as ffi.ffi_callback_pointer
                     return callback(41) as integer
                 end
             ]])
@@ -628,8 +628,8 @@ describe("source-written owned C type code generation", function()
             }
         ]], function(header)
             local csrc = h.compile_and_read_c([[
-                local c = foreign import "]] .. header .. [["
-                local lua = foreign import "lua.h"
+                foreign import "]] .. header .. [["
+                foreign import "lua.h"
 
                 local array_calls = 0
                 local map_calls = 0
@@ -654,7 +654,7 @@ describe("source-written owned C type code generation", function()
                 end
 
                 local function collect_and_allocate(): integer
-                    lua.lua_gc(L, lua.LUA_GCCOLLECT)
+                    ffi.lua_gc(L, ffi.LUA_GCCOLLECT)
                     local i = 1
                     while i <= 128 do
                         local values = {i, i + 1, i + 2}
@@ -662,7 +662,7 @@ describe("source-written owned C type code generation", function()
                             { ["value"] = i }
                         i = i + 1
                     end
-                    lua.lua_gc(L, lua.LUA_GCCOLLECT)
+                    ffi.lua_gc(L, ffi.LUA_GCCOLLECT)
                     return 7
                 end
 
@@ -671,19 +671,19 @@ describe("source-written owned C type code generation", function()
                     local by_name = make_map()
                     local callback = make_function()
                     local score = 0
-                    if c.ffi_same_identity(
-                        values as c.ffi_void_pointer,
-                        values as c.ffi_void_pointer) ~= 0 then
+                    if ffi.ffi_same_identity(
+                        values as ffi.ffi_void_pointer,
+                        values as ffi.ffi_void_pointer) ~= 0 then
                         score = score + 1
                     end
-                    if c.ffi_same_identity(
-                        by_name as c.ffi_void_pointer,
-                        by_name as c.ffi_void_pointer) ~= 0 then
+                    if ffi.ffi_same_identity(
+                        by_name as ffi.ffi_void_pointer,
+                        by_name as ffi.ffi_void_pointer) ~= 0 then
                         score = score + 2
                     end
-                    if c.ffi_same_identity(
-                        callback as c.ffi_void_pointer,
-                        callback as c.ffi_void_pointer) ~= 0 then
+                    if ffi.ffi_same_identity(
+                        callback as ffi.ffi_void_pointer,
+                        callback as ffi.ffi_void_pointer) ~= 0 then
                         score = score + 4
                     end
                     return score + values[1]
@@ -695,14 +695,14 @@ describe("source-written owned C type code generation", function()
                     map_calls = 0
                     function_calls = 0
                     local score =
-                        c.ffi_present_after(
-                            make_array() as c.ffi_void_pointer,
+                        ffi.ffi_present_after(
+                            make_array() as ffi.ffi_void_pointer,
                             collect_and_allocate())
-                        + c.ffi_present_after(
-                            make_map() as c.ffi_void_pointer,
+                        + ffi.ffi_present_after(
+                            make_map() as ffi.ffi_void_pointer,
                             collect_and_allocate())
-                        + c.ffi_present_after(
-                            make_function() as c.ffi_void_pointer,
+                        + ffi.ffi_present_after(
+                            make_function() as ffi.ffi_void_pointer,
                             collect_and_allocate())
                     return score
                         + array_calls * 100
@@ -713,11 +713,11 @@ describe("source-written owned C type code generation", function()
                 function predicates(): boolean
                     function_calls = 0
                     local real =
-                        make_function() is c.ffi_void_pointer
+                        make_function() is ffi.ffi_void_pointer
                     local raw: value = 42
                     local malformed: () -> () = raw
                     local fake =
-                        malformed is c.ffi_void_pointer
+                        malformed is ffi.ffi_void_pointer
                     return real and not fake and function_calls == 1
                 end
 
@@ -725,21 +725,21 @@ describe("source-written owned C type code generation", function()
                     local raw: value = 42
                     local malformed: () -> () = raw
                     local pointer =
-                        malformed as c.ffi_void_pointer
-                    return c.ffi_present_after(pointer, 1)
+                        malformed as ffi.ffi_void_pointer
+                    return ffi.ffi_present_after(pointer, 1)
                 end
 
                 function c_function_pointer(): integer
-                    local callback = c.ffi_get_callback()
+                    local callback = ffi.ffi_get_callback()
                     local pointer =
-                        callback as c.ffi_void_pointer
-                    return c.ffi_present_after(pointer, 1)
+                        callback as ffi.ffi_void_pointer
+                    return ffi.ffi_present_after(pointer, 1)
                 end
 
                 function roundtrip_c_function_pointer(): integer
                     local pointer =
-                        c.ffi_get_callback() as c.ffi_void_pointer
-                    local callback = pointer as c.ffi_callback_pointer
+                        ffi.ffi_get_callback() as ffi.ffi_void_pointer
+                    local callback = pointer as ffi.ffi_callback_pointer
                     return callback(41) as integer
                 end
             ]])
@@ -776,13 +776,13 @@ describe("source-written owned C type code generation", function()
             typedef const char ffi_const_char;
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 local type ConstChars =
-                    owned c.ffi_const_char[]
+                    owned ffi.ffi_const_char[]
 
                 function qualified_bytes(): string
                     local bytes: ConstChars =
-                        c.ffi_const_char.new_array(3)
+                        ffi.ffi_const_char.new_array(3)
                     return bytes as string
                 end
             ]], [[
@@ -808,9 +808,9 @@ describe("source-written owned C type code generation", function()
             }
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local type Item = owned *c.ffi_item
+                local type Item = owned *ffi.ffi_item
                 local type Items = {Item}
                 local type ByName = {string: Item}
                 local type Transform = (Item) -> Item
@@ -819,7 +819,7 @@ describe("source-written owned C type code generation", function()
                     local total = 0
                     local i = 1
                     while i <= #... do
-                        total = total + c.ffi_read(...[i])
+                        total = total + ffi.ffi_read(...[i])
                         i = i + 1
                     end
                     return total
@@ -837,10 +837,10 @@ describe("source-written owned C type code generation", function()
                 end
 
                 function exercise(): integer
-                    local first: Item = c.ffi_item.new()
-                    local second: Item = c.ffi_item.new()
-                    c.ffi_write(first, 11)
-                    c.ffi_write(second, 13)
+                    local first: Item = ffi.ffi_item.new()
+                    local second: Item = ffi.ffi_item.new()
+                    ffi.ffi_write(first, 11)
+                    ffi.ffi_write(second, 13)
 
                     local items: Items = { first, second }
                     local raw_items: value = items
@@ -857,10 +857,10 @@ describe("source-written owned C type code generation", function()
 
                     return sum(first, second)
                         + sum(emit(first, second))
-                        + c.ffi_read(restored_items[1] as Item)
-                        + c.ffi_read(
+                        + ffi.ffi_read(restored_items[1] as Item)
+                        + ffi.ffi_read(
                             restored_by_name["second"] as Item)
-                        + c.ffi_read(restored_transform(first))
+                        + ffi.ffi_read(restored_transform(first))
                 end
             ]], [[
                 assert(test.exercise() == 83)
@@ -884,9 +884,9 @@ describe("source-written owned C type code generation", function()
                 -- carry the defining C scope across this synthetic module set.
                 local ok, err = h.generate_modules({
                     owned_tag_a = [[
-                        local c = foreign import "]] ..
+                        foreign import "]] ..
                             first_header .. [["
-                        local type Owner = owned *c.ffi_same
+                        local type Owner = owned *ffi.ffi_same
 
                         local function read(owner: Owner): integer
                             return owner.left as integer
@@ -897,15 +897,15 @@ describe("source-written owned C type code generation", function()
                         end
                     ]],
                     owned_tag_b = [[
-                        local c = foreign import "]] ..
+                        foreign import "]] ..
                             second_header .. [["
                         local a = import "owned_tag_a"
-                        local type Owner = owned *c.ffi_same
+                        local type Owner = owned *ffi.ffi_same
 
                         function call_wrong(): integer
                             local raw: value = a.expose()
                             local read: (Owner) -> integer = raw
-                            return read(c.ffi_same.new())
+                            return read(ffi.ffi_same.new())
                         end
                     ]],
                 }, "owned_tag_b", nil, { interface = "compiled" })

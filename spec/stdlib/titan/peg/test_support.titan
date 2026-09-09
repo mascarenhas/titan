@@ -1,6 +1,6 @@
 local test = import "test"
 local pattern = import "peg"
-local clocale = foreign import "locale.h"
+foreign import "locale.h"
 
 local function bytes_contain(subject: string, needle: string): boolean
   if #needle == 0 then return true end
@@ -76,16 +76,16 @@ local function repeat_text(piece: string, count: integer): string
 end
 
 local function use_c_ctype_locale(): string
-  local previous_pointer = clocale.setlocale(clocale.LC_CTYPE, nil)
+  local previous_pointer = ffi.setlocale(ffi.LC_CTYPE, nil)
   test.assert(previous_pointer ~= nil, "failed to query C character locale")
   local previous = previous_pointer as string
-  test.assert(clocale.setlocale(clocale.LC_CTYPE, "C") ~= nil,
+  test.assert(ffi.setlocale(ffi.LC_CTYPE, "C") ~= nil,
               "failed to select C character locale")
   return previous
 end
 
 local function restore_c_ctype_locale(previous: string)
-  test.assert(clocale.setlocale(clocale.LC_CTYPE, previous) ~= nil,
+  test.assert(ffi.setlocale(ffi.LC_CTYPE, previous) ~= nil,
               "failed to restore C character locale")
 end
 

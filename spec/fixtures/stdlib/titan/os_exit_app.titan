@@ -1,17 +1,17 @@
 local async = import "async"
 local system = import "os"
 local timer = import "timer"
-local stdio = foreign import "stdio.h"
+foreign import "stdio.h"
 
 local function append(path: string, text: string)
-  local file = stdio.fopen(path, "ab")
+  local file = ffi.fopen(path, "ab")
   if not file then raise "could not open exit marker" end
-  local written = stdio.fwrite(text, #text, 1, file)
+  local written = ffi.fwrite(text, #text, 1, file)
   if (written as integer) ~= 1 then
-    stdio.fclose(file)
+    ffi.fclose(file)
     raise "could not write exit marker"
   end
-  if stdio.fclose(file) ~= 0 then
+  if ffi.fclose(file) ~= 0 then
     raise "could not close exit marker"
   end
 end

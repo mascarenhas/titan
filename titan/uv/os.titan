@@ -5,64 +5,64 @@ local record SignalWaitCall
 end
 
 local record uv_signal_t
-  local handle: owned *libuv.uv_signal_t
+  local handle: owned *ffi.uv_signal_t
   local callback: (uv_signal_t, integer) -> ()
   local root_index: integer
 end
 
-foreign function uv_signal_cb(signal: *libuv.uv_signal_t,
+foreign function uv_signal_cb(signal: *ffi.uv_signal_t,
                               signum: int)
-  local handle = signal as *libuv.uv_handle_t
-  local owner = libuv.uv_handle_get_data(handle) as *ffi.Udata
+  local handle = signal as *ffi.uv_handle_t
+  local owner = ffi.uv_handle_get_data(handle) as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
-  local loop = libuv.uv_handle_get_loop(handle)
-  local L = libuv.uv_loop_get_data(loop) as *lua.lua_State
+  local loop = ffi.uv_handle_get_loop(handle)
+  local L = ffi.uv_loop_get_data(loop) as *ffi.lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
       callback.upvalue[2]) as UvIntegerCallbackEntry
-  local top = lua.lua_gettop(L)
-  entry(L, module, callback, owner, signum as lua.lua_Integer)
-  lua.lua_settop(L, top)
+  local top = ffi.lua_gettop(L)
+  entry(L, module, callback, owner, signum as ffi.lua_Integer)
+  ffi.lua_settop(L, top)
 end
 
 local function signal_number(name: string): int
-  if name == "hup" then return csignal.SIGHUP end
-  if name == "int" then return csignal.SIGINT end
-  if name == "quit" then return csignal.SIGQUIT end
-  if name == "kill" then return csignal.SIGKILL end
-  if name == "term" then return csignal.SIGTERM end
-  if name == "usr1" then return csignal.SIGUSR1 end
-  if name == "usr2" then return csignal.SIGUSR2 end
+  if name == "hup" then return ffi.SIGHUP end
+  if name == "int" then return ffi.SIGINT end
+  if name == "quit" then return ffi.SIGQUIT end
+  if name == "kill" then return ffi.SIGKILL end
+  if name == "term" then return ffi.SIGTERM end
+  if name == "usr1" then return ffi.SIGUSR1 end
+  if name == "usr2" then return ffi.SIGUSR2 end
   return 0 as int
 end
 
 local function signal_name(signum: integer): string?
-  if signum == csignal.SIGHUP then return "hup" end
-  if signum == csignal.SIGINT then return "int" end
-  if signum == csignal.SIGQUIT then return "quit" end
-  if signum == csignal.SIGKILL then return "kill" end
-  if signum == csignal.SIGTERM then return "term" end
-  if signum == csignal.SIGUSR1 then return "usr1" end
-  if signum == csignal.SIGUSR2 then return "usr2" end
+  if signum == ffi.SIGHUP then return "hup" end
+  if signum == ffi.SIGINT then return "int" end
+  if signum == ffi.SIGQUIT then return "quit" end
+  if signum == ffi.SIGKILL then return "kill" end
+  if signum == ffi.SIGTERM then return "term" end
+  if signum == ffi.SIGUSR1 then return "usr1" end
+  if signum == ffi.SIGUSR2 then return "usr2" end
   return nil
 end
 
 local function os_sized_buffer(
-    uv_buffer_func: (*char, *libuv.size_t) ->
+    uv_buffer_func: (*char, *ffi.size_t) ->
                     int,
-    capacity: libuv.size_t,
+    capacity: ffi.size_t,
     operation: string): string?
   local actual_capacity = capacity
   while true do
-    local sizes = libuv.size_t.new_array(1)
+    local sizes = ffi.size_t.new_array(1)
     local bytes = char.new_array(actual_capacity as integer)
     sizes[0] = actual_capacity
     local status = uv_buffer_func(bytes, sizes)
     if status >= 0 then
       return bytes_string(bytes, sizes[0] as integer)
-    elseif status == libuv.UV_ENOBUFS then
+    elseif status == ffi.UV_ENOBUFS then
       actual_capacity = sizes[0]
-    elseif status == libuv.UV_ENOENT then
+    elseif status == ffi.UV_ENOENT then
       return nil
     else
       raise make_error(status, operation)
@@ -72,52 +72,52 @@ local function os_sized_buffer(
 end
 
 local function os_cwd_buffer(bytes: *char,
-                             sizes: *libuv.size_t): int
-  return libuv.uv_cwd(bytes, sizes)
+                             sizes: *ffi.size_t): int
+  return ffi.uv_cwd(bytes, sizes)
 end
 
 local function os_homedir_buffer(bytes: *char,
-                                 sizes: *libuv.size_t): int
-  return libuv.uv_os_homedir(bytes, sizes)
+                                 sizes: *ffi.size_t): int
+  return ffi.uv_os_homedir(bytes, sizes)
 end
 
 local function os_tmpdir_buffer(bytes: *char,
-                                sizes: *libuv.size_t): int
-  return libuv.uv_os_tmpdir(bytes, sizes)
+                                sizes: *ffi.size_t): int
+  return ffi.uv_os_tmpdir(bytes, sizes)
 end
 
 local function os_hostname_buffer(bytes: *char,
-                                  sizes: *libuv.size_t): int
-  return libuv.uv_os_gethostname(bytes, sizes)
+                                  sizes: *ffi.size_t): int
+  return ffi.uv_os_gethostname(bytes, sizes)
 end
 
 local function os_exepath_buffer(bytes: *char,
-                                 sizes: *libuv.size_t): int
+                                 sizes: *ffi.size_t): int
   local capacity = sizes[0]
-  local status = libuv.uv_exepath(bytes, sizes)
+  local status = ffi.uv_exepath(bytes, sizes)
   local supplied = capacity as integer
   if status >= 0 and (sizes[0] as integer) == supplied - 1 then
-    sizes[0] = (supplied * 2) as libuv.size_t
-    return libuv.UV_ENOBUFS as int
+    sizes[0] = (supplied * 2) as ffi.size_t
+    return ffi.UV_ENOBUFS as int
   end
   return status
 end
 
 local function current_directory(operation: string): string
   return os_sized_buffer(os_cwd_buffer,
-      OS_BUFFER_INITIAL as libuv.size_t,
+      OS_BUFFER_INITIAL as ffi.size_t,
       operation) as string
 end
 
 local function change_directory(path: string, operation: string)
   checked_text(path, operation)
-  local status = libuv.uv_chdir(path)
+  local status = ffi.uv_chdir(path)
   check_status(status, operation)
 end
 
 local function fs_tmpname_template(): string
   return (os_sized_buffer(os_tmpdir_buffer,
-      OS_BUFFER_INITIAL as libuv.size_t,
+      OS_BUFFER_INITIAL as ffi.size_t,
       "fs.tmpname") as string) ..
       "/titan-fs-XXXXXX"
 end
@@ -125,41 +125,41 @@ end
 local function os_getenv(name: string): string?
   checked_text(name, "os.getenv")
   local operation = function (bytes: *char,
-                              sizes: *libuv.size_t): int
-    return libuv.uv_os_getenv(name, bytes, sizes)
+                              sizes: *ffi.size_t): int
+    return ffi.uv_os_getenv(name, bytes, sizes)
   end
   return os_sized_buffer(operation,
-      OS_BUFFER_INITIAL as libuv.size_t,
+      OS_BUFFER_INITIAL as ffi.size_t,
       "os.getenv")
 end
 
 local function os_setenv(name: string, contents: string)
   checked_text(name, "os.setenv")
   checked_text(contents, "os.setenv")
-  check_status(libuv.uv_os_setenv(name, contents),
+  check_status(ffi.uv_os_setenv(name, contents),
                "os.setenv")
 end
 
 local function os_unsetenv(name: string)
   checked_text(name, "os.unsetenv")
-  check_status(libuv.uv_os_unsetenv(name), "os.unsetenv")
+  check_status(ffi.uv_os_unsetenv(name), "os.unsetenv")
 end
 
 local function os_homedir(): string
   return os_sized_buffer(os_homedir_buffer,
-      OS_BUFFER_INITIAL as libuv.size_t,
+      OS_BUFFER_INITIAL as ffi.size_t,
       "os.homedir") as string
 end
 
 local function os_tmpdir(): string
   return os_sized_buffer(os_tmpdir_buffer,
-      OS_BUFFER_INITIAL as libuv.size_t,
+      OS_BUFFER_INITIAL as ffi.size_t,
       "os.tmpdir") as string
 end
 
 local function os_hostname(): string
   return os_sized_buffer(os_hostname_buffer,
-      OS_BUFFER_INITIAL as libuv.size_t,
+      OS_BUFFER_INITIAL as ffi.size_t,
       "os.hostname") as string
 end
 
@@ -168,21 +168,21 @@ local function os_exepath(): string
     raise "os.exepath is only available in a compiled Titan program"
   end
   return os_sized_buffer(os_exepath_buffer,
-      OS_BUFFER_INITIAL as libuv.size_t,
+      OS_BUFFER_INITIAL as ffi.size_t,
       "os.exepath") as string
 end
 
 local function os_pid(): integer
-  return libuv.uv_os_getpid()
+  return ffi.uv_os_getpid()
 end
 
 local function os_ppid(): integer
-  return libuv.uv_os_getppid()
+  return ffi.uv_os_getppid()
 end
 
 local function os_clock(): float
-  local usage = libuv.uv_rusage_t.new()
-  local status = libuv.uv_getrusage(usage)
+  local usage = ffi.uv_rusage_t.new()
+  local status = ffi.uv_getrusage(usage)
   check_status(status, "os.clock")
   return ((usage.ru_utime.tv_sec as integer) as float) +
          ((usage.ru_utime.tv_usec as integer) as float) / 1000000.0 +
@@ -191,8 +191,8 @@ local function os_clock(): float
 end
 
 local function os_time(): integer
-  local current = libuv.uv_timeval64_t.new()
-  local status = libuv.uv_gettimeofday(current)
+  local current = ffi.uv_timeval64_t.new()
+  local status = ffi.uv_gettimeofday(current)
   check_status(status, "os.current_time")
   return current.tv_sec as integer
 end
@@ -200,11 +200,11 @@ end
 local function SignalWaitCall:dispatch(task: Task): Immediate?
   local runtime = task.runtime
   accepting_work(runtime, "wait for a signal")
-  local native: owned *libuv.uv_signal_t = libuv.uv_signal_t.new()
+  local native: owned *ffi.uv_signal_t = ffi.uv_signal_t.new()
   local callback = function (owner: uv_signal_t, result: integer)
-    local signal_handle: *libuv.uv_signal_t = owner.handle
+    local signal_handle: *ffi.uv_signal_t = owner.handle
     close_handle(runtime,
-                 signal_handle as *libuv.uv_handle_t,
+                 signal_handle as *ffi.uv_handle_t,
                  owner, owner.root_index,
                  task, signal_name(result) as string)
     owner.root_index = 0
@@ -213,27 +213,27 @@ local function SignalWaitCall:dispatch(task: Task): Immediate?
   end
   local owner = uv_signal_t.new(native, callback, 0)
   owner.root_index = root_handle(runtime, owner)
-  local status = libuv.uv_signal_init(runtime.loop, native)
+  local status = ffi.uv_signal_init(runtime.loop, native)
   if status < 0 then
     unroot_handle(runtime, owner.root_index)
     owner.root_index = 0
     return immediate_error(status, "signal.init")
   end
-  local signal_handle: *libuv.uv_signal_t = native
-  libuv.uv_handle_set_data(
-      signal_handle as *libuv.uv_handle_t,
+  local signal_handle: *ffi.uv_signal_t = native
+  ffi.uv_handle_set_data(
+      signal_handle as *ffi.uv_handle_t,
       owner as *void)
   local cancel_action: CancelAction = function ()
-    close_handle(runtime, signal_handle as *libuv.uv_handle_t,
+    close_handle(runtime, signal_handle as *ffi.uv_handle_t,
                  owner, owner.root_index,
                  task, nil)
     owner.root_index = 0
   end
-  status = libuv.uv_signal_start_oneshot(
+  status = ffi.uv_signal_start_oneshot(
       native, uv_signal_cb,
       self.signum as int)
   if status < 0 then
-    close_handle(runtime, signal_handle as *libuv.uv_handle_t,
+    close_handle(runtime, signal_handle as *ffi.uv_handle_t,
                  owner, owner.root_index, nil, nil)
     owner.root_index = 0
     return immediate_error(status, "signal.start")

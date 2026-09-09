@@ -16,6 +16,7 @@ local implementation = core.coder
 -- Supported compiler-facing API; implementation helpers live in the slices.
 return {
     generate = implementation.generate,
+    generate_ffi_header = implementation.generate_ffi_header,
     generate_foreign_header = implementation.generate_foreign_header,
     external_symbols = implementation.external_symbols,
     interface_external_symbols = implementation.interface_external_symbols,

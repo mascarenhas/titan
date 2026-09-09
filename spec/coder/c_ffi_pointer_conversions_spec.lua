@@ -42,17 +42,17 @@ describe("unsafe C object-pointer conversion code generation", function()
             }
         ]], function(header)
             local csrc = h.compile_and_read_c([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function reinterpret(
-                    pointer: *c.ffi_source
-                ): *c.ffi_target
+                    pointer: *ffi.ffi_source
+                ): *ffi.ffi_target
                     return pointer
                 end
 
                 function local_address(): integer
-                    local object: c.ffi_source = c.ffi_make_source()
-                    return c.ffi_read_target(object) as integer
+                    local object: ffi.ffi_source = ffi.ffi_make_source()
+                    return ffi.ffi_read_target(object) as integer
                 end
             ]])
 
@@ -91,16 +91,16 @@ describe("unsafe C object-pointer conversion code generation", function()
             }
         ]], function(header)
             local source = [[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function arrays(): integer
-                    local local_sources: c.ffi_source[2] =
-                        c.ffi_source.new_array(2)
-                    return c.ffi_read_target(c.ffi_sources) as integer
-                        + c.ffi_read_target(local_sources) as integer
-                        + c.ffi_read_const(c.ffi_const_values) as integer
-                        + c.ffi_read_volatile(
-                            c.ffi_volatile_values) as integer
+                    local local_sources: ffi.ffi_source[2] =
+                        ffi.ffi_source.new_array(2)
+                    return ffi.ffi_read_target(ffi.ffi_sources) as integer
+                        + ffi.ffi_read_target(local_sources) as integer
+                        + ffi.ffi_read_const(ffi.ffi_const_values) as integer
+                        + ffi.ffi_read_volatile(
+                            ffi.ffi_volatile_values) as integer
                 end
             ]]
             local csrc = h.compile_and_read_c(source)
@@ -148,28 +148,28 @@ describe("unsafe C object-pointer conversion code generation", function()
             }
         ]], function(header)
             local source = [[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function reinterpret(
-                    pointer: *c.ffi_source
-                ): *c.ffi_target
-                    return pointer as *c.ffi_target
+                    pointer: *ffi.ffi_source
+                ): *ffi.ffi_target
+                    return pointer as *ffi.ffi_target
                 end
 
                 function explicit(): integer
-                    local object: c.ffi_source =
-                        c.ffi_make_source(53)
-                    local pointer: *c.ffi_source = object
-                    return c.ffi_read_target(
+                    local object: ffi.ffi_source =
+                        ffi.ffi_make_source(53)
+                    local pointer: *ffi.ffi_source = object
+                    return ffi.ffi_read_target(
                         reinterpret(pointer)) as integer
                 end
 
                 function vararg(): integer
-                    local object: c.ffi_source =
-                        c.ffi_make_source(59)
-                    local pointer: *c.ffi_source = object
-                    return c.ffi_read_vararg(
-                        1, pointer as *c.ffi_target) as integer
+                    local object: ffi.ffi_source =
+                        ffi.ffi_make_source(59)
+                    local pointer: *ffi.ffi_source = object
+                    return ffi.ffi_read_vararg(
+                        1, pointer as *ffi.ffi_target) as integer
                 end
             ]]
             local csrc = h.compile_and_read_c(source)
@@ -210,11 +210,11 @@ describe("unsafe C object-pointer conversion code generation", function()
             }
         ]], function(header)
             local csrc = h.compile_and_read_c([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function nested_callback_pointer(): integer
-                    return c.ffi_accept_const_pointer(
-                        c.ffi_get_mutable_pointer()) as integer
+                    return ffi.ffi_accept_const_pointer(
+                        ffi.ffi_get_mutable_pointer()) as integer
                 end
             ]])
 
@@ -314,19 +314,19 @@ describe("unsafe C object-pointer conversion code generation", function()
 #endif
         ]], function(header)
             local source = [[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function survives_unsafe_gc_write(): integer
-                    local raw: c.TValue = nil
-                    c.ffi_reset_unsafe_outparam_finalized()
-                    c.ffi_write_unsafe_gc_value(
-                        L, raw as *c.TValue)
-                    c.ffi_collect_unsafe_outparam(L)
-                    if (c.ffi_was_unsafe_outparam_finalized()
+                    local raw: ffi.TValue = nil
+                    ffi.ffi_reset_unsafe_outparam_finalized()
+                    ffi.ffi_write_unsafe_gc_value(
+                        L, raw as *ffi.TValue)
+                    ffi.ffi_collect_unsafe_outparam(L)
+                    if (ffi.ffi_was_unsafe_outparam_finalized()
                             as integer) ~= 0 then
                         return -1
                     end
-                    if (c.ffi_unsafe_outparam_is_userdata(raw)
+                    if (ffi.ffi_unsafe_outparam_is_userdata(raw)
                             as integer) == 0 then
                         return -2
                     end
@@ -382,31 +382,31 @@ describe("unsafe C object-pointer conversion code generation", function()
             }
         ]], function(header)
             local csrc = h.compile_and_read_c([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function handle(
-                    tcp: *c.ffi_tcp
-                ): *c.ffi_handle
+                    tcp: *ffi.ffi_tcp
+                ): *ffi.ffi_handle
                     return tcp
                 end
 
                 local function stream(
-                    pipe: *c.ffi_pipe
-                ): *c.ffi_stream
+                    pipe: *ffi.ffi_pipe
+                ): *ffi.ffi_stream
                     return pipe
                 end
 
                 local function request(
-                    fs: *c.ffi_fs
-                ): *c.ffi_request
+                    fs: *ffi.ffi_fs
+                ): *ffi.ffi_request
                     return fs
                 end
 
                 local function direct(): integer
-                    local tcp = c.ffi_tcp.new()
-                    local fs = c.ffi_fs.new()
-                    c.ffi_close(tcp, nil)
-                    return c.ffi_cancel(fs) as integer
+                    local tcp = ffi.ffi_tcp.new()
+                    local fs = ffi.ffi_fs.new()
+                    ffi.ffi_close(tcp, nil)
+                    return ffi.ffi_cancel(fs) as integer
                 end
             ]])
 

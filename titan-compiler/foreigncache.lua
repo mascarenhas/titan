@@ -1,16 +1,15 @@
--- Converted foreign declarations form one ordered compilation-unit graph.
--- Later headers may complete owners reached from earlier imports, so replay
--- all C symbol/tag/history roots together, never unrelated per-header blobs.
+-- One converted C graph belongs to one module-wide ffi namespace. Generated
+-- header descriptors are current input authority and never serialized paths.
 local cpp = require "c-parser.cpp"
 local sha256 = require "titan-compiler.sha256"
 local cacheadapter = require "titan-compiler.cacheadapter"
+local version = require "titan-compiler.version"
 
-local foreigncache = { VERSION = 1, KIND = "ffi-conversion-v1" }
+local foreigncache = { VERSION = 2, KIND = "ffi-conversion-v2" }
 local roots = {
     "foreign_types", "foreign_type_history", "foreign_names",
     "foreign_name_history", "foreign_macro_definitions", "foreign_macro_changes",
-    "foreign_field_macro_cache", "c_file_tags", "c_prototype_tags",
-    "pending_foreign_redeclarations", "foreign_includes", "c_profile",
+    "foreign_field_macro_cache", "c_file_tags", "c_prototype_tags", "c_profile",
 }
 local statistics = setmetatable({}, { __mode = "k" })
 
@@ -33,65 +32,73 @@ function foreigncache.stats(strategy)
     }
 end
 
-function foreigncache.key(st, imports, prepared)
-    if #imports == 0 or not st.probe_service then return nil end
+local function collect_inputs(namespace)
+    local include = namespace._include
+    local inputs, seen = {}, {}
+    for _, name in ipairs({ "c_header_dependencies", "c_header_search_inputs" }) do
+        for _, input in ipairs(include[name] or {}) do
+            local key = input.kind .. "\0" .. input.path
+            if not seen[key] then
+                seen[key] = true
+                inputs[#inputs + 1] = {
+                    kind = input.kind, path = input.path, identity = input.identity,
+                    observation = cpp.copy_header_observation(input.observation),
+                }
+            end
+        end
+    end
+    return inputs
+end
+
+function foreigncache.key(st, namespace)
+    local include = namespace._include
+    if not include or not st.probe_service or not st.probe_service.profile_identity
+       or not include.c_header_graph_key then return nil end
     local pieces = {}
     local function add(value)
         if type(value) ~= "string" then return false end
         pieces[#pieces + 1] = #value .. ":" .. value
         return true
     end
-    add("titan-ffi-conversion-v1")
+    add(foreigncache.KIND)
     add(st.modname)
     add(st.source_dir or "")
-    -- Each parsed include's graph key below already binds the exact compiler
-    -- argv, effective flags, language mode, include roots and forced headers.
-    -- Converted types additionally depend on the target profile; compiled
-    -- probe-cache metadata is neither an owner nor an input of this graph.
-    if not add(st.probe_service.profile_identity) then return nil end
-    for _, node in ipairs(imports) do
-        local item = prepared[node]
-        local include = item and item.ftypes and item.include
-        if not include or not add(include.c_header_graph_key) then return nil end
-        add(tostring(node._toplevel_order))
-        add(node.headername)
-        add(include.rendered)
-        for _, name in ipairs({ "c_header_dependencies", "c_header_search_inputs" }) do
-            local inputs = include[name]
-            if type(inputs) ~= "table" then return nil end
-            add(tostring(#inputs))
-            for _, input in ipairs(inputs) do
-                if not add(input.kind) or not add(input.path)
-                   or not add(input.identity) then return nil end
-            end
-        end
+    add(st.probe_service.profile_identity)
+    add(include.c_header_graph_key)
+    for _, input in ipairs(collect_inputs(namespace)) do
+        add(input.kind); add(input.path); add(input.identity)
     end
-    return "titan-ffi-conversion-v1:sha256:" .. sha256.hex(table.concat(pieces))
+    return foreigncache.KIND .. ":sha256:" .. sha256.hex(table.concat(pieces))
 end
 
-local function references(imports)
-    local external, restored = {}, {}
-    for index, node in ipairs(imports) do
-        local key = "foreign-import:" .. index
-        external[node], restored[key] = key, node
+local function references(namespace)
+    local external, current = {}, {}
+    local function add(value, key)
+        if type(value) == "table" then external[value], current[key] = key, value end
     end
-    return external, restored
+    add(namespace, "ffi-namespace")
+    add(namespace._include, "ffi-include")
+    local visited = {}
+    local function add_header(header)
+        if not header or visited[header] then return end
+        visited[header] = true
+        add(header, "ffi-header:" .. header.logical_name)
+        for _, dependency in ipairs(header.dependencies or {}) do add_header(dependency) end
+    end
+    add_header(namespace._include.generated_header)
+    return external, current
 end
 
-function foreigncache.encode(st, imports, key)
+function foreigncache.encode(st, namespace, key)
     local snapshot = {
         version = foreigncache.VERSION, key = key, roots = {},
-        node_types = {}, node_includes = {},
-        foreign_includes_version = st.foreign_includes_version,
-        last_foreign_import_node = st.last_foreign_import_node,
+        abi = version.TITAN_ABI_VERSION,
+        namespace_type = namespace._type,
         converted_enums = st._converted_c_enums,
+        converted_aggregates = st._converted_c_aggregates,
     }
     for _, name in ipairs(roots) do snapshot.roots[name] = st[name] end
-    for index, node in ipairs(imports) do
-        snapshot.node_types[index], snapshot.node_includes[index] =
-            node._type, node._include
-    end
-    local external = references(imports)
+    local external = references(namespace)
     return cpp.encode_graph(snapshot, {
         external = external,
         sha256_binary = st.cache_adapter and st.cache_adapter.sha256_binary,
@@ -99,129 +106,56 @@ function foreigncache.encode(st, imports, key)
     })
 end
 
-local function valid_snapshot(snapshot, imports, key)
-    local valid = type(snapshot) == "table" and snapshot.key == key
-        and snapshot.version == foreigncache.VERSION
-        and type(snapshot.roots) == "table"
-        and type(snapshot.node_types) == "table"
-        and type(snapshot.node_includes) == "table"
-        and #snapshot.node_types == #imports
-        and #snapshot.node_includes == #imports
-        and snapshot.foreign_includes_version == #imports
-        and snapshot.last_foreign_import_node == imports[#imports]
-        and (snapshot.converted_enums == nil or type(snapshot.converted_enums) == "table")
-    if valid then
-        for _, name in ipairs(roots) do
-            if type(snapshot.roots[name]) ~= "table" then valid = false; break end
-        end
-    end
-    if valid then
-        for index, node in ipairs(imports) do
-            local typ = snapshot.node_types[index]
-            local include = snapshot.node_includes[index]
-            if type(typ) ~= "table" or typ._tag ~= "Type.CModule"
-               or typ.name ~= node.headername
-               or type(typ.members) ~= "table" or type(typ.type_members) ~= "table"
-               or type(include) ~= "table" or type(include.rendered) ~= "string" then
-                valid = false
-                break
-            end
-        end
-    end
-    return valid
-end
-
-local function collect_inputs(imports)
-    local inputs, seen = {}, {}
-    for _, node in ipairs(imports) do
-        for _, name in ipairs({ "c_header_dependencies", "c_header_search_inputs" }) do
-            for _, input in ipairs(node._include[name]) do
-                local identity = input.kind .. "\0" .. input.path
-                if not seen[identity] then
-                    seen[identity] = true
-                    inputs[#inputs + 1] = {
-                        kind = input.kind, path = input.path, identity = input.identity,
-                        observation = cpp.copy_header_observation(input.observation),
-                    }
-                end
-            end
-        end
-    end
-    return inputs
-end
-
-
-local function prepare_snapshot(snapshot, imports, key, st, saved_inputs)
-    if not valid_snapshot(snapshot, imports, key) then return false end
-    -- Current prepared headers have already passed the shared file validator.
-    -- A reused converted graph keeps that fresh observation metadata, never
-    -- the older timestamps embedded in its otherwise unchanged semantic blob.
-    local saved = {}
-    if type(saved_inputs) == "table" then
-        for _, input in ipairs(saved_inputs) do
-            if type(input) == "table" and type(input.kind) == "string"
-               and type(input.path) == "string" then
-                saved[input.kind .. "\0" .. input.path] = input
-            end
-        end
+local function prepare_snapshot(snapshot, key, inputs, saved_inputs)
+    if type(snapshot) ~= "table" or snapshot.version ~= foreigncache.VERSION
+       or snapshot.abi ~= version.TITAN_ABI_VERSION or snapshot.key ~= key then return false end
+    local previous = {}
+    for _, input in ipairs(saved_inputs or {}) do
+        previous[input.kind .. "\0" .. input.path] = input
     end
     local observations_changed = false
-    for index, node in ipairs(imports) do
-        local prepared = st.prepared_foreign_imports and st.prepared_foreign_imports[node]
-        local current_include = prepared and prepared.include
-        if not current_include then return false end
-        for _, name in ipairs({ "c_header_dependencies", "c_header_search_inputs" }) do
-            local inputs, current_inputs = snapshot.node_includes[index][name], current_include[name]
-            if type(inputs) ~= "table" or type(current_inputs) ~= "table"
-               or #inputs ~= #current_inputs then return false end
-            for ordinal, input in ipairs(inputs) do
-                local current_input = current_inputs[ordinal]
-                if type(input) ~= "table" or input.kind ~= current_input.kind
-                   or input.path ~= current_input.path or input.identity ~= current_input.identity then return false end
-                local metadata = saved[input.kind .. "\0" .. input.path]
-                local previous = metadata and metadata.identity == input.identity
-                    and metadata.observation or input.observation
-                observations_changed = observations_changed or not cpp.same_header_observation(
-                    cpp.copy_header_observation(previous), current_input.observation)
-                input.observation = cpp.copy_header_observation(current_input.observation)
-            end
+    for _, input in ipairs(inputs) do
+        local old = previous[input.kind .. "\0" .. input.path]
+        if old and old.identity == input.identity then
+            observations_changed = observations_changed or not cpp.same_header_observation(
+                cpp.copy_header_observation(old.observation), input.observation)
         end
     end
     return true, observations_changed
 end
 
-function foreigncache.restore(st, imports, key)
+function foreigncache.restore(st, namespace, key)
     local stats = counters(st)
     if stats then stats.lookups = stats.lookups + 1 end
     local payload, saved_inputs = cacheadapter.get(st.cache_adapter, foreigncache.KIND, key)
-    local _, current = references(imports)
-    local snapshot = payload and cpp.decode_graph(payload, {
+    local _, current = references(namespace)
+    local decoded, snapshot = pcall(cpp.decode_graph, payload, {
         references = current,
         sha256_binary = st.cache_adapter and st.cache_adapter.sha256_binary,
         yield = st.cache_adapter and st.cache_adapter.yield,
     })
-    local checked, valid, observations_changed = pcall(
-        prepare_snapshot, snapshot, imports, key, st, saved_inputs)
-    if not checked and type(valid) ~= "string" then error(valid, 0) end
-    valid = checked and valid
-    if not valid then
+    if not decoded and type(snapshot) ~= "string" then error(snapshot, 0) end
+    if not decoded then
         if stats then stats.misses = stats.misses + 1 end
         return false
     end
-    -- Decode and validate every root before mutating the current checker.
+    local inputs = collect_inputs(namespace)
+    local checked, valid, observations_changed = pcall(
+        prepare_snapshot, snapshot, key, inputs, saved_inputs)
+    if not checked and type(valid) ~= "string" then error(valid, 0) end
+    if not checked or not valid then
+        if stats then stats.misses = stats.misses + 1 end
+        return false
+    end
     for _, name in ipairs(roots) do st[name] = snapshot.roots[name] end
     st._converted_c_enums = snapshot.converted_enums
-    st.foreign_includes_version = snapshot.foreign_includes_version
-    st.last_foreign_import_node = snapshot.last_foreign_import_node
-    for index, node in ipairs(imports) do
-        node._type, node._include = snapshot.node_types[index], snapshot.node_includes[index]
-        st:add_symbol(node.localname, node)
-    end
+    st._converted_c_aggregates = snapshot.converted_aggregates
+    namespace._type = snapshot.namespace_type
+    st:add_symbol("ffi", namespace)
     if observations_changed then
-        local inputs = collect_inputs(imports)
         local refreshed = cacheadapter.refresh_inputs(st.cache_adapter, foreigncache.KIND, key, inputs)
         if refreshed == nil and st.cache_adapter.put then
-            local updated = foreigncache.encode(st, imports, key)
+            local updated = foreigncache.encode(st, namespace, key)
             if updated then cacheadapter.put(st.cache_adapter, foreigncache.KIND, key, updated, inputs) end
         end
     end
@@ -229,9 +163,9 @@ function foreigncache.restore(st, imports, key)
     return true
 end
 
-
-function foreigncache.store(st, key, payload, imports)
-    if cacheadapter.put(st.cache_adapter, foreigncache.KIND, key, payload, collect_inputs(imports)) then
+function foreigncache.store(st, key, payload, namespace)
+    if payload and cacheadapter.put(st.cache_adapter, foreigncache.KIND, key,
+            payload, collect_inputs(namespace)) then
         local stats = counters(st)
         if stats then stats.stores = stats.stores + 1 end
     end

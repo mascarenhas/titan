@@ -6,7 +6,7 @@ local ssl = import "ssl"
 local str = import "string"
 local timer = import "timer"
 local url = import "url"
-local ffi = foreign import "titan/ffi.h"
+foreign import "titan/ffi.h"
 
 -- This folder module is intentionally layered over the public net, ssl, io,
 -- and async modules. Its C boundary contains only exact llhttp foreign

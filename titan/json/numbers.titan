@@ -1,5 +1,5 @@
-local json_cstdlib = foreign import "stdlib.h"
-local json_clocale = foreign import "locale.h"
+foreign import "stdlib.h"
+foreign import "locale.h"
 
 local function json_byte(subject: string, position: integer): integer
   local bytes = subject as const *unsigned char
@@ -99,7 +99,7 @@ end
 
 local function decimal_float(token: string, source: string, position: integer,
                               path: Path): float
-  local convention = json_clocale.localeconv()
+  local convention = ffi.localeconv()
   local point = convention.decimal_point as string
   local normalized = token
   if point ~= "." then
@@ -113,7 +113,7 @@ local function decimal_float(token: string, source: string, position: integer,
       index = index + 1
     end
   end
-  local result: float = json_cstdlib.strtod(normalized, nil)
+  local result: float = ffi.strtod(normalized, nil)
   if result ~= result or result == math.huge or result == -math.huge then
     json_fail("number_range", "number is outside the finite float range", path, source, position)
   end
@@ -158,7 +158,7 @@ local function float_text(number: float, path: Path): string
     json_fail("non_finite", "JSON cannot represent a nonfinite number", path, nil, nil)
   end
   local text = strings.format("%.17g", number)
-  local convention = json_clocale.localeconv()
+  local convention = ffi.localeconv()
   local point = convention.decimal_point as string
   if point ~= "." then
     local first?, last? = strings.find(text, point)

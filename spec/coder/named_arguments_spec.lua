@@ -175,7 +175,7 @@ describe("named arguments (code generation)", function()
             }
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 record Box
                     text: string
@@ -190,18 +190,18 @@ describe("named arguments (code generation)", function()
                 end
 
                 function make_box(): Box
-                    c.ffi_collect(L)
+                    ffi.ffi_collect(L)
                     return Box.new { text = "boxed" }
                 end
 
                 function make_callback(): (integer) -> integer
-                    c.ffi_collect(L)
+                    ffi.ffi_collect(L)
                     return increment
                 end
 
                 function verify(callback: (integer) -> integer,
                                 text: string, box: Box): integer
-                    c.ffi_collect(L)
+                    ffi.ffi_collect(L)
                     if text ~= "alive42" or box.text ~= "boxed" then
                         return -1
                     end
@@ -349,35 +349,35 @@ describe("named arguments (code generation)", function()
             }
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function ffi_order(): integer
-                    c.ffi_reset {}
-                    local packed: integer = c.ffi_pack {
-                        third = c.ffi_mark { digit = 1 },
-                        first = c.ffi_mark { digit = 2 },
-                        second = c.ffi_mark { digit = 3 },
+                    ffi.ffi_reset {}
+                    local packed: integer = ffi.ffi_pack {
+                        third = ffi.ffi_mark { digit = 1 },
+                        first = ffi.ffi_mark { digit = 2 },
+                        second = ffi.ffi_mark { digit = 3 },
                     }
-                    local trace: integer = c.ffi_trace {}
+                    local trace: integer = ffi.ffi_trace {}
                     return trace * 1000 + packed
                 end
 
                 function ffi_conversion(): float
-                    return c.ffi_convert { integral = 2, floating = 3 }
+                    return ffi.ffi_convert { integral = 2, floating = 3 }
                 end
 
                 function ffi_defaults(): integer
-                    local zero: integer = c.ffi_zero {}
-                    local nullable: integer = c.ffi_nullable { required = 9 }
-                    local keyword: integer = c.ffi_when { when = 5 }
+                    local zero: integer = ffi.ffi_zero {}
+                    local nullable: integer = ffi.ffi_nullable { required = 9 }
+                    local keyword: integer = ffi.ffi_when { when = 5 }
                     return zero + nullable + keyword
                 end
 
                 function ffi_contextual_keywords(): integer
-                    local holder = c.ffi_keyword_holder.new()
+                    local holder = ffi.ffi_keyword_holder.new()
                     holder.when = 5
-                    local result: c.type = c.when { when = holder.when }
-                    return result + c.repeat
+                    local result: ffi.type = ffi.when { when = holder.when }
+                    return result + ffi.repeat
                 end
             ]], [[
                 assert(test.ffi_order() == 123231)
@@ -396,11 +396,11 @@ describe("named arguments (code generation)", function()
             }
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function ffi_copyback(): integer
-                    local out: c.ffi_int = 0 as c.ffi_int
-                    c.ffi_write { new_value = 42, out = out }
+                    local out: ffi.ffi_int = 0 as ffi.ffi_int
+                    ffi.ffi_write { new_value = 42, out = out }
                     return out as integer
                 end
             ]], [[
@@ -452,17 +452,17 @@ describe("named arguments (code generation)", function()
             }
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function ffi_named_gc_copyback(): integer
-                    local raw: c.TValue = nil
-                    c.ffi_named_reset_outparam_finalized {}
-                    c.ffi_named_write_gc_value { out = raw, state = L }
-                    c.ffi_named_collect { state = L }
-                    if (c.ffi_named_was_outparam_finalized {} as integer) ~= 0 then
+                    local raw: ffi.TValue = nil
+                    ffi.ffi_named_reset_outparam_finalized {}
+                    ffi.ffi_named_write_gc_value { out = raw, state = L }
+                    ffi.ffi_named_collect { state = L }
+                    if (ffi.ffi_named_was_outparam_finalized {} as integer) ~= 0 then
                         return -1
                     end
-                    if (c.ffi_named_is_userdata { value = raw } as integer) == 0 then
+                    if (ffi.ffi_named_is_userdata { value = raw } as integer) == 0 then
                         return -2
                     end
                     return 1

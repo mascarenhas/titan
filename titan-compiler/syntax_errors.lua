@@ -133,6 +133,8 @@ local errors = {
     --this label is not thrown in rule 'import' because rule 'toplevelvar'
     --matches an input like "local bola = X", given that X is a valid expression,
     --or throws a label when X is not a valid expression
+    ReservedFFI = "The name 'ffi' is reserved for the module C namespace.",
+    BoundForeignImport = "Foreign imports are unbound; use 'foreign import' and access C names through 'ffi'.",
     ImportImport = "Expected 'import' keyword.",
 
     StringLParImport = "Expected the name of a module after '('.",

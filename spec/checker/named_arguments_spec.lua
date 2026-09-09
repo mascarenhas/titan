@@ -301,14 +301,14 @@ describe("named arguments (typechecker)", function()
                 extern int ffi_nullable(struct ffi_node *pointer, int required);
             ]], function(header)
                 local ok, err = run_checker([[
-                    local c = foreign import "]] .. header .. [["
+                    foreign import "]] .. header .. [["
 
                     function run(): integer
-                        local a: integer = c.ffi_reordered { right = 2, left = 1 }
-                        local b: integer = c.ffi_keyword { repeat = 3 }
-                        local w: integer = c.ffi_when { when = 5 }
-                        local z: integer = c.ffi_zero {}
-                        local n: integer = c.ffi_nullable { required = 4 }
+                        local a: integer = ffi.ffi_reordered { right = 2, left = 1 }
+                        local b: integer = ffi.ffi_keyword { repeat = 3 }
+                        local w: integer = ffi.ffi_when { when = 5 }
+                        local z: integer = ffi.ffi_zero {}
+                        local n: integer = ffi.ffi_nullable { required = 4 }
                         return a + b + w + z + n
                     end
                 ]])
@@ -323,21 +323,21 @@ describe("named arguments (typechecker)", function()
                 extern int ffi_named(int left, int right);
                 extern int ffi_nullable(struct ffi_node *pointer, int required);
             ]], function(header)
-                local prefix = 'local c = foreign import "' .. header .. '"\n'
+                local prefix = "foreign import \"" .. header .. '"\n'
                 local ok, err = run_checker(prefix .. [[
                     function unknown(): integer
-                        return c.ffi_named { left = 1, unknown = 2 }
+                        return ffi.ffi_named { left = 1, unknown = 2 }
                     end
                     function duplicate(): integer
-                        return c.ffi_named { left = 1, left = 2, right = 3 }
+                        return ffi.ffi_named { left = 1, left = 2, right = 3 }
                     end
                     function required(): integer
-                        return c.ffi_nullable { pointer = nil }
+                        return ffi.ffi_nullable { pointer = nil }
                     end
                 ]])
                 assert.falsy(ok)
                 assert.match(
-                    "function 'c%.ffi_named' has no parameter named 'unknown'",
+                    "function 'ffi%.ffi_named' has no parameter named 'unknown'",
                     err)
                 assert.match("named argument 'left' is supplied more than once",
                     err)
@@ -363,13 +363,13 @@ describe("named arguments (typechecker)", function()
                     "ffi_conflict",
                 }
                 local ok, err = run_checker(
-                    'local c = foreign import "' .. header .. [["
+                    "foreign import \"" .. header .. [["
                     local function run()
-                        c.ffi_old {}
-                        c.ffi_unnamed {}
-                        c.ffi_partial {}
-                        c.ffi_duplicate {}
-                        c.ffi_conflict {}
+                        ffi.ffi_old {}
+                        ffi.ffi_unnamed {}
+                        ffi.ffi_partial {}
+                        ffi.ffi_duplicate {}
+                        ffi.ffi_conflict {}
                     end
                 ]])
                 assert.falsy(ok)
@@ -379,7 +379,7 @@ describe("named arguments (typechecker)", function()
                 assert.equal(5, unavailable)
                 for _, name in ipairs(names) do
                     assert.match(
-                        "parameter names are unavailable for foreign function 'c%."
+                        "parameter names are unavailable for foreign function 'ffi%."
                             .. name .. "'", err)
                 end
             end)
@@ -391,13 +391,13 @@ describe("named arguments (typechecker)", function()
                 typedef int ffi_int;
             ]], function(header)
                 local ok, err = run_checker(
-                    'local c = foreign import "' .. header .. [["
-                    local function callback(cb: c.ffi_callback): integer
+                    "foreign import \"" .. header .. [["
+                    local function callback(cb: ffi.ffi_callback): integer
                         return cb { value = 1 } as integer
                     end
                     local function constructors()
-                        local one = c.ffi_int.new {}
-                        local many = c.ffi_int.new_array { count = 2 }
+                        local one = ffi.ffi_int.new {}
+                        local many = ffi.ffi_int.new_array { count = 2 }
                     end
                 ]])
                 assert.falsy(ok)
@@ -413,10 +413,10 @@ describe("named arguments (typechecker)", function()
                 extern int ffi_variadic(int fixed, ...);
             ]], function(header)
                 assert_checker_error(
-                    "named arguments are not supported for variadic function 'c%.ffi_variadic'",
-                    'local c = foreign import "' .. header .. [["
+                    "named arguments are not supported for variadic function 'ffi%.ffi_variadic'",
+                    "foreign import \"" .. header .. [["
                     function run(): integer
-                        return c.ffi_variadic { fixed = 1 }
+                        return ffi.ffi_variadic { fixed = 1 }
                     end
                 ]])
             end)
@@ -427,10 +427,10 @@ describe("named arguments (typechecker)", function()
                 extern int ffi_strict(int first, int second);
             ]], function(header)
                 assert_checker_error(
-                    "function 'c%.ffi_strict' called with 1 arguments but expects 2",
-                    'local c = foreign import "' .. header .. [["
+                    "function 'ffi%.ffi_strict' called with 1 arguments but expects 2",
+                    "foreign import \"" .. header .. [["
                     function run(): integer
-                        return c.ffi_strict(1)
+                        return ffi.ffi_strict(1)
                     end
                 ]])
             end)
@@ -444,7 +444,7 @@ describe("named arguments (typechecker)", function()
                 typedef struct ffi_node ffi_node;
             ]], function(header)
                 local ok, err, ast = run_checker([[
-                    local c = foreign import "]] .. header .. [["
+                    foreign import "]] .. header .. [["
 
                     record Inner
                         note: string?
@@ -458,7 +458,7 @@ describe("named arguments (typechecker)", function()
                     end
 
                     local record PointerBox
-                        pointer: *c.ffi_node
+                        pointer: *ffi.ffi_node
                     end
 
                     local function construct(): Outer

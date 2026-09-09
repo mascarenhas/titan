@@ -386,7 +386,12 @@ STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/math.titan titan/lua.titan titan/iteration.titan titan/gc.titan \
 	titan/test.titan titan/reflect.titan $(SQLITE3_TITAN_SOURCES) \
 	$(JSON_TITAN_SOURCES)
-STDLIB_GENERATED_FOREIGN_HEADERS := titan/coroutine.titan.h \
+STDLIB_GENERATED_FFI_HEADERS := $(addsuffix .ffi.h, \
+	$(addprefix titan/,$(filter-out uv http peg string sqlite3 json,$(STDLIB_MODULES))) \
+	titan/uv/uv titan/http/http titan/peg/peg titan/string/string \
+	titan/sqlite3/sqlite3 titan/json/json)
+STDLIB_GENERATED_FOREIGN_HEADERS := $(STDLIB_GENERATED_FFI_HEADERS) \
+	titan/coroutine.titan.h \
 	titan/fs.titan.h titan/uv/uv.titan.h titan/http/http.titan.h \
 	titan/sqlite3/sqlite3.titan.h titan/json/json.titan.h
 STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua titan/async.lua \

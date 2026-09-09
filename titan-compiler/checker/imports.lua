@@ -755,66 +755,6 @@ function makemoduletype(modname, modast, st)
     modtype._source = true
     modtype.source_members = source_members
     modtype.source_type_members = source_type_members
-    if has_source_foreign then
-        local header_inputs = {}
-        for index, input in ipairs(modast._c_header_dependencies or {}) do
-            header_inputs[index] = {
-                kind = input.kind,
-                path = input.path,
-                identity = input.identity,
-                observation = cdriver.copy_header_observation(input.observation),
-            }
-        end
-        local macro_changes = {}
-        for name in pairs(st.foreign_macro_changes or {}) do
-            macro_changes[name] = true
-        end
-        local macro_definitions = {}
-        local macro_environment = st:foreign_macro_environment() or {}
-        for name, definition in pairs(macro_environment) do
-            macro_definitions[name] = definition
-        end
-        local diagnostic_aliases = {}
-        local seen_diagnostic_aliases = {}
-        local function add_diagnostic_alias(physical_path, public_path)
-            if type(physical_path) ~= "string" or
-               type(public_path) ~= "string" then
-                return
-            end
-            local key = physical_path .. "\0" .. public_path
-            if seen_diagnostic_aliases[key] then return end
-            seen_diagnostic_aliases[key] = true
-            diagnostic_aliases[#diagnostic_aliases + 1] = {
-                physical_path = physical_path,
-                public_path = public_path,
-            }
-        end
-        for _, node in ipairs(modast) do
-            local public_header = node._tag == "Ast.TopLevelImport"
-                and node._source_import
-                and node._foreign_header_probe_identity or nil
-            if type(public_header) == "string" then
-                add_diagnostic_alias(node._foreign_header, public_header)
-                local nested = node._source_c_context and
-                    node._source_c_context.diagnostic_aliases or {}
-                for _, alias in ipairs(nested) do
-                    add_diagnostic_alias(
-                        alias.physical_path, alias.public_path)
-                end
-            end
-        end
-        -- Source-only compiler metadata.  The callable descriptors already
-        -- live in `source_members`; this context carries only the generated
-        -- companion's transitive real-header inputs, diagnostic path aliases,
-        -- and final macro environment plus changed-name delta.
-        -- Binary metadata validation rejects this field.
-        modtype._source_c_context = {
-            header_inputs = header_inputs,
-            diagnostic_aliases = diagnostic_aliases,
-            macro_changes = macro_changes,
-            macro_definitions = macro_definitions,
-        }
-    end
     return modtype
 end
 

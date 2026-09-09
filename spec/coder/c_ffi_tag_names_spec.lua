@@ -42,15 +42,15 @@ describe("named C tag code generation", function()
             }
         ]], function(header)
             local source = [[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function item_value(): integer
-                    local item: c.Item = c.make_item(17)
+                    local item: ffi.Item = ffi.make_item(17)
                     return item.count as integer
                 end
 
                 function cell_value(): integer
-                    local cell: c.Cell = c.make_cell(23)
+                    local cell: ffi.Cell = ffi.make_cell(23)
                     return cell.count as integer
                 end
             ]]
@@ -82,18 +82,18 @@ describe("named C tag code generation", function()
             }
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function function_value(): integer
-                    return c.stat() as integer
+                    return ffi.stat() as integer
                 end
 
                 function external_function_value(): integer
-                    return c.external_stat() as integer
+                    return ffi.external_stat() as integer
                 end
 
                 function field_value(): integer
-                    local result: c.stat = c.make_stat()
+                    local result: ffi.stat = ffi.make_stat()
                     return result.new as integer
                 end
             ]], [[
@@ -114,11 +114,11 @@ describe("named C tag code generation", function()
             }
         ]], function(header)
             local csrc = h.compile_and_read_c([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function pass(
-                    pointer: *c.Opaque): *c.Opaque
-                    return c.identity(pointer)
+                    pointer: *ffi.Opaque): *ffi.Opaque
+                    return ffi.identity(pointer)
                 end
             ]])
             assert.matches("struct Opaque %*", csrc)
@@ -192,43 +192,43 @@ describe("named C tag code generation", function()
             }
         ]], function(header)
             local csrc, ast = h.compile_and_read_c([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 foreign function dns_callback(
-                    request: *c.ffi_dns_request,
-                    status: c.ffi_int,
-                    result: *c.ffi_addrinfo): ()
+                    request: *ffi.ffi_dns_request,
+                    status: ffi.ffi_int,
+                    result: *ffi.ffi_addrinfo): ()
                 end
 
                 foreign function connect_callback(
-                    request: *c.ffi_connect_request,
-                    status: c.ffi_int): ()
+                    request: *ffi.ffi_connect_request,
+                    status: ffi.ffi_int): ()
                 end
 
                 local function dns_shape(
-                    loop: *c.ffi_loop,
-                    dns: *c.ffi_dns_request,
-                    connect: *c.ffi_connect_request,
-                    tcp: *c.ffi_tcp,
-                    node: const *c.ffi_char):
-                    (c.ffi_int, c.ffi_int)
-                    local service: c.ffi_char[6] =
-                        c.ffi_char.new_array(6)
-                    local hints = c.ffi_addrinfo.new()
-                    local address = c.ffi_sockaddr.new()
-                    local storage = c.ffi_sockaddr_storage.new()
-                    hints.family = c.FFI_AF_UNSPEC
-                    hints.socket_type = c.FFI_SOCK_STREAM
-                    hints.protocol = c.FFI_IPPROTO_TCP
-                    hints.flags = c.FFI_AI_NUMERICSERV
-                    if c.FFI_AF_INET == c.FFI_AF_INET6 then
+                    loop: *ffi.ffi_loop,
+                    dns: *ffi.ffi_dns_request,
+                    connect: *ffi.ffi_connect_request,
+                    tcp: *ffi.ffi_tcp,
+                    node: const *ffi.ffi_char):
+                    (ffi.ffi_int, ffi.ffi_int)
+                    local service: ffi.ffi_char[6] =
+                        ffi.ffi_char.new_array(6)
+                    local hints = ffi.ffi_addrinfo.new()
+                    local address = ffi.ffi_sockaddr.new()
+                    local storage = ffi.ffi_sockaddr_storage.new()
+                    hints.family = ffi.FFI_AF_UNSPEC
+                    hints.socket_type = ffi.FFI_SOCK_STREAM
+                    hints.protocol = ffi.FFI_IPPROTO_TCP
+                    hints.flags = ffi.FFI_AI_NUMERICSERV
+                    if ffi.FFI_AF_INET == ffi.FFI_AF_INET6 then
                         address.family = 0
                     end
-                    local dns_status = c.ffi_getaddrinfo(
+                    local dns_status = ffi.ffi_getaddrinfo(
                         loop, dns, dns_callback, node, service, hints)
                     local generic =
-                        storage as const *c.ffi_sockaddr
-                    local connect_status = c.ffi_tcp_connect(
+                        storage as const *ffi.ffi_sockaddr
+                    local connect_status = ffi.ffi_tcp_connect(
                         connect, tcp, generic, connect_callback)
                     return dns_status, connect_status
                 end
@@ -240,7 +240,7 @@ describe("named C tag code generation", function()
             assert.match(
                 "struct ffi_sockaddr_storage _local_storage_%d+ = %{0%};",
                 csrc)
-            local aliases = ast[1]._type.type_members
+            local aliases = ast._ffi_namespace._type.type_members
             for _, name in ipairs({
                 "ffi_addrinfo", "ffi_sockaddr", "ffi_sockaddr_storage",
             }) do
@@ -252,7 +252,7 @@ describe("named C tag code generation", function()
                 "FFI_SOCK_STREAM", "FFI_IPPROTO_TCP",
                 "FFI_AI_NUMERICSERV",
             }) do
-                assert.truthy(ast[1]._type.members[name], name)
+                assert.truthy(ast._ffi_namespace._type.members[name], name)
             end
             for _, spelling in ipairs({
                 "FFI_AF_UNSPEC", "FFI_AF_INET", "FFI_AF_INET6",

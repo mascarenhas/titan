@@ -1,2136 +1,697 @@
 local h = require "spec.support.helpers"
 local checker = require "titan-compiler.checker"
-local checker_core = require "titan-compiler.checker.core"
+local cdriver = require "c-parser.cdriver"
 local cprobe = require "titan-compiler.cprobe"
 local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
 local types = require "titan-compiler.types"
 
-local function with_header(contents, fn)
-    local header = os.tmpname() .. ".h"
-    local file = assert(io.open(header, "w"))
-    assert(file:write(contents))
-    assert(file:close())
-
-    local results = { pcall(fn, header) }
-    os.remove(header)
-    if not results[1] then error(results[2], 0) end
-    table.remove(results, 1)
-    return table.unpack(results)
-end
-
+-- Authored headers share a real directory so ordinary relative #includes use
+-- the same search rules as a project. No aliases or reconstructed declarations
+-- are needed to establish one module-wide C environment.
 local function with_headers(contents, fn)
+    local directory = os.tmpname()
+    assert(os.remove(directory))
+    assert(lfs.mkdir(directory))
     local headers = {}
-    local function open_header(index)
-        if index > #contents then
-            return fn(table.unpack(headers))
+    local result = table.pack(pcall(function()
+        for index, source in ipairs(contents) do
+            local filename = directory .. "/header" .. index .. ".h"
+            headers[#headers + 1] = filename
+            local file = assert(io.open(filename, "w"))
+            assert(file:write(source))
+            assert(file:close())
         end
-        return with_header(contents[index], function(header)
-            headers[index] = header
-            return open_header(index + 1)
-        end)
+        return fn(headers)
+    end))
+    for _, filename in ipairs(headers) do os.remove(filename) end
+    assert(lfs.rmdir(directory))
+    if not result[1] then error(result[2], 0) end
+    return table.unpack(result, 2, result.n)
+end
+
+local function imports(headers)
+    local source = {}
+    for _, header in ipairs(headers) do
+        source[#source + 1] = 'foreign import "' .. header .. '"\n'
     end
-    return open_header(1)
+    return table.concat(source)
 end
 
-local function with_hard_link(source, fn)
-    local alias = os.tmpname() .. ".h"
-    os.remove(alias)
-    assert(lfs.link(source, alias))
-
-    local results = { pcall(fn, alias) }
-    os.remove(alias)
-    if not results[1] then error(results[2], 0) end
-    table.remove(results, 1)
-    return table.unpack(results)
+local function checked(contents, body)
+    return with_headers(contents, function(headers)
+        local ok, err, ast = h.run_checker(imports(headers) .. (body or ""))
+        assert.truthy(ok, err)
+        return ast._ffi_namespace._type, ast
+    end)
 end
 
-local function new_context_configured_probe_service(options)
-    local context = driver.new_resolver_context()
-    local configured, configure_error =
-        driver.configure_foreign_c(context)
-    assert.truthy(configured, configure_error)
-
-    local service_options = {}
-    for key, value in pairs(options or {}) do
-        service_options[key] = value
-    end
-    service_options.toolchain =
-        assert(driver.toolchain_descriptor(context))
-    local service, service_error = cprobe.new_service(service_options)
-    assert.truthy(service, service_error)
-    return context, service
+local function rejected(contents)
+    with_headers(contents, function(headers)
+        local ok, err = h.run_checker(imports(headers))
+        assert.falsy(ok)
+        assert.matches("final ordered C header context is invalid", err, 1, true)
+        assert.matches("configured C compiler rejected", err, 1, true)
+        assert.not_matches("declaration compatibility candidate", err, 1, true)
+    end)
 end
 
-local function close_context_configured_probe_service(context, service)
-    local service_closed, service_close_error = service:close()
-    local context_closed, context_close_error =
-        driver.close_resolver_context(context)
-    assert.truthy(service_closed, service_close_error)
-    assert.truthy(context_closed, context_close_error)
-end
-
-local function nested_array_bound(typ)
+local function bound(typ)
     typ = types.resolve_c_typedef(typ)
-    if typ._tag == "Type.CArray" then
-        return typ.len
-    elseif typ._tag == "Type.CPointer" then
-        return nested_array_bound(typ.pointee)
-    end
+    if typ._tag == "Type.CArray" then return typ.len end
+    if typ._tag == "Type.CPointer" then return bound(typ.pointee) end
 end
 
-describe("compatible C declarations across foreign imports", function()
-    it("retains one consistent complete parameter-name list", function()
-        with_headers({
+local function with_service(options, fn)
+    local context = driver.new_resolver_context()
+    local result = table.pack(pcall(function()
+        local configured, err = driver.configure_foreign_c(context)
+        assert.truthy(configured, err)
+        options.toolchain = assert(driver.toolchain_descriptor(context))
+        local service = assert(cprobe.new_service(options))
+        local outcome = table.pack(pcall(fn, service))
+        local closed, close_error = service:close()
+        assert.truthy(closed, close_error)
+        if not outcome[1] then error(outcome[2], 0) end
+        return table.unpack(outcome, 2, outcome.n)
+    end))
+    local closed, close_error = driver.close_resolver_context(context)
+    assert.truthy(closed, close_error)
+    if not result[1] then error(result[2], 0) end
+    return table.unpack(result, 2, result.n)
+end
+
+local function check_with_service(code, service)
+    h.reset(true)
+    local ast = assert(h.parse(code))
+    local _, errors = checker.check("test", ast, code, "test.titan", nil, {
+        probe_service_provider = function() return service end,
+    })
+    return errors, ast
+end
+
+describe("C declarations in one module-wide ffi environment", function()
+    it("retains consistent complete parameter names", function()
+        local ffi = checked({
             "extern int ffi_named(int value);",
             "extern int ffi_named(int value);",
-        }, function(first_header, second_header)
-            local ok, err, ast = h.run_checker(
-                'local first = foreign import "' .. first_header .. '"\n' ..
-                'local second = foreign import "' .. second_header .. '"\n' ..
-                [[
-                    function run(): integer
-                        return first.ffi_named { value = 1 }
-                            + second.ffi_named { value = 2 }
-                    end
-                ]])
-            assert.truthy(ok, err)
-            for i = 1, 2 do
-                assert.same({ "value" },
-                    ast[i]._type.members.ffi_named.paramnames)
+        }, [[
+            function run(): integer
+                return ffi.ffi_named { value = 1 }
             end
-        end)
+        ]])
+        assert.same({ "value" }, ffi.members.ffi_named.paramnames)
     end)
 
-    it("upgrades every occurrence from unknown to complete parameter names",
-    function()
-        with_headers({
-            "extern int ffi_named(int);",
-            "extern int ffi_named(int value);",
-            "extern int ffi_named(int);",
-        }, function(first_header, second_header, third_header)
-            local ok, err, ast = h.run_checker(
-                'local first = foreign import "' .. first_header .. '"\n' ..
-                'local second = foreign import "' .. second_header .. '"\n' ..
-                'local third = foreign import "' .. third_header .. '"\n' ..
-                [[
-                    function run(): integer
-                        return first.ffi_named { value = 1 }
-                            + second.ffi_named { value = 2 }
-                            + third.ffi_named { value = 3 }
-                    end
-                ]])
-            assert.truthy(ok, err)
-            for i = 1, 3 do
-                assert.same({ "value" },
-                    ast[i]._type.members.ffi_named.paramnames)
-            end
-        end)
-    end)
-
-    it("permanently poisons differing complete parameter-name lists",
-    function()
-        with_headers({
-            [[
-                extern int ffi_forward(int first);
-                extern int ffi_reverse(int second);
-            ]],
-            [[
-                extern int ffi_forward(int second);
-                extern int ffi_reverse(int first);
-            ]],
-            [[
-                extern int ffi_forward(int first);
-                extern int ffi_reverse(int first);
-            ]],
-        }, function(first_header, second_header, third_header)
-            local imports =
-                'local first = foreign import "' .. first_header .. '"\n' ..
-                'local second = foreign import "' .. second_header .. '"\n' ..
-                'local third = foreign import "' .. third_header .. '"\n'
-            local ok, err, ast = h.run_checker(imports .. [[
+    it("retains complete names across unnamed declarations in either order", function()
+        for _, sources in ipairs({
+            { "extern int ffi_named(int);", "extern int ffi_named(int value);",
+              "extern int ffi_named(int);" },
+            { "extern int ffi_named(int value);", "extern int ffi_named(int);" },
+        }) do
+            local ffi = checked(sources, [[
                 function run(): integer
-                    return first.ffi_forward(1)
-                        + second.ffi_forward(2)
-                        + third.ffi_forward(3)
-                        + first.ffi_reverse(4)
-                        + second.ffi_reverse(5)
-                        + third.ffi_reverse(6)
+                    return ffi.ffi_named { value = 1 }
                 end
             ]])
-            assert.truthy(ok, err)
-            for i = 1, 3 do
-                assert.is_false(
-                    ast[i]._type.members.ffi_forward.paramnames)
-                assert.is_false(
-                    ast[i]._type.members.ffi_reverse.paramnames)
-            end
-
-            local named_ok, named_err = h.run_checker(imports .. [[
-                local function run()
-                    first.ffi_forward { first = 1 }
-                    second.ffi_forward { second = 2 }
-                    third.ffi_forward { first = 3 }
-                    first.ffi_reverse { second = 4 }
-                    second.ffi_reverse { first = 5 }
-                    third.ffi_reverse { first = 6 }
-                end
-            ]])
-            assert.falsy(named_ok)
-            local _, unavailable = named_err:gsub(
-                "parameter names are unavailable for foreign function", "")
-            assert.equal(6, unavailable)
-            for _, alias in ipairs({ "first", "second", "third" }) do
-                for _, name in ipairs({ "ffi_forward", "ffi_reverse" }) do
-                    assert.match(
-                        "foreign function '" .. alias .. "%." .. name .. "'",
-                        named_err)
-                end
-            end
-        end)
+            assert.same({ "value" }, ffi.members.ffi_named.paramnames)
+        end
     end)
 
-    it("accepts named and unnamed parameter declarator equivalents",
-    function()
-        with_header([[
-            extern int ffi_abstract_array(int values[7]);
-            extern int ffi_abstract_callback(
-                int (*callback)(double));
-            extern int ffi_abstract_array_pointer(
-                int (*values)[7]);
-        ]], function(named_header)
-            with_header([[
-                extern int ffi_abstract_array(int [7]);
-                extern int ffi_abstract_callback(int (*)(double));
-                extern int ffi_abstract_array_pointer(int (*)[7]);
-            ]], function(unnamed_header)
-                local ok, err, ast = h.run_checker(
-                    'local named = foreign import "' ..
-                        named_header .. '"\n' ..
-                    'local unnamed = foreign import "' ..
-                        unnamed_header .. '"\n')
-                assert.truthy(ok, err)
-
-                for _, name in ipairs({
-                    "ffi_abstract_array",
-                    "ffi_abstract_callback",
-                    "ffi_abstract_array_pointer",
-                }) do
-                    assert.equal(
-                        ast[1]._type.members[name].type,
-                        ast[2]._type.members[name].type)
-                end
-            end)
-        end)
-    end)
-
-    it("accepts function and object redeclarations through typedef aliases",
-    function()
-        with_header([[
-            typedef long ffi_public_offset_t;
-            extern int ffi_shared_lock(
-                int fd, int command, ffi_public_offset_t offset);
-            extern ffi_public_offset_t ffi_shared_cursor;
-        ]], function(public_header)
-            with_header([[
-                typedef long ffi_internal_offset_t;
-                extern int ffi_shared_lock(
-                    int fd, int command, ffi_internal_offset_t offset);
-                extern ffi_internal_offset_t ffi_shared_cursor;
-            ]], function(internal_header)
-                local ok, err, ast = h.run_checker(
-                    'local public = foreign import "' ..
-                        public_header .. '"\n' ..
-                    'local internal = foreign import "' ..
-                        internal_header .. '"\n')
-                assert.truthy(ok, err)
-
-                local public = ast[1]._type.members
-                local internal = ast[2]._type.members
-                assert.equal(public.ffi_shared_lock.type,
-                    internal.ffi_shared_lock.type)
-                assert.equal(public.ffi_shared_cursor.type,
-                    internal.ffi_shared_cursor.type)
-                assert.equal("ffi_public_offset_t",
-                    public.ffi_shared_lock.type.params[3].name)
-            end)
-        end)
-    end)
-
-    it("preserves compatible redeclarations through an active type macro",
-    function()
+    it("permanently disables named calls after differing complete lists", function()
         with_headers({
-            [[
-                typedef signed char ffi_internal_byte;
-                typedef ffi_internal_byte ffi_shared_byte;
-                #define ffi_shared_byte ffi_internal_byte
-            ]],
-            [[
-                #undef ffi_shared_byte
-                typedef signed char ffi_shared_byte;
-            ]],
-        }, function(macro_header, direct_header)
-            local ok, err, ast = h.run_checker(
-                'local macro = foreign import "' ..
-                    macro_header .. '"\n' ..
-                'local direct = foreign import "' ..
-                    direct_header .. '"\n')
+            "extern int ffi_named(int first);",
+            "extern int ffi_named(int second);",
+            "extern int ffi_named(int first);",
+        }, function(headers)
+            local source = imports(headers)
+            local ok, err, ast = h.run_checker(source .. [[
+                function positional(): integer return ffi.ffi_named(1) end
+            ]])
             assert.truthy(ok, err)
-
-            local macro_type =
-                ast[1]._type.type_members.ffi_shared_byte
-            local direct_type =
-                ast[2]._type.type_members.ffi_shared_byte
-            assert.equal(macro_type, direct_type)
-            assert.is_nil(ast[1]._type.members.ffi_shared_byte)
-            assert.is_nil(ast[2]._type.members.ffi_shared_byte)
-        end)
-    end)
-
-    it("forms stable old-style and prototype composites in either order",
-    function()
-        with_header([[
-            extern int ffi_oldstyle_composite();
-        ]], function(oldstyle_header)
-            with_header([[
-                extern int ffi_oldstyle_composite(int value);
-            ]], function(prototype_header)
-                for _, headers in ipairs({
-                    {oldstyle_header, prototype_header},
-                    {prototype_header, oldstyle_header},
-                }) do
-                    local ok, err, ast = h.run_checker(
-                        'local first = foreign import "' ..
-                            headers[1] .. '"\n' ..
-                        'local second = foreign import "' ..
-                            headers[2] .. '"\n')
-                    assert.truthy(ok, err)
-
-                    local first = ast[1]._type.members
-                        .ffi_oldstyle_composite
-                    local second = ast[2]._type.members
-                        .ffi_oldstyle_composite
-                    assert.equal(first.type, second.type)
-                    assert.equal(1, #first.type.params)
-                    assert.equal("Type.CFunction", first.type._tag)
-                    assert.equal("prototype",
-                        first.type._paramstyle)
-                    assert.same({"value"}, first.paramnames)
-                    assert.same({"value"}, second.paramnames)
+            assert.is_false(ast._ffi_namespace._type.members.ffi_named.paramnames)
+            ok, err = h.run_checker(source .. [[
+                function named(): integer
+                    return ffi.ffi_named { first = 1 }
                 end
-            end)
-        end)
-    end)
-
-    it("rejects prototypes changed by default argument promotions",
-    function()
-        with_header([[
-            extern int ffi_unstable_oldstyle();
-        ]], function(oldstyle_header)
-            with_header([[
-                extern int ffi_unstable_oldstyle(char value);
-            ]], function(prototype_header)
-                local ok, err = h.run_checker(
-                    'local oldstyle = foreign import "' ..
-                        oldstyle_header .. '"\n' ..
-                    'local prototype = foreign import "' ..
-                        prototype_header .. '"\n')
-                assert.falsy(ok)
-                assert.matches(
-                    "conflicting C declaration for "
-                        .. "'ffi_unstable_oldstyle'",
-                    err, 1, true)
-                assert.matches(
-                    "configured C compiler rejected",
-                    err, 1, true)
-            end)
-        end)
-    end)
-
-    it("rejects one-header old-style promotion conflicts at baseline",
-    function()
-        with_header([[
-            extern int ffi_one_header_oldstyle();
-            extern int ffi_one_header_oldstyle(char value);
-        ]], function(header)
-            local ok, err = h.run_checker(
-                'local c = foreign import "' .. header .. '"\n')
+            ]])
             assert.falsy(ok)
-            assert.matches(
-                "final ordered C header context is invalid",
-                err, 1, true)
-            assert.matches(
-                "configured C compiler rejected",
+            assert.matches("parameter names are unavailable for foreign function 'ffi.ffi_named'",
                 err, 1, true)
         end)
+    end)
+
+    it("retains names in array and callback abstract-declarator repeats", function()
+        local ffi = checked({ [[
+            extern int ffi_array(int values[7]);
+            extern int ffi_callback(int (*callback)(double));
+            extern int ffi_array_pointer(int (*values)[7]);
+        ]], [[
+            extern int ffi_array(int [7]);
+            extern int ffi_callback(int (*)(double));
+            extern int ffi_array_pointer(int (*)[7]);
+        ]] })
+        assert.same({ "values" }, ffi.members.ffi_array.paramnames)
+        assert.same({ "callback" }, ffi.members.ffi_callback.paramnames)
+        assert.same({ "values" }, ffi.members.ffi_array_pointer.paramnames)
+        assert.equal("Type.CPointer", ffi.members.ffi_array.type.params[1]._tag)
+        assert.equal("Type.CFunction", ffi.members.ffi_callback.type.params[1].pointee._tag)
+        assert.equal(7, bound(ffi.members.ffi_array_pointer.type.params[1]))
+    end)
+
+    it("accepts function and object redeclarations through equivalent typedefs", function()
+        local ffi = checked({ [[
+            typedef long ffi_public_offset_t;
+            extern int ffi_lock(int fd, ffi_public_offset_t offset);
+            extern ffi_public_offset_t ffi_cursor;
+        ]], [[
+            typedef long ffi_internal_offset_t;
+            extern int ffi_lock(int fd, ffi_internal_offset_t offset);
+            extern ffi_internal_offset_t ffi_cursor;
+        ]] }, [[
+            function run(): integer return ffi.ffi_lock(1, ffi.ffi_cursor) end
+        ]])
+        assert.same({ "fd", "offset" }, ffi.members.ffi_lock.paramnames)
+        assert.equal("long", types.resolve_c_typedef(ffi.members.ffi_cursor.type).spelling)
+    end)
+
+    it("merges named-call metadata through equivalent typedef spellings", function()
+        local ffi = checked({ [[
+            typedef long ffi_first;
+            extern int ffi_named(ffi_first);
+        ]], [[
+            typedef long ffi_second;
+            extern int ffi_named(ffi_second value);
+        ]] }, [[
+            function run(): integer return ffi.ffi_named { value = 1 } end
+        ]])
+        assert.same({ "value" }, ffi.members.ffi_named.paramnames)
+    end)
+
+    it("forms a prototype composite from an old-style declaration in either order", function()
+        for _, sources in ipairs({
+            { "extern int ffi_composite();", "extern int ffi_composite(int value);" },
+            { "extern int ffi_composite(int value);", "extern int ffi_composite();" },
+        }) do
+            local ffi = checked(sources, [[
+                function run(): integer return ffi.ffi_composite { value = 1 } end
+            ]])
+            local member = ffi.members.ffi_composite
+            assert.equal("prototype", member.type._paramstyle)
+            assert.equal(1, #member.type.params)
+            assert.same({ "value" }, member.paramnames)
+        end
     end)
 
     it("normalizes typedef and direct pointee qualifiers", function()
-        with_header([[
+        local ffi = checked({ [[
             typedef const int ffi_const_int;
-            extern ffi_const_int *ffi_qualified_pointer;
-            extern ffi_const_int ffi_qualified_scalar_alias;
-            extern ffi_const_int ffi_qualified_array[3];
-        ]], function(typedef_header)
-            with_header([[
-                extern const int *ffi_qualified_pointer;
-                extern const int ffi_qualified_scalar_alias;
-                extern const int ffi_qualified_array[3];
-            ]], function(direct_header)
-                local ok, err, ast = h.run_checker(
-                    'local aliases = foreign import "' ..
-                        typedef_header .. '"\n' ..
-                    'local direct = foreign import "' ..
-                        direct_header .. '"\n')
-                assert.truthy(ok, err)
-                assert.equal(
-                    ast[1]._type.members.ffi_qualified_pointer.type,
-                    ast[2]._type.members.ffi_qualified_pointer.type)
-                assert.equal(
-                    ast[1]._type.members.ffi_qualified_scalar_alias.type,
-                    ast[2]._type.members.ffi_qualified_scalar_alias.type)
-                assert.equal(
-                    ast[1]._type.members.ffi_qualified_array.type,
-                    ast[2]._type.members.ffi_qualified_array.type)
-            end)
-        end)
+            extern ffi_const_int *ffi_pointer;
+            extern ffi_const_int ffi_scalar;
+            extern ffi_const_int ffi_values[3];
+        ]], [[
+            extern const int *ffi_pointer;
+            extern const int ffi_scalar;
+            extern const int ffi_values[3];
+        ]] })
+        assert.equal("Type.CPointer", ffi.members.ffi_pointer.type._tag)
+        assert.equal(3, bound(ffi.members.ffi_values.type))
+        assert.truthy(ffi.members.ffi_scalar)
     end)
 
-    it("rejects different top-level object qualifiers", function()
-        with_header([[
-            extern const int ffi_qualified_scalar;
-            extern int * const ffi_qualified_pointer_object;
-        ]], function(qualified_header)
-            with_header([[
-                extern int ffi_qualified_scalar;
-                extern int *ffi_qualified_pointer_object;
-            ]], function(unqualified_header)
-                local ok, err = h.run_checker(
-                    'local qualified = foreign import "' ..
-                        qualified_header .. '"\n' ..
-                    'local unqualified = foreign import "' ..
-                        unqualified_header .. '"\n')
-                assert.falsy(ok)
-                assert.matches(
-                    "conflicting C declaration for 'ffi_qualified_scalar'",
-                    err, 1, true)
-                assert.matches(
-                    "conflicting C declaration for "
-                        .. "'ffi_qualified_pointer_object'",
-                    err, 1, true)
-            end)
-        end)
+    it("forms a known-bound array composite in either order", function()
+        for _, sources in ipairs({
+            { "extern int ffi_values[];", "extern int ffi_values[7];" },
+            { "extern int ffi_values[7];", "extern int ffi_values[];" },
+        }) do
+            local ffi = checked(sources)
+            assert.equal("Type.CArray", ffi.members.ffi_values.type._tag)
+            assert.equal(7, bound(ffi.members.ffi_values.type))
+        end
     end)
 
-    it("forms the known-bound composite array type in either order", function()
-        with_header([[
-            extern int ffi_composite_values[];
-        ]], function(unknown_header)
-            with_header([[
-                extern int ffi_composite_values[7];
-            ]], function(known_header)
-                for _, headers in ipairs({
-                    { unknown_header, known_header },
-                    { known_header, unknown_header },
-                }) do
-                    local ok, err, ast = h.run_checker(
-                        'local first = foreign import "' ..
-                            headers[1] .. '"\n' ..
-                        'local second = foreign import "' ..
-                            headers[2] .. '"\n')
-                    assert.truthy(ok, err)
-                    local first =
-                        ast[1]._type.members.ffi_composite_values.type
-                    local second =
-                        ast[2]._type.members.ffi_composite_values.type
-                    assert.equal(first, second)
-                    assert.equal("Type.CArray", first._tag)
-                    assert.equal(7, first.len)
-                end
-            end)
-        end)
+    it("completes only the redeclared object without mutating its array typedef", function()
+        for _, sources in ipairs({
+            { [[typedef int ffi_array[];
+                extern ffi_array ffi_values;
+                extern ffi_array ffi_untouched;]],
+              "extern int ffi_values[7];" },
+            { "extern int ffi_values[7];",
+              [[typedef int ffi_array[];
+                extern ffi_array ffi_values;
+                extern ffi_array ffi_untouched;]] },
+        }) do
+            local ffi = checked(sources)
+            assert.equal(7, bound(ffi.members.ffi_values.type))
+            assert.equal("", bound(ffi.type_members.ffi_array))
+            assert.equal("", bound(ffi.members.ffi_untouched.type))
+        end
     end)
 
-    it("forms each array composite before probing its next redeclaration",
-    function()
-        with_headers({
-            [[
-                extern int ffi_wave_values[];
-                #define TITAN_FFI_HIDE_WAVE_BOUNDS 1
-            ]],
-            [[
-                #ifndef TITAN_FFI_HIDE_WAVE_BOUNDS
-                extern int ffi_wave_values[3];
-                #endif
-            ]],
-            [[
-                #ifndef TITAN_FFI_HIDE_WAVE_BOUNDS
-                extern int ffi_wave_values[4];
-                #endif
-            ]],
-        }, function(first_header, second_header, third_header)
-            local calls = {}
-            local context, service =
-                new_context_configured_probe_service({
-                    runner = function(argv, metadata)
-                        if metadata.stage == "baseline" or
-                           metadata.source:find("titan_probe_d%[") then
-                            calls[#calls + 1] = metadata
-                        end
-                        return require("c-parser.cdriver")
-                            .capture_command(argv)
-                    end,
-                })
-            local code =
-                'local first = foreign import "' .. first_header .. '"\n' ..
-                'local second = foreign import "' .. second_header .. '"\n' ..
-                'local third = foreign import "' .. third_header .. '"\n'
-            h.reset(true)
-            local ast = assert(h.parse(code))
-            local _, errors = checker.check(
-                "test", ast, code, "test.titan", nil, {
-                    probe_service_provider = function() return service end,
-                })
-            local err = table.concat(errors, "\n")
-            assert.not_equal("", err)
-            assert.matches(
-                "conflicting C declaration for 'ffi_wave_values'",
-                err, 1, true)
-            assert.matches(
-                "rejected the declaration compatibility candidate",
-                err, 1, true)
-            assert.equal(3, #calls)
-            assert.equal("baseline", calls[1].stage)
-            assert.matches("%[%]", calls[2].source)
-            assert.matches("%[3%]", calls[2].source)
-            assert.not_matches("%[4%]", calls[2].source)
-            assert.matches("%[3%]", calls[3].source)
-            assert.matches("%[4%]", calls[3].source)
-            assert.not_matches("%[%]", calls[3].source)
-            close_context_configured_probe_service(context, service)
-        end)
-    end)
-
-    it("expands a completed declaration-owned array alias in the next probe",
-    function()
-        with_headers({
-            [[
-                typedef int ffi_wave_array_alias[];
-                extern ffi_wave_array_alias ffi_wave_alias_values;
-                #define TITAN_FFI_HIDE_ALIAS_BOUNDS 1
-            ]],
-            [[
-                #ifndef TITAN_FFI_HIDE_ALIAS_BOUNDS
-                extern int ffi_wave_alias_values[3];
-                #endif
-            ]],
-            [[
-                #ifndef TITAN_FFI_HIDE_ALIAS_BOUNDS
-                extern int ffi_wave_alias_values[4];
-                #endif
-            ]],
-        }, function(first_header, second_header, third_header)
-            local calls = {}
-            local context, service =
-                new_context_configured_probe_service({
-                    runner = function(argv, metadata)
-                        if metadata.stage == "baseline" or
-                           metadata.source:find("titan_probe_d%[") then
-                            calls[#calls + 1] = metadata
-                        end
-                        return require("c-parser.cdriver")
-                            .capture_command(argv)
-                    end,
-                })
-            local code =
-                'local first = foreign import "' .. first_header .. '"\n' ..
-                'local second = foreign import "' .. second_header .. '"\n' ..
-                'local third = foreign import "' .. third_header .. '"\n'
-            h.reset(true)
-            local ast = assert(h.parse(code))
-            local _, errors = checker.check(
-                "test", ast, code, "test.titan", nil, {
-                    probe_service_provider = function() return service end,
-                })
-            local err = table.concat(errors, "\n")
-            assert.matches(
-                "conflicting C declaration for 'ffi_wave_alias_values'",
-                err, 1, true)
-            assert.equal(3, #calls)
-            assert.matches("%[%]", calls[2].source)
-            assert.matches("%[3%]", calls[2].source)
-            assert.matches("%[3%]", calls[3].source)
-            assert.matches("%[4%]", calls[3].source)
-            assert.not_matches(
-                "extern ffi_wave_array_alias titan_probe_d",
-                calls[3].source)
-            close_context_configured_probe_service(context, service)
-        end)
-    end)
-
-    it("redirects a typedef before checking the next distinct name",
-    function()
-        local guarded = [[
-            #ifndef TITAN_FFI_SHARED_WAVE_ALIAS
-            #define TITAN_FFI_SHARED_WAVE_ALIAS
-            typedef struct { int value; } ffi_shared_wave_alias;
-            extern ffi_shared_wave_alias *ffi_shared_wave_object;
-            #endif
-        ]]
-        with_headers({ guarded, guarded },
-        function(first_header, second_header)
-            local calls = {}
-            local context, service =
-                new_context_configured_probe_service({
-                    runner = function(argv, metadata)
-                        if metadata.stage == "baseline" or
-                           metadata.source:find("extern ffi_shared_wave_alias ") then
-                            calls[#calls + 1] = metadata
-                        end
-                        return require("c-parser.cdriver")
-                            .capture_command(argv)
-                    end,
-                })
-            local code =
-                'local first = foreign import "' .. first_header .. '"\n' ..
-                'local second = foreign import "' .. second_header .. '"\n'
-            h.reset(true)
-            local ast = assert(h.parse(code))
-            local _, errors = checker.check(
-                "test", ast, code, "test.titan", nil, {
-                    probe_service_provider = function() return service end,
-                })
-            assert.equal(0, #errors, table.concat(errors, "\n"))
-            assert.equal(3, #calls)
-            assert.equal("baseline", calls[1].stage)
-            assert.matches(
-                "extern ffi_shared_wave_alias titan_probe_d",
-                calls[2].source)
-            assert.matches(
-                "extern ffi_shared_wave_alias %*titan_probe_d",
-                calls[3].source)
-
-            local first_alias = ast[1]._type.type_members
-                .ffi_shared_wave_alias
-            local second_alias = ast[2]._type.type_members
-                .ffi_shared_wave_alias
-            assert.equal(first_alias, second_alias)
-            assert.equal(first_alias.target, second_alias.target)
-            assert.equal(
-                ast[1]._type.members.ffi_shared_wave_object.type,
-                ast[2]._type.members.ffi_shared_wave_object.type)
-            close_context_configured_probe_service(context, service)
-        end)
-    end)
-
-    it("accepts target-C-equivalent symbolic array bounds", function()
-        with_headers({
-            [[
-                enum { FFI_SYMBOLIC_BOUND = 3 };
-                extern int ffi_symbolic_values[FFI_SYMBOLIC_BOUND];
-                extern int ffi_sizeof_values[sizeof(int)];
-            ]],
-            [[
-                extern int ffi_symbolic_values[3];
-                extern int ffi_sizeof_values[sizeof(int)];
-            ]],
-        }, function(symbolic_header, numeric_header)
-            local ok, err, ast = h.run_checker(
-                'local symbolic = foreign import "' ..
-                    symbolic_header .. '"\n' ..
-                'local numeric = foreign import "' ..
-                    numeric_header .. '"\n')
-            assert.truthy(ok, err)
-            for _, name in ipairs({
-                "ffi_symbolic_values",
-                "ffi_sizeof_values",
-            }) do
-                assert.equal(
-                    ast[1]._type.members[name].type,
-                    ast[2]._type.members[name].type)
-            end
-        end)
-    end)
-
-    it("preserves pointer-to-array precedence in symbolic bounds", function()
-        with_headers({
-            [[
-                extern int
-                    ffi_pointer_sized_values[sizeof(int (*)[3])];
-            ]],
-            [[
-                extern int
-                    ffi_pointer_sized_values[sizeof(void *)];
-            ]],
-        }, function(array_pointer_header, void_pointer_header)
-            local ok, err, ast = h.run_checker(
-                'local array_pointer = foreign import "' ..
-                    array_pointer_header .. '"\n' ..
-                'local void_pointer = foreign import "' ..
-                    void_pointer_header .. '"\n')
-            assert.truthy(ok, err)
-            assert.equal(
-                ast[1]._type.members.ffi_pointer_sized_values.type,
-                ast[2]._type.members.ffi_pointer_sized_values.type)
-        end)
-    end)
-
-    it("renders repeated pointer-to-function symbolic bounds", function()
-        with_headers({
-            [[
-                extern int
-                    ffi_callback_sized_values[sizeof(int (*)(double))];
-            ]],
-            [[
-                extern int
-                    ffi_callback_sized_values[sizeof(int (*)(double))];
-            ]],
-        }, function(first_header, second_header)
-            local ok, err, ast = h.run_checker(
-                'local first = foreign import "' ..
-                    first_header .. '"\n' ..
-                'local second = foreign import "' ..
-                    second_header .. '"\n')
-            assert.truthy(ok, err)
-            assert.equal(
-                ast[1]._type.members.ffi_callback_sized_values.type,
-                ast[2]._type.members.ffi_callback_sized_values.type)
-        end)
-    end)
-
-    it("renders static array parameters in repeated symbolic bounds",
-    function()
-        with_headers({
-            [[
-                extern int ffi_static_parameter_extent[
-                    sizeof(int (*)(int [static 3]))];
-            ]],
-            [[
-                extern int ffi_static_parameter_extent[
-                    sizeof(int (*)(int [static 3]))];
-            ]],
-        }, function(first_header, second_header)
-            local ok, err, ast = h.run_checker(
-                'local first = foreign import "' ..
-                    first_header .. '"\n' ..
-                'local second = foreign import "' ..
-                    second_header .. '"\n')
-            assert.truthy(ok, err)
-            assert.equal(
-                ast[1]._type.members.ffi_static_parameter_extent.type,
-                ast[2]._type.members.ffi_static_parameter_extent.type)
-        end)
-    end)
-
-    it("lets target C reject unequal symbolic array bounds", function()
-        with_headers({
-            [[
-                enum { FFI_HIDDEN_BOUND = 3 };
-                extern int ffi_hidden_values[FFI_HIDDEN_BOUND];
-                #define TITAN_FFI_HIDE_UNEQUAL_BOUND 1
-            ]],
-            [[
-                #ifndef TITAN_FFI_HIDE_UNEQUAL_BOUND
-                extern int ffi_hidden_values[4];
-                #endif
-            ]],
-        }, function(symbolic_header, unequal_header)
-            local ok, err = h.run_checker(
-                'local symbolic = foreign import "' ..
-                    symbolic_header .. '"\n' ..
-                'local unequal = foreign import "' ..
-                    unequal_header .. '"\n')
-            assert.falsy(ok)
-            assert.matches(
-                "conflicting C declaration for 'ffi_hidden_values'",
-                err, 1, true)
-            assert.matches(
-                "rejected the declaration compatibility candidate",
-                err, 1, true)
-        end)
-    end)
-
-    it("keeps typedef array composites declaration-owned in either order",
-    function()
-        with_header([[
-            typedef int ffi_incomplete_array[];
-            extern ffi_incomplete_array ffi_typedef_values;
-            extern ffi_incomplete_array ffi_typedef_untouched;
-        ]], function(unknown_header)
-            with_header([[
-                extern int ffi_typedef_values[7];
-            ]], function(known_header)
-                for order, headers in ipairs({
-                    { unknown_header, known_header },
-                    { known_header, unknown_header },
-                }) do
-                    local ok, err, ast = h.run_checker(
-                        'local first = foreign import "' ..
-                            headers[1] .. '"\n' ..
-                        'local second = foreign import "' ..
-                            headers[2] .. '"\n')
-                    assert.truthy(ok, err)
-                    local first =
-                        ast[1]._type.members.ffi_typedef_values.type
-                    local second =
-                        ast[2]._type.members.ffi_typedef_values.type
-                    assert.equal(first, second)
-                    assert.equal(7, nested_array_bound(first))
-                    if order == 1 then
-                        assert.equal("Type.CTypedef", first._tag)
-                        assert.equal("ffi_incomplete_array", first.name)
-                    end
-
-                    local aliases = order == 1
-                        and ast[1]._type or ast[2]._type
-                    local alias = aliases.type_members
-                        .ffi_incomplete_array
-                    local untouched = aliases.members
-                        .ffi_typedef_untouched.type
-                    assert.equal("", nested_array_bound(alias))
-                    assert.equal("", nested_array_bound(untouched))
-                end
-            end)
-        end)
-    end)
-
-    it("completes nested pointer and function array paths independently",
-    function()
-        with_header([[
+    it("completes nested pointer and function arrays without mutating other uses", function()
+        local ffi = checked({ [[
             typedef int ffi_unknown_array[];
             typedef ffi_unknown_array *ffi_unknown_pointer;
-            extern ffi_unknown_array *ffi_nested_pointer;
-            extern ffi_unknown_array *ffi_nested_untouched;
-            extern int ffi_nested_function(ffi_unknown_pointer value);
+            extern ffi_unknown_array *ffi_pointer;
+            extern ffi_unknown_array *ffi_untouched;
+            extern int ffi_function(ffi_unknown_pointer value);
             extern int ffi_function_untouched(ffi_unknown_pointer value);
-        ]], function(unknown_header)
-            with_header([[
-                typedef int ffi_known_array[7];
-                typedef ffi_known_array *ffi_known_pointer;
-                extern ffi_known_array *ffi_nested_pointer;
-                extern int ffi_nested_function(ffi_known_pointer value);
-            ]], function(known_header)
-                local ok, err, ast = h.run_checker(
-                    'local unknown = foreign import "' ..
-                        unknown_header .. '"\n' ..
-                    'local known = foreign import "' ..
-                        known_header .. '"\n')
-                assert.truthy(ok, err)
-
-                local unknown = ast[1]._type
-                local known = ast[2]._type
-                local pointer =
-                    unknown.members.ffi_nested_pointer.type
-                assert.equal(pointer,
-                    known.members.ffi_nested_pointer.type)
-                assert.equal(7, nested_array_bound(pointer))
-                assert.equal("", nested_array_bound(
-                    unknown.members.ffi_nested_untouched.type))
-                assert.equal("", nested_array_bound(
-                    unknown.type_members.ffi_unknown_array))
-
-                local fn =
-                    unknown.members.ffi_nested_function.type
-                assert.equal(fn,
-                    known.members.ffi_nested_function.type)
-                assert.equal(7,
-                    nested_array_bound(fn.params[1]))
-                assert.equal("", nested_array_bound(
-                    unknown.members
-                        .ffi_function_untouched.type.params[1]))
-            end)
-        end)
+        ]], [[
+            typedef int ffi_known_array[7];
+            typedef ffi_known_array *ffi_known_pointer;
+            extern ffi_known_array *ffi_pointer;
+            extern int ffi_function(ffi_known_pointer value);
+        ]] })
+        assert.equal(7, bound(ffi.members.ffi_pointer.type))
+        assert.equal(7, bound(ffi.members.ffi_function.type.params[1]))
+        assert.equal("", bound(ffi.members.ffi_untouched.type))
+        assert.equal("", bound(ffi.members.ffi_function_untouched.type.params[1]))
+        assert.equal("", bound(ffi.type_members.ffi_unknown_array))
     end)
 
-    it("imports exact ordered pointer, array, and function declarators",
-    function()
-        with_header([[
+    it("retains exact pointer, array, and function declarator ordering", function()
+        local ffi = checked({ [[
             extern int *ffi_pointer_array[3];
             extern int (*ffi_array_pointer)[3];
             extern int (*ffi_callbacks[2])(int);
             extern int (*ffi_row_factory(void))[3];
-        ]], function(header)
-            local ok, err, ast = h.run_checker(
-                'local c = foreign import "' .. header .. '"\n')
-            assert.truthy(ok, err)
-            local members = ast[1]._type.members
-
-            local pointer_array =
-                members.ffi_pointer_array.type
-            assert.equal("Type.CArray", pointer_array._tag)
-            assert.equal(3, pointer_array.len)
-            assert.equal("Type.CPointer",
-                pointer_array.elem._tag)
-
-            local array_pointer =
-                members.ffi_array_pointer.type
-            assert.equal("Type.CPointer", array_pointer._tag)
-            assert.equal("Type.CArray",
-                array_pointer.pointee._tag)
-            assert.equal(3, array_pointer.pointee.len)
-
-            local callbacks = members.ffi_callbacks.type
-            assert.equal("Type.CArray", callbacks._tag)
-            assert.equal(2, callbacks.len)
-            assert.equal("Type.CPointer", callbacks.elem._tag)
-            assert.equal("Type.CFunction",
-                callbacks.elem.pointee._tag)
-
-            local factory =
-                members.ffi_row_factory.type
-            assert.equal("Type.CFunction", factory._tag)
-            assert.equal("Type.CPointer", factory.ret._tag)
-            assert.equal("Type.CArray",
-                factory.ret.pointee._tag)
-            assert.equal(3, factory.ret.pointee.len)
-        end)
+        ]] })
+        local members = ffi.members
+        local array = members.ffi_pointer_array.type
+        assert.equal("Type.CArray", array._tag)
+        assert.equal(3, array.len)
+        assert.equal("Type.CPointer", array.elem._tag)
+        local pointer = members.ffi_array_pointer.type
+        assert.equal("Type.CPointer", pointer._tag)
+        assert.equal("Type.CArray", pointer.pointee._tag)
+        assert.equal(3, pointer.pointee.len)
+        local callbacks = members.ffi_callbacks.type
+        assert.equal("Type.CArray", callbacks._tag)
+        assert.equal(2, callbacks.len)
+        assert.equal("Type.CFunction", callbacks.elem.pointee._tag)
+        local factory = members.ffi_row_factory.type
+        assert.equal("Type.CFunction", factory._tag)
+        assert.equal("Type.CPointer", factory.ret._tag)
+        assert.equal("Type.CArray", factory.ret.pointee._tag)
+        assert.equal(3, factory.ret.pointee.len)
     end)
 
-    it("matches matrix array parameters with pointer-to-array parameters",
-    function()
-        with_header([[
-            extern int ffi_matrix_parameter(int values[][3]);
-        ]], function(array_header)
-            with_header([[
-                extern int ffi_matrix_parameter(int (*values)[3]);
-            ]], function(pointer_header)
-                local ok, err, ast = h.run_checker(
-                    'local arrays = foreign import "' ..
-                        array_header .. '"\n' ..
-                    'local pointers = foreign import "' ..
-                        pointer_header .. '"\n')
-                assert.truthy(ok, err)
-                local first = ast[1]._type.members
-                    .ffi_matrix_parameter.type
-                local second = ast[2]._type.members
-                    .ffi_matrix_parameter.type
-                assert.equal(first, second)
-                assert.equal("Type.CPointer",
-                    first.params[1]._tag)
-                assert.equal("Type.CArray",
-                    first.params[1].pointee._tag)
-                assert.equal(3, first.params[1].pointee.len)
-            end)
-        end)
+    it("adjusts matrix and bare callback parameters to their pointer forms", function()
+        local ffi = checked({ [[
+            extern int ffi_matrix(int values[][3]);
+            extern int ffi_callback(int callback(void));
+            extern int ffi_qualifiers(const int value, int * const pointer);
+        ]], [[
+            extern int ffi_matrix(int (*values)[3]);
+            extern int ffi_callback(int (*callback)(void));
+            extern int ffi_qualifiers(int value, int *pointer);
+        ]] })
+        local matrix = ffi.members.ffi_matrix.type.params[1]
+        assert.equal("Type.CPointer", matrix._tag)
+        assert.equal("Type.CArray", matrix.pointee._tag)
+        assert.equal(3, matrix.pointee.len)
+        local callback = ffi.members.ffi_callback.type.params[1]
+        assert.equal("Type.CPointer", callback._tag)
+        assert.equal("Type.CFunction", callback.pointee._tag)
+        assert.same({ "value", "pointer" }, ffi.members.ffi_qualifiers.paramnames)
     end)
 
-    it("preserves qualified nonvoid and void function returns", function()
-        with_header([[
+    it("preserves qualified nonvoid and void returns through typedefs", function()
+        local ffi = checked({ [[
             typedef const int ffi_const_int;
             typedef const void ffi_const_void;
-            extern ffi_const_int ffi_qualified_return(void);
-            extern ffi_const_void ffi_qualified_void_return(void);
-        ]], function(alias_header)
-            with_header([[
-                extern const int ffi_qualified_return(void);
-                extern const void ffi_qualified_void_return(void);
-            ]], function(direct_header)
-                local ok, err, ast = h.run_checker(
-                    'local aliases = foreign import "' ..
-                        alias_header .. '"\n' ..
-                    'local direct = foreign import "' ..
-                        direct_header .. '"\n')
-                assert.truthy(ok, err)
-                assert.equal(
-                    ast[1]._type.members.ffi_qualified_return.type,
-                    ast[2]._type.members.ffi_qualified_return.type)
-                assert.equal(
-                    ast[1]._type.members
-                        .ffi_qualified_void_return.type,
-                    ast[2]._type.members
-                        .ffi_qualified_void_return.type)
-                assert.equal("Type.CVoid",
-                    types.resolve_c_typedef(ast[1]._type.members
-                        .ffi_qualified_void_return.type.ret)._tag)
-            end)
-        end)
-
-        with_header([[
-            extern const int ffi_return_conflict(void);
-            extern const void ffi_void_return_conflict(void);
-        ]], function(qualified_header)
-            with_header([[
-                extern int ffi_return_conflict(void);
-                extern void ffi_void_return_conflict(void);
-            ]], function(plain_header)
-                local ok, err = h.run_checker(
-                    'local qualified = foreign import "' ..
-                        qualified_header .. '"\n' ..
-                    'local plain = foreign import "' ..
-                        plain_header .. '"\n')
-                assert.falsy(ok)
-                assert.matches(
-                    "conflicting C declaration for "
-                        .. "'ffi_return_conflict'",
-                    err, 1, true)
-                assert.matches(
-                    "conflicting C declaration for "
-                        .. "'ffi_void_return_conflict'",
-                    err, 1, true)
-            end)
-        end)
+            extern ffi_const_int ffi_number(void);
+            extern ffi_const_void ffi_nothing(void);
+        ]], [[
+            extern const int ffi_number(void);
+            extern const void ffi_nothing(void);
+        ]] })
+        assert.equal("Type.CInteger", types.resolve_c_typedef(ffi.members.ffi_number.type.ret)._tag)
+        assert.equal("Type.CVoid", types.resolve_c_typedef(ffi.members.ffi_nothing.type.ret)._tag)
     end)
 
-    it("matches nested aliased C callback signatures in every value path",
-    function()
-        with_header([[
+    it("accepts nested aliased callbacks in direct, array, and returned value paths", function()
+        checked({ [[
             typedef int ffi_first_int;
             typedef int ffi_second_int;
-            typedef ffi_first_int
-                (*ffi_first_callback)(ffi_first_int);
-            typedef ffi_second_int
-                (*ffi_second_callback)(ffi_second_int);
-            typedef ffi_first_callback
-                (*ffi_first_factory)(void);
-            typedef ffi_second_callback
-                (*ffi_second_factory)(void);
-            typedef ffi_first_callback *ffi_first_callback_pointer;
-            typedef ffi_second_callback *ffi_second_callback_pointer;
-
+            typedef ffi_first_int (*ffi_first_callback)(ffi_first_int);
+            typedef ffi_second_int (*ffi_second_callback)(ffi_second_int);
+            typedef ffi_first_callback (*ffi_first_factory)(void);
+            typedef ffi_second_callback (*ffi_second_factory)(void);
+            typedef ffi_first_callback *ffi_first_pointer;
+            typedef ffi_second_callback *ffi_second_pointer;
             extern ffi_first_callback ffi_get_callback(void);
             extern void ffi_take_callback(ffi_second_callback callback);
             extern ffi_first_callback ffi_callbacks[4];
             extern ffi_first_int ffi_direct(ffi_first_int value);
             extern ffi_first_factory ffi_get_factory(void);
             extern void ffi_take_factory(ffi_second_factory factory);
-            extern ffi_first_callback_pointer
-                ffi_get_callback_pointer(void);
-            extern void ffi_take_callback_pointer(
-                ffi_second_callback_pointer pointer);
-        ]], function(header)
-            local ok, err, ast = h.run_checker([[
-                local c = foreign import "]] .. header .. [["
-
-                local function use(): nil
-                    c.ffi_take_callback(c.ffi_get_callback())
-                    c.ffi_take_callback(c.ffi_callbacks[0])
-                    c.ffi_take_callback(c.ffi_direct)
-                    c.ffi_take_factory(c.ffi_get_factory())
-                    c.ffi_take_callback_pointer(
-                        c.ffi_get_callback_pointer())
-                    return nil
-                end
-            ]])
-            assert.truthy(ok, err)
-        end)
-    end)
-
-    it("keeps callback identity strict before nested unsafe pointer fallback",
-    function()
-        with_header([[
-            typedef int (*ffi_plain_callback)(int);
-            typedef const int (*ffi_const_callback)(int);
-            extern ffi_plain_callback ffi_get_plain(void);
-            extern void ffi_take_const(ffi_const_callback callback);
-            extern int ffi_direct_plain(int value);
-
-            typedef void (*ffi_mutable_callback)(int *);
-            typedef void (*ffi_const_pointee_callback)(const int *);
-            extern ffi_mutable_callback ffi_get_mutable(void);
-            extern void ffi_take_const_pointee(
-                ffi_const_pointee_callback callback);
-            extern ffi_mutable_callback ffi_mutable_callbacks[1];
-            typedef ffi_mutable_callback *ffi_mutable_callback_pointer;
-            typedef ffi_const_pointee_callback
-                *ffi_const_callback_pointer;
-            extern ffi_mutable_callback_pointer
-                ffi_get_mutable_pointer(void);
-            extern void ffi_take_const_pointer(
-                ffi_const_callback_pointer pointer);
-        ]], function(header)
-            local ok, err, ast = h.run_checker([[
-                local c = foreign import "]] .. header .. [["
-
-                local function bad(): nil
-                    c.ffi_take_const(c.ffi_get_plain())
-                    c.ffi_take_const(c.ffi_direct_plain)
-                    c.ffi_take_const_pointee(
-                        c.ffi_get_mutable())
-                    c.ffi_take_const_pointee(
-                        c.ffi_mutable_callbacks[0])
-                    c.ffi_take_const_pointer(
-                        c.ffi_get_mutable_pointer())
-                    return nil
-                end
-            ]])
-            assert.falsy(ok)
-            assert.is_false(types.consistent(
-                ast[1]._type.type_members
-                    .ffi_const_callback_pointer,
-                ast[1]._type.type_members
-                    .ffi_mutable_callback_pointer))
-            assert.matches("types in argument 1", err)
-            assert.matches("foreign %(C%) function", err)
-            assert.matches("ffi_take_const_pointee", err, 1, true)
-            assert.not_matches(
-                "ffi_take_const_pointer", err, 1, true)
-        end)
-    end)
-
-    it("accepts top-level callback parameter qualification and array composites",
-    function()
-        with_header([[
-            typedef void (*ffi_plain_parameter)(int *);
-            typedef void (*ffi_const_parameter)(int * const);
-            extern ffi_plain_parameter ffi_get_parameter(void);
-            extern void ffi_take_parameter(ffi_const_parameter callback);
-
-            typedef int ffi_unknown_callback_array[];
-            typedef int ffi_known_callback_array[7];
-            typedef void (*ffi_unknown_array_callback)(
-                ffi_unknown_callback_array *);
-            typedef void (*ffi_known_array_callback)(
-                ffi_known_callback_array *);
-            extern ffi_unknown_array_callback
-                ffi_get_array_callback(void);
-            extern void ffi_take_array_callback(
-                ffi_known_array_callback callback);
-        ]], function(header)
-            local ok, err = h.run_checker([[
-                local c = foreign import "]] .. header .. [["
-
-                local function good(): nil
-                    c.ffi_take_parameter(c.ffi_get_parameter())
-                    c.ffi_take_array_callback(
-                        c.ffi_get_array_callback())
-                    return nil
-                end
-            ]])
-            assert.truthy(ok, err)
-        end)
-    end)
-
-    it("adjusts function parameters to compatible function pointers",
-    function()
-        with_header([[
-            extern int ffi_callback_user(int callback(void));
-        ]], function(function_header)
-            with_header([[
-                extern int ffi_callback_user(int (*callback)(void));
-            ]], function(pointer_header)
-                local ok, err, ast = h.run_checker(
-                    'local function_form = foreign import "' ..
-                        function_header .. '"\n' ..
-                    'local pointer_form = foreign import "' ..
-                        pointer_header .. '"\n')
-                assert.truthy(ok, err)
-                local callback = ast[1]._type.members
-                    .ffi_callback_user.type.params[1]
-                assert.equal("Type.CPointer", callback._tag)
-                assert.equal("Type.CFunction", callback.pointee._tag)
-                assert.equal(
-                    ast[1]._type.members.ffi_callback_user.type,
-                    ast[2]._type.members.ffi_callback_user.type)
-            end)
-        end)
-    end)
-
-    it("adjusts away top-level function parameter qualifiers", function()
-        with_header([[
-            extern int ffi_parameter_qualifiers(
-                const int value, int * const pointer);
-        ]], function(qualified_header)
-            with_header([[
-                extern int ffi_parameter_qualifiers(
-                    int value, int *pointer);
-            ]], function(unqualified_header)
-                local ok, err = h.run_checker(
-                    'local qualified = foreign import "' ..
-                        qualified_header .. '"\n' ..
-                    'local unqualified = foreign import "' ..
-                        unqualified_header .. '"\n')
-                assert.truthy(ok, err)
-            end)
-        end)
-    end)
-
-    it("still rejects declarations with different resolved C types",
-    function()
-        with_header([[
-            typedef long ffi_wide_value_t;
-            extern int ffi_conflict(ffi_wide_value_t value);
-        ]], function(wide_header)
-            with_header([[
-                typedef int ffi_narrow_value_t;
-                extern int ffi_conflict(ffi_narrow_value_t value);
-            ]], function(narrow_header)
-                local ok, err = h.run_checker(
-                    'local wide = foreign import "' ..
-                        wide_header .. '"\n' ..
-                    'local narrow = foreign import "' ..
-                        narrow_header .. '"\n')
-                assert.falsy(ok)
-                assert.matches(
-                    "conflicting C declaration for 'ffi_conflict'",
-                    err, 1, true)
-                assert.matches("ffi_wide_value_t", err, 1, true)
-                assert.matches("ffi_narrow_value_t", err, 1, true)
-            end)
-        end)
-    end)
-
-    it("rejects one typedef name with conflicting resolved types", function()
-        with_header([[
-            typedef int ffi_conflicting_type;
-        ]], function(integer_header)
-            with_header([[
-                typedef double ffi_conflicting_type;
-            ]], function(double_header)
-                local ok, err = h.run_checker(
-                    'local integers = foreign import "' ..
-                        integer_header .. '"\n' ..
-                    'local doubles = foreign import "' ..
-                        double_header .. '"\n')
-                assert.falsy(ok)
-                assert.matches(
-                    "conflicting C declaration for 'ffi_conflicting_type'",
-                    err, 1, true)
-            end)
-        end)
-    end)
-
-    it("uses the active type macro that shadows an earlier typedef",
-    function()
-        with_header([[
-            typedef int ffi_public_number;
-            typedef double ffi_replacement_number;
-            #define ffi_public_number ffi_replacement_number
-        ]], function(header)
-            local ok, err, ast = h.run_checker(
-                'local c = foreign import "' .. header .. '"\n' ..
-                [[
-                    function identity(x: float): float
-                        local converted =
-                            x as c.ffi_public_number
-                        return converted as float
-                    end
-                ]])
-            assert.truthy(ok, err)
-
-            local alias =
-                ast[1]._type.type_members.ffi_public_number
-            assert.equal("Type.CTypedef", alias._tag)
-            assert.equal("ffi_public_number", alias.name)
-            local resolved = types.resolve_c_typedef(alias)
-            assert.equal("Type.CFloat", resolved._tag)
-            assert.equal("double", resolved.spelling)
-            assert.is_nil(
-                ast[1]._type.members.ffi_public_number)
-        end)
-    end)
-
-    it("keeps named aggregate targets nominal through a shared typedef",
-    function()
-        with_header([[
-            struct ffi_first_record { int value; };
-            typedef struct ffi_first_record ffi_shared_record;
-        ]], function(first_header)
-            with_header([[
-                struct ffi_second_record { int value; };
-                typedef struct ffi_second_record ffi_shared_record;
-            ]], function(second_header)
-                local ok, err = h.run_checker(
-                    'local first = foreign import "' ..
-                        first_header .. '"\n' ..
-                    'local second = foreign import "' ..
-                        second_header .. '"\n')
-                assert.falsy(ok)
-                assert.matches(
-                    "conflicting C declaration for 'ffi_shared_record'",
-                    err, 1, true)
-            end)
-        end)
-    end)
-
-    it("rejects independently declared same-shaped anonymous typedefs",
-    function()
-        with_header([[
-            typedef struct { int value; } ffi_same_shape;
-        ]], function(first_header)
-            with_header([[
-                typedef struct { int value; } ffi_same_shape;
-            ]], function(second_header)
-                local ok, err = h.run_checker(
-                    'local first = foreign import "' ..
-                        first_header .. '"\n' ..
-                    'local second = foreign import "' ..
-                        second_header .. '"\n')
-                assert.falsy(ok)
-                assert.matches(
-                    "conflicting C declaration for 'ffi_same_shape'",
-                    err, 1, true)
-            end)
-        end)
-    end)
-
-    it("recognizes one guarded anonymous typedef through outer aliases",
-    function()
-        with_header([[
-            #ifndef TITAN_FFI_GUARDED_COMMON
-            #define TITAN_FFI_GUARDED_COMMON
-            typedef struct {
-                int values[4 * sizeof(int)];
-            } ffi_guarded_common, ffi_guarded_common_second;
-            #endif
-        ]], function(common_header)
-            local common_name =
-                assert(common_header:match("([^/]+)$"))
-            with_header(
-                '#include "' .. common_name .. '"\n'
-                .. 'typedef ffi_guarded_common ffi_outer_a;\n'
-                .. 'extern ffi_outer_a ffi_guarded_object;\n',
-                function(first_header)
-                    with_header(
-                        '#include "' .. common_name .. '"\n'
-                        .. 'typedef ffi_guarded_common_second ffi_outer_b;\n'
-                        .. 'extern ffi_outer_b ffi_guarded_object;\n',
-                        function(second_header)
-                            local ok, err = h.run_checker(
-                                'local first = foreign import "' ..
-                                    first_header .. '"\n' ..
-                                'local second = foreign import "' ..
-                                    second_header .. '"\n')
-                            assert.truthy(ok, err)
-                        end)
-                end)
-        end)
-    end)
-
-    it("recognizes one guarded prototype-tag declaration through path aliases",
-    function()
-        with_header([[
-            #ifndef TITAN_FFI_GUARDED_PROTOTYPE_TAG
-            #define TITAN_FFI_GUARDED_PROTOTYPE_TAG
-            extern int ffi_guarded_prototype_tag(
-                struct ffi_guarded_local *value);
-            #endif
-        ]], function(common_header)
-            local common_name =
-                assert(common_header:match("([^/]+)$"))
-            with_header(
-                '#include "' .. common_name .. '"\n',
-                function(first_header)
-                    with_header(
-                        '#include "./' .. common_name .. '"\n',
-                        function(second_header)
-                            local ok, err, ast = h.run_checker(
-                                'local first = foreign import "' ..
-                                    first_header .. '"\n' ..
-                                'local second = foreign import "' ..
-                                    second_header .. '"\n')
-                            assert.truthy(ok, err)
-
-                            local first = ast[1]._type.members
-                                .ffi_guarded_prototype_tag.type
-                            local second = ast[2]._type.members
-                                .ffi_guarded_prototype_tag.type
-                            assert.equal(first, second)
-                            assert.equal(first.params[1].pointee,
-                                second.params[1].pointee)
-                            assert.is_nil(ast[1]._type.type_members
-                                .ffi_guarded_local)
-                            assert.is_nil(ast[2]._type.type_members
-                                .ffi_guarded_local)
-                        end)
-                end)
-        end)
-    end)
-
-    it("recognizes one pragma-once prototype tag through hard-link aliases",
-    function()
-        with_header([[
-            #pragma once
-            extern int ffi_hard_linked_prototype_tag(
-                struct ffi_hard_linked_local *value);
-        ]], function(common_header)
-            with_hard_link(common_header, function(alias_header)
-                local ok, err, ast = h.run_checker(
-                    'local first = foreign import "' ..
-                        common_header .. '"\n' ..
-                    'local second = foreign import "' ..
-                        alias_header .. '"\n')
-                assert.truthy(ok, err)
-
-                local first = ast[1]._type.members
-                    .ffi_hard_linked_prototype_tag.type
-                local second = ast[2]._type.members
-                    .ffi_hard_linked_prototype_tag.type
-                assert.equal(first, second)
-                assert.equal(first.params[1].pointee,
-                    second.params[1].pointee)
-            end)
-        end)
-    end)
-
-    it("does not excuse same-source macro-dependent type changes", function()
-        with_header([[
-            #ifndef TITAN_FFI_SOURCE_REPEAT_MACRO
-            #define TITAN_FFI_SOURCE_REPEAT_MACRO
-            extern TITAN_FFI_SHARED_TYPE ffi_source_repeat_macro(void);
-            #endif
-        ]], function(common_header)
-            local common_name =
-                assert(common_header:match("([^/]+)$"))
-            with_headers({
-                "#define TITAN_FFI_SUPPRESS_FIRST 1\n",
-                [[
-                    #ifndef TITAN_FFI_SUPPRESS_FIRST
-                    #define TITAN_FFI_SHARED_TYPE int
-                    #include "]] .. common_name .. [["
-                    #undef TITAN_FFI_SHARED_TYPE
-                    #endif
-                ]],
-                [[
-                    #define TITAN_FFI_SHARED_TYPE double
-                    #include "]] .. common_name .. [["
-                    #undef TITAN_FFI_SHARED_TYPE
-                ]],
-            }, function(prelude_header, first_header, second_header)
-                local ok, err, ast = h.run_checker(
-                    'local prelude = foreign import "' ..
-                        prelude_header .. '"\n' ..
-                    'local first = foreign import "' ..
-                        first_header .. '"\n' ..
-                    'local second = foreign import "' ..
-                        second_header .. '"\n')
-                assert.falsy(ok)
-                assert.matches(
-                    "conflicting C declaration for " ..
-                        "'ffi_source_repeat_macro'",
-                    err, 1, true)
-                assert.not_equal(
-                    ast[2]._type.members.ffi_source_repeat_macro.type,
-                    ast[3]._type.members.ffi_source_repeat_macro.type)
-            end)
-        end)
-    end)
-
-    it("preserves prototype-tag alias topology in source repeats", function()
-        with_header([[
-            #ifndef TITAN_FFI_SOURCE_REPEAT_TOPOLOGY
-            #define TITAN_FFI_SOURCE_REPEAT_TOPOLOGY
-            extern int ffi_source_repeat_topology(
-                struct ffi_topology_local { int value; } *outer,
-                void (*callback)(TITAN_FFI_CALLBACK_TAG *inner));
-            #endif
-        ]], function(common_header)
-            local common_name =
-                assert(common_header:match("([^/]+)$"))
-            with_headers({
-                "#define TITAN_FFI_SUPPRESS_TOPOLOGY_FIRST 1\n",
-                [[
-                    #ifndef TITAN_FFI_SUPPRESS_TOPOLOGY_FIRST
-                    #define TITAN_FFI_CALLBACK_TAG struct ffi_topology_local
-                    #include "]] .. common_name .. [["
-                    #undef TITAN_FFI_CALLBACK_TAG
-                    #endif
-                ]],
-                [[
-                    #define TITAN_FFI_CALLBACK_TAG \
-                        struct ffi_topology_local { int value; }
-                    #include "]] .. common_name .. [["
-                    #undef TITAN_FFI_CALLBACK_TAG
-                ]],
-            }, function(prelude_header, first_header, second_header)
-                local ok, err = h.run_checker(
-                    'local prelude = foreign import "' ..
-                        prelude_header .. '"\n' ..
-                    'local first = foreign import "' ..
-                        first_header .. '"\n' ..
-                    'local second = foreign import "' ..
-                        second_header .. '"\n')
-                assert.falsy(ok)
-                assert.matches(
-                    "conflicting C declaration for " ..
-                        "'ffi_source_repeat_topology'",
-                    err, 1, true)
-            end)
-        end)
-    end)
-
-    it("keeps separately sourced prototype tags nominal", function()
-        with_headers({
-            [[
-                extern int ffi_distinct_prototype_tag(
-                    struct ffi_distinct_local *value);
-            ]],
-            [[
-                extern int ffi_distinct_prototype_tag(
-                    struct ffi_distinct_local *value);
-            ]],
-        }, function(first_header, second_header)
-            local ok, err = h.run_checker(
-                'local first = foreign import "' .. first_header .. '"\n' ..
-                'local second = foreign import "' .. second_header .. '"\n')
-            assert.falsy(ok)
-            assert.matches(
-                "conflicting C declaration for " ..
-                    "'ffi_distinct_prototype_tag'",
-                err, 1, true)
-        end)
-    end)
-
-    it("rejects an unguarded physical prototype-tag declaration twice",
-    function()
-        with_header([[
-            extern int ffi_unguarded_prototype_tag(
-                struct ffi_unguarded_local *value);
-        ]], function(common_header)
-            local common_name =
-                assert(common_header:match("([^/]+)$"))
-            with_header(
-                '#include "' .. common_name .. '"\n',
-                function(first_header)
-                    with_header(
-                        '#include "' .. common_name .. '"\n',
-                        function(second_header)
-                            local ok, err = h.run_checker(
-                                'local first = foreign import "' ..
-                                    first_header .. '"\n' ..
-                                'local second = foreign import "' ..
-                                    second_header .. '"\n')
-                            assert.falsy(ok)
-                            assert.matches(
-                                "final ordered C header context is invalid",
-                                err, 1, true)
-                        end)
-                end)
-        end)
-    end)
-
-    it("uses the final header context across path aliases and three imports",
-    function()
-        with_header([[
-            #ifndef TITAN_FFI_ALIASED_COMMON
-            #define TITAN_FFI_ALIASED_COMMON
-            typedef struct {
-                int value;
-            } ffi_aliased_common;
-            #endif
-        ]], function(common_header)
-            local common_name =
-                assert(common_header:match("([^/]+)$"))
-            with_header(
-                '#include "' .. common_name .. '"\n'
-                .. 'extern ffi_aliased_common ffi_aliased_object;\n',
-                function(first_header)
-                    with_header(
-                        '#include "./' .. common_name .. '"\n'
-                        .. 'extern ffi_aliased_common '
-                        .. 'ffi_aliased_object;\n',
-                        function(second_header)
-                            with_header(
-                                '#include "' .. common_name .. '"\n'
-                                .. 'extern ffi_aliased_common '
-                                .. 'ffi_aliased_object;\n',
-                                function(third_header)
-                                    local ok, err, ast = h.run_checker(
-                                        'local first = foreign import "' ..
-                                            first_header .. '"\n' ..
-                                        'local second = foreign import "' ..
-                                            second_header .. '"\n' ..
-                                        'local third = foreign import "' ..
-                                            third_header .. '"\n')
-                                    assert.truthy(ok, err)
-                                    local first =
-                                        ast[1]._type.type_members
-                                            .ffi_aliased_common
-                                    assert.equal(first,
-                                        ast[2]._type.type_members
-                                            .ffi_aliased_common)
-                                    assert.equal(first,
-                                        ast[3]._type.type_members
-                                            .ffi_aliased_common)
-                                    assert.equal(
-                                        ast[1]._type.members
-                                            .ffi_aliased_object.type,
-                                        ast[3]._type.members
-                                            .ffi_aliased_object.type)
-                                end)
-                        end)
-                end)
-        end)
-    end)
-
-    it("recognizes one pragma-once anonymous typedef", function()
-        with_header([[
-            #pragma once
-            typedef struct {
-                int value;
-            } ffi_pragma_common;
-        ]], function(common_header)
-            local common_name =
-                assert(common_header:match("([^/]+)$"))
-            with_header(
-                '#include "' .. common_name .. '"\n'
-                .. 'extern ffi_pragma_common ffi_pragma_object;\n',
-                function(first_header)
-                    with_header(
-                        '#include "' .. common_name .. '"\n'
-                        .. 'extern ffi_pragma_common ffi_pragma_object;\n',
-                        function(second_header)
-                            local ok, err, ast = h.run_checker(
-                                'local first = foreign import "' ..
-                                    first_header .. '"\n' ..
-                                'local second = foreign import "' ..
-                                    second_header .. '"\n')
-                            assert.truthy(ok, err)
-                            assert.equal(
-                                ast[1]._type.type_members.ffi_pragma_common,
-                                ast[2]._type.type_members.ffi_pragma_common)
-                        end)
-                end)
-        end)
-    end)
-
-    it("rejects a syntactic guard invalidated between wrappers", function()
-        with_header([[
-            #ifndef TITAN_FFI_UNDEF_COMMON
-            #define TITAN_FFI_UNDEF_COMMON
-            typedef struct {
-                int value;
-            } ffi_undef_common;
-            #endif
-        ]], function(common_header)
-            local common_name =
-                assert(common_header:match("([^/]+)$"))
-            with_header(
-                '#include "' .. common_name .. '"\n',
-                function(first_header)
-                    with_header(
-                        '#undef TITAN_FFI_UNDEF_COMMON\n'
-                        .. '#include "' .. common_name .. '"\n',
-                        function(second_header)
-                            local ok, err = h.run_checker(
-                                'local first = foreign import "' ..
-                                    first_header .. '"\n' ..
-                                'local second = foreign import "' ..
-                                    second_header .. '"\n')
-                            assert.falsy(ok)
-                            assert.matches(
-                                "conflicting C declaration for "
-                                    .. "'ffi_undef_common'",
-                                err, 1, true)
-                            assert.matches(
-                                "rejected the final ordered foreign "
-                                    .. "header context",
-                                err, 1, true)
-                        end)
-                end)
-        end)
-    end)
-
-    it("checks distinct redeclarations in source order",
-    function()
-        with_headers({
-            [[
-                extern int ffi_order_integer(int value);
-                extern long ffi_order_long(long value);
-            ]],
-            [[
-                extern int ffi_order_integer(int value);
-                extern long ffi_order_long(long value);
-            ]],
-        }, function(first_header, second_header)
-            local calls = {}
-            local context, service =
-                new_context_configured_probe_service({
-                    runner = function(_, metadata)
-                        if metadata.stage == "baseline" or
-                           metadata.source:find("titan_probe_d%(") then
-                            calls[#calls + 1] = metadata
-                        end
-                        return {
-                            started = true,
-                            ok = true,
-                            status = 0,
-                            diagnostic = "",
-                        }
-                    end,
-                })
-            local code =
-                'local first = foreign import "' .. first_header .. '"\n' ..
-                'local second = foreign import "' .. second_header .. '"\n'
-            h.reset(true)
-            local ast = assert(h.parse(code))
-            local _, errors = checker.check(
-                "test", ast, code, "test.titan", nil, {
-                    probe_service_provider =
-                        function() return service end,
-                })
-            assert.equal(0, #errors)
-            assert.equal(3, #calls)
-            assert.equal("baseline", calls[1].stage)
-            assert.equal("candidate", calls[2].stage)
-            assert.equal("candidate", calls[3].stage)
-            assert.not_equal(calls[2].source, calls[3].source)
-            assert.matches("extern int titan_probe_d%(int%)",
-                calls[2].source)
-            assert.matches("extern long titan_probe_d%(long%)",
-                calls[3].source)
-            for _, name in ipairs({
-                "ffi_order_integer", "ffi_order_long",
-            }) do
-                assert.equal(
-                    ast[1]._type.members[name].type,
-                    ast[2]._type.members[name].type)
+            extern ffi_first_pointer ffi_get_pointer(void);
+            extern void ffi_take_pointer(ffi_second_pointer pointer);
+        ]] }, [[
+            local function use()
+                ffi.ffi_take_callback(ffi.ffi_get_callback())
+                ffi.ffi_take_callback(ffi.ffi_callbacks[0])
+                ffi.ffi_take_callback(ffi.ffi_direct)
+                ffi.ffi_take_factory(ffi.ffi_get_factory())
+                ffi.ffi_take_pointer(ffi.ffi_get_pointer())
             end
-            close_context_configured_probe_service(context, service)
+        ]])
+    end)
+
+    it("accepts callback parameter qualification and incomplete array compatibility", function()
+        checked({ [[
+            typedef void (*ffi_plain)(int *);
+            typedef void (*ffi_qualified)(int * const);
+            extern ffi_plain ffi_get(void);
+            extern void ffi_take(ffi_qualified callback);
+            typedef int ffi_unknown_array[];
+            typedef int ffi_known_array[7];
+            typedef void (*ffi_unknown)(ffi_unknown_array *);
+            typedef void (*ffi_known)(ffi_known_array *);
+            extern ffi_unknown ffi_get_array(void);
+            extern void ffi_take_array(ffi_known callback);
+        ]] }, [[
+            local function use()
+                ffi.ffi_take(ffi.ffi_get())
+                ffi.ffi_take_array(ffi.ffi_get_array())
+            end
+        ]])
+    end)
+
+    for _, case in ipairs({
+        { "enum and numeric bounds", "enum { FFI_BOUND = 3 }; extern int ffi_values[FFI_BOUND];",
+          "extern int ffi_values[3];" },
+        { "repeated sizeof bounds", "extern int ffi_values[sizeof(int)];",
+          "extern int ffi_values[sizeof(int)];" },
+        { "pointer-to-array sizeof bounds", "extern int ffi_values[sizeof(int (*)[3])];",
+          "extern int ffi_values[sizeof(void *)];" },
+        { "callback sizeof bounds", "extern int ffi_values[sizeof(int (*)(double))];",
+          "extern int ffi_values[sizeof(int (*)(double))];" },
+        { "static callback array sizeof bounds", "extern int ffi_values[sizeof(int (*)(int [static 3]))];",
+          "extern int ffi_values[sizeof(int (*)(int [static 3]))];" },
+    }) do
+        it("accepts C-equivalent " .. case[1], function()
+            local ffi = checked({ case[2], case[3] })
+            assert.equal("Type.CArray", ffi.members.ffi_values.type._tag)
+        end)
+    end
+
+    it("lets earlier macros suppress later declarations before type conversion", function()
+        local ffi = checked({ [[
+            extern int ffi_values[];
+            #define FFI_SUPPRESS_BOUND 1
+        ]], [[
+            #ifndef FFI_SUPPRESS_BOUND
+            extern int ffi_values[3];
+            #endif
+        ]], [[
+            #ifndef FFI_SUPPRESS_BOUND
+            extern int ffi_values[4];
+            #endif
+        ]] })
+        assert.equal("", bound(ffi.members.ffi_values.type))
+    end)
+
+    it("uses final redefinition and undef state for macro members", function()
+        local ffi = checked({ [[
+            #define FFI_REDEFINED 1
+            #define FFI_REMOVED 3
+        ]], [[
+            #undef FFI_REDEFINED
+            #define FFI_REDEFINED 2.5
+            #undef FFI_REMOVED
+        ]] }, [[
+            function number(): float return ffi.FFI_REDEFINED end
+        ]])
+        assert.equal("Type.CFloat", ffi.members.FFI_REDEFINED.type._tag)
+        assert.is_nil(ffi.members.FFI_REMOVED)
+    end)
+
+    it("uses an active type macro that shadows an earlier typedef", function()
+        local ffi = checked({ [[
+            typedef int ffi_number;
+            typedef double ffi_replacement;
+            #define ffi_number ffi_replacement
+        ]] }, [[
+            function identity(x: float): float
+                local converted = x as ffi.ffi_number
+                return converted as float
+            end
+        ]])
+        local alias = ffi.type_members.ffi_number
+        assert.equal("ffi_number", alias.name)
+        assert.equal("Type.CFloat", types.resolve_c_typedef(alias)._tag)
+        assert.equal("double", types.resolve_c_typedef(alias).spelling)
+        assert.is_nil(ffi.members.ffi_number)
+    end)
+
+    it("uses only the active conditional declaration of a shared C name", function()
+        local ffi = checked({ "#define FFI_SUPPRESS_FIRST 1", [[
+            #ifndef FFI_SUPPRESS_FIRST
+            extern int ffi_conditional(void);
+            #endif
+        ]], "extern double ffi_conditional(void);" })
+        assert.equal("Type.CFloat", ffi.members.ffi_conditional.type.ret._tag)
+    end)
+
+    it("keeps distinct anonymous aliases when one conflicting object is suppressed", function()
+        local ffi = checked({ [[
+            typedef struct { int value; } ffi_first;
+            extern ffi_first ffi_object;
+            #define FFI_SUPPRESS_SECOND 1
+        ]], [[
+            typedef struct { int value; } ffi_second;
+            #ifndef FFI_SUPPRESS_SECOND
+            extern ffi_second ffi_object;
+            #endif
+        ]] })
+        assert.not_equal(ffi.type_members.ffi_first.target, ffi.type_members.ffi_second.target)
+        assert.equal(ffi.type_members.ffi_first,
+            ffi.members.ffi_object.type)
+    end)
+
+    it("parses one guarded anonymous definition through repeated real includes", function()
+        local ffi = checked({ [[
+            #ifndef FFI_COMMON
+            #define FFI_COMMON
+            typedef struct { int values[4]; } ffi_common, ffi_second;
+            #endif
+        ]], [[
+            #include "header1.h"
+            typedef ffi_common ffi_outer_a;
+            extern ffi_outer_a ffi_object;
+        ]], [[
+            #include "./header1.h"
+            typedef ffi_second ffi_outer_b;
+            extern ffi_outer_b ffi_object;
+        ]] })
+        assert.equal(types.resolve_c_typedef(ffi.type_members.ffi_outer_a),
+            types.resolve_c_typedef(ffi.type_members.ffi_outer_b))
+        assert.equal(types.resolve_c_typedef(ffi.type_members.ffi_common),
+            types.resolve_c_typedef(ffi.members.ffi_object.type))
+    end)
+
+    it("honors pragma once for repeated inclusion of the same authored header", function()
+        local ffi = checked({ [[
+            #pragma once
+            typedef struct { int value; } ffi_common;
+        ]], [[
+            #include "header1.h"
+            extern ffi_common ffi_object;
+        ]], [[
+            #include "header1.h"
+            extern ffi_common ffi_object;
+        ]] })
+        assert.equal(ffi.type_members.ffi_common, ffi.members.ffi_object.type)
+    end)
+
+    it("shares an anonymous union only among declarators of that definition", function()
+        local ffi = checked({ [[
+            typedef union { int number; double fraction; } ffi_first, ffi_second;
+            typedef union { int number; double fraction; } ffi_distinct;
+        ]] })
+        local first = types.resolve_c_typedef(ffi.type_members.ffi_first)
+        local second = types.resolve_c_typedef(ffi.type_members.ffi_second)
+        local distinct = types.resolve_c_typedef(ffi.type_members.ffi_distinct)
+        assert.equal("Type.CUnion", first._tag)
+        assert.equal(first, second)
+        assert.not_equal(first, distinct)
+    end)
+
+    it("keeps incompatible callback signatures strict at direct argument boundaries", function()
+        with_headers({ [[
+            typedef void (*ffi_mutable_callback)(int *);
+            typedef void (*ffi_const_callback)(const int *);
+            extern ffi_mutable_callback ffi_get_callback(void);
+            extern void ffi_take_callback(ffi_const_callback callback);
+        ]] }, function(headers)
+            local ok, err = h.run_checker(imports(headers) .. [[
+                local function use()
+                    ffi.ffi_take_callback(ffi.ffi_get_callback())
+                end
+            ]])
+            assert.falsy(ok)
+            assert.matches("types in argument 1", err, 1, true)
+            assert.matches("ffi_take_callback", err, 1, true)
         end)
     end)
 
-    it("propagates production baseline exceptions through the checker",
-    function()
-        with_header(
-            "extern int ffi_production_baseline_exception(int value);",
-            function(header)
-                local context = driver.new_resolver_context()
-                local service, service_error =
-                    driver.get_probe_service(context)
-                assert.truthy(service, service_error)
-                local original_module_context = service.module_context
+    it("keeps a guarded prototype-local tag out of the file-scope namespace", function()
+        local ffi = checked({ [[
+            #ifndef FFI_LOCAL_TAG
+            #define FFI_LOCAL_TAG
+            extern int ffi_function(struct ffi_local *value);
+            #endif
+        ]], '#include "header1.h"', '#include "./header1.h"' })
+        assert.is_nil(ffi.type_members.ffi_local)
+        assert.equal("Type.CStruct", ffi.members.ffi_function.type.params[1].pointee._tag)
+    end)
+
+    for _, case in ipairs({
+        { "old-style promotion conflicts", "extern int ffi_conflict();",
+          "extern int ffi_conflict(char value);" },
+        { "top-level object qualifier conflicts", "extern const int ffi_conflict;",
+          "extern int ffi_conflict;" },
+        { "resolved function parameter conflicts", "extern int ffi_conflict(long value);",
+          "extern int ffi_conflict(int value);" },
+        { "one typedef with different resolved types", "typedef int ffi_conflict;",
+          "typedef double ffi_conflict;" },
+        { "distinct named aggregate aliases", "struct ffi_first { int value; }; typedef struct ffi_first ffi_conflict;",
+          "struct ffi_second { int value; }; typedef struct ffi_second ffi_conflict;" },
+        { "distinct anonymous aggregate aliases", "typedef struct { int value; } ffi_conflict;",
+          "typedef struct { int value; } ffi_conflict;" },
+        { "unguarded prototype-local tag repeats", "extern int ffi_conflict(struct ffi_local *value);",
+          "extern int ffi_conflict(struct ffi_local *value);" },
+        { "unequal symbolic array bounds", "enum { FFI_BOUND = 3 }; extern int ffi_conflict[FFI_BOUND];",
+          "extern int ffi_conflict[4];" },
+        { "repeated named struct definitions", "struct ffi_conflict { int first; };",
+          "struct ffi_conflict { int second; };" },
+        { "repeated named union definitions", "union ffi_conflict { int first; };",
+          "union ffi_conflict { int second; };" },
+        { "repeated named enum definitions", "enum ffi_conflict { FFI_VALUE = 1 };",
+          "enum ffi_conflict { FFI_VALUE = 1 };" },
+    }) do
+        it("rejects " .. case[1] .. " in the combined context", function()
+            rejected({ case[2], case[3] })
+        end)
+    end
+
+    it("rejects a header guard explicitly invalidated before another include", function()
+        rejected({ [[
+            #ifndef FFI_GUARDED
+            #define FFI_GUARDED
+            typedef struct { int value; } ffi_conflict;
+            #endif
+        ]], [[
+            #undef FFI_GUARDED
+            #include "header1.h"
+        ]] })
+    end)
+
+    it("preserves repeated directives so a state-changing header can conflict", function()
+        with_headers({ [[
+            #ifndef FFI_REPEAT
+            #define FFI_REPEAT
+            extern int ffi_conflict;
+            #else
+            extern long ffi_conflict;
+            #endif
+        ]] }, function(headers)
+            local ok, err = h.run_checker(imports({ headers[1], headers[1] }))
+            assert.falsy(ok)
+            assert.matches("final ordered C header context is invalid", err, 1, true)
+        end)
+    end)
+
+    it("validates one module baseline without per-name reconciliation probes", function()
+        with_headers({ [[
+            extern int ffi_first(int value);
+            extern long ffi_second(long value);
+        ]], [[
+            extern int ffi_first(int value);
+            extern long ffi_second(long value);
+        ]] }, function(headers)
+            local calls, contexts = {}, 0
+            with_service({ runner = function(argv, metadata)
+                calls[#calls + 1] = metadata
+                return cdriver.capture_command(argv)
+            end }, function(service)
+                local module_context = service.module_context
+                service.module_context = function(self, options)
+                    contexts = contexts + 1
+                    local context = assert(module_context(self, options))
+                    context.validate_declaration_compatibility = function()
+                        error("obsolete declaration-pair validation was called")
+                    end
+                    return context
+                end
+                local errors, ast = check_with_service(imports(headers), service)
+                assert.equal(0, #errors, table.concat(errors, "\n"))
+                assert.equal(1, contexts)
+                assert.equal(1, #calls)
+                assert.equal("baseline", calls[1].stage)
+                assert.not_matches("titan_probe_d", calls[1].source, 1, true)
+                assert.truthy(ast._ffi_namespace._type.members.ffi_first)
+                assert.truthy(ast._ffi_namespace._type.members.ffi_second)
+                assert.is_nil(ast[1]._type)
+                assert.is_nil(ast[2]._type)
+            end)
+        end)
+    end)
+
+    it("propagates cancellation from the production baseline unchanged", function()
+        with_headers({ "extern int ffi_value;" }, function(headers)
+            with_service({}, function(service)
+                local module_context = service.module_context
                 local cancellation = {}
                 service.module_context = function(self, options)
-                    local module_probe, err =
-                        original_module_context(self, options)
-                    assert.truthy(module_probe, err)
-                    assert.equal(cprobe.ModuleContext,
-                        getmetatable(module_probe))
-                    module_probe.validate_baseline = function()
-                        error(cancellation, 0)
-                    end
-                    return module_probe
+                    local context = assert(module_context(self, options))
+                    assert.equal(cprobe.ModuleContext, getmetatable(context))
+                    context.validate_baseline = function() error(cancellation, 0) end
+                    return context
                 end
-
-                local code =
-                    'local ffi = foreign import "' .. header .. '"\n'
-                h.reset(true)
-                local ast = assert(h.parse(code))
-                local result = table.pack(pcall(
-                    checker.check,
-                    "test", ast, code, "test.titan", nil, {
-                        probe_service_provider =
-                            function() return service end,
-                    }))
-                local closed, close_error =
-                    driver.close_resolver_context(context)
-
-                assert.is_false(result[1],
-                    result[3] and table.concat(result[3], "\n"))
-                assert.is_true(result[2] == cancellation)
-                assert.truthy(closed, close_error)
+                local ok, err = pcall(check_with_service, imports(headers), service)
+                assert.is_false(ok)
+                assert.is_true(err == cancellation)
             end)
-    end)
-
-    it("propagates production compatibility exceptions through the checker",
-    function()
-        with_headers({
-            "extern int ffi_production_pair_exception(int value);",
-            "extern int ffi_production_pair_exception(int value);",
-        }, function(first_header, second_header)
-            local context = driver.new_resolver_context()
-            local service, service_error =
-                driver.get_probe_service(context)
-            assert.truthy(service, service_error)
-            local original_module_context = service.module_context
-            local cancellation = {}
-            service.module_context = function(self, options)
-                local module_probe, err =
-                    original_module_context(self, options)
-                assert.truthy(module_probe, err)
-                assert.equal(cprobe.ModuleContext,
-                    getmetatable(module_probe))
-                module_probe.validate_baseline = function()
-                    return { status = "success" }
-                end
-                module_probe.validate_declaration_compatibility =
-                    function()
-                        error(cancellation, 0)
-                    end
-                return module_probe
-            end
-
-            local code =
-                'local first = foreign import "' .. first_header .. '"\n' ..
-                'local second = foreign import "' .. second_header .. '"\n'
-            h.reset(true)
-            local ast = assert(h.parse(code))
-            local result = table.pack(pcall(
-                checker.check,
-                "test", ast, code, "test.titan", nil, {
-                    probe_service_provider =
-                        function() return service end,
-                }))
-            local closed, close_error =
-                driver.close_resolver_context(context)
-
-            assert.is_false(result[1],
-                result[3] and table.concat(result[3], "\n"))
-            assert.is_true(result[2] == cancellation)
-            assert.truthy(closed, close_error)
         end)
     end)
 
-    it("normalizes an injected baseline exception as infrastructure",
-    function()
-        with_header(
-            "extern int ffi_injected_baseline_exception(int value);",
-            function(header)
-                local context = driver.new_resolver_context()
-                local profile_service, service_error =
-                    driver.get_probe_service(context)
-                assert.truthy(profile_service, service_error)
-                local module_probe = {
-                    validate_baseline = function()
-                        error("injected baseline", 0)
-                    end,
-                }
-                local service = {
-                    profile = profile_service.profile,
+    it("reports an injected baseline exception as infrastructure failure", function()
+        with_headers({ "extern int ffi_value;" }, function(headers)
+            with_service({}, function(service)
+                local adapter = {
+                    profile = service.profile,
                     cdriver_process_options = function()
-                        return profile_service:cdriver_process_options()
+                        return service:cdriver_process_options()
                     end,
                     module_context = function()
-                        return module_probe
+                        return { validate_baseline = function()
+                            error("injected baseline", 0)
+                        end }
                     end,
                 }
-
-                local code =
-                    'local ffi = foreign import "' .. header .. '"\n'
-                h.reset(true)
-                local ast = assert(h.parse(code))
-                local result = table.pack(pcall(
-                    checker.check,
-                    "test", ast, code, "test.titan", nil, {
-                        probe_service_provider =
-                            function() return service end,
-                    }))
-                local closed, close_error =
-                    driver.close_resolver_context(context)
-
-                assert.is_true(result[1])
-                assert.matches(
-                    "ordered header baseline validation failed: " ..
-                        "injected baseline",
-                    table.concat(result[3], "\n"), 1, true)
-                assert.truthy(closed, close_error)
-            end)
-    end)
-
-    it("normalizes injected declaration probe failures", function()
-        with_headers({
-            "extern int ffi_injected_probe(int value);",
-            "extern int ffi_injected_probe(int value);",
-        }, function(first_header, second_header)
-            local context, profile_service =
-                new_context_configured_probe_service()
-            local profile = profile_service.profile
-
-            local scenarios = {
-                {
-                    expected = "cannot validate a declaration pair",
-                },
-                {
-                    probe = function()
-                        return { status = "success" }
-                    end,
-                },
-                {
-                    expected = "probe returned no result",
-                    probe = function() return nil end,
-                },
-                {
-                    expected = "validation failed: injected probe",
-                    probe = function()
-                        error("injected probe", 0)
-                    end,
-                },
-            }
-
-            local candidate = {
-                left_type = {},
-                right_type = {},
-                left_declaration = "left",
-                right_declaration = "right",
-            }
-            for _, scenario in ipairs(scenarios) do
-                local module_probe = {
-                    validate_declaration_compatibility = scenario.probe,
-                }
-                local result =
-                    checker_core.validate_foreign_declaration_compatibility(
-                        module_probe, candidate.left_type, candidate.right_type,
-                        candidate.left_declaration, candidate.right_declaration)
-                if scenario.expected then
-                    assert.equal("infrastructure_failure", result.status)
-                    assert.matches(
-                        scenario.expected, result.message, 1, true)
-                else
-                    assert.equal("success", result.status)
-                end
-            end
-
-            local code =
-                'local first = foreign import "' .. first_header .. '"\n' ..
-                'local second = foreign import "' .. second_header .. '"\n'
-            local service = {
-                profile = profile,
-                cdriver_process_options = function()
-                    return profile_service:cdriver_process_options()
-                end,
-                module_context = function()
-                    return {
-                        validate_baseline = function()
-                            return { status = "success" }
-                        end,
-                        validate_declaration_compatibility =
-                            function() return nil end,
-                    }
-                end,
-            }
-            h.reset(true)
-            local ast = assert(h.parse(code))
-            local _, errors = checker.check(
-                "test", ast, code, "test.titan", nil, {
-                    probe_service_provider = function() return service end,
-                })
-            assert.matches(
-                "probe returned no result",
-                table.concat(errors, "\n"), 1, true)
-            close_context_configured_probe_service(
-                context, profile_service)
-        end)
-    end)
-
-    it("reports baseline infrastructure failure without a conflict verdict",
-    function()
-        with_header([[
-            #ifndef TITAN_FFI_INFRA_COMMON
-            #define TITAN_FFI_INFRA_COMMON
-            typedef struct {
-                int value;
-            } ffi_infra_common;
-            #endif
-        ]], function(common_header)
-            local common_name =
-                assert(common_header:match("([^/]+)$"))
-            with_header(
-                '#include "' .. common_name .. '"\n',
-                function(first_header)
-                    with_header(
-                        '#include "' .. common_name .. '"\n',
-                        function(second_header)
-                            local calls = 0
-                            local context, service =
-                                new_context_configured_probe_service({
-                                    runner = function()
-                                        calls = calls + 1
-                                        return nil,
-                                            "test compiler could not be started"
-                                    end,
-                                })
-                            local code =
-                                'local first = foreign import "' ..
-                                    first_header .. '"\n' ..
-                                'local second = foreign import "' ..
-                                    second_header .. '"\n'
-                            h.reset(true)
-                            local ast = assert(h.parse(code))
-                            local _, errors = checker.check(
-                                "test", ast, code, "test.titan", nil, {
-                                    probe_service_provider =
-                                        function() return service end,
-                                })
-                            assert.equal(1, calls)
-                            local err = table.concat(errors, "\n")
-                            assert.matches(
-                                "cannot validate the final ordered "
-                                    .. "C header context",
-                                err, 1, true)
-                            assert.not_matches(
-                                "conflicting C declaration for "
-                                    .. "'ffi_infra_common'",
-                                err, 1, true)
-                            close_context_configured_probe_service(
-                                context, service)
-                        end)
-                end)
-        end)
-    end)
-
-    it("rejects exact isolated repeats changed by cumulative macro state",
-    function()
-        with_header([[
-            #ifndef TITAN_FFI_SELF_CHANGING_HEADER
-            #define TITAN_FFI_SELF_CHANGING_HEADER
-            extern int ffi_self_changing_object;
-            #else
-            extern long ffi_self_changing_object;
-            #endif
-        ]], function(header)
-            local ok, err = h.run_checker(
-                'local first = foreign import "' .. header .. '"\n' ..
-                'local second = foreign import "' .. header .. '"\n')
-            assert.falsy(ok)
-            assert.matches(
-                "final ordered C header context is invalid",
-                err, 1, true)
-            assert.not_matches(
-                "conflicting C declaration for "
-                    .. "'ffi_self_changing_object'",
-                err, 1, true)
-        end)
-    end)
-
-    it("does not collapse distinct macro-suppressed anonymous aliases",
-    function()
-        with_header([[
-            typedef struct { int value; } ffi_macro_first_alias;
-            extern ffi_macro_first_alias ffi_macro_shared_object;
-            #define TITAN_FFI_SUPPRESS_SECOND_OBJECT 1
-        ]], function(first_header)
-            with_header([[
-                typedef struct { int value; } ffi_macro_second_alias;
-                #ifndef TITAN_FFI_SUPPRESS_SECOND_OBJECT
-                extern ffi_macro_second_alias ffi_macro_shared_object;
-                #endif
-            ]], function(second_header)
-                local ok, err, ast = h.run_checker(
-                    'local first = foreign import "' ..
-                        first_header .. '"\n' ..
-                    'local second = foreign import "' ..
-                        second_header .. '"\n')
-                assert.falsy(ok)
-                assert.matches(
-                    "conflicting C declaration for "
-                        .. "'ffi_macro_shared_object'",
-                    err, 1, true)
-                assert.matches(
-                    "rejected the declaration compatibility candidate",
-                    err, 1, true)
-
-                local first = ast[1]._type.type_members
-                    .ffi_macro_first_alias
-                local second = ast[2]._type.type_members
-                    .ffi_macro_second_alias
-                assert.not_equal(first.target, second.target)
+                local errors = check_with_service(imports(headers), adapter)
+                assert.matches("ordered header baseline validation failed: injected baseline",
+                    table.concat(errors, "\n"), 1, true)
             end)
         end)
     end)
 
-    it("rejects repeated named tag definitions in the final context",
-    function()
-        with_header([[
-            struct ffi_repeated_tag {
-                int first;
-            };
-        ]], function(first_header)
-            with_header([[
-                struct ffi_repeated_tag {
-                    int second;
-                };
-            ]], function(second_header)
-                local ok, err = h.run_checker(
-                    'local first = foreign import "' ..
-                        first_header .. '"\n' ..
-                    'local second = foreign import "' ..
-                        second_header .. '"\n')
-                assert.falsy(ok)
-                assert.matches(
-                    "final ordered C header context is invalid",
-                    err, 1, true)
+    it("reports an unavailable baseline compiler without a declaration conflict", function()
+        with_headers({ "extern int ffi_value;" }, function(headers)
+            local calls = 0
+            with_service({ runner = function()
+                calls = calls + 1
+                return nil, "test compiler could not be started"
+            end }, function(service)
+                local errors = check_with_service(imports(headers), service)
+                local err = table.concat(errors, "\n")
+                assert.equal(1, calls)
+                assert.matches("cannot validate the final ordered C header context", err, 1, true)
+                assert.not_matches("conflicting C declaration", err, 1, true)
             end)
         end)
-    end)
-
-    it("rejects one unguarded anonymous typedef emitted twice", function()
-        with_header([[
-            typedef struct {
-                int value;
-            } ffi_unguarded_common;
-        ]], function(common_header)
-            local common_name =
-                assert(common_header:match("([^/]+)$"))
-            with_header(
-                '#include "' .. common_name .. '"\n'
-                .. 'extern ffi_unguarded_common ffi_unguarded_object;\n',
-                function(first_header)
-                    with_header(
-                        '#include "' .. common_name .. '"\n'
-                        .. 'extern ffi_unguarded_common '
-                        .. 'ffi_unguarded_object;\n',
-                        function(second_header)
-                            local ok, err = h.run_checker(
-                                'local first = foreign import "' ..
-                                    first_header .. '"\n' ..
-                                'local second = foreign import "' ..
-                                    second_header .. '"\n')
-                            assert.falsy(ok)
-                            assert.matches(
-                                "conflicting C declaration for "
-                                    .. "'ffi_unguarded_common'",
-                                err, 1, true)
-            end)
-        end)
-    end)
-    end)
-
-    it("rejects repeated anonymous declarations within one import", function()
-        for _, case in ipairs({
-            {
-                name = "ffi_repeated_anonymous_typedef",
-                source = [[
-                    typedef struct { int value; }
-                        ffi_repeated_anonymous_typedef;
-                    typedef struct { int value; }
-                        ffi_repeated_anonymous_typedef;
-                ]],
-            },
-            {
-                name = "ffi_repeated_anonymous_object",
-                source = [[
-                    extern struct { int value; }
-                        ffi_repeated_anonymous_object;
-                    extern struct { int value; }
-                        ffi_repeated_anonymous_object;
-                ]],
-            },
-        }) do
-            with_header(case.source, function(header)
-                local ok, err = h.run_checker(
-                    'local c = foreign import "' .. header .. '"\n')
-                assert.falsy(ok)
-                assert.matches(
-                    "final ordered C header context is invalid",
-                    err, 1, true)
-            end)
-        end
-    end)
-
-    it("rejects repeated same-kind tag definitions within one import",
-    function()
-        for _, source in ipairs({
-            [[
-                struct ffi_repeated_tag_one_header { int value; };
-                struct ffi_repeated_tag_one_header { int value; };
-            ]],
-            [[
-                union ffi_repeated_union_one_header { int value; };
-                union ffi_repeated_union_one_header { int value; };
-            ]],
-            [[
-                enum ffi_repeated_enum_one_header { FFI_REPEAT_VALUE = 1 };
-                enum ffi_repeated_enum_one_header { FFI_REPEAT_VALUE = 1 };
-            ]],
-        }) do
-            with_header(source, function(header)
-                local ok, err = h.run_checker(
-                    'local c = foreign import "' .. header .. '"\n')
-                assert.falsy(ok)
-                assert.matches(
-                    "final ordered C header context is invalid",
-                    err, 1, true)
-            end)
-        end
     end)
 end)

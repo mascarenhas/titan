@@ -1,10 +1,10 @@
 -- Module-local LPegLabel state and raw-Lua bootstrap used by peg.titan.
 
 local function _initialize_native()
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  if private_lpeg.titan_lpeglabel_open(L) ~= 1 or
-      lua.lua_type(L, -1) ~= lua.LUA_TTABLE then
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.titan_lpeglabel_open(L) ~= 1 or
+      ffi.lua_type(L, -1) ~= ffi.LUA_TTABLE then
     raise "embedded LPegLabel opener did not return its module table"
   end
   local raw_engine: value = ffi.lua_totvalue(L, -1)
@@ -32,8 +32,8 @@ local function _initialize_native()
   _setmaxstack = _engine["setmaxstack"] as NativeSetMaxStack
   _version_text = _engine["version"] as string
 
-  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, PATTERN_REGISTRY_KEY)
-  if lua.lua_type(L, -1) ~= lua.LUA_TTABLE then
+  ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, PATTERN_REGISTRY_KEY)
+  if ffi.lua_type(L, -1) ~= ffi.LUA_TTABLE then
     raise "embedded LPegLabel did not install its private pattern metatable"
   end
   local raw_metatable: value = ffi.lua_totvalue(L, -1)

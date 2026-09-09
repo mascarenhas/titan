@@ -11,4 +11,4 @@ local task_support = import "support.async.titan"
 
 -- Package-search tests inspect and temporarily replace existing Lua package
 -- fields through the narrow C API boundary.
-local cstat = foreign import "sys/stat.h"
+foreign import "sys/stat.h"

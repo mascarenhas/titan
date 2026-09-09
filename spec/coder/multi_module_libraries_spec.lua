@@ -1864,10 +1864,10 @@ end
 ]])
         write_file(source_root .. "/bundle/unused.titan",
             string.format([[
-local private = foreign import %q
+foreign import %q
 
 function get(): integer
-    return private.titan_test_never_available() as integer
+    return ffi.titan_test_never_available() as integer
 end
 ]], missing_header))
         local definition = compile_c_object(
@@ -2094,22 +2094,22 @@ function get(): integer return dep.get() + 1 end
 typedef int ffi_int;
 ]])
         write_file(source_root .. "/headers/provider.titan", [[
-local c = foreign import "types.h"
+foreign import "types.h"
 
-foreign function increment(input: c.ffi_int): c.ffi_int
+foreign function increment(input: ffi.ffi_int): ffi.ffi_int
     return input + 1
 end
 ]])
         write_file(source_root .. "/headers/consumer.titan", [[
-local c = foreign import "types.h"
+foreign import "types.h"
 local provider = import "headers.provider.titan"
 
-foreign function twice(input: c.ffi_int): c.ffi_int
+foreign function twice(input: ffi.ffi_int): ffi.ffi_int
     return provider.increment(provider.increment(input))
 end
 
 function run(): integer
-    return twice(4 as c.ffi_int) as integer
+    return twice(4 as ffi.ffi_int) as integer
 end
 ]])
 
@@ -2148,40 +2148,40 @@ typedef int ffi_int;
 typedef int consumer_int;
 ]])
         write_file(source_root .. "/macro/provider.titan", [[
-local c = foreign import "provider.h"
-foreign function identity(input: c.ffi_int): c.ffi_int return input end
+foreign import "provider.h"
+foreign function identity(input: ffi.ffi_int): ffi.ffi_int return input end
 ]])
         write_file(source_root .. "/macro/consumer.titan", [[
-local c = foreign import "consumer.h"
+foreign import "consumer.h"
 local provider = import "macro.provider.titan"
-function collision(): integer return c.TITAN_SOURCE_COLLISION end
+function collision(): integer return ffi.TITAN_SOURCE_COLLISION end
 ]])
 
         local ok, output = compile(workspace, source_root, "macro.consumer")
         assert.truthy(ok, output)
-        local generated = read_file(source_root .. "/macro/consumer.c")
-        local direct = assert(generated:find(
-            '/macro/consumer.h"', 1, true))
-        local dependency = assert(generated:find(
-            '/macro/provider.titan.h"', direct, true))
-        assert.is_true(direct < dependency)
+        local environment = read_file(source_root .. "/macro/consumer.ffi.h")
+        local dependency = assert(environment:find(
+            '/macro/provider.ffi.h"', 1, true))
+        local direct = assert(environment:find(
+            '/macro/consumer.h"', dependency, true))
+        assert.is_true(dependency < direct)
         local ran, result = run_lua(workspace, [[
 local consumer = require "macro.consumer"
 io.write(consumer.collision())
 ]])
         assert.truthy(ran, result)
-        assert.equal("2", result)
+        assert.equal("1", result)
     end)
 
     it("removes stale owned foreign headers and preserves reserved user files",
        function()
         write_file(source_root .. "/stale/types.h", "typedef int ffi_int;\n")
         write_file(source_root .. "/stale/item.titan", [[
-local c = foreign import "types.h"
-foreign function identity(input: c.ffi_int): c.ffi_int
+foreign import "types.h"
+foreign function identity(input: ffi.ffi_int): ffi.ffi_int
     return input
 end
-function answer(): integer return identity(7 as c.ffi_int) as integer end
+function answer(): integer return identity(7 as ffi.ffi_int) as integer end
 ]])
         local ok, output = compile(workspace, source_root, "stale.item")
         assert.truthy(ok, output)
@@ -2196,8 +2196,8 @@ function answer(): integer return identity(7 as c.ffi_int) as integer end
 
         write_file(source_root .. "/reserved/types.h", "typedef int ffi_int;\n")
         write_file(source_root .. "/reserved/item.titan", [[
-local c = foreign import "types.h"
-foreign function identity(input: c.ffi_int): c.ffi_int return input end
+foreign import "types.h"
+foreign function identity(input: ffi.ffi_int): ffi.ffi_int return input end
 ]])
         local reserved = source_root .. "/reserved/item.titan.h"
         write_file(reserved, "/* user-owned */\n")

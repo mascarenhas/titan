@@ -149,28 +149,28 @@ end
 -- The callback closure retains the Task and result through the timer's close
 -- callback, which is the completion point for every one-shot timer.
 local record TimerOwner
-  local handle: owned *libuv.uv_timer_t
+  local handle: owned *ffi.uv_timer_t
   local callback: (TimerOwner) -> ()
   local root_index: integer
 end
 
-foreign function uv_timer_cb(timer: *libuv.uv_timer_t)
-  local handle = timer as *libuv.uv_handle_t
-  local owner = libuv.uv_handle_get_data(handle) as *ffi.Udata
+foreign function uv_timer_cb(timer: *ffi.uv_timer_t)
+  local handle = timer as *ffi.uv_handle_t
+  local owner = ffi.uv_handle_get_data(handle) as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
-  local loop = libuv.uv_handle_get_loop(handle)
-  local L = libuv.uv_loop_get_data(loop) as *lua.lua_State
+  local loop = ffi.uv_handle_get_loop(handle)
+  local L = ffi.uv_loop_get_data(loop) as *ffi.lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
       callback.upvalue[2]) as UvNoargCallbackEntry
-  local top = lua.lua_gettop(L)
+  local top = ffi.lua_gettop(L)
   entry(L, module, callback, owner)
-  lua.lua_settop(L, top)
+  ffi.lua_settop(L, top)
 end
 
 -- A repeating timer retains only its latest tick and at most one waiter.
 local record uv_timer_t
-  local handle: owned *libuv.uv_timer_t
+  local handle: owned *ffi.uv_timer_t
   local callback: (uv_timer_t) -> ()
   local runtime: Runtime
   local waiting: Task?
@@ -517,7 +517,7 @@ local function ticker_callback(ticker: uv_timer_t)
 end
 
 local function activate_timer(runtime: Runtime,
-                              native: owned *libuv.uv_timer_t,
+                              native: owned *ffi.uv_timer_t,
                               owner: value,
                               owner_pointer: *void,
                               milliseconds: integer,
@@ -525,21 +525,21 @@ local function activate_timer(runtime: Runtime,
   -- Root the native storage before init links the handle into the loop. If
   -- reserving the root fails, libuv has not seen the handle yet.
   local root_index = root_handle(runtime, owner)
-  local status = libuv.uv_timer_init(runtime.loop, native)
+  local status = ffi.uv_timer_init(runtime.loop, native)
   if status < 0 then
     unroot_handle(runtime, root_index)
     raise make_error(status, "timer.init")
   end
-  local timer_handle: *libuv.uv_timer_t = native
-  libuv.uv_handle_set_data(
-      timer_handle as *libuv.uv_handle_t,
+  local timer_handle: *ffi.uv_timer_t = native
+  ffi.uv_handle_set_data(
+      timer_handle as *ffi.uv_handle_t,
       owner_pointer)
-  status = libuv.uv_timer_start(
+  status = ffi.uv_timer_start(
       native, uv_timer_cb,
-      milliseconds as libuv.uint64_t,
-      repeat_time as libuv.uint64_t)
+      milliseconds as ffi.uint64_t,
+      repeat_time as ffi.uint64_t)
   if status < 0 then
-    close_handle(runtime, timer_handle as *libuv.uv_handle_t,
+    close_handle(runtime, timer_handle as *ffi.uv_handle_t,
                  owner, root_index, nil, nil)
     raise make_error(status, "timer.start")
   end
@@ -553,7 +553,7 @@ local function start_timer(task: Task, milliseconds: integer,
                            failed: boolean,
                            payload: value): TimerOwner
   local runtime = task.runtime
-  local native: owned *libuv.uv_timer_t = libuv.uv_timer_t.new()
+  local native: owned *ffi.uv_timer_t = ffi.uv_timer_t.new()
   local completion = function ()
     if terminal(task.state) then
       task.resume_token = nil
@@ -567,10 +567,10 @@ local function start_timer(task: Task, milliseconds: integer,
     end
   end
   local callback = function (owner: TimerOwner)
-    local timer_handle: *libuv.uv_timer_t = owner.handle
+    local timer_handle: *ffi.uv_timer_t = owner.handle
     do
       task.cancel_action = nil
-      begin_close(runtime, timer_handle as *libuv.uv_handle_t,
+      begin_close(runtime, timer_handle as *ffi.uv_handle_t,
                   owner, owner.root_index, completion)
       owner.root_index = 0
     catch
@@ -609,7 +609,7 @@ end
 local function start_ticker(task: Task,
                             milliseconds: integer): uv_timer_t
   local runtime = task.runtime
-  local native: owned *libuv.uv_timer_t = libuv.uv_timer_t.new()
+  local native: owned *ffi.uv_timer_t = ffi.uv_timer_t.new()
   local ticker = uv_timer_t.new(native, ticker_callback, runtime,
                                 nil, false, 0)
   ticker.root_index = activate_timer(
@@ -648,16 +648,16 @@ end
 
 local function SleepCall:dispatch(task: Task): Immediate?
   if self.milliseconds < 0 then
-    return immediate_error(libuv.UV_EINVAL, "timer.sleep")
+    return immediate_error(ffi.UV_EINVAL, "timer.sleep")
   end
   -- Build the cancellation closure before libuv accepts the timer. Once
   -- uv_timer_start succeeds, dispatch performs only non-allocating installs.
   local timer: TimerOwner? = nil
   local cancel_action: CancelAction = function ()
     local owner = timer as TimerOwner
-    local timer_handle: *libuv.uv_timer_t = owner.handle
+    local timer_handle: *ffi.uv_timer_t = owner.handle
     close_handle(task.runtime,
-                 timer_handle as *libuv.uv_handle_t,
+                 timer_handle as *ffi.uv_handle_t,
                  owner, owner.root_index,
                  task, nil)
   end
@@ -669,9 +669,9 @@ end
 local function ticker_open_for(ticker: uv_timer_t,
                                task: Task): boolean
   if ticker.runtime ~= task.runtime then return false end
-  local timer_handle: *libuv.uv_timer_t = ticker.handle
-  return libuv.uv_is_closing(
-      timer_handle as *libuv.uv_handle_t) == 0
+  local timer_handle: *ffi.uv_timer_t = ticker.handle
+  return ffi.uv_is_closing(
+      timer_handle as *ffi.uv_handle_t) == 0
 end
 
 local function TickerTickCall:dispatch(task: Task): Immediate?
@@ -698,14 +698,14 @@ end
 local function TickerCloseCall:dispatch(task: Task): Immediate?
   local ticker = self.ticker
   if not ticker_open_for(ticker, task) then return immediate_ok(nil) end
-  local timer_handle: *libuv.uv_timer_t = ticker.handle
+  local timer_handle: *ffi.uv_timer_t = ticker.handle
   local waiter? = ticker.waiting
   if waiter then
     wake_task_next_turn(waiter as Task, false, false)
     ticker.waiting = nil
   end
   close_handle(ticker.runtime,
-               timer_handle as *libuv.uv_handle_t,
+               timer_handle as *ffi.uv_handle_t,
                ticker, ticker.root_index, task, nil)
   ticker.root_index = 0
   return nil
@@ -714,7 +714,7 @@ end
 local function CleanupStepCall:dispatch(task: Task): Immediate?
   local pointer = collect_handle(task.runtime)
   if pointer == nil then return immediate_ok(false) end
-  close_handle(task.runtime, pointer as *libuv.uv_handle_t,
+  close_handle(task.runtime, pointer as *ffi.uv_handle_t,
                nil, 0, task, true)
   return nil
 end

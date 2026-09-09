@@ -33,19 +33,19 @@ describe("constructor-selected C allocation code generation", function()
             typedef ffi_pair ffi_pair_row[2];
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function exercise(): integer
-                    local pair = c.ffi_pair.new()
+                    local pair = ffi.ffi_pair.new()
                     pair.left = 10
                     pair.right = 2
 
-                    local pairs = c.ffi_pair.new_array(2)
+                    local pairs = ffi.ffi_pair.new_array(2)
                     pairs[0].left = pair.left
                     pairs[1].right = 7
 
-                    local copy: owned *c.ffi_pair = pair
-                    local copied_pairs: owned c.ffi_pair[] = pairs
+                    local copy: owned *ffi.ffi_pair = pair
+                    local copied_pairs: owned ffi.ffi_pair[] = pairs
                     pair.left = 99
                     pairs[0].left = 88
 
@@ -55,8 +55,8 @@ describe("constructor-selected C allocation code generation", function()
                 end
 
                 function nested_arrays(): integer
-                    local rows: c.ffi_pair_row[2] =
-                        c.ffi_pair_row.new_array(2)
+                    local rows: ffi.ffi_pair_row[2] =
+                        ffi.ffi_pair_row.new_array(2)
                     rows[0][1].left = 13
                     rows[1][0].right = 17
                     return rows[0][1].left as integer
@@ -78,15 +78,15 @@ describe("constructor-selected C allocation code generation", function()
             } ffi_packet;
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function automatic(): integer
-                    local packet = c.ffi_packet.new(3)
+                    local packet = ffi.ffi_packet.new(3)
                     packet.tag = 4
                     packet.items[0] = 5
                     packet.items[1] = 6
                     packet.items[2] = 7
-                    local copy: owned *c.ffi_packet = packet
+                    local copy: owned *ffi.ffi_packet = packet
                     packet.items[1] = 90
                     return packet.tag as integer + #packet.items
                         + copy.items[0] as integer
@@ -96,8 +96,8 @@ describe("constructor-selected C allocation code generation", function()
                 end
 
                 function dynamic_owned(count: integer): integer
-                    local packet: owned *c.ffi_packet =
-                        c.ffi_packet.new(count as c.ffi_int)
+                    local packet: owned *ffi.ffi_packet =
+                        ffi.ffi_packet.new(count as ffi.ffi_int)
                     packet.items[count - 1] = 11
                     return #packet.items
                         + packet.items[count - 1] as integer
@@ -116,16 +116,16 @@ describe("constructor-selected C allocation code generation", function()
             typedef struct ffi_packet { int tag; int items[]; } ffi_packet;
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function fail()
                     raise "expected"
                 end
 
                 function exercise(): integer
-                    local pair = c.ffi_pair.new()
-                    local pairs = c.ffi_pair.new_array(2)
-                    local packet = c.ffi_packet.new(2)
+                    local pair = ffi.ffi_pair.new()
+                    local pairs = ffi.ffi_pair.new_array(2)
+                    local packet = ffi.ffi_packet.new(2)
                     pair.value = 3
                     pairs[1].value = 5
                     packet.items[1] = 7

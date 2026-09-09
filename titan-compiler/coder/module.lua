@@ -1118,7 +1118,11 @@ function allocate_upvalues(tlcontext, ast)
     end
 end
 
-function coder.generate_foreign_header(modname, ast, tlcontext)
+function coder.generate_ffi_header(modname, ast, source_header)
+    return require("titan-compiler.ffiheaders").render(modname, ast, source_header)
+end
+
+function coder.generate_foreign_header(modname, ast, tlcontext, header_paths)
     local has_foreign = false
     for _, node in ipairs(ast) do
         if not node._ignore and node._tag == "Ast.TopLevelForeignFunc" then
@@ -1127,88 +1131,28 @@ function coder.generate_foreign_header(modname, ast, tlcontext)
         end
     end
     if not has_foreign then
-        ast._foreign_header_include_keys = nil
         return nil
     end
 
     local guard = "TITAN_GENERATED_FOREIGN_"
         .. coder._source_private_prefix(modname, "header"):upper() .. "_H"
-    local direct, supplemental, source_headers = {}, {}, {}
-    local seen = {}
-    local covered_include_keys = {}
-    local function add_include(list, include)
-        local line = coder._foreign_include_line(include)
-        if include.rendered then
-            covered_include_keys[include.rendered] = true
-        end
-        if not seen[line] then
-            seen[line] = true
-            list[#list + 1] = line
-        end
-    end
+    header_paths = header_paths or {}
+    local ffi_header = header_paths.ffi_header or ast._ffi_header_output
+        or (ast._ffi_header and ast._ffi_header.filename)
+        or (modname:gsub("[.]", "/") .. ".ffi.h")
+    local includes = { "#include " .. c_string_literal(ffi_header) }
+    local seen = { [ffi_header] = true }
     for _, node in ipairs(ast) do
-        if not node._ignore and node._tag == "Ast.TopLevelForeignImport" then
-            add_include(direct, assert(node._include))
-        elseif not node._ignore and node._tag == "Ast.TopLevelImport"
+        if not node._ignore and node._tag == "Ast.TopLevelImport"
             and node._source_import and node._foreign_header then
-            local line = "#include " .. c_string_literal(node._foreign_header)
-            if not seen[line] then
-                seen[line] = true
-                source_headers[#source_headers + 1] = line
+            local header = header_paths.source_header
+                and header_paths.source_header(node) or node._foreign_header
+            if not seen[header] then
+                seen[header] = true
+                includes[#includes + 1] = "#include " .. c_string_literal(header)
             end
         end
     end
-
-    local origins = {}
-    local visited = {}
-    local function collect_type(typ)
-        if type(typ) ~= "table" or not typ._tag
-            or not typ._tag:match("^Type%.") then
-            return
-        end
-        for _, include in ipairs(types.c_ffi_includes(typ)) do
-            if include and include.rendered then
-                origins[include.rendered] = include
-            end
-        end
-    end
-    local function visit(value)
-        if type(value) ~= "table" or visited[value] then return end
-        visited[value] = true
-        collect_type(value._type)
-        if value._decl then
-            collect_type(value._decl.type)
-            collect_type(value._decl.ctype)
-        end
-        for key, child in pairs(value) do
-            if type(key) ~= "string" or key:sub(1, 1) ~= "_" then
-                if type(child) == "table" then
-                    if child._tag then
-                        visit(child)
-                    else
-                        for _, item in ipairs(child) do visit(item) end
-                    end
-                end
-            end
-        end
-    end
-    for _, node in ipairs(ast) do
-        if not node._ignore and node._tag == "Ast.TopLevelForeignFunc" then
-            visit(node)
-        end
-    end
-    local origin_keys = {}
-    for key in pairs(origins) do origin_keys[#origin_keys + 1] = key end
-    table.sort(origin_keys, util.bytewise_less)
-    for _, key in ipairs(origin_keys) do
-        add_include(supplemental, origins[key])
-    end
-
-    local includes = {}
-    for _, list in ipairs({ direct, supplemental, source_headers }) do
-        for _, line in ipairs(list) do includes[#includes + 1] = line end
-    end
-    ast._foreign_header_include_keys = covered_include_keys
 
     local declarations = {}
     local inline_bodies = {}

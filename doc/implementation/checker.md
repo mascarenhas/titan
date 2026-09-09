@@ -68,23 +68,16 @@ aliases and C declarations:
   re-declaring a name in the same inner block silently overwrites it, except
   for read-only compiler-synthesized locals such as `L`, which `declare`
   rejects before adding the new symbol.
-* `foreign_types` and `foreign_names` are separate namespaces populated by
-  `foreign import`, so C typedef and ordinary C names never collide with Titan
-  symbols. Their `foreign_type_history` and `foreign_name_history` lists retain
-  `{order, decl}` entries for module-variable frontier lookup. Completed
-  canonical C struct/union owners also carry `_definition_order`;
-  `foreign_definition_visible` prevents an in-place completion performed by a
-  later header from exposing fields or allocation eligibility at an earlier
-  frontier. A third checker-owned registry holds module-wide file-scope C tags
-  by base name/kind/provenance. It reuses same-kind owners across imports,
-  rejects cross-import kind conflicts, and stays distinct from both ordinary C
-  names and prototype-local tag scopes.
+* The reserved `ffi` symbol refers to a single `Type.CModule`, with separate
+  ordinary-value and type-member maps built from the complete module C
+  translation unit. C typedef and ordinary C names stay separate from Titan
+  symbols. Canonical file-scope aggregates and prototype-local tags preserve
+  the C scopes established by that combined parse.
 * During a `TopLevelVar`, `initializer_order` makes `find_symbol` hide the
-  current and later module variables and later Titan/foreign imports. The C
-  lookup helpers scan their histories backward for the last declaration whose
-  recorded order is at or before that frontier. Outside this narrow mode,
-  lookups return the final module-wide declarations collected by the staged
-  passes.
+  current and later module variables and later ordinary Titan import aliases.
+  The complete `ffi` environment remains visible, including macros and
+  aggregate completion from later written foreign directives. Outside this
+  narrow mode, staged declaration passes expose all ordinary module names.
 * `st.modname` is stored at construction and used by `typefromnode` to fully
   qualify nominal type names: the written type `Point` inside module `geo`
   becomes `types.Nominal("geo.Point")`.
@@ -977,8 +970,9 @@ The staged declaration pass invokes every import in AST order before resolving
 records and callable signatures. Its alias is therefore available to every
 non-module-variable declaration even when the import node occurs later in the
 AST. This early loading does not erase the language's sequential frontier:
-while checking a module variable, `symtab.find_symbol` masks later
-`TopLevelImport` and `TopLevelForeignImport` nodes by `_toplevel_order`.
+while checking a module variable, `symtab.find_symbol` masks later ordinary
+`TopLevelImport` aliases by `_toplevel_order`. Unbound foreign directives
+populate the completed `ffi` environment before that pass.
 
 On success, the import node's `_type` is the returned `Type.Module`, and
 errors found while checking the dependency propagate into this module's
@@ -1050,41 +1044,34 @@ Two real loaders exist in `driver.lua`:
   serializes and re-loads every module type, so the round-trip is exercised
   by every import test in the suite.
 
-`foreign import` is checked separately (`Ast.TopLevelForeignImport`): it runs
-the C parser pipeline and converts each declaration with
-`foreigntypes.convert`. C values become members of a `Type.CModule`; a direct
-function member retains `Type.CFunction`, while a function-pointer value retains
-`Type.CPointer(Type.CFunction)` and neither is projected to `Type.Function`. C
-type declarations become `type_members` plus entries in the symbol table's
-`foreign_types` namespace, which is what lets local annotations such as
-`c.size_t` resolve (see [FFI internals](ffi-internals.md)). Before conversion,
-the `TypeList` supplies complete syntactic typedef-name and file-scope tag
-metadata. A named tag-only struct/union with no same-name real typedef is
-published directly in `type_members` through its canonical `struct@T` /
-`union@T` owner; it is not wrapped in a fake `CTypedef`. Ordered conversion
-binds a prototype tag to an already-visible file tag when appropriate and
-otherwise keeps it prototype-local.
-Every converted C type and accepted ordinary C name is also recorded with the
-foreign-import node's `_toplevel_order`. Although the final foreign namespaces
-are available to later declaration stages, a module variable asks those
-histories for the last declaration at its `initializer_order`, so a later
-header cannot leak C names or types backward through early import collection.
-Because C aggregate owners are canonical objects completed in place,
-`foreigntypes` additionally stamps a completed struct/union with
-`_definition_order`; field lookup and allocation call
-`foreign_definition_visible` so that later completion is treated as absent or
-incomplete at an earlier module-variable frontier.
-The same frontier-aware complete-object predicate protects by-value
+An unbound `Ast.TopLevelForeignImport` contributes a header directive to the
+module C environment. After loading explicit source dependencies, the checker
+prepares `A.ffi.h` and invokes `cdriver.process_module` once on that actual
+header. `foreigntypes.convert` builds one `Type.CModule` for the reserved `ffi`
+namespace. Direct functions retain `Type.CFunction`; function-pointer values
+retain `Type.CPointer(Type.CFunction)`, and neither is projected to
+`Type.Function`. C type declarations become `type_members`, allowing local
+annotations such as `ffi.size_t` (see [FFI internals](ffi-internals.md)).
+
+Before conversion, the complete TypeList supplies syntactic typedef-name and
+file-scope tag metadata. A named tag-only struct/union with no same-name real
+typedef is published directly through its canonical `struct@T` / `union@T`
+owner, without a fake `CTypedef`. Actual C declaration order determines whether
+a prototype refers to a file-scope tag or owns a prototype-local tag. Include
+guards and macros determine which declarations occur; the checker does not
+merge independent header snapshots.
+
+All final C names and complete aggregates are available even to earlier
+module-variable initializers. The complete-object predicate protects by-value
 parameters/results/locals/casts, fixed-array elements, allocation,
 `sizeof`/`alignof`, and field lookup. Expression lookup on `Type.CModule` is
-value-first; when an ordinary member collides with a type spelling, type
-pseudo-members are rejected with a collision-specific diagnostic instead of
-stealing the real function/variable.
+value-first: a value/type spelling collision rejects type pseudo-members with
+a specific diagnostic while preserving the real function or variable.
 
 The checker also receives the resolver's `cprobe.Service`. The complete raw C
 probe source keys acceptance or rejection in memory and in the configured
-prefix cache. After all foreign imports
-establish a module's ordered header context,
+prefix cache. After the combined `.ffi.h`
+establishes the module C environment,
 contextual object-pointer conversions and C operators ask that service to
 compile their exact `cdeclarator` spelling. The checker records complete
 conversion/operator traits and coercion plans on the AST; the coder consumes

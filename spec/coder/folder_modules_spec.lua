@@ -171,7 +171,7 @@ end
         write_file(module_folder .. "/foldercase.titan", main_source)
         write_file(module_folder .. "/a.titan", [[
 local support = import "support"
-local probe = foreign import "probe.h"
+foreign import "probe.h"
 
 local type Delta = integer
 
@@ -191,7 +191,7 @@ function Box:bump(delta: Delta): integer
 end
 
 local function initialize_total(): integer
-    return support.offset() + (probe.FOLDER_MODULE_PROBE as integer)
+    return support.offset() + (ffi.FOLDER_MODULE_PROBE as integer)
 end
 
 local function contributor_bump(delta: Delta): integer
@@ -286,6 +286,8 @@ end
         assert.falsy(generated:find("foldercase_trace_", 1, true))
         assert.falsy(generated:find("must_not_exist", 1, true))
         assert.truthy(generated:find(
+            '#include "' .. module_folder .. '/foldercase.ffi.h"', 1, true))
+        assert.truthy(read_file(module_folder .. "/foldercase.ffi.h"):find(
             '#include "' .. module_folder .. '/probe.h"', 1, true))
     end)
 

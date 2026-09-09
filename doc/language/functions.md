@@ -521,7 +521,7 @@ end
 ```
 
 The one visibility frontier is a top-level *module-variable declaration*: it
-sees only imports and other module variables written earlier, while seeing all
+sees only ordinary Titan imports and other module variables written earlier, while seeing all
 record/union owners, Interfaces, aliases, and callable declarations wherever
 they appear. Its
 initializer must also be a compile-time constant and therefore cannot call an

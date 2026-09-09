@@ -54,7 +54,6 @@ function coder._numeric_trait(source_type, target_type, typ)
 end
 
 function coder._numeric_c_name(typ, trait)
-    coder._record_c_type_use(typ)
     local resolved = coder._resolve_cast_type(typ)
     if resolved._tag == "Type.Integer" then return "lua_Integer" end
     if resolved._tag == "Type.Float" then return "lua_Number" end

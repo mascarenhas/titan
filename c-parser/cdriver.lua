@@ -9,9 +9,10 @@ local cdefines = require("c-parser.cdefines")
 local compiler_io = require("titan-compiler.io")
 local sha256 = require("titan-compiler.sha256")
 local cacheadapter = require("titan-compiler.cacheadapter")
+local version = require "titan-compiler.version"
 
-cdriver.HEADER_CACHE_VERSION = 1
-local HEADER_CACHE_KIND = "c-header-v1"
+cdriver.HEADER_CACHE_VERSION = 2
+local HEADER_CACHE_KIND = "c-header-v2"
 
 local SEP = package.config:sub(1, 1)
 local default_io = compiler_io.new_sync()
@@ -66,7 +67,7 @@ local compiler_include_dirs = setmetatable({}, { __mode = "k" })
 -- resident-memory bound, so production retention lasts for the provider's
 -- lifetime. Focused tests can still install finite limits below.
 local PROCESS_CACHE_LIMIT = math.maxinteger
--- Approximate the complete graphs actually cloned into retained entries,
+-- Approximate the complete graphs retained in entries,
 -- including unique string bytes and the preprocessor's token-provenance side
 -- tables. These constants track ordinary 64-bit Lua object and slot costs
 -- closely enough to report retained size and exercise finite test limits
@@ -83,9 +84,8 @@ local process_analysis_mt = {}
 
 -- An analysis is an explicit narrow C reuse authority. Long-lived compiler
 -- clients create one for a coherent analysis with final publication-time
--- header validation; it owns completed header graphs and semantic C-probe
--- verdict tables. Ordinary cdriver callers omit it and retain clone-per-call
--- isolation.
+-- header validation; it records validated header entries and semantic C-probe
+-- verdict tables. Parsed C graphs are read-only and shared by all callers.
 function cdriver.new_process_analysis()
     return setmetatable({
         providers = setmetatable({}, { __mode = "k" }),
@@ -185,7 +185,7 @@ local function oldest_cache_key(cache)
 end
 
 -- Production limits are practically unbounded. Finite test configurations
--- evict before cloning a miss, preserving the embedding policy mechanism and
+-- evict before retaining a miss, preserving the embedding policy mechanism and
 -- exercising count, retained-weight, and oversized-entry behavior.
 local function make_cache_room(cache, key, weight)
     if weight > cache.weight_limit then
@@ -632,7 +632,6 @@ local function copy_input_tail(inputs, prefix_length)
     return copy
 end
 
-local clone_graph = cpp.clone_graph
 local graph_weight = cpp.graph_weight
 
 -- The fourth process_file result exists for target-profile acquisition. Its
@@ -672,38 +671,13 @@ local function input_tail_matches_prefix(inputs, identities)
     return true
 end
 
-local function valid_cached_inputs(inputs, kind)
-    if type(inputs) ~= "table" then return false end
-    for index, input in ipairs(inputs) do
-        if type(input) ~= "table" or input.kind ~= kind
-           or type(input.path) ~= "string" or input.path:sub(1, 1) ~= "/"
-           or type(input.identity) ~= "string" or input.identity == "" then
-            return false
-        end
-    end
-    for key in next, inputs do
-        if math.type(key) ~= "integer" or key < 1 or key > #inputs then
-            return false
-        end
-    end
-    return true
-end
-
 local function decode_header_entry(payload, key, adapter)
     local entry = cpp.decode_graph(payload, { sha256_binary = adapter.sha256_binary, yield = adapter.yield })
     if type(entry) ~= "table" or entry.version ~= cdriver.HEADER_CACHE_VERSION
-       or entry.key ~= key or type(entry.ffi_types) ~= "table"
-       or type(entry.ffi_types.macro_definitions) ~= "table"
-       or type(entry.ffi_types.macro_changes) ~= "table"
-       or not valid_cached_inputs(entry.dependencies, "file")
-       or not valid_cached_inputs(entry.search_inputs, "search") then
+       or entry.abi ~= version.TITAN_ABI_VERSION or entry.key ~= key then
         return nil
     end
-    for _, item in ipairs(entry.ffi_types) do
-        if type(item) ~= "table" or type(item.name) ~= "string"
-           or type(item.type) ~= "table" then return nil end
-    end
-    entry.version, entry.key = nil, nil
+    entry.version, entry.abi, entry.key = nil, nil, nil
     entry.weight, entry.last_used = 0, 0
     return entry
 end
@@ -711,6 +685,7 @@ end
 local function encode_header_entry(entry, key, adapter)
     return cpp.encode_graph({
         version = cdriver.HEADER_CACHE_VERSION,
+        abi = version.TITAN_ABI_VERSION,
         key = key,
         ffi_types = entry.ffi_types,
         dependencies = entry.dependencies,
@@ -762,11 +737,92 @@ local function refresh_header_observations(entry, key, adapter)
     if refreshed then entry.observations_changed = nil end
 end
 
+-- Resolve authored directives in one configured include-search context, without
+-- preprocessing each header into an independent declaration graph. Keep the
+-- original search candidates: the generated header uses absolute quoted paths.
+function cdriver.resolve_includes(filenames, options)
+    options = normalize_options(options)
+    local strategy = io_for(options)
+    local ctx, err = new_cpp_context(options)
+    if not ctx then return nil, err end
+    local cwd, cwd_err = strategy:cwd()
+    if not cwd then return nil, cwd_err end
+    local includes = {}
+    for index, filename in ipairs(filenames) do
+        local searches = {}
+        local function observe(path, openable)
+            path = absolute_lookup_path(path, cwd)
+            searches[#searches + 1] = {
+                kind = "search", path = path,
+                identity = search_candidate_identity(path, openable, strategy),
+            }
+            return true
+        end
+        local include, include_err = resolve_include(filename, options, ctx.incdirs, observe)
+        if not include then return nil, include_err end
+        if is_absolute_path(include.resolved) or file_exists(include.resolved, strategy) then
+            include.resolved = absolute_lookup_path(include.resolved, cwd)
+        end
+        include.c_header_search_inputs = searches
+        includes[index] = include
+    end
+    return includes
+end
+
+local generated_header_cache = setmetatable({}, { __mode = "k" })
+
+local function generated_lookup_path(header, path)
+    local prefix = header.bundle_root .. "/"
+    if path:sub(1, #prefix) ~= prefix then return nil end
+    -- Only this owned directory tree is known to have no symbolic links.
+    -- Preserve '..' in authored header observations, but resolve it here so
+    -- nested generated includes cannot escape as persistent file inputs.
+    local components = {}
+    for component in path:sub(#prefix + 1):gmatch("[^/]+") do
+        if component == ".." then
+            if #components == 0 then return nil end
+            components[#components] = nil
+        elseif component ~= "." then
+            components[#components + 1] = component
+        end
+    end
+    return prefix .. table.concat(components, "/")
+end
+
+local function generated_header_inputs(header)
+    local cached = generated_header_cache[header]
+    if cached then return cached.files, cached.searches end
+    -- The resolver owns these immutable plans and files until it closes.
+    -- Authored headers and their lookup candidates are still revalidated by
+    -- process_file; generated bytes are checked when the preprocessor reads
+    -- them, without reopening the entire owned tree before every cache hit.
+    local files, searches, visited = {}, {}, {}
+    local function visit(item)
+        if visited[item] then return end
+        visited[item] = true
+        files[item.filename] = item
+        for _, input in ipairs(item.search_inputs or {}) do
+            searches[#searches + 1] = input
+        end
+        for _, dependency in ipairs(item.dependencies) do
+            visit(dependency)
+        end
+    end
+    visit(header)
+    generated_header_cache[header] = { files = files, searches = searches }
+    return files, searches
+end
+
 local function process_file_inner(filename, options)
     options = normalize_options(options)
     local cache_valid, cache_error = cacheadapter.validate(options.cache_adapter)
     if not cache_valid then return nil, cache_error end
     local strategy = io_for(options)
+    local generated = options.generated_header
+    local generated_files, generated_searches
+    if generated then
+        generated_files, generated_searches = generated_header_inputs(generated)
+    end
     local analysis_entries, analysis_error =
         process_analysis_entries(options, strategy)
     if analysis_entries == false then return nil, analysis_error end
@@ -807,6 +863,10 @@ local function process_file_inner(filename, options)
     end
     local function record_search(path, identity)
         path = absolute_lookup_path(path, cwd)
+        -- Generated files are immutable inputs bound by the bundle digest.
+        -- Their temporary location is neither a real-header dependency nor
+        -- a persistent include-search observation.
+        if generated and generated_lookup_path(generated, path) then return true end
         local previous = search_identities[path]
         if previous and previous ~= identity then
             return nil, "C include candidate changed while it was searched: " ..
@@ -823,11 +883,20 @@ local function process_file_inner(filename, options)
     end
     ctx.header_dependency_observer = function(path, contents, read_state)
         path = absolute_lookup_path(path, cwd)
+        local input = generated_files and (generated_files[path]
+            or generated_files[generated_lookup_path(generated, path)])
+        if input then
+            if input.contents ~= contents then
+                return nil, "generated C environment changed during analysis: " .. input.identity
+            end
+            return true
+        end
         return record_dependency(
             path, file_contents_identity(path, contents, strategy, read_state))
     end
     ctx.include_search_observer = function(path, openable)
         path = absolute_lookup_path(path, cwd)
+        if generated and generated_lookup_path(generated, path) then return true end
         return record_search(
             path, search_candidate_identity(path, openable, strategy))
     end
@@ -849,18 +918,37 @@ local function process_file_inner(filename, options)
         end
     end
 
-    local include
-    include, err = resolve_include(
-        filename, options, ctx.incdirs, ctx.include_search_observer)
-    if not include then
-        return nil, "failed resolving C header '" .. filename .. "': " .. err
+    for _, search in ipairs(generated_searches or {}) do
+        local current, _, changed = cdriver.revalidate_header_input(search, validation_options)
+        if not current or changed then
+            return nil, "C include candidate changed after module header resolution: " .. search.path
+        end
+        local recorded, record_error = record_search(search.path, search.identity)
+        if not recorded then return nil, record_error end
     end
-    if is_absolute_path(include.resolved) or
-       file_exists(include.resolved, strategy) then
-        include.resolved = absolute_lookup_path(include.resolved, cwd)
+
+    local include, parse_filename
+    if generated then
+        include = {
+            original = generated.logical_name,
+            resolved = generated.identity,
+            include_kind = "quote",
+            include_name = generated.logical_name,
+            generated_header = generated,
+        }
+        parse_filename = generated.filename
+    else
+        include, err = resolve_include(
+            filename, options, ctx.incdirs, ctx.include_search_observer)
+        if not include then
+            return nil, "failed resolving C header '" .. filename .. "': " .. err
+        end
+        if is_absolute_path(include.resolved) or file_exists(include.resolved, strategy) then
+            include.resolved = absolute_lookup_path(include.resolved, cwd)
+        end
+        parse_filename = file_exists(include.resolved, strategy)
+            and include.resolved or filename
     end
-    local parse_filename = file_exists(include.resolved, strategy)
-        and include.resolved or filename
 
     -- Forced headers and this caller's top-level search have already been
     -- observed. A reusable entry owns only the subsequent parse tail, which
@@ -869,7 +957,8 @@ local function process_file_inner(filename, options)
     local dependency_prefix_length = #dependencies
     local search_prefix_length = #search_inputs
     local cache = process_cache_for(strategy)
-    local cache_key = process_cache_key(filename, include, ctx, cwd)
+    local cache_key = process_cache_key(
+        generated and generated.digest or filename, include, ctx, cwd)
     include.c_header_graph_key = cache_key
     cache.lookups = cache.lookups + 1
     local restored_validated
@@ -910,8 +999,7 @@ local function process_file_inner(filename, options)
         previous_cached = cached
         local analysis_entry = analysis_entries
             and analysis_entries[cache_key] or nil
-        local analysis_reuse = analysis_entry ~= nil
-            and analysis_entry.entry == cached
+        local analysis_reuse = analysis_entry == cached
         local validation_started = cdriver.process_phase_clock(options)
         local prefix_compatible =
             input_tail_matches_prefix(
@@ -934,28 +1022,14 @@ local function process_file_inner(filename, options)
             -- Retry without charging another logical lookup or miss.
         elseif compatible then
             refresh_header_observations(cached, cache_key, options.cache_adapter)
-            local ffi_types
-            if analysis_reuse then
-                ffi_types = analysis_entry.ffi_types
-                local reuse_started = cdriver.process_phase_clock(options)
-                cdriver.emit_process_phase(options, filename, include,
-                    "graph_clone", "analysis_reuse", reuse_started)
-            else
-                local clone_started = cdriver.process_phase_clock(options)
-                ffi_types = clone_graph(cached.ffi_types)
-                cdriver.emit_process_phase(options, filename, include,
-                    "graph_clone", "hit", clone_started)
-            end
+            local ffi_types = cached.ffi_types
             -- Identity checks may yield. The optional trace sink is required
             -- to be non-yielding, but it is arbitrary reentrant Lua and can
             -- still replace this key synchronously. Memoize or publish only
             -- while the exact validated entry object remains current.
             if cache.entries[cache_key] == cached then
                 if analysis_entries and not analysis_reuse then
-                    analysis_entries[cache_key] = {
-                        entry = cached,
-                        ffi_types = ffi_types,
-                    }
+                    analysis_entries[cache_key] = cached
                 end
                 for _, input in ipairs(cached.dependencies) do
                     assert(record_dependency(input.path, input.identity, input.observation))
@@ -1084,7 +1158,7 @@ local function process_file_inner(filename, options)
 
     local type_conversion_started = cdriver.process_phase_clock(options)
     local ffi_types, err = ctypes.register_types(res, {
-        header = filename,
+        header = generated and generated.identity or filename,
         resolved_header = include.resolved,
     })
     cdriver.emit_process_phase(options, filename, include,
@@ -1104,10 +1178,9 @@ local function process_file_inner(filename, options)
     cdriver.emit_process_phase(options, filename, include,
         "macro_conversion", "complete", macro_conversion_started)
 
-    -- The live result remains owned by this caller. Cache a separate complete
-    -- graph so later checker mutation cannot leak into another resolver, then
-    -- clone that private graph on every hit. Size and evict first so a large
-    -- clone is never allocated alongside entries which cannot remain resident.
+    -- Parsing publishes an immutable C graph. Checker conversion creates its
+    -- own Titan types and keeps conversion memos in its symbol table, so every
+    -- caller can share this parsed graph without a retention or hit copy.
     local dependency_tail = copy_input_tail(
         dependencies, dependency_prefix_length)
     local search_tail = copy_input_tail(
@@ -1122,7 +1195,7 @@ local function process_file_inner(filename, options)
     -- Production retention has no practical byte bound, so avoid traversing
     -- and allocating a proportional `seen` table solely to estimate weight.
     -- Finite test configurations still weigh the actual retained entry shape
-    -- before cloning; the fixed-size key and cache hash slot are separate
+    -- before retaining; the fixed-size key and cache hash slot are separate
     -- retained allocations which must also fit under their configured bound.
     local cache_weight = 0
     if cache.tracks_weight then
@@ -1132,17 +1205,10 @@ local function process_file_inner(filename, options)
     end
     entry.weight = cache_weight
     if make_cache_room(cache, cache_key, cache_weight) then
-        local retained_clone_started = cdriver.process_phase_clock(options)
-        entry.ffi_types = clone_graph(ffi_types)
         store_cache_entry(cache, cache_key, entry)
         if analysis_entries then
-            analysis_entries[cache_key] = {
-                entry = entry,
-                ffi_types = ffi_types,
-            }
+            analysis_entries[cache_key] = entry
         end
-        cdriver.emit_process_phase(options, filename, include,
-            "graph_clone", "retained_store", retained_clone_started)
         if options.cache_adapter and options.cache_adapter.put then
             local payload = encode_header_entry(entry, cache_key, options.cache_adapter)
             if payload and cache.entries[cache_key] == entry then
@@ -1179,6 +1245,34 @@ function cdriver.process_file(filename, options)
     cdriver.emit_process_phase(
         options, filename, include, "process_total",
         processed and "complete" or "failed", started)
+    return processed, process_error, include, context
+end
+
+-- A module's generated header is one ordered preprocessor/parser input. The
+-- actual files preserve C include semantics; only their stable generated
+-- contents and origins, rather than their temporary paths, identify this graph.
+function cdriver.process_module(header, options)
+    local configured = {}
+    for key, value in pairs(normalize_options(options)) do configured[key] = value end
+    configured.generated_header = header
+    local processed, process_error, include, context =
+        cdriver.process_file(header.filename, configured)
+    if not processed and type(process_error) == "string" then
+        local pending, seen = { header }, {}
+        while #pending > 0 do
+            local current = table.remove(pending)
+            if not seen[current] then
+                seen[current] = true
+                if type(current.filename) == "string" then
+                    process_error = process_error:gsub(current.filename:gsub("(%W)", "%%%1"),
+                        function() return current.identity end)
+                end
+                for _, dependency in ipairs(current.dependencies) do
+                    pending[#pending + 1] = dependency
+                end
+            end
+        end
+    end
     return processed, process_error, include, context
 end
 

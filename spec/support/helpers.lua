@@ -296,6 +296,12 @@ function M.generate_modules(modules, main, forapp, options)
         local typ, err = checker.checkimport(main, loader)
         if not typ then return nil, err end
         if #err ~= 0 then return nil, table.concat(err, "\n") end
+        local names = {}
+        for name in pairs(imported) do names[#names + 1] = name end
+        table.sort(names)
+        local headers_ok, headers_error =
+            driver.prepare_foreign_headers(names, imported, verbose())
+        if not headers_ok then return nil, headers_error end
         local ofiles = {}
         for name, mod in pairs(imported) do
             local ok, e = driver.compile_module(name, mod, deps, verbose())

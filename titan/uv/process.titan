@@ -1,22 +1,22 @@
-local process_fcntl = foreign import "fcntl.h"
-local process_unistd = foreign import "unistd.h"
-local process_socket = foreign import "sys/socket.h"
+foreign import "fcntl.h"
+foreign import "unistd.h"
+foreign import "sys/socket.h"
 
 local type CharPointer = *char
-local type ParentStdioStat = cstat.stat
+local type ParentStdioStat = ffi.stat
 
 -- Stream reads are the one multi-shot operation in this contributor. A
 -- stream therefore buffers callback chunks and has at most one suspended
 -- reader. Every write independently owns one uv_write_t; libuv supplies the
 -- native stream ordering.
 local union StdioNative
-  pipe: owned *libuv.uv_pipe_t
-  tty: owned *libuv.uv_tty_t
+  pipe: owned *ffi.uv_pipe_t
+  tty: owned *ffi.uv_tty_t
 end
 
 local record uv_stdio_t
   local native: StdioNative
-  local alloc_callback: (uv_stdio_t, libuv.size_t,
+  local alloc_callback: (uv_stdio_t, ffi.size_t,
                          *void) -> ()
   local read_callback: (uv_stdio_t, integer) -> ()
   local buffer: Bytes?
@@ -34,7 +34,7 @@ local record ProcessExitResult
 end
 
 local record uv_process_t
-  local handle: owned *libuv.uv_process_t
+  local handle: owned *ffi.uv_process_t
   local exit_callback: (uv_process_t, integer, integer) -> ()
   local runtime: Runtime
   local waiter: Task?
@@ -42,22 +42,22 @@ local record uv_process_t
   local root_index: integer
 end
 
-foreign function uv_process_exit_cb(process: *libuv.uv_process_t,
-                                    exit_status: libuv.int64_t,
+foreign function uv_process_exit_cb(process: *ffi.uv_process_t,
+                                    exit_status: ffi.int64_t,
                                     term_signal: int)
-  local handle = process as *libuv.uv_handle_t
-  local owner = libuv.uv_handle_get_data(handle) as *ffi.Udata
+  local handle = process as *ffi.uv_handle_t
+  local owner = ffi.uv_handle_get_data(handle) as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
-  local loop = libuv.uv_handle_get_loop(handle)
-  local L = libuv.uv_loop_get_data(loop) as *lua.lua_State
+  local loop = ffi.uv_handle_get_loop(handle)
+  local L = ffi.uv_loop_get_data(loop) as *ffi.lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
       callback.upvalue[2]) as UvTwoIntegerCallbackEntry
-  local top = lua.lua_gettop(L)
+  local top = ffi.lua_gettop(L)
   entry(L, module, callback, owner,
-        exit_status as lua.lua_Integer,
-        term_signal as lua.lua_Integer)
-  lua.lua_settop(L, top)
+        exit_status as ffi.lua_Integer,
+        term_signal as ffi.lua_Integer)
+  ffi.lua_settop(L, top)
 end
 
 local record MergedSpawnSlot
@@ -73,8 +73,8 @@ end
 
 local record uv_spawn_config
   local runtime: Runtime
-  local options: owned *libuv.uv_process_options_t
-  local stdio: owned libuv.uv_stdio_container_t[]
+  local options: owned *ffi.uv_process_options_t
+  local stdio: owned ffi.uv_stdio_container_t[]
   local slots: {SpawnSlot}
   local consumed: boolean
 end
@@ -108,17 +108,17 @@ end
 local parent_runtime: Runtime? = nil
 local cached_parent_stdio: {uv_stdio_t} = {}
 
-local function stream_native(stdio: uv_stdio_t): *libuv.uv_stream_t
+local function stream_native(stdio: uv_stdio_t): *ffi.uv_stream_t
   case stdio.native
   when pipe: native then
-    return (native as *libuv.uv_pipe_t) as *libuv.uv_stream_t
+    return (native as *ffi.uv_pipe_t) as *ffi.uv_stream_t
   when tty: native then
-    return (native as *libuv.uv_tty_t) as *libuv.uv_stream_t
+    return (native as *ffi.uv_tty_t) as *ffi.uv_stream_t
   end
 end
 
-local function stream_handle(stdio: uv_stdio_t): *libuv.uv_handle_t
-  return stream_native(stdio) as *libuv.uv_handle_t
+local function stream_handle(stdio: uv_stdio_t): *ffi.uv_handle_t
+  return stream_native(stdio) as *ffi.uv_handle_t
 end
 
 local function slot_child(slot: SpawnSlot): uv_stdio_t
@@ -179,7 +179,7 @@ local function next_chunk(stdio: uv_stdio_t): string?
 end
 
 local function stop_stream_read(stdio: uv_stdio_t)
-  libuv.uv_read_stop(stream_native(stdio))
+  ffi.uv_read_stop(stream_native(stdio))
 end
 
 local function close_stream_from_callback(stdio: uv_stdio_t)
@@ -189,9 +189,9 @@ local function close_stream_from_callback(stdio: uv_stdio_t)
   stdio.root_index = 0
 end
 
-local function stream_alloc(stdio: uv_stdio_t, size: libuv.size_t,
+local function stream_alloc(stdio: uv_stdio_t, size: ffi.size_t,
                             pointer: *void)
-  local descriptor = pointer as *libuv.uv_buf_t
+  local descriptor = pointer as *ffi.uv_buf_t
   do
     local bytes = char.new_array(size as integer)
     stdio.buffer = bytes
@@ -257,7 +257,7 @@ local function deliver_stream_read(stdio: uv_stdio_t, result: integer)
   stop_stream_read(stdio)
   local failed = false
   local payload: value = nil
-  if result ~= libuv.UV_EOF then
+  if result ~= ffi.UV_EOF then
     failed = true
     payload = make_error(result, "stdio.read")
     stdio.read_error = payload
@@ -276,10 +276,10 @@ catch
 end
 
 local function start_stream_read(stdio: uv_stdio_t): integer
-  local status = libuv.uv_read_start(
+  local status = ffi.uv_read_start(
       stream_native(stdio), uv_alloc_cb,
       uv_read_cb)
-  if status == libuv.UV_EALREADY then return 0 end
+  if status == ffi.UV_EALREADY then return 0 end
   return status
 end
 
@@ -290,7 +290,7 @@ local function StreamReadCall:dispatch(task: Task): Immediate?
   if state.read_error ~= nil then
     return Immediate.new(true, state.read_error)
   end
-  if libuv.uv_is_closing(stream_handle(state)) ~= 0 then
+  if ffi.uv_is_closing(stream_handle(state)) ~= 0 then
     return immediate_ok(nil)
   end
   if state.waiter then
@@ -313,7 +313,7 @@ end
 
 local function StreamWriteCall:dispatch(task: Task): Immediate?
   local state = self.stream
-  if libuv.uv_is_closing(stream_handle(state)) ~= 0 then
+  if ffi.uv_is_closing(stream_handle(state)) ~= 0 then
     return Immediate.new(true, "cannot write to a closed stream")
   end
   if #self.data == 0 then return immediate_ok(nil) end
@@ -324,7 +324,7 @@ end
 local function StreamCloseCall:dispatch(task: Task): Immediate?
   local state = self.stream
   local handle = stream_handle(state)
-  if libuv.uv_is_closing(handle) ~= 0 then
+  if ffi.uv_is_closing(handle) ~= 0 then
     return immediate_ok(nil)
   end
   local reader? = state.waiter
@@ -350,8 +350,8 @@ local function process_exit_callback(owner: uv_process_t,
     owner.waiter = nil
     owner.result.code = exit_status
     owner.result.signal_number = term_signal
-    local native: *libuv.uv_process_t = owner.handle
-    close_handle(owner.runtime, native as *libuv.uv_handle_t,
+    local native: *ffi.uv_process_t = owner.handle
+    close_handle(owner.runtime, native as *ffi.uv_handle_t,
                  owner, owner.root_index, nil, nil)
     owner.root_index = 0
     if waiter then
@@ -368,8 +368,8 @@ end
 
 local function ProcessWaitCall:dispatch(task: Task): Immediate?
   local state = self.process
-  local native: *libuv.uv_process_t = state.handle
-  if libuv.uv_is_active(native as *libuv.uv_handle_t) == 0 then
+  local native: *ffi.uv_process_t = state.handle
+  if ffi.uv_is_active(native as *ffi.uv_handle_t) == 0 then
     return immediate_ok(state.result)
   end
   if state.waiter then
@@ -393,8 +393,8 @@ end
 local function ProcessSpawnFailureCall:dispatch(task: Task): Immediate?
   local process = self.process
   local runtime = process.runtime
-  local native: *libuv.uv_process_t = process.handle
-  local handle = native as *libuv.uv_handle_t
+  local native: *ffi.uv_process_t = process.handle
+  local handle = native as *ffi.uv_handle_t
   if loop_owns_handle(runtime, handle) then
     close_handle(runtime, handle, process,
                  process.root_index, task, nil)
@@ -407,17 +407,17 @@ local function ProcessSpawnFailureCall:dispatch(task: Task): Immediate?
 end
 
 local function new_pipe_stdio(runtime: Runtime): (integer, uv_stdio_t?)
-  local native: owned *libuv.uv_pipe_t = libuv.uv_pipe_t.new()
+  local native: owned *ffi.uv_pipe_t = ffi.uv_pipe_t.new()
   local stdio = new_stdio(StdioNative.pipe(native), runtime)
   stdio.root_index = root_handle(runtime, stdio)
-  local status = libuv.uv_pipe_init(runtime.loop, native, 0)
+  local status = ffi.uv_pipe_init(runtime.loop, native, 0)
   if status < 0 then
     unroot_handle(runtime, stdio.root_index)
     stdio.root_index = 0
     return status, nil
   end
-  local native_pointer: *libuv.uv_pipe_t = native
-  libuv.uv_handle_set_data(native_pointer as *libuv.uv_handle_t,
+  local native_pointer: *ffi.uv_pipe_t = native
+  ffi.uv_handle_set_data(native_pointer as *ffi.uv_handle_t,
                            stdio as *void)
   return 0, stdio
 end
@@ -429,7 +429,7 @@ local function discard_unpublished_stdio(stdio: uv_stdio_t?)
   if not stdio then return end
   local stream = stdio as uv_stdio_t
   local handle = stream_handle(stream)
-  if libuv.uv_is_closing(handle) ~= 0 then return end
+  if ffi.uv_is_closing(handle) ~= 0 then return end
   stream.chunks = {}
   stream.chunk_head = 1
   close_handle(stream.runtime, handle, stream,
@@ -446,28 +446,28 @@ local function start_captured_read(stdio: uv_stdio_t,
 end
 
 local function duplicate_descriptor(
-    descriptor: libuv.uv_file): libuv.uv_file
-  local duplicate = process_unistd.dup(descriptor)
-  while duplicate < 0 and cerrno.errno == cerrno.EINTR do
-    duplicate = process_unistd.dup(descriptor)
+    descriptor: ffi.uv_file): ffi.uv_file
+  local duplicate = ffi.dup(descriptor)
+  while duplicate < 0 and ffi.errno == ffi.EINTR do
+    duplicate = ffi.dup(descriptor)
   end
   if duplicate < 0 then
-    raise make_error(libuv.uv_translate_sys_error(cerrno.errno),
+    raise make_error(ffi.uv_translate_sys_error(ffi.errno),
                      "stdio.parent.duplicate")
   end
-  local status = process_fcntl.fcntl(
-      duplicate, process_fcntl.F_SETFD, process_fcntl.FD_CLOEXEC)
-  while status < 0 and cerrno.errno == cerrno.EINTR do
-    status = process_fcntl.fcntl(
-        duplicate, process_fcntl.F_SETFD, process_fcntl.FD_CLOEXEC)
+  local status = ffi.fcntl(
+      duplicate, ffi.F_SETFD, ffi.FD_CLOEXEC)
+  while status < 0 and ffi.errno == ffi.EINTR do
+    status = ffi.fcntl(
+        duplicate, ffi.F_SETFD, ffi.FD_CLOEXEC)
   end
   if status < 0 then
-    local saved_errno = cerrno.errno
-    close_descriptor(duplicate as libuv.uv_file)
-    raise make_error(libuv.uv_translate_sys_error(saved_errno),
+    local saved_errno = ffi.errno
+    close_descriptor(duplicate as ffi.uv_file)
+    raise make_error(ffi.uv_translate_sys_error(saved_errno),
                      "stdio.parent.duplicate.cloexec")
   end
-  return duplicate as libuv.uv_file
+  return duplicate as ffi.uv_file
 end
 
 local function parent_stdio_kind_error(code: integer, descriptor: integer,
@@ -499,74 +499,74 @@ local function parent_stdio_pipe_hint(descriptor: integer): boolean
   return selected
 end
 
-local function parent_stdio_kind(descriptor: integer): libuv.uv_handle_type
-  local fd = descriptor as libuv.uv_file
-  local guessed = libuv.uv_guess_handle(fd)
-  if guessed == libuv.UV_TTY or guessed == libuv.UV_NAMED_PIPE then
+local function parent_stdio_kind(descriptor: integer): ffi.uv_handle_type
+  local fd = descriptor as ffi.uv_file
+  local guessed = ffi.uv_guess_handle(fd)
+  if guessed == ffi.UV_TTY or guessed == ffi.UV_NAMED_PIPE then
     return guessed
   end
-  if guessed ~= libuv.UV_UNKNOWN_HANDLE then
-    raise parent_stdio_kind_error(libuv.UV_ENOTSUP, descriptor,
+  if guessed ~= ffi.UV_UNKNOWN_HANDLE then
+    raise parent_stdio_kind_error(ffi.UV_ENOTSUP, descriptor,
       "uv_guess_handle classified unsupported kind " .. (guessed as integer))
   end
 
   -- uv_guess_handle does not promise errno; its isatty probe can leave an
   -- unrelated value behind. Inspect this UNKNOWN fd explicitly.
   local metadata = ParentStdioStat.new()
-  if cstat.fstat(fd, metadata) ~= 0 then
-    local saved_errno = cerrno.errno
-    raise parent_stdio_kind_error(libuv.uv_translate_sys_error(saved_errno),
+  if ffi.fstat(fd, metadata) ~= 0 then
+    local saved_errno = ffi.errno
+    raise parent_stdio_kind_error(ffi.uv_translate_sys_error(saved_errno),
                                    descriptor, "fstat")
   end
-  if (metadata.st_mode & cstat.S_IFMT) ~= cstat.S_IFSOCK then
-    raise parent_stdio_kind_error(libuv.UV_ENOTSUP, descriptor,
+  if (metadata.st_mode & ffi.S_IFMT) ~= ffi.S_IFSOCK then
+    raise parent_stdio_kind_error(ffi.UV_ENOTSUP, descriptor,
                                    "fstat did not identify a socket")
   end
 
-  local address = process_socket.sockaddr_storage.new()
-  local address_size = process_socket.socklen_t.new_array(1)
-  address_size[0] = process_socket.sockaddr_storage.sizeof as
-                    process_socket.socklen_t
+  local address = ffi.sockaddr_storage.new()
+  local address_size = ffi.socklen_t.new_array(1)
+  address_size[0] = ffi.sockaddr_storage.sizeof as
+                    ffi.socklen_t
   local name_status = ffi.titan_posix_getsockname(fd,
-      address as *process_socket.sockaddr, address_size)
+      address as *ffi.sockaddr, address_size)
   local name_errno = 0
-  if name_status ~= 0 then name_errno = cerrno.errno end
+  if name_status ~= 0 then name_errno = ffi.errno end
 
   local socket_type = int.new_array(1)
-  local type_size = process_socket.socklen_t.new_array(1)
-  type_size[0] = int.sizeof as process_socket.socklen_t
-  local type_status = process_socket.getsockopt(fd, process_socket.SOL_SOCKET,
-      process_socket.SO_TYPE, socket_type, type_size)
+  local type_size = ffi.socklen_t.new_array(1)
+  type_size[0] = int.sizeof as ffi.socklen_t
+  local type_status = ffi.getsockopt(fd, ffi.SOL_SOCKET,
+      ffi.SO_TYPE, socket_type, type_size)
   local type_errno = 0
-  if type_status ~= 0 then type_errno = cerrno.errno end
+  if type_status ~= 0 then type_errno = ffi.errno end
 
   -- Both probes run even when the first fails: any available contradiction
   -- defeats launcher knowledge about the missing metadata.
-  if name_status == 0 and address.ss_family ~= process_socket.AF_UNIX then
-    raise parent_stdio_kind_error(libuv.UV_ENOTSUP, descriptor,
+  if name_status == 0 and address.ss_family ~= ffi.AF_UNIX then
+    raise parent_stdio_kind_error(ffi.UV_ENOTSUP, descriptor,
       "getsockname reported family " .. (address.ss_family as integer))
   end
   if type_status == 0 and
-     (type_size[0] ~= (int.sizeof as process_socket.socklen_t) or
-      socket_type[0] ~= process_socket.SOCK_STREAM) then
-    raise parent_stdio_kind_error(libuv.UV_ENOTSUP, descriptor,
+     (type_size[0] ~= (int.sizeof as ffi.socklen_t) or
+      socket_type[0] ~= ffi.SOCK_STREAM) then
+    raise parent_stdio_kind_error(ffi.UV_ENOTSUP, descriptor,
       "getsockopt(SO_TYPE) did not identify SOCK_STREAM")
   end
-  if name_errno ~= 0 and name_errno ~= cerrno.EPERM and
-     name_errno ~= cerrno.EACCES then
-    raise parent_stdio_kind_error(libuv.uv_translate_sys_error(name_errno),
+  if name_errno ~= 0 and name_errno ~= ffi.EPERM and
+     name_errno ~= ffi.EACCES then
+    raise parent_stdio_kind_error(ffi.uv_translate_sys_error(name_errno),
                                    descriptor, "getsockname")
   end
-  if type_errno ~= 0 and type_errno ~= cerrno.EPERM and
-     type_errno ~= cerrno.EACCES then
-    raise parent_stdio_kind_error(libuv.uv_translate_sys_error(type_errno),
+  if type_errno ~= 0 and type_errno ~= ffi.EPERM and
+     type_errno ~= ffi.EACCES then
+    raise parent_stdio_kind_error(ffi.uv_translate_sys_error(type_errno),
                                    descriptor, "getsockopt(SO_TYPE)")
   end
   if name_errno == 0 and type_errno == 0 then
-    raise parent_stdio_kind_error(libuv.UV_ENOTSUP, descriptor,
+    raise parent_stdio_kind_error(ffi.UV_ENOTSUP, descriptor,
       "uv_guess_handle remained unknown with inspectable socket metadata")
   end
-  if parent_stdio_pipe_hint(descriptor) then return libuv.UV_NAMED_PIPE end
+  if parent_stdio_pipe_hint(descriptor) then return ffi.UV_NAMED_PIPE end
 
   local missing_probe = "getsockname"
   local denied_errno = name_errno
@@ -574,7 +574,7 @@ local function parent_stdio_kind(descriptor: integer): libuv.uv_handle_type
     missing_probe = "getsockopt(SO_TYPE)"
     denied_errno = type_errno
   end
-  raise parent_stdio_kind_error(libuv.uv_translate_sys_error(denied_errno),
+  raise parent_stdio_kind_error(ffi.uv_translate_sys_error(denied_errno),
     descriptor, missing_probe ..
       " denied without a valid TITAN_STDIO_PIPE_FDS hint for this fd")
 end
@@ -587,23 +587,23 @@ local function initialize_parent_stdio(runtime: Runtime,
   end
   local cache_index = descriptor + 1
   local cached: uv_stdio_t? = cached_parent_stdio[cache_index]
-  if cached and libuv.uv_is_closing(
+  if cached and ffi.uv_is_closing(
       stream_handle(cached as uv_stdio_t)) == 0 then
     return cached as uv_stdio_t
   end
   cached_parent_stdio[cache_index] = nil
 
   local guessed = parent_stdio_kind(descriptor)
-  local duplicate = duplicate_descriptor(descriptor as libuv.uv_file)
+  local duplicate = duplicate_descriptor(descriptor as ffi.uv_file)
   defer close_descriptor(duplicate)
   local stdio: uv_stdio_t? = nil
   local keep = false
   defer if not keep then discard_unpublished_stdio(stdio) end
-  if guessed == libuv.UV_TTY then
-    local native: owned *libuv.uv_tty_t = libuv.uv_tty_t.new()
+  if guessed == ffi.UV_TTY then
+    local native: owned *ffi.uv_tty_t = ffi.uv_tty_t.new()
     local owner = new_stdio(StdioNative.tty(native), runtime)
     owner.root_index = root_handle(runtime, owner)
-    local status = libuv.uv_tty_init(
+    local status = ffi.uv_tty_init(
         runtime.loop, native, duplicate, 0)
     if status < 0 then
       unroot_handle(runtime, owner.root_index)
@@ -611,27 +611,27 @@ local function initialize_parent_stdio(runtime: Runtime,
       stdio = nil
       raise make_error(status, "stdio.parent.init")
     end
-    local native_pointer: *libuv.uv_tty_t = native
-    libuv.uv_handle_set_data(native_pointer as *libuv.uv_handle_t,
+    local native_pointer: *ffi.uv_tty_t = native
+    ffi.uv_handle_set_data(native_pointer as *ffi.uv_handle_t,
                              owner as *void)
     stdio = owner
 
-    local actual = libuv.uv_os_fd_t.new_array(1)
-    status = libuv.uv_fileno(native_pointer as *libuv.uv_handle_t, actual)
+    local actual = ffi.uv_os_fd_t.new_array(1)
+    status = ffi.uv_fileno(native_pointer as *ffi.uv_handle_t, actual)
     check_status(status, "stdio.parent.fileno")
     if (actual[0] as integer) ~= (duplicate as integer) then
       status = close_descriptor(duplicate)
       check_status(status, "stdio.parent.duplicate.close")
     end
-    duplicate = -1 as libuv.uv_file
+    duplicate = -1 as ffi.uv_file
   else
     local status = 0
     status, stdio = new_pipe_stdio(runtime)
     check_status(status, "stdio.parent.init")
-    status = libuv.uv_pipe_open(
-        stream_native(stdio as uv_stdio_t) as *libuv.uv_pipe_t, duplicate)
+    status = ffi.uv_pipe_open(
+        stream_native(stdio as uv_stdio_t) as *ffi.uv_pipe_t, duplicate)
     check_status(status, "stdio.parent.open")
-    duplicate = -1 as libuv.uv_file
+    duplicate = -1 as ffi.uv_file
   end
 
   local result = stdio as uv_stdio_t
@@ -643,7 +643,7 @@ end
 local function validate_config(state: uv_spawn_config): integer
   local task = running_task()
   if state.consumed or state.runtime ~= task.runtime then
-    return libuv.UV_EINVAL
+    return ffi.UV_EINVAL
   end
   return 0
 end
@@ -665,7 +665,7 @@ end
 
 local function bind_slot(state: uv_spawn_config, index: integer,
                          slot: SpawnSlot, flags: integer)
-  state.stdio[index].flags = flags as libuv.uv_stdio_flags
+  state.stdio[index].flags = flags as ffi.uv_stdio_flags
   state.stdio[index].data.stream = stream_native(slot_child(slot))
 end
 
@@ -739,25 +739,25 @@ local function config_merged_output(state: uv_spawn_config):
     discard_unpublished_stdio(child_stream)
   end
 
-  local descriptors = libuv.uv_file.new_array(2)
-  descriptors[0] = -1 as libuv.uv_file
-  descriptors[1] = -1 as libuv.uv_file
+  local descriptors = ffi.uv_file.new_array(2)
+  descriptors[0] = -1 as ffi.uv_file
+  descriptors[1] = -1 as ffi.uv_file
   defer do
     close_descriptor(descriptors[0])
     close_descriptor(descriptors[1])
   end
-  status = libuv.uv_pipe(
-      descriptors, libuv.UV_NONBLOCK_PIPE as int, 0)
+  status = ffi.uv_pipe(
+      descriptors, ffi.UV_NONBLOCK_PIPE as int, 0)
   if status < 0 then return status, nil end
-  status = libuv.uv_pipe_open(
-      stream_native(parent_stream) as *libuv.uv_pipe_t, descriptors[0])
+  status = ffi.uv_pipe_open(
+      stream_native(parent_stream) as *ffi.uv_pipe_t, descriptors[0])
   if status < 0 then return status, nil end
-  descriptors[0] = -1 as libuv.uv_file
-  status = libuv.uv_pipe_open(
-      stream_native(child_stream) as *libuv.uv_pipe_t, descriptors[1])
+  descriptors[0] = -1 as ffi.uv_file
+  status = ffi.uv_pipe_open(
+      stream_native(child_stream) as *ffi.uv_pipe_t, descriptors[1])
   if status < 0 then return status, nil end
-  descriptors[1] = -1 as libuv.uv_file
-  status = libuv.uv_stream_set_blocking(stream_native(child_stream), 1)
+  descriptors[1] = -1 as ffi.uv_file
+  status = ffi.uv_stream_set_blocking(stream_native(child_stream), 1)
   if status < 0 then return status, nil end
   keep = true
   return 0, SpawnSlot.merged(
@@ -767,10 +767,10 @@ end
 local function os_spawn_config_new(): uv_spawn_config
   local task = running_task()
   accepting_work(task.runtime, "configure a Process")
-  local options: owned *libuv.uv_process_options_t =
-      libuv.uv_process_options_t.new()
-  local stdio: owned libuv.uv_stdio_container_t[] =
-      libuv.uv_stdio_container_t.new_array(3)
+  local options: owned *ffi.uv_process_options_t =
+      ffi.uv_process_options_t.new()
+  local stdio: owned ffi.uv_stdio_container_t[] =
+      ffi.uv_stdio_container_t.new_array(3)
   options.exit_cb = uv_process_exit_cb
   options.stdio_count = 3 as int
   options.stdio = stdio
@@ -793,11 +793,11 @@ local function configure_capture(config: uv_spawn_config,
   local slot = captured as SpawnSlot
   if descriptor == 0 then
     configure_slot(config, descriptor, slot,
-                   libuv.UV_CREATE_PIPE | libuv.UV_READABLE_PIPE)
+                   ffi.UV_CREATE_PIPE | ffi.UV_READABLE_PIPE)
     return 0
   end
   configure_slot(config, descriptor, slot,
-                 libuv.UV_CREATE_PIPE | libuv.UV_WRITABLE_PIPE)
+                 ffi.UV_CREATE_PIPE | ffi.UV_WRITABLE_PIPE)
   return 0
 end
 
@@ -809,7 +809,7 @@ local function configure_parent(config: uv_spawn_config,
   status, parent = prepare_inherited_stdio(config, descriptor)
   if status < 0 then return status end
   local slot = parent as SpawnSlot
-  configure_slot(config, descriptor, slot, libuv.UV_INHERIT_STREAM)
+  configure_slot(config, descriptor, slot, ffi.UV_INHERIT_STREAM)
   return 0
 end
 
@@ -821,8 +821,8 @@ local function os_spawn_config_with_merged_output(
   status, merged = config_merged_output(config)
   if status >= 0 then
     local slot = merged as SpawnSlot
-    configure_slot(config, 1, slot, libuv.UV_INHERIT_STREAM)
-    configure_slot(config, 2, slot, libuv.UV_INHERIT_STREAM)
+    configure_slot(config, 1, slot, ffi.UV_INHERIT_STREAM)
+    configure_slot(config, 2, slot, ffi.UV_INHERIT_STREAM)
   end
   return status
 end
@@ -843,7 +843,7 @@ local function os_spawn_config_error(config: uv_spawn_config, status: integer)
 end
 
 local function new_process(runtime: Runtime): uv_process_t
-  local native: owned *libuv.uv_process_t = libuv.uv_process_t.new()
+  local native: owned *ffi.uv_process_t = ffi.uv_process_t.new()
   return uv_process_t.new {
     handle = native,
     exit_callback = process_exit_callback,
@@ -865,18 +865,18 @@ local function os_process_spawn_with_config(file: string, args: {string},
   local stdout_slot? = config_slot(state, 1)
   local stderr_slot? = config_slot(state, 2)
   if not stdin_slot or not stdout_slot or not stderr_slot then
-    os_spawn_config_error(config, libuv.UV_EINVAL)
+    os_spawn_config_error(config, ffi.UV_EINVAL)
   end
   accepting_work(state.runtime, "spawn a Process")
 
   if contains_nul(file) then
-    raise make_error(libuv.UV_EINVAL, "process.spawn.file")
+    raise make_error(ffi.UV_EINVAL, "process.spawn.file")
   end
   local index = 1
   while index <= #args do
     if contains_nul(args[index]) then
       raise make_error(
-          libuv.UV_EINVAL, "process.spawn.argument")
+          ffi.UV_EINVAL, "process.spawn.argument")
     end
     index = index + 1
   end
@@ -888,7 +888,7 @@ local function os_process_spawn_with_config(file: string, args: {string},
   local stderr_merged_child? =
       slot_merged_child(stderr_slot as SpawnSlot)
   local process = new_process(state.runtime)
-  local process_handle: *libuv.uv_process_t = process.handle
+  local process_handle: *ffi.uv_process_t = process.handle
   local argument_count = #args + 1
   local argv = CharPointer.new_array(argument_count + 1)
   argv[0] = file
@@ -902,7 +902,7 @@ local function os_process_spawn_with_config(file: string, args: {string},
   state.options.args = argv
   process.root_index = root_handle(state.runtime, process)
   state.consumed = true
-  local spawn_status = libuv.uv_spawn(
+  local spawn_status = ffi.uv_spawn(
       state.runtime.loop, process_handle, state.options)
 
   if spawn_status < 0 then
@@ -914,7 +914,7 @@ local function os_process_spawn_with_config(file: string, args: {string},
 
   -- uv_spawn has now initialized the handle and the non-reentrant loop cannot
   -- deliver exit_callback until control returns to uv_run.
-  libuv.uv_handle_set_data(process_handle as *libuv.uv_handle_t,
+  ffi.uv_handle_set_data(process_handle as *ffi.uv_handle_t,
                            process as *void)
 
   state.slots = {}
@@ -952,20 +952,20 @@ local function os_process_kill(process: uv_process_t, signal: string)
   if signum <= 0 then
     raise "unsupported process signal name '" .. signal .. "'"
   end
-  local native: *libuv.uv_process_t = process.handle
-  if libuv.uv_is_active(native as *libuv.uv_handle_t) == 0 then
+  local native: *ffi.uv_process_t = process.handle
+  if ffi.uv_is_active(native as *ffi.uv_handle_t) == 0 then
     raise "cannot signal an exited Process"
   end
-  local status = libuv.uv_process_kill(process.handle, signum)
-  if status < 0 and status ~= libuv.UV_ESRCH then
+  local status = ffi.uv_process_kill(process.handle, signum)
+  if status < 0 and status ~= ffi.UV_ESRCH then
     raise make_error(status, "process.kill")
   end
 end
 
 local function os_process_is_running(process: uv_process_t): boolean
   validate_process(process)
-  local native: *libuv.uv_process_t = process.handle
-  return libuv.uv_is_active(native as *libuv.uv_handle_t) ~= 0
+  local native: *ffi.uv_process_t = process.handle
+  return ffi.uv_is_active(native as *ffi.uv_handle_t) ~= 0
 end
 
 local function os_parent_stdio(descriptor: integer): uv_stdio_t

@@ -1,8 +1,8 @@
 local uv = import "uv.titan"
 local str = import "string"
-local libuv = foreign import "uv.h"
-local lua = foreign import "lua.h"
-local ffi = foreign import "titan/ffi.h"
+foreign import "uv.h"
+foreign import "lua.h"
+foreign import "titan/ffi.h"
 
 local READ_CHUNK_BYTES = 64 * 1024
 
@@ -22,14 +22,14 @@ record Stat
 end
 
 local type FsNoargCallbackEntry =
-  foreign (*lua.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata) -> ()
+  foreign (*ffi.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata) -> ()
 local type FsEventCallbackEntry =
-  foreign (*lua.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
-           const *char, lua.lua_Integer,
-           lua.lua_Integer) -> ()
+  foreign (*ffi.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
+           const *char, ffi.lua_Integer,
+           ffi.lua_Integer) -> ()
 
 local record RealpathRequest
-  local handle: owned *libuv.uv_fs_t
+  local handle: owned *ffi.uv_fs_t
   local callback: (RealpathRequest) -> ()
   local waiter: uv.Task?
   local failed: boolean
@@ -37,7 +37,7 @@ local record RealpathRequest
 end
 
 local record WatchRegistration
-  local handle: owned *libuv.uv_fs_event_t
+  local handle: owned *ffi.uv_fs_event_t
   local callback: (WatchRegistration, const *char,
                    integer, integer) -> ()
   local runtime: uv.Runtime
@@ -57,35 +57,35 @@ end
 
 local realpath_roots: {RealpathRequest: boolean} = {}
 
-foreign function fs_realpath_cb(request: *libuv.uv_fs_t)
-  local owner = libuv.uv_req_get_data(
-      request as *libuv.uv_req_t) as *ffi.Udata
+foreign function fs_realpath_cb(request: *ffi.uv_fs_t)
+  local owner = ffi.uv_req_get_data(
+      request as *ffi.uv_req_t) as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
-  local L = libuv.uv_loop_get_data(request.loop) as *lua.lua_State
+  local L = ffi.uv_loop_get_data(request.loop) as *ffi.lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
       callback.upvalue[2]) as FsNoargCallbackEntry
-  local top = lua.lua_gettop(L)
+  local top = ffi.lua_gettop(L)
   entry(L, module, callback, owner)
-  lua.lua_settop(L, top)
+  ffi.lua_settop(L, top)
 end
 
-foreign function fs_watcher_event_cb(handle: *libuv.uv_fs_event_t,
+foreign function fs_watcher_event_cb(handle: *ffi.uv_fs_event_t,
                                       filename: const *char,
                                       events: int,
                                       status: int)
-  local native_handle = handle as *libuv.uv_handle_t
-  local owner = libuv.uv_handle_get_data(native_handle) as *ffi.Udata
+  local native_handle = handle as *ffi.uv_handle_t
+  local owner = ffi.uv_handle_get_data(native_handle) as *ffi.Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
-  local loop = libuv.uv_handle_get_loop(native_handle)
-  local L = libuv.uv_loop_get_data(loop) as *lua.lua_State
+  local loop = ffi.uv_handle_get_loop(native_handle)
+  local L = ffi.uv_loop_get_data(loop) as *ffi.lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
       callback.upvalue[2]) as FsEventCallbackEntry
-  local top = lua.lua_gettop(L)
+  local top = ffi.lua_gettop(L)
   entry(L, module, callback, owner, filename,
-        events as lua.lua_Integer, status as lua.lua_Integer)
-  lua.lua_settop(L, top)
+        events as ffi.lua_Integer, status as ffi.lua_Integer)
+  ffi.lua_settop(L, top)
 end
 
 function open(path: string, mode: string): File
@@ -210,7 +210,7 @@ end
 local function missing_path(failure: value): boolean
   if failure is uv.OperationError then
     local operation = failure as uv.OperationError
-    return operation.code == (libuv.UV_ENOENT as integer)
+    return operation.code == (ffi.UV_ENOENT as integer)
   end
   return false
 end
@@ -295,13 +295,13 @@ local function RealpathRequest:finish()
   local failed = false
   local payload: value = nil
   do
-    defer libuv.uv_fs_req_cleanup(self.handle)
-    local result = libuv.uv_fs_get_result(self.handle) as integer
+    defer ffi.uv_fs_req_cleanup(self.handle)
+    local result = ffi.uv_fs_get_result(self.handle) as integer
     if result < 0 then
       failed = true
       payload = uv.make_error(result, "fs.realpath")
     else
-      local resolved = libuv.uv_fs_get_ptr(
+      local resolved = ffi.uv_fs_get_ptr(
           self.handle) as const *char
       payload = resolved as string
     end
@@ -322,7 +322,7 @@ function realpath(path: string): string
   uv.accepting_work(runtime, "resolve a filesystem path")
   local checked = uv.checked_text(path, "fs.realpath")
   local resume_token = uv.ResumeToken.new("fs.realpath")
-  local native: owned *libuv.uv_fs_t = libuv.uv_fs_t.new()
+  local native: owned *ffi.uv_fs_t = ffi.uv_fs_t.new()
   local callback = function (request: RealpathRequest)
     request:finish()
   end
@@ -333,12 +333,12 @@ function realpath(path: string): string
   end
   defer cancel_action()
   request:root()
-  libuv.uv_req_set_data((native as *libuv.uv_fs_t) as *libuv.uv_req_t,
+  ffi.uv_req_set_data((native as *ffi.uv_fs_t) as *ffi.uv_req_t,
                         request as *void)
-  local status = libuv.uv_fs_realpath(
+  local status = ffi.uv_fs_realpath(
       runtime.loop, native, checked, fs_realpath_cb)
   if status < 0 then
-    libuv.uv_fs_req_cleanup(native)
+    ffi.uv_fs_req_cleanup(native)
     request:unroot()
     raise uv.make_error(status, "fs.realpath")
   end
@@ -427,13 +427,13 @@ local function Watcher:remove_registration(
 end
 
 local function WatchRegistration:stop()
-  local status = libuv.uv_fs_event_stop(self.handle)
+  local status = ffi.uv_fs_event_stop(self.handle)
   if status < 0 then raise uv.make_error(status, "fs.watcher.stop") end
 end
 
 local function WatchRegistration:close(wait: boolean)
   local handle =
-    (self.handle as *libuv.uv_fs_event_t) as *libuv.uv_handle_t
+    (self.handle as *ffi.uv_fs_event_t) as *ffi.uv_handle_t
   if wait then
     uv.wait_handle_close(self.runtime, handle, self,
                          self.runtime_root_index)
@@ -458,7 +458,7 @@ end
 local function Watcher:new_registration(
     path: string, directory: boolean): WatchRegistration
   local runtime = self.runtime
-  local native: owned *libuv.uv_fs_event_t = libuv.uv_fs_event_t.new()
+  local native: owned *ffi.uv_fs_event_t = ffi.uv_fs_event_t.new()
   local callback = function (registration: WatchRegistration,
                              filename: const *char,
                              events: integer, status: integer)
@@ -478,16 +478,16 @@ local function Watcher:new_registration(
     runtime_root_index = 0,
   }
   registration.runtime_root_index = uv.root_handle(runtime, registration)
-  local init_status = libuv.uv_fs_event_init(runtime.loop, native)
+  local init_status = ffi.uv_fs_event_init(runtime.loop, native)
   if init_status < 0 then
     uv.unroot_handle(runtime, registration.runtime_root_index)
     registration.runtime_root_index = 0
     raise uv.make_error(init_status, "fs.watcher.init")
   end
-  local handle = (native as *libuv.uv_fs_event_t) as *libuv.uv_handle_t
-  libuv.uv_handle_set_data(
+  local handle = (native as *ffi.uv_fs_event_t) as *ffi.uv_handle_t
+  ffi.uv_handle_set_data(
       handle, registration as *void)
-  local start_status = libuv.uv_fs_event_start(
+  local start_status = ffi.uv_fs_event_start(
       native, fs_watcher_event_cb, path, 0)
   if start_status < 0 then
     registration:close(false)
@@ -526,7 +526,7 @@ function Watcher:watch(path: string)
 
   local info? = stat(canonical)
   if not info then
-    raise uv.make_error(libuv.UV_ENOENT as integer,
+    raise uv.make_error(ffi.UV_ENOENT as integer,
                         "fs.watcher.watch")
   end
   local registration = self:new_registration(
@@ -607,7 +607,7 @@ local function Watcher:map_notification(
 
     local path = registration:event_path(notification.filename)
     local renamed =
-      (notification.events & (libuv.UV_RENAME as integer)) ~= 0
+      (notification.events & (ffi.UV_RENAME as integer)) ~= 0
     local exists = true
     if registration.directory then
       if not lstat(registration.path) then

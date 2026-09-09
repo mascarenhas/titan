@@ -55,9 +55,9 @@ local function _relabel_slice(source: string, first: integer,
   local result = char.new_array(length)
   local source_bytes = source as const *char
   local result_bytes = result as *char
-  cstring.memcpy(
+  ffi.memcpy(
     result_bytes, source_bytes + first - 1,
-    length as cstring.size_t)
+    length as ffi.size_t)
   return result as string
 end
 
@@ -190,7 +190,7 @@ local function _relabel_decimal(text: string): integer
     if digit < 0 or digit > 9 then
       raise "invalid decimal PEG repetition"
     end
-    if result > (lua.LUA_MAXINTEGER as integer - digit) // 10 then
+    if result > (ffi.LUA_MAXINTEGER as integer - digit) // 10 then
       raise "PEG repetition count is too large"
     end
     result = result * 10 + digit

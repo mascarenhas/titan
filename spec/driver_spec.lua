@@ -5,9 +5,11 @@ local driver = require "titan-compiler.driver"
 local compiler_io = require "titan-compiler.io"
 local cdriver = require "c-parser.cdriver"
 local cprobe = require "titan-compiler.cprobe"
+local cprobe_cache = require "titan-compiler.cprobe_cache"
 local csemantics = require "titan-compiler.csemantics"
 local coder = require "titan-compiler.coder"
 local sourceinterface = require "titan-compiler.sourceinterface"
+local ffiheaders = require "titan-compiler.ffiheaders"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local types = require "titan-compiler.types"
 local util = require "titan-compiler.util"
@@ -521,11 +523,11 @@ describe("compiler installation discovery", function()
     it("derives the format-1 probe cache from an explicit prefix first",
        function()
         local cpath = "/installed/lib/lua/5.5/?.so"
-        assert.equal("/explicit/var/cache/titan-probes/1",
+        assert.equal("/explicit/var/cache/titan-probes/" .. cprobe_cache.VERSION,
             driver.probe_cache_directory(cpath, "/explicit"))
-        assert.equal("/installed/var/cache/titan-probes/1",
+        assert.equal("/installed/var/cache/titan-probes/" .. cprobe_cache.VERSION,
             driver.probe_cache_directory(cpath, ""))
-        assert.equal("/var/cache/titan-probes/1",
+        assert.equal("/var/cache/titan-probes/" .. cprobe_cache.VERSION,
             driver.probe_cache_directory(
                 "/lib/lua/5.5/?.so", nil))
         assert.is_nil(driver.probe_cache_directory(nil, nil))
@@ -563,7 +565,7 @@ assert(driver.PROBE_CACHE_DIRECTORY == nil)
         package.loaded[module_name] = loaded_driver
         assert.truthy(loaded, value)
 
-        local expected = "/explicit/var/cache/titan-probes/1"
+        local expected = "/explicit/var/cache/titan-probes/" .. cprobe_cache.VERSION
         assert.equal(expected, value.PROBE_CACHE_DIRECTORY)
         local context = value.new_resolver_context()
         assert.equal(expected, value.PROBE_CACHE_DIRECTORY)
@@ -1278,6 +1280,12 @@ describe("loader resolver ownership", function()
         assert.same({
             "/virtual/remove-failure.h",
         }, unlink_context.source_foreign_header_temporaries)
+        ffiheaders.remember_file(unlink_context, "/virtual/remove-failure.h")
+        assert.equal(1, #unlink_context.source_foreign_header_temporaries)
+        function unlink_strategy:unlink() return true end
+        assert.is_true(driver.close_resolver_context(unlink_context))
+        assert.is_nil(unlink_context.source_foreign_header_temporaries)
+        assert.is_nil(unlink_context.source_foreign_header_paths)
 
         local lstat_strategy = compiler_io.new_sync()
         function lstat_strategy:lstat(path)
@@ -1296,6 +1304,12 @@ describe("loader resolver ownership", function()
         assert.same({
             "/virtual/lstat-failure.h",
         }, lstat_context.source_foreign_header_temporaries)
+        ffiheaders.remember_file(lstat_context, "/virtual/lstat-failure.h")
+        assert.equal(1, #lstat_context.source_foreign_header_temporaries)
+        function lstat_strategy:lstat() return nil end
+        assert.is_true(driver.close_resolver_context(lstat_context))
+        assert.is_nil(lstat_context.source_foreign_header_temporaries)
+        assert.is_nil(lstat_context.source_foreign_header_paths)
     end)
 
     it("reports an owned resolver close failure after a successful body",
@@ -1557,6 +1571,36 @@ describe("generated C formatting", function()
         remove_tree(root)
     end)
 
+    it("keeps both module headers unchanged when either formatter fails", function()
+        local root = os.tmpname()
+        assert(os.remove(root))
+        assert(lfs.mkdir(root))
+        local header, ffi_header = root .. "/module.titan.h", root .. "/module.ffi.h"
+        local old_header = driver.FOREIGN_HEADER_MARKER .. "\n/* old declarations */\n"
+        local old_ffi = driver.FFI_HEADER_MARKER .. "\n/* old environment */\n"
+        write_file(header, old_header)
+        write_file(ffi_header, old_ffi)
+        local plan = { filename = header, ast = {},
+            contents = driver.FOREIGN_HEADER_MARKER .. "\n/* new declarations */\n",
+            ffi_header = { filename = ffi_header, marker = driver.FFI_HEADER_MARKER,
+                contents = driver.FFI_HEADER_MARKER .. "\n/* new environment */\n" } }
+        local calls = {}
+        driver.format_generated_file = function(path)
+            calls[#calls + 1] = path
+            if #calls == 2 then return nil, "second header formatting failed" end
+            return true
+        end
+        local ok, err = driver.write_foreign_header_plan(plan)
+        assert.is_nil(ok)
+        assert.equal("second header formatting failed", err)
+        assert.equal(old_header, assert(util.get_file_contents(header)))
+        assert.equal(old_ffi, assert(util.get_file_contents(ffi_header)))
+        assert.is_nil(plan.ast._ffi_header_prepared)
+        assert.is_nil(plan.ast._foreign_header_prepared)
+        for _, path in ipairs(calls) do assert.is_nil(lfs.symlinkattributes(path)) end
+        remove_tree(root)
+    end)
+
     it("publishes a generated header only after its staged copy formats",
     function()
         local root = os.tmpname() .. " formatter space"
@@ -1602,6 +1646,36 @@ describe("generated C formatting", function()
 end)
 
 describe("source foreign-header planning", function()
+    it("orders explicit source environments before every authored directive", function()
+        local function foreign(header)
+            return { _tag = "Ast.TopLevelForeignImport",
+                _include = { rendered = header } }
+        end
+        local ast = {
+            foreign('"/project/main.h"'),
+            { _tag = "Ast.TopLevelImport", _source_import = true,
+                _ffi_header = "/native/z.ffi.h" },
+            { _tag = "Ast.TopLevelImport", _ffi_header = "/native/ordinary.ffi.h" },
+            foreign("<limits.h>"),
+            { _tag = "Ast.TopLevelImport", _source_import = true,
+                _ffi_header = "/native/a.ffi.h" },
+            foreign('"/project/main.h"'),
+            { _tag = "Ast.TopLevelForeignImport", _ignore = true },
+        }
+        local contents = coder.generate_ffi_header("test", ast)
+        local includes = {}
+        for line in contents:gmatch("[^\n]+") do
+            if line:sub(1, 9) == "#include " then includes[#includes + 1] = line end
+        end
+        assert.same({ '#include "/native/z.ffi.h"', '#include "/native/a.ffi.h"',
+            '#include "/project/main.h"', '#include <limits.h>',
+            '#include "/project/main.h"' }, includes)
+        assert.not_equal(coder.generate_ffi_header("a.b", {}),
+            coder.generate_ffi_header("a_b", {}))
+        assert.not_equal(coder.generate_ffi_header("Case", {}),
+            coder.generate_ffi_header("case", {}))
+    end)
+
     it("plans dependency headers, writes owned outputs, and removes stale ones",
     function()
         local root = os.tmpname()
@@ -1653,7 +1727,9 @@ describe("source foreign-header planning", function()
         assert.equal(2, #plans)
         assert.same({ producer = 1, consumer = 1 }, generated)
         assert.equal(root .. "/producer.titan.h", import._foreign_header)
+        assert.equal(root .. "/producer.ffi.h", import._ffi_header)
         assert.truthy(plans[2].contents:find(import._foreign_header, 1, true))
+        assert.truthy(plans[2].ffi_header.contents:find(import._ffi_header, 1, true))
         assert.is_true(driver.write_foreign_header_plans(plans))
         assert.equal(plans[1].contents,
             producer_ast._foreign_header_contents)
@@ -1661,6 +1737,10 @@ describe("source foreign-header planning", function()
             consumer_ast._foreign_header_contents)
         assert.equal("file", lfs.attributes(root .. "/producer.titan.h", "mode"))
         assert.equal("file", lfs.attributes(root .. "/consumer.titan.h", "mode"))
+        assert.equal("file", lfs.attributes(root .. "/producer.ffi.h", "mode"))
+        assert.equal("file", lfs.attributes(root .. "/consumer.ffi.h", "mode"))
+        assert.equal(plans[1].ffi_header.contents, producer_ast._ffi_header_contents)
+        assert.is_true(consumer_ast._ffi_header_prepared)
 
         producer_ast[1]._ignore = true
         consumer_ast[2]._ignore = true
@@ -1669,6 +1749,10 @@ describe("source foreign-header planning", function()
         assert.is_true(driver.write_foreign_header_plans(stale))
         assert.is_nil(lfs.symlinkattributes(root .. "/producer.titan.h"))
         assert.is_nil(lfs.symlinkattributes(root .. "/consumer.titan.h"))
+        assert.equal("file", lfs.attributes(root .. "/producer.ffi.h", "mode"))
+        assert.equal("file", lfs.attributes(root .. "/consumer.ffi.h", "mode"))
+        assert.equal(root .. "/producer.ffi.h", import._ffi_header)
+        assert.is_nil(import._foreign_header)
         remove_tree(root)
     end)
 
@@ -1701,11 +1785,230 @@ describe("source foreign-header planning", function()
         ok, err = driver.validate_foreign_header_plan(plan)
         assert.is_nil(ok)
         assert.matches("refusing to overwrite user-owned", err, 1, true)
+
+        write_file(root .. "/plain.ffi.h", "/* user-owned C environment */\n")
+        local ffi_plan = driver.plan_foreign_header("plain", {}, root .. "/plain.titan")
+        ok, err = driver.validate_foreign_header_plan(ffi_plan)
+        assert.is_nil(ok)
+        assert.matches("refusing to overwrite user-owned", err, 1, true)
+        assert.matches("plain.ffi.h", err, 1, true)
+        remove_tree(root)
+    end)
+
+    it("uses finalized header paths for an already compiled source dependency", function()
+        local root = os.tmpname()
+        assert(os.remove(root))
+        assert(lfs.mkdir(root))
+        local import = { _tag = "Ast.TopLevelImport", modname = "dependency",
+            _source_import = true, _ffi_header = "/old/checking/dependency.ffi.h" }
+        local plans = assert(driver.plan_foreign_headers({ "dependency", "consumer" }, {
+            dependency = { ast = {}, compiled = root .. "/dependency.o",
+                filename = "/external/dependency.titan", native_output = root .. "/dependency.titan" },
+            consumer = { ast = { import }, filename = root .. "/consumer.titan" },
+        }))
+        assert.equal(1, #plans)
+        assert.equal(root .. "/dependency.ffi.h", import._ffi_header)
+        assert.falsy(plans[1].ffi_header.contents:find("/old/checking/", 1, true))
         remove_tree(root)
     end)
 end)
 
+describe("module checking header bundles", function()
+    local owners
+    before_each(function() owners = {} end)
+    after_each(function()
+        for _, owner in ipairs(owners) do assert.is_true(ffiheaders.close(owner)) end
+    end)
+    local function owner()
+        local value = { io = compiler_io.new_sync() }
+        owners[#owners + 1] = value
+        return value
+    end
+    local function foreign(header, search_inputs)
+        return { _tag = "Ast.TopLevelForeignImport", _include = {
+            rendered = header, c_header_search_inputs = search_inputs,
+        } }
+    end
+    local function source(descriptor)
+        return { _tag = "Ast.TopLevelImport", _source_import = true,
+            _ffi_header_descriptor = descriptor, _ffi_header = descriptor.filename }
+    end
+
+    it("keeps stable content identity across fresh owners and body changes", function()
+        local first_owner, second_owner = owner(), owner()
+        local observation = { path = "/project/include.h", kind = "file" }
+        local first_ast = { foreign('"/project/include.h"', { observation }) }
+        local first = assert(ffiheaders.prepare(first_owner, "pkg.main", first_ast,
+            "/project/pkg/main.titan"))
+        local second = assert(ffiheaders.prepare(second_owner, "pkg.main", {
+            foreign('"/project/include.h"', { { path = "/changed/observation" } }),
+            { _tag = "Ast.TopLevelFunc", name = "changed_body" },
+        }, "/project/pkg/main.titan"))
+        assert.not_equal(first.filename, second.filename)
+        assert.equal(first.digest, second.digest)
+        assert.equal(first.contents, second.contents)
+        assert.same({ observation }, first.search_inputs)
+        assert.equal(first, first_ast._ffi_header)
+        assert.equal(first.contents, assert(util.get_file_contents(first.filename)))
+        assert.falsy(first.contents:find(first.bundle_root, 1, true))
+        local other_origin = assert(ffiheaders.prepare(owner(), "pkg.main", first_ast,
+            "/other-project/pkg/main.titan"))
+        assert.not_equal(first.digest, other_origin.digest)
+        local changed = assert(ffiheaders.prepare(owner(), "pkg.main", {
+            foreign("<limits.h>"), foreign('"/project/include.h"'),
+        }, "/project/pkg/main.titan"))
+        assert.not_equal(first.digest, changed.digest)
+    end)
+
+    it("recreates real dependency trees after the original owner closes", function()
+        local original = owner()
+        local dependency = assert(ffiheaders.prepare(original, "shared.base", {
+            foreign("<stddef.h>"),
+        }, "/project/shared/base.titan"))
+        local first_consumer = assert(ffiheaders.prepare(original, "app.main", {
+            source(dependency), source(dependency), foreign("<limits.h>"),
+        }, "/project/app/main.titan"))
+        assert.equal(2, #first_consumer.dependencies)
+        assert.truthy(first_consumer.contents:find(
+            '#include "../shared/base.ffi.h"', 1, true))
+        assert.is_true(ffiheaders.close(original))
+        assert.is_nil(lfs.symlinkattributes(dependency.filename))
+
+        local replay_owner = owner()
+        local replay = assert(ffiheaders.materialize(replay_owner, first_consumer))
+        assert.equal(first_consumer.digest, replay.digest)
+        assert.equal(replay.dependencies[1], replay.dependencies[2])
+        assert.not_equal(dependency.filename, replay.dependencies[1].filename)
+        assert.equal(dependency.contents,
+            assert(util.get_file_contents(replay.dependencies[1].filename)))
+        assert.equal(replay.bundle_root, replay.dependencies[1].bundle_root)
+        local second_consumer = assert(ffiheaders.prepare(owner(), "app.main", {
+            source(dependency), source(dependency), foreign("<limits.h>"),
+        }, "/project/app/main.titan"))
+        assert.equal(first_consumer.digest, second_consumer.digest)
+    end)
+
+    it("retains every created file and directory through write cancellation", function()
+        local state = owner()
+        local strategy = state.io
+        local original_write = strategy.write_file
+        local cancelled = {}
+        function strategy:write_file(path, contents)
+            assert(original_write(self, path, contents))
+            error(cancelled)
+        end
+        local ok, err = pcall(ffiheaders.prepare, state, "nested.deep.module", {},
+            "/project/nested/deep/module.titan")
+        assert.is_false(ok)
+        assert.equal(cancelled, err)
+        local root = state.source_ffi_header_bundle
+        assert.equal("file", lfs.attributes(root .. "/nested/deep/module.ffi.h", "mode"))
+        assert.is_true(ffiheaders.close(state))
+        assert.is_nil(lfs.symlinkattributes(root))
+        assert.is_nil(state.source_foreign_header_temporaries)
+        assert.is_nil(state.source_ffi_header_directories)
+    end)
+
+    it("computes each environment digest once and retains it during reuse", function()
+        local sha256 = require "titan-compiler.sha256"
+        local original_hex, environment_hashes = sha256.hex, 0
+        sha256.hex = function(contents)
+            if contents:find("titan-module-ffi-v1", 1, true) == 1 then
+                environment_hashes = environment_hashes + 1
+            end
+            return original_hex(contents)
+        end
+        local ok, err = pcall(function()
+            local state = owner()
+            local base = assert(ffiheaders.prepare(state, "base", {}, "/project/base.titan"))
+            local middle = assert(ffiheaders.prepare(state, "middle", { source(base) },
+                "/project/middle.titan"))
+            local main = assert(ffiheaders.prepare(state, "main", { source(middle), source(base) },
+                "/project/main.titan"))
+            assert.equal(3, environment_hashes)
+            assert.equal(main, assert(ffiheaders.materialize(state, main)))
+            local replay = assert(ffiheaders.materialize(owner(), main))
+            assert.equal(main.digest, replay.digest)
+            assert.equal(replay.dependencies[2], replay.dependencies[1].dependencies[1])
+            for _ = 1, 3 do
+                local include = assert(cprobe.normalize_include_descriptor({
+                    original = main.logical_name, include_name = main.logical_name,
+                    include_kind = "quote", resolved = main.identity, generated_header = main,
+                }, { io = state.io }))
+                assert.equal(main, include.generated_header)
+            end
+            assert.equal(3, environment_hashes)
+        end)
+        sha256.hex = original_hex
+        assert.is_true(ok, err)
+    end)
+
+    it("preserves real C include nesting, diamonds, and dependency-first macro state", function()
+        local state = owner()
+        local function authored(contents)
+            local path = os.tmpname()
+            ffiheaders.remember_file(state, path)
+            write_file(path, contents)
+            return foreign('"' .. path .. '"')
+        end
+        local leaf = assert(ffiheaders.prepare(state, "shared.leaf", { authored([[
+            enum { bundle_include_depth = __INCLUDE_LEVEL__ };
+            #define BUNDLE_SEED 17
+        ]]) }, "/project/shared/leaf.titan"))
+        local left = assert(ffiheaders.prepare(state, "branch.left", { source(leaf) },
+            "/project/branch/left.titan"))
+        local right = assert(ffiheaders.prepare(state, "branch.right", { source(leaf) },
+            "/project/branch/right.titan"))
+        local main = assert(ffiheaders.prepare(state, "app.main", {
+            authored([[
+                #if BUNDLE_SEED != 17
+                #error source environments must precede own headers
+                #endif
+                #define BUNDLE_SELECTED 31
+            ]]),
+            source(left), source(right),
+            authored([[
+                #if BUNDLE_SELECTED != 31
+                #error authored headers must preserve source order
+                #endif
+                enum { combined_result = BUNDLE_SEED + BUNDLE_SELECTED };
+            ]]),
+        }, "/project/app/main.titan"))
+        local probe = os.tmpname()
+        ffiheaders.remember_file(state, probe)
+        write_file(probe, '#include "app/main.ffi.h"\n' .. [[
+            _Static_assert(bundle_include_depth == 4, "real include nesting");
+            _Static_assert(combined_result == 48, "final combined environment");
+        ]])
+        local args = assert(cdriver.split_shell_words(driver.CC))
+        for _, arg in ipairs({ "-fsyntax-only", "-x", "c", "-I", main.bundle_root, probe }) do
+            args[#args + 1] = arg
+        end
+        local result = state.io:run(args, { stderr_to_stdout = true })
+        assert.truthy(result.started and result.ok, result.diagnostic or result.stdout)
+    end)
+end)
+
 describe("standalone output ownership", function()
+    it("checks FFI headers against all native inputs and outputs", function()
+        local ok, err = driver.validate_program_output_paths({
+            { modname = "module", output = "module.titan", ffi_header = "program" },
+        }, "program", "entrypoint.c", {})
+        assert.is_nil(ok)
+        assert.matches("aliases output", err, 1, true)
+        ok, err = driver.validate_program_output_paths({
+            { modname = "module", output = "module.titan", ffi_header = "Module.ffi.h" },
+        }, "program", "entrypoint.c", { "module.ffi.h" })
+        assert.is_nil(ok)
+        assert.matches("aliases input", err, 1, true)
+        ok, err = driver.validate_program_output_paths({
+            { modname = "a", output = "a.titan", ffi_header = "same.h" },
+            { modname = "b", output = "b.titan", foreign_header = "same.h" },
+        }, "program", "entrypoint.c", {})
+        assert.is_nil(ok)
+        assert.matches("aliases output", err, 1, true)
+    end)
+
     it("rejects source and synthetic output collisions before compilation",
        function()
         local stems = {
@@ -2351,7 +2654,7 @@ describe("compiler module loader", function()
         -- An embedded semantic profile cannot stand in for native C tooling.
         local native_consumer = "embedded_native_consumer"
         write_file(source .. "/" .. native_consumer .. ".titan", [[
-            local native = foreign import "unavailable_native.h"
+            foreign import "unavailable_native.h"
             function answer(): integer return 42 end
         ]])
         ok, loaded, errors = loader(native_consumer)
@@ -3370,22 +3673,34 @@ describe("compiler module loader", function()
                 c_header_dependencies = {},
                 c_header_search_inputs = {},
             }))), "C header origin is not covered by the source interface")
-        reject(direct(with_type("source_manifest_bad_wrapper",
-            aggregate({
-                rendered = "\"bad-wrapper.h\"",
-                probe_wrapper = { name = "", contents = "" },
-            }))), "has an invalid source-foreign header wrapper")
-
-        local wrapped = direct(with_type("source_manifest_wrapped_origin",
-            aggregate({
-                rendered = "\"titan-source-foreign-test.h\"",
-                probe_wrapper = {
-                    name = "titan-source-foreign-test.h",
-                    contents = "generated interface",
-                },
-            })))
-        assert.is_string(sourceinterface.serialize(wrapped))
-
+        local function generated_origin(headers)
+            local owner = { io = compiler_io.new_sync() }
+            local ast = {}
+            for _, name in ipairs(headers or {}) do
+                ast[#ast + 1] = { _tag = "Ast.TopLevelForeignImport",
+                    _include = { rendered = "<" .. name .. ">" } }
+            end
+            local descriptor = assert(ffiheaders.prepare(owner,
+                "source_manifest_generated_origin", ast,
+                "/project/source_manifest_generated_origin.titan"))
+            assert.is_true(ffiheaders.close(owner))
+            return assert(cprobe.normalize_include_descriptor({
+                include_kind = "quote", include_name = descriptor.logical_name,
+                resolved = descriptor.identity, generated_header = descriptor,
+            }))
+        end
+        local function generated_manifest(origin)
+            return direct(with_type("source_manifest_generated_origin", aggregate(origin)))
+        end
+        local first_origin = generated_origin({ "first.h", "second.h" })
+        local first_manifest = assert(sourceinterface.serialize(generated_manifest(first_origin)))
+        -- A fresh temporary tree with identical logical contents keeps identity.
+        assert.equal(first_manifest, assert(sourceinterface.serialize(generated_manifest(
+            generated_origin({ "first.h", "second.h" })))))
+        -- The logical spelling stays fixed, so the bundle digest must distinguish
+        -- a changed environment when aggregate layout is omitted from the graph.
+        assert.not_equal(first_manifest, assert(sourceinterface.serialize(generated_manifest(
+            generated_origin({ "second.h", "first.h" })))))
         reject(direct(with_type("source_manifest_bad_descriptor", {})),
             "is not a type descriptor")
         reject(direct(with_type("source_manifest_unspellable_enum", {
@@ -4347,7 +4662,7 @@ end
         assert.truthy(closed, close_error)
     end)
 
-    it("cleans a source checking header when normalization is cancelled",
+    it("cleans a source checking header when its write is cancelled",
     function()
         local candidate = source_entry("provider")
         candidate.ast = {{
@@ -4357,14 +4672,15 @@ end
         candidate.source_manifest = source_manifest(candidate)
 
         local strategy = compiler_io.new_sync()
-        local ordinary_read_file = strategy.read_file
+        local ordinary_write_file = strategy.write_file
         local checking_header
-        function strategy:read_file(path)
-            if path:find(".titan.h.check.tmp.", 1, true) then
+        function strategy:write_file(path, contents)
+            local wrote, err = ordinary_write_file(self, path, contents)
+            if wrote and path:match("/provider[.]titan[.]h$") then
                 checking_header = path
                 error("simulated checking-header cancellation")
             end
-            return ordinary_read_file(self, path)
+            return wrote, err
         end
         local context = driver.new_resolver_context({ io = strategy })
         local original_generate_foreign_header =
@@ -5316,7 +5632,7 @@ end
         local function trace_generated_header(
                 requested, resolved, phase, outcome, cpu_ms, identity)
             if phase == "process_total" and
-               requested:find(".titan.h.check.tmp.", 1, true) then
+               requested:match("[.]titan[.]h$") then
                 parsed_generated_headers[#parsed_generated_headers + 1] = {
                     requested = requested,
                     resolved = resolved,
@@ -5334,9 +5650,9 @@ end
             write_file(relative_root .. "/a/provider.h",
                 "typedef int provider_int;\n")
             write_file(relative_root .. "/a/provider.titan", [[
-                local c = foreign import "provider.h"
+                foreign import "provider.h"
                 foreign function identity(
-                        input: c.provider_int): c.provider_int
+                        input: ffi.provider_int): ffi.provider_int
                     return input
                 end
             ]])
@@ -5371,7 +5687,7 @@ end
             assert.equal("/", old_header:sub(1, 1))
             assert.not_equal(public_header, old_header)
             assert.matches(
-                "provider[.]titan[.]h[.]check[.]tmp[.]", old_header)
+                "/a/provider[.]titan[.]h$", old_header)
             assert.equal("file", lfs.attributes(old_header, "mode"))
 
             local cached_ok, _, cached_errors, cached_info =

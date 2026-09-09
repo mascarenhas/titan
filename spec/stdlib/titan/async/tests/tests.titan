@@ -8,9 +8,9 @@ local task_support = import "support.async.titan"
 
 -- These narrow Lua/C boundaries build reachability probes and inspect raw
 -- traceback text without adding unrelated Titan standard-library imports.
-local lua = foreign import "lua.h"
-local ffi = foreign import "titan/ffi.h"
-local cstring = foreign import "string.h"
+foreign import "lua.h"
+foreign import "titan/ffi.h"
+foreign import "string.h"
 
 interface ReaderCloserShape
   function read(): string?

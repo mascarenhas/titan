@@ -208,10 +208,10 @@ jobs:
         id: regular-probe-cache
         uses: ubicloud/cache/restore@v4
         with:
-          path: .lua/var/cache/titan-probes/1
-          key: titan-probes-1-${{ runner.os }}-${{ runner.arch }}-test-linux-stdlib-${{ github.sha }}
+          path: .lua/var/cache/titan-probes/2
+          key: titan-probes-2-${{ runner.os }}-${{ runner.arch }}-test-linux-stdlib-${{ github.sha }}
           restore-keys: |
-            titan-probes-1-${{ runner.os }}-${{ runner.arch }}-test-linux-stdlib-
+            titan-probes-2-${{ runner.os }}-${{ runner.arch }}-test-linux-stdlib-
 
       - name: Build and install the rock
         # The dependency cache may contain the preceding commit's installed
@@ -310,7 +310,7 @@ jobs:
       - name: Save regular Linux C-probe results
         uses: ubicloud/cache/save@v4
         with:
-          path: .lua/var/cache/titan-probes/1
+          path: .lua/var/cache/titan-probes/2
           key: ${{ steps.regular-probe-cache.outputs.cache-primary-key }}
 
       # The prepared artifact was packed before the source-mode smoke, so this
@@ -543,10 +543,10 @@ jobs:
       - name: Restore macOS C-probe results
         uses: ubicloud/cache@v4
         with:
-          path: .lua/var/cache/titan-probes/1
-          key: titan-probes-1-${{ runner.os }}-${{ runner.arch }}-test-macos-${{ github.sha }}
+          path: .lua/var/cache/titan-probes/2
+          key: titan-probes-2-${{ runner.os }}-${{ runner.arch }}-test-macos-${{ github.sha }}
           restore-keys: |
-            titan-probes-1-${{ runner.os }}-${{ runner.arch }}-test-macos-
+            titan-probes-2-${{ runner.os }}-${{ runner.arch }}-test-macos-
 
       # Build and install the rock so the `titan` Lua support module (ltitanlib.c,
       # required by one coder spec via `require 'titan'`) is on the Lua path.
@@ -837,10 +837,10 @@ jobs:
       - name: Restore sanitizer C-probe results
         uses: ubicloud/cache@v4
         with:
-          path: .lua/var/cache/titan-probes/1
-          key: titan-probes-1-${{ runner.os }}-${{ runner.arch }}-sanitizer-${{ github.sha }}
+          path: .lua/var/cache/titan-probes/2
+          key: titan-probes-2-${{ runner.os }}-${{ runner.arch }}-sanitizer-${{ github.sha }}
           restore-keys: |
-            titan-probes-1-${{ runner.os }}-${{ runner.arch }}-sanitizer-
+            titan-probes-2-${{ runner.os }}-${{ runner.arch }}-sanitizer-
 
       - name: Build sanitizer-enabled Titan artifacts
         run: |

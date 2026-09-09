@@ -6,6 +6,7 @@ local c99 = require("c-parser.c99")
 local sha256 = require("titan-compiler.sha256")
 local compiler_io = require("titan-compiler.io")
 local cacheadapter = require("titan-compiler.cacheadapter")
+local version = require "titan-compiler.version"
 local parse_contents
 
 -- Standalone c-parser callers retain the ordinary synchronous behavior. The
@@ -1151,29 +1152,9 @@ local function forced_inputs(forced)
 end
 
 local function valid_forced_entry(entry, key)
-    if type(entry) ~= "table" or entry.owner ~= "titan-forced-preprocessor"
-       or entry.version ~= 1 or entry.key ~= key
-       or type(entry.forced) ~= "table" or type(entry.probed) ~= "table"
-       or type(entry.probed.incdirs) ~= "table" or type(entry.probed.defines) ~= "table"
-       or type(entry.probed.semantic_digest) ~= "string"
-       or type(entry.forced.manifest) ~= "string" then return false end
-    for _, name in ipairs({ "dependencies", "search_inputs", "output", "output_origins",
-                            "macro_changes", "scanned_defines", "incdirs", "base_defines" }) do
-        if type(entry.forced[name]) ~= "table" then return false end
-    end
-    for _, name in ipairs({ "dependencies", "search_inputs" }) do
-        local expected = name == "dependencies" and "file" or "search"
-        local inputs = entry.forced[name]
-        for _, input in ipairs(inputs) do
-            if type(input) ~= "table" or input.kind ~= expected
-               or type(input.path) ~= "string" or input.path:sub(1, 1) ~= "/"
-               or type(input.identity) ~= "string" or input.identity == "" then return false end
-        end
-        for key in next, inputs do
-            if math.type(key) ~= "integer" or key < 1 or key > #inputs then return false end
-        end
-    end
-    return true
+    return type(entry) == "table" and entry.owner == "titan-forced-preprocessor"
+       and entry.version == 1 and entry.abi == version.TITAN_ABI_VERSION
+       and entry.key == key
 end
 
 local function overlay_forced_inputs(forced, saved)
@@ -1213,7 +1194,8 @@ end
 
 local function encode_forced_entry(entry, adapter)
     return cpp.encode_graph({ owner = entry.owner, version = entry.version, key = entry.key,
-        forced = entry.forced, probed = entry.probed }, forced_graph_options(adapter))
+        abi = version.TITAN_ABI_VERSION, forced = entry.forced, probed = entry.probed },
+        forced_graph_options(adapter))
 end
 
 local function completed_forced_configuration(configuration)
@@ -1233,7 +1215,7 @@ local function completed_forced_configuration(configuration)
     local slot = "forced|" .. key
     local candidate = cache[slot]
     if not candidate and adapter then
-        local payload, saved = cacheadapter.get(adapter, "c-header-v1", key)
+        local payload, saved = cacheadapter.get(adapter, "c-header-v2", key)
         local decoded = payload and cpp.decode_graph(payload, forced_graph_options(adapter))
         local ok, valid = pcall(valid_forced_entry, decoded, key)
         if ok and valid then
@@ -1254,10 +1236,10 @@ local function completed_forced_configuration(configuration)
             cache[slot] = candidate
             if candidate.observations_changed and adapter then
                 local inputs = forced_inputs(candidate.forced)
-                local refreshed = cacheadapter.refresh_inputs(adapter, "c-header-v1", key, inputs)
+                local refreshed = cacheadapter.refresh_inputs(adapter, "c-header-v2", key, inputs)
                 if refreshed == nil and adapter.put then
                     local payload = encode_forced_entry(candidate, adapter)
-                    refreshed = payload and cacheadapter.put(adapter, "c-header-v1", key, payload, inputs)
+                    refreshed = payload and cacheadapter.put(adapter, "c-header-v2", key, payload, inputs)
                 end
                 if refreshed then candidate.observations_changed = nil end
             end
@@ -1292,7 +1274,7 @@ local function completed_forced_configuration(configuration)
     if adapter and adapter.put then
         local payload = encode_forced_entry(entry, adapter)
         if payload and cache[slot] == entry then
-            cacheadapter.put(adapter, "c-header-v1", key, payload, forced_inputs(scanned))
+            cacheadapter.put(adapter, "c-header-v2", key, payload, forced_inputs(scanned))
         end
     end
     return clone_graph(scanned), nil, probed

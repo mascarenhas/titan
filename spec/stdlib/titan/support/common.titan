@@ -1,8 +1,8 @@
 local test = import "test"
-local lua_api = foreign import "lua.h"
-local lua_aux = foreign import "lauxlib.h"
-local ffi = foreign import "titan/ffi.h"
-local cstring = foreign import "string.h"
+foreign import "lua.h"
+foreign import "lauxlib.h"
+foreign import "titan/ffi.h"
+foreign import "string.h"
 
 local type LuaCallable = (...: value) -> (...: value)
 local type CheckedAction = () -> ()
@@ -11,18 +11,18 @@ local type CheckedAction = () -> ()
 -- only to construct or inspect boundary values which Titan cannot spell
 -- directly; behavior assertions remain in Titan.
 local function lua_helper(source: string): value
-  local top = lua_api.lua_gettop(L)
-  defer lua_api.lua_settop(L, top)
-  if lua_api.lua_checkstack(L, 2) == 0 then
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 2) == 0 then
     raise "cannot reserve Lua stack for native test helper"
   end
-  local status = lua_aux.luaL_loadstring(L, source)
-  if status ~= lua_api.LUA_OK then
+  local status = ffi.luaL_loadstring(L, source)
+  if status ~= ffi.LUA_OK then
     local failure: value = ffi.lua_totvalue(L, -1)
     raise failure
   end
-  status = lua_api.lua_pcallk(L, 0, 1, 0, 0, nil)
-  if status ~= lua_api.LUA_OK then
+  status = ffi.lua_pcallk(L, 0, 1, 0, 0, nil)
+  if status ~= ffi.LUA_OK then
     local failure: value = ffi.lua_totvalue(L, -1)
     raise failure
   end
@@ -31,11 +31,11 @@ end
 
 local function error_text(failure: value): string
   local result = "<unprintable error>"
-  local top = lua_api.lua_gettop(L)
-  defer lua_api.lua_settop(L, top)
-  if lua_api.lua_checkstack(L, 2) ~= 0 then
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 2) ~= 0 then
     ffi.lua_pushtvalue(L, failure)
-    lua_aux.luaL_tolstring(L, -1, nil)
+    ffi.luaL_tolstring(L, -1, nil)
     local rendered: value = ffi.lua_totvalue(L, -1)
     if rendered is string then result = rendered as string end
   end
@@ -43,7 +43,7 @@ local function error_text(failure: value): string
 end
 
 local function contains(subject: string, fragment: string): boolean
-  return cstring.strstr(subject, fragment) ~= nil
+  return ffi.strstr(subject, fragment) ~= nil
 end
 
 

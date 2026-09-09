@@ -25,13 +25,14 @@ function checker.check(modname, ast, subject, filename, loader, options)
     loop_frames = {}
     local st = symtab.new(modname)
     st.cache_adapter = options.cache_adapter
+    st.prepare_ffi_header = options.prepare_ffi_header
+    st.filename = filename
     local previous_check_state = active_check_state
     active_check_state = st
     st.c_profile = nil
     st.foreign_includes = {}
     st.foreign_includes_version = 0
     st.supplemental_foreign_includes = {}
-    st.pending_foreign_redeclarations = {}
     st.target_profile_provider = options.target_profile_provider
     st.probe_service_provider = options.probe_service_provider
     if filename then
@@ -106,6 +107,14 @@ function checker.check(modname, ast, subject, filename, loader, options)
         if checked and close_call_ok and not closed then
             table.insert(errors,
                 "cannot clean the C probe service: " .. tostring(close_err))
+        end
+    end
+    if st.ffi_header_owner then
+        local ok, header_closed, header_error = pcall(ffiheaders.close, st.ffi_header_owner)
+        if checked and ok and not header_closed then
+            table.insert(errors, "cannot clean the C header bundle: " .. tostring(header_error))
+        elseif not ok and close_call_ok then
+            close_call_ok, closed = false, header_closed
         end
     end
     -- Every source check returns its frozen declared interface to a resolver

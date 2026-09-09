@@ -147,46 +147,55 @@ local SUPPORT_ROOT_ARTIFACTS = {
     "titan/test__test_entrypoint.o",
 }
 
+local function remove_artifact(path)
+    os.remove(path)
+    local stem = path:match("^(.*)[.]c$")
+    if stem then
+        os.remove(stem .. ".ffi.h")
+        os.remove(stem .. ".titan.h")
+    end
+end
+
 local function clean_nested()
-    for _, path in ipairs(NESTED_ARTIFACTS) do os.remove(path) end
+    for _, path in ipairs(NESTED_ARTIFACTS) do remove_artifact(path) end
     remove_tree("nested/tests__main.dSYM")
     lfs.rmdir("nested")
 end
 
 local function clean()
-    for _, path in ipairs(ARTIFACTS) do os.remove(path) end
-    for _, path in ipairs(COLLISION_ARTIFACTS) do os.remove(path) end
-    for _, path in ipairs(BOOTSTRAP_ARTIFACTS) do os.remove(path) end
-    for _, path in ipairs(STATIC_ARTIFACTS) do os.remove(path) end
-    for _, path in ipairs(SUPPORT_ROOT_ARTIFACTS) do os.remove(path) end
+    for _, path in ipairs(ARTIFACTS) do remove_artifact(path) end
+    for _, path in ipairs(COLLISION_ARTIFACTS) do remove_artifact(path) end
+    for _, path in ipairs(BOOTSTRAP_ARTIFACTS) do remove_artifact(path) end
+    for _, path in ipairs(STATIC_ARTIFACTS) do remove_artifact(path) end
+    for _, path in ipairs(SUPPORT_ROOT_ARTIFACTS) do remove_artifact(path) end
     clean_nested()
     remove_tree(ROOT .. ".dSYM")
     remove_tree(BOOTSTRAP .. ".dSYM")
     remove_tree(STATIC .. ".dSYM")
     remove_tree("titan/test.dSYM")
-    os.remove("test_runner_progname__entrypoint.c")
+    remove_artifact("test_runner_progname__entrypoint.c")
     os.remove("test_runner_progname__entrypoint.o")
     os.remove("test_runner_progname__main")
     remove_tree("test_runner_progname__main.dSYM")
     os.remove("test_runner_hierarchy.titan")
-    os.remove("test_runner_hierarchy.c")
+    remove_artifact("test_runner_hierarchy.c")
     os.remove("test_runner_hierarchy.o")
-    os.remove("test_runner_hierarchy__test_support.c")
+    remove_artifact("test_runner_hierarchy__test_support.c")
     os.remove("test_runner_hierarchy__test_support.o")
-    os.remove("test_runner_hierarchy__test_runner.c")
+    remove_artifact("test_runner_hierarchy__test_runner.c")
     os.remove("test_runner_hierarchy__test_runner.o")
-    os.remove("test_runner_hierarchy__test_entrypoint.c")
+    remove_artifact("test_runner_hierarchy__test_entrypoint.c")
     os.remove("test_runner_hierarchy__test_entrypoint.o")
     os.remove("test_runner_hierarchy/child.titan")
-    os.remove("test_runner_hierarchy/child.c")
+    remove_artifact("test_runner_hierarchy/child.c")
     os.remove("test_runner_hierarchy/child.o")
     lfs.rmdir("test_runner_hierarchy")
     os.remove("url")
-    os.remove("url__test_support.c")
+    remove_artifact("url__test_support.c")
     os.remove("url__test_support.o")
-    os.remove("url__test_runner.c")
+    remove_artifact("url__test_runner.c")
     os.remove("url__test_runner.o")
-    os.remove("url__test_entrypoint.c")
+    remove_artifact("url__test_entrypoint.c")
     os.remove("url__test_entrypoint.o")
     remove_tree("url.dSYM")
 end

@@ -227,11 +227,11 @@ describe("type-relation soundness (checker)", function()
     it("does not lift C numeric conversions through Arrays", function()
         with_header("typedef double ffi_double;\n", function(header)
             assert_rejected([[
-            local c = foreign import "]] .. header .. [["
+            foreign import "]] .. header .. [["
 
             function bridge(): integer
                 local source: {float} = {2.0}
-                local middle: {c.ffi_double} = source
+                local middle: {ffi.ffi_double} = source
                 local final: {integer} = middle
                 return final[1]
             end
@@ -428,17 +428,17 @@ describe("type-relation soundness (checker)", function()
     it("admits C scalar Array and Map reads for complete lowering", function()
         with_header("typedef int ffi_int;\n", function(header)
             local errors = check_errs([[
-            local c = foreign import "]] .. header .. [["
+            foreign import "]] .. header .. [["
 
             function read_array(): integer
-                local one = 1 as c.ffi_int
-                local xs: {c.ffi_int} = {one}
+                local one = 1 as ffi.ffi_int
+                local xs: {ffi.ffi_int} = {one}
                 return xs[1]
             end
 
             function read_map(): integer
-                local one = 1 as c.ffi_int
-                local map: {string: c.ffi_int} = {
+                local one = 1 as ffi.ffi_int
+                local map: {string: ffi.ffi_int} = {
                     ["one"] = one
                 }
                 return map["one"]
@@ -451,26 +451,26 @@ describe("type-relation soundness (checker)", function()
     it("keeps raw C pointers out of implicit and Array dynamic paths", function()
         with_header("typedef int ffi_int;\n", function(header)
             local errors = check_errs([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function implicit(v: value): nil
-                    local pointer: *c.ffi_int = v
+                    local pointer: *ffi.ffi_int = v
                 end
 
                 local function compare(
-                    pointer: *c.ffi_int,
+                    pointer: *ffi.ffi_int,
                     dynamic: value
                 ): boolean
                     return pointer == dynamic
                 end
 
                 local function construct(
-                    pointer: *c.ffi_int
-                ): {*c.ffi_int}
+                    pointer: *ffi.ffi_int
+                ): {*ffi.ffi_int}
                     return {pointer}
                 end
 
-                local function raw(pointer: *c.ffi_int): nil
+                local function raw(pointer: *ffi.ffi_int): nil
                 end
 
                 local function expose(): value
@@ -489,16 +489,16 @@ describe("type-relation soundness (checker)", function()
     it("rejects raw C pointer Array and Map observations statically", function()
         with_header("typedef int ffi_int;\n", function(header)
             local errors = check_errs([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function read_array(
-                    pointers: {*c.ffi_int}
+                    pointers: {*ffi.ffi_int}
                 )
                     local pointer = pointers[1]
                 end
 
                 local function read_map(
-                    pointers: {string: *c.ffi_int}
+                    pointers: {string: *ffi.ffi_int}
                 )
                     local pointer = pointers["one"]
                 end
@@ -512,19 +512,19 @@ describe("type-relation soundness (checker)", function()
     it("allows raw C pointer Array and Map write-only lvalues", function()
         with_header("typedef int ffi_int;\n", function(header)
             local errors = check_errs([[
-            local c = foreign import "]] .. header .. [["
+            foreign import "]] .. header .. [["
 
             local function write_array(
-                pointers: {*c.ffi_int},
-                pointer: *c.ffi_int
+                pointers: {*ffi.ffi_int},
+                pointer: *ffi.ffi_int
             )
                 pointers[1] = pointer
             end
 
             local function write_map(
-                pointer: *c.ffi_int
+                pointer: *ffi.ffi_int
             )
-                local pointers: {string: *c.ffi_int} = {
+                local pointers: {string: *ffi.ffi_int} = {
                     ["one"] = pointer,
                 }
                 pointers["two"] = pointer

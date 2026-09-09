@@ -217,7 +217,7 @@ For example, the extension source starts with both imports:
 
 ```titan
 local runtime = import "uv"
-local uv = foreign import "uv.h"
+foreign import "uv.h"
 ```
 
 This Titan-side bundled contract covers ordinary function calls, whose
@@ -395,7 +395,7 @@ from `package.cpath`; override it with `TITAN_PATH_0_6` or `TITAN_PATH`.
 
 Titan caches C-FFI probe results by their complete, unpreprocessed C source.
 Both successful and rejected probes are remembered. The cache does not track
-compiler options or header changes; clear `<prefix>/var/cache/titan-probes/1`
+compiler options or header changes; clear `<prefix>/var/cache/titan-probes/2`
 if results appear stale, or set `TITAN_PROBE_CACHE_DISABLE=1` to bypass
 persistent reuse. Generated C is compiled normally.
 

@@ -38,11 +38,11 @@ describe("named file-scope C tags", function()
             union Cell { int count; double number; };
         ]], function(header)
             local ok, err, ast = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
             ]])
             assert.truthy(ok, err)
 
-            local cmod = ast[1]._type
+            local cmod = ast._ffi_namespace._type
             assert.equal("Type.CStruct",
                 cmod.type_members.Item._tag)
             assert.equal("Item",
@@ -71,11 +71,11 @@ describe("named file-scope C tags", function()
         it("gives a syntactic same-name typedef precedence", function()
             with_header(source, function(header)
                 local ok, err, ast = run_checker([[
-                    local c = foreign import "]] .. header .. [["
+                    foreign import "]] .. header .. [["
                 ]])
                 assert.truthy(ok, err)
 
-                local item = ast[1]._type.type_members.Item
+                local item = ast._ffi_namespace._type.type_members.Item
                 if source:match("_Complex", 1, true) then
                     assert.is_nil(item)
                 else
@@ -92,19 +92,19 @@ describe("named file-scope C tags", function()
             struct PointerOnly *pointer_value;
         ]], function(header)
             local ok, err, ast = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
-                local function forward(p: *c.Forward): *c.ForwardRef
+                local function forward(p: *ffi.Forward): *ffi.ForwardRef
                     return p
                 end
 
-                local function pointer(): *c.PointerOnly
-                    return c.pointer_value
+                local function pointer(): *ffi.PointerOnly
+                    return ffi.pointer_value
                 end
             ]])
             assert.truthy(ok, err)
 
-            local aliases = ast[1]._type.type_members
+            local aliases = ast._ffi_namespace._type.type_members
             assert.equal("Type.CStruct", aliases.Forward._tag)
             assert.equal("Type.CTypedef", aliases.ForwardRef._tag)
             assert.equal(aliases.Forward,
@@ -120,11 +120,11 @@ describe("named file-scope C tags", function()
             extern int consume(struct PrototypeOnly *value);
         ]], function(header)
             local ok, err, ast = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
             ]])
             assert.truthy(ok, err)
 
-            local aliases = ast[1]._type.type_members
+            local aliases = ast._ffi_namespace._type.type_members
             assert.is_nil(aliases.Choice)
             assert.is_nil(aliases.PrototypeOnly)
         end)
@@ -140,22 +140,22 @@ describe("named file-scope C tags", function()
             }
         ]], function(header)
             local ok, err, ast = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function call_stat(): integer
-                    return c.stat() as integer
+                    return ffi.stat() as integer
                 end
 
                 local function read_field(): integer
-                    local result: c.stat = c.make_stat()
+                    local result: ffi.stat = ffi.make_stat()
                     return result.new as integer
                 end
             ]])
             assert.truthy(ok, err)
             assert.equal("Type.CStruct",
-                ast[1]._type.type_members.stat._tag)
+                ast._ffi_namespace._type.type_members.stat._tag)
             assert.equal("Type.ModuleMember",
-                ast[1]._type.members.stat._tag)
+                ast._ffi_namespace._type.members.stat._tag)
         end)
     end)
 
@@ -166,17 +166,17 @@ describe("named file-scope C tags", function()
             extern int external_stat(void);
         ]], function(header)
             local ok, err, ast = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function call_external_stat(): integer
-                    return c.external_stat() as integer
+                    return ffi.external_stat() as integer
                 end
             ]])
             assert.truthy(ok, err)
             assert.equal("Type.CStruct",
-                ast[1]._type.type_members.external_stat._tag)
+                ast._ffi_namespace._type.type_members.external_stat._tag)
             assert.equal("Type.ModuleMember",
-                ast[1]._type.members.external_stat._tag)
+                ast._ffi_namespace._type.members.external_stat._tag)
         end)
     end)
 
@@ -186,10 +186,10 @@ describe("named file-scope C tags", function()
             static int stat(void) { return 9; }
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function bad()
-                    local result = c.stat.new()
+                    local result = ffi.stat.new()
                 end
             ]])
             assert.falsy(ok)
@@ -215,28 +215,28 @@ describe("named file-scope C tags", function()
             #define macro_name 13
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function real_fields(): integer
-                    return c.object_name.new as integer
-                        + c.object_name.new_array as integer
-                        + c.object_name.alignof as integer
+                    return ffi.object_name.new as integer
+                        + ffi.object_name.new_array as integer
+                        + ffi.object_name.alignof as integer
                 end
             ]])
             assert.truthy(ok, err)
 
             for _, collided in ipairs({
-                { expression = "c.int_name.new()",
+                { expression = "ffi.int_name.new()",
                   diagnostic = "int_name%.new" },
-                { expression = "c.int_name.new_array(1)",
+                { expression = "ffi.int_name.new_array(1)",
                   diagnostic = "int_name%.new_array" },
-                { expression = "c.enum_name.sizeof",
+                { expression = "ffi.enum_name.sizeof",
                   diagnostic = "enum_name%.sizeof" },
-                { expression = "c.macro_name.alignof",
+                { expression = "ffi.macro_name.alignof",
                   diagnostic = "macro_name%.alignof" },
             }) do
                 ok, err = run_checker([[
-                    local c = foreign import "]] .. header .. [["
+                    foreign import "]] .. header .. [["
                     local function bad()
                         local result = ]] .. collided.expression
                     .. "\n                    end\n")
@@ -255,10 +255,10 @@ describe("named file-scope C tags", function()
             struct Forward;
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 local function identity(
-                    pointer: *c.Forward): *c.Forward
+                    pointer: *ffi.Forward): *ffi.Forward
                     return pointer
                 end
             ]])
@@ -270,7 +270,7 @@ describe("named file-scope C tags", function()
         {
             name = "parameter",
             code = [[
-                local function bad(item: c.Forward)
+                local function bad(item: ffi.Forward)
                 end
             ]],
             diagnostic = "parameter 'item'",
@@ -278,8 +278,8 @@ describe("named file-scope C tags", function()
         {
             name = "return",
             code = [[
-                local function bad(): c.Forward
-                    return c.impossible()
+                local function bad(): ffi.Forward
+                    return ffi.impossible()
                 end
             ]],
             diagnostic = "return type 1",
@@ -288,7 +288,7 @@ describe("named file-scope C tags", function()
             name = "initialized local",
             code = [[
                 local function bad()
-                    local item: c.Forward = c.impossible()
+                    local item: ffi.Forward = ffi.impossible()
                 end
             ]],
             diagnostic = "declaration of local variable 'item'",
@@ -296,8 +296,8 @@ describe("named file-scope C tags", function()
         {
             name = "cast target",
             code = [[
-                local function bad(pointer: *c.Forward)
-                    local item = pointer as c.Forward
+                local function bad(pointer: *ffi.Forward)
+                    local item = pointer as ffi.Forward
                 end
             ]],
             diagnostic = "by%-value C cast target",
@@ -305,7 +305,7 @@ describe("named file-scope C tags", function()
         {
             name = "field access",
             code = [[
-                local function bad(pointer: *c.Forward): integer
+                local function bad(pointer: *ffi.Forward): integer
                     return pointer.count as integer
                 end
             ]],
@@ -314,14 +314,14 @@ describe("named file-scope C tags", function()
         {
             name = "sizeof",
             code = [[
-                local item_size = c.Forward.sizeof
+                local item_size = ffi.Forward.sizeof
             ]],
             diagnostic = "C pseudo%-member '%.sizeof'",
         },
         {
             name = "alignof",
             code = [[
-                local item_alignment = c.Forward.alignof
+                local item_alignment = ffi.Forward.alignof
             ]],
             diagnostic = "C pseudo%-member '%.alignof'",
         },
@@ -329,7 +329,7 @@ describe("named file-scope C tags", function()
             name = "allocation",
             code = [[
                 local function bad()
-                    local item = c.Forward.new()
+                    local item = ffi.Forward.new()
                 end
             ]],
             diagnostic = "cannot allocate incomplete C struct",
@@ -342,7 +342,7 @@ describe("named file-scope C tags", function()
                 extern struct Forward impossible(void);
             ]], function(header)
                 local ok, err = run_checker(
-                    'local c = foreign import "' .. header .. '"\n'
+                    "foreign import \"" .. header .. '"\n'
                     .. use.code)
                 assert.falsy(ok)
                 assert.matches(use.diagnostic, err)
@@ -352,7 +352,7 @@ describe("named file-scope C tags", function()
         end)
     end
 
-    it("keeps later completion hidden from an earlier module variable",
+    it("uses later C completion in an earlier module variable",
     function()
         with_header([[
             struct Shared;
@@ -362,23 +362,21 @@ describe("named file-scope C tags", function()
                 struct Shared { int count; };
             ]], function(definition_header)
                 local ok, err = run_checker([[
-                    local before = foreign import "]]
+                    foreign import "]]
                     .. forward_header .. [["
-                    local item: before.Shared = before.make_shared()
-                    local after = foreign import "]]
+                    local item: ffi.Shared = ffi.make_shared()
+                    foreign import "]]
                     .. definition_header .. [["
                 ]])
                 assert.falsy(ok)
-                assert.matches(
-                    "declaration of module variable 'item'", err)
-                assert.matches(
-                    "incomplete or not yet visible", err, 1, true)
+                assert.matches("has no TValue representation", err, 1, true)
+                assert.falsy(err:find("incomplete", 1, true))
             end)
         end)
     end)
 
     for _, member in ipairs({ "sizeof", "alignof" }) do
-        it("keeps later completion hidden from an earlier ." .. member,
+        it("uses later C completion in an earlier ." .. member,
         function()
             with_header([[
                 struct Shared;
@@ -387,17 +385,13 @@ describe("named file-scope C tags", function()
                     struct Shared { int count; };
                 ]], function(definition_header)
                     local ok, err = run_checker(
-                        'local before = foreign import "'
+                        "foreign import \""
                         .. forward_header .. '"\n'
-                        .. "local metric = before.Shared."
+                        .. "local metric = ffi.Shared."
                         .. member .. "\n"
-                        .. 'local after = foreign import "'
+                        .. "foreign import \""
                         .. definition_header .. '"\n')
-                    assert.falsy(ok)
-                    assert.matches(
-                        "C pseudo%-member '%." .. member .. "'", err)
-                    assert.matches(
-                        "incomplete or not yet visible", err, 1, true)
+                    assert.truthy(ok, err)
                 end)
             end)
         end)
@@ -415,19 +409,19 @@ describe("named file-scope C tags", function()
                 }
             ]], function(definition_header)
                 local ok, err, ast = run_checker([[
-                    local before = foreign import "]] .. forward_header .. [["
-                    local after = foreign import "]] .. definition_header .. [["
+                    foreign import "]] .. forward_header .. [["
+                    foreign import "]] .. definition_header .. [["
 
                     local function read(): integer
-                        local item: before.Shared = after.make_shared()
+                        local item: ffi.Shared = ffi.make_shared()
                         return item.count as integer
                     end
                 ]])
                 assert.truthy(ok, err)
-                assert.equal(ast[1]._type.type_members.Shared,
-                    ast[2]._type.type_members.Shared)
+                assert.equal(ast._ffi_namespace._type.type_members.Shared,
+                    ast._ffi_namespace._type.type_members.Shared)
                 assert.is_true(
-                    ast[1]._type.type_members.Shared.complete)
+                    ast._ffi_namespace._type.type_members.Shared.complete)
             end)
         end)
     end)
@@ -448,28 +442,28 @@ describe("named file-scope C tags", function()
                         struct PriorImport *right);
                 ]], function(consumer_header)
                     local ok, err, ast = run_checker([[
-                        local same = foreign import "]]
+                        foreign import "]]
                         .. same_header .. [["
-                        local prior = foreign import "]]
+                        foreign import "]]
                         .. prior_header .. [["
-                        local consumer = foreign import "]]
+                        foreign import "]]
                         .. consumer_header .. [["
                     ]])
                     assert.truthy(ok, err)
 
                     local same_type =
-                        ast[1]._type.type_members.SameHeader
+                        ast._ffi_namespace._type.type_members.SameHeader
                     local same_fn =
-                        ast[1]._type.members.consume_same.type
+                        ast._ffi_namespace._type.members.consume_same.type
                     assert.equal(same_type,
                         same_fn.params[1].pointee)
                     assert.equal(same_type,
                         same_fn.params[2].pointee)
 
                     local prior_type =
-                        ast[2]._type.type_members.PriorImport
+                        ast._ffi_namespace._type.type_members.PriorImport
                     local prior_fn =
-                        ast[3]._type.members.consume_prior.type
+                        ast._ffi_namespace._type.members.consume_prior.type
                     assert.equal(prior_type,
                         prior_fn.params[1].pointee)
                     assert.equal(prior_type,
@@ -490,20 +484,20 @@ describe("named file-scope C tags", function()
                 struct Later { int value; };
             ]], function(later_header)
                 local ok, err, ast = run_checker([[
-                    local consumer = foreign import "]]
+                    foreign import "]]
                     .. consumer_header .. [["
-                    local later = foreign import "]]
+                    foreign import "]]
                     .. later_header .. [["
                 ]])
                 assert.truthy(ok, err)
 
                 local consume =
-                    ast[1]._type.members.consume_later.type
+                    ast._ffi_namespace._type.members.consume_later.type
                 local local_tag = consume.params[1].pointee
                 assert.equal(local_tag,
                     consume.params[2].pointee)
                 assert.not_equal(local_tag,
-                    ast[2]._type.type_members.Later)
+                    ast._ffi_namespace._type.type_members.Later)
             end)
         end)
     end)
@@ -516,14 +510,13 @@ describe("named file-scope C tags", function()
                 extern void consume(union Shared *value);
             ]], function(union_header)
                 local ok, err = run_checker([[
-                    local first = foreign import "]] .. struct_header .. [["
-                    local second = foreign import "]] .. union_header .. [["
+                    foreign import "]] .. struct_header .. [["
+                    foreign import "]] .. union_header .. [["
                 ]])
                 assert.falsy(ok)
                 assert.matches(
                     "conflicting C tag kinds for 'Shared'", err, 1, true)
-                assert.matches(struct_header, err, 1, true)
-                assert.matches(union_header, err, 1, true)
+                assert.matches("test.ffi.h", err, 1, true)
                 assert.matches("struct", err, 1, true)
                 assert.matches("union", err, 1, true)
             end)
@@ -538,10 +531,10 @@ describe("named file-scope C tags", function()
             };
         ]], function(header)
             local ok, err, ast = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
             ]])
             assert.truthy(ok, err)
-            local cmod = ast[1]._type
+            local cmod = ast._ffi_namespace._type
             assert.equal("Type.CStruct",
                 cmod.type_members.Callbacks._tag)
             assert.is_nil(cmod.type_members.Local)
@@ -557,9 +550,9 @@ describe("named file-scope C tags", function()
             };
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
-                local packet_size = c.Packet.sizeof
-                local packet_alignment = c.Packet.alignof
+                foreign import "]] .. header .. [["
+                local packet_size = ffi.Packet.sizeof
+                local packet_alignment = ffi.Packet.alignof
             ]])
             assert.truthy(ok, err)
         end)

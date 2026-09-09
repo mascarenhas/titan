@@ -60,7 +60,7 @@ checkvar = util.make_visitor({
                 local tag = decl._tag
                 local allowed = tag == "Ast.Decl"
                     or tag == "Ast.TopLevelForeignFunc"
-                    or tag == "Ast.TopLevelForeignImport"
+                    or tag == "Checker.ForeignNamespace"
                     or (tag == "Ast.TopLevelImport" and decl._source_import)
                 if not allowed then
                     node._type = invalid(errors, node.loc,

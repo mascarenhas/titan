@@ -1,21 +1,21 @@
-local sqlnative = foreign import "native.h"
-local sqlc = foreign import "sqlite3.h"
-local sqlstdlib = foreign import "stdlib.h"
-local sqlstring = foreign import "string.h"
+foreign import "native.h"
+foreign import "sqlite3.h"
+foreign import "stdlib.h"
+foreign import "string.h"
 
 -- Native byte copies always have an additional NUL byte. BLOB length remains
 -- explicit, and even an empty BLOB has a non-NULL address at the bind boundary.
 foreign function sqlite_copy_bytes(source: const *void,
-                                   length: sqlnative.size_t): *char
+                                   length: ffi.size_t): *char
   if length + 1 == 0 then return nil end
-  local copy = sqlstdlib.malloc(length + 1) as *char
+  local copy = ffi.malloc(length + 1) as *char
   if copy == nil then return nil end
-  if length > 0 then sqlstring.memcpy(copy, source, length) end
+  if length > 0 then ffi.memcpy(copy, source, length) end
   (copy + length)[0] = 0 as char
   return copy
 end
 
-foreign function sqlite_wrapper_error(packet: *sqlnative.TitanSqlitePacket,
+foreign function sqlite_wrapper_error(packet: *ffi.TitanSqlitePacket,
                                       message: const *char)
   if packet.failed ~= 0 then return end
   packet.failed = 1
@@ -26,37 +26,37 @@ end
 
 -- Capture the original status and connection diagnostic before reset/finalize
 -- can replace them. Allocation failure must never replace that original code.
-foreign function sqlite_capture_error(packet: *sqlnative.TitanSqlitePacket,
+foreign function sqlite_capture_error(packet: *ffi.TitanSqlitePacket,
                                       status: int)
   if packet.failed ~= 0 then return end
   packet.failed = 1
   packet.code = status & 255
   packet.extended_code = status
-  local message = sqlc.sqlite3_errstr(status)
+  local message = ffi.sqlite3_errstr(status)
   if packet.db ~= nil then
-    local extended = sqlc.sqlite3_extended_errcode(packet.db)
+    local extended = ffi.sqlite3_extended_errcode(packet.db)
     if extended & 255 == packet.code then
       packet.extended_code = extended
-      message = sqlc.sqlite3_errmsg(packet.db)
+      message = ffi.sqlite3_errmsg(packet.db)
     end
   end
   packet.fallback_message = "SQLite error (diagnostic allocation failed)"
   if message ~= nil then
-    packet.message = sqlite_copy_bytes(message, sqlstring.strlen(message))
+    packet.message = sqlite_copy_bytes(message, ffi.strlen(message))
   end
 end
 
-foreign function sqlite_copy_error(packet: *sqlnative.TitanSqlitePacket)
+foreign function sqlite_copy_error(packet: *ffi.TitanSqlitePacket)
   if packet.failed ~= 0 then return end
   packet.failed = 1
-  packet.code = sqlc.SQLITE_NOMEM
-  packet.extended_code = sqlc.SQLITE_NOMEM
+  packet.code = ffi.SQLITE_NOMEM
+  packet.extended_code = ffi.SQLITE_NOMEM
   packet.fallback_message = "out of memory copying SQLite result"
 end
 
-foreign function sqlite_capture_cleanup(packet: *sqlnative.TitanSqlitePacket,
+foreign function sqlite_capture_cleanup(packet: *ffi.TitanSqlitePacket,
                                         status: int)
-  if status == sqlc.SQLITE_OK then return end
+  if status == ffi.SQLITE_OK then return end
   if packet.failed == 0 then
     sqlite_capture_error(packet, status)
     return
@@ -64,32 +64,32 @@ foreign function sqlite_capture_cleanup(packet: *sqlnative.TitanSqlitePacket,
   if packet.cleanup_code ~= 0 then return end
   packet.cleanup_code = status & 255
   packet.cleanup_extended_code = status
-  local message = sqlc.sqlite3_errstr(status)
+  local message = ffi.sqlite3_errstr(status)
   if packet.db ~= nil then
-    local extended = sqlc.sqlite3_extended_errcode(packet.db)
+    local extended = ffi.sqlite3_extended_errcode(packet.db)
     if extended & 255 == packet.cleanup_code then
       packet.cleanup_extended_code = extended
-      message = sqlc.sqlite3_errmsg(packet.db)
+      message = ffi.sqlite3_errmsg(packet.db)
     end
   end
   if message ~= nil then
-    packet.cleanup_message = sqlite_copy_bytes(message, sqlstring.strlen(message))
+    packet.cleanup_message = sqlite_copy_bytes(message, ffi.strlen(message))
   end
 end
 
-foreign function sqlite_reset_statement(packet: *sqlnative.TitanSqlitePacket)
-  local status = sqlc.sqlite3_reset(packet.stmt)
+foreign function sqlite_reset_statement(packet: *ffi.TitanSqlitePacket)
+  local status = ffi.sqlite3_reset(packet.stmt)
   sqlite_capture_cleanup(packet, status)
-  status = sqlc.sqlite3_clear_bindings(packet.stmt)
+  status = ffi.sqlite3_clear_bindings(packet.stmt)
   sqlite_capture_cleanup(packet, status)
   -- Reset retires execution even if it reports the prior step's failure.
   packet.needs_reset = 0
 end
 
-foreign function sqlite_bind_arguments(packet: *sqlnative.TitanSqlitePacket)
+foreign function sqlite_bind_arguments(packet: *ffi.TitanSqlitePacket)
   sqlite_reset_statement(packet)
   if packet.failed ~= 0 then return end
-  local count = sqlc.sqlite3_bind_parameter_count(packet.stmt)
+  local count = ffi.sqlite3_bind_parameter_count(packet.stmt)
   if packet.argument_count ~= count then
     sqlite_wrapper_error(packet, "argument count does not match SQL parameter count")
     return
@@ -99,25 +99,25 @@ foreign function sqlite_bind_arguments(packet: *sqlnative.TitanSqlitePacket)
   while index < count do
     local cell = packet.arguments + index
     local position = index + 1
-    local status: int = sqlc.SQLITE_OK
-    if cell.kind == sqlc.SQLITE_NULL then
-      status = sqlc.sqlite3_bind_null(packet.stmt, position)
-    elseif cell.kind == sqlc.SQLITE_INTEGER then
-      status = sqlc.sqlite3_bind_int64(packet.stmt, position, cell.integer_value)
-    elseif cell.kind == sqlc.SQLITE_FLOAT then
-      status = sqlc.sqlite3_bind_double(packet.stmt, position, cell.float_value)
-    elseif cell.kind == sqlc.SQLITE_TEXT then
-      status = sqlc.sqlite3_bind_text64(packet.stmt, position, cell.bytes,
-          cell.length as sqlc.sqlite3_uint64, sqlc.SQLITE_TRANSIENT,
-          sqlc.SQLITE_UTF8 as unsigned char)
-    elseif cell.kind == sqlc.SQLITE_BLOB then
-      status = sqlc.sqlite3_bind_blob64(packet.stmt, position, cell.bytes,
-          cell.length as sqlc.sqlite3_uint64, sqlc.SQLITE_TRANSIENT)
+    local status: int = ffi.SQLITE_OK
+    if cell.kind == ffi.SQLITE_NULL then
+      status = ffi.sqlite3_bind_null(packet.stmt, position)
+    elseif cell.kind == ffi.SQLITE_INTEGER then
+      status = ffi.sqlite3_bind_int64(packet.stmt, position, cell.integer_value)
+    elseif cell.kind == ffi.SQLITE_FLOAT then
+      status = ffi.sqlite3_bind_double(packet.stmt, position, cell.float_value)
+    elseif cell.kind == ffi.SQLITE_TEXT then
+      status = ffi.sqlite3_bind_text64(packet.stmt, position, cell.bytes,
+          cell.length as ffi.sqlite3_uint64, ffi.SQLITE_TRANSIENT,
+          ffi.SQLITE_UTF8 as unsigned char)
+    elseif cell.kind == ffi.SQLITE_BLOB then
+      status = ffi.sqlite3_bind_blob64(packet.stmt, position, cell.bytes,
+          cell.length as ffi.sqlite3_uint64, ffi.SQLITE_TRANSIENT)
     else
       sqlite_wrapper_error(packet, "invalid native SQL parameter kind")
       return
     end
-    if status ~= sqlc.SQLITE_OK then
+    if status ~= ffi.SQLITE_OK then
       sqlite_capture_error(packet, status)
       return
     end
@@ -125,47 +125,47 @@ foreign function sqlite_bind_arguments(packet: *sqlnative.TitanSqlitePacket)
   end
 end
 
-foreign function sqlite_copy_columns(packet: *sqlnative.TitanSqlitePacket)
-  packet.column_count = sqlc.sqlite3_column_count(packet.stmt)
+foreign function sqlite_copy_columns(packet: *ffi.TitanSqlitePacket)
+  packet.column_count = ffi.sqlite3_column_count(packet.stmt)
   if packet.column_count == 0 then return end
-  packet.columns = sqlstdlib.calloc(packet.column_count as sqlstdlib.size_t,
-                                    sqlnative.TitanSqliteColumn.sizeof)
+  packet.columns = ffi.calloc(packet.column_count as ffi.size_t,
+                                    ffi.TitanSqliteColumn.sizeof)
   if packet.columns == nil then
     sqlite_copy_error(packet)
     return
   end
   local index: int = 0
   while index < packet.column_count do
-    local name = sqlc.sqlite3_column_name(packet.stmt, index)
+    local name = ffi.sqlite3_column_name(packet.stmt, index)
     if name == nil then
-      sqlite_capture_error(packet, sqlc.SQLITE_NOMEM)
+      sqlite_capture_error(packet, ffi.SQLITE_NOMEM)
       return
     end
-    packet.columns[index].name = sqlite_copy_bytes(name, sqlstring.strlen(name))
+    packet.columns[index].name = sqlite_copy_bytes(name, ffi.strlen(name))
     if packet.columns[index].name == nil then
       sqlite_copy_error(packet)
       return
     end
-    local declared = sqlc.sqlite3_column_decltype(packet.stmt, index)
+    local declared = ffi.sqlite3_column_decltype(packet.stmt, index)
     if declared ~= nil then
       packet.columns[index].declared_type =
-          sqlite_copy_bytes(declared, sqlstring.strlen(declared))
+          sqlite_copy_bytes(declared, ffi.strlen(declared))
       if packet.columns[index].declared_type == nil then
         sqlite_copy_error(packet)
         return
       end
-    elseif sqlc.sqlite3_errcode(packet.db) == sqlc.SQLITE_NOMEM then
-      sqlite_capture_error(packet, sqlc.SQLITE_NOMEM)
+    elseif ffi.sqlite3_errcode(packet.db) == ffi.SQLITE_NOMEM then
+      sqlite_capture_error(packet, ffi.SQLITE_NOMEM)
       return
     end
     index = index + 1
   end
 end
 
-foreign function sqlite_copy_row(packet: *sqlnative.TitanSqlitePacket)
-  packet.cell_count = sqlc.sqlite3_column_count(packet.stmt)
-  packet.cells = sqlstdlib.calloc(packet.cell_count as sqlstdlib.size_t,
-                                 sqlnative.TitanSqliteCell.sizeof)
+foreign function sqlite_copy_row(packet: *ffi.TitanSqlitePacket)
+  packet.cell_count = ffi.sqlite3_column_count(packet.stmt)
+  packet.cells = ffi.calloc(packet.cell_count as ffi.size_t,
+                                 ffi.TitanSqliteCell.sizeof)
   if packet.cells == nil then
     sqlite_copy_error(packet)
     return
@@ -173,38 +173,38 @@ foreign function sqlite_copy_row(packet: *sqlnative.TitanSqlitePacket)
   local index: int = 0
   while index < packet.cell_count do
     local cell = packet.cells + index
-    cell.kind = sqlc.sqlite3_column_type(packet.stmt, index)
-    if cell.kind == sqlc.SQLITE_INTEGER then
-      cell.integer_value = sqlc.sqlite3_column_int64(packet.stmt, index)
-    elseif cell.kind == sqlc.SQLITE_FLOAT then
-      cell.float_value = sqlc.sqlite3_column_double(packet.stmt, index)
-    elseif cell.kind ~= sqlc.SQLITE_NULL then
+    cell.kind = ffi.sqlite3_column_type(packet.stmt, index)
+    if cell.kind == ffi.SQLITE_INTEGER then
+      cell.integer_value = ffi.sqlite3_column_int64(packet.stmt, index)
+    elseif cell.kind == ffi.SQLITE_FLOAT then
+      cell.float_value = ffi.sqlite3_column_double(packet.stmt, index)
+    elseif cell.kind ~= ffi.SQLITE_NULL then
       local source: const *void = nil
-      if cell.kind == sqlc.SQLITE_TEXT then
-        source = sqlc.sqlite3_column_text(packet.stmt, index)
+      if cell.kind == ffi.SQLITE_TEXT then
+        source = ffi.sqlite3_column_text(packet.stmt, index)
       else
-        source = sqlc.sqlite3_column_blob(packet.stmt, index)
+        source = ffi.sqlite3_column_blob(packet.stmt, index)
       end
       -- Check the suspect NULL before any other SQLite call. Empty BLOB is
       -- legitimately NULL; TEXT, even empty, has a terminator on success.
       if source == nil then
-        if sqlc.sqlite3_errcode(packet.db) == sqlc.SQLITE_NOMEM then
-          sqlite_capture_error(packet, sqlc.SQLITE_NOMEM)
+        if ffi.sqlite3_errcode(packet.db) == ffi.SQLITE_NOMEM then
+          sqlite_capture_error(packet, ffi.SQLITE_NOMEM)
           return
         end
-        if cell.kind == sqlc.SQLITE_TEXT then
-          sqlite_capture_error(packet, sqlc.SQLITE_NOMEM)
+        if cell.kind == ffi.SQLITE_TEXT then
+          sqlite_capture_error(packet, ffi.SQLITE_NOMEM)
           return
         end
       end
-      local length = sqlc.sqlite3_column_bytes(packet.stmt, index)
+      local length = ffi.sqlite3_column_bytes(packet.stmt, index)
       if length == 0 then
-        if sqlc.sqlite3_errcode(packet.db) == sqlc.SQLITE_NOMEM then
-          sqlite_capture_error(packet, sqlc.SQLITE_NOMEM)
+        if ffi.sqlite3_errcode(packet.db) == ffi.SQLITE_NOMEM then
+          sqlite_capture_error(packet, ffi.SQLITE_NOMEM)
           return
         end
       end
-      cell.length = length as sqlnative.size_t
+      cell.length = length as ffi.size_t
       cell.bytes = sqlite_copy_bytes(source, cell.length)
       if cell.bytes == nil then
         sqlite_copy_error(packet)
@@ -217,30 +217,30 @@ foreign function sqlite_copy_row(packet: *sqlnative.TitanSqlitePacket)
 end
 
 foreign function sqlite_open_worker(argument: *void)
-  local packet = argument as *sqlnative.TitanSqlitePacket
-  local db: *sqlc.sqlite3 = nil
-  local status = sqlc.sqlite3_open_v2(packet.input, db,
-      sqlc.SQLITE_OPEN_READWRITE | sqlc.SQLITE_OPEN_CREATE |
-      sqlc.SQLITE_OPEN_FULLMUTEX, nil)
+  local packet = argument as *ffi.TitanSqlitePacket
+  local db: *ffi.sqlite3 = nil
+  local status = ffi.sqlite3_open_v2(packet.input, db,
+      ffi.SQLITE_OPEN_READWRITE | ffi.SQLITE_OPEN_CREATE |
+      ffi.SQLITE_OPEN_FULLMUTEX, nil)
   packet.db = db
   if db ~= nil then packet.owns_db = 1 end
-  if status ~= sqlc.SQLITE_OK then
+  if status ~= ffi.SQLITE_OK then
     sqlite_capture_error(packet, status)
     return
   end
-  status = sqlc.sqlite3_extended_result_codes(db, 1)
-  if status ~= sqlc.SQLITE_OK then sqlite_capture_error(packet, status) end
+  status = ffi.sqlite3_extended_result_codes(db, 1)
+  if status ~= ffi.SQLITE_OK then sqlite_capture_error(packet, status) end
 end
 
 foreign function sqlite_prepare_worker(argument: *void)
-  local packet = argument as *sqlnative.TitanSqlitePacket
-  local statement: *sqlc.sqlite3_stmt = nil
+  local packet = argument as *ffi.TitanSqlitePacket
+  local statement: *ffi.sqlite3_stmt = nil
   local tail: const *char = nil
-  local status = sqlc.sqlite3_prepare_v2(packet.db, packet.input, -1,
+  local status = ffi.sqlite3_prepare_v2(packet.db, packet.input, -1,
                                         statement, tail)
   packet.stmt = statement
   if statement ~= nil then packet.owns_stmt = 1 end
-  if status ~= sqlc.SQLITE_OK then
+  if status ~= ffi.SQLITE_OK then
     sqlite_capture_error(packet, status)
     return
   end
@@ -251,35 +251,35 @@ foreign function sqlite_prepare_worker(argument: *void)
   -- Ask SQLite to parse the tail, so comments, quoted semicolons, triggers,
   -- and empty statements keep SQLite's own syntax rather than a second lexer.
   while tail[0] ~= 0 do
-    local extra: *sqlc.sqlite3_stmt = nil
+    local extra: *ffi.sqlite3_stmt = nil
     local next_tail: const *char = nil
-    status = sqlc.sqlite3_prepare_v2(packet.db, tail, -1, extra, next_tail)
-    if status ~= sqlc.SQLITE_OK then
+    status = ffi.sqlite3_prepare_v2(packet.db, tail, -1, extra, next_tail)
+    if status ~= ffi.SQLITE_OK then
       sqlite_capture_error(packet, status)
       return
     end
     if extra ~= nil then
       sqlite_wrapper_error(packet, "SQL must contain exactly one statement")
-      status = sqlc.sqlite3_finalize(extra)
+      status = ffi.sqlite3_finalize(extra)
       sqlite_capture_cleanup(packet, status)
       return
     end
     tail = next_tail
   end
-  packet.parameter_count = sqlc.sqlite3_bind_parameter_count(statement)
-  packet.column_count = sqlc.sqlite3_column_count(statement)
+  packet.parameter_count = ffi.sqlite3_bind_parameter_count(statement)
+  packet.column_count = ffi.sqlite3_column_count(statement)
 end
 
 foreign function sqlite_execute_worker(argument: *void)
-  local packet = argument as *sqlnative.TitanSqlitePacket
+  local packet = argument as *ffi.TitanSqlitePacket
   sqlite_bind_arguments(packet)
   if packet.failed == 0 then
     packet.needs_reset = 1
-    local status = sqlc.sqlite3_step(packet.stmt)
-    if status == sqlc.SQLITE_DONE then
-      packet.changes = sqlc.sqlite3_changes64(packet.db)
+    local status = ffi.sqlite3_step(packet.stmt)
+    if status == ffi.SQLITE_DONE then
+      packet.changes = ffi.sqlite3_changes64(packet.db)
       packet.done = 1
-    elseif status == sqlc.SQLITE_ROW then
+    elseif status == ffi.SQLITE_ROW then
       sqlite_wrapper_error(packet, "execute expected SQLITE_DONE; use query for rows")
     else
       sqlite_capture_error(packet, status)
@@ -289,19 +289,19 @@ foreign function sqlite_execute_worker(argument: *void)
 end
 
 foreign function sqlite_query_worker(argument: *void)
-  local packet = argument as *sqlnative.TitanSqlitePacket
-  if sqlc.sqlite3_column_count(packet.stmt) == 0 then
+  local packet = argument as *ffi.TitanSqlitePacket
+  if ffi.sqlite3_column_count(packet.stmt) == 0 then
     sqlite_wrapper_error(packet, "query requires a statement with result columns")
     return
   end
   sqlite_bind_arguments(packet)
   if packet.failed == 0 then
     packet.needs_reset = 1
-    local status = sqlc.sqlite3_step(packet.stmt)
-    if status == sqlc.SQLITE_ROW then
+    local status = ffi.sqlite3_step(packet.stmt)
+    if status == ffi.SQLITE_ROW then
       sqlite_copy_columns(packet)
       if packet.failed == 0 then sqlite_copy_row(packet) end
-    elseif status == sqlc.SQLITE_DONE then
+    elseif status == ffi.SQLITE_DONE then
       packet.done = 1
       sqlite_copy_columns(packet)
       sqlite_reset_statement(packet)
@@ -315,12 +315,12 @@ foreign function sqlite_query_worker(argument: *void)
 end
 
 foreign function sqlite_fetch_worker(argument: *void)
-  local packet = argument as *sqlnative.TitanSqlitePacket
+  local packet = argument as *ffi.TitanSqlitePacket
   packet.needs_reset = 1
-  local status = sqlc.sqlite3_step(packet.stmt)
-  if status == sqlc.SQLITE_ROW then
+  local status = ffi.sqlite3_step(packet.stmt)
+  if status == ffi.SQLITE_ROW then
     sqlite_copy_row(packet)
-  elseif status == sqlc.SQLITE_DONE then
+  elseif status == ffi.SQLITE_DONE then
     packet.done = 1
     sqlite_reset_statement(packet)
   else
@@ -332,13 +332,13 @@ foreign function sqlite_fetch_worker(argument: *void)
 end
 
 foreign function sqlite_reset_worker(argument: *void)
-  local packet = argument as *sqlnative.TitanSqlitePacket
+  local packet = argument as *ffi.TitanSqlitePacket
   sqlite_reset_statement(packet)
 end
 
 foreign function sqlite_finalize_worker(argument: *void)
-  local packet = argument as *sqlnative.TitanSqlitePacket
-  local status = sqlc.sqlite3_finalize(packet.stmt)
+  local packet = argument as *ffi.TitanSqlitePacket
+  local status = ffi.sqlite3_finalize(packet.stmt)
   -- Finalize destroys the statement even when it reports an execution error.
   packet.stmt = nil
   packet.owns_stmt = 0
@@ -347,9 +347,9 @@ foreign function sqlite_finalize_worker(argument: *void)
 end
 
 foreign function sqlite_close_worker(argument: *void)
-  local packet = argument as *sqlnative.TitanSqlitePacket
-  local status = sqlc.sqlite3_close(packet.db)
-  if status == sqlc.SQLITE_OK then
+  local packet = argument as *ffi.TitanSqlitePacket
+  local status = ffi.sqlite3_close(packet.db)
+  if status == ffi.SQLITE_OK then
     packet.db = nil
     packet.owns_db = 0
   else
@@ -358,32 +358,32 @@ foreign function sqlite_close_worker(argument: *void)
 end
 
 foreign function sqlite_autocommit_worker(argument: *void)
-  local packet = argument as *sqlnative.TitanSqlitePacket
-  packet.autocommit = sqlc.sqlite3_get_autocommit(packet.db)
+  local packet = argument as *ffi.TitanSqlitePacket
+  packet.autocommit = ffi.sqlite3_get_autocommit(packet.db)
 end
 
-foreign function sqlite_transaction(packet: *sqlnative.TitanSqlitePacket,
+foreign function sqlite_transaction(packet: *ffi.TitanSqlitePacket,
                                      command: const *char)
-  local status = sqlc.sqlite3_exec(packet.db, command, nil, nil, nil)
-  if status ~= sqlc.SQLITE_OK then sqlite_capture_error(packet, status) end
-  packet.autocommit = sqlc.sqlite3_get_autocommit(packet.db)
+  local status = ffi.sqlite3_exec(packet.db, command, nil, nil, nil)
+  if status ~= ffi.SQLITE_OK then sqlite_capture_error(packet, status) end
+  packet.autocommit = ffi.sqlite3_get_autocommit(packet.db)
 end
 
 foreign function sqlite_begin_worker(argument: *void)
-  local packet = argument as *sqlnative.TitanSqlitePacket
-  packet.autocommit = sqlc.sqlite3_get_autocommit(packet.db)
+  local packet = argument as *ffi.TitanSqlitePacket
+  packet.autocommit = ffi.sqlite3_get_autocommit(packet.db)
   if packet.autocommit ~= 0 then sqlite_transaction(packet, "BEGIN DEFERRED") end
 end
 
 foreign function sqlite_commit_worker(argument: *void)
-  local packet = argument as *sqlnative.TitanSqlitePacket
-  packet.autocommit = sqlc.sqlite3_get_autocommit(packet.db)
+  local packet = argument as *ffi.TitanSqlitePacket
+  packet.autocommit = ffi.sqlite3_get_autocommit(packet.db)
   if packet.autocommit == 0 then sqlite_transaction(packet, "COMMIT") end
 end
 
 foreign function sqlite_rollback_worker(argument: *void)
-  local packet = argument as *sqlnative.TitanSqlitePacket
-  packet.autocommit = sqlc.sqlite3_get_autocommit(packet.db)
+  local packet = argument as *ffi.TitanSqlitePacket
+  packet.autocommit = ffi.sqlite3_get_autocommit(packet.db)
   if packet.autocommit == 0 then sqlite_transaction(packet, "ROLLBACK") end
 end
 
@@ -391,7 +391,7 @@ end
 -- fails or accepted work completes with cancellation pending. No operation is
 -- repeated: this retires only the native ownership still held by the packet.
 foreign function sqlite_retire_worker(argument: *void)
-  local packet = argument as *sqlnative.TitanSqlitePacket
+  local packet = argument as *ffi.TitanSqlitePacket
   if packet.owns_stmt ~= 0 then
     sqlite_finalize_worker(argument)
   elseif packet.needs_reset ~= 0 then
@@ -402,39 +402,39 @@ end
 
 -- Pure malloc/free ownership may retire synchronously on the loop thread.
 -- SQLite handles and execution have already been retired or transferred.
-foreign function sqlite_free_packet(packet: *sqlnative.TitanSqlitePacket)
-  sqlstdlib.free(packet.input)
+foreign function sqlite_free_packet(packet: *ffi.TitanSqlitePacket)
+  ffi.free(packet.input)
   packet.input = nil
   local index: int = 0
   if packet.arguments ~= nil then
     while index < packet.argument_count do
-      sqlstdlib.free(packet.arguments[index].bytes)
+      ffi.free(packet.arguments[index].bytes)
       index = index + 1
     end
-    sqlstdlib.free(packet.arguments)
+    ffi.free(packet.arguments)
     packet.arguments = nil
   end
   index = 0
   if packet.columns ~= nil then
     while index < packet.column_count do
-      sqlstdlib.free(packet.columns[index].name)
-      sqlstdlib.free(packet.columns[index].declared_type)
+      ffi.free(packet.columns[index].name)
+      ffi.free(packet.columns[index].declared_type)
       index = index + 1
     end
-    sqlstdlib.free(packet.columns)
+    ffi.free(packet.columns)
     packet.columns = nil
   end
   index = 0
   if packet.cells ~= nil then
     while index < packet.cell_count do
-      sqlstdlib.free(packet.cells[index].bytes)
+      ffi.free(packet.cells[index].bytes)
       index = index + 1
     end
-    sqlstdlib.free(packet.cells)
+    ffi.free(packet.cells)
     packet.cells = nil
   end
-  sqlstdlib.free(packet.message)
+  ffi.free(packet.message)
   packet.message = nil
-  sqlstdlib.free(packet.cleanup_message)
+  ffi.free(packet.cleanup_message)
   packet.cleanup_message = nil
 end

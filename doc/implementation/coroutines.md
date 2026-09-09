@@ -40,10 +40,10 @@ use backing `Table *`. This internal/boxed distinction is part of ABI 2; see
 the Lua and private helper headers:
 
 ```lua
-local mco = foreign import "minicoro.h"
-local lua = foreign import "lua.h"
-local lual = foreign import "lauxlib.h"
-local ffi = foreign import "titan/ffi.h"
+foreign import "minicoro.h"
+foreign import "lua.h"
+foreign import "lauxlib.h"
+foreign import "titan/ffi.h"
 ```
 
 The exported `Coro` record has local fields:

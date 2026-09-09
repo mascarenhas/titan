@@ -87,6 +87,7 @@ build = {
       ["titan-compiler.projectcache"] = "titan-compiler/projectcache.lua",
       ["titan-compiler.cacheadapter"] = "titan-compiler/cacheadapter.lua",
       ["titan-compiler.foreigncache"] = "titan-compiler/foreigncache.lua",
+      ["titan-compiler.ffiheaders"] = "titan-compiler/ffiheaders.lua",
       ["titan-compiler.checker"] = "titan-compiler/checker.lua",
       ["titan-compiler.checker.calls"] = "titan-compiler/checker/calls.lua",
       ["titan-compiler.checker.common"] = "titan-compiler/checker/common.lua",

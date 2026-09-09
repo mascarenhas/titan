@@ -239,8 +239,8 @@ describe("surface C99 types", function()
     it("keeps header-defined typedef identity module-local", function()
         with_header("typedef int local_word;\n", function(header)
             local ok, err = run_checker(
-                'local c = foreign import "' .. header .. '"\n' ..
-                "type Word = c.local_word")
+                "foreign import \"" .. header .. '"\n' ..
+                "type Word = ffi.local_word")
             assert.falsy(ok)
             assert.match("cannot export C FFI type '.-local_word'", err)
             assert.match("non%-portable header%-defined type", err)

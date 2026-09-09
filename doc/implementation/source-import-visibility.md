@@ -100,42 +100,32 @@ Local Interfaces remain rejected. Interface satisfaction is evaluated at the
 cast site, so a source-visible local concrete method can participate without
 turning Interface conversion into a transitive relation.
 
-## Use-driven C header origins
+## Combined C environment inheritance
 
-Titan visibility and C compilation context are separate. The checker-normalized
-include descriptor that produced a C declaration is retained as compiler-only
-`_c_origin_header` metadata on its declaration graph. Primitives from the
-shared target profile remain undecorated. Typedefs, pointers, arrays, callbacks,
-aggregates, and their physical fields retain enough origin information for a
-later renderer to select what its exact spelling needs.
+Titan visibility and C compilation context are separate. An explicit `.titan`
+edge carries the dependency's validated `.ffi.h` descriptor. The consumer's
+`.ffi.h` includes all explicit-source dependency FFI headers in written import
+order before its own foreign directives. The C driver preprocesses and parses
+that actual combined header once, preserving include guards, final macro state,
+and C declaration/tag scopes. The resulting C names populate the consumer's
+reserved `ffi` namespace throughout its Titan module.
 
-During C or companion-header generation, every actual C type/declaration
-renderer records only origins on its selected declarator path. A retained
-typedef or aggregate stops at its own spelling; hidden typedef targets/aggregate
-fields are not traversed, and an `owned` value's `Udata *` representation does
-not collect its payload header until a real payload cast or access renders that
-type. The relevant preamble contains direct foreign imports in AST order,
-followed by non-direct used origins in stable byte order; normalized
-`include.rendered` text is the identity and emitted spelling for both roles.
-Selecting an unrelated Titan nominal member therefore cannot pull in another
-member's C header.
+This C include chain is transitive. Private Titan declarations still require a
+direct explicit source-import capability; a transitive C include does not make
+`alias.private_member` available. Ordinary Titan imports and binary providers
+supply no generated C environment. Each module remains an ordinary separate C
+translation unit.
 
-Explicit source imports do not merge Titan aliases, C type/tag registries, or
-declaration graphs. Each module remains an ordinary C translation unit. An
-explicitly imported producer with source foreign declarations does, however,
-supply one real generated C header: after all imports are visited, the consumer
-checker processes those headers in AST order and replays their macro effects
-into its cumulative probe context. This is declaration plumbing, not Titan
-permission—the explicit-source capability still gates `alias.foreign_member`
-independently. It makes the consumer's checked macro/declaration surface agree
-with the header that its final generated C will include.
+A source dependency defining foreign functions also contributes `.titan.h` for
+its prototypes and eligible inline bodies. Generated C includes its own
+`.ffi.h` before any `.titan.h`. Resolver-owned checking trees contain the actual
+generated headers with deterministic logical paths; there are no forwarding
+wrappers or supplemental origin lists collected from used type graphs.
 
-Other source-private C uses retain the narrow use-driven rule. A probe context
-starts from the consumer's direct imports and source-generated headers, then
-adds only origins required by rendered operand declarations. Enum-carrier
-selection uses that final context and the exact current surface, including an
-outer typedef; a check in one producer or alias cannot certify another
-unrelated header context.
+Enum selection and contextual C probes use the exact current type surface in
+the consumer's combined `.ffi.h` context. A producer's successful probe does not
+certify a different consumer header environment. Additional consumer headers
+may cause C declaration or conversion diagnostics during final compilation.
 
 ## Module state and native linkage
 

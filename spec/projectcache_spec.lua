@@ -3,6 +3,7 @@ local types = require "titan-compiler.types"
 local parser = require "titan-compiler.parser"
 local lfs = require "lfs"
 local sha256 = require "titan-compiler.sha256"
+local cpp = require "c-parser.cpp"
 
 describe("checked project payloads", function()
     local previous_imported, previous_registry, loaders
@@ -71,16 +72,6 @@ describe("checked project payloads", function()
         assert.is_true(consumer.ast[1]._source_import)
     end)
 
-    it("rejects external ASTs through otherwise retained type annotations", function()
-        local entry = load_module("project", "function answer(): integer return 42 end")
-        local external = assert(parser.parse("/outside/external.titan",
-            "function external(): integer return 1 end"))
-        entry.ast[1]._external_navigation = external[1]
-        local payload, err = driver.encode_project_entry(entry)
-        assert.is_nil(payload)
-        assert.matches("external source AST", err, 1, true)
-    end)
-
     it("forwards checksum callbacks without swallowing cancellation objects", function()
         local entry = load_module("checksums", "function answer(): integer return 42 end")
         local calls = 0
@@ -101,6 +92,61 @@ describe("checked project payloads", function()
         ok, err = pcall(driver.decode_project_entry, payload, options)
         assert.is_false(ok)
         assert.equal(cancelled, err)
+    end)
+
+    it("transports deep cyclic annotations and CPP provenance while yielding", function()
+        local entry = load_module("graph_annotations", "function answer(): integer return 42 end")
+        local context = assert(cpp.new_context())
+        assert(cpp.parse_contents("/macro-sidecars.h", [[
+#define STRINGIFY(x) #x
+#define VALUE STRINGIFY(a + b)
+]], context))
+        local root = { macros = context.defines }
+        local tail = root
+        for _ = 1, 6000 do
+            tail.next = {}
+            tail = tail.next
+        end
+        tail.parent, root[tail] = root, tail
+        root.alias = tail
+        root.weak = setmetatable({ [tail] = root }, { __mode = "k" })
+        local external_key = { label = "owned outside the entry" }
+        root.weak_only = setmetatable({ [external_key] = "preserved" }, { __mode = "k" })
+        entry.ast._annotations = root
+        local calls = 0
+        local payload = assert(driver.encode_project_entry(entry, {
+            yield = function()
+                calls = calls + 1
+                assert.equal("owned outside the entry", external_key.label)
+                collectgarbage("collect")
+            end,
+        }))
+        assert.is_true(calls > 4)
+        local copy = assert(driver.decode_project_entry(payload)).ast._annotations
+        local retained_key = next(copy.weak_only)
+        assert.is_not_nil(retained_key)
+        assert.equal("owned outside the entry", retained_key.label)
+        assert.equal("preserved", copy.weak_only[retained_key])
+        local last = copy
+        for _ = 1, 6000 do last = last.next end
+        assert.equal(copy, last.parent)
+        assert.equal(last, copy[last])
+        assert.equal(last, copy.alias)
+        assert.equal(copy, copy.weak[last])
+        assert.equal("k", getmetatable(copy.weak).__mode)
+        assert.equal('"a + b"', cpp.expand_macro("VALUE", copy.macros))
+        assert.equal('"a + b"', cpp.expand_macro("VALUE", root.macros))
+        local cancellation = {}
+        calls = 0
+        local ok, err = pcall(driver.encode_project_entry, entry, {
+            yield = function()
+                calls = calls + 1
+                if calls == 2 then error(cancellation, 0) end
+            end,
+        })
+        assert.is_false(ok)
+        assert.equal(2, calls)
+        assert.equal(cancellation, err)
     end)
 
     it("overlays matching current header observations throughout a private graph", function()
@@ -129,10 +175,19 @@ describe("checked project payloads", function()
         assert.same(old, assert(driver.decode_project_entry(payload)).c_header_dependencies[1].observation)
     end)
 
-    it("cooperates during declared-registry validation and propagates cancellation", function()
+    it("assembles empty modules without a declared owner registry", function()
+        local entry = load_module("empty_registry", "")
+        entry.ast._declared_registry = nil
+        local restored = assert(driver.decode_project_entry(assert(driver.encode_project_entry(entry))))
+        assert.same({}, driver.project_entries_registry({ empty_registry = restored }))
+    end)
+
+    it("cooperates during large declared-registry assembly and propagates cancellation", function()
         local entry = load_module("registry_yield", "function answer(): integer return 42 end")
-        entry.ast[1]._large_annotation = {}
-        for index = 1, 20000 do entry.ast[1]._large_annotation[index] = index end
+        for index = 1, 20000 do
+            local name = "registry_yield.Item" .. index
+            entry.ast._declared_registry[name] = { _tag = "Type.Record", name = name }
+        end
         local calls, cancellation = 0, {}
         local ok, err = pcall(driver.project_entries_registry, { registry_yield = entry }, {
             yield = function()
@@ -149,11 +204,14 @@ describe("checked project payloads", function()
         local entries = {}
         for index = 1, 100 do
             local name = "small_entry_" .. index
-            local annotation = {}
-            for item = 1, 100 do annotation[item] = { value = item } end
+            local declared = {}
+            for item = 1, 100 do
+                local fqtn = name .. ".Item" .. item
+                declared[fqtn] = { _tag = "Type.Record", name = fqtn }
+            end
             entries[name] = {
                 kind = "source", filename = name .. ".titan", source_files = { name .. ".titan" },
-                deps = {}, source_manifest = "source", ast = { _declared_registry = {}, annotation = annotation },
+                deps = {}, source_manifest = "source", ast = { _declared_registry = declared },
                 type = { _tag = "Type.Module", name = name, _source = true,
                     source_members = {}, source_type_members = {} },
             }
@@ -180,11 +238,35 @@ describe("checked project payloads", function()
             if path == header then reads = reads + 1 end
             return ordinary_read(self, path)
         end
+        local artifacts = {}
+        local adapter = {
+            get = function(kind, key)
+                local artifact = artifacts[kind .. ":" .. key]
+                if artifact then return artifact.payload, artifact.inputs end
+            end,
+            put = function(kind, key, payload, inputs)
+                artifacts[kind .. ":" .. key] = { payload = payload, inputs = inputs }
+                return true
+            end,
+        }
+        local function consumer_source(value)
+            return string.format([[
+                local provider = import "baseline_provider.titan"
+                function answer(): integer
+                    local current = provider.identity(%d)
+                    return 42
+                end
+            ]], value)
+        end
         local ok, err = pcall(function()
             local provider = load_module("baseline_provider", string.format([[
-                local c = foreign import %q
-                foreign function identity(input: c.retained_count): c.retained_count return input end
-            ]], header), nil, { io = strategy })
+                foreign import %q
+                foreign function identity(input: ffi.retained_count): ffi.retained_count return input end
+            ]], header), nil, { io = strategy, cache_adapter = adapter })
+            -- The consumer now preprocesses its inherited C environment too.
+            -- Prime that stable header graph before measuring later edits.
+            load_module("baseline_consumer", consumer_source(0),
+                { baseline_provider = provider }, { io = strategy, cache_adapter = adapter })
             local old_stamp = provider.c_header_dependencies[1].observation.modified_seconds
             local stamp = assert(lfs.attributes(header, "modification"))
             assert(lfs.touch(header, stamp + 1, stamp + 1))
@@ -195,14 +277,8 @@ describe("checked project payloads", function()
             reads = 0
             for index = 1, 2 do
                 driver.imported, types.registry = {}, {}
-                load_module("baseline_consumer", string.format([[
-                    local provider = import "baseline_provider.titan"
-                    function answer(): integer
-                        local current = provider.identity(%d)
-                        return 42
-                    end
-                ]], index), { baseline_provider = provider }, {
-                    io = strategy, header_inputs = current,
+                load_module("baseline_consumer", consumer_source(index), { baseline_provider = provider }, {
+                    io = strategy, header_inputs = current, cache_adapter = adapter,
                 })
                 assert.equal(0, reads)
             end
@@ -214,17 +290,30 @@ describe("checked project payloads", function()
 
     it("recreates source-private checking headers after decoding a closed resolver", function()
         local provider = load_module("provider", [[
-            local c = foreign import "stdint.h"
-            foreign function identity(input: c.int32_t): c.int32_t return input end
+            foreign import "stdint.h"
+            foreign function identity(input: ffi.int32_t): ffi.int32_t return input end
         ]])
         local original_header = assert(provider.checking_foreign_header)
+        local original_ffi = assert(provider.checking_ffi_header)
+        local original_bundle = assert(provider.ast._ffi_header.bundle_root)
         assert.equal("file", lfs.attributes(original_header, "mode"))
+        assert.equal("file", lfs.attributes(original_ffi, "mode"))
         local payload = assert(driver.encode_project_entry(provider))
+        assert.is_nil(payload:find(original_header, 1, true))
+        assert.is_nil(payload:find(original_bundle, 1, true))
+        assert.equal(original_bundle, provider.ast._ffi_header.bundle_root)
         assert.is_true(driver.close_loader(loaders[1]))
         assert.is_nil(lfs.attributes(original_header))
+        assert.is_nil(lfs.attributes(original_ffi))
         driver.imported, types.registry = {}, {}
         local restored = assert(driver.decode_project_entry(payload, { module_name = "provider" }))
         assert.is_nil(restored.checking_foreign_header)
+        assert.is_nil(restored.checking_ffi_header)
+        assert.is_nil(restored.ast._ffi_header.filename)
+        assert.is_nil(restored.ast._ffi_header.bundle_root)
+        assert.equal("provider.ffi.h", restored.ast._ffi_header.logical_name)
+        assert.equal(restored.ast._ffi_header,
+            restored.ast._ffi_namespace._include.generated_header)
         local consumer = load_module("consumer", [[
             local provider = import "provider.titan"
             function answer(): integer
@@ -236,18 +325,96 @@ describe("checked project payloads", function()
         assert.not_equal(original_header, fresh)
         assert.equal("file", lfs.attributes(fresh, "mode"))
         assert.equal(fresh, consumer.ast[1]._foreign_header)
+        assert.equal(restored.checking_ffi_header, consumer.ast[1]._ffi_header)
+        assert.equal("file", lfs.attributes(restored.checking_ffi_header, "mode"))
     end)
 
-    it("rejects wrong module/file ownership and corrupt payloads without global changes", function()
+    it("replays inherited C type origins after all project resolver headers close", function()
+        local provider = load_module("provider", [[
+            foreign import "stdint.h"
+            foreign function identity(input: ffi.int32_t): ffi.int32_t return input end
+        ]])
+        local consumer = load_module("consumer", [[
+            local provider = import "provider.titan"
+            foreign function identity(input: ffi.int32_t): ffi.int32_t
+                return provider.identity(input)
+            end
+        ]], { provider = provider })
+        local options = { project_files = {
+            [provider.filename] = true, [consumer.filename] = true,
+        } }
+        local payloads = {
+            provider = assert(driver.encode_project_entry(provider, options)),
+            consumer = assert(driver.encode_project_entry(consumer, options)),
+        }
+        local original_bundles = {
+            provider.ast._ffi_header.bundle_root, consumer.ast._ffi_header.bundle_root,
+        }
+        for _, payload in pairs(payloads) do
+            for _, bundle in ipairs(original_bundles) do
+                assert.is_nil(payload:find(bundle, 1, true))
+            end
+        end
+        for _, loader in ipairs(loaders) do assert.is_true(driver.close_loader(loader)) end
+        driver.imported, types.registry = {}, {}
+        local retained = {
+            provider = assert(driver.decode_project_entry(payloads.provider, options)),
+            consumer = assert(driver.decode_project_entry(payloads.consumer, options)),
+        }
+        local plan = retained.consumer.ast._ffi_header
+        assert.equal("consumer.ffi.h", plan.logical_name)
+        assert.equal("provider.ffi.h", plan.dependencies[1].logical_name)
+        assert.equal(retained.consumer.ast[1]._ffi_header_descriptor, plan.dependencies[1])
+        local original_parse, parsed = parser.parse, {}
+        parser.parse = function(filename, source)
+            parsed[#parsed + 1] = filename
+            return original_parse(filename, source)
+        end
+        local ok, result = pcall(load_module, "after_restart", [[
+            local consumer = import "consumer.titan"
+            function answer(): integer
+                local result: ffi.int32_t = consumer.identity(42)
+                return 42
+            end
+        ]], retained)
+        parser.parse = original_parse
+        assert.is_true(ok, result)
+        assert.same({ result.filename }, parsed)
+        assert.equal(retained.consumer, driver.imported.consumer)
+        assert.equal(retained.provider, driver.imported.provider)
+        assert.equal(retained.provider.ast._ffi_header.digest,
+            retained.consumer.ast._ffi_header.dependencies[1].digest)
+    end)
+
+    it("rejects incompatible project graph and ABI envelopes", function()
+        local entry = load_module("durable", [[
+            foreign import "stdint.h"
+            foreign function identity(input: ffi.int32_t): ffi.int32_t return input end
+        ]])
+        local payload = assert(driver.encode_project_entry(entry))
+        local imported, registry = driver.imported, types.registry
+        local mutations = {
+            function(root) root.abi = root.abi + 1 end,
+            function(root) root.graph_version = root.graph_version + 1 end,
+            function(root) root.kind = "another-graph-owner" end,
+            function(root) root.version = 1 end,
+        }
+        for _, mutate in ipairs(mutations) do
+            local envelope = assert(cpp.decode_graph(payload))
+            mutate(envelope)
+            assert.is_nil(driver.decode_project_entry(assert(cpp.encode_graph(envelope))))
+            assert.equal(imported, driver.imported)
+            assert.equal(registry, types.registry)
+        end
+    end)
+
+    it("rejects corrupt payloads without changing compiler globals", function()
         local entry = load_module("project", "function answer(): integer return 42 end")
         local payload = assert(driver.encode_project_entry(entry))
         local imported, registry = driver.imported, types.registry
-        assert.is_nil(driver.decode_project_entry(payload, { module_name = "other" }))
-        assert.is_nil(driver.decode_project_entry(payload, { project_files = {} }))
         assert.is_nil(driver.decode_project_entry(payload:sub(1, -2)))
         assert.equal(imported, driver.imported)
         assert.equal(registry, types.registry)
-        assert.is_nil(driver.encode_project_entry({ kind = "source", ast = {} }))
     end)
 end)
 

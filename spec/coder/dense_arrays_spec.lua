@@ -1509,17 +1509,17 @@ describe("dense Array code generation and boundaries", function()
             }
         ]], function(header)
             h.run_coder_app(
-                'local c = foreign import "' .. header .. '"',
+                "foreign import \"" .. header .. '"',
                 [[
                     local rejected = false
                     do
-                        c.titan_test_write_integer(L, args)
+                        ffi.titan_test_write_integer(L, args)
                     catch
                         rejected = true
                     end
                     if not rejected or #args ~= 0 then return 1 end
 
-                    c.titan_test_write_string(L, args)
+                    ffi.titan_test_write_string(L, args)
                     if #args ~= 1 then return 2 end
                     if args[1] ~= "written through the carried writer" then
                         return 3

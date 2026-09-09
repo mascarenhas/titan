@@ -193,10 +193,10 @@ wrappers. Its implementation imports minicoro and private runtime
 headers:
 
 ```lua
-local mco = foreign import "minicoro.h"
-local lua = foreign import "lua.h"
-local lual = foreign import "lauxlib.h"
-local ffi = foreign import "titan/ffi.h"
+foreign import "minicoro.h"
+foreign import "lua.h"
+foreign import "lauxlib.h"
+foreign import "titan/ffi.h"
 ```
 
 The FFI calls that need the current Lua state use Titan's existing

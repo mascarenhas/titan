@@ -277,12 +277,10 @@ get_type_of_exp = typed("Exp, TypeList -> {string}?", function(exp, lst)
         exp.unop or (exp.op and exp[2] == nil and exp.op)
     if unary == "*" then
         local etype = get_type_of_exp(exp[1], lst)
-        if not etype then
-            return nil
-        end
-        local rem = table.remove(etype)
-        if rem ~= "*" then return nil end
-        return etype
+        if not etype or etype[#etype] ~= "*" then return nil end
+        -- Primitive and parsed declaration tokens are shared read-only. Only
+        -- this derived pointee spelling needs a new array.
+        return table.move(etype, 1, #etype - 1, 1, {})
     elseif unary == "-" then
         return get_type_of_exp(exp[1], lst)
     elseif exp.op == "?" then

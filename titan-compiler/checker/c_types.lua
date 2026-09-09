@@ -257,73 +257,13 @@ function ensure_module_probe(st)
     return module_probe
 end
 
-checker._enum_carrier_names = {
-    "char", "signed char", "unsigned char",
-    "short", "unsigned short",
-    "int", "unsigned int",
-    "long", "unsigned long",
-    "long long", "unsigned long long",
-}
+checker._enum_carrier_names = cprobe.enum_carrier_names
 
--- Build a use-specific probe preamble from this module's written foreign
--- imports plus only the origin headers needed to spell the probed C types.
--- Source-import authority is not propagated here: the types themselves carry
--- the normalized header origins established by their trusted producer.
-function checker._probe_for_c_types(st, probed_types)
-    local direct_keys = {}
-    for _, include in ipairs(st.foreign_includes or {}) do
-        direct_keys[assert(include.rendered,
-            "direct C include has no normalized spelling")] = true
-    end
-
-    local supplemental = {}
-    for _, typ in ipairs(probed_types or {}) do
-        for _, include in ipairs(types.c_ffi_includes(typ)) do
-            local key = assert(include.rendered,
-                "C origin include has no normalized spelling")
-            if not direct_keys[key] then supplemental[key] = include end
-        end
-    end
-    local keys = {}
-    for key in pairs(supplemental) do keys[#keys + 1] = key end
-    if #keys == 0 then return ensure_module_probe(st) end
-    table.sort(keys)
-
-    local includes_version = st.foreign_includes_version or 0
-    local cache_key = tostring(includes_version) .. "\0" ..
-        table.concat(keys, "\0")
-    st.c_type_probes = st.c_type_probes or {}
-    if st.c_type_probes[cache_key] then
-        return st.c_type_probes[cache_key]
-    end
-
-    local service, err = ensure_probe_service(st)
-    if not service then return nil, err end
-    local remembered
-    remembered, err = remember_forced_foreign_headers(st, service)
-    if not remembered then return nil, err end
-    local includes = {}
-    for _, include in ipairs(st.foreign_includes or {}) do
-        includes[#includes + 1] = include
-    end
-    for _, key in ipairs(keys) do
-        includes[#includes + 1] = supplemental[key]
-    end
-    local probe
-    probe, err = service:module_context({
-        module = st.modname,
-        source_dir = st.source_dir or ".",
-        includes = includes,
-    })
-    if not probe then return nil, err end
-    -- These origin headers can be needed only by a source-private C type.
-    -- Retain their parsed dependencies even without a written foreign import.
-    for _, key in ipairs(keys) do
-        st.supplemental_foreign_includes[
-            #st.supplemental_foreign_includes + 1] = supplemental[key]
-    end
-    st.c_type_probes[cache_key] = probe
-    return probe
+-- Every actual C use sees the one module environment, including explicit
+-- source dependencies. Rendering a type does not reconstruct another set of
+-- header origins or another preprocessor ordering.
+function checker._probe_for_c_types(st)
+    return ensure_module_probe(st)
 end
 
 function checker._ensure_c_enum_supported(
@@ -380,42 +320,38 @@ function checker._ensure_c_enum_supported(
                 resolved._c_enum_probe_spelling
         end
 
-        local candidates, entries = {}, {}
-        for _, name in ipairs(checker._enum_carrier_names) do
+        local eligible_ids, entries = {}, {}
+        for id, name in ipairs(checker._enum_carrier_names) do
             local entry = profile.integers[name]
             if entry then
                 local fits, range_error = csemantics.integer_range_contains(
                     lua_entry.type._c_numeric, entry.type._c_numeric)
                 assert(fits ~= nil, range_error)
                 if fits or resolved._c_enum_enumerator then
-                    candidates[#candidates + 1] = {
-                        left_type = declaration_type,
-                        right_type = entry.type,
-                    }
-                    entries[#entries + 1] = entry
+                    eligible_ids[#eligible_ids + 1] = id
+                    entries[id] = entry
                 end
             end
         end
 
-        local results = probe:validate_declaration_compatibilities(candidates)
-        local selected
-        for index, result in ipairs(results) do
-            if result.accepted then
-                if selected then
-                    checker.typeerror(errors, loc,
-                        "configured C compiler reported multiple carriers "
-                        .. "for enum type '%s'", types.tostring(typ))
-                    return false
-                end
-                selected = entries[index]
-            elseif result.status == "infrastructure_failure" then
-                checker.typeerror(errors, loc,
-                    "cannot validate C enum type '%s' with the configured "
-                    .. "compiler: %s", types.tostring(typ),
-                    result.message or result.summary or result.status)
-                return false
-            end
+        local result = probe:select_enum_carrier(declaration_type, eligible_ids)
+        if not result.accepted then
+            checker.typeerror(errors, loc,
+                "cannot validate C enum type '%s' with the configured "
+                .. "compiler: %s", types.tostring(typ),
+                result.message or result.summary or result.status)
+            return false
         end
+        local selection = assert(result.selection,
+            "successful enum query has no selection")
+        if selection.match_count > 1 then
+            checker.typeerror(errors, loc,
+                "configured C compiler reported multiple carriers "
+                .. "for enum type '%s'", types.tostring(typ))
+            return false
+        end
+        local selected = selection.match_count == 1 and
+            assert(entries[selection.carrier_id], "selected enum carrier is ineligible")
         if not selected then
             if resolved._c_enum_enumerator then
                 checker.typeerror(errors, loc,
@@ -550,66 +486,6 @@ function is_foreign_ordinary_identifier(name, ftype)
                 or ftype.type == "enum")
 end
 
--- Foreign imports are extracted independently, so two import closures can
--- contain the same physical declaration even though the generated ordered
--- includes emit it only once through an include guard or `#pragma once`.
--- Source identity is useful only for recognizing that repeated extraction;
--- the declaration graphs must additionally differ only by explicitly marked
--- prototype-local tag objects. The final ordered-header compiler baseline
--- still decides whether the declaration is actually emitted compatibly in the
--- translation unit.
-function same_foreign_declaration_source(left, right)
-    local lsource = left and left.provenance
-    local rsource = right and right.provenance
-    local left_has_identity = lsource ~= nil
-       and lsource.device ~= nil
-       and lsource.inode ~= nil
-    local right_has_identity = rsource ~= nil
-       and rsource.device ~= nil
-       and rsource.inode ~= nil
-    local same_file = left_has_identity and right_has_identity
-       and lsource.device == rsource.device
-       and lsource.inode == rsource.inode
-       or (not left_has_identity or not right_has_identity)
-          and lsource ~= nil
-          and rsource ~= nil
-          and lsource.file ~= nil
-          and lsource.file == rsource.file
-    return lsource ~= nil
-       and rsource ~= nil
-       and lsource.line ~= nil
-       and lsource.column ~= nil
-       and same_file
-       and lsource.line == rsource.line
-       and lsource.column == rsource.column
-end
-
-function queue_foreign_redeclaration(
-        st, node, name, previous, current, compatibility)
-    local queue = st.pending_foreign_redeclarations
-    queue[#queue + 1] = {
-        node = node,
-        name = name,
-        header = node.headername,
-        previous = previous,
-        current = current.type,
-        current_entry = current,
-        declaration = current.declaration,
-        compatibility = compatibility,
-    }
-    return queue[#queue]
-end
-
-function bind_pending_foreign_slot(
-        pending, members, type_members, is_type)
-    if not pending then return end
-    if is_type then
-        pending.type_members = type_members
-    else
-        pending.member = members[pending.name]
-    end
-end
-
 function copy_foreign_paramnames(names)
     if names == false then return false end
     local out = {}
@@ -617,126 +493,6 @@ function copy_foreign_paramnames(names)
         out[#out + 1] = name
     end
     return out
-end
-
-function same_foreign_paramnames(left, right)
-    if #left ~= #right then return false end
-    for i = 1, #left do
-        if left[i] ~= right[i] then return false end
-    end
-    return true
-end
-
--- Parameter spellings are declaration metadata rather than C type identity.
--- Merge them only after the declaration pair probe accepts the redeclaration,
--- then rewrite every accepted import occurrence to the same consensus.
-function merge_foreign_paramnames(previous, current)
-    local previous_state = previous.paramnames_state
-    local current_state = current.paramnames_state
-    if not previous_state or not current_state then return end
-
-    local state
-    local names = false
-    if previous_state == "conflicting"
-       or current_state == "conflicting" then
-        state = "conflicting"
-    elseif previous_state == "complete"
-       and current_state == "complete" then
-        if same_foreign_paramnames(
-                previous.paramnames, current.paramnames) then
-            state = "complete"
-            names = previous.paramnames
-        else
-            state = "conflicting"
-        end
-    elseif previous_state == "complete" then
-        state = "complete"
-        names = previous.paramnames
-    elseif current_state == "complete" then
-        state = "complete"
-        names = current.paramnames
-    else
-        state = "unknown"
-    end
-
-    local members = {}
-    local seen = {}
-    for _, entry in ipairs({ previous, current }) do
-        for _, member in ipairs(entry.paramname_members or {}) do
-            if not seen[member] then
-                seen[member] = true
-                members[#members + 1] = member
-            end
-        end
-    end
-
-    previous.paramnames_state = state
-    previous.paramnames = copy_foreign_paramnames(names)
-    previous.paramname_members = members
-    current.paramnames_state = state
-    current.paramnames = copy_foreign_paramnames(names)
-    current.paramname_members = members
-    for _, member in ipairs(members) do
-        member.paramnames = copy_foreign_paramnames(names)
-    end
-end
-
-function rewrite_foreign_type_history(
-        st, name, current, canonical)
-    if st.foreign_types[name] == current then
-        st.foreign_types[name] = canonical
-    end
-    for _, entry in ipairs(st.foreign_type_history[name] or {}) do
-        if entry.decl == current then entry.decl = canonical end
-    end
-end
-
-function canonicalize_foreign_redeclaration(st, pending)
-    local previous = pending.previous
-    local current = pending.current
-    local canonical = foreigntypes.merge_declaration_composite(
-        previous.type, current)
-
-    -- A separately parsed occurrence of one accepted typedef can be retained
-    -- by declarations unique to that header snapshot. Point its private alias
-    -- object at the canonical target before replacing public slots, so those
-    -- transitive references also follow the accepted canonical declaration.
-    if current._tag == "Type.CTypedef"
-       and previous.type._tag == "Type.CTypedef" then
-        current.target = previous.type.target
-    end
-
-    if pending.type_members then
-        pending.type_members[pending.name] = canonical
-        rewrite_foreign_type_history(
-            st, pending.name, current, canonical)
-    elseif pending.member then
-        pending.member.type = canonical
-    end
-    merge_foreign_paramnames(previous, pending.current_entry)
-    st.foreign_names[pending.name] = previous
-end
-
-function report_foreign_redeclaration_failure(
-        pending, errors, result)
-    local summary = result and (result.message or result.summary
-        or result.diagnostic) or
-        "the final ordered C header validation returned no result"
-    if result and result.status == "rejected" then
-        checker.typeerror(errors, pending.node.loc,
-            "conflicting C declaration for '%s' in foreign import '%s'; "
-            .. "previous declaration from '%s' has type %s, "
-            .. "new declaration has type %s; %s",
-            pending.name, pending.header, pending.previous.header,
-            types.tostring(pending.previous.type),
-            types.tostring(pending.current), summary)
-    else
-        checker.typeerror(errors, pending.node.loc,
-            "cannot validate potentially compatible C declaration for "
-            .. "'%s' in foreign import '%s' against the previous "
-            .. "declaration from '%s': %s",
-            pending.name, pending.header, pending.previous.header, summary)
-    end
 end
 
 function report_foreign_header_context_failure(st, errors, result)
@@ -755,28 +511,6 @@ function report_foreign_header_context_failure(st, errors, result)
     end
 end
 
-function restore_rejected_foreign_type_registries(st, pending)
-    local rejected, names = {}, {}
-    for _, declaration in ipairs(pending) do
-        if declaration.type_members then
-            rejected[declaration.current] = true
-            names[declaration.name] = declaration.previous.type
-        end
-    end
-    for name, canonical in pairs(names) do
-        local history = st.foreign_type_history[name] or {}
-        local retained = {}
-        for _, entry in ipairs(history) do
-            if not rejected[entry.decl] then
-                retained[#retained + 1] = entry
-            end
-        end
-        st.foreign_type_history[name] = retained
-        st.foreign_types[name] =
-            retained[#retained] and retained[#retained].decl or canonical
-    end
-end
-
 -- Production probe methods can cross the compiler I/O strategy and suspend a
 -- Titan Task. Invoke those methods directly so a cancellation raised while
 -- resuming through Lua is not mistaken for an ordinary probe failure. Keep
@@ -788,39 +522,9 @@ local function invoke_module_probe(module_probe, method, ...)
     return pcall(method, module_probe, ...)
 end
 
-function validate_foreign_declaration_compatibility(
-        module_probe, left_type, right_type,
-        left_declaration, right_declaration)
-    local method = module_probe.validate_declaration_compatibility
-    if type(method) ~= "function" then
-        return {
-            status = "infrastructure_failure",
-            message =
-                "the C probe service cannot validate a declaration pair",
-        }
-    end
-    local ok, validated = invoke_module_probe(
-        module_probe, method, left_type, right_type,
-        left_declaration, right_declaration)
-    if ok and type(validated) == "table" then return validated end
-    return {
-        status = "infrastructure_failure",
-        message = ok
-            and "the C declaration compatibility probe returned no result"
-            or "C declaration compatibility validation failed: "
-                .. tostring(validated),
-    }
-end
-
-function finalize_foreign_redeclarations(st, errors)
-    local pending = st.pending_foreign_redeclarations
-    -- Independent parsing supplies each import's member graph, but only the C
-    -- compiler can validate the macro/tag/declaration state produced by their
-    -- exact cumulative order. Validate every nonempty preamble: the
-    -- best-effort isolated parser may collapse an invalid repeated declaration
-    -- within one header before it reaches the converted declaration registry.
-    -- The one final compiler baseline is therefore the authoritative
-    -- translation-unit check for both one-header and multi-header modules.
+function validate_foreign_environment(st, errors)
+    -- Keep one native baseline for analysis-only diagnostics. The combined
+    -- parser owns declaration identity; no per-name pair questions remain.
     if #st.foreign_includes == 0 then return end
 
     local module_probe, probe_error = ensure_module_probe(st)
@@ -853,46 +557,8 @@ function finalize_foreign_redeclarations(st, errors)
         end
     end
 
-    if result.status == "success" then
-        local rejected = {}
-        for _, declaration in ipairs(pending) do
-            local compatibility
-            if declaration.compatibility == "source-repeat" then
-                -- An exact source repeat emitted only one declaration in the
-                -- ordered headers. Synthetic duplicates would invent two
-                -- prototype scopes, so the baseline already proves this case.
-                compatibility = { status = "success" }
-            else
-                compatibility = validate_foreign_declaration_compatibility(
-                    module_probe, declaration.previous.type,
-                    declaration.current, declaration.previous.declaration,
-                    declaration.declaration)
-            end
-
-            if compatibility.status == "success" then
-                -- Complete each declaration before rendering the next one:
-                -- []/[3] must be followed by [3]/[4], not another [] probe.
-                -- This also preserves redirected typedef and function roots.
-                canonicalize_foreign_redeclaration(st, declaration)
-            else
-                rejected[#rejected + 1] = declaration
-                report_foreign_redeclaration_failure(
-                    declaration, errors, compatibility)
-            end
-        end
-        restore_rejected_foreign_type_registries(st, rejected)
-    else
-        restore_rejected_foreign_type_registries(st, pending)
+    if result.status ~= "success" then
         report_foreign_header_context_failure(st, errors, result)
-        if result.status == "rejected" then
-            for _, declaration in ipairs(pending) do
-                if declaration.compatibility == "conditional"
-                   or declaration.compatibility == "source-repeat" then
-                    report_foreign_redeclaration_failure(
-                        declaration, errors, result)
-                end
-            end
-        end
     end
 end
 

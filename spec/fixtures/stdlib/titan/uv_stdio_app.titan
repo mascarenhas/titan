@@ -2,7 +2,7 @@ local async = import "async"
 local fs = import "fs"
 local system = import "os"
 local str = import "string"
-local probe = foreign import "uv_stdio_probe.h"
+foreign import "uv_stdio_probe.h"
 
 local function required_input(candidate: system.InputStream?,
                               label: string): system.InputStream
@@ -81,10 +81,10 @@ local function reject_parent_stdout(expected: string, expected_name: string?,
   warm_stderr:close()
   async.yield()
 
-  if close_stdout and probe.titan_uv_test_stdio_close_child_stdout() ~= 0 then
+  if close_stdout and ffi.titan_uv_test_stdio_close_child_stdout() ~= 0 then
     raise "could not close child stdout for EBADF probe"
   end
-  local before = probe.titan_uv_test_stdio_open_fd_count()
+  local before = ffi.titan_uv_test_stdio_open_fd_count()
   if before < 0 then raise "could not count descriptors before rejection" end
   local kind_rejected = false
   do
@@ -123,7 +123,7 @@ local function reject_parent_stdout(expected: string, expected_name: string?,
     end
     if not rejected then raise "unsupported parent stdout was accepted" end
   end
-  if probe.titan_uv_test_stdio_open_fd_count() ~= before then
+  if ffi.titan_uv_test_stdio_open_fd_count() ~= before then
     raise "parent stdout rejection leaked a descriptor"
   end
   return expected
@@ -133,8 +133,8 @@ local function deny_metadata(probes: integer, descriptors: integer,
                              access_error: boolean?)
   local access = 0
   if access_error then access = 1 end
-  if probe.titan_uv_test_stdio_deny_metadata(probes, descriptors, access) ~= 0 then
-    raise probe.titan_uv_test_stdio_failure() as string
+  if ffi.titan_uv_test_stdio_deny_metadata(probes, descriptors, access) ~= 0 then
+    raise ffi.titan_uv_test_stdio_failure() as string
   end
 end
 
@@ -171,42 +171,42 @@ local function run_case(mode: string): string
   elseif mode == "closed" then
     return reject_parent_stdout("parent-closed-rejected", "EBADF", "fstat", true)
   elseif mode == "denied-pipes" or mode == "denied-pipes-access" then
-    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_ALL, 7,
+    deny_metadata(ffi.TITAN_UV_TEST_STDIO_DENY_ALL, 7,
                   mode == "denied-pipes-access")
     return parent_pipes()
   elseif mode == "denied-stdin" then
-    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_ALL, 7)
+    deny_metadata(ffi.TITAN_UV_TEST_STDIO_DENY_ALL, 7)
     if system.stdin:is_tty() or read_all(system.stdin) ~= "parent-pipe-input" then
       raise "hinted stdin did not preserve pipe input"
     end
     return "parent-stdin-ok"
   elseif mode == "denied-stdout" then
-    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_ALL, 7)
+    deny_metadata(ffi.TITAN_UV_TEST_STDIO_DENY_ALL, 7)
     return parent_stdout()
   elseif mode == "denied-stderr" then
-    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_ALL, 7)
+    deny_metadata(ffi.TITAN_UV_TEST_STDIO_DENY_ALL, 7)
     if system.stderr:is_tty() then raise "hinted stderr was misclassified" end
     system.stderr:write("pipe-stderr")
     return "parent-stderr-ok"
   elseif mode == "denied-reject" then
-    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_ALL, 7)
+    deny_metadata(ffi.TITAN_UV_TEST_STDIO_DENY_ALL, 7)
     return reject_parent_stdout("parent-denied-rejected", "EPERM", "getsockname")
   elseif mode == "deny-name-stdout" then
-    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_NAME, 2)
+    deny_metadata(ffi.TITAN_UV_TEST_STDIO_DENY_NAME, 2)
     return parent_stdout()
   elseif mode == "deny-type-stdout" then
-    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_TYPE, 2, true)
+    deny_metadata(ffi.TITAN_UV_TEST_STDIO_DENY_TYPE, 2, true)
     return parent_stdout()
   elseif mode == "deny-name-reject" then
-    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_NAME, 2)
+    deny_metadata(ffi.TITAN_UV_TEST_STDIO_DENY_NAME, 2)
     return reject_parent_stdout("parent-contradiction-rejected", "ENOTSUP",
                                  "getsockopt(SO_TYPE)")
   elseif mode == "deny-type-reject" then
-    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_TYPE, 2)
+    deny_metadata(ffi.TITAN_UV_TEST_STDIO_DENY_TYPE, 2)
     return reject_parent_stdout("parent-contradiction-rejected", "ENOTSUP",
                                  "getsockname")
   elseif mode == "denied-diagnostic" then
-    deny_metadata(probe.TITAN_UV_TEST_STDIO_DENY_ALL, 7)
+    deny_metadata(ffi.TITAN_UV_TEST_STDIO_DENY_ALL, 7)
     return denied_diagnostic()
   end
   raise "unknown stdio fixture mode '" .. mode .. "'"

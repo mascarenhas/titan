@@ -646,7 +646,7 @@ describe("flexible return code generation", function()
             }
         ]], function(header)
             run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function exact_base(): (...: integer)
                     return 2, 3
@@ -760,10 +760,10 @@ describe("flexible return code generation", function()
             }
         ]], function(header)
             run_coder([[
-            local c = foreign import "]] .. header .. [["
+            foreign import "]] .. header .. [["
 
             function request_anchor(): integer
-                return c.flex_request_anchor() as integer
+                return ffi.flex_request_anchor() as integer
             end
 
             function exact_base(): (...: integer)
@@ -957,16 +957,16 @@ describe("flexible return code generation", function()
             static int flex_order_read(void) { return flex_order_state; }
         ]], function(header)
             run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function pair(first: integer, second: integer): integer
                     return first * 10 + second
                 end
 
                 function ordered(): integer
-                    c.flex_order_reset()
-                    return pair((c.flex_order_bump()),
-                        c.flex_order_read())
+                    ffi.flex_order_reset()
+                    return pair((ffi.flex_order_bump()),
+                        ffi.flex_order_read())
                 end
             ]], [[
                 local got = test.ordered()

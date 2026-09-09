@@ -133,14 +133,14 @@ describe("flexible-return runtime acceptance", function()
             }
         ]], function(header)
             h.run_coder([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
 
                 function triple(): (integer, integer, integer)
                     return 5, 7, 99
                 end
 
                 function strict_sum(): integer
-                    return c.flex_accept_add(triple()) as integer
+                    return ffi.flex_accept_add(triple()) as integer
                 end
             ]], [[
                 assert(test.strict_sum() == 12)

@@ -573,7 +573,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
         assert.truthy(file:close())
 
         local source = string.format([[
-            local c = foreign import %s
+            foreign import %s
 
             local function zero()
             end
@@ -593,11 +593,11 @@ describe("closure adjustment wrappers (end-to-end)", function()
                 local as_value: () -> value = zero
                 local as_option: () -> integer? = zero
                 local as_cpointer:
-                    () -> c.closure_adjustment_pointer = zero
+                    () -> ffi.closure_adjustment_pointer = zero
                 return as_nil() == nil
                     and as_value() == nil
                     and as_option() == nil
-                    and c.closure_adjustment_is_null(as_cpointer()) == 1
+                    and ffi.closure_adjustment_is_null(as_cpointer()) == 1
             end
 
             function interface_nil(): boolean

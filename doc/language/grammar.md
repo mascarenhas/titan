@@ -21,6 +21,10 @@ LPegLabel grammar of `parser.lua` — see
 
 ### Identifiers and reserved words
 
+The compiler owns the binding `ffi` for the module C namespace. It remains an
+identifier token, but a Titan declaration cannot shadow it. C members named
+`ffi` are unaffected; this restriction concerns the Titan binding.
+
 A **Name** is any ASCII sequence matching `[A-Za-z_][A-Za-z0-9_]*` that
 is not a reserved word. Tokenization is longest-match, so `andy`,
 `return17`, and `_end` are names. The reserved words are:
@@ -175,7 +179,7 @@ tltype   ::= [local] type Name '=' type
 recordfield     ::= [local] [const] Name ['?'] ':' type [';']
 unionvariant    ::= [local] Name [':' type] [';']
 tlimport        ::= local Name '=' import importname
-tlforeignimport ::= local Name '=' foreign import importname
+tlforeignimport ::= foreign import importname
 moduleinit     ::= do block end
 importname      ::= LiteralString | '(' LiteralString ')'
 parlist         ::= param {',' param} [',' varargparam]
@@ -191,7 +195,7 @@ namedtype       ::= Name [typeargs] | Name '.' Name [typeargs]
 ```lua
 local m = import "ext.module"        -- both import forms are accepted
 local internals = import "ext.module.titan" -- explicit source marker
-local c = foreign import("stdlib.h")
+foreign import("stdlib.h")
 record Point
     x: float
     y: float

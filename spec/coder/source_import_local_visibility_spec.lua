@@ -20,7 +20,7 @@ end
 
 local function clean_generated_modules()
     for name in pairs(generated_modules) do
-        for _, suffix in ipairs({ ".c", ".o", ".so", ".a" }) do
+        for _, suffix in ipairs({ ".c", ".o", ".so", ".a", ".ffi.h", ".titan.h" }) do
             remove_tree(name .. suffix)
         end
         remove_tree(name .. ".so.dSYM")
@@ -261,11 +261,11 @@ struct SourceOwnedRuntime { int field; };
 
         generate({
             source_runtime_owned_owner = string.format([[
-                local c = foreign import %q
-                local type Item = c.SourceOwnedRuntime
+                foreign import %q
+                local type Item = ffi.SourceOwnedRuntime
 
                 local function make(): owned *Item
-                    return c.SourceOwnedRuntime.new()
+                    return ffi.SourceOwnedRuntime.new()
                 end
 
                 local function id(
@@ -299,10 +299,13 @@ struct SourceOwnedRuntime { int field; };
             ]],
         }, "source_runtime_owned_consumer")
 
-        local forwarder = read_file("source_runtime_owned_forwarder.c")
-        assert.falsy(forwarder:match("#include [^\n]*" .. header:gsub("%p", "%%%0")), forwarder)
-        local consumer = read_file("source_runtime_owned_consumer.c")
-        assert.truthy(consumer:match("#include [^\n]*" .. header:gsub("%p", "%%%0")), consumer)
+        local owner = read_file("source_runtime_owned_owner.ffi.h")
+        assert.truthy(owner:find(header, 1, true), owner)
+        local forwarder = read_file("source_runtime_owned_forwarder.ffi.h")
+        assert.truthy(forwarder:find('/source_runtime_owned_owner.ffi.h"', 1, true), forwarder)
+        local consumer = read_file("source_runtime_owned_consumer.ffi.h")
+        assert.truthy(consumer:find('/source_runtime_owned_forwarder.ffi.h"', 1, true), consumer)
+        assert.truthy(consumer:find('/source_runtime_owned_owner.ffi.h"', 1, true), consumer)
         os.remove(header)
 
         call("source_runtime_owned_consumer", [[
@@ -311,7 +314,7 @@ struct SourceOwnedRuntime { int field; };
     end)
 
 
-    it("keeps direct and source-origin quoted-header spelling identical", function()
+    it("shares the producer header spelling for source-imported FILE-sized layouts", function()
         local header = "source_runtime_file_macro.h"
         local file = assert(io.open(header, "wb"))
         assert(file:write([[
@@ -331,11 +334,11 @@ static struct SourceRuntimeFileMacro *source_runtime_file_macro_make(void) {
 
         generate({
             source_runtime_file_macro_owner = string.format([[
-                local c = foreign import %q
-                local type Item = c.SourceRuntimeFileMacro
+                foreign import %q
+                local type Item = ffi.SourceRuntimeFileMacro
 
                 local function get(): *Item
-                    return c.source_runtime_file_macro_make()
+                    return ffi.source_runtime_file_macro_make()
                 end
             ]], header),
             source_runtime_file_macro_consumer = [[
@@ -348,12 +351,11 @@ static struct SourceRuntimeFileMacro *source_runtime_file_macro_make(void) {
             ]],
         }, "source_runtime_file_macro_consumer")
         local owner_include = read_file(
-            "source_runtime_file_macro_owner.c"):match(
+            "source_runtime_file_macro_owner.ffi.h"):match(
                 "#include [^\n]*source_runtime_file_macro%.h[^\n]*")
-        local consumer_include = read_file(
-            "source_runtime_file_macro_consumer.c"):match(
-                "#include [^\n]*source_runtime_file_macro%.h[^\n]*")
-        assert.equal(owner_include, consumer_include)
+        assert.truthy(owner_include)
+        local consumer = read_file("source_runtime_file_macro_consumer.ffi.h")
+        assert.truthy(consumer:find('/source_runtime_file_macro_owner.ffi.h"', 1, true), consumer)
         os.remove(header)
 
         call("source_runtime_file_macro_consumer", [[
@@ -391,19 +393,19 @@ static struct SourceRuntimeFileMacro *source_runtime_file_macro_make(void) {
 
         generate({
             source_runtime_probe_owner = string.format([[
-                local counts = foreign import %q
-                local lefts = foreign import %q
-                local rights = foreign import %q
-                local type Count = counts.source_runtime_count
-                local type Left = lefts.SourceRuntimeLeft
-                local type Right = rights.SourceRuntimeRight
+                foreign import %q
+                foreign import %q
+                foreign import %q
+                local type Count = ffi.source_runtime_count
+                local type Left = ffi.SourceRuntimeLeft
+                local type Right = ffi.SourceRuntimeRight
 
                 local function count(): Count
-                    return counts.source_runtime_count_value()
+                    return ffi.source_runtime_count_value()
                 end
 
                 local function left(): *Left
-                    return lefts.source_runtime_left()
+                    return ffi.source_runtime_left()
                 end
             ]], count_header, left_header, right_header),
             source_runtime_probe_consumer = [[
@@ -422,17 +424,19 @@ static struct SourceRuntimeFileMacro *source_runtime_file_macro_make(void) {
         os.remove(left_header)
         os.remove(right_header)
 
-        local generated = read_file("source_runtime_probe_consumer.c")
-        assert.truthy(generated:find(count_header, 1, true), generated)
-        assert.truthy(generated:find(left_header, 1, true), generated)
-        assert.truthy(generated:find(right_header, 1, true), generated)
+        local owner = read_file("source_runtime_probe_owner.ffi.h")
+        assert.truthy(owner:find(count_header, 1, true), owner)
+        assert.truthy(owner:find(left_header, 1, true), owner)
+        assert.truthy(owner:find(right_header, 1, true), owner)
+        local consumer = read_file("source_runtime_probe_consumer.ffi.h")
+        assert.truthy(consumer:find('/source_runtime_probe_owner.ffi.h"', 1, true), consumer)
         call("source_runtime_probe_consumer", [[
             assert(source_runtime_probe_consumer.run() == 42)
         ]])
     end)
 
 
-    it("stops source-origin traversal at a retained C typedef", function()
+    it("inherits the complete producer environment through a retained C typedef", function()
         local base_header = "source_runtime_retained_base.h"
         local alias_header = "source_runtime_retained_alias.h"
         local base = assert(io.open(base_header, "wb"))
@@ -456,12 +460,12 @@ static struct SourceRuntimeFileMacro *source_runtime_file_macro_make(void) {
 
         generate({
             source_runtime_retained_owner = string.format([[
-                local base = foreign import %q
-                local alias = foreign import %q
-                local type Retained = alias.SourceRuntimeRetainedAlias
+                foreign import %q
+                foreign import %q
+                local type Retained = ffi.SourceRuntimeRetainedAlias
 
                 local function get(): *Retained
-                    return alias.source_runtime_retained_get()
+                    return ffi.source_runtime_retained_get()
                 end
             ]], base_header, alias_header),
             source_runtime_retained_consumer = [[
@@ -476,33 +480,35 @@ static struct SourceRuntimeFileMacro *source_runtime_file_macro_make(void) {
         os.remove(base_header)
         os.remove(alias_header)
 
-        local generated = read_file("source_runtime_retained_consumer.c")
-        assert.truthy(generated:find(alias_header, 1, true), generated)
-        assert.falsy(generated:find(
-            "#include \"" .. base_header, 1, true), generated)
+        local owner = read_file("source_runtime_retained_owner.ffi.h")
+        local base_include = assert(owner:find(base_header, 1, true))
+        local alias_include = assert(owner:find(alias_header, 1, true))
+        assert.is_true(base_include < alias_include)
+        local consumer = read_file("source_runtime_retained_consumer.ffi.h")
+        assert.truthy(consumer:find('/source_runtime_retained_owner.ffi.h"', 1, true), consumer)
         call("source_runtime_retained_consumer", [[
             assert(source_runtime_retained_consumer.run() == 33)
         ]])
     end)
 
-    it("adds only origin headers required by generated FFI declarations",
+    it("inherits all authored C headers through transitive source imports",
     function()
         generate({
             source_runtime_ffi_leaf = [[
-                local stdio = foreign import "stdio.h"
-                local unused = foreign import "stdatomic.h"
-                local type File = stdio.FILE
+                foreign import "stdio.h"
+                foreign import "stdatomic.h"
+                local type File = ffi.FILE
 
                 local function open(): *File
-                    return stdio.tmpfile()
+                    return ffi.tmpfile()
                 end
 
                 local function write(file: *File): integer
-                    return stdio.fputs("source visibility", file) as integer
+                    return ffi.fputs("source visibility", file) as integer
                 end
 
                 local function close(file: *File): integer
-                    return stdio.fclose(file) as integer
+                    return ffi.fclose(file) as integer
                 end
             ]],
             source_runtime_ffi_bridge = [[
@@ -539,16 +545,13 @@ static struct SourceRuntimeFileMacro *source_runtime_file_macro_make(void) {
             ]],
         }, "source_runtime_ffi_consumer")
 
-        for _, name in ipairs({
-            "source_runtime_ffi_bridge",
-            "source_runtime_ffi_consumer",
-        }) do
-            local generated = read_file(name .. ".c")
-            assert.truthy(generated:find(
-                "#include <stdio.h>", 1, true), name .. ".c")
-            assert.falsy(generated:find(
-                "#include <stdatomic.h>", 1, true), name .. ".c")
-        end
+        local leaf = read_file("source_runtime_ffi_leaf.ffi.h")
+        assert.truthy(leaf:find("#include <stdio.h>", 1, true), leaf)
+        assert.truthy(leaf:find("#include <stdatomic.h>", 1, true), leaf)
+        local bridge = read_file("source_runtime_ffi_bridge.ffi.h")
+        assert.truthy(bridge:find('/source_runtime_ffi_leaf.ffi.h"', 1, true), bridge)
+        local consumer = read_file("source_runtime_ffi_consumer.ffi.h")
+        assert.truthy(consumer:find('/source_runtime_ffi_bridge.ffi.h"', 1, true), consumer)
 
         call("source_runtime_ffi_consumer", [[
             assert(source_runtime_ffi_consumer.run() == 42)

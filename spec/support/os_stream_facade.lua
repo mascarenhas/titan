@@ -26,10 +26,10 @@ end
 -- process fixture keeps its native build graph to coroutine/uv/async plus the
 -- two facades under test.
 local STRING_SUPPORT = [====[
-local lua = foreign import "lua.h"
-local lual = foreign import "lauxlib.h"
-local ffi = foreign import "titan/ffi.h"
-local cstring = foreign import "string.h"
+foreign import "lua.h"
+foreign import "lauxlib.h"
+foreign import "titan/ffi.h"
+foreign import "string.h"
 
 record StringWriter
   local contents: string
@@ -85,10 +85,10 @@ function sub(subject: string, first: integer,
   if initial > ending then return "" end
   local count = ending - initial + 1
   local storage = char.new_array(count)
-  cstring.memcpy(
+  ffi.memcpy(
     storage as *char,
     (subject as const *char) + initial - 1,
-    count as cstring.size_t)
+    count as ffi.size_t)
   return storage as string
 end
 
@@ -107,9 +107,9 @@ function find(subject: string, needle: string,
   local offset = first - 1
   local limit = #subject - #needle
   while offset <= limit do
-    if cstring.memcmp(
+    if ffi.memcmp(
         subject_bytes + offset, needle_bytes,
-        #needle as cstring.size_t) == 0 then
+        #needle as ffi.size_t) == 0 then
       return offset + 1, offset + #needle
     end
     offset = offset + 1
@@ -118,10 +118,10 @@ function find(subject: string, needle: string,
 end
 
 function tostring(candidate: value): string
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
   ffi.lua_pushtvalue(L, candidate)
-  lual.luaL_tolstring(L, -1, nil)
+  ffi.luaL_tolstring(L, -1, nil)
   return ffi.lua_totvalue(L, -1) as value
 end
 ]====]

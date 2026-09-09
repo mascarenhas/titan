@@ -879,6 +879,20 @@ local function convert_struct_or_union(st, ftype)
     end
 
     local key = c_type_key(ftype) or ""
+    -- An anonymous definition has no spelling key, but all of its declarators
+    -- still refer to the same raw CType object in this module's parsed graph.
+    -- Keep that identity without equating independently declared aggregates.
+    if key == "" then
+        st._converted_c_aggregates = st._converted_c_aggregates
+            or setmetatable({}, { __mode = "k" })
+        local cached = st._converted_c_aggregates[ftype]
+        if cached then
+            if ftype.fields and not cached.complete then
+                return populate_struct_or_union(st, cached, ftype)
+            end
+            return cached
+        end
+    end
     local existing = st:find_foreign_type(key)
     if existing then
         if ftype.fields and not existing.complete then
@@ -890,6 +904,8 @@ local function convert_struct_or_union(st, ftype)
     local owner = new_struct_or_union(ftype)
     if key ~= "" then
         st:add_foreign_type(key, owner)
+    else
+        st._converted_c_aggregates[ftype] = owner
     end
 
     return populate_struct_or_union(st, owner, ftype)

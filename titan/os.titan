@@ -1,8 +1,8 @@
 local uv = import "uv.titan"
 local str = import "string"
-local ctime = foreign import "time.h"
-local clocale = foreign import "locale.h"
-local cstring = foreign import "string.h"
+foreign import "time.h"
+foreign import "locale.h"
+foreign import "string.h"
 
 -- Time/date behavior is translated and adapted from src/loslib.c in the
 -- immutable Lua 5.5.1 release:
@@ -129,7 +129,7 @@ local function validate_date_format(format: string)
 end
 
 local function formatted_date(format: string,
-                              calendar: *ctime.tm): string
+                              calendar: *ffi.tm): string
   if #format == 0 then return "" end
   validate_date_format(format)
 
@@ -146,15 +146,15 @@ local function formatted_date(format: string,
 
   while true do
     local buffer = char.new_array(capacity)
-    local written = ctime.strftime(
-      buffer, capacity as cstring.size_t, format, calendar)
+    local written = ffi.strftime(
+      buffer, capacity as ffi.size_t, format, calendar)
     if written ~= 0 then
       local length = written as integer
       local result = char.new_array(length)
-      cstring.memcpy(
+      ffi.memcpy(
         result as *char,
         buffer as const *char,
-        written as cstring.size_t)
+        written as ffi.size_t)
       return result as string
     end
     if capacity >= maximum then return "" end
@@ -180,12 +180,12 @@ local function checked_time_field(number: integer, delta: integer,
 end
 
 local function locale_category(name: string): int
-  if name == "all" then return clocale.LC_ALL end
-  if name == "collate" then return clocale.LC_COLLATE end
-  if name == "ctype" then return clocale.LC_CTYPE end
-  if name == "monetary" then return clocale.LC_MONETARY end
-  if name == "numeric" then return clocale.LC_NUMERIC end
-  if name == "time" then return clocale.LC_TIME end
+  if name == "all" then return ffi.LC_ALL end
+  if name == "collate" then return ffi.LC_COLLATE end
+  if name == "ctype" then return ffi.LC_CTYPE end
+  if name == "monetary" then return ffi.LC_MONETARY end
+  if name == "numeric" then return ffi.LC_NUMERIC end
+  if name == "time" then return ffi.LC_TIME end
   raise "invalid locale category '" .. name .. "'"
 end
 
@@ -288,9 +288,9 @@ function clock(): float
 end
 
 function difftime(later: integer, earlier: integer): float
-  return ctime.difftime(
-    later as ctime.time_t,
-    earlier as ctime.time_t) as float
+  return ffi.difftime(
+    later as ffi.time_t,
+    earlier as ffi.time_t) as float
 end
 
 function date(format: string?, timestamp: integer?): value
@@ -304,12 +304,12 @@ function date(format: string?, timestamp: integer?): value
     actual_format = str.sub(actual_format, 2)
   end
 
-  local instant = uv.os_time() as ctime.time_t
+  local instant = uv.os_time() as ffi.time_t
   if timestamp then
-    instant = (timestamp as integer) as ctime.time_t
+    instant = (timestamp as integer) as ffi.time_t
   end
-  local calendar = ctime.localtime(instant)
-  if utc then calendar = ctime.gmtime(instant) end
+  local calendar = ffi.localtime(instant)
+  if utc then calendar = ffi.gmtime(instant) end
   if not calendar then
     raise "date result cannot be represented in this installation"
   end
@@ -339,11 +339,11 @@ function setlocale(locale: string?, category: string?): string?
   reject_embedded_nul(actual_category, "locale category")
   local category_id = locale_category(actual_category)
 
-  local selected = clocale.setlocale(category_id, nil)
+  local selected = ffi.setlocale(category_id, nil)
   if locale then
     local requested = locale as string
     reject_embedded_nul(requested, "locale name")
-    selected = clocale.setlocale(category_id, requested)
+    selected = ffi.setlocale(category_id, requested)
   end
   if not selected then return nil end
   return selected as string
@@ -378,7 +378,7 @@ function time(year: integer?, month: integer?, day: integer?,
   if min then actual_minute = min as integer end
   if sec then actual_second = sec as integer end
 
-  local calendar = ctime.tm.new()
+  local calendar = ffi.tm.new()
   calendar.tm_year = checked_time_field(year as integer, 1900, "year")
   calendar.tm_mon = checked_time_field(month as integer, 1, "month")
   calendar.tm_mday = checked_time_field(day as integer, 0, "day")
@@ -392,8 +392,8 @@ function time(year: integer?, month: integer?, day: integer?,
     calendar.tm_isdst = 1 as int
   end
 
-  local instant = ctime.mktime(calendar)
-  if instant == (-1 as ctime.time_t) then
+  local instant = ffi.mktime(calendar)
+  if instant == (-1 as ffi.time_t) then
     raise "time result cannot be represented in this installation"
   end
   return instant as integer

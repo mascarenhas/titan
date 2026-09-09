@@ -1,7 +1,7 @@
 local test = import "test"
-local lua = foreign import "lua.h"
-local lual = foreign import "lauxlib.h"
-local ffi = foreign import "titan/ffi.h"
+foreign import "lua.h"
+foreign import "lauxlib.h"
+foreign import "titan/ffi.h"
 
 local type Contains = (string, string) -> boolean
 local type UnaryString = (string) -> string
@@ -51,18 +51,18 @@ local set_gc_mode_function: SetGcMode? = nil
 local collect_gc_function: CollectGc? = nil
 
 local function load_lua_function(source: string): value
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  if lua.lua_checkstack(L, 2) == 0 then
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 2) == 0 then
     raise "cannot reserve Lua stack for string/url test helper"
   end
-  local status = lual.luaL_loadstring(L, source)
-  if status ~= lua.LUA_OK then
+  local status = ffi.luaL_loadstring(L, source)
+  if status ~= ffi.LUA_OK then
     local failure: value = ffi.lua_totvalue(L, -1)
     raise failure
   end
-  status = lua.lua_pcallk(L, 0, 1, 0, 0, nil)
-  if status ~= lua.LUA_OK then
+  status = ffi.lua_pcallk(L, 0, 1, 0, 0, nil)
+  if status ~= ffi.LUA_OK then
     local failure: value = ffi.lua_totvalue(L, -1)
     raise failure
   end
@@ -72,11 +72,11 @@ end
 local function render_error(failure: value): string
   local result = "<error while rendering failure>"
   do
-    local top = lua.lua_gettop(L)
-    defer lua.lua_settop(L, top)
-    if lua.lua_checkstack(L, 2) ~= 0 then
+    local top = ffi.lua_gettop(L)
+    defer ffi.lua_settop(L, top)
+    if ffi.lua_checkstack(L, 2) ~= 0 then
       ffi.lua_pushtvalue(L, failure)
-      lual.luaL_tolstring(L, -1, nil)
+      ffi.luaL_tolstring(L, -1, nil)
       local rendered: value = ffi.lua_totvalue(L, -1)
       if rendered is string then result = rendered as string end
     end

@@ -434,7 +434,10 @@ describe("source-import local visibility (checker)", function()
                         return true, compiled_owner, {},
                             { kind = provider_kind }
                     end
-                    return true, source_owner, {}, { kind = "source" }
+                    return true, source_owner, {}, {
+                        kind = "source",
+                        ffi_header_descriptor = imported.source_registry_owner.ast._ffi_header,
+                    }
                 end
                 local _, errors = checker.check(
                     "source_registry_consumer", ast, subject,
@@ -455,8 +458,8 @@ describe("source-import local visibility (checker)", function()
         file:close()
         local modules = {
             source_alias_provider = string.format([[
-                local c = foreign import %q
-                local type Wide = c.source_alias_wide_enum
+                foreign import %q
+                local type Wide = ffi.source_alias_wide_enum
                 local type WideArray = {Wide}
                 local type WideMap = {string: WideArray}
                 local type WideFunction = (WideMap) -> integer
@@ -521,12 +524,12 @@ describe("source-import local visibility (checker)", function()
             assert.truthy(configured, configuration_error)
             local ok, err, imported = h.run_checker_modules({
                 source_probe_input_provider = string.format([[
-                    local c = foreign import %q
-                    local type Left = c.SourceProbeInputLeft
-                    local type Right = c.SourceProbeInputRight
+                    foreign import %q
+                    local type Left = ffi.SourceProbeInputLeft
+                    local type Right = ffi.SourceProbeInputRight
 
                     local function left(): *Left
-                        return c.source_probe_input_left()
+                        return ffi.source_probe_input_left()
                     end
                 ]], header),
                 source_probe_input_consumer = [[

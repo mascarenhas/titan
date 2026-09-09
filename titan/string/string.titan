@@ -1,8 +1,8 @@
-local lua = foreign import "lua.h"
-local lual = foreign import "lauxlib.h"
-local ffi = foreign import "titan/ffi.h"
-local cstring = foreign import "string.h"
-local cctype = foreign import "ctype.h"
+foreign import "lua.h"
+foreign import "lauxlib.h"
+foreign import "titan/ffi.h"
+foreign import "string.h"
+foreign import "ctype.h"
 local peg = import "peg"
 local gc = import "gc"
 
@@ -85,7 +85,7 @@ function lower(subject: string): string
   while index < length do
     local octet = source[index] as unsigned char
     storage[index] =
-      cctype.tolower(octet as int) as char
+      ffi.tolower(octet as int) as char
     index = index + 1
   end
   return storage as string
@@ -100,7 +100,7 @@ function upper(subject: string): string
   while index < length do
     local octet = source[index] as unsigned char
     storage[index] =
-      cctype.toupper(octet as int) as char
+      ffi.toupper(octet as int) as char
     index = index + 1
   end
   return storage as string
@@ -136,20 +136,20 @@ function rep(subject: string, count: integer,
   local offset = 0
   while occurrence < count do
     if subject_length > 0 then
-      cstring.memcpy(output + offset, subject_bytes,
-                     subject_length as cstring.size_t)
+      ffi.memcpy(output + offset, subject_bytes,
+                     subject_length as ffi.size_t)
       offset = offset + subject_length
     end
     if separator_length > 0 then
-      cstring.memcpy(output + offset, separator_bytes,
-                     separator_length as cstring.size_t)
+      ffi.memcpy(output + offset, separator_bytes,
+                     separator_length as ffi.size_t)
       offset = offset + separator_length
     end
     occurrence = occurrence + 1
   end
   if subject_length > 0 then
-    cstring.memcpy(output + offset, subject_bytes,
-                   subject_length as cstring.size_t)
+    ffi.memcpy(output + offset, subject_bytes,
+                   subject_length as ffi.size_t)
   end
   return storage as string
 end
@@ -193,10 +193,10 @@ function char(...: integer): string
 end
 
 function tostring(candidate: value): string
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
   ffi.lua_pushtvalue(L, candidate)
-  lual.luaL_tolstring(L, -1, nil)
+  ffi.luaL_tolstring(L, -1, nil)
   return ffi.lua_totvalue(L, -1) as value
 end
 
@@ -283,9 +283,9 @@ function find(subject: string, needle: string,
   local limit = subject_length - needle_length
   while offset <= limit do
     if subject_bytes[offset] == needle_bytes[0] and
-        cstring.memcmp(
+        ffi.memcmp(
           subject_bytes + offset, needle_bytes,
-          needle_length as cstring.size_t) == 0 then
+          needle_length as ffi.size_t) == 0 then
       return offset + 1, offset + needle_length
     end
     offset = offset + 1
@@ -330,7 +330,7 @@ function pack(format_string: string, ...: value): string
       argument = argument + 1
       local number =
         (next_pack_argument(arguments, argument) as integer)
-          as lua.lua_Integer
+          as ffi.lua_Integer
       check_signed_pack_range(number, option.size)
       builder_append(
         builder,
@@ -340,7 +340,7 @@ function pack(format_string: string, ...: value): string
       argument = argument + 1
       local number =
         (next_pack_argument(arguments, argument) as integer)
-          as lua.lua_Integer
+          as ffi.lua_Integer
       check_unsigned_pack_range(number, option.size)
       builder_append(
         builder,
@@ -352,7 +352,7 @@ function pack(format_string: string, ...: value): string
         builder,
         pack_float_bytes(
           (next_pack_argument(arguments, argument) as float)
-            as lua.lua_Number,
+            as ffi.lua_Number,
           state.little_endian, state.native_little_endian))
     elseif option.kind == PACK_NUMBER then
       argument = argument + 1
@@ -360,7 +360,7 @@ function pack(format_string: string, ...: value): string
         builder,
         pack_number_bytes(
           (next_pack_argument(arguments, argument) as float)
-            as lua.lua_Number,
+            as ffi.lua_Number,
           state.little_endian, state.native_little_endian))
     elseif option.kind == PACK_DOUBLE then
       argument = argument + 1
@@ -368,7 +368,7 @@ function pack(format_string: string, ...: value): string
         builder,
         pack_double_bytes(
           (next_pack_argument(arguments, argument) as float)
-            as lua.lua_Number,
+            as ffi.lua_Number,
           state.little_endian, state.native_little_endian))
     elseif option.kind == PACK_CHAR then
       argument = argument + 1
@@ -387,11 +387,11 @@ function pack(format_string: string, ...: value): string
       local text =
         next_pack_argument(arguments, argument) as string
       check_unsigned_pack_range(
-        #text as lua.lua_Integer, option.size)
+        #text as ffi.lua_Integer, option.size)
       builder_append(
         builder,
         pack_integer_bytes(
-          #text as lua.lua_Integer, option.size,
+          #text as ffi.lua_Integer, option.size,
           state.little_endian, false))
       checked_pack_growth(builder.length, #text)
       builder_append(builder, text)
@@ -500,9 +500,9 @@ function unpack(format_string: string, data: string,
       local packed_length =
         unpack_integer_bytes(
           data, position, option.size,
-          state.little_endian, false) as lua.lua_Unsigned
+          state.little_endian, false) as ffi.lua_Unsigned
       if packed_length >
-          (MAXIMUM_STRING_BYTES as lua.lua_Unsigned) then
+          (MAXIMUM_STRING_BYTES as ffi.lua_Unsigned) then
         raise "data string too short"
       end
       local length = packed_length as integer

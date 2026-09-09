@@ -102,22 +102,22 @@ describe("type-test expressions (typechecker)", function()
             typedef struct TValue TValue;
         ]], function(header)
             h.assert_type_check([[
-            local c = foreign import "]] .. header .. [["
+            foreign import "]] .. header .. [["
 
             function c_integer(v: value): boolean
-                return v is c.ffi_int
+                return v is ffi.ffi_int
             end
             function c_float(v: value): boolean
-                return v is c.ffi_double
+                return v is ffi.ffi_double
             end
             function c_pointer(v: value): boolean
-                return v is c.ffi_void_ptr
+                return v is ffi.ffi_void_ptr
             end
             function c_userdata(v: value): boolean
-                return v is *c.Udata
+                return v is *ffi.Udata
             end
             function c_tvalue(v: value): boolean
-                return v is c.TValue
+                return v is ffi.TValue
             end
             ]])
         end)
@@ -129,15 +129,15 @@ describe("type-test expressions (typechecker)", function()
             typedef struct test_record { int field; } test_record;
         ]], function(header)
             h.assert_type_error("cannot cast 'value' to '.-test_array'", [[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 function array(v: value): boolean
-                    return v is c.test_array
+                    return v is ffi.test_array
                 end
             ]])
             h.assert_type_error("cannot cast 'value' to '.-test_record'", [[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 function aggregate(v: value): boolean
-                    return v is c.test_record
+                    return v is ffi.test_record
                 end
             ]])
         end)

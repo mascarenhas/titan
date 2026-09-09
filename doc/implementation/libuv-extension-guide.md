@@ -235,7 +235,7 @@ The current DNS owner is:
 
 ```titan
 local record uv_getaddrinfo_t
-  local native: owned *libuv.uv_getaddrinfo_t
+  local native: owned *ffi.uv_getaddrinfo_t
   local callback: (uv_getaddrinfo_t, integer,
                    *void) -> ()
 end
@@ -513,13 +513,13 @@ example. `new_tcp` plus `TcpRole` is the persistent multi-shot example.
 
 An imported libuv handle type cannot appear in an exported module interface;
 its graph depends on `uv.h`, not only contextual portable primitives. Define
-one ordinary Titan wrapper that owns `*libuv.uv_X_t` locally, plus only its
+one ordinary Titan wrapper that owns `*ffi.uv_X_t` locally, plus only its
 callbacks, Runtime identity, root index, and inherent persistent state. Public
 facades hold the wrapper as an opaque `uv` record and expose ordinary Titan
 records, unions, Interfaces, strings, numbers, and options.
 
-For a stream subtype, add small local conversions to `*libuv.uv_stream_t` and
-`*libuv.uv_handle_t`. For another handle, add only the handle conversion.
+For a stream subtype, add small local conversions to `*ffi.uv_stream_t` and
+`*ffi.uv_handle_t`. For another handle, add only the handle conversion.
 Centralizing casts makes generic close and state calls visible without a
 parallel kind tag.
 

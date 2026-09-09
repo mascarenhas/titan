@@ -152,21 +152,6 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
     local initvars = {}
     local includes = {}
     local sigs = {}
-    local direct_foreign_includes = {}
-    local direct_foreign_include_keys = {}
-    local supplemental_foreign_includes = {}
-    local function add_foreign_include(include, direct)
-        local key = assert(include.rendered,
-            "foreign include has no normalized spelling")
-        if direct then
-            if direct_foreign_include_keys[key] then return end
-            direct_foreign_include_keys[key] = true
-            direct_foreign_includes[#direct_foreign_includes + 1] = include
-        elseif not supplemental_foreign_includes[key] then
-            supplemental_foreign_includes[key] = include
-        end
-    end
-    coder._ffi_include_collector = add_foreign_include
     local initmods = {}
     local loadmods = {}
     local loadglobals = {}
@@ -231,8 +216,6 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
                     tlcontext.source_foreign_headers[#tlcontext.source_foreign_headers + 1] =
                         node._foreign_header
                 end
-            elseif tag == "Ast.TopLevelForeignImport" then
-                add_foreign_include(assert(node._include), true)
             elseif tag == "Ast.TopLevelVar" then
                 codevardec(initctx, initvars, switch_get, switch_set, gvar_map, node)
             elseif tag == "Ast.TopLevelRecord" then
@@ -891,37 +874,22 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         INITNAME = tlcontext.prefix .. 'init',
     }))
 
-    local foreignimports = {}
+    -- The runtime prefix comes first; this module's checked C environment
+    -- precedes every generated Titan declaration header.
+    local ffi_header = ast._ffi_header_output
+        or (ast._ffi_header and ast._ffi_header.filename)
+        or (modname:gsub("[.]", "/") .. ".ffi.h")
+    local foreignimports = {
+        "#include " .. c_string_literal(ffi_header),
+    }
     if ast._foreign_header_output then
-        -- The generated companion reproduces the checked direct-FFI block and
-        -- every source-foreign dependency before its declarations. Including
-        -- only that companion here avoids requiring user C headers to be
-        -- self-idempotent merely because this module has foreign functions.
         foreignimports[#foreignimports + 1] =
             "#include " .. c_string_literal(ast._foreign_header_output)
     else
-        for _, include in ipairs(direct_foreign_includes) do
-            foreignimports[#foreignimports + 1] =
-                coder._foreign_include_line(include)
-        end
         for _, header in ipairs(tlcontext.source_foreign_headers) do
             foreignimports[#foreignimports + 1] =
                 "#include " .. c_string_literal(header)
         end
-    end
-    local supplemental_keys = {}
-    for key in pairs(supplemental_foreign_includes) do
-        if not direct_foreign_include_keys[key]
-            and not (ast._foreign_header_output
-                and ast._foreign_header_include_keys
-                and ast._foreign_header_include_keys[key]) then
-            supplemental_keys[#supplemental_keys + 1] = key
-        end
-    end
-    table.sort(supplemental_keys, util.bytewise_less)
-    for _, key in ipairs(supplemental_keys) do
-        foreignimports[#foreignimports + 1] = coder._foreign_include_line(
-            supplemental_foreign_includes[key])
     end
 
     local preamble_substs = {
@@ -969,7 +937,6 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         foreign_header = coder.generate_foreign_header(
             modname, ast, tlcontext)
     end
-    coder._ffi_include_collector = nil
     local source = preamble .. "\n\n" .. table.concat(code, "\n\n")
     -- A `#line` directive applies its number to the immediately following
     -- physical source line. Template substitutions can contribute blank

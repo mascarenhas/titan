@@ -1,18 +1,18 @@
 local test = import "test"
-local lua = foreign import "lua.h"
+foreign import "lua.h"
 
 local function clear_lua_helper_globals()
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  if lua.lua_checkstack(L, 3) == 0 then
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 3) == 0 then
     raise "cannot reserve Lua stack for helper-global mutation"
   end
-  lua.lua_rawgeti(L, lua.LUA_REGISTRYINDEX,
-                  lua.LUA_RIDX_GLOBALS as lua.lua_Integer)
-  lua.lua_pushnil(L)
-  lua.lua_setfield(L, -2, "string")
-  lua.lua_pushnil(L)
-  lua.lua_setfield(L, -2, "tonumber")
+  ffi.lua_rawgeti(L, ffi.LUA_REGISTRYINDEX,
+                  ffi.LUA_RIDX_GLOBALS as ffi.lua_Integer)
+  ffi.lua_pushnil(L)
+  ffi.lua_setfield(L, -2, "string")
+  ffi.lua_pushnil(L)
+  ffi.lua_setfield(L, -2, "tonumber")
 end
 
 function test_location_after_lua_global_mutation(context: test.Context)

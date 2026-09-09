@@ -124,7 +124,7 @@ qualified Titan-module lookup is accepted only when
 `_foreign_function_reference` identifies a source foreign member. An imported
 C namespace remains usable because its functions, values, fields, types,
 `sizeof`, and `alignof` are already direct C declarations. A producer's
-`foreign import` alias is not copied into the consumer's symbol table.
+reserved `ffi` namespace is established from the consumer's combined C header.
 
 After ordinary checking and elaboration, `_validate_foreign_body_node` performs
 a closed AST walk. It rejects `StatTry` (including parser-lowered `defer`),
@@ -168,35 +168,24 @@ provider cannot forge the permission: the closed metadata validator rejects
 context fields. Another source module cannot relay the declaration, and static
 co-residence or native symbol discovery does not create a Titan name for it.
 
-C declaration plumbing is kept separate from permission. An explicit source import
-of a producer that has foreign declarations records the producer's generated
-header path on the import node. That header makes the C prototype and any
-inline definition visible to the consumer translation unit, but only the
-source-provenance overlay makes `alias.member` typecheck. Including a header is
-therefore not authorization.
+C declaration plumbing is kept separate from permission. Every explicit source
+import carries the producer's generated `.ffi.h` descriptor into the consumer's
+combined C environment. If the producer defines foreign functions, its
+`.titan.h` also makes their prototypes and eligible inline bodies visible to
+generated C. The source-provenance overlay alone makes `alias.member` typecheck.
+Transitive C header inclusion does not grant transitive private Titan access.
 
-The consumer checker must see the same preprocessing environment as its final
-C compiler. After all direct Titan and C imports have been visited,
-`apply_source_foreign_headers` adds source-generated headers to the module probe
-context in AST order and replays their producer-owned final macro environments
-and changed-name deltas before aliases, declarations, module initializers, or
-bodies are checked. The source module type carries only that compiler-private
-macro state and the exact transitive real-header inputs already established
-while checking the producer. Keeping the complete final environment is
-necessary when a source companion is the consumer's first C include:
-compiler-default and configured `-D` macros are part of that environment even
-though the header itself did not change them. The
-consumer synthesizes the generated-companion include descriptor from those
-facts; it does not preprocess, parse, or convert the resolver-owned temporary
-header through `cdriver` a second time. Probes reach the physical companion
-through a private forwarding include with stable public-header spelling. The
-probe cache hashes only the resulting unpreprocessed source, without reading
-header contents for its key. The baseline checks the companion's declarations
-and emitted include order using the same C compiler that will compile the module. This keeps
-macro projections and contextual probes aligned with the emitted translation
-unit without treating compiler output as a new foreign API. As elsewhere in the trusted C FFI, deliberately
-configuration-dependent cross-translation-unit ABI declarations remain the C
-programmer's responsibility.
+The consumer checker prepares one `A.ffi.h` containing explicit-source
+dependency FFI headers before its local directives, then preprocesses and parses
+that actual header. Include guards, final macro state, and actual C scopes
+produce the reserved `ffi` namespace before aliases, signatures, initializers,
+and bodies are checked. Probes use the same deterministic generated FFI tree;
+there is no synthetic per-type origin reconstruction or forwarding header.
+The probe cache hashes the complete unpreprocessed source, including the
+stable logical include and generated-bundle digest comment, without hashing real author headers as
+extra key inputs. The configured C compiler checks the combined baseline and
+final generated unit. Additional consumer headers can cause late C diagnostics
+for imported declarations while Titan source-private visibility stays direct.
 
 ## Exact raw-C lowering and sequencing
 
@@ -257,29 +246,31 @@ registration appears in a foreign body.
 
 ### Contents and inline classification
 
-A logical source module with at least one foreign declaration owns one
-source-adjacent companion:
+Every logical source module owns `A.ffi.h`; a module with foreign functions also
+owns `A.titan.h`:
 
-| Canonical source | Header |
-| --- | --- |
-| flat `foo/bar.titan` | `foo/bar.titan.h` |
-| folder main `foo/bar/bar.titan` | `foo/bar/bar.titan.h` |
+| Canonical source | C environment | Foreign declarations |
+| --- | --- | --- |
+| flat `foo/bar.titan` | `foo/bar.ffi.h` | `foo/bar.titan.h` |
+| folder main `foo/bar/bar.titan` | `foo/bar/bar.ffi.h` | `foo/bar/bar.titan.h` |
 
-`driver.foreign_header_filename` derives the name from the physical native
-output, so an external `--tree` and a folder module follow the same canonical
-main rule as generated C and object files. Contributors never own headers.
+`driver.ffi_header_filename` and `driver.foreign_header_filename` derive these
+names from the canonical physical output. External `--tree` sources and folder
+modules follow the same main-file rule as generated C and object files;
+contributors never own separate headers.
 
-`coder.generate_foreign_header` emits, in order:
+`coder.generate_ffi_header` delegates to `ffiheaders.render`: ownership banner
+and guard, explicit-source dependency `.ffi.h` includes in declaration order,
+then local foreign directives in combined AST order. For folder modules this is
+main first, then bytewise-sorted contributors.
 
-1. the ownership banner and a module-derived include guard;
-2. direct C imports in AST order;
-3. bytewise-sorted supplemental origin headers required to render C types used
-   by the declarations and bodies;
-4. generated headers for explicit source dependencies that define foreign
-   functions;
-5. the portable definition of `TITAN_SOURCE_LOCAL`;
-6. all foreign prototypes in declaration order; and
-7. all eligible inline bodies, also in declaration order.
+`coder.generate_foreign_header` emits:
+
+1. the ownership banner and module-derived include guard;
+2. its own `.ffi.h` and needed explicit-source `.titan.h` includes;
+3. the portable definition of `TITAN_SOURCE_LOCAL`;
+4. all foreign prototypes in declaration order; and
+5. all eligible inline bodies in declaration order.
 
 Before any generated companion is consumed or published, the driver applies
 required `#line` normalization. With `titanc --pretty-print` it additionally
@@ -289,9 +280,9 @@ preserves the intentional include sequence above.
 
 Putting every prototype before every inline body supports calls among the
 module's foreign declarations. Include lines are normalized and deduplicated.
-A generated module C file includes its own companion as the complete checked
-foreign block rather than repeating the user's direct headers; a module with no
-companion includes its direct C and source-generated headers itself.
+A generated module C file includes its own `.ffi.h` first and then its own
+`.titan.h` when present, plus needed explicit-source Titan declaration headers.
+It does not reconstruct a supplemental origin list from individual C types.
 
 `_foreign_function_is_inline` skips an optional prefix of initialized local
 declarations and then recognizes exactly three root shapes: one return; one
@@ -305,18 +296,19 @@ manufacture a canonical out-of-line identity.
 ### Temporary headers during checking
 
 Recursive source checking happens before the final physical output graph is
-planned. When a checked dependency contains foreign declarations,
-`defaultloader` therefore renders a sibling temporary header such as the final
-path plus `.check.tmp.<unique>`, completes its normalization/optional-format
-boundary, converts the completed checking path to an absolute pathname, and only
-then returns it in the trusted source loader result. A consumer can immediately
-process the completed header in the exact header/probe
-context described above, even when final object compilation will sort the
-consumer before the producer. Probe rendering uses a private wrapper whose
-stable spelling comes from the eventual public companion path. Its absolute
-quoted include lets the C compiler read the unique physical checking file while
-preserving nested quoted-include origin. It is materialized only on a cache miss
-inside the probe service's private workspace.
+published. `ffiheaders` validates immutable descriptors for each logical module,
+its authored include text, and its dependency descriptors, and materializes the
+actual generated `.ffi.h` tree under a private root with deterministic logical
+paths. A content-derived descriptor digest binds its text and dependencies.
+Relative generated-header edges preserve that logical tree. Absolute author
+header includes preserve quoted-include origin. A consumer can parse and probe
+its complete environment immediately after its source dependencies are checked.
+
+Dependencies with foreign functions also receive a completed checking
+`.titan.h` in that tree, including its own `.ffi.h` and needed dependency Titan
+headers. These actual files require no forwarding include or filesystem alias.
+They pass the required normalization and optional formatting boundary before
+use.
 
 These files belong to the resolver context. `close_resolver_context` removes
 every recorded temporary and closes the shared C-probe service on ordinary,
@@ -329,16 +321,17 @@ CLI's close guard.
 After all source modules typecheck, `titanc` calls
 `driver.plan_foreign_headers` over the sorted invocation-wide source graph. It
 first derives every final absolute header identity without rendering content,
-rejects two logical modules claiming one path, then rewrites each explicit source
-edge from its temporary checking path to the finalized producer path. It renders
-each required header exactly once from that finalized graph. The completed text
+rejects two logical modules claiming one path, then rewrites explicit-source
+`.ffi.h` and `.titan.h` edges from checking paths to finalized producer paths.
+It renders each required header exactly once from that finalized graph. The completed text
 is retained on the AST for the later module-code generation pass instead of
 walking the same decorated foreign-function bodies again. Every plan is
 ownership-validated before any plan is written and is also included in the
 CLI's general output-path preflight.
 
 A required path may be replaced only when its first bytes are
-`driver.FOREIGN_HEADER_MARKER`; a user file, symlink, directory, or other
+the applicable generated-header marker (`driver.FFI_HEADER_MARKER` or
+`driver.FOREIGN_HEADER_MARKER`); a user file, symlink, directory, or other
 unowned object is refused. For a source module with no remaining foreign
 declaration, a banner-owned old companion is removed and an unowned same path is
 left alone. Each final companion is written to a sibling stage, normalized and
@@ -352,9 +345,8 @@ The companion is a source-build intermediate. Provider publication validates
 and commits the DSO, archive, shims, dSYM, and standard test-support source—not
 generated foreign headers. Headers add no metadata key, DSO claim, archive
 member, installed SDK declaration, Lua shim, or module-state slot. Repository
-cleanup names the three known standard companions exactly, while generic test
-cleanup removes a `.titan.h` only under its bounded generated-source ownership
-rule. Sanitizer generated-C snapshots preserve the required header closure with
+cleanup covers both generated header suffixes under their bounded
+generated-source ownership rules. Sanitizer generated-C snapshots preserve the required header closure with
 the saved translation unit.
 
 ## Target-directed allocation plans

@@ -3,8 +3,8 @@
 -- needs async operations starts one Task and pumps one Runtime explicitly.
 local async = import "async"
 local test = import "test.titan"
-local lua = foreign import "lua.h"
-local ffi = foreign import "titan/ffi.h"
+foreign import "lua.h"
+foreign import "titan/ffi.h"
 
 local type Body = () -> ()
 local type Cleanup = () -> ()
@@ -22,9 +22,9 @@ local active_session: Session? = nil
 
 local function reinstall_trace(trace: string)
   ffi.lua_pushtvalue(L, trace)
-  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY)
-  lua.lua_pushboolean(L, 1)
-  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_PINNED)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY)
+  ffi.lua_pushboolean(L, 1)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_PINNED)
 end
 
 local function remember_failure(session: Session, failure: value,

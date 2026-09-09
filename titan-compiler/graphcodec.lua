@@ -57,6 +57,7 @@ local function encode(root, options)
     work(0, true)
     local nodes, ids, records = {}, {}, {}
     local external = options.external or {}
+    local filter = options.filter
     local entry_count, byte_count = 0, 4
     local chunks = {}
     local function append(bytes)
@@ -118,10 +119,14 @@ local function encode(root, options)
         record.annotations = value(annotations)
         -- next/rawget deliberately do not invoke payload metamethods.
         for key, item in next, node do
-            entry_count = entry_count + 1
-            assert(entry_count <= bound.max_entries,
-                "graph entry limit exceeded")
-            record[#record + 1] = value(key) .. value(item)
+            if not filter or filter(node, key, item) then
+                entry_count = entry_count + 1
+                assert(entry_count <= bound.max_entries,
+                    "graph entry limit exceeded")
+                record[#record + 1] = value(key) .. value(item)
+            else
+                work()
+            end
         end
         records[index] = record
         index = index + 1
@@ -228,6 +233,7 @@ local function decode(payload, options)
     -- publication. The node directory roots every object through this phase.
     for index, record in ipairs(records) do
         work()
+        if options.restore_node then options.restore_node(nodes[index]) end
         if record.meta then setmetatable(nodes[index], record.meta) end
     end
     for index, record in ipairs(records) do

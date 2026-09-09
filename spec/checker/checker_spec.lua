@@ -577,8 +577,8 @@ describe("Titan type checker", function()
     it("rejects assignment to a foreign variable cleanly", function ()
         with_header("extern int test_errno;\n", function(header)
             local errors = check_errs([[
-                local c = foreign import "]] .. header .. [["
-                function f() c.test_errno = 0 end
+                foreign import "]] .. header .. [["
+                function f() ffi.test_errno = 0 end
             ]])
             assert.equal(1, #errors, table.concat(errors, "\n"))
             assert.match("cannot assign to foreign variable", errors[1])
@@ -1463,10 +1463,10 @@ describe("Titan type checker", function()
             typedef struct ffi_file ffi_file;
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 local function compare(
-                    left: *c.ffi_file,
-                    right: *c.ffi_file
+                    left: *ffi.ffi_file,
+                    right: *ffi.ffi_file
                 ): boolean
                     return left == right
                         and left ~= right
@@ -1483,10 +1483,10 @@ describe("Titan type checker", function()
     for _, op in ipairs({"<", ">", "<=", ">="}) do
         it("can compare compatible object pointers using " .. op, function()
             local code = [[
-                local stdio = foreign import "stdio.h"
+                foreign import "stdio.h"
                 function fn(): boolean
-                    local f1 = stdio.fopen("a.txt", "w")
-                    local f2 = stdio.fopen("a.txt", "w")
+                    local f1 = ffi.fopen("a.txt", "w")
+                    local f2 = ffi.fopen("a.txt", "w")
                     return f1 ]] .. op .. [[ f2
                 end
             ]]
@@ -1951,13 +1951,13 @@ describe("Titan type checker", function()
 
     it("fails to load foreign modules that do not exist", function ()
         local code = [[
-            local foo = foreign import "does_not_exist.h"
-            local bar = foreign import "not_a_header_file"
+            foreign import "does_not_exist.h"
+            foreign import "not_a_header_file"
         ]]
         local ok, err = run_checker(code)
         assert.falsy(ok)
-        assert.match("failed preprocessing 'does_not_exist.h'", err)
-        assert.match("failed preprocessing 'not_a_header_file'", err)
+        assert.match("failed preprocessing", err)
+        assert.match("does_not_exist.h:file not found", err, 1, true)
     end)
 
     it("correctly imports modules that do exist", function ()
@@ -1990,21 +1990,17 @@ describe("Titan type checker", function()
 
     it("correctly imports foreign modules that do exist", function ()
         local code = [[
-            local stdio = foreign import "stdio.h"
+            foreign import "stdio.h"
         ]]
         local ok, err, ast = run_checker(code)
         assert.truthy(ok, err)
-        assert_ast(ast[1], {
-            _tag = "Ast.TopLevelForeignImport",
-            localname = "stdio",
+        assert_ast(ast[1], { _tag = "Ast.TopLevelForeignImport", headername = "stdio.h" })
+        assert_ast(ast._ffi_namespace, {
+            _tag = "Checker.ForeignNamespace", name = "ffi",
             _type = {
-                _tag = "Type.CModule",
-                members = {
-                    printf = {
-                        type = {_tag = "Type.CFunction"}
-                    }
-                }
-            }
+                _tag = "Type.CModule", name = "ffi",
+                members = { printf = { type = { _tag = "Type.CFunction" } } },
+            },
         })
     end)
 
@@ -2016,13 +2012,13 @@ describe("Titan type checker", function()
             extern void ffi_consume(void *pointer);
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 local function use(
-                    left: *c.ffi_left,
-                    right: *c.ffi_right
+                    left: *ffi.ffi_left,
+                    right: *ffi.ffi_right
                 )
-                    c.ffi_consume(left)
-                    c.ffi_consume(right)
+                    ffi.ffi_consume(left)
+                    ffi.ffi_consume(right)
                 end
             ]])
             assert.truthy(ok, err)
@@ -2035,10 +2031,10 @@ describe("Titan type checker", function()
             extern char *ffi_copy(char *target, const char *source);
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 function f()
-                    local mem = c.ffi_allocate()
-                    local s = c.ffi_copy(mem, "Hello")
+                    local mem = ffi.ffi_allocate()
+                    local s = ffi.ffi_copy(mem, "Hello")
                 end
             ]])
             assert.falsy(ok)
@@ -2052,10 +2048,10 @@ describe("Titan type checker", function()
             extern char *ffi_copy(char *target, const char *source);
         ]], function(header)
             local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 function f()
-                    local mem = c.ffi_allocate()
-                    local s = c.ffi_copy(mem as string, "Hello")
+                    local mem = ffi.ffi_allocate()
+                    local s = ffi.ffi_copy(mem as string, "Hello")
                 end
             ]])
             assert.truthy(ok, err)
@@ -2065,12 +2061,12 @@ describe("Titan type checker", function()
     it("can check foreign module variables", function()
         with_header("extern int ffi_count;\n", function(header)
             local errors = check_errs([[
-                local c = foreign import "]] .. header .. [["
+                foreign import "]] .. header .. [["
                 function accepted(): integer
-                    return c.ffi_count
+                    return ffi.ffi_count
                 end
                 function rejected(): string
-                    return c.ffi_count
+                    return ffi.ffi_count
                 end
             ]])
             assert.equal(1, #errors, table.concat(errors, "\n"))
@@ -2086,18 +2082,18 @@ describe("Titan type checker", function()
         -- Enum constant used as an integer: must type-check cleanly
         -- (previously crashed the checker with 'impossible: Enum').
         local code = [[
-            local colors = foreign import "]] .. header .. [["
+            foreign import "]] .. header .. [["
             function fun(): integer
-                return colors.GREEN
+                return ffi.GREEN
             end
         ]]
         local ok, err = run_checker(code)
         assert.truthy(ok, err)
         -- Same constant used where a string is expected: clean type error.
         code = [[
-            local colors = foreign import "]] .. header .. [["
+            foreign import "]] .. header .. [["
             function fun(): string
-                return colors.GREEN
+                return ffi.GREEN
             end
         ]]
         ok, err = run_checker(code)
@@ -2116,13 +2112,13 @@ describe("Titan type checker", function()
         fd:write("float _Complex frob(float _Complex x);\nint dbl(int x);\n")
         fd:close()
         local ok, err = run_checker([[
-            local c = foreign import "]] .. header .. [["
-            function f(x: integer): integer return c.dbl(x) end
+            foreign import "]] .. header .. [["
+            function f(x: integer): integer return ffi.dbl(x) end
         ]])
         assert.truthy(ok, err)
         local ok2, err2 = run_checker([[
-            local c = foreign import "]] .. header .. [["
-            function f(x: integer): integer return c.frob(x) end
+            foreign import "]] .. header .. [["
+            function f(x: integer): integer return ffi.frob(x) end
         ]])
         os.remove(header)
         assert.falsy(ok2)

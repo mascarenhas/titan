@@ -1,20 +1,20 @@
 local test = import "test"
 local system = import "os"
-local lua_api = foreign import "lua.h"
-local lua_aux = foreign import "lauxlib.h"
-local ffi = foreign import "titan/ffi.h"
-local cstring = foreign import "string.h"
-local ctime = foreign import "time.h"
+foreign import "lua.h"
+foreign import "lauxlib.h"
+foreign import "titan/ffi.h"
+foreign import "string.h"
+foreign import "time.h"
 
 local type CheckedAction = () -> ()
 
 local function error_text(failure: value): string
   local result = "<unprintable error>"
-  local top = lua_api.lua_gettop(L)
-  defer lua_api.lua_settop(L, top)
-  if lua_api.lua_checkstack(L, 2) ~= 0 then
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 2) ~= 0 then
     ffi.lua_pushtvalue(L, failure)
-    lua_aux.luaL_tolstring(L, -1, nil)
+    ffi.luaL_tolstring(L, -1, nil)
     local rendered: value = ffi.lua_totvalue(L, -1)
     if rendered is string then result = rendered as string end
   end
@@ -22,17 +22,17 @@ local function error_text(failure: value): string
 end
 
 local function contains(subject: string, fragment: string): boolean
-  return cstring.strstr(subject, fragment) ~= nil
+  return ffi.strstr(subject, fragment) ~= nil
 end
 
 local function error_string_field(failure: value,
                                   name: string): string?
-  local top = lua_api.lua_gettop(L)
-  defer lua_api.lua_settop(L, top)
-  if lua_api.lua_checkstack(L, 2) == 0 then return nil end
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 2) == 0 then return nil end
   ffi.lua_pushtvalue(L, failure)
-  local field_type = lua_api.lua_getfield(L, -1, name)
-  if field_type ~= lua_api.LUA_TSTRING then return nil end
+  local field_type = ffi.lua_getfield(L, -1, name)
+  if field_type ~= ffi.LUA_TSTRING then return nil end
   local field: value = ffi.lua_totvalue(L, -1)
   if field is string then return field as string end
   return nil
@@ -117,17 +117,17 @@ local function as_date(candidate: value,
 end
 
 local function host_time(): integer
-  return ctime.time(nil) as integer
+  return ffi.time(nil) as integer
 end
 
 local function c_utc_format(format: string): string
-  local instant = 0 as ctime.time_t
-  local calendar = ctime.gmtime(instant)
+  local instant = 0 as ffi.time_t
+  local calendar = ffi.gmtime(instant)
   if not calendar then raise "gmtime could not represent the epoch" end
   local storage = char.new_array(256)
-  local written = ctime.strftime(
+  local written = ffi.strftime(
     storage as *char,
-    256 as cstring.size_t, format, calendar)
+    256 as ffi.size_t, format, calendar)
   if written == 0 then raise "strftime did not fit the test buffer" end
   local bytes = storage as *char
   return bytes as string
