@@ -2899,10 +2899,27 @@ enum probe_wide { PROBE_WIDE = 18446744073709551615ULL };
                     assert.equal(spelling:find("__typeof__", 1, true) and 6 or selected_id,
                         selected.selection.carrier_id)
                 end
-                local qualified = module:select_enum_carrier(
-                    types.CInteger("qualified_probe_alias", true, 3, 32), all_ids)
+                local qualified_type =
+                    types.CInteger("qualified_probe_alias", true, 3, 32)
+                local qualified = module:select_enum_carrier(qualified_type, all_ids)
                 assert.equal("success", qualified.status, qualified.message)
-                assert.equal(0, qualified.selection.match_count)
+                -- GCC versions differ on qualified enums; preserve the answer
+                -- from the previous declaration-pair probe on the same host.
+                local oracle_service = assert(cprobe.new_service({
+                    compiler_argv = compiler, cflags = flags, syntax_only = true }))
+                local oracle_module = assert(oracle_service:module_context({ includes = {
+                    { include_kind = "quote", include_name = header } } }))
+                local carrier_type = types.CInteger(
+                    short_enums and "signed char" or "int", true,
+                    short_enums and 1 or 3, short_enums and 8 or 32)
+                local oracle = oracle_module:validate_declaration_compatibility(
+                    qualified_type, carrier_type)
+                assert.is_true(oracle_service:close())
+                assert.is_true(oracle.status == "success" or oracle.status == "rejected",
+                    oracle.message)
+                local accepted = oracle.status == "success"
+                assert.equal(accepted and 1 or 0, qualified.selection.match_count)
+                assert.equal(accepted and selected_id or 0, qualified.selection.carrier_id)
                 local absent = module:select_enum_carrier(int_enum, { 7 })
                 assert.equal("success", absent.status, absent.message)
                 assert.equal(0, absent.selection.match_count)

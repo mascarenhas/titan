@@ -3972,21 +3972,23 @@ done
                 "\n  test%-linux%-stdlib:(.-)" ..
                 "\n  test%-linux%-compiler:"))
             local compiler_job = assert(workflow:match(
-                "\n  test%-linux%-compiler:(.-)\n  # macOS"))
+                "\n  test%-linux%-compiler:(.-)\n  compiler%-coverage:"))
+            local coverage_job = assert(workflow:match(
+                "\n  compiler%-coverage:(.-)\n  # macOS"))
             local macos_job = assert(workflow:match(
                 "\n  test%-macos:(.-)\n  sanitizer:"))
             local sanitizer_job = assert(workflow:match(
                 "\n  sanitizer:(.*)"))
 
-            assert.equal(3, count_literal(workflow,
+            assert.equal(4, count_literal(workflow,
                 "if: github.event_name == 'push'"), workflow)
             assert.equal(1, count_literal(workflow,
                 "if: github.event_name == 'workflow_dispatch'"), workflow)
-            assert.equal(4, count_literal(workflow, "\n    runs-on:"),
+            assert.equal(5, count_literal(workflow, "\n    runs-on:"),
                 workflow)
             for _, job_name in ipairs({
-                "test-linux-stdlib", "test-linux-compiler", "test-macos",
-                "sanitizer",
+                "test-linux-stdlib", "test-linux-compiler", "compiler-coverage",
+                "test-macos", "sanitizer",
             }) do
                 assert.equal(1, count_literal(workflow,
                     "\n  " .. job_name .. ":"), job_name)
@@ -4214,8 +4216,13 @@ done
             assert.is_true(system_index < upload_index, stdlib_job)
 
             assert.equal(1, count_literal(compiler_job,
-                    "name: compiler/language (ubuntu-24.04, LuaCov)"),
+                    "name: compiler/language shards ${{ matrix.shard-pair }} " ..
+                    "(ubuntu-24.04, LuaCov)"),
                 compiler_job)
+            assert.equal(1, count_literal(compiler_job,
+                'shard-pair: ["1-2", "3-4"]'), compiler_job)
+            assert.equal(1, count_literal(compiler_job,
+                "fail-fast: false"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
                 "needs: test-linux-stdlib"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
@@ -4228,6 +4235,9 @@ done
                 "name: titan-linux-prepared.tar.gz"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
                 "ci_parallel_compiler_tests.sh"), compiler_job)
+            assert.truthy(compiler_job:find(
+                'ci_parallel_compiler_tests.sh "${{ matrix.shard-pair }}"',
+                1, true), compiler_job)
             assert.falsy(compiler_job:find(
                 "ci_test_groups.sh compiler", 1, true), compiler_job)
             assert.equal(1, count_literal(compiler_job,
@@ -4238,10 +4248,28 @@ done
                 "- name: Restore prepared Linux tree and environment",
                 1, true))
             local compiler_tests_index = assert(compiler_job:find(
-                "- name: Run four isolated compiler shards with covered " ..
+                "- name: Run two isolated compiler shards with covered " ..
                 "and stress invocations",
                 compiler_unpack_index, true))
             assert.is_true(compiler_unpack_index < compiler_tests_index)
+            local compiler_upload_index = assert(compiler_job:find(
+                "- name: Upload compiler pair coverage",
+                compiler_tests_index, true))
+            assert.is_true(compiler_tests_index < compiler_upload_index)
+            local compiler_upload = named_step(
+                compiler_job, "Upload compiler pair coverage")
+            for _, required in ipairs({
+                "actions/upload-artifact@v7",
+                "name: titan-compiler-coverage-${{ matrix.shard-pair }}",
+                "path: luacov.stats.out",
+                "if-no-files-found: error",
+                "overwrite: true",
+            }) do
+                assert.truthy(compiler_upload:find(required, 1, true), required)
+            end
+            assert.falsy(compiler_job:find("continue-on-error", 1, true))
+            assert.falsy(compiler_job:find("id-token: write", 1, true))
+            assert.falsy(compiler_job:find("codecov/codecov-action", 1, true))
             assert.falsy(compiler_job:find(
                 "C-probe results", 1, true))
             assert.truthy(read_file(
@@ -4264,7 +4292,33 @@ done
             end
             assert.equal(3, count_literal(workflow,
                 "TITAN_PROBE_CACHE_DISABLE=1"), workflow)
-            assert_codecov_job(compiler_job, "compiler")
+            assert.equal(1, count_literal(coverage_job,
+                "needs: test-linux-compiler"), coverage_job)
+            assert.equal(1, count_literal(coverage_job,
+                "runs-on: ubicloud-standard-2"), coverage_job)
+            assert.equal(1, count_literal(coverage_job,
+                "name: titan-linux-prepared.tar.gz"), coverage_job)
+            assert.equal(2, count_literal(coverage_job,
+                "actions/download-artifact@v8"), coverage_job)
+            assert.truthy(coverage_job:find(
+                "pattern: titan-compiler-coverage-*", 1, true))
+            assert.truthy(coverage_job:find(
+                "merge_luacov_stats.lua luacov.stats.out", 1, true))
+            for _, pair in ipairs({ "1-2", "3-4" }) do
+                assert.equal(1, count_literal(coverage_job,
+                    "titan-compiler-coverage-" .. pair ..
+                    "/luacov.stats.out"), coverage_job)
+            end
+            local coverage_merge_index = assert(coverage_job:find(
+                "- name: Merge all four compiler shards", 1, true))
+            local coverage_report_index = assert(coverage_job:find(
+                "- name: Generate compiler coverage report",
+                coverage_merge_index, true))
+            assert.is_true(coverage_merge_index < coverage_report_index)
+            assert.falsy(coverage_job:find("always()", 1, true))
+            assert.falsy(coverage_job:find("continue-on-error", 1, true))
+            assert.falsy(coverage_job:find("ci_test_groups.sh", 1, true))
+            assert_codecov_job(coverage_job, "compiler")
 
             assert.equal(1, count_literal(macos_job,
                 "if: github.event_name == 'workflow_dispatch'"), macos_job)
@@ -4448,6 +4502,10 @@ done
             assert.equal(2, count_literal(parallel_compiler,
                 "xargs -r -n1 -P2"), parallel_compiler)
             for _, required in ipairs({
+                'shards=(1 2 3 4)',
+                '1-2) shards=(1 2)',
+                '3-4) shards=(3 4)',
+                'for shard in "${shards[@]}"',
                 'mktemp -d "$runner_temp/titan-compiler-workers.XXXXXX"',
                 'tar --exclude="./.lua" --exclude="./.git"',
                 'cd "$worker" || exit 1',

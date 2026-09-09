@@ -16,8 +16,8 @@ env:
 
 jobs:
   # Build and install the regular Linux tree once, run every uncovered
-  # runtime/stdlib gate on that warm producer, and give the one compiler/LuaCov
-  # consumer a pristine copy of the optimized bundled tree.
+  # runtime/stdlib gate on that warm producer, and give the compiler/LuaCov
+  # consumers pristine copies of the optimized bundled tree.
   test-linux-stdlib:
     name: stdlib (ubuntu-24.04, build+all-no-coverage)
     if: github.event_name == 'push'
@@ -343,14 +343,17 @@ jobs:
           overwrite: true
 
   test-linux-compiler:
-    name: compiler/language (ubuntu-24.04, LuaCov)
+    name: compiler/language shards ${{ matrix.shard-pair }} (ubuntu-24.04, LuaCov)
     needs: test-linux-stdlib
     if: github.event_name == 'push'
     runs-on: ubicloud-standard-2
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard-pair: ["1-2", "3-4"]
     permissions:
       contents: read
-      id-token: write
 
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -376,12 +379,63 @@ jobs:
       # compiler cleanup and checkout-root fixture names cannot race. Each
       # shard first runs ordinary compiler tests with LuaCov and then its
       # explicitly tagged stress oracles without LuaCov. They share only the
-      # prepared installed prefix, and their LuaCov stats are merged after all
-      # four deterministic shards pass.
-      - name: Run four isolated compiler shards with covered and stress invocations
+      # prepared installed prefix. Each runner executes two shards concurrently
+      # and publishes their merged stats only after both pass.
+      - name: Run two isolated compiler shards with covered and stress invocations
         env:
           TITAN_EXTRA_CFLAGS: "-O0"
-        run: bash spec/support/ci_parallel_compiler_tests.sh
+        run: bash spec/support/ci_parallel_compiler_tests.sh "${{ matrix.shard-pair }}"
+
+      - name: Upload compiler pair coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: titan-compiler-coverage-${{ matrix.shard-pair }}
+          path: luacov.stats.out
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  compiler-coverage:
+    name: compiler coverage (ubuntu-24.04, merged)
+    needs: test-linux-compiler
+    if: github.event_name == 'push'
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download prepared Linux tree
+        uses: actions/download-artifact@v8
+        with:
+          name: titan-linux-prepared.tar.gz
+          path: ${{ runner.temp }}
+
+      - name: Restore prepared Linux tree and environment
+        run: |
+          tar -xzf "$RUNNER_TEMP/titan-linux-prepared.tar.gz" \
+            -C "$GITHUB_WORKSPACE"
+          test "$(cat .ci-prepared-workspace)" = "$GITHUB_WORKSPACE"
+          echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
+          .lua/bin/lua -v
+
+      - name: Download compiler pair coverage
+        uses: actions/download-artifact@v8
+        with:
+          pattern: titan-compiler-coverage-*
+          path: ${{ runner.temp }}/titan-compiler-coverage
+
+      - name: Merge all four compiler shards
+        run: |
+          lua spec/support/merge_luacov_stats.lua luacov.stats.out \
+            "$RUNNER_TEMP/titan-compiler-coverage/titan-compiler-coverage-1-2/luacov.stats.out" \
+            "$RUNNER_TEMP/titan-compiler-coverage/titan-compiler-coverage-3-4/luacov.stats.out"
 
       - name: Generate compiler coverage report
         run: |

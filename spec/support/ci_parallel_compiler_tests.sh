@@ -2,6 +2,21 @@
 
 set -u
 
+shards=(1 2 3 4)
+case "${1-all}" in
+    all) ;;
+    1-2) shards=(1 2) ;;
+    3-4) shards=(3 4) ;;
+    *)
+        echo "usage: $0 [all|1-2|3-4]" >&2
+        exit 2
+        ;;
+esac
+if (( $# > 1 )); then
+    echo "usage: $0 [all|1-2|3-4]" >&2
+    exit 2
+fi
+
 workspace=${GITHUB_WORKSPACE:-$PWD}
 runner_temp=${RUNNER_TEMP:-/tmp}
 archive=${TITAN_PREPARED_ARCHIVE:-$runner_temp/titan-linux-prepared.tar.gz}
@@ -26,7 +41,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 export archive worker_root
-if ! printf '%s\n' 1 2 3 4 | xargs -r -n1 -P2 bash -c '
+if ! printf '%s\n' "${shards[@]}" | xargs -r -n1 -P2 bash -c '
     shard=$1
     worker=$worker_root/work-$shard
     mkdir -p "$worker" || exit 1
@@ -39,7 +54,7 @@ fi
 
 export workspace worker_root busted
 xargs_status=0
-printf '%s\n' 1 2 3 4 | xargs -r -n1 -P2 bash -c '
+printf '%s\n' "${shards[@]}" | xargs -r -n1 -P2 bash -c '
     shard=$1
     worker=$worker_root/work-$shard
     log=$worker_root/shard-$shard.log
@@ -66,7 +81,7 @@ printf '%s\n' 1 2 3 4 | xargs -r -n1 -P2 bash -c '
 ' _ || xargs_status=$?
 
 status=$xargs_status
-for shard in 1 2 3 4; do
+for shard in "${shards[@]}"; do
     if [[ ! -s $worker_root/shard-$shard.log ]]; then
         echo "compiler shard $shard produced no readable log" >&2
         status=1
@@ -84,7 +99,7 @@ done
 if (( status != 0 )); then exit 1; fi
 
 stats=()
-for shard in 1 2 3 4; do
+for shard in "${shards[@]}"; do
     file=$worker_root/work-$shard/luacov.stats.out
     if [[ ! -f $file ]]; then
         echo "compiler shard $shard produced no LuaCov stats" >&2
