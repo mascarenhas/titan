@@ -694,4 +694,69 @@ describe("C declarations in one module-wide ffi environment", function()
             end)
         end)
     end)
+
+    for _, case in ipairs({
+        {
+            name = "the enum query is rejected",
+            result = { status = "rejected", accepted = false,
+                message = "injected enum query rejection" },
+            diagnostic = "cannot validate C enum type",
+            detail = "injected enum query rejection",
+        },
+        {
+            name = "the enum query infrastructure fails",
+            result = { status = "infrastructure_failure",
+                message = "injected enum compiler startup failure" },
+            diagnostic = "cannot validate C enum type",
+            detail = "injected enum compiler startup failure",
+        },
+        {
+            name = "the enum query reports multiple carriers",
+            result = { status = "success", accepted = true,
+                selection = { kind = "enum_carrier", match_count = 2,
+                    carrier_id = 3 } },
+            diagnostic = "configured C compiler reported multiple carriers",
+        },
+    }) do
+        it("rejects enum values when " .. case.name, function()
+            with_headers({ [[
+                typedef enum ffi_probe_enum {
+                    FFI_PROBE_NEGATIVE = -1, FFI_PROBE_POSITIVE = 1
+                } ffi_probe_enum;
+                extern ffi_probe_enum ffi_enum_value;
+            ]] }, function(headers)
+                with_service({}, function(service)
+                    local queries = 0
+                    local module_context = service.module_context
+                    service.module_context = function(self, options)
+                        local context = assert(module_context(self, options))
+                        context.select_enum_carrier = function(_, typ, eligible_ids)
+                            queries = queries + 1
+                            assert.truthy(types.resolve_c_typedef(typ)._c_enum_identity)
+                            assert.is_true(#eligible_ids >= 2)
+                            return case.result
+                        end
+                        return context
+                    end
+                    local source = imports(headers)
+                    local unused_errors = check_with_service(source, service)
+                    assert.equal(0, #unused_errors, table.concat(unused_errors, "\n"))
+                    assert.equal(0, queries)
+
+                    local errors = check_with_service(source .. [[
+                        function run(): integer
+                            return ffi.ffi_enum_value as integer
+                        end
+                    ]], service)
+                    local err = table.concat(errors, "\n")
+                    assert.is_true(queries > 0)
+                    assert.is_true(#errors > 0)
+                    assert.matches(case.diagnostic, err, 1, true)
+                    if case.detail then assert.matches(case.detail, err, 1, true) end
+                    assert.not_matches("full range fits in lua_Integer", err, 1, true)
+                    assert.not_matches("conflicting C declaration", err, 1, true)
+                end)
+            end)
+        end)
+    end
 end)

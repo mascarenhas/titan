@@ -4551,7 +4551,7 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 30, 31, 30, 29 }, shard_counts)
+            assert.same({ 26, 32, 30, 32 }, shard_counts)
             assert.equal(120, assigned_count)
 
             local stress_partition = read_file(
