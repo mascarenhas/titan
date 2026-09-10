@@ -2279,9 +2279,7 @@ function cprobe.new_service(options)
     local raw_include_dirs =
         option(options, toolchain, "include_dirs", nil)
     if raw_include_dirs == nil then
-        raw_include_dirs, err =
-            cdriver.resolve_compiler_include_dirs(nil, strategy)
-        if not raw_include_dirs then return nil, err end
+        return nil, "no include dirs"
     end
     local include_dirs
     include_dirs, err = normalize_include_dirs(

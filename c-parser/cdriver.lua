@@ -1,5 +1,3 @@
-local _, module_loader_path = ...
-
 local cdriver = {}
 
 local cpp = require("c-parser.cpp")
@@ -18,49 +16,6 @@ local HEADER_CACHE_KIND = "c-header-v3"
 
 local SEP = package.config:sub(1, 1)
 local default_io = compiler_io.new_sync()
-
--- Capture the compiler module's physical lookup root once, before an ordinary
--- titanc caller can change cwd. Lua's file searcher passes the selected path as
--- the chunk's second argument; prefer an absolute debug or loader path because
--- that is the normal language-server configuration and needs no cwd I/O.
---
--- A checkout-relative package.path has no recoverable load-time anchor after a
--- later chdir. In that fallback only, ask the synchronous standalone provider
--- for cwd now. Keep a failed capture as a deferred discovery error so requiring
--- cdriver still works for callers which always pass explicit include roots.
-local module_source = debug.getinfo(1, "S").source
-local debug_module_path = module_source:sub(1, 1) == "@"
-    and module_source:sub(2) or nil
-local function absolute_module_path(path)
-    return type(path) == "string" and path:match("^/") ~= nil
-end
-local module_path
-if absolute_module_path(debug_module_path) then
-    module_path = debug_module_path
-elseif absolute_module_path(module_loader_path) then
-    module_path = module_loader_path
-else
-    module_path = debug_module_path or
-        (type(module_loader_path) == "string" and module_loader_path or nil)
-end
-local module_dir_error
-if module_path and not absolute_module_path(module_path) then
-    local called, load_root, cwd_error = pcall(default_io.cwd, default_io)
-    if called and load_root then
-        module_path = load_root .. SEP .. module_path
-    else
-        module_dir_error =
-            "failed capturing compiler module cwd while loading cdriver: " ..
-            tostring(called and cwd_error or load_root)
-        module_path = nil
-    end
-elseif not module_path then
-    module_dir_error = "cdriver module loader did not provide a file path"
-end
-local module_dir = module_path and
-    (module_path:match("^(.*)[/\\][^/\\]+$") or ".") or nil
-
-local compiler_include_dirs = setmetatable({}, { __mode = "k" })
 
 -- A language-server compiler instance owns one long-lived I/O strategy while
 -- constructing many short-lived resolver contexts. Keep completed header
@@ -336,70 +291,6 @@ local function file_exists(filename, strategy)
     return strategy:readable(filename)
 end
 
-local function parent_dir(dir)
-    local parent = dir:match("^(.*)[/\\][^/\\]+$")
-    if parent == "" or parent == dir then
-        return nil
-    end
-    return parent
-end
-
-local function find_runtime_dir(start_dir, strategy)
-    local dir = start_dir
-    while dir do
-        local runtime = join_path(dir, "titan-runtime")
-        if file_exists(join_path(runtime, "titan/ffi.h"), strategy) then
-            return runtime
-        end
-        dir = parent_dir(dir)
-    end
-end
-
-local function find_sdk_include_dir(start_dir, strategy)
-    local dir = start_dir
-    while dir do
-        local include = join_path(dir, "include")
-        if file_exists(join_path(include, "titan/ffi.h"), strategy) then
-            return include
-        end
-        dir = parent_dir(dir)
-    end
-end
-
-local function find_lua_source_dir(start_dir, strategy)
-    local dir = start_dir
-    while dir do
-        local lua_source = join_path(join_path(dir, "lua-5.5.1"), "src")
-        if file_exists(join_path(lua_source, "lua.h"), strategy) then
-            return lua_source
-        end
-        lua_source = join_path(join_path(dir, "src"), "lua-5.5.1")
-        if file_exists(join_path(lua_source, "lua.h"), strategy) then
-            return lua_source
-        end
-        dir = parent_dir(dir)
-    end
-end
-
-local function default_compiler_include_dirs(strategy)
-    if compiler_include_dirs[strategy] then
-        return compiler_include_dirs[strategy]
-    end
-
-    if not module_dir then return nil, module_dir_error end
-    local resolved = {
-        find_runtime_dir(module_dir, strategy) or
-            find_sdk_include_dir(module_dir, strategy)
-            or "titan-runtime",
-    }
-    local lua_source = find_lua_source_dir(module_dir, strategy)
-    if lua_source then
-        table.insert(resolved, lua_source)
-    end
-    compiler_include_dirs[strategy] = resolved
-    return resolved
-end
-
 -- Resolve the fixed Titan/Lua SDK roots once and return an owned ordered copy.
 -- Passing nil requests checkout/installed-module discovery; an explicit empty
 -- array remains empty. This distinction lets direct checker embeddings share
@@ -407,11 +298,6 @@ end
 -- accidentally converting "discover" into "no fixed headers".
 function cdriver.resolve_compiler_include_dirs(value, strategy)
     strategy = strategy or default_io
-    if value == nil then
-        local discovery_error
-        value, discovery_error = default_compiler_include_dirs(strategy)
-        if not value then return nil, discovery_error end
-    end
     if type(value) ~= "table" then
         return nil, "compiler include dirs must be an ordered array"
     end

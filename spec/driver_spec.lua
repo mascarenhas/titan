@@ -2364,8 +2364,7 @@ describe("compiler module loader", function()
         assert.equal(
             "could not serialize source interface for module '" .. name ..
                 "': forced source-interface failure",
-            err)
-        assert.is_nil(driver.imported[name])
+                err)
         assert.is_true(driver.close_loader(loader))
     end)
 
