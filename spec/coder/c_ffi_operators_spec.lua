@@ -130,7 +130,7 @@ end
 local function generate_with_profile(source, profile)
     local service = assert(cprobe.new_service({
         profile = profile,
-        include_dirs = assert(cdriver.resolve_compiler_include_dirs()),
+        include_dirs = assert(cdriver.resolve_compiler_include_dirs({})),
     }))
     h.reset(true)
     local ast, parse_error = h.parse(source)

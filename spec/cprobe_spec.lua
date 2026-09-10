@@ -275,7 +275,7 @@ describe("C probe service", function()
         assert.is_true(service:close())
 
         local discovered = assert(
-            cdriver.resolve_compiler_include_dirs(nil))
+            cdriver.resolve_compiler_include_dirs(defaults.compiler_include_dirs))
         local default_service = assert(cprobe.new_service())
         local defaults =
             assert(default_service:cdriver_process_options())

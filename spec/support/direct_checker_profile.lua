@@ -65,7 +65,7 @@ if check_language_flag or check_io_strategy then
             cppflags = {},
             cflags = {},
             include_dirs = assert(cdriver.resolve_compiler_include_dirs(
-                nil, expected_io_strategy)),
+                {}, expected_io_strategy)),
             io = expected_io_strategy,
         }
     else

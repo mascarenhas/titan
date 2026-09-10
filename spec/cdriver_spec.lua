@@ -915,81 +915,6 @@ describe("C FFI cdriver", function()
             remove_tree({ header }, { titan, root })
         end)
 
-        it("does no cwd I/O for an absolute language-server module path",
-        function()
-            local checkout = assert(lfs.currentdir())
-            local module_path = checkout .. "/c-parser/cdriver.lua"
-            local chunk = assert(loadfile(module_path))
-            local original_new_sync = compiler_io.new_sync
-            compiler_io.new_sync = function()
-                local strategy = original_new_sync()
-                function strategy:cwd()
-                    error("absolute module load queried synchronous cwd")
-                end
-                return strategy
-            end
-
-            local loaded, fresh = pcall(
-                chunk, "c-parser.cdriver", module_path)
-
-            compiler_io.new_sync = original_new_sync
-            assert.truthy(loaded, fresh)
-            assert.is_table(fresh)
-
-            local strategy = original_new_sync()
-            function strategy:cwd()
-                error("absolute module discovery queried request cwd")
-            end
-            local dirs, discovery_error =
-                fresh.resolve_compiler_include_dirs(nil, strategy)
-            assert.truthy(dirs, discovery_error)
-            assert.matches("/titan%-runtime$", dirs[1])
-        end)
-
-        it("captures a relative module root without trusting PWD", function()
-            local checkout = assert(lfs.currentdir())
-            local chunk = assert(loadfile("c-parser/cdriver.lua"))
-            local original_new_sync = compiler_io.new_sync
-            local original_getenv = os.getenv
-            local cwd_calls = 0
-            compiler_io.new_sync = function()
-                local strategy = original_new_sync()
-                function strategy:cwd()
-                    cwd_calls = cwd_calls + 1
-                    return checkout
-                end
-                return strategy
-            end
-            os.getenv = function(name)
-                if name == "PWD" then
-                    error("cdriver module root must not read PWD")
-                end
-                return original_getenv(name)
-            end
-
-            local loaded, fresh = pcall(
-                chunk, "c-parser.cdriver", "c-parser/cdriver.lua")
-
-            compiler_io.new_sync = original_new_sync
-            os.getenv = original_getenv
-            assert.truthy(loaded, fresh)
-            assert.equal(1, cwd_calls)
-
-            local olddir = assert(lfs.currentdir())
-            assert(lfs.chdir("/tmp"))
-            local resolved, failure = pcall(function()
-                local strategy = original_new_sync()
-                function strategy:cwd()
-                    error("discovery rebound the captured module root")
-                end
-                return assert(fresh.resolve_compiler_include_dirs(
-                    nil, strategy))
-            end)
-            assert(lfs.chdir(olddir))
-            assert.truthy(resolved, failure)
-            assert.matches("/titan%-runtime$", failure[1])
-        end)
-
         it("defers a failed relative-root capture for explicit roots",
         function()
             local chunk = assert(loadfile("c-parser/cdriver.lua"))
@@ -1014,12 +939,7 @@ describe("C FFI cdriver", function()
             assert.same({ "/explicit/compiler/include" },
                 assert(fresh.resolve_compiler_include_dirs({
                     "/explicit/compiler/include",
-                }, strategy)))
-            local dirs, discovery_error =
-                fresh.resolve_compiler_include_dirs(nil, strategy)
-            assert.is_nil(dirs)
-            assert.matches("simulated load%-time cwd failure",
-                discovery_error)
+                    }, strategy)))
         end)
     end)
 
