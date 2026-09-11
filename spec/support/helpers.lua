@@ -63,6 +63,7 @@ local function checker_probe_options(session)
         probe_service_provider = function()
             return driver.get_probe_service(session)
         end,
+        compiler_include_dirs = {}
     }
 end
 

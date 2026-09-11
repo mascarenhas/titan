@@ -101,7 +101,7 @@ describe("generated module C header inputs", function()
         local root = directory()
         file(root .. "/broken.h", '#include "missing-dependency.h"\n')
         local state = owner()
-        local options = { io = state.io, source_dir = root }
+        local options = { io = state.io, source_dir = root, compiler_include_dirs = {} }
         local header = prepare(state, "broken", root .. "/broken.titan", { "broken.h" }, options)
         local result, err = cdriver.process_module(header, options)
         assert.is_nil(result)
@@ -475,6 +475,7 @@ describe("completed C header payload transport", function()
         local options = {
             cache_adapter = adapter,
             cppflags = { "-DTITAN_STR(x)=#x", "-DTITAN_VALUE=TITAN_STR(a + b)" },
+            compiler_include_dirs = {},
         }
         local first = assert_process_file(path, options)
         assert.equal(1, matches)

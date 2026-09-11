@@ -338,12 +338,15 @@ end
 
 local function normalize_options(options)
     if type(options) == "string" then
-        return { source_dir = options }
+        return { source_dir = options, compiler_include_dirs = {} }
     end
     if type(options) == "table" then
+        if options.compiler_include_dirs == nil then
+            options.compiler_include_dirs = {}
+        end
         return options
     end
-    return {}
+    return { compiler_include_dirs = {} }
 end
 
 -- Internal compiler-client telemetry. The language server supplies a
