@@ -2057,6 +2057,11 @@ install-titan-sdk: $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) $(LUA_LIB) \
 	  rm -f "$$rocks_tree/include/uv.h"; \
 	  rm -rf "$$rocks_tree/include/uv"; \
 	fi; \
+	if test "$(OPENSSL_MODE)" != system; then \
+	  cp -R "$(OPENSSL_BUILD_DIR)/include/." "$$rocks_tree/include/"; \
+	fi; \
+	install -m 0644 "$(LLHTTP_HEADER)" "$$rocks_tree/include/"; \
+	install -m 0644 "$(SQLITE3_HEADER)" "$$rocks_tree/include/"; \
 	rm -f "$$rocks_tree/lib/libuv.a"
 
 # The real bundled libuv archive is private input to the paired titan.so/titan.a
