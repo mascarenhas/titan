@@ -63,7 +63,7 @@ local function checker_probe_options(session)
         probe_service_provider = function()
             return driver.get_probe_service(session)
         end,
-        compiler_include_dirs = {}
+        compiler_include_dirs = { './lua-5.5.1/src', './titan-runtime' }
     }
 end
 
