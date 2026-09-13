@@ -1,4 +1,8 @@
-package.path = "./?.lua;./?/init.lua;" .. package.path
+local source_root = assert(arg[3], "missing compiler source root")
+package.path = source_root .. "/?.lua;" .. source_root .. "/?/init.lua;" .. package.path
+local include_dirs = {}
+for index = 4, #arg do include_dirs[#include_dirs + 1] = arg[index] end
+assert(#include_dirs > 0, "missing explicit SDK include roots")
 
 assert(package.loaded["titan-compiler.driver"] == nil,
     "compiler driver was loaded before direct-checker test")
@@ -12,7 +16,7 @@ local compiler_io = require "titan-compiler.io"
 assert(package.loaded["titan-compiler.driver"] == nil,
     "requiring the checker loaded the compiler driver")
 
-local language_flag_mode = arg[2]
+local language_flag_mode = arg[2] ~= "" and arg[2] or nil
 local check_language_flag = language_flag_mode ~= nil
     and language_flag_mode ~= "io"
     and language_flag_mode ~= "toolchain-io"
@@ -50,9 +54,13 @@ if check_language_flag or check_io_strategy then
         end
         return original_target_profile_inputs(options)
     end
+end
+
+do
     local configured = {
         compiler = os.getenv("CC") or "cc",
         compile_flags = compile_flags,
+        compiler_include_dirs = include_dirs,
         language_mode = "c99",
         language_flag = expected_language_flag,
     }
@@ -65,7 +73,7 @@ if check_language_flag or check_io_strategy then
             cppflags = {},
             cflags = {},
             include_dirs = assert(cdriver.resolve_compiler_include_dirs(
-                { "./lua-5.5.1/src", "./titan-runtime" }, expected_io_strategy)),
+                include_dirs, expected_io_strategy)),
             io = expected_io_strategy,
         }
     else

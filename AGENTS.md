@@ -288,9 +288,12 @@ change them only when their own compatibility rules require it.
   `$ROCKS_TREE/lib/titan/0.6/libtitan.a`. `libtitan.a` contains exactly
   `titan.o` and `minicoro.o`; `ltitanlib.o` is outside that archive and is
   the sole input to the private bootstrap. The non-Lua headers staged under
-  `$ROCKS_TREE/include` are `minicoro.h`, `titan.h`, and
-  `titan/ffi.h`; bundled mode also stages `uv.h` and `uv/`, but the
-  private `libuv.a` is never installed.
+  `$ROCKS_TREE/include` are `minicoro.h`, `titan.h`, `titan/ffi.h`,
+  `llhttp.h`, and `sqlite3.h`; bundled mode also stages `uv.h`, `uv/`, and
+  the complete public `openssl/` headers (ordinary source and configured
+  generated headers). System reinstall removes the corresponding bundled
+  libuv/OpenSSL headers. The private native dependency archives are never
+  installed separately.
   The pinned, privately namespaced LPegLabel build produces
   `lpeglabel-build/libtitan-lpeglabel.a` with exactly `lplcap.o`, `lplcode.o`,
   `lplprint.o`, `lpltree.o`, and `lplvm.o`. It is standard-provider payload,
@@ -839,6 +842,10 @@ launcher. The profile's standard Busted helper prepares driver layout and
 direct checker C-header lookup through one existing resolver context, then
 closes it. It rejects a missing root option before tests start. Preserve
 private checkout ownership for concurrent compiler tests.
+
+The shared checker/coder spec helper also configures the selected driver's
+native context explicitly, so plain installed-compiler Busted runs supply the
+same SDK roots without depending on C-header autodiscovery.
 
 Default Busted, `make busted-test`, and `luarocks test` still use the installed
 compiler snapshot, so reinstall compiler edits before those commands or

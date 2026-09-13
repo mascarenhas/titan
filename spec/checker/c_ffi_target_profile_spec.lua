@@ -24,6 +24,21 @@ local function lua_executable()
     return "lua"
 end
 
+local function direct_checker_command(header, mode)
+    local driver = require "titan-compiler.driver"
+    local context = driver.new_resolver_context()
+    local argv = {
+        lua_executable(),
+        lfs.currentdir() .. "/spec/support/direct_checker_profile.lua",
+        header, mode or "", lfs.currentdir(),
+    }
+    for _, directory in ipairs(driver.foreign_include_dirs()) do
+        argv[#argv + 1] = directory
+    end
+    assert(driver.close_resolver_context(context))
+    return shell_command(argv)
+end
+
 local function native_target_profile()
     local driver = require "titan-compiler.driver"
     local context = driver.new_resolver_context()
@@ -139,7 +154,7 @@ describe("direct-checker target profiles", function()
         end)
     end)
 
-    it("derives the selected target without loading the compiler driver",
+    it("uses explicit SDK roots outside the checkout without loading the driver",
        function()
         local header = os.tmpname() .. ".h"
         local file = assert(io.open(header, "w"))
@@ -147,15 +162,16 @@ describe("direct-checker target profiles", function()
             "#define TITAN_PROFILE_VALUE 0xffffffffU\n"))
         assert(file:close())
 
-        local command = shell_command({
-            lua_executable(),
-            "spec/support/direct_checker_profile.lua",
-            header,
-        })
-        local pipe = assert(io.popen(command .. " 2>&1", "r"))
+        local workdir = os.tmpname()
+        assert(os.remove(workdir))
+        assert(lfs.mkdir(workdir))
+        local command = direct_checker_command(header)
+        local pipe = assert(io.popen("cd " .. assert(cdriver.shell_quote(workdir)) ..
+            " && " .. command .. " 2>&1", "r"))
         local output = assert(pipe:read("*a"))
         local ok, why, status = pipe:close()
         os.remove(header)
+        assert(lfs.rmdir(workdir))
 
         assert.truthy(ok,
             ("%s (%s %s)"):format(output, tostring(why), tostring(status)))
@@ -171,12 +187,7 @@ describe("direct-checker target profiles", function()
 
         local ok, failure = xpcall(function()
             for _, mode in ipairs({ "string", "false" }) do
-                local command = shell_command({
-                    lua_executable(),
-                    "spec/support/direct_checker_profile.lua",
-                    header,
-                    mode,
-                })
+                local command = direct_checker_command(header, mode)
                 local pipe = assert(io.popen(command .. " 2>&1", "r"))
                 local output = assert(pipe:read("*a"))
                 local succeeded, why, status = pipe:close()
@@ -203,12 +214,7 @@ describe("direct-checker target profiles", function()
 
         local failure
         for _, mode in ipairs({ "io", "toolchain-io" }) do
-            local command = shell_command({
-                lua_executable(),
-                "spec/support/direct_checker_profile.lua",
-                header,
-                mode,
-            })
+            local command = direct_checker_command(header, mode)
             local pipe = assert(io.popen(command .. " 2>&1", "r"))
             local output = assert(pipe:read("*a"))
             local ok, why, status = pipe:close()

@@ -17,6 +17,19 @@ local assert = require 'luassert'
 
 local M = {}
 
+-- Direct checker/coder specs bypass the driver's ordinary loader entrypoint.
+-- Configure their native context explicitly from the selected installation,
+-- including for default Busted runs which do not use the checkout helper.
+do
+    local context = driver.new_resolver_context()
+    local configured, configuration_error = xpcall(function()
+        assert(driver.configure_foreign_c(context))
+    end, debug.traceback)
+    local closed, close_error = driver.close_resolver_context(context)
+    assert(configured, configuration_error)
+    assert(closed, close_error)
+end
+
 M.verbose = false
 local function verbose() return M.verbose end
 
@@ -63,7 +76,7 @@ local function checker_probe_options(session)
         probe_service_provider = function()
             return driver.get_probe_service(session)
         end,
-        compiler_include_dirs = { './lua-5.5.1/src', './titan-runtime' }
+        compiler_include_dirs = driver.foreign_include_dirs(),
     }
 end
 

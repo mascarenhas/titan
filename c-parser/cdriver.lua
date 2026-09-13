@@ -291,13 +291,10 @@ local function file_exists(filename, strategy)
     return strategy:readable(filename)
 end
 
--- Resolve the fixed Titan/Lua SDK roots once and return an owned ordered copy.
--- Passing nil requests checkout/installed-module discovery; an explicit empty
--- array remains empty. This distinction lets direct checker embeddings share
--- the exact roots later installed in their probe service instead of
--- accidentally converting "discover" into "no fixed headers".
-function cdriver.resolve_compiler_include_dirs(value, strategy)
-    strategy = strategy or default_io
+-- Validate caller-owned Titan/Lua SDK roots and return an ordered copy.
+-- The driver or embedding supplies its exact roots; this layer never discovers
+-- an installation from its module path or the working directory.
+function cdriver.resolve_compiler_include_dirs(value)
     if type(value) ~= "table" then
         return nil, "compiler include dirs must be an ordered array"
     end

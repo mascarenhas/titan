@@ -916,14 +916,14 @@ describe("C FFI cdriver", function()
             remove_tree({ header }, { titan, root })
         end)
 
-        it("defers a failed relative-root capture for explicit roots",
+        it("copies explicit include roots without filesystem discovery",
         function()
             local chunk = assert(loadfile("c-parser/cdriver.lua"))
             local original_new_sync = compiler_io.new_sync
             compiler_io.new_sync = function()
                 local strategy = original_new_sync()
                 function strategy:cwd()
-                    return nil, "simulated load-time cwd failure"
+                    error("include configuration must not capture cwd")
                 end
                 return strategy
             end
@@ -935,12 +935,19 @@ describe("C FFI cdriver", function()
             assert.truthy(loaded, fresh)
             local strategy = original_new_sync()
             function strategy:cwd()
-                error("default discovery retried cwd after module load")
+                error("include configuration must not discover cwd")
             end
-            assert.same({ "/explicit/compiler/include" },
-                assert(fresh.resolve_compiler_include_dirs({
-                    "/explicit/compiler/include",
-                    }, strategy)))
+            function strategy:readable()
+                error("include configuration must not discover headers")
+            end
+            local roots = { "/explicit/compiler/include", "/explicit/lua/src" }
+            local resolved = assert(fresh.resolve_compiler_include_dirs(roots, strategy))
+            assert.same(roots, resolved)
+            assert.not_equal(roots, resolved)
+            assert.same({}, assert(fresh.resolve_compiler_include_dirs({}, strategy)))
+            local missing, missing_error = fresh.resolve_compiler_include_dirs(nil, strategy)
+            assert.is_nil(missing)
+            assert.matches("must be an ordered array", missing_error, 1, true)
         end)
     end)
 

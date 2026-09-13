@@ -97,10 +97,13 @@ module C environment itself.
 
 The installed compiler ships `<root>/include/titan/ffi.h` and passes
 `<root>/include` as both a C-FFI probe path and a generated-C include path.
-Checkout developer mode instead searches upward from the loaded compiler
-module for `titan-runtime/titan/ffi.h`. Thus `foreign import "titan/ffi.h"`
-works without depending on the process cwd while keeping an installed compiler
-inside one SDK root. Portable primitives are contextual Titan types rather than
+The driver supplies the configured SDK and Lua source roots explicitly through
+`driver.foreign_include_dirs()`; checkout developer mode uses its configured
+`titan-runtime` root. Neither the C parser nor probe service walks parent
+directories to locate headers. Direct checker embeddings supply the same roots
+through their foreign-C configuration. Thus `foreign import "titan/ffi.h"`
+uses the selected installation independently of the process cwd. Portable
+primitives are contextual Titan types rather than
 typedefs in this header. The file includes the matched Lua internal declarations
 for `lua_State`, `TValue`, `Udata`, and `CClosure`. `TValue` remains a distinct
 C type in Titan's FFI type graph. Private runtime helpers can move values across
@@ -595,7 +598,9 @@ signature directly.
 
 The checker keeps final per-module C type maps and extracted field-macro
 classifications produced by the combined parse. A field projection is resolved
-against that classification and the receiver's canonical C aggregate. Include
+against that classification and the receiver's canonical C aggregate. The
+checker owns its mutable lookup map, so negative field-lookup memos never
+modify the immutable classifications shared by header-cache hits. Include
 guards and C scopes decide which declarations exist; no isolated snapshots
 are merged by ordinary name, and no source-repeat/prototype-tag escape hatch
 is needed to reconcile independently parsed imports. Anonymous and

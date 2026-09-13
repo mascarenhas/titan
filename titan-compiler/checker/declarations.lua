@@ -673,8 +673,12 @@ function check_foreign_environment(module_ast, st, errors)
     else
         local started = cdriver.process_phase_clock(options)
         -- The one real module header has already established final macro
-        -- visibility. Field lookups consume its extracted classifications.
-        st.foreign_field_macro_cache = ftypes.field_macro_classes
+        -- visibility. Field lookups memoize misses as false, so their map must
+        -- belong to this checker rather than the shared immutable header graph.
+        st.foreign_field_macro_cache = {}
+        for name, classification in pairs(ftypes.field_macro_classes) do
+            st.foreign_field_macro_cache[name] = classification
+        end
         local members, type_members = {}, {}
         for _, item in ipairs(ftypes) do
             local name, ftype = item.name, item.type

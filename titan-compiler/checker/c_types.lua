@@ -4,7 +4,7 @@ local _ENV = core
 -- The compiler driver installs the exact C toolchain configuration used for
 -- generated code. Keeping this small hook in the checker makes every foreign
 -- import use the same compiler, language mode, and already parsed CPP flags,
--- while checker-only embeddings retain cdriver's environment-based defaults.
+-- while checker-only embeddings supply their own explicit SDK include roots.
 foreign_c_options = {}
 
 foreign_c_config_error = nil

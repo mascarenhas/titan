@@ -240,6 +240,7 @@ describe("standalone-prefix source installation", function()
         end
         for _, header in ipairs({
             "lua.h", "luaconf.h", "titan.h", "minicoro.h", "titan/ffi.h",
+            "llhttp.h", "sqlite3.h",
         }) do
             assert_file(PREFIX .. "/include/" .. header)
         end
@@ -400,6 +401,39 @@ describe("standalone-prefix source installation", function()
             assert_file(PREFIX .. "/include/uv.h")
             assert_file(PREFIX .. "/include/uv/version.h")
         end
+
+        local expected_openssl_mode = os.getenv("TITAN_EXPECT_OPENSSL_MODE")
+            or "bundled"
+        if expected_openssl_mode == "system" then
+            assert_absent(PREFIX .. "/include/openssl")
+        else
+            assert.equal("bundled", expected_openssl_mode)
+            -- Generated headers alone are incomplete: ssl.h includes ordinary
+            -- source headers such as e_ostime.h from the same public tree.
+            for _, header in ipairs({
+                "ssl.h", "sslerr.h", "e_ostime.h", "configuration.h", "opensslv.h",
+            }) do
+                assert_file(PREFIX .. "/include/openssl/" .. header)
+            end
+        end
+
+        local workspace = temporary_directory("sdk-headers")
+        local source = workspace .. "/sdk.c"
+        write_file(source, [[
+#include <lua.h>
+#include <titan/ffi.h>
+#include <uv.h>
+#include <llhttp.h>
+#include <sqlite3.h>
+#include <openssl/ssl.h>
+int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
+]])
+        local headers_ok, headers_output = run(compiler_argv(
+            "-std=c99", "-D_GNU_SOURCE", "-DOPENSSL_API_COMPAT=30000",
+            "-I", PREFIX .. "/include", "-I", PREFIX .. "/src/lua-5.5.1",
+            "-fsyntax-only", source), workspace)
+        remove_tree(workspace)
+        assert.truthy(headers_ok, headers_output)
 
         local manifest_path = PREFIX ..
             "/lib/luarocks/rocks-5.5/titan/0.6.0-1/rock_manifest"
