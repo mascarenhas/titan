@@ -2028,7 +2028,8 @@ titan: lpeglabel libbacktrace libuv openssl llhttp sqlite3 $(TITAN_RUNTIME_LIB) 
 	fi
 
 install-titan-sdk: $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) $(LUA_LIB) \
-		$(LIBBT_LIB) $(LIBUV_LIB) $(TITAN_SDK_ROOT_HEADERS) \
+		$(LIBBT_LIB) $(LIBUV_LIB) $(OPENSSL_LIBS) $(LLHTTP_HEADER) \
+		$(SQLITE3_HEADER) $(TITAN_SDK_ROOT_HEADERS) \
 		$(TITAN_SDK_NAMESPACED_HEADERS) stage-titan-bootstrap
 	@test -n "$(strip $(ROCKS_TREE))" || { \
 	  echo "ERROR: install-titan-sdk requires ROCKS_TREE" >&2; exit 1; \
@@ -2057,6 +2058,15 @@ install-titan-sdk: $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) $(LUA_LIB) \
 	  rm -f "$$rocks_tree/include/uv.h"; \
 	  rm -rf "$$rocks_tree/include/uv"; \
 	fi; \
+	if test "$(OPENSSL_MODE)" != system; then \
+	  mkdir -p "$$rocks_tree/include/openssl"; \
+	  install -m 0644 $(OPENSSL_SRC_DIR)/include/openssl/*.h \
+	    $(OPENSSL_BUILD_DIR)/include/openssl/*.h "$$rocks_tree/include/openssl/"; \
+	else \
+	  rm -rf "$$rocks_tree/include/openssl"; \
+	fi; \
+	install -m 0644 "$(LLHTTP_HEADER)" "$$rocks_tree/include/"; \
+	install -m 0644 "$(SQLITE3_HEADER)" "$$rocks_tree/include/"; \
 	rm -f "$$rocks_tree/lib/libuv.a"
 
 # The real bundled libuv archive is private input to the paired titan.so/titan.a

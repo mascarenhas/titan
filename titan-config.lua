@@ -1,10 +1,5 @@
 extra_ffi_include_dirs = {
   "vendor/lpeglabel",
-  "llhttp-release-v9.4.3/include",
-  "sqlite-autoconf-3530400",
-  "openssl-build/include",
-  "openssl-3.5.7/include",
-  "libuv-v1.52.1/include",
   "spec/fixtures/stdlib/native"
 }
 

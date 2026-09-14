@@ -5,6 +5,7 @@ local csemantics = require "titan-compiler.csemantics"
 local sha256 = require "titan-compiler.sha256"
 local types = require "titan-compiler.types"
 local cdriver = require "c-parser.cdriver"
+local driver = require "titan-compiler.driver"
 local compiler_io = require "titan-compiler.io"
 local ffiheaders = require "titan-compiler.ffiheaders"
 local lfs = require "lfs"
@@ -163,6 +164,7 @@ describe("C probe service", function()
         assert.is_true(service:close())
 
         local rejected, err = cprobe.new_service({
+            include_dirs = {},
             profile = target_profile(),
             profile_identity = "wrong identity",
         })
@@ -194,6 +196,7 @@ describe("C probe service", function()
         end
 
         local service, err = cprobe.new_service({
+            include_dirs = {},
             io = strategy,
             profile = target_profile(),
         })
@@ -226,6 +229,7 @@ describe("C probe service", function()
         end
 
         local service, err = cprobe.new_service({
+            include_dirs = {},
             io = strategy,
             profile = target_profile(),
         })
@@ -274,12 +278,14 @@ describe("C probe service", function()
         assert.not_equal(service.profile, options.profile)
         assert.is_true(service:close())
 
-        local discovered = assert(
-            cdriver.resolve_compiler_include_dirs(nil))
-        local default_service = assert(cprobe.new_service())
+        local missing, missing_error = cprobe.new_service()
+        assert.is_nil(missing)
+        assert.matches("include_dirs must be an explicit ordered array",
+            missing_error, 1, true)
+        local default_service = assert(cprobe.new_service({ include_dirs = {} }))
         local defaults =
             assert(default_service:cdriver_process_options())
-        assert.same(discovered, defaults.compiler_include_dirs)
+        assert.same({}, defaults.compiler_include_dirs)
         assert.is_true(default_service:close())
 
         local mixed_service = new_fake_service({
@@ -891,6 +897,7 @@ exit 0
 ]])
 
         local service = assert(cprobe.new_service({
+            include_dirs = {},
             compiler_argv = { "/bin/sh", fake_compiler },
         }))
         local module = assert(service:module_context())
@@ -997,6 +1004,7 @@ exit 0
     it("reports injected workspace and cleanup failures as infrastructure",
     function()
         local service = assert(cprobe.new_service({
+            include_dirs = {},
             runner = function()
                 error("runner must not be reached")
             end,
@@ -1014,6 +1022,7 @@ exit 0
 
         local cleanup_called = 0
         local write_failure_service = assert(cprobe.new_service({
+            include_dirs = {},
             runner = function()
                 error("runner must not be reached")
             end,
@@ -1045,6 +1054,7 @@ exit 0
 
         for _, invalid_root in ipairs({ "relative/workspace", "/bad\0root" }) do
             local invalid_service = assert(cprobe.new_service({
+                include_dirs = {},
                 runner = function()
                     error("runner must not be reached")
                 end,
@@ -1252,6 +1262,7 @@ struct titan_probe_target_s { int value; };
 ]])
 
         local service = assert(cprobe.new_service({
+            include_dirs = driver.foreign_include_dirs(),
             -- Resolve past a checkout/user ccache shim: this integration
             -- exercises cprobe itself and must not depend on ccache's chosen
             -- cache directory being writable inside a test sandbox.
@@ -1627,6 +1638,7 @@ struct titan_probe_target_s { int value; };
         end
         local execution_events = {}
         local service = assert(cprobe.new_service({
+            include_dirs = {},
             cache_directory = cache,
             runner = runner,
             temp_provider = provider,
@@ -1668,6 +1680,7 @@ struct titan_probe_target_s { int value; };
         }))
         local private_root, calls = nil, 0
         local service = assert(cprobe.new_service({
+            include_dirs = {},
             io = strategy, cache_directory = cache,
             runner = function(_, metadata)
                 calls = calls + 1
@@ -1693,6 +1706,7 @@ struct titan_probe_target_s { int value; };
         assert.is_nil(lfs.attributes(private_root))
 
         local restored = assert(cprobe.new_service({
+            include_dirs = {},
             cache_directory = cache,
             runner = function() error("persistent generated result must not compile") end,
         }))
@@ -2545,6 +2559,7 @@ enum titan_cache_enum {
 };
 ]])
         local service = assert(cprobe.new_service({
+            include_dirs = driver.foreign_include_dirs(),
             compiler_argv = lfs.attributes("/usr/bin/cc", "mode")
                 and { "/usr/bin/cc" } or (os.getenv("CC") or "cc"),
             cflags = { "-Wall", "-Wextra", "-Werror" },
@@ -2884,6 +2899,7 @@ enum probe_wide { PROBE_WIDE = 18446744073709551615ULL };
                 local flags = { "-Wall", "-Wextra", "-Werror" }
                 if short_enums then flags[#flags + 1] = "-fshort-enums" end
                 local service = assert(cprobe.new_service({ compiler_argv = compiler,
+                    include_dirs = driver.foreign_include_dirs(),
                     cflags = flags, syntax_only = true,
                     execution_trace = function(event) executions[#executions + 1] = event end }))
                 local module = assert(service:module_context({ includes = {
@@ -2906,6 +2922,7 @@ enum probe_wide { PROBE_WIDE = 18446744073709551615ULL };
                 -- GCC versions differ on qualified enums; preserve the answer
                 -- from the previous declaration-pair probe on the same host.
                 local oracle_service = assert(cprobe.new_service({
+                    include_dirs = driver.foreign_include_dirs(),
                     compiler_argv = compiler, cflags = flags, syntax_only = true }))
                 local oracle_module = assert(oracle_service:module_context({ includes = {
                     { include_kind = "quote", include_name = header } } }))

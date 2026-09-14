@@ -135,6 +135,54 @@ describe("module foreign conversion payloads", function()
             types.resolve_c_typedef(aliases.same_anonymous))
     end)
 
+    it("keeps negative field lookups out of shared header definitions", function()
+        header("fields.h", [[
+            typedef struct { int member; struct { int member; } nested; } item;
+            #define PROJECT nested.member
+        ]])
+        local filename = directory .. "/cached.titan"
+        local source = [[
+            foreign import "fields.h"
+            local function read(input: *ffi.item): integer
+                return input.member + input.PROJECT
+            end
+        ]]
+        local context = driver.new_resolver_context({
+            cache_adapter = adapter, extra_ffi_include_dirs = { directory },
+            analysis_only = true,
+        })
+        contexts[#contexts + 1] = context
+        local function analyze()
+            driver.imported, types.registry = {}, {}
+            local loader = driver.defaultloader({}, {
+                context = context, source_roots = { cached = true },
+                source_overrides = { cached = {
+                    kind = "generated", main = filename, files = { filename },
+                    contents = { [filename] = source },
+                } },
+            })
+            loaders[#loaders + 1] = loader
+            local ok, result, errors = loader("cached")
+            assert.is_true(ok, result)
+            assert.equal(0, #errors, table.concat(errors, "\n"))
+        end
+        analyze()
+        local first = driver.compiler_cache_stats({ context = context })
+        assert.equal(1, first.conversion.stores)
+        -- Reuse the parsed header while asking for a fresh converted namespace.
+        -- Reading the physical member during the first body check must not
+        -- have inserted a false macro memo into that shared header graph.
+        for key in pairs(payloads) do
+            if key:find("ffi-conversion-v3\0", 1, true) == 1 then
+                payloads[key] = nil
+            end
+        end
+        analyze()
+        local second = driver.compiler_cache_stats({ context = context })
+        assert.is_true(second.headers.hits > first.headers.hits)
+        assert.equal(2, second.conversion.stores)
+    end)
+
     it("replays exact constants, recursive layouts, macro projections and callable names", function()
         header("extracted.h", [[
             typedef int word;

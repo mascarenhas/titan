@@ -46,8 +46,7 @@ local function test_process_options(service)
         language_mode = "c99",
         compile_flags = {},
         cppflags = {},
-        compiler_include_dirs =
-            assert(cdriver.resolve_compiler_include_dirs()),
+        compiler_include_dirs = {},
     }
 end
 
@@ -68,7 +67,7 @@ local function fake_check(header, body, answer, options)
     local calls = {}
     local service = assert(cprobe.new_service({
         profile = test_profile(),
-        include_dirs = options and options.include_dirs or nil,
+        include_dirs = options and options.include_dirs or {},
         runner = function(_, metadata)
             calls[#calls + 1] = metadata
             if metadata.stage == "candidate" and answer == "reject" then

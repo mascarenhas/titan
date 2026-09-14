@@ -87,6 +87,12 @@ Header lookup mirrors C include intent:
 * Other relative names are treated as system headers and emitted as
   `#include <...>`.
 
+The compiler selects Lua and Titan headers from its configured SDK; it never
+searches parent directories for a compiler checkout. The installed SDK also
+contains `llhttp.h`, `sqlite3.h`, and, in bundled mode, the public libuv and
+OpenSSL headers matching its standard provider. System libuv/OpenSSL mode uses
+the system headers and removes the corresponding bundled headers on reinstall.
+
 Portable C primitive types are built into Titan's type grammar and do not need
 a header import. `titan/ffi.h` instead exposes the opaque Lua state type
 `lua_State`, Lua's internal `TValue` and `Udata` types, and the small trusted

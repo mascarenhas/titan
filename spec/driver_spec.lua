@@ -2331,42 +2331,118 @@ describe("compiler module loader", function()
         return manifest
     end
 
-    it("reports source-interface publication failures as analysis errors",
+    it("reports source-interface serialization failures with checker diagnostics",
     function()
         local name = "source_manifest_publication_failure"
-        local filename = root .. "/" .. name .. ".titan"
-        local loader = driver.defaultloader({}, {
-            source_roots = { [name] = true },
-            source_overrides = {
-                [name] = {
-                    kind = "generated",
-                    main = filename,
-                    files = { filename },
-                    contents = {
-                        [filename] = [[
-                            function answer(): integer
-                                return 42
-                            end
-                        ]],
-                    },
-                },
-            },
-        })
-        local serialize = driver.serialize_source_interface
-        driver.serialize_source_interface = function()
-            return nil, "forced source-interface failure"
+        local filename = source .. "/" .. name .. ".titan"
+        write_file(filename, [[
+            function answer(): integer
+                return "wrong type"
+            end
+        ]])
+        local context = driver.new_resolver_context({ analysis_only = true })
+        local static_deps = {}
+        local loader = driver.defaultloader(static_deps, { context = context })
+        local serialize = types.serialize
+        types.serialize = function(modtype)
+            if modtype.name == name then
+                error("forced source-interface failure", 0)
+            end
+            return serialize(modtype)
         end
-        local called, ok, _, errors = pcall(loader, name)
+        local called, ok, modtype, errors, info = pcall(loader, name)
+        types.serialize = serialize
+
+        assert.truthy(called, tostring(ok))
+        assert.is_true(ok, tostring(modtype))
+        assert.equal(2, #errors, table.concat(errors, "\n"))
+        assert.matches(filename .. ":2:", errors[1], 1, true)
+        assert.matches("type error:", errors[1], 1, true)
+        assert.matches("string", errors[1], 1, true)
+        assert.matches("integer", errors[1], 1, true)
+        assert.equal(filename .. ":1:1: could not serialize source interface " ..
+            "for module '" .. name .. "': forced source-interface failure",
+            errors[2])
+        local entry = assert(driver.imported[name])
+        assert.equal("source", entry.kind)
+        assert.equal(modtype, entry.type)
+        assert.is_table(entry.ast)
+        assert.is_nil(entry.source_manifest)
+        assert.is_true(static_deps[name])
+        assert.same({ name }, context.checked_source_modules)
+        assert.equal("source", info.kind)
+        assert.equal(filename, info.filename)
+        assert.is_true(driver.close_loader(loader))
+        assert.is_true(driver.close_resolver_context(context))
+
+        -- A fresh analysis can recover without a stale circularity marker or
+        -- failed interface escaping into its reusable source state.
+        driver.imported = {}
+        types.registry = {}
+        write_file(filename, "function answer(): integer return 42 end\n")
+        loader = driver.defaultloader({})
+        ok, modtype, errors = loader(name)
+        assert.is_true(ok, tostring(modtype))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.is_string(driver.imported[name].source_manifest)
+        assert.is_true(driver.close_loader(loader))
+    end)
+
+    it("propagates source-interface diagnostics from ordinary source imports",
+    function()
+        local dependency = "source_manifest_failed_dependency"
+        local consumer = "source_manifest_import_consumer"
+        local dependency_filename = source .. "/" .. dependency .. ".titan"
+        write_file(dependency_filename,
+            "function answer(): integer return 42 end\n")
+        write_file(source .. "/" .. consumer .. ".titan", [[
+            local provider = import "source_manifest_failed_dependency"
+            function answer(): integer return provider.answer() end
+        ]])
+        local context = driver.new_resolver_context({ analysis_only = true })
+        local loader = driver.defaultloader({}, { context = context })
+        local serialize = driver.serialize_source_interface
+        driver.serialize_source_interface = function(entry)
+            if entry.type.name == dependency then
+                return nil, "forced source-interface validation failure"
+            end
+            return serialize(entry)
+        end
+        local called, ok, modtype, errors = pcall(loader, consumer)
         driver.serialize_source_interface = serialize
 
         assert.truthy(called, tostring(ok))
-        assert.truthy(ok)
-        assert.equal(1, #errors)
-        assert.equal(
-            "could not serialize source interface for module '" .. name ..
-                "': forced source-interface failure",
+        assert.is_true(ok, tostring(modtype))
+        assert.equal(1, #errors, table.concat(errors, "\n"))
+        assert.equal(dependency_filename ..
+                ":1:1: could not serialize source interface " ..
+                "for module '" .. dependency ..
+                "': forced source-interface validation failure",
             errors[1])
-        assert.is_nil(driver.imported[name].source_manifest)
+        assert.is_nil(driver.imported[dependency].source_manifest)
+        assert.is_table(driver.imported[dependency].ast)
+        assert.is_string(driver.imported[consumer].source_manifest)
+        assert.same({ dependency, consumer }, context.checked_source_modules)
+        assert.is_true(driver.close_loader(loader))
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
+    it("retains a source manifest when checking reports body errors",
+    function()
+        local name = "source_manifest_body_error"
+        write_file(source .. "/" .. name .. ".titan", [[
+            function answer(): integer
+                return "wrong type"
+            end
+        ]])
+        local loader = driver.defaultloader({})
+        local ok, modtype, errors = loader(name)
+        assert.is_true(ok, tostring(modtype))
+        assert.equal(1, #errors, table.concat(errors, "\n"))
+        assert.matches("type error:", errors[1], 1, true)
+        local entry = driver.imported[name]
+        assert.is_string(entry.source_manifest)
+        assert.equal(source_manifest(entry), entry.source_manifest)
         assert.is_true(driver.close_loader(loader))
     end)
 
@@ -2664,7 +2740,9 @@ describe("compiler module loader", function()
         assert.matches("native toolchain is unavailable", table.concat(errors, "\n"),
             1, true)
         assert.is_true(native_commands > 0)
-        assert.is_nil(driver.imported[native_consumer].source_manifest)
+        -- Native checking failed, but the ordinary answer declaration remains
+        -- serializable. Diagnostics, not manifest presence, determine success.
+        assert.is_string(driver.imported[native_consumer].source_manifest)
         assert.is_true(driver.close_loader(loader))
         assert.is_true(driver.close_resolver_context(context))
     end)
@@ -2732,7 +2810,7 @@ describe("compiler module loader", function()
         assert.matches("native profile acquisition is unavailable",
             table.concat(errors, "\n"), 1, true)
         assert.is_true(native_commands > 0)
-        assert.is_nil(driver.imported[consumer].source_manifest)
+        assert.is_string(driver.imported[consumer].source_manifest)
         assert.is_true(driver.close_loader(loader))
         assert.is_true(driver.close_resolver_context(context))
     end)

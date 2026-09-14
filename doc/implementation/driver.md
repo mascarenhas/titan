@@ -631,7 +631,9 @@ own Task there; the synchronous strategy's method is a no-op.
 
 * **`driver.imported`** — a process-global cache keyed by logical module name.
   Source entries carry `{ kind = "source", ast, type, filename,
-  source_files, program_output, deps, c_header_dependencies }`; DSO entries
+  source_files, program_output, deps, c_header_dependencies, source_manifest }`;
+  `source_manifest` is absent only when its serialization reports an error.
+  DSO entries
   carry `{ kind = "dynamic", type, filename, relative }`; archive entries
   carry `{ kind = "static", type, filename, static_archive,
   static_provider }`; trusted host-inventory entries carry
@@ -739,6 +741,19 @@ initializer remain keyed by `modname`. Node locations are the only retained
 per-contributor information. The checker receives the main filename as its
 source directory; because contributors are immediate siblings, quoted foreign
 headers from any file resolve under that same directory.
+
+The loader attempts source-interface serialization even when checking reports
+errors: a body error need not prevent a valid declaration manifest. If
+serialization fails, the checked entry is still published with its AST and
+module type, while `source_manifest` remains absent. The loader returns
+`true, module_type, errors, source_info`, adding a diagnostic at the canonical
+main's `1:1` location that names the module and serializer failure. Ordinary
+imports propagate this diagnostic with the existing checker errors, and CLI
+compilation stops before code generation. Semantic clients can publish these
+diagnostics but must exclude the failed module from reusable interface and
+project caches; absence of a source manifest is not an analyzer failure. A
+fresh analysis resets `driver.imported` and `types.registry` as usual and can
+retry serialization after the underlying problem is fixed.
 
 Every successfully checked source entry also owns an ordered
 `c_header_dependencies` array. A `file` item names a header whose exact parsed
@@ -1552,9 +1567,13 @@ standard logical modules are published in the full `titan.so`/`titan.a` pair.
 The private five-member LPegLabel archive follows it only in the standard
 provider payload and is not part of the runtime SDK.
 The staged non-Lua SDK headers under `<root>/include` are `minicoro.h`,
-`titan.h` and `titan/ffi.h`. Checkout developer
-mode selects the corresponding local archive and headers so runtime edits can
-be tested before reinstalling.
+`titan.h`, `titan/ffi.h`, `llhttp.h`, and `sqlite3.h`. Bundled libuv also
+installs `uv.h` and `uv/`; bundled OpenSSL installs the complete public
+`openssl/` tree, combining ordinary source headers with generated configuration
+headers. Reinstalling in system mode removes the corresponding bundled libuv
+and OpenSSL headers so subsequent checks use the selected system headers.
+Checkout developer mode selects the corresponding local archive and headers so
+runtime edits can be tested before reinstalling.
 
 ### `titan.h`
 
@@ -1754,7 +1773,7 @@ the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 | `titan._loadlibglobal` | `ltitanlib.c` / generated shims | internal canonical-path `RTLD_LAZY` + `RTLD_GLOBAL` loader | Maps or promotes a Lua-selected provider in a separate per-state cache and returns the requested logical `luaopen_*` entry. |
 | `Type.Module.file` | `types.lua`, `driver.lua`, `coder.lua` | exact logical `.so` path for a DSO claim, overwritten after dynamic lookup | Transient selected relative DSO used by generated handle imports; deliberately omitted from serialized interfaces and never populated with an archive path. |
 | `driver.LUA_SOURCE_PATH` | `driver.lua` | `<root>/src/lua-5.5.1` installed; `lua-5.5.1/src` in checkout mode; checkout-only override by `titanc --lua` | Lua internal source/header tree used at compile time. Installed mode rejects the override because `INSTALL_PATHS` supplies matching `<root>/lib/liblua.a` and `<root>/lib/titan/0.6/libtitan.a`. |
-| `driver.INCLUDE_PATH` | `driver.lua` | `<root>/include` in installed mode | Titan SDK and bundled-libuv headers used by generated C and foreign imports; the non-Lua Titan set is `minicoro.h`, `titan.h` and `titan/ffi.h`. Generated source-foreign companions are source-build intermediates, not installed SDK headers. |
+| `driver.INCLUDE_PATH` | `driver.lua` | `<root>/include` in installed mode | Titan SDK and selected bundled-dependency headers used by generated C and foreign imports: `minicoro.h`, `titan.h`, `titan/ffi.h`, `llhttp.h`, `sqlite3.h`, plus bundled `uv.h`, `uv/`, and `openssl/`. Generated source-foreign companions are source-build intermediates, not installed SDK headers. |
 | `driver.TITAN_RUNTIME_PATH` / `driver.LIBBACKTRACE_PATH` | `driver.lua` | `titan-runtime/` / `libbacktrace` | Checkout-only runtime source/archive/header and separate libbacktrace locations. |
 | `CC` / `driver.CC` | environment / `driver.lua` | `"cc"` | C compiler command, parsed as shell words and shared with foreign-import probing. |
 | `TITAN_JOBS` / `titanc --jobs` | environment / CLI | `1` | Positive bound for concurrent generated logical-module C object compilations. The CLI wins over the environment. It does not affect checker probes, code generation, formatting, entrypoints, linking, archiving, or provider validation. |

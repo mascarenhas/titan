@@ -210,7 +210,12 @@ use this combined environment for the current consumer.
 `titanc`, the filesystem loader, table loader, and child compiler paths thread
 the service through `checker.check`. A direct external `checker.check` without
 an injected service creates and closes a fresh one using the current
-`cdriver` configuration. Rich result tables remain resolver-local and do not
+checker configuration. Embeddings must supply explicit `compiler_include_dirs`
+(or a toolchain's `include_dirs`); the C parser and probe service do not discover
+an SDK by walking up from their Lua modules. Driver-backed helpers use
+`driver.foreign_include_dirs()` so preprocessing and compilation select the
+same configured installation. An explicit empty array means no fixed SDK roots.
+Rich result tables remain resolver-local and do not
 survive `driver.configure_foreign_c`; a production service may additionally use
 the analysis-local and persistent semantic-result caches below.
 
@@ -241,6 +246,12 @@ starts at `A.ffi.h`; it does not synthesize that runtime prefix. Include
 directories, language mode, parsed compiler command, and target flags are shared
 with generated compilation. They configure execution without adding separate
 probe-cache identity beyond the literal text emitted into the probe.
+
+SDK staging waits for its native header producers. Bundled OpenSSL's public
+include directory combines ordinary source headers with generated configured
+headers; copying only its build directory loses required public includes.
+System reinstall removes that bundled directory, as it does bundled libuv
+headers. The SDK always installs the public llhttp and SQLite headers.
 
 Each uncached candidate first validates its baseline translation unit. The
 checker also validates the module's combined C environment after extraction,

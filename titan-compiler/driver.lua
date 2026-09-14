@@ -4135,16 +4135,19 @@ function driver.defaultloader(static_deps, options)
             ffi_header = ast._ffi_header and ast._ffi_header.identity,
             checking_ffi_header = ast._ffi_header and ast._ffi_header.filename,
         }
-        if #errors == 0 then
-            local source_manifest, manifest_error =
-                driver.serialize_source_interface(entry)
-            if not source_manifest then
-                errors[#errors + 1] = "could not serialize source interface " ..
-                    "for module '" .. modname .. "': " ..
-                    tostring(manifest_error)
-            else
-                entry.source_manifest = source_manifest
-            end
+        local source_manifest, manifest_error =
+            driver.serialize_source_interface(entry)
+        if not source_manifest then
+            -- Keep the checked source available to semantic clients even when
+            -- its interface cannot be retained. Report this alongside checker
+            -- diagnostics so callers do not lose either the AST or the
+            -- original errors, and never leave a circularity sentinel behind.
+            errors[#errors + 1] = location.format_error(
+                location.new(source.main, 1, 1),
+                "could not serialize source interface for module '%s': %s",
+                modname, tostring(manifest_error))
+        else
+            entry.source_manifest = source_manifest
         end
         driver.imported[modname] = entry
         static_deps[modname] = true
