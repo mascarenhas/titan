@@ -690,7 +690,12 @@ describe("libuv Makefile configuration", function()
             write_file(print_makefile,
                 "print-titan-flags:\n\t@printf '%s\\n' '$(CFLAGS)'\n")
             local function flags(host, compiler, override)
-                local argv = { "env", "-u", "CFLAGS", "make", "--no-print-directory", "-s", "-f", "Makefile",
+                -- This standalone query runs through a Lua pipe without the
+                -- parent Make jobserver descriptors. Isolate its settings so
+                -- stale coordination flags cannot prepend a warning to stdout.
+                local argv = { "env", "-u", "CFLAGS", "-u", "MAKEFLAGS",
+                    "-u", "MFLAGS", "-u", "GNUMAKEFLAGS", "-u", "MAKELEVEL",
+                    "-u", "MAKEOVERRIDES", "make", "--no-print-directory", "-s", "-f", "Makefile",
                     "-f", print_makefile, "HOST_OS=" .. host, "CC=" .. compiler,
                     "print-titan-flags" }
                 if override then argv[#argv + 1] = "CFLAGS=" .. override end
