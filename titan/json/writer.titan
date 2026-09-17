@@ -32,7 +32,7 @@ local function utf8_width(subject: string, position: integer, path: Path): integ
   return width
 end
 
-local function emit_quoted(subject: string, path: Path, emit: (string) -> ())
+local function emit_quoted(subject: string, path: Path, emit: function (string): ())
   emit('"')
   local first = 1
   local position = 1
@@ -161,7 +161,7 @@ local function Encoder:map(subject: value, entries: {value: value},
   local minimum_bytes = 2
   for key, entry in iteration.pairs(entries) do
     case reflect.inspect(key)
-    when is_string: name then
+    when is_string(name) then
       if #keys >= self.settings.max_nodes - self.nodes then
         json_fail("limit_exceeded", "value exceeds max_nodes", path, nil, nil)
       end
@@ -192,7 +192,7 @@ local function Encoder:map(subject: value, entries: {value: value},
 end
 
 local function Encoder:record_fields(subject: value, fields: const {reflect.FieldType},
-                                      read: (integer) -> value, path: Path,
+                                      read: function (integer): (value), path: Path,
                                       depth: integer)
   self:enter(subject, path)
   defer self.active[subject] = nil
@@ -246,12 +246,12 @@ local function Encoder:visit(subject: value, path: Path, depth: integer)
   local inspected = reflect.inspect(subject)
   local container = false
   case inspected
-  when is_array then container = true
-  when is_const_array then container = true
-  when is_map then container = true
-  when is_record then container = true
-  when is_interface then container = true
-  when is_union then container = true
+  when is_array() then container = true
+  when is_const_array() then container = true
+  when is_map() then container = true
+  when is_record() then container = true
+  when is_interface() then container = true
+  when is_union() then container = true
   end
   if container then
     depth = depth + 1
@@ -260,22 +260,22 @@ local function Encoder:visit(subject: value, path: Path, depth: integer)
     end
   end
   case inspected
-  when is_nil then self:append("null", path)
-  when is_boolean: boolean_value then
+  when is_nil() then self:append("null", path)
+  when is_boolean(boolean_value) then
     if boolean_value then self:append("true", path) else self:append("false", path) end
-  when is_integer: integer_value then self:append(strings.format("%d", integer_value), path)
-  when is_float: float_value then self:append(float_text(float_value, path), path)
-  when is_string: string_value then self:quoted(string_value, path)
-  when is_array: array_value then self:array(subject, array_value.val, path, depth)
-  when is_const_array: array_value then self:array(subject, array_value.val, path, depth)
-  when is_map: map_value then self:map(subject, map_value.val, path, depth)
-  when is_record: record_value then
+  when is_integer(integer_value) then self:append(strings.format("%d", integer_value), path)
+  when is_float(float_value) then self:append(float_text(float_value, path), path)
+  when is_string(string_value) then self:quoted(string_value, path)
+  when is_array(array_value) then self:array(subject, array_value.val, path, depth)
+  when is_const_array(array_value) then self:array(subject, array_value.val, path, depth)
+  when is_map(map_value) then self:map(subject, map_value.val, path, depth)
+  when is_record(record_value) then
     self:record_fields(subject, record_value.descriptor.fields,
       function(index: integer): value return record_value:get(index) end, path, depth)
-  when is_interface: interface_value then
+  when is_interface(interface_value) then
     self:record_fields(subject, interface_value.descriptor.fields,
       function(index: integer): value return interface_value:get(index) end, path, depth)
-  when is_union: union_value then self:union_value(subject, union_value, path, depth)
+  when is_union(union_value) then self:union_value(subject, union_value, path, depth)
   else json_fail("unsupported_type", "value has no JSON representation", path, nil, nil)
   end
 end

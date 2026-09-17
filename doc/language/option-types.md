@@ -44,8 +44,8 @@ Two consequences of that rationale shape everything below:
 subtype of `T?`, or that the pair belongs to Titan's gradual-consistency
 relation. `T -> T?` and `T? -> T` are named automatic coercions with explicit
 representation and nil behavior. They do not lift through an Array, Map, or
-Function: in particular, an `() -> T` value cannot be adjusted to
-`() -> T?`. See the type system's
+Function: in particular, an `function (): (T)` value cannot be adjusted to
+`function (): (T?)`. See the type system's
 [relations and normative boundary matrix](types.md#relations-and-boundaries-no-subtyping).
 
 A declared [flexible return](flexible-returns.md) is another source of
@@ -60,7 +60,7 @@ projection stays `value`, because `value` already includes nil.
 In a type annotation, `?` is a suffix on any simple type, including array
 and map types and (qualified) record, union, or Interface names:
 
-```lua
+```titan
 local a: integer?           = nil
 local b: string?            = "hi"
 local c: {integer}?         = nil      -- option of array
@@ -78,7 +78,7 @@ simple types in this grammar. Name the function type with an alias and apply
 the suffix to that name instead:
 
 ```titan
-local type Handler = (string) -> boolean
+local type Handler = function (string): (boolean)
 local handler: Handler? = nil
 ```
 
@@ -96,7 +96,7 @@ An unannotated `local` declaration never infers an option type — `tryforce`
 applies first, so the initializer is unwrapped and the variable gets the
 base type. Putting `?` on the *name* opts in to option inference:
 
-```lua
+```titan
 function read(xs: {integer})
     local x = xs[1]      -- x: integer  (xs[1] is integer?, unwrapped — raises if absent)
     local y? = xs[1]     -- y: integer? (option type inferred, nil flows through)
@@ -115,10 +115,10 @@ The subtle difference: *with* a type, `x?:` is pure sugar for writing `T?`;
 *without* one, `x?` is an inference directive — the only way to say
 "infer, but keep it nullable".
 
-The `?` name marker works in every position the parser accepts it,
-including on a module-level variable (`y? = 18` at the top level infers
-`integer?`) and on a declaration that receives one of the *extra* values of
-a multiple-return call (`local a, b? = f()` optionizes `b`).
+The name marker is available in block declarations, including a declaration
+that receives an extra value from a multiple-return call (`local a, b? = f()`
+optionizes `b`). Module-variable names do not accept it: write
+`y: integer? = 18` to declare an optional module variable.
 This is especially useful for a finite projection from a flexible result tail:
 `local first?, second? = produce()` retains the possibility that either
 position is absent.
@@ -147,7 +147,7 @@ A `T` converts implicitly to `T?` wherever implicit adjustments happen
 the full list is in [the type system](types.md)), and `nil` converts to any
 option type:
 
-```lua
+```titan
 function find(xs: {string}, wanted: string): integer?
     for i = 1, #xs do
         if xs[i] == wanted then
@@ -167,7 +167,7 @@ raised with this message shape (catchable with `pcall` from Lua, like every
 Titan run-time error — see [error handling](error-handling.md)):
 
 ```
-<file>:<line>:<col>: type error, expected <T> but found nil
+<file>:<line>:<col>: type error, expected<|T|> but found nil
 ```
 
 Gradually consistent option bases retain the same strict policy. For example,
@@ -179,7 +179,7 @@ the broader dynamic conversions described below.
 
 For example, compiling and running:
 
-```lua
+```titan
 -- Titan (first.titan)
 function first(xs: {integer}): integer
     local x: integer = xs[1]    -- implicit unwrap of integer?
@@ -213,7 +213,7 @@ unannotated initializers, as shown above. Notably *not* unwrapped:
 `==`/`~=` operands, conditions, `not`, `and`/`or` operands, and method-call
 receivers (each covered in its own section below).
 
-```lua
+```titan
 function get(a: {{string}}): string
     return a[1][1]       -- a[1] : {string}? is unwrapped, then indexed
 end
@@ -224,7 +224,7 @@ value, whether the option is the direct result of an array or map read or
 is held in a plain *variable* — a local, a parameter, a module variable, or
 a record field — and whether the consuming context is arithmetic, a call
 argument, an array or map index, or string concatenation. A nil at run time
-raises the `expected <T> but found nil` error shown above.
+raises the `expected<|T|> but found nil` error shown above.
 
 The same unwrap fires when you **call through** an option-of-function. An
 array or map whose element type is a function yields a `T?` on indexing, so
@@ -307,7 +307,7 @@ it, default it, or store it into an option and it flows.
 the same optionized type, `nil` is assignable, and assigning it removes
 the element (clears the Array slot or Map key):
 
-```lua
+```titan
 function delete(xs: {integer}, i: integer)
     xs[i] = nil          -- removes the element
 end
@@ -342,7 +342,7 @@ instead wrapped directly into the existing option type: nil inhabits every
 option, and independently constructing `nil?` would lose that relationship.
 All of these typecheck:
 
-```lua
+```titan
 function eq(t: {string}, s: string): boolean
     return t[1] == s          -- string? == string
 end
@@ -392,7 +392,7 @@ the right operand has type `T` (exactly `T` — see below), the whole
 expression has the bare type `T`: if the option is nil you get the default,
 otherwise the value, with no error possible.
 
-```lua
+```titan
 function get(t: {integer}, i: integer, def: integer): integer
     return t[i] or def
 end
@@ -416,7 +416,7 @@ both when `v` is nil and when it is `false`). That is exactly what makes
 the Lua ternary idiom type out: in `t[i] and v1 or v2` with `v1, v2: T`,
 the `and` has type `T?` and the `or` collapses it back to `T`:
 
-```lua
+```titan
 function pick(t: {integer}, i: integer, v1: integer, v2: integer): integer
     return t[i] and v1 or v2
 end
@@ -441,7 +441,7 @@ otherwise — except `boolean?`, where both `nil` and `false` are false,
 matching Lua truthiness exactly. `not` follows the same rule. Testing
 before using is therefore the natural pattern for container reads:
 
-```lua
+```titan
 function fill(t: {integer}, i: integer, v: integer): integer
     if t[i] then
         return t[i] + 1      -- this read is unwrapped; the check still runs
@@ -484,7 +484,7 @@ time, so an otherwise satisfying record/union remains rejected when no loaded
 conversion site witnessed the pair. `is I?` tests entry presence without
 calling it.
 
-```lua
+```titan
 -- Titan (greet.titan)
 function greet(name: string?): string
     return "hello " .. (name or "world")

@@ -28,7 +28,7 @@ installation cannot be mixed with `peg.Pattern` values.
 
 ## Public types
 
-```titan
+```text
 record Pattern
 record Rule
 record Definition
@@ -54,13 +54,13 @@ be inspected or changed by callers.
 
 ## Constructors
 
-```titan
+```text
 function literal(text: string): Pattern
 function any(count: integer?): Pattern
 function succeed(): Pattern
 function fail(): Pattern
 function runtime(
-  callback: (string, integer, string) -> (...: value)
+  callback: function (string, integer, string): (...: value)
 ): Pattern
 
 function set(bytes: string): Pattern
@@ -122,7 +122,7 @@ subject's end.
 
 Titan uses named functions in place of LPeg's overloaded operators:
 
-```titan
+```text
 function sequence(...: Pattern): Pattern
 function choice(...: Pattern): Pattern
 function difference(first: Pattern, ...: Pattern): Pattern
@@ -169,12 +169,12 @@ recovery rule named `"fail"`, and reports the ordinary
 
 ## Captures
 
-```titan
+```text
 function capture(pattern: Pattern): Pattern
 function constant(...: value): Pattern
 function match_time(
   pattern: Pattern,
-  callback: (string, integer, value, ...: value) -> (...: value)
+  callback: function (string, integer, value, ...: value): (...: value)
 ): Pattern
 function back_capture(key: value): Pattern
 function argument(index: integer): Pattern
@@ -183,7 +183,7 @@ function substitution(pattern: Pattern): Pattern
 function table_capture(pattern: Pattern): Pattern
 function fold_capture(
   pattern: Pattern,
-  callback: (value, ...: value) -> value
+  callback: function (value, ...: value): (value)
 ): Pattern
 function group(pattern: Pattern, key: value): Pattern
 
@@ -195,7 +195,7 @@ function query_capture(
 ): Pattern
 function function_capture(
   pattern: Pattern,
-  callback: (value, ...: value) -> (...: value)
+  callback: function (value, ...: value): (...: value)
 ): Pattern
 ```
 
@@ -290,7 +290,7 @@ therefore uses `function_capture` for the delayed public operation and
 
 ## Matching
 
-```titan
+```text
 function Pattern:match(
   subject: string,
   init: integer?,
@@ -357,7 +357,7 @@ source-level default-argument syntax.
 
 ## Locale, version, and engine limits
 
-```titan
+```text
 function locale(): Locale
 function set_max_stack(maximum: integer)
 function version(): string
@@ -404,7 +404,7 @@ Other fixed native limits include:
 The relabel API compiles a textual pattern notation into the same opaque
 `Pattern` type:
 
-```titan
+```text
 function define(name: string, pattern: Pattern): Definition
 function define_value(name: string, candidate: value): Definition
 
@@ -426,7 +426,7 @@ function Match:values(): (...: value)
 function gsub(
   subject: string,
   candidate: value,
-  replacement: (string) -> string
+  replacement: function (string): (string)
 ): string
 function update_locale()
 function line_column(
@@ -466,7 +466,7 @@ literal-versus-pattern distinction analogous to `string.find`, so the module
 does not export `find`.
 
 `gsub` returns only the transformed string, unlike Lua's `string.gsub`, which
-also returns a count. Its replacement is always a `(string) -> string` function.
+also returns a count. Its replacement is always a `function (string): (string)` function.
 The function receives the whole matched byte string exactly once for each
 accepted replacement, independent of captures inside the candidate, and its
 string result is inserted literally. Template, capture-index, and table

@@ -409,7 +409,7 @@ describe("Array, Map, and vararg spread expressions (code generator)", function(
             end
 
             function through_value(
-                sink: (...: {integer: string}) -> string,
+                sink: function (...: {integer: string}): string,
                 items: {integer: {integer: string}}
             ): string
                 return sink(...items)
@@ -418,7 +418,7 @@ describe("Array, Map, and vararg spread expressions (code generator)", function(
             function through_titan_value(
                 items: {integer: {integer: string}}
             ): string
-                local sink: (...: {integer: string}) -> string = consume
+                local sink: function (...: {integer: string}): string = consume
                 return sink(...items)
             end
 
@@ -628,7 +628,7 @@ describe("Array, Map, and vararg spread expressions (code generator)", function(
             end
 
             local function required(
-                force: () -> (), ...: View
+                force: function (): (), ...: View
             ): integer
                 force()
                 churn()
@@ -636,7 +636,7 @@ describe("Array, Map, and vararg spread expressions (code generator)", function(
             end
 
             local function optional(
-                force: () -> (), ...: View?
+                force: function (): (), ...: View?
             ): integer
                 force()
                 churn()
@@ -650,21 +650,21 @@ describe("Array, Map, and vararg spread expressions (code generator)", function(
                 return total
             end
 
-            function array_required(force: () -> ()): integer
+            function array_required(force: function (): ()): integer
                 local items: {value} = {
                     Item.new(10), Item.new(20), Item.new(30)
                 }
                 return required(force, ...items)
             end
 
-            function map_required(force: () -> ()): integer
+            function map_required(force: function (): ()): integer
                 local items: {integer: value} = {
                     Item.new(10), Item.new(20), Item.new(30)
                 }
                 return required(force, ...items)
             end
 
-            function array_optional(force: () -> ()): integer
+            function array_optional(force: function (): ()): integer
                 local items: {value?} = {
                     Item.new(40), nil, Item.new(60)
                 }
@@ -708,30 +708,30 @@ describe("Array, Map, and vararg spread expressions (code generator)", function(
     it("executes nested generic Array and Map producers after inference",
     function()
         run_coder([[
-            function make_array<T>(): {T}
+            function make_array<|T|>(): {T}
                 return {((42 as value) as T)}
             end
 
-            function make_map<T>(): {integer: T}
+            function make_map<|T|>(): {integer: T}
                 local out: {integer: T} = {((42 as value) as T)}
                 return out
             end
 
-            function make_optional_array<T>(present: boolean): {T}?
+            function make_optional_array<|T|>(present: boolean): {T}?
                 if not present then return nil end
-                return make_array<T>()
+                return make_array<|T|>()
             end
 
-            function make_optional_map<T>(present: boolean): {integer: T}?
+            function make_optional_map<|T|>(present: boolean): {integer: T}?
                 if not present then return nil end
-                return make_map<T>()
+                return make_map<|T|>()
             end
 
-            function second<T>(head: T, tail: T): T
+            function second<|T|>(head: T, tail: T): T
                 return tail
             end
 
-            function open_head<T>(head: T, ...: T): T
+            function open_head<|T|>(head: T, ...: T): T
                 return ...[1]
             end
 
@@ -756,7 +756,7 @@ describe("Array, Map, and vararg spread expressions (code generator)", function(
             end
 
             function optional_array_open(): integer
-                return open_head(1, ...make_optional_array<integer>(true))
+                return open_head(1, ...make_optional_array<|integer|>(true))
             end
 
             function optional_map_fixed(): integer
@@ -764,11 +764,11 @@ describe("Array, Map, and vararg spread expressions (code generator)", function(
             end
 
             function optional_map_open(): integer
-                return open_head(1, ...make_optional_map<integer>(true))
+                return open_head(1, ...make_optional_map<|integer|>(true))
             end
 
             function missing_optional_array(): integer
-                return second(1, ...make_optional_array<integer>(false))
+                return second(1, ...make_optional_array<|integer|>(false))
             end
         ]], [[
             assert(test.array_fixed() == 42)
@@ -809,11 +809,11 @@ describe("Array, Map, and vararg spread expressions (code generator)", function(
 
             closed_state: integer = 0
 
-            function generic_step<T>(state: T, control: T): T?
+            function generic_step<|T|>(state: T, control: T): T?
                 return nil
             end
 
-            function generic_setup<U>(
+            function generic_setup<|U|>(
                 state: U, control: U, finish: U
             ): {U}
                 return {state, control, finish}
@@ -969,21 +969,21 @@ describe("Array, Map, and vararg spread expressions (code generator)", function(
 
                 function pointer(): integer
                     evaluations = 0
-                    local fn: ffi.ffi_spread_binary = ffi.ffi_spread_choose()
+                    local fn: foreign ffi_spread_binary = ffi.ffi_spread_choose()
                     local result = fn(...pair()) as integer
                     return result * 10 + evaluations
                 end
 
                 function allocation(): integer
                     evaluations = 0
-                    local values: owned ffi.ffi_spread_int[] =
-                        ffi.ffi_spread_int.new_array(...count())
+                    local values: owned ffi_spread_int[] =
+                        foreign ffi_spread_int.new_array(...count())
                     return #values * 10 + evaluations
                 end
 
                 function mutated_automatic(): integer
                     evaluations = 0
-                    local box = ffi.ffi_spread_box.new()
+                    local box = foreign ffi_spread_box.new()
                     do
                         ffi.ffi_spread_fill(box, ...pair())
                         raise "observe through spill"

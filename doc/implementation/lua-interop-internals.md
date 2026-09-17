@@ -17,7 +17,7 @@ and dependency linking are in the
 All generated-C excerpts are real output of `coder.generate` for this
 module:
 
-```lua
+```titan
 -- interop.titan
 record Point
     x: float

@@ -42,7 +42,7 @@ describe("type-relation soundness (checker)", function()
             function strict(a: value): boolean
                 return a
             end
-            function optional<T>(a: T?): boolean
+            function optional<|T|>(a: T?): boolean
                 return not a
             end
         ]])
@@ -231,7 +231,7 @@ describe("type-relation soundness (checker)", function()
 
             function bridge(): integer
                 local source: {float} = {2.0}
-                local middle: {ffi.ffi_double} = source
+                local middle: {foreign ffi_double} = source
                 local final: {integer} = middle
                 return final[1]
             end
@@ -246,7 +246,7 @@ describe("type-relation soundness (checker)", function()
                 source = [[
                     function actual(): integer return 1 end
                     function probe()
-                        local optional_result: () -> integer? = actual
+                        local optional_result: function (): integer? = actual
                     end
                 ]],
             },
@@ -255,7 +255,7 @@ describe("type-relation soundness (checker)", function()
                 source = [[
                     function actual(): float return 1.5 end
                     function probe()
-                        local narrowed_result: () -> integer = actual
+                        local narrowed_result: function (): integer = actual
                     end
                 ]],
             },
@@ -264,7 +264,7 @@ describe("type-relation soundness (checker)", function()
                 source = [[
                     function actual(x: float) end
                     function probe()
-                        local converted_input: (integer) -> () = actual
+                        local converted_input: function (integer): () = actual
                     end
                 ]],
             },
@@ -280,8 +280,8 @@ describe("type-relation soundness (checker)", function()
             function none(): nil return nil end
 
             function through(): integer
-                local optional: () -> integer? = none
-                local definite: () -> integer = optional
+                local optional: function (): integer? = none
+                local definite: function (): integer = optional
                 return definite()
             end
         ]], "optional")
@@ -290,9 +290,9 @@ describe("type-relation soundness (checker)", function()
             function none(): nil return nil end
 
             function through_array(): integer
-                local first: {() -> nil} = {none}
-                local middle: {() -> integer?} = first
-                local final: {() -> integer} = middle
+                local first: {function (): nil} = {none}
+                local middle: {function (): integer?} = first
+                local final: {function (): integer} = middle
                 return final[1]()
             end
         ]], "middle")
@@ -311,7 +311,7 @@ describe("type-relation soundness (checker)", function()
                 local dynamic_map: {string: value} = int_map
                 local int_map_again: {string: integer} = dynamic_map
 
-                local dynamic_result: () -> integer = actual
+                local dynamic_result: function (): integer = actual
                 return ints_again[1] + int_map_again["x"] +
                     dynamic_result()
             end
@@ -329,8 +329,8 @@ describe("type-relation soundness (checker)", function()
                 values: {integer},
                 entries: {string: integer}
             ): (integer, integer, boolean, boolean)
-                local narrow: (integer) -> integer = short
-                local wide: (integer, integer) -> integer = short
+                local narrow: function (integer): integer = short
+                local wide: function (integer, integer): integer = short
                 return values[1], entries["x"],
                     narrow == wide, wide == narrow
             end
@@ -431,14 +431,14 @@ describe("type-relation soundness (checker)", function()
             foreign import "]] .. header .. [["
 
             function read_array(): integer
-                local one = 1 as ffi.ffi_int
-                local xs: {ffi.ffi_int} = {one}
+                local one = 1 as foreign ffi_int
+                local xs: {foreign ffi_int} = {one}
                 return xs[1]
             end
 
             function read_map(): integer
-                local one = 1 as ffi.ffi_int
-                local map: {string: ffi.ffi_int} = {
+                local one = 1 as foreign ffi_int
+                local map: {string: foreign ffi_int} = {
                     ["one"] = one
                 }
                 return map["one"]
@@ -454,23 +454,23 @@ describe("type-relation soundness (checker)", function()
                 foreign import "]] .. header .. [["
 
                 local function implicit(v: value): nil
-                    local pointer: *ffi.ffi_int = v
+                    local pointer: foreign *ffi_int = v
                 end
 
                 local function compare(
-                    pointer: *ffi.ffi_int,
+                    pointer: foreign *ffi_int,
                     dynamic: value
                 ): boolean
                     return pointer == dynamic
                 end
 
                 local function construct(
-                    pointer: *ffi.ffi_int
-                ): {*ffi.ffi_int}
+                    pointer: foreign *ffi_int
+                ): {foreign *ffi_int}
                     return {pointer}
                 end
 
-                local function raw(pointer: *ffi.ffi_int): nil
+                local function raw(pointer: foreign *ffi_int): nil
                 end
 
                 local function expose(): value
@@ -492,13 +492,13 @@ describe("type-relation soundness (checker)", function()
                 foreign import "]] .. header .. [["
 
                 local function read_array(
-                    pointers: {*ffi.ffi_int}
+                    pointers: {foreign *ffi_int}
                 )
                     local pointer = pointers[1]
                 end
 
                 local function read_map(
-                    pointers: {string: *ffi.ffi_int}
+                    pointers: {string: foreign *ffi_int}
                 )
                     local pointer = pointers["one"]
                 end
@@ -515,16 +515,16 @@ describe("type-relation soundness (checker)", function()
             foreign import "]] .. header .. [["
 
             local function write_array(
-                pointers: {*ffi.ffi_int},
-                pointer: *ffi.ffi_int
+                pointers: {foreign *ffi_int},
+                pointer: foreign *ffi_int
             )
                 pointers[1] = pointer
             end
 
             local function write_map(
-                pointer: *ffi.ffi_int
+                pointer: foreign *ffi_int
             )
-                local pointers: {string: *ffi.ffi_int} = {
+                local pointers: {string: foreign *ffi_int} = {
                     ["one"] = pointer,
                 }
                 pointers["two"] = pointer

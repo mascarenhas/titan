@@ -7,14 +7,14 @@ record MappingPerson
 end
 
 union MappingEvent
-  local hidden: string
-  empty
-  count: integer
-  person: MappingPerson
-  optional: string?
-  dynamic: value
-  people: {MappingPerson}
-  wire: {string: value}
+  local hidden(string)
+  empty()
+  count(integer)
+  person(MappingPerson)
+  optional(string?)
+  dynamic(value)
+  people({MappingPerson})
+  wire({string: value})
 end
 
 function MappingEvent.private_value(): MappingEvent
@@ -47,7 +47,7 @@ record MappingLink
   next: MappingLink?
 end
 
-record MappingBox<T>
+record MappingBox<|T|>
   item: T
 end
 
@@ -88,7 +88,7 @@ local function mapping_error(source: string, target: reflect.Type,
   return failure
 end
 
-local function mapping_raises(action: () -> ()): boolean
+local function mapping_raises(action: function (): ()): boolean
   action()
   return false
 catch
@@ -159,7 +159,7 @@ function test_mapping_record_rejections_and_unknown_policy(_context: test.Contex
                 "constructor_unavailable", "$")
   local local_value = MappingLocal.new("local")
   case reflect.inspect(local_value)
-  when is_record: record_value then
+  when is_record(record_value) then
     mapping_error([[{"label":"local"}]], reflect.Type.is_record(record_value.descriptor),
                   "constructor_unavailable", "$")
   else raise "expected local record"
@@ -180,19 +180,19 @@ function test_mapping_nested_records_unions_and_const_containers(_context: test.
               envelope.frozen[3] == 3 and envelope.either[2] == 5)
   test.assert(envelope.by_name["one"].name == "Edsger")
   case envelope.events[2]
-  when person: person then test.assert(person.name == "Grace")
+  when person(person) then test.assert(person.name == "Grace")
   else raise "wrong person arm"
   end
   case envelope.events[3]
-  when people: people then test.assert(people[1].name == "Lin")
+  when people(people) then test.assert(people[1].name == "Lin")
   else raise "wrong Array payload arm"
   end
   case reflect.inspect(envelope.frozen)
-  when is_const_array then
+  when is_const_array() then
   else raise "decoded const field has a mutable Array tag"
   end
   case reflect.inspect(envelope.either)
-  when is_array then
+  when is_array() then
   else raise "maybe-const target must decode as a mutable Array"
   end
   local again: MappingEnvelope = json.decode(json.encode(envelope),
@@ -206,27 +206,27 @@ function test_mapping_union_empty_optional_and_dynamic_arms(_context: test.Conte
   test.assert(json.encode(empty) == [[{"tag":"empty"}]])
   local count: MappingEvent = json.decode([[{"tag":"count","value":2.0}]], target)
   case count
-  when count: amount then test.assert(amount == 2)
+  when count(amount) then test.assert(amount == 2)
   else raise "wrong numeric arm"
   end
   local token = MappingToken.new()
   local optional: MappingEvent = json.decode([[{"tag":"optional","value":null}]],
     target, json.DecodeOption.null_value(token))
   case optional
-  when optional: payload then test.assert(payload == nil)
+  when optional(payload) then test.assert(payload == nil)
   else raise "wrong optional arm"
   end
   local dynamic: MappingEvent = json.decode([[{"tag":"dynamic","value":null}]],
     target, json.DecodeOption.null_value(token))
   case dynamic
-  when dynamic: payload then test.assert(payload == token)
+  when dynamic(payload) then test.assert(payload == token)
   else raise "wrong dynamic arm"
   end
   test.assert(json.encode(optional) == [[{"tag":"optional","value":null}]])
   local wire: MappingEvent = json.decode(
     [[{"tag":"wire","value":{"tag":"inner","value":23}}]], target)
   case wire
-  when wire: payload then
+  when wire(payload) then
     test.assert(payload["tag"] == "inner" and payload["value"] == 23)
   else raise "wrong nested Map arm"
   end
@@ -288,12 +288,12 @@ function test_mapping_recursive_nominals_and_erased_leaves(_context: test.Contex
   local linked: MappingLink = json.decode(
     [[{"number":1,"next":{"number":2,"next":null}}]], mapping_target("MappingLink"))
   test.assert(linked.number == 1 and linked.next.number == 2 and linked.next.next == nil)
-  local erased: MappingBox<value> = json.decode(
+  local erased: MappingBox<|value|> = json.decode(
     [[{"item":{"name":"Ada","active":true}}]], mapping_target("MappingBox"))
   local item: {string: value} = erased.item
   test.assert(item["name"] == "Ada", "erased generic leaves must remain dynamic")
   case reflect.inspect(erased.item)
-  when is_map then
+  when is_map() then
   else raise "erased leaf unexpectedly reconstructed a nominal type"
   end
   mapping_error("{}", mapping_target("DoesNotExist"), "unknown_type", "$")

@@ -373,10 +373,10 @@ function read(): integer
 end
 
 function callable_relay(): integer
-    local broad: (value) -> value = common.identity
-    local narrowed: (Box) -> Box = broad
+    local broad: function (value): value = common.identity
+    local narrowed: function (Box): Box = broad
     local dynamic: value = narrowed
-    local wider: (Box, value) -> Box = dynamic
+    local wider: function (Box, value): Box = dynamic
     return wider(Box.new(42), "ignored").n
 end
 
@@ -1095,12 +1095,12 @@ end
 local api = import "shape.api"
 
 function use(value_: api.Incrementer): integer
-    local add: (integer) -> integer = value_:add
+    local add: function (integer): integer = value_:add
     return add(2)
 end
 
 function use_dynamic(value_: api.Dynamic, input: value): value
-    local convert: (value) -> value = value_:convert
+    local convert: function (value): value = value_:convert
     return convert(input)
 end
 ]])
@@ -1129,7 +1129,7 @@ function inc(x: integer): integer
     return x + 1
 end
 
-function twice(f: (integer) -> integer, x: integer): integer
+function twice(f: function (integer): integer, x: integer): integer
     return f(f(x))
 end
 ]])
@@ -1150,7 +1150,7 @@ end
 
 function roundtrip_exact(x: integer): integer
     local dynamic: value = provider.inc
-    local f: (integer) -> integer = dynamic
+    local f: function (integer): integer = dynamic
     return f(x)
 end
 
@@ -1200,7 +1200,7 @@ local facade = import "shape.facade"
 
 function run(): integer
     local foo: facade.Foo = facade.make(40)
-    local plus: (integer) -> integer = foo:plus
+    local plus: function (integer): integer = foo:plus
     return foo:plus(1) + plus(2) + facade.exact(1)
         + facade.roundtrip_exact(5)
 end
@@ -1352,12 +1352,12 @@ end
 local api = import "exact_iface.api"
 
 function use(value_: api.Incrementer): integer
-    local add: (integer) -> integer = value_:add
+    local add: function (integer): integer = value_:add
     return add(2)
 end
 
 function use_dynamic(value_: api.Dynamic, input: value): value
-    local convert: (value) -> value = value_:convert
+    local convert: function (value): value = value_:convert
     return convert(input)
 end
 ]])
@@ -1527,7 +1527,7 @@ local owner = import "base.owner"
 type Box = owner.Box
 
 function get(): integer
-    local make: (integer) -> Box = Box.new
+    local make: function (integer): Box = Box.new
     return make(40).n
 end
 ]])
@@ -1651,7 +1651,7 @@ return module.get(), module.initializations(), box.n
         inspect(loaded_api)
     local impl_answer: value, impl_initialized: value, impl_box: value =
         inspect(loaded_impl)
-    local make: (integer) -> api.Box = api.Box.new
+    local make: function (integer): api.Box = api.Box.new
     if api_answer as integer ~= 42 or api_initialized as integer ~= 1 or
        api_box as integer ~= 42 or impl_answer as integer ~= 42 or
        impl_initialized as integer ~= 1 or impl_box as integer ~= 42 or
@@ -2096,7 +2096,7 @@ typedef int ffi_int;
         write_file(source_root .. "/headers/provider.titan", [[
 foreign import "types.h"
 
-foreign function increment(input: ffi.ffi_int): ffi.ffi_int
+foreign function increment(input: ffi_int): ffi_int
     return input + 1
 end
 ]])
@@ -2104,12 +2104,12 @@ end
 foreign import "types.h"
 local provider = import "headers.provider.titan"
 
-foreign function twice(input: ffi.ffi_int): ffi.ffi_int
+foreign function twice(input: ffi_int): ffi_int
     return provider.increment(provider.increment(input))
 end
 
 function run(): integer
-    return twice(4 as ffi.ffi_int) as integer
+    return twice(4 as foreign ffi_int) as integer
 end
 ]])
 
@@ -2149,7 +2149,7 @@ typedef int consumer_int;
 ]])
         write_file(source_root .. "/macro/provider.titan", [[
 foreign import "provider.h"
-foreign function identity(input: ffi.ffi_int): ffi.ffi_int return input end
+foreign function identity(input: ffi_int): ffi_int return input end
 ]])
         write_file(source_root .. "/macro/consumer.titan", [[
 foreign import "consumer.h"
@@ -2178,10 +2178,10 @@ io.write(consumer.collision())
         write_file(source_root .. "/stale/types.h", "typedef int ffi_int;\n")
         write_file(source_root .. "/stale/item.titan", [[
 foreign import "types.h"
-foreign function identity(input: ffi.ffi_int): ffi.ffi_int
+foreign function identity(input: ffi_int): ffi_int
     return input
 end
-function answer(): integer return identity(7 as ffi.ffi_int) as integer end
+function answer(): integer return identity(7 as foreign ffi_int) as integer end
 ]])
         local ok, output = compile(workspace, source_root, "stale.item")
         assert.truthy(ok, output)
@@ -2197,7 +2197,7 @@ function answer(): integer return identity(7 as ffi.ffi_int) as integer end
         write_file(source_root .. "/reserved/types.h", "typedef int ffi_int;\n")
         write_file(source_root .. "/reserved/item.titan", [[
 foreign import "types.h"
-foreign function identity(input: ffi.ffi_int): ffi.ffi_int return input end
+foreign function identity(input: ffi_int): ffi_int return input end
 ]])
         local reserved = source_root .. "/reserved/item.titan.h"
         write_file(reserved, "/* user-owned */\n")

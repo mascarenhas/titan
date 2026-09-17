@@ -5,7 +5,7 @@ not declare a new type or create a run-time value.
 
 ```titan
 type UserId = integer
-type Handler = (string) -> boolean
+type Handler = function (string): (boolean)
 type MaybeHandler = Handler?
 
 local type Scratch = {string}
@@ -79,13 +79,13 @@ type Point = geometry.Point
 type Event = messages.Message
 
 local p: Point = Point.new(1.0, 2.0)
-local make_point: (float, float) -> Point = Point.new
+local make_point: function (float, float): (Point) = Point.new
 local event: Event = Event.write("hello")
 ```
 
 A constructor-preserving alias to a bare generic owner is itself applicable:
-`type Crate = Box` permits `Crate<integer>.new(1)`. A concrete alias such as
-`type IntBox = Box<integer>` is already closed and uses `IntBox.new(1)`; it
+`type Crate = Box` permits `Crate<|integer|>.new(1)`. A concrete alias such as
+`type IntBox = Box<|integer|>` is already closed and uses `IntBox.new(1)`; it
 cannot receive another owner list.
 
 Record aliases expose the original record's visible record functions,
@@ -125,7 +125,7 @@ end
 local shapes = import "shapes"
 
 function draw_origin()
-    local make_point: (float, float) -> shapes.Point = shapes.Point.new
+    local make_point: function (float, float): (shapes.Point) = shapes.Point.new
     local p = make_point(0.0, 0.0)
     p:move(10.0, 5.0)
 end
@@ -139,19 +139,27 @@ state. `draw` therefore does not separately open `geometry`. The same ownership
 is preserved through static providers and chains of aliases.
 
 A `local type` alias is visible only inside its defining module and is omitted
-from the compiled interface. As with other exported declarations, the target
-of a public alias must itself be exportable: it cannot contain a local record
-or union or a header-dependent C-FFI type. Contextual C primitives and pointer,
-foreign-function-pointer, or owned graphs built entirely from them are
-exportable alias targets. An imported C typedef remains nonexportable even when
-it resolves to a contextual primitive. A local alias may name any of these
-types and is also the way to give a compound pointer type a namespace for
-allocation or layout pseudo-members:
+from the compiled interface. A public alias must have an exportable target: it
+cannot expose a local nominal type or a header-dependent foreign type.
+
+Ordinary `type` aliases name Titan types, including owned C storage and Titan
+containers, Options, or callable types containing foreign components. They
+cannot name a direct raw foreign type; parentheses alone do not change that
+category. For raw C aliases, use `foreign type Name = T`. That declaration is
+always module-local, has no `local` modifier, and emits a real C typedef in the
+module's `.ffi.h`. An explicit source import inherits that C header environment;
+an ordinary Titan import does not expose a foreign alias as `module.Name`.
 
 ```titan
-local type VoidPointer = *void
-local pointers = VoidPointer.new_array(4)
+foreign type VoidPointer = *void
+local type Bytes = owned char[]
+local function storage(): Bytes
+    return foreign char.new_array(4)
+end
 ```
+
+An owned alias remains transparent Titan type syntax. A foreign alias instead
+obeys C typedef identity and namespace rules. See [The C FFI](ffi.md).
 
 Aliases and their targets are order-independent within a module. In
 particular, a qualified alias target may use an import declared later:

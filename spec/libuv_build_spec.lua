@@ -100,33 +100,33 @@ local UV_FOREIGN_CALLBACKS = {
         name = "uv_signal_cb",
         source = "titan/uv/os.titan",
         slot = 1,
-        call = "entry(L, module, callback, owner, signum as ffi.lua_Integer)"
+        call = "entry(L, module, callback, owner, signum as foreign lua_Integer)"
     },
     {
         name = "uv_process_exit_cb",
         source = "titan/uv/process.titan",
         slot = 1,
         call = "entry(L, module, callback, owner, " ..
-            "exit_status as ffi.lua_Integer, term_signal as ffi.lua_Integer)"
+            "exit_status as foreign lua_Integer, term_signal as foreign lua_Integer)"
     },
     {
         name = "uv_write_cb",
         source = "titan/uv/runtime.titan",
         slot = 1,
-        call = "entry(L, module, callback, owner, status as ffi.lua_Integer)"
+        call = "entry(L, module, callback, owner, status as foreign lua_Integer)"
     },
     {
         name = "uv_alloc_cb",
         source = "titan/uv/runtime.titan",
         slot = 1,
         call = "entry(L, module, callback, owner, suggested_size, " ..
-            "buf as *void)"
+            "buf as foreign *void)"
     },
     {
         name = "uv_read_cb",
         source = "titan/uv/runtime.titan",
         slot = 2,
-        call = "entry(L, module, callback, owner, nread as ffi.lua_Integer)"
+        call = "entry(L, module, callback, owner, nread as foreign lua_Integer)"
     },
     {
         name = "uv_close_cb",
@@ -139,7 +139,7 @@ local UV_FOREIGN_CALLBACKS = {
         source = "titan/uv/runtime.titan",
         slot = 1,
         call = "entry(L, module, callback, owner, " ..
-            "handle as *void)"
+            "handle as foreign *void)"
     },
     {
         name = "uv_timer_cb",
@@ -151,26 +151,26 @@ local UV_FOREIGN_CALLBACKS = {
         name = "uv_getaddrinfo_cb",
         source = "titan/uv/tcp.titan",
         slot = 1,
-        call = "entry(L, module, callback, owner, status as ffi.lua_Integer, " ..
-            "result as *void)"
+        call = "entry(L, module, callback, owner, status as foreign lua_Integer, " ..
+            "result as foreign *void)"
     },
     {
         name = "uv_connect_cb",
         source = "titan/uv/tcp.titan",
         slot = 1,
-        call = "entry(L, module, callback, owner, status as ffi.lua_Integer)"
+        call = "entry(L, module, callback, owner, status as foreign lua_Integer)"
     },
     {
         name = "uv_shutdown_cb",
         source = "titan/uv/tcp.titan",
         slot = 1,
-        call = "entry(L, module, callback, owner, status as ffi.lua_Integer)"
+        call = "entry(L, module, callback, owner, status as foreign lua_Integer)"
     },
     {
         name = "uv_connection_cb",
         source = "titan/uv/tcp.titan",
         slot = 3,
-        call = "entry(L, module, callback, owner, status as ffi.lua_Integer)"
+        call = "entry(L, module, callback, owner, status as foreign lua_Integer)"
     },
     {
         name = "uv_work_cb",
@@ -181,7 +181,7 @@ local UV_FOREIGN_CALLBACKS = {
         name = "uv_after_work_cb",
         source = "titan/uv/work.titan",
         slot = 2,
-        call = "entry(L, module, callback, owner, status as ffi.lua_Integer)"
+        call = "entry(L, module, callback, owner, status as foreign lua_Integer)"
     },
 }
 local FS_FOREIGN_CALLBACKS = {
@@ -194,7 +194,7 @@ local FS_FOREIGN_CALLBACKS = {
         name = "fs_watcher_event_cb",
         slot = 1,
         call = "entry(L, module, callback, owner, filename, " ..
-            "events as ffi.lua_Integer, status as ffi.lua_Integer)"
+            "events as foreign lua_Integer, status as foreign lua_Integer)"
     },
 }
 local FS_DIRECT_LIBUV_CALLS = {
@@ -721,7 +721,7 @@ describe("libuv Makefile configuration", function()
     it("changes only an inherited default SIGPIPE disposition", function()
         local uv = read_file(UV_MAIN_SOURCE)
         for _, contract in ipairs({
-            "local current = Sigaction.new()",
+            "local current = foreign Sigaction.new()",
             "ffi.sigaction(ffi.SIGPIPE, nil, current)",
             "if current.sa_handler ~= ffi.SIG_DFL then return 0 end",
             "current.sa_handler = ffi.SIG_IGN",
@@ -762,11 +762,11 @@ describe("libuv Makefile configuration", function()
         for _, contract in ipairs({
             "record ResumeToken",
             "const source: string?",
-            "union CancellationReason<B>",
-            "union TaskStatus<A, B>",
-            "record Task<A, B>",
-            "local record TerminalRegistration<A, B>",
-            "listener: (TaskStatus<A, B>) -> ()): () -> ()",
+            "union CancellationReason<|B|>",
+            "union TaskStatus<|A, B|>",
+            "record Task<|A, B|>",
+            "local record TerminalRegistration<|A, B|>",
+            "listener: function (TaskStatus<|A, B|>): ()): function (): ()",
             "local record SuspendCall",
             "local token: ResumeToken",
             "local cancel_action: CancelAction?",
@@ -777,9 +777,9 @@ describe("libuv Makefile configuration", function()
             "failed: boolean,",
             "local function suspend(token: ResumeToken, " ..
             "cancel_action: CancelAction?)",
-            "local function run_internal(func: () -> value): " ..
-            "Task<value, value>",
-            "Task<value, value>.new(",
+            "local function run_internal(func: function (): (value)): " ..
+            "Task<|value, value|>",
+            "Task<|value, value|>.new(",
         }) do
             assert.truthy(task:find(contract, 1, true), contract)
         end
@@ -787,39 +787,39 @@ describe("libuv Makefile configuration", function()
 
         local async = read_file("titan/async.titan")
         for _, contract in ipairs({
-            "function run<A, B>(func: () -> A): Task<A, B>",
-            "function run_foreign(f: foreign (*void) -> (), arg: *void)",
-            "function running(): Task<value, value>",
+            "function run<|A, B|>(func: function (): (A)): Task<|A, B|>",
+            "function run_foreign(f: foreign function (*void): void, arg: foreign *void)",
+            "function running(): Task<|value, value|>",
             "type ResumeToken = uv.ResumeToken",
-            "type SuspendCancelAction = () -> ()",
+            "type SuspendCancelAction = function (): ()",
             "function suspend(token: ResumeToken,",
             "cancel_action: SuspendCancelAction?)",
-            "function channel<T>(size: integer?):",
+            "function channel<|T|>(size: integer?):",
             "ResumeToken.new(\"channel\")",
             "local transfer: {T} = {}",
-            "local send: (T) -> ()",
-            "local receive: () -> T",
-            "channel<string>(size)",
-            "union AnyTwoResult<A1, A2>",
-            "union AnyFiveResult<A1, A2, A3, A4, A5>",
-            "union RaceTwoResult<A1, B1, A2, B2>",
-            "union RaceFiveResult<A1, B1, A2, B2, A3, B3, " ..
-            "A4, B4, A5, B5>",
-            "union AllTwoError<A1, B1, A2, B2>",
-            "union AllFiveError<A1, B1, A2, B2, A3, B3, " ..
-            "A4, B4, A5, B5>",
-            "function any_two<A1, B1, A2, B2>(",
-            "function any_five<A1, B1, A2, B2, A3, B3, " ..
-            "A4, B4, A5, B5>(",
-            "function race_two<A1, B1, A2, B2>(",
-            "function race_five<A1, B1, A2, B2, A3, B3, " ..
-            "A4, B4, A5, B5>(",
-            "function all_two<A1, B1, A2, B2>(",
-            "function all_five<A1, B1, A2, B2, A3, B3, " ..
-            "A4, B4, A5, B5>(",
-            "function join<A, B>(task: Task<A, B>): TaskStatus<A, B>",
-            "function join_five<A1, B1, A2, B2, A3, B3, " ..
-            "A4, B4, A5, B5>(",
+            "local send: function (T): ()",
+            "local receive: function (): (T)",
+            "channel<|string|>(size)",
+            "union AnyTwoResult<|A1, A2|>",
+            "union AnyFiveResult<|A1, A2, A3, A4, A5|>",
+            "union RaceTwoResult<|A1, B1, A2, B2|>",
+            "union RaceFiveResult<|A1, B1, A2, B2, A3, B3, " ..
+            "A4, B4, A5, B5|>",
+            "union AllTwoError<|A1, B1, A2, B2|>",
+            "union AllFiveError<|A1, B1, A2, B2, A3, B3, " ..
+            "A4, B4, A5, B5|>",
+            "function any_two<|A1, B1, A2, B2|>(",
+            "function any_five<|A1, B1, A2, B2, A3, B3, " ..
+            "A4, B4, A5, B5|>(",
+            "function race_two<|A1, B1, A2, B2|>(",
+            "function race_five<|A1, B1, A2, B2, A3, B3, " ..
+            "A4, B4, A5, B5|>(",
+            "function all_two<|A1, B1, A2, B2|>(",
+            "function all_five<|A1, B1, A2, B2, A3, B3, " ..
+            "A4, B4, A5, B5|>(",
+            "function join<|A, B|>(task: Task<|A, B|>): TaskStatus<|A, B|>",
+            "function join_five<|A1, B1, A2, B2, A3, B3, " ..
+            "A4, B4, A5, B5|>(",
         }) do
             assert.truthy(async:find(contract, 1, true), contract)
         end
@@ -832,7 +832,7 @@ describe("libuv Makefile configuration", function()
 
         local http = read_file("titan/http/server.titan")
         assert.truthy(http:find(
-            "async.run<Request?, value>(", 1, true), http)
+            "async.run<|Request?, value|>(", 1, true), http)
         assert.truthy(http:find(
             "async.run(function (): nil", 1, true), http)
     end)
@@ -1069,7 +1069,7 @@ int main(void) {
                 if callback.worker then
                     for _, contract in ipairs({
                         "ffi.uv_req_get_data",
-                        "carrier[1] as WorkFunction",
+                        "carrier[1] as foreign WorkFunction",
                         "local arg = carrier[2]",
                         "f(arg)",
                     }) do
@@ -1586,7 +1586,7 @@ int main(void) {
         assert.truthy(ssl:find(
             "private_key_data = fs.read_file", 1, true), ssl)
         assert.truthy(ssl:find(
-                "local default_client_context: *ffi.SSL_CTX", 1, true),
+                "local default_client_context: foreign *SSL_CTX", 1, true),
             ssl)
         assert.truthy(ssl:find(
             "local default_client_context_owner: " ..
@@ -1595,7 +1595,7 @@ int main(void) {
             "local function finalize_default_client_context(" ..
             "\n    owner: DefaultClientContextOwner)", 1, true), ssl)
         assert.truthy(ssl:find(
-            "gc.finalizable<DefaultClientContextOwner>(" ..
+            "gc.finalizable<|DefaultClientContextOwner|>(" ..
             "\n      owner, finalize_default_client_context)",
             1, true), ssl)
         assert.falsy(ssl:find(
@@ -2775,7 +2775,7 @@ it("checks installed Lua headers with the direct checkout checker", function()
     local checker = require "titan-compiler.checker"
     local source = [[
         foreign import "lua.h"
-        local function stack_size(state: *ffi.lua_State): integer
+        local function stack_size(state: foreign *lua_State): integer
             return ffi.lua_gettop(state) as integer
         end
     ]]
@@ -3847,7 +3847,7 @@ done
                 'local gc = import "gc"',
                 'local testing = import "test"',
                 'not testing.testing() and not testing.verbose()',
-                "local peer = async.run<value, value>(",
+                "local peer = async.run<|value, value|>(",
                 "timer.sleep(0)",
                 "fs.write_file(marker,",
                 "local metadata = fs.stat(marker)",
@@ -4551,8 +4551,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 26, 32, 30, 32 }, shard_counts)
-            assert.equal(120, assigned_count)
+            assert.same({ 28, 34, 30, 33 }, shard_counts)
+            assert.equal(125, assigned_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")

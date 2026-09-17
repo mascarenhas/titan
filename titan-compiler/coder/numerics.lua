@@ -903,6 +903,9 @@ function coder._codeis(ctx, node)
     coder._checked_written_cast_plan(
         node._written_cast, original_source_type, node.target,
         "written type test")
+    if node._written_cast.op == "current_module" then
+        return "", "1"
+    end
     local source_type = coder._resolve_cast_type(node.exp._type)
     local target_type = coder._resolve_cast_type(node.target)
     local stats, source

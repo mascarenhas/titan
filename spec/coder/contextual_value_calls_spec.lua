@@ -31,7 +31,7 @@ describe("contextual calls through value (code generation)", function()
             end
 
             function invoke(
-                fn: (integer) -> integer,
+                fn: function (integer): integer,
                 number: integer
             ): integer
                 return fn(number)
@@ -85,31 +85,31 @@ describe("contextual calls through value (code generation)", function()
             end
 
             function Callables.add(n: integer): integer return n + 10 end
-            function Callables.identity<T>(item: T): T return item end
+            function Callables.identity<|T|>(item: T): T return item end
             function Callables:add_to(n: integer): integer
                 return self.base + n
             end
-            function Callables:echo<T>(item: T): T return item end
+            function Callables:echo<|T|>(item: T): T return item end
 
             union Choice
-                item: integer
-                empty
+                item(integer)
+                empty()
             end
 
-            function call(fn: (...: value) -> (...: value),
+            function call(fn: function (...: value): (...: value),
                           ...: value): (...: value)
                 return fn(...)
             end
 
-            function call_method(fn: (value, ...: value) -> (...: value),
+            function call_method(fn: function (value, ...: value): (...: value),
                                  receiver: value, ...: value): (...: value)
                 return fn(receiver, ...)
             end
 
             function payload(choice: Choice): integer
                 case choice
-                when item: n then return n
-                when empty then return 0
+                when item(n) then return n
+                when empty() then return 0
                 end
             end
         ]], [[
@@ -187,31 +187,31 @@ describe("contextual calls through value (code generation)", function()
     it("closes dependent contextual calls without repeating lexical evaluation",
         function()
             run_coder([[
-            function agree<T>(left: T, right: T): T
+            function agree<|T|>(left: T, right: T): T
                 return left
             end
 
-            function make_fixed<T>(): (T, T) -> T
+            function make_fixed<|T|>(): function (T, T): T
                 return function(left: T, right: T): T return left end
             end
 
-            function make_open<T>(): (...: T) -> T
+            function make_open<|T|>(): function (...: T): T
                 return function(...: T): T return ...[1] end
             end
 
-            record Box<T>
+            record Box<|T|>
                 item: T
             end
 
-            function take_array<T>(items: {T}, witness: T): T
+            function take_array<|T|>(items: {T}, witness: T): T
                 return witness
             end
 
-            function take_map<T>(items: {string: T}, witness: T): T
+            function take_map<|T|>(items: {string: T}, witness: T): T
                 return witness
             end
 
-            function take_box<T>(box: Box<T>, witness: T): T
+            function take_box<|T|>(box: Box<|T|>, witness: T): T
                 return witness
             end
 
@@ -311,10 +311,10 @@ describe("contextual calls through value (code generation)", function()
     it("runs dependent derived demands and open inputs once in order",
         function()
             run_coder([[
-            function agree<T>(left: T, right: T): T return left end
-            function take<T>(items: {T}, witness: T): T return witness end
-            function pick<T>(left: T?, right: T): T return right end
-            function make_map<T>(): {T: T} return {} end
+            function agree<|T|>(left: T, right: T): T return left end
+            function take<|T|>(items: {T}, witness: T): T return witness end
+            function pick<|T|>(left: T?, right: T): T return right end
+            function make_map<|T|>(): {T: T} return {} end
 
             local steps: integer = 0
             local selections: integer = 0
@@ -345,7 +345,7 @@ describe("contextual calls through value (code generation)", function()
                 mark(expected)
                 return "item"
             end
-            function spread<T>(expected: integer): (...: T)
+            function spread<|T|>(expected: integer): (...: T)
                 mark(expected)
                 return (40 as value) as T, (41 as value) as T
             end
@@ -437,12 +437,12 @@ describe("contextual calls through value (code generation)", function()
     it("recovers an exact contextual tag instead of adding a Lua frame",
         function()
             run_coder([[
-            function original(probe: () -> integer): integer
+            function original(probe: function (): integer): integer
                 return probe()
             end
 
             function contextual(callable: value,
-                                probe: () -> integer): integer
+                                probe: function (): integer): integer
                 return callable(probe)
             end
         ]], h.DEPTH_PROBE .. [[
@@ -465,15 +465,15 @@ describe("contextual calls through value (code generation)", function()
                 return #...
             end
 
-            function array_sink(f: () -> integer): {integer}
+            function array_sink(f: function (): integer): {integer}
                 return { f() }
             end
 
-            function argument_sink(f: () -> integer): integer
+            function argument_sink(f: function (): integer): integer
                 return count(f())
             end
 
-            function return_sink(f: () -> integer): (...: integer)
+            function return_sink(f: function (): integer): (...: integer)
                 return f()
             end
         ]]
@@ -526,7 +526,7 @@ describe("contextual calls through value (code generation)", function()
                 return present()
             end
 
-            function generic_required(f: () -> (...: integer)): integer
+            function generic_required(f: function (): (...: integer)): integer
                 return f()
             end
         ]], [[

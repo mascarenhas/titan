@@ -6,8 +6,8 @@ foreign import "lua.h"
 foreign import "lauxlib.h"
 foreign import "print_capture.h"
 
-local type PrintableFactory = (string, string, boolean) -> value
-local type ConversionLog = () -> string
+local type PrintableFactory = function (string, string, boolean): (value)
+local type ConversionLog = function (): (string)
 
 local function begin_stdout_capture(): (integer, integer)
   local read_descriptor = -1
@@ -24,9 +24,9 @@ local function begin_stdout_capture(): (integer, integer)
     end
   end
 
-  local descriptors = int.new_array(2)
+  local descriptors = foreign int.new_array(2)
   local status: integer = ffi.titan_spec_capture_pipe(
-      descriptors as *int)
+      descriptors as foreign *int)
   test.assert(status == 0, "could not create stdout capture pipe")
   read_descriptor = descriptors[0]
   write_descriptor = descriptors[1]
@@ -58,17 +58,17 @@ end
 
 local function captured_bytes(read_descriptor: integer,
                               capacity: integer): string
-  local storage = char.new_array(capacity)
+  local storage = foreign char.new_array(capacity)
   local count: integer = ffi.titan_spec_capture_read(
-      read_descriptor, storage as *char,
-      capacity as ffi.titan_spec_size)
+      read_descriptor, storage as foreign *char,
+      capacity as foreign titan_spec_size)
   test.assert(count >= 0, "stdout capture had no completed write")
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   test.assert(ffi.lua_checkstack(L, 1) ~= 0,
               "cannot reserve Lua stack for captured stdout")
-  ffi.lua_pushlstring(L, storage as *char,
-                      count as ffi.titan_spec_size)
+  ffi.lua_pushlstring(L, storage as foreign *char,
+                      count as foreign titan_spec_size)
   local result: value = ffi.lua_totvalue(L, -1)
   return result as string
 end

@@ -3,30 +3,27 @@ foreign import "lua.h"
 foreign import "lauxlib.h"
 foreign import "titan/ffi.h"
 
-local type VoidPointer = *void
+foreign type VoidPointer = *void
 
-local type coro_entry_func = foreign (
-  *ffi.lua_State, *ffi.Udata, *ffi.CClosure,
-  ffi.TValue, *ffi.mco_coro
-) -> ()
+foreign type coro_entry_func = function (*lua_State, *Udata, *CClosure, TValue, *mco_coro): void
 
-foreign function coro_entry_trampoline(co: *ffi.mco_coro)
-  local owner = ffi.mco_get_user_data(co) as *ffi.Udata
+foreign function coro_entry_trampoline(co: *mco_coro)
+  local owner = ffi.mco_get_user_data(co) as foreign *Udata
   local T = ffi.lmacro_thvalue(owner.uv[0].uv)
   local module = ffi.lmacro_uvalue(owner.uv[1].uv)
   local callback = ffi.lmacro_clCvalue(owner.uv[2].uv)
   local func = owner.uv[3].uv
-  local entry = ffi.lmacro_pvalue(callback.upvalue[2]) as coro_entry_func
+  local entry = ffi.lmacro_pvalue(callback.upvalue[2]) as foreign coro_entry_func
   entry(T, module, nil, func, co)
 end
 
 local STACK_SIZE = 2 * 1024 * 1024
 local TITAN_CORO_OWNER_USERVALUES = 5
-local runtime = ffi.mco_runtime.new()
+local runtime = foreign mco_runtime.new()
 
 record Coro
   local udata: value -- just for GC rooting
-  local handle: *ffi.mco_coro
+  local handle: foreign *mco_coro
   local default_tag: value
 end
 
@@ -49,18 +46,18 @@ local function effective_tag(default_tag: value, explicit_tag: value): value
   return tag
 end
 
-local function check_mco_result(result: ffi.mco_result)
+local function check_mco_result(result: foreign mco_result)
   if result ~= ffi.MCO_SUCCESS then
     raise (ffi.mco_result_description(result) as string)
   end
 end
 
-local function root_transfer(co: *ffi.mco_coro, payload: value)
+local function root_transfer(co: foreign *mco_coro, payload: value)
   if not co then
     return
   end
-  local owner: *ffi.Udata =
-    ffi.mco_get_user_data(co) as *ffi.Udata
+  local owner: foreign *Udata =
+    ffi.mco_get_user_data(co) as foreign *Udata
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 2) == 0 then
@@ -75,33 +72,33 @@ local function root_transfer(co: *ffi.mco_coro, payload: value)
   end
 end
 
-local function clear_transfer(co: *ffi.mco_coro)
+local function clear_transfer(co: foreign *mco_coro)
   root_transfer(co, nil)
 end
 
-local function push_transfer(source: *ffi.mco_coro,
-                             ok: int, payload: value)
+local function push_transfer(source: foreign *mco_coro,
+                             ok: foreign int, payload: value)
   root_transfer(source, payload)
   local result = ffi.mco_push(
-    source, payload as ffi.TValue, ffi.TValue.sizeof)
+    source, payload as foreign TValue, foreign TValue.sizeof)
   if result ~= ffi.MCO_SUCCESS then
     clear_transfer(source)
     check_mco_result(result)
   end
-  result = ffi.mco_push(source, ok, int.sizeof)
+  result = ffi.mco_push(source, ok, foreign int.sizeof)
   if result ~= ffi.MCO_SUCCESS then
-    local rollback = ffi.mco_pop(source, nil, ffi.TValue.sizeof)
+    local rollback = ffi.mco_pop(source, nil, foreign TValue.sizeof)
     check_mco_result(rollback)
     clear_transfer(source)
     check_mco_result(result)
   end
 end
 
-local function discard_transfer(source: *ffi.mco_coro)
+local function discard_transfer(source: foreign *mco_coro)
   if source then
-    local ok_result = ffi.mco_pop(source, nil, int.sizeof)
+    local ok_result = ffi.mco_pop(source, nil, foreign int.sizeof)
     check_mco_result(ok_result)
-    local payload_result = ffi.mco_pop(source, nil, ffi.TValue.sizeof)
+    local payload_result = ffi.mco_pop(source, nil, foreign TValue.sizeof)
     check_mco_result(payload_result)
     clear_transfer(source)
   end
@@ -141,20 +138,20 @@ local function raise_with_appended_trace(err: value)
   end
 end
 
-local function transfer_source(co: *ffi.mco_coro): *ffi.mco_coro
+local function transfer_source(co: foreign *mco_coro): foreign *mco_coro
   if co and co.stacked_co then
     return co.stacked_co
   end
   return co
 end
 
-local function pop_transfer_or_raise(co: *ffi.mco_coro,
+local function pop_transfer_or_raise(co: foreign *mco_coro,
                                      append_trace: boolean): value
-  local ok: int = 0 as int
-  local payload: ffi.TValue = nil
-  local ok_result = ffi.mco_pop(co, ok, int.sizeof)
+  local ok: foreign int = 0 as foreign int
+  local payload: foreign TValue = nil
+  local ok_result = ffi.mco_pop(co, ok, foreign int.sizeof)
   check_mco_result(ok_result)
-  local payload_result = ffi.mco_pop(co, payload, ffi.TValue.sizeof)
+  local payload_result = ffi.mco_pop(co, payload, foreign TValue.sizeof)
   check_mco_result(payload_result)
   clear_transfer(co)
   if ok == 0 then
@@ -167,10 +164,10 @@ local function pop_transfer_or_raise(co: *ffi.mco_coro,
   return payload
 end
 
-local function resume_result_or_raise(co: *ffi.mco_coro,
-                                      source: *ffi.mco_coro,
+local function resume_result_or_raise(co: foreign *mco_coro,
+                                      source: foreign *mco_coro,
                                       tag: value): value
-  local ctag: ffi.TValue = tag
+  local ctag: foreign TValue = tag
   local result = ffi.mco_resume(co, ctag)
   if result ~= ffi.MCO_SUCCESS then
     discard_transfer(source)
@@ -183,8 +180,8 @@ local function resume_result_or_raise(co: *ffi.mco_coro,
   return pop_transfer_or_raise(result_source, true)
 end
 
-local function yield_result_or_raise(co: *ffi.mco_coro, tag: value): value
-  local ctag: ffi.TValue = tag
+local function yield_result_or_raise(co: foreign *mco_coro, tag: value): value
+  local ctag: foreign TValue = tag
   local result = ffi.mco_yield(co, ctag)
   if result ~= ffi.MCO_SUCCESS then
     discard_transfer(co)
@@ -239,17 +236,17 @@ function is_yieldable(tag: value): boolean
   if tag == nil then
     missing_yield_tag()
   end
-  local ctag: ffi.TValue = tag
+  local ctag: foreign TValue = tag
   return ffi.mco_is_yieldable(runtime.current_co, ctag) ~= 0
 end
 
 local function coro_gc(handle: value)
   ffi.lua_pushtvalue(L, handle)
-  local co = (ffi.lua_touserdata(L, -1) as **ffi.mco_coro)[0]
+  local co = (ffi.lua_touserdata(L, -1) as foreign *(*mco_coro))[0]
   ffi.mco_destroy(co)
 end
 
-local function coro_entry(func: (value) -> value, co: *ffi.mco_coro)
+local function coro_entry(func: function (value): (value), co: foreign *mco_coro)
   local arg = pop_transfer_or_raise(co, false)
   local res = func(arg)
   push_transfer(co, 1, res)
@@ -258,12 +255,12 @@ catch
   push_transfer(co, 0, error)
 end
 
-function create(func: (value) -> value, default_tag: value): Coro
-  local slot: **ffi.mco_coro = ffi.lua_newuserdatauv(
-    L, VoidPointer.sizeof, TITAN_CORO_OWNER_USERVALUES)
+function create(func: function (value): (value), default_tag: value): Coro
+  local slot: foreign *(*mco_coro) = ffi.lua_newuserdatauv(
+    L, foreign VoidPointer.sizeof, TITAN_CORO_OWNER_USERVALUES)
   local _ = ffi.titan_newthread(L)
   ffi.lua_setiuservalue(L, -2, 1)
-  ffi.lua_pushtvalue(L, M)
+  ffi.lua_pushtvalue(L, M as foreign *Udata)
   ffi.lua_setiuservalue(L, -2, 2)
   ffi.lua_pushtvalue(L, coro_entry)
   ffi.lua_setiuservalue(L, -2, 3)

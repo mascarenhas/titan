@@ -46,19 +46,19 @@ describe("surface C99 types", function()
             { "unsigned long", "unsigned long", "Type.CInteger" },
             { "long long", "long long", "Type.CInteger" },
             { "unsigned long long", "unsigned long long", "Type.CInteger" },
-            { "foreign float", "float", "Type.CFloat" },
+            { "float", "float", "Type.CFloat" },
             { "double", "double", "Type.CFloat" },
             { "long double", "long double", "Type.CFloat" },
         }
         local declarations = {}
         for index, spelling in ipairs(spellings) do
             declarations[#declarations + 1] =
-                "local type T" .. index .. " = " .. spelling[1]
+                "foreign type SurfaceT" .. index .. " = " .. spelling[1]
         end
         local ok, err, ast = run_checker(table.concat(declarations, "\n"))
         assert.truthy(ok, err)
         for index, spelling in ipairs(spellings) do
-            local typ = ast[index]._type
+            local typ = types.resolve_c_typedef(ast[index]._type)
             assert.equal(spelling[3], typ._tag, spelling[1])
             if typ._tag ~= "Type.CVoid" then
                 assert.equal(spelling[2], typ.spelling, spelling[1])
@@ -70,15 +70,15 @@ describe("surface C99 types", function()
     it("provides primitive allocation and layout pseudo-members", function()
         local ok, err = run_checker([[
             function exercise(): integer
-                local chars: owned char[] = char.new_array(2)
-                local floats: owned foreign float[] =
+                local chars: owned char[] = foreign char.new_array(2)
+                local floats: owned float[] =
                     foreign float.new_array(2)
                 local words: owned unsigned long[] =
-                    unsigned long.new_array(2)
-                local fixed: int[4] = int.new_array(4)
-                local wide: unsigned long[2] =
-                    unsigned long.new_array(2)
-                return bool.sizeof + signed char.alignof
+                    foreign unsigned long.new_array(2)
+                local fixed = foreign int.new_array(4)
+                local wide =
+                    foreign unsigned long.new_array(2)
+                return foreign bool.sizeof + foreign signed char.alignof
                     + #chars + #floats + #words
                     + fixed[0] as integer + wide[0] as integer
             end
@@ -88,26 +88,24 @@ describe("surface C99 types", function()
 
     it("stores portable function pointers in module TValue slots", function()
         for _, declaration in ipairs({
-            "local callback: Callback = nil",
-            "callback: Callback = nil",
+            "local callback: foreign function (int): int = nil",
+            "callback: foreign function (int): int = nil",
         }) do
-            local ok, err = run_checker([[
-                type Callback = foreign (int) -> int
-            ]] .. declaration)
+            local ok, err = run_checker(declaration)
             assert.truthy(ok, err)
         end
 
         local ok, err = run_checker([[
-            pointer: *void = nil
+            pointer: foreign *void = nil
 
-            function read(): *void
+            function read(): foreign *void
                 return pointer
             end
         ]])
         assert.truthy(ok, err)
     end)
 
-    it("preserves value and type-alias precedence for contextual words",
+    it("keeps Titan bindings independent from explicit foreign primitives",
     function()
         local ok, err, ast = run_checker([[
             local char: integer = 4
@@ -127,11 +125,10 @@ describe("surface C99 types", function()
         assert.equal("Type.String", ast[4].params[1]._type._tag)
 
         ok, err = run_checker([[
-            local type CChar = char
             local char: integer = 4
 
             function allocate(): integer
-                local chars: owned char[] = CChar.new_array(2)
+                local chars: owned char[] = foreign char.new_array(2)
                 return #chars + char
             end
         ]])
@@ -140,79 +137,77 @@ describe("surface C99 types", function()
         ok, err = run_checker([[
             local type int = string
             function layout(): integer
-                return int.sizeof
+                return foreign int.sizeof
             end
         ]])
-        assert.falsy(ok)
-        assert.match("variable 'int' not declared", err)
+        assert.truthy(ok, err)
 
         ok, err = run_checker([[
             local type char = integer
             function layout(): integer
-                return char.alignof
+                return foreign char.alignof
             end
         ]])
-        assert.falsy(ok)
-        assert.match("variable 'char' not declared", err)
+        assert.truthy(ok, err)
     end)
 
-    it("reserves every otherwise-named component from nominal definitions",
+    it("allows C contextual words in the separate Titan nominal namespace",
     function()
         for _, name in ipairs({
             "void", "bool", "char", "signed", "unsigned",
             "short", "int", "long", "double",
         }) do
             local ok, err = run_checker("record " .. name .. " end")
-            assert.falsy(ok, name)
-            assert.match("cannot define Titan nominal type '" .. name ..
-                "'; the name is a contextual C99 type", err)
+            assert.truthy(ok, name .. ": " .. tostring(err))
         end
 
         local ok, err = run_checker([[
             union unsigned
-                item
+                item()
             end
         ]])
-        assert.falsy(ok)
-        assert.match("cannot define Titan nominal type 'unsigned'", err)
+        assert.truthy(ok, err)
 
         ok, err = run_checker([[
             interface long
                 function read(): integer
             end
         ]])
-        assert.falsy(ok)
-        assert.match("cannot define Titan nominal type 'long'", err)
+        assert.truthy(ok, err)
     end)
 
     it("exports portable recursive graphs and rehydrates numeric traits",
     function()
         local ok, err, imported = h.run_checker_modules({
             provider = [[
-                type Void = void
-                type VoidPointer = *Void
-                type Word = unsigned long
-
-                record Box
-                    number: int
+                function word(item: foreign unsigned long): foreign unsigned long
+                    return item
                 end
 
-                function identity(item: int): int
+                function pointer(item: foreign *void): foreign *void
+                    return item
+                end
+
+                record Box
+                    number: foreign int
+                end
+
+                function identity(item: foreign int): foreign int
                     return item
                 end
 
                 function make(): owned char[]
-                    return char.new_array(2)
+                    return foreign char.new_array(2)
                 end
             ]],
             consumer = [[
                 local provider = import "provider"
 
                 function size(): integer
-                    return provider.Word.sizeof + provider.Word.alignof
+                    return foreign unsigned long.sizeof + foreign unsigned long.alignof
                 end
 
-                function use(item: int): int
+                function use(item: foreign int): foreign int
                     local box = provider.Box.new(item)
                     return provider.identity(box.number)
                 end
@@ -221,14 +216,13 @@ describe("surface C99 types", function()
                     return provider.make()
                 end
 
-                local function pointer(item: provider.VoidPointer):
-                        provider.VoidPointer
-                    return item
+                local function pointer(item: foreign *void): foreign *void
+                    return provider.pointer(item)
                 end
             ]],
         }, "consumer")
         assert.truthy(ok, err)
-        local word = imported.provider.type.type_members.Word
+        local word = imported.provider.type.members.word.type.params[1]
         assert.equal("Type.CInteger", word._tag)
         assert.equal("unsigned long", word.spelling)
         assert.is_table(word._c_numeric)
@@ -240,24 +234,25 @@ describe("surface C99 types", function()
         with_header("typedef int local_word;\n", function(header)
             local ok, err = run_checker(
                 "foreign import \"" .. header .. '"\n' ..
-                "type Word = ffi.local_word")
+                "foreign type Word = local_word\n" ..
+                "function expose(item: foreign Word): foreign Word return item end")
             assert.falsy(ok)
-            assert.match("cannot export C FFI type '.-local_word'", err)
+            assert.match("cannot export C FFI type 'foreign Word'", err)
             assert.match("non%-portable header%-defined type", err)
         end)
     end)
 
     it("accepts lua_State as built-in exportable FFI type without foreign import", function()
         local ok, err = run_checker([[
-            type StatePtr = *lua_State
-            type Callback = foreign (*lua_State) -> int
+            foreign type StatePtr = *lua_State
+            foreign type Callback = function (*lua_State): int
 
             record StateHolder
-                state: *lua_State
+                state: foreign *lua_State
             end
 
-            function inspect_state(s: *lua_State): *lua_State
-                local cur: *lua_State = L
+            function inspect_state(s: foreign *lua_State): foreign *lua_State
+                local cur: foreign *lua_State = L
                 return s
             end
         ]])
@@ -267,11 +262,11 @@ describe("surface C99 types", function()
     it("rejects lua_State by value as incomplete C struct", function()
         local ok, err = run_checker([[
             function test(): integer
-                local s: lua_State
+                local s: foreign lua_State
                 return 0
             end
         ]])
         assert.falsy(ok)
-        assert.match("requires complete C struct type 'lua_State'", err)
+        assert.match("requires complete C struct type 'foreign lua_State'", err)
     end)
 end)

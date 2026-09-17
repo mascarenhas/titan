@@ -19,7 +19,7 @@ callable representation:
 
 | Source/compiler form | Checked representation | Generated representation |
 | --- | --- | --- |
-| `foreign (P...) -> R` | `Type.CPointer(Type.CFunction(P, R, false, false))` | an exact C function-pointer declarator |
+| `foreign function(P...): R` | `Type.CPointer(Type.CFunction(P, R, false, false))` | an exact C function-pointer declarator |
 | `foreign function f(P...): R ... end` | `Type.CFunction(P, R, false, false)` on `Ast.TopLevelForeignFunc` | one plain C function, inline in the generated header or hidden out of line |
 | a direct reference to `f` | a declaration designator, not a value | the bare generated C name |
 | an exactly typed pointer context | C declaration-to-pointer decay | the same bare generated C name |
@@ -31,52 +31,39 @@ callable protocol; `Type.CFunction` continues to mean a direct C declaration.
 
 ## Parser and AST
 
-`foreign` was already a reserved token for `foreign import`. The top-level
-grammar now tries `foreignfunc` before an ordinary function declaration:
+The factored top-level grammar distinguishes `foreign function`, `foreign
+import`, and `foreign type` using their next keyword. Predicate expansion is bounded and terminal-only;
+selected syntactic nonterminals carry committed error labels, and ordered
+alternatives factor any shared syntactic prefix. A foreign function uses
+foreign-only parameter and return types:
 
 ```text
-FOREIGN FUNCTION NAME "(" paramlist ")" rettypeopt block END
+foreign function AnyName '(' [foreignparlist] ')' [':' foreigntype] block end
 ```
 
-It constructs
-`Ast.TopLevelForeignFunc(loc, name, params, rettypes, flexrettype, block)`.
-Keeping a distinct tag prevents visitors from accidentally assigning `_mod`,
-`_fn`, closure, or Lua-entry semantics merely because the surface body resembles
-an ordinary function.
+It produces `Ast.TopLevelForeignFunc(loc, name, params, rettypes, flexrettype,
+block)`. Missing results become C void. `Ast.TypeForeignFunction` represents
+`function(foreign_types): foreign_result` inside foreign type syntax and lowers
+to a C function pointer. Bare C variadic tails remain represented for a precise
+unsupported-source-variadic diagnostic. Titan function types use their distinct
+`function(types): results` grammar and may carry Titan flexible tails.
 
-The type grammar also tries `foreignfunctype` before the ordinary arrow forms:
+Unqualified `Ast.TypeForeignName` nodes never consult term bindings. Foreign
+pointer/array constructors use existing `TypeCPointer`/`TypeCArray` syntax nodes;
+another constructor beneath a pointer must be parenthesized. Unsized array
+annotations retain the direct-local borrowed-view semantics. Written fixed
+array extents are removed; allocation inference creates semantic fixed arrays.
 
-```text
-FOREIGN typelist RARROW rettype
-```
+`Ast.TypeOwned(loc, subtype)` belongs to the Titan type grammar. Its full foreign
+operand must resolve to a pointer or array, possibly through an alias; the
+checker extracts payload and countedness and creates `Type.COwned`. This keeps
+ordinary owned aliases and trailing Options in the Titan category. Owned types
+are rejected in foreign signatures and foreign-body local declarations.
 
-and constructs
-`Ast.TypeForeignFunction(loc, argtypes, rettypes, varargtype, flexrettype)`.
-The parser preserves input and result tails in the AST so the checker can issue
-the foreign-specific rejection; it does not silently discard them. The checker
-then lowers the admitted fixed shape to the existing C pointer/function types.
-
-The allocation part of the wrap-up changes local-declaration grammar too.
-`Ast.TypeCArray` is now accepted only as an initialized local target:
-
-```titan
-local fixed: c.Item[4] = c.Item.new_array(4)
-local view: c.Item[] = c.Item.new_array(count)
-```
-
-Its `length` is an `Ast.ExpInteger` for the fixed form and `false` for the
-unsized form. The latter is a target spelling, not a C incomplete-array local;
-the checker lowers it to `Type.CPointer(element)`. Neither form enters the
-general type grammar. The old special initializer-less C-array production is
-gone, so either form follows the initialized `local ... = ...` AST shape. The
-general parser separately admits an omitted RHS for mutable locals with an
-explicit nil-bearing type, but a restricted foreign-function body rejects that
-form and every const local requires an expression list.
-
-As with every new `_tag`, the checker visitors, top-level duplicate/name passes,
-source-interface builder, coder traversal, and AST debugging paths explicitly
-handle both foreign tags. The foreign declaration participates in ordinary
-top-level duplicate precedence, but not in ordinary module-member publication.
+`Ast.TopLevelForeignTypeAlias(loc, name, type)` is always local and emits an
+actual raw-C typedef through the `.ffi.h` plan. It has no Titan runtime member.
+`Ast.ExpForeignType(loc, type)` routes foreign allocation/layout expressions
+without making ordinary terms or imported type names into namespaces.
 
 ## Signature collection and the raw-C checking context
 
@@ -88,7 +75,7 @@ uses `typefromnode` and accepts only direct declarable C FFI components:
 
 * parameters cannot be `void`, owners, arrays, direct functions, C modules, or
   Titan values;
-* the result is either absent (`Type.CVoid`) or one non-void direct C type;
+* the result is either absent/explicit void (`Type.CVoid`) or one direct C type;
 * complete structs and unions may travel by value, while incomplete objects are
   accepted only behind pointers; and
 * input variadics, multiple results, and flexible result tails are diagnosed.
@@ -124,7 +111,7 @@ qualified Titan-module lookup is accepted only when
 `_foreign_function_reference` identifies a source foreign member. An imported
 C namespace remains usable because its functions, values, fields, types,
 `sizeof`, and `alignof` are already direct C declarations. A producer's
-reserved `ffi` namespace is established from the consumer's combined C header.
+builtin `ffi` value namespace and separate foreign type namespace is established from the consumer's combined C header.
 
 After ordinary checking and elaboration, `_validate_foreign_body_node` performs
 a closed AST walk. It rejects `StatTry` (including parser-lowered `defer`),
@@ -151,7 +138,7 @@ foreign entry has no Titan `setjmp`, root frame, catch, or cleanup protocol.
 compiler-private `source_members` overlay. The member is marked
 `_foreign_source` and local regardless of its surface lack of a `local`
 modifier. It is absent from `Type.Module.members`, `type_members`, serialized
-`*_types`, and `.titan.meta`.
+`foreign *_types`, and `.titan.meta`.
 
 This declaration boundary is independent of C type exportability. A public
 ordinary Titan signature may serialize a foreign function-pointer type built
@@ -178,7 +165,7 @@ Transitive C header inclusion does not grant transitive private Titan access.
 The consumer checker prepares one `A.ffi.h` containing explicit-source
 dependency FFI headers before its local directives, then preprocesses and parses
 that actual header. Include guards, final macro state, and actual C scopes
-produce the reserved `ffi` namespace before aliases, signatures, initializers,
+produce the builtin `ffi` value namespace and separate foreign type namespace before aliases, signatures, initializers,
 and bodies are checked. Probes use the same deterministic generated FFI tree;
 there is no synthetic per-type origin reconstruction or forwarding header.
 The probe cache hashes the complete unpreprocessed source, including the
@@ -377,7 +364,7 @@ For a complete, eligible struct or union `T`, `.new()` selects:
 | --- | --- |
 | inferred, or explicitly `T` | `automatic_object`, a zeroed C `T` local |
 | `owned *T` | `owned`, a zeroed Lua userdata owner |
-| compatible `*T` | `owned_borrow`, a pointer into a hidden owner rooted for the generated frame |
+| compatible `foreign *T` | `owned_borrow`, a pointer into a hidden owner rooted for the generated frame |
 | any non-direct-local context | ordinary `owned *T` |
 
 Automatic selection is aggregate-specific; a scalar, pointer, or enum
@@ -391,16 +378,19 @@ For a non-FAM element type `T`, `.new_array(count)` selects:
 
 | Direct local sink/count | Plan/result |
 | --- | --- |
-| inferred positive integer literal `N` | `automatic_array`, zeroed `T[N]` |
-| written `T[N]`, matching positive literal | `automatic_array`, exact `T[N]` |
-| written `T[]` or `*T`, positive literal | `automatic_array_borrow`, pointer over zeroed `T[N]` backing |
-| written `T[]` or `*T`, dynamic or zero count | `owned_borrow`, pointer into hidden counted-owner backing |
+| inferred positive integer literal or eligible integer macro `N` | `automatic_array`, zeroed `T[N]` |
+| written `foreign T[]` or `foreign *T`, positive literal or eligible macro | `automatic_array_borrow`, pointer over zeroed `T[N]` backing |
+| written `foreign T[]` or `foreign *T`, dynamic or zero count | `owned_borrow`, pointer into hidden counted-owner backing |
 | written `owned T[]` | `owned` for every count |
 | inferred dynamic/zero count or non-direct-local context | ordinary `owned T[]` |
 
-A written fixed extent must be positive and match the source literal count.
-“Compile-time” deliberately means the literal AST form, not a host-side
-constant folder. The borrowed `T[]` target becomes a raw pointer and carries no
+Written fixed extents are absent from the grammar. Constant selection accepts
+integer literal ASTs and proven object-like integer macros. The macro
+declaration retains its exact target-profile decimal value as
+`_c_integer_constant`; values outside the supported extent representation are
+rejected, without host arithmetic evaluation or a size threshold. Arbitrary
+constant expressions/Titan bindings do not qualify. The borrowed `foreign T[]`
+target becomes a raw pointer and carries no
 length; `#` and counted bounds checks are unavailable after that lowering. A
 pointer may escape and dangle after its automatic block/frame, and a pointer
 into a hidden owner loses ownership when that frame stops rooting the owner.
@@ -417,7 +407,7 @@ defer-tail predeclaration, and try-spill analysis attached to the actual
 For a complete `struct T` whose marked final field is `E field[]`,
 `c_pseudo_member` changes `.new` to one-count arity and makes `.new_array`
 unavailable. A literal nonnegative count at an inferred/by-value direct local
-selects `automatic_fam`; an explicit owner, explicit `*T`, dynamic count, or
+selects `automatic_fam`; an explicit owner, explicit `foreign *T`, dynamic count, or
 non-local expression selects one owner (with a borrowed pointer for the raw
 pointer sink).
 
@@ -503,7 +493,7 @@ exports for those bridges.
 Each uv/HTTP callback preserves the reviewed owner protocol in source: recover
 the exact already-traced owner and callback closure, recover the loop/main Lua
 state and module from their fixed slots, read the closure's native entry through
-an exact `foreign (...) -> ...` type, save the stack top, invoke the entry with
+an exact `foreign function(...): ...` type, save the stack top, invoke the entry with
 the original closure as `_fn`, and restore the top. The owner remains reachable
 through its runtime/parser ownership throughout the callback, so pushing the
 same userdata would add no GC protection. The
@@ -559,8 +549,10 @@ before the linker runs.
 The native symbol contract has two ABI-visible properties: generated standard
 objects define callbacks absent from the runtime/HTTP support objects, and
 callable entry families use the separated module/nominal/member hierarchy.
-ABI 2 carries that contract together with generic and public standard-library
-metadata. A mismatched runtime or generated object is rejected even when its
+Current prerelease ABI 2 retains that contract together with generic and public
+standard-library metadata. The revised callable/owned type spellings change
+registry keys without an ABI-number increment during prerelease development.
+A mismatched runtime or generated object is rejected even when its
 serialized public types happen to match.
 
 `TITAN_VERSION` `0.6.0` derives the `0.6` library namespace used by

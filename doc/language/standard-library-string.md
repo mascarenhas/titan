@@ -70,7 +70,7 @@ in the flexible tail.
 
 ## Byte operations
 
-```titan
+```text
 function len(subject: string): integer
 function sub(subject: string,
              first: integer,
@@ -128,7 +128,7 @@ empty needle at a valid start succeeds with `last == first - 1`.
 
 ## Value conversion
 
-```titan
+```text
 function tostring(candidate: value): string
 ```
 
@@ -151,7 +151,7 @@ not need a variadic tail merely to ignore extra arguments.
 
 ## Formatting
 
-```titan
+```text
 function format(format_string: string, ...: value): string
 ```
 
@@ -185,7 +185,7 @@ ignored after their expressions have been evaluated.
 
 ## Binary packing
 
-```titan
+```text
 function pack(format_string: string, ...: value): string
 function packsize(format_string: string): integer
 function unpack(format_string: string,
@@ -240,7 +240,7 @@ positive position raises.
 The module provides structurally typed in-memory implementations of the
 `io.ReaderCloser` and `io.WriterCloser` interfaces without importing `io`:
 
-```titan
+```text
 record StringReader
 record StringWriter
 
@@ -280,7 +280,7 @@ provides channel-backed ReaderCloser/WriterCloser records. Its contract is in
 Regexes operate on bytes. Character classes and word boundaries are ASCII;
 there is no implicit UTF-8 or Unicode mode.
 
-```titan
+```text
 record Span
   first: integer
   last: integer
@@ -296,9 +296,9 @@ function Regex:group_count(): integer
 function Regex:match(subject: string,
                      init: integer?): RegexMatch?
 function Regex:gmatch(subject: string,
-                      init: integer?): () -> RegexMatch?
+                      init: integer?): function (): (RegexMatch?)
 function Regex:gsub(subject: string,
-                    replacement: (string) -> string,
+                    replacement: function (string): (string),
                     maximum: integer?): (string, integer)
 
 function RegexMatch:span(): Span
@@ -333,20 +333,20 @@ capture as nil would prematurely terminate Titan's generic `for`.
 
 The source-expression conveniences compile through a private weak cache:
 
-```titan
+```text
 function match(subject: string,
                expression: string,
                init: integer?): RegexMatch?
 function gmatch(subject: string,
                 expression: string,
-                init: integer?): () -> RegexMatch?
+                init: integer?): function (): (RegexMatch?)
 function matches(subject: string,
-                 pattern: string): () -> (string?, ...: string?)
+                 pattern: string): function (): (string?, ...: string?)
 function split(subject: string,
-               delimiter: string?): () -> string?
+               delimiter: string?): function (): (string?)
 function gsub(subject: string,
               expression: string,
-              replacement: (string) -> string,
+              replacement: function (string): (string),
               maximum: integer?): (string, integer)
 ```
 
@@ -450,7 +450,7 @@ makes byte progress. This prevents an iterator or substitution from looping
 forever without discarding bytes.
 
 `gsub` accepts exactly one replacement function of type
-`(string) -> string`. It calls the function once for each accepted match and
+`function (string): (string)`. It calls the function once for each accepted match and
 passes the whole matched string as its sole argument, whether or not the
 regular expression contains captures. Capture groups remain available through
 the `RegexMatch` operations returned by `match` and `gmatch`; `gsub` does not

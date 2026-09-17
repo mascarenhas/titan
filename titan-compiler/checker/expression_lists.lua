@@ -186,6 +186,17 @@ function is_open_expression_marker(exp)
         or exp._tag == "Ast.ExpSpread")
 end
 
+-- A vararg range becomes a spread according to its semantic consumer, not
+-- according to its position in a parser capture list. Parentheses remain an
+-- ExpAdjust boundary and therefore cannot make an outer list open.
+function normalize_spread_expression(exp)
+    if exp and exp._tag == "Ast.ExpSubset"
+       and exp.exp._tag == "Ast.ExpDots" then
+        return ast.ExpSpread(exp.loc, exp, false, false)
+    end
+    return exp
+end
+
 -- Refresh every annotation derived solely from a checked spread element. This
 -- is also used when a nested generic producer closes after the carrier was
 -- first checked; the subject remains context-free, while its now-final element
@@ -248,6 +259,8 @@ function check_spread_marker(node, st, errors)
     if node._spread_checked then return node._spread_elem end
     local subject = node.exp
     local first, last = false, false
+    local vararg_range = subject._tag == "Ast.ExpSubset"
+        or node.first or node.last
     if subject._tag == "Ast.ExpSubset" then
         first, last = subject.first, subject.last
         subject = subject.exp
@@ -258,6 +271,11 @@ function check_spread_marker(node, st, errors)
         check_dots_marker(subject, st, errors)
         kind = "dots"
         elem = subject._vararg_elem
+        if not vararg_range and elem._tag ~= "Type.Invalid" then
+            checker.typeerror(errors, node.loc,
+                "a collection spread cannot use bare '...' as its subject; use the vararg tail directly")
+            kind, elem = "invalid", types.Invalid()
+        end
     else
         -- A spread subject has no target-directed contextual conversion: its
         -- checked type decides between Array and integer-keyed Map semantics.
@@ -317,6 +335,9 @@ end
 -- lowering.  `fixed` and `tail_scalars` describe the values delivered to the
 -- sink, and `open_source` identifies the sole possible runtime-sized final run.
 function adjust_explist(exps, demand, st, errors)
+    for i, exp in ipairs(exps) do
+        exps[i] = normalize_spread_expression(exp)
+    end
     local adjusted = {
         exps = {},
         fixed = {},
@@ -663,6 +684,7 @@ function classify_constructor_fields(node, errors)
     local invalid_open = false
 
     for i, field in ipairs(node.fields) do
+        field.exp = normalize_spread_expression(field.exp)
         local kind = constructor_field_kind(field)
         if not seen[kind] then
             seen[kind] = true
@@ -2165,7 +2187,7 @@ end
 
 function declare(node, st, errors)
     local builtin = st:find_symbol(node.name)
-    if builtin and builtin._readonly then
+    if builtin and builtin._readonly and not builtin._builtin then
         checker.typeerror(errors, node.loc,
             "cannot declare local '%s' because it shadows a built-in local",
             node.name)

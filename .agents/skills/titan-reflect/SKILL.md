@@ -15,13 +15,13 @@ local reflect = import "reflect"
 function read_public_field(candidate: value, name: string): value
   local inspected = reflect.inspect(candidate)
   case inspected
-  when is_record: record_value then
+  when is_record(record_value) then
     for i = 1, record_value.n_fields do
       if record_value.descriptor.fields[i].name == name then
         return record_value:get(i)
       end
     end
-  when is_interface: interface_value then
+  when is_interface(interface_value) then
     for i = 1, interface_value.n_fields do
       if interface_value.descriptor.fields[i].name == name then
         return interface_value:get(i)
@@ -83,7 +83,7 @@ every other descriptor is returned unchanged. Neither operation recursively
 expands a whole schema.
 
 Descriptors expose the shared erased runtime schema. Distinct specializations
-such as `Box<integer>` and `Box<string>` share the base nominal name.
+such as `Box<|integer|>` and `Box<|string|>` share the base nominal name.
 Unconstrained parameters hydrate to `Type.is_value()`. Interface-constrained
 parameters hydrate to `Type.is_named` for the **outer constraint Interface**;
 generic arguments are erased, and the caller explicitly invokes `:resolve()`
@@ -118,9 +118,9 @@ checks and argument/result adjustment. Public record/union methods and statics
 are sorted by name; Interface methods retain declaration order.
 
 Titan, Lua, and Lua C function wrappers all retain callable `.val` fields of
-type `(...: value) -> (...: value)`. Use `.val` for ordinary invocation.
+type `function (...: value): (...: value)`. Use `.val` for ordinary invocation.
 `TitanFunctionValue.lua_entry` and `LuaCFunctionValue.entry` are typed
-`foreign (*lua_State) -> int` pointers; `native_entry` is a `*void` address
+`foreign function (*lua_State): int` pointers; `native_entry` is a `foreign *void` address
 without a callable Titan signature. Raw entry invocation belongs at an audited
 FFI/Lua boundary, not in ordinary introspection examples.
 

@@ -154,7 +154,7 @@ describe("error handling (typechecker)", function()
             ok([[
                 function f(): nil
                     defer do
-                        local g: () -> integer = function(): integer
+                        local g: function (): integer = function(): integer
                             while true do
                                 break
                             end
@@ -172,7 +172,7 @@ describe("error handling (typechecker)", function()
             -- The lambda has its own catch, so its bare raise is governed by it.
             ok([[
                 function f(): nil
-                    local g: () -> nil = function(): nil
+                    local g: function (): nil = function(): nil
                         nop(1)
                     catch
                         raise
@@ -250,7 +250,7 @@ describe("error handling (typechecker)", function()
                 function f(): nil
                     nop(1)
                 catch
-                    local g: () -> nil = function(): nil
+                    local g: function (): nil = function(): nil
                         raise
                     end
                     g()

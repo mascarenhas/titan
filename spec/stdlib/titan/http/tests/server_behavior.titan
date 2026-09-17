@@ -1,6 +1,6 @@
 local function start_server_streaming(first_port: integer): async.Task
   support.outcome = "running"
-  return async.run<value, value>(function (): value
+  return async.run<|value, value|>(function (): value
     local handler_started = false
     local server_value: http.Server? = nil
     local handler: http.Handler = function (request: http.Request,
@@ -44,7 +44,7 @@ local function start_server_streaming(first_port: integer): async.Task
     local server, port = support.http_listen(first_port, handler)
     defer server:close()
     server_value = server
-    local serving = async.run<value, value>(function (): value
+    local serving = async.run<|value, value|>(function (): value
       server:serve()
       return nil
     end)
@@ -86,7 +86,7 @@ end
 
 local function start_expect_continue(first_port: integer): async.Task
   support.outcome = "running"
-  return async.run<value, value>(function (): value
+  return async.run<|value, value|>(function (): value
     local handled = 0
     local handler: http.Handler = function (request: http.Request,
                                             response: http.Response)
@@ -103,7 +103,7 @@ local function start_expect_continue(first_port: integer): async.Task
 
     local server, port = support.http_listen(first_port, handler)
     defer server:close()
-    local serving = async.run<value, value>(function (): value
+    local serving = async.run<|value, value|>(function (): value
       server:serve()
       return nil
     end)
@@ -115,7 +115,7 @@ local function start_expect_continue(first_port: integer): async.Task
       end
     end
     local timed_out = false
-    local watchdog = async.run<value, value>(function (): value
+    local watchdog = async.run<|value, value|>(function (): value
       timer.sleep(5000)
       timed_out = true
       support.outcome = "expect-timeout-after-" .. support.outcome
@@ -198,7 +198,7 @@ end
 
 local function start_buffered_next_requests(first_port: integer): async.Task
   support.outcome = "running"
-  return async.run<value, value>(function (): value
+  return async.run<|value, value|>(function (): value
     local handled = 0
     local handler: http.Handler = function (_: http.Request,
                                             response: http.Response)
@@ -209,7 +209,7 @@ local function start_buffered_next_requests(first_port: integer): async.Task
     end
     local server, port = support.http_listen(first_port, handler)
     defer server:close()
-    local serving = async.run<value, value>(function (): value
+    local serving = async.run<|value, value|>(function (): value
       server:serve()
       return nil
     end)
@@ -217,7 +217,7 @@ local function start_buffered_next_requests(first_port: integer): async.Task
     local client = net.connect("127.0.0.1", port)
     defer client:close()
     local watchdog_fired = false
-    local watchdog = async.run<value, value>(function (): value
+    local watchdog = async.run<|value, value|>(function (): value
       timer.sleep(5000)
       watchdog_fired = true
       support.outcome = "buffered-timeout-after-" .. support.outcome
@@ -264,7 +264,7 @@ end
 
 local function start_unread_request_drain(first_port: integer): async.Task
   support.outcome = "running"
-  return async.run<value, value>(function (): value
+  return async.run<|value, value|>(function (): value
     local handled = 0
     local targets: {string} = {}
     local handler: http.Handler = function (request: http.Request,
@@ -279,7 +279,7 @@ local function start_unread_request_drain(first_port: integer): async.Task
     end
     local server, port = support.http_listen(first_port, handler)
     defer server:close()
-    local serving = async.run<value, value>(function (): value
+    local serving = async.run<|value, value|>(function (): value
       server:serve()
       return nil
     end)
@@ -287,7 +287,7 @@ local function start_unread_request_drain(first_port: integer): async.Task
     local client = net.connect("127.0.0.1", port)
     defer client:close()
     local timed_out = false
-    local watchdog = async.run<value, value>(function (): value
+    local watchdog = async.run<|value, value|>(function (): value
       timer.sleep(5000)
       timed_out = true
       support.outcome = "request-drain-timeout-after-" .. support.outcome
@@ -332,7 +332,7 @@ end
 
 local function start_server_failure_isolation(first_port: integer): async.Task
   support.outcome = "running"
-  return async.run<value, value>(function (): value
+  return async.run<|value, value|>(function (): value
     local handled = 0
     local reset_body_rejected = false
     local handler: http.Handler = function (request: http.Request,
@@ -360,7 +360,7 @@ local function start_server_failure_isolation(first_port: integer): async.Task
 
     local server, port = support.http_listen(first_port, handler)
     defer server:close()
-    local serving = async.run<value, value>(function (): value
+    local serving = async.run<|value, value|>(function (): value
       server:serve()
       return nil
     end)
@@ -372,7 +372,7 @@ local function start_server_failure_isolation(first_port: integer): async.Task
       end
     end
     local timed_out = false
-    local watchdog = async.run<value, value>(function (): value
+    local watchdog = async.run<|value, value|>(function (): value
       timer.sleep(5000)
       timed_out = true
       support.outcome = "server-failure-timeout-after-" .. support.outcome
@@ -384,7 +384,7 @@ local function start_server_failure_isolation(first_port: integer): async.Task
     end)
     defer task_support.cancel_and_join_task(watchdog, "nested HTTP watchdog cleanup")
 
-    local exchange: (string) -> string = function (
+    local exchange: function (string): (string) = function (
         request_text: string): string
       local connection = net.connect("127.0.0.1", port)
       defer connection:close()
@@ -473,14 +473,14 @@ end
 
 local function start_cancelled_server_close(first_port: integer): async.Task
   support.outcome = "running"
-  return async.run<value, value>(function (): value
+  return async.run<|value, value|>(function (): value
     local handler: http.Handler = function (_request: http.Request,
                                             _response: http.Response)
       raise "cancelled-close server unexpectedly accepted a request"
     end
     local server, _ = support.http_listen(first_port, handler)
     defer server:close()
-    local serving = async.run<value, value>(function (): value
+    local serving = async.run<|value, value|>(function (): value
       server:serve()
       return nil
     end)
@@ -491,7 +491,7 @@ local function start_cancelled_server_close(first_port: integer): async.Task
 
     local closer: async.Task? = nil
     local close_returned = false
-    closer = async.run<value, value>(function (): value
+    closer = async.run<|value, value|>(function (): value
       (closer as async.Task):cancel(async.CancellationReason.simple(
         "cancel before HTTP listener transport close"))
       server:close()
@@ -506,7 +506,7 @@ local function start_cancelled_server_close(first_port: integer): async.Task
           "Task cancellation interrupted HTTP Server close")
 
     local timed_out = false
-    local watchdog = async.run<value, value>(function (): value
+    local watchdog = async.run<|value, value|>(function (): value
       timer.sleep(5000)
       timed_out = true
       serving:cancel(async.CancellationReason.simple(
@@ -529,7 +529,7 @@ end
 
 local function start_cancelled_client_close(first_port: integer): async.Task
   support.outcome = "running"
-  return async.run<value, value>(function (): value
+  return async.run<|value, value|>(function (): value
     local server, port = support.raw_listen(first_port)
     defer server:close()
     local peer_connection: net.Connection? = nil
@@ -541,7 +541,7 @@ local function start_cancelled_client_close(first_port: integer): async.Task
     end
 
     local peer_saw_eof = false
-    local peer = async.run<value, value>(function (): value
+    local peer = async.run<|value, value|>(function (): value
       local connection = server:accept()
       defer connection:close()
       peer_connection = connection
@@ -567,7 +567,7 @@ local function start_cancelled_client_close(first_port: integer): async.Task
     defer response:close()
     local closer: async.Task? = nil
     local close_returned = false
-    closer = async.run<value, value>(function (): value
+    closer = async.run<|value, value|>(function (): value
       (closer as async.Task):cancel(async.CancellationReason.simple(
         "cancel before HTTP client transport close"))
       response:close()
@@ -584,7 +584,7 @@ local function start_cancelled_client_close(first_port: integer): async.Task
           "logically closed HTTP response remained readable")
 
     local timed_out = false
-    local watchdog = async.run<value, value>(function (): value
+    local watchdog = async.run<|value, value|>(function (): value
       timer.sleep(5000)
       timed_out = true
       peer:cancel(async.CancellationReason.simple(
@@ -609,7 +609,7 @@ end
 local function start_idle_timeout_api(first_port: integer,
                                       missing_pem_path: string): async.Task
   support.outcome = "running"
-  return async.run<value, value>(function (): value
+  return async.run<|value, value|>(function (): value
     local handler: http.Handler = function (_request: http.Request,
                                             _response: http.Response)
     end

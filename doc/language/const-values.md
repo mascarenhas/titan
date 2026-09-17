@@ -117,13 +117,13 @@ A record field accepts `const` after an optional `local`:
 ```titan
 record Request
     const method: string
-    local const token?: string
+    local const token: string?
     metadata: {string: value}
 end
 ```
 
-The complete forms are `[local] const name: T` and the record-only optional
-shorthand `[local] const name?: T`. Const fields are filled by `Record.new`, a
+The complete form is `[local] const name: T`; an optional field writes
+`[local] const name: T?`. There is no optional field-name shorthand. Const fields are filled by `Record.new`, a
 named call, or a context-typed record constructor. They cannot be replaced by
 a later Titan assignment or Lua field write. A mutable record field remains
 writable as before.
@@ -148,9 +148,8 @@ interface NamedReader
 end
 ```
 
-Interface fields use `name: T` and are implicitly const. They do not use the
-record-only `name?: T` shorthand; write `name: T?` when the field type is an
-Option. Field and method names share one namespace, so a duplicate or
+Interface fields use `name: T` and are implicitly const. As with record
+fields, write `name: T?` when the field type is an Option. Field and method names share one namespace, so a duplicate or
 field/method collision is rejected in source order. The body must contain at
 least one member.
 

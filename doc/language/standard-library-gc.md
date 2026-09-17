@@ -16,7 +16,7 @@ and Lua code in that state.
 
 ## Weak Maps and ephemerons
 
-```titan
+```text
 function weak(map: {value: value})
 function ephemeron(map: {value: value})
 ```
@@ -34,8 +34,8 @@ used as weak keys are not made collectable by this setting.
 
 ## Finalizers
 
-```titan
-function finalizable<T>(v: T, f: (T) -> ()): ()
+```text
+function finalizable<|T|>(v: T, f: function (T): ()): ()
 ```
 
 `finalizable` statically pairs the candidate with a callback over its exact
@@ -57,15 +57,15 @@ local function finish_cache(cache: {string: integer}): ()
 end
 
 local function configure(owner: Owner, cache: {string: integer})
-  gc.finalizable<Owner>(owner, finish_owner)
-  gc.finalizable<{string: integer}>(cache, finish_cache)
+  gc.finalizable<|Owner|>(owner, finish_owner)
+  gc.finalizable<|{string: integer}|>(cache, finish_cache)
 end
 ```
 
 The callback is checked against the selected `T` by Titan's ordinary callable
-rules; for example, a `(DifferentOwner) -> ()` callback is rejected for
-`finalizable<Owner>`. `T` is not a static collectability constraint, however.
-An application such as `finalizable<integer>(17, integer_callback)` typechecks
+rules; for example, a `function (DifferentOwner): ()` callback is rejected for
+`finalizable<|Owner|>`. `T` is not a static collectability constraint, however.
+An application such as `finalizable<|integer|>(17, integer_callback)` typechecks
 and then raises the established run-time error. The value must still be a table
 or full userdata; passing nil, a scalar, a function, a thread, or light
 userdata raises. The Lua stack is restored on that error as well as on success.
@@ -112,7 +112,7 @@ or its failure must be handled directly.
 
 ## Collector actions and queries
 
-```titan
+```text
 function pause()
 function resume()
 function paused(): boolean

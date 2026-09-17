@@ -60,16 +60,16 @@ describe("scalar variadic parameters (code generator)", function()
                 return observe((...))
             end
 
-            function generic_first<T>(...: T): T?
+            function generic_first<|T|>(...: T): T?
                 return (...)
             end
 
             function generic_optional(...: integer): integer?
-                return generic_first<integer>(...)
+                return generic_first<|integer|>(...)
             end
 
             function generic_required(...: integer): integer
-                return generic_first<integer>(...)
+                return generic_first<|integer|>(...)
             end
         ]], [[
             assert(test.first() == nil)
@@ -1632,13 +1632,13 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
                 while i <= n do s = s + #(...[i]); i = i + 1 end
                 return s
             end
-            function call_generic(f: (...: value) -> integer, ...: string): integer
+            function call_generic(f: function (...: value): integer, ...: string): integer
                 -- f holds a ...: string function viewed as ...: value -> tag mismatch
                 -- -> the generic path; we forward our own ...: string into it.
                 return f(...)
             end
             function run(a: string, b: string): integer
-                local v: (...: value) -> integer = totallen
+                local v: function (...: value): integer = totallen
                 return call_generic(v, a, b)
             end
         ]], [[
@@ -1692,7 +1692,7 @@ describe("untyped lambda vararg inference (code generator)", function()
     it("infers ...:integer from a typed local and value-calls it", function()
         run_coder([[
             function go(): integer
-                local f: (...: integer) -> integer = function(...)
+                local f: function (...: integer): integer = function(...)
                     local s = 0
                     local i = 1
                     local n = #...
@@ -1710,7 +1710,7 @@ describe("untyped lambda vararg inference (code generator)", function()
     -- variadic function type; inference flows from the callee's parameter type.
     it("infers the vararg element from a parameter context (passed as arg)", function()
         run_coder([[
-            function apply(f: (...: integer) -> integer): integer
+            function apply(f: function (...: integer): integer): integer
                 return f(10, 20, 30)
             end
             function go(): integer
@@ -1727,7 +1727,7 @@ describe("untyped lambda vararg inference (code generator)", function()
     -- then value-called by the caller.
     it("infers the vararg element from a return-type context", function()
         run_coder([[
-            function make(): (...: integer) -> integer
+            function make(): function (...: integer): integer
                 return function(...)
                     local s = 0
                     local i = 1

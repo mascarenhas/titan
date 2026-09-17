@@ -106,7 +106,7 @@ describe("variadic parameters (typechecker)", function()
             assert.same(types.Option(types.Integer()), required.exp._type)
 
             assert_type_check([[
-                function first<T>(...: T): T?
+                function first<|T|>(...: T): T?
                     return (...)
                 end
 
@@ -472,7 +472,7 @@ describe("variadic parameters (typechecker)", function()
                     return a
                 end
                 function foo(): integer
-                    local f: (integer, ...: integer) -> integer = g
+                    local f: function (integer, ...: integer): integer = g
                     return f(1)
                 end
             ]])
@@ -483,7 +483,7 @@ describe("variadic parameters (typechecker)", function()
                 function g(...: integer): integer
                     return 0
                 end
-                function foo(): (...: value) -> integer
+                function foo(): function (...: value): integer
                     return g
                 end
             ]])
@@ -495,7 +495,7 @@ describe("variadic parameters (typechecker)", function()
                     return 0
                 end
                 function foo(): integer
-                    local f: (integer) -> integer = g
+                    local f: function (integer): integer = g
                     return f(1)
                 end
             ]])
@@ -582,7 +582,7 @@ describe("variadic parameters (typechecker)", function()
         it("infers the element type from a typed local context", function()
             assert_type_check([[
                 function foo(): integer
-                    local f: (...: integer) -> integer = function(...)
+                    local f: function (...: integer): integer = function(...)
                         return ...[1]
                     end
                     return f(1, 2)
@@ -592,7 +592,7 @@ describe("variadic parameters (typechecker)", function()
 
         it("infers the element type from a parameter context", function()
             assert_type_check([[
-                function apply(f: (...: integer) -> integer): integer
+                function apply(f: function (...: integer): integer): integer
                     return f(1, 2, 3)
                 end
                 function foo(): integer
@@ -603,7 +603,7 @@ describe("variadic parameters (typechecker)", function()
 
         it("infers the element type from a return-type context", function()
             assert_type_check([[
-                function make(): (...: string) -> integer
+                function make(): function (...: string): integer
                     return function(...) return #... end
                 end
             ]])
@@ -611,7 +611,7 @@ describe("variadic parameters (typechecker)", function()
 
         it("an explicit `...: T` lambda vararg wins over context", function()
             assert_type_check([[
-                function apply(f: (...: integer) -> integer): integer
+                function apply(f: function (...: integer): integer): integer
                     return f(1, 2)
                 end
                 function foo(): integer
@@ -637,7 +637,7 @@ describe("variadic parameters (typechecker)", function()
             -- lambda is variadic. The inference path reports that specifically.
             local errs = check_errs([[
                 function foo(): integer
-                    local f: (integer) -> integer = function(a, ...)
+                    local f: function (integer): integer = function(a, ...)
                         return a + ...[1]
                     end
                     return f(1)

@@ -1,7 +1,7 @@
 -- Each legacy case used a fresh child process. The native runner keeps the
 -- same complete Task boundary, deterministic port seed, EADDRINUSE retry, and
 -- public status/support.outcome oracle while executing the protocols in one Runtime.
-local type CaseStart = (integer) -> async.Task
+local type CaseStart = function (integer): (async.Task)
 
 local function run_case(_: test.Context, start: CaseStart,
                         first_port: integer, expected: string)

@@ -72,7 +72,7 @@ non-exact Function type, that later edge has the ordinary conditional
 [fresh-wrapper rule](closure-adjustment-wrappers.md); it does not change which
 source closure the import selected. A foreign declaration is different: it has
 no closure or module-state value and decays only to an exactly compatible
-[`foreign (...) -> ...` pointer](foreign-functions.md).
+[`foreign function(...): ...` pointer](foreign-functions.md).
 
 Local Interfaces are not supported. A local concrete method that is visible
 through an explicit source import may, however, satisfy an ordinary public
@@ -100,7 +100,14 @@ An explicit-source-visible declaration may contain a C FFI type even when its
 consumer does not repeat the producer's foreign directives. Every source
 module generates `A.ffi.h`. An explicit `.titan` import includes the dependency's
 `.ffi.h` in the consumer's combined C environment, before the consumer's direct
-foreign directives. This C header chain is transitive and follows actual C
+foreign directives. `foreign type Name = foreigntype` declarations are raw C typedefs in these
+headers. They are always local to source, have no `local` modifier, and do not
+occupy the exported or source-private Titan type-member maps. An explicit
+source importer sees their unqualified foreign names through the header graph,
+including transitive typedefs. Ordinary `type` aliases retain their existing
+Titan namespace and direct source-private visibility.
+
+This C header chain is transitive and follows actual C
 include guards, macro state, and declaration scopes.
 
 A producer defining foreign functions also generates `A.titan.h` for its C
@@ -109,7 +116,7 @@ first, then its `.titan.h` when present and the needed explicit-source Titan
 headers. Resolver-owned checking trees contain the actual generated headers;
 final compilation uses their source-adjacent counterparts.
 
-The consumer's reserved `ffi` namespace comes from parsing its combined
+The consumer's builtin `ffi` value namespace and separate foreign type namespace comes from parsing its combined
 `.ffi.h`. Private Titan names still require a direct written `.titan` import:
 `alias.member` remains governed by the explicit-source capability even when a
 C declaration arrives through a transitive header. Ordinary and binary imports

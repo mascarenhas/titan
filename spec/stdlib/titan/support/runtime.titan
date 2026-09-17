@@ -6,8 +6,8 @@ local test = import "test.titan"
 foreign import "lua.h"
 foreign import "titan/ffi.h"
 
-local type Body = () -> ()
-local type Cleanup = () -> ()
+local type Body = function (): ()
+local type Cleanup = function (): ()
 
 local record Session
   cleanups: {Cleanup}
@@ -77,7 +77,7 @@ local function run(body: Body)
   active_session = session
   defer active_session = nil
 
-  local task = async.run<value, value>(function (): value
+  local task = async.run<|value, value|>(function (): value
     do
       body()
     catch

@@ -1,4 +1,4 @@
-local type ProcessChildCase = (string) -> ()
+local type ProcessChildCase = function (string): ()
 
 local function with_process_child(body: ProcessChildCase)
   runtime_test.run(function ()
@@ -141,12 +141,12 @@ function test_process_cancellation_waits_for_accepted_callbacks(
     test.assert(output:read_until("\n", true) == "READY",
                 "detached-wait child did not become ready")
 
-    local waiter = async.run<value, value>(function (): value
+    local waiter = async.run<|value, value|>(function (): value
       process:wait()
       return nil
     end)
     task_support.cleanup_task(waiter, "detached process waiter cleanup")
-    local reader = async.run<value, value>(function (): value
+    local reader = async.run<|value, value|>(function (): value
       output:read()
       return nil
     end)

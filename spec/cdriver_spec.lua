@@ -3114,7 +3114,7 @@ typedef double compiler_selection;
                         local code = [[
                             foreign import "alternate_lua_path.h"
                             function size(): integer
-                                return ffi.alternate_lua_path_marker.sizeof
+                                return foreign alternate_lua_path_marker.sizeof
                                     as integer
                             end
                         ]]

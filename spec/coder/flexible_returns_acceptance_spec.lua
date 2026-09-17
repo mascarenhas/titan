@@ -90,14 +90,14 @@ describe("flexible-return runtime acceptance", function()
             function bound_method(): integer
                 reset()
                 local receiver = Receiver.new()
-                local f: (integer) -> integer = receiver:method_take
+                local f: function (integer): integer = receiver:method_take
                 local result = f(mark(1), mark(2), mark(3))
                 return result * 1000 + trace
             end
 
             function lambda_call(): integer
                 reset()
-                local f: (integer) -> integer =
+                local f: function (integer): integer =
                     function(first: integer): integer
                         return first
                     end
@@ -107,7 +107,7 @@ describe("flexible-return runtime acceptance", function()
 
             function first_class_top(): integer
                 reset()
-                local f: (integer) -> integer = take
+                local f: function (integer): integer = take
                 local result = f(mark(1), mark(2), mark(3))
                 return result * 1000 + trace
             end
@@ -169,32 +169,32 @@ describe("flexible-return runtime acceptance", function()
             end
 
             function call_short_input(): integer
-                local f: (integer, string) -> integer = short_input
+                local f: function (integer, string): integer = short_input
                 return f(41, "ignored")
             end
 
             function call_narrow_result(): integer
-                local f: () -> integer = wide_fixed
+                local f: function (): integer = wide_fixed
                 return f()
             end
 
             function optional_projection(present: boolean): integer?
-                local f: (boolean) -> integer? = projected
+                local f: function (boolean): integer? = projected
                 return f(present)
             end
 
             function required_projection(present: boolean): integer
-                local f: (boolean) -> integer = projected
+                local f: function (boolean): integer = projected
                 return f(present)
             end
 
             function consume_fixed_suffix(): (integer, ...: integer)
-                local f: () -> (integer, ...: integer) = wide_fixed
+                local f: function (): (integer, ...: integer) = wide_fixed
                 return f()
             end
 
             function consume_fixed_and_flexible(): (integer, ...: integer)
-                local f: () -> (integer, ...: integer) = mixed
+                local f: function (): (integer, ...: integer) = mixed
                 return f()
             end
         ]], [[
@@ -225,24 +225,23 @@ describe("flexible-return runtime acceptance", function()
     it("preserves simultaneous input and output tails on exact and generic paths",
     function()
         local source = [[
-            function bounce(probe: () -> integer,
+            function bounce(probe: function (): integer,
                             ...: integer): (integer, ...: integer)
                 return probe(), ...
             end
 
-            function exact(probe: () -> integer,
+            function exact(probe: function (): integer,
                            ...: integer): (integer, ...: integer)
                 return bounce(probe, ...)
             end
 
-            function generic(f: (() -> integer, ...: integer)
-                                -> (integer, ...: integer),
-                             probe: () -> integer,
+            function generic(f: function (function (): integer, ...: integer): (integer, ...: integer),
+                             probe: function (): integer,
                              ...: integer): (integer, ...: integer)
                 return f(probe, ...)
             end
 
-            function contextual(f: value, probe: () -> integer,
+            function contextual(f: value, probe: function (): integer,
                                 ...: integer): (integer, ...: integer)
                 return f(probe, ...)
             end

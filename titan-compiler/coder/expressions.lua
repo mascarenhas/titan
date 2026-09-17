@@ -2691,7 +2691,10 @@ function codeexp_dispatch(ctx, node, iscondition, target)
                 "checked expression C conversion")
         end
     end
-    if tag == "Ast.VarDot" and node.exp._type._tag == "Type.CModule" then
+    if tag == "Ast.ExpCast" and node._written_cast
+       and node._written_cast.op == "current_module" then
+        return "", "_mod"
+    elseif tag == "Ast.VarDot" and node.exp._type._tag == "Type.CModule" then
         local fstats, fexp = codeforeignvar(ctx, node)
         local cstats, cexp = foreigntonativeexp(ctx, node, fexp, target)
         return fstats .. cstats, cexp
@@ -3281,6 +3284,11 @@ function codeexp_dispatch(ctx, node, iscondition, target)
         })
         return code, tmpname
     elseif tag == "Ast.ExpAdjust" then
+        if node._adjusted_spread then
+            local setup = code_spread_carrier(ctx, node._adjusted_spread)
+            local stats, value = codeexp(ctx, node.exp, iscondition, target)
+            return setup .. stats, value
+        end
         if node._adjustvoid then
             -- `(f())` on a zero-return call: execute the void call for effect,
             -- then yield a single nil value (encoded as int 0, like Type.Nil)
@@ -3328,7 +3336,12 @@ end
 
 function codeforeignexp(ctx, node, target)
     local tag = node._tag
-    if tag == "Ast.ExpCall" and node._c_pointer_call then
+    if tag == "Ast.ExpCast" and node._written_cast
+       and node._written_cast.op == "current_module" then
+        -- The marker is not an ordinary first-class source value. Preserve
+        -- the checker-owned cast instead of peeling it for C operand lowering.
+        return codeexp(ctx, node)
+    elseif tag == "Ast.ExpCall" and node._c_pointer_call then
         return codecfunctionptrcall(ctx, node)
     elseif tag == "Ast.ExpCall" and node._direct_foreign_reference then
         return codeforeigncall(ctx, node)

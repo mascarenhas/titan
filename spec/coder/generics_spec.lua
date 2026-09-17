@@ -28,19 +28,19 @@ describe("generic erased core", function()
     it("publishes declared generic nominal metadata beside erased accessors", function()
         local _, tree = h.with_extra_cflags({ "-DTITAN_COMPILER_TESTS" }, function()
             return h.compile_and_read_c([[
-                record Box<T>
+                record Box<|T|>
                     local hidden: T
                     item: T
                     optional: T?
                 end
-                union Choice<T>
-                    local hidden: T
-                    item: T
+                union Choice<|T|>
+                    local hidden(T)
+                    item(T)
                 end
-                interface Reader<T>
+                interface Reader<|T|>
                     function get(): T
                 end
-                record Holder<T: Reader<integer>>
+                record Holder<|T: Reader<|integer|>|>
                     item: T
                 end
             ]])
@@ -80,15 +80,15 @@ describe("generic erased core", function()
             record Token
             end
 
-            function identity<T>(item: T): T
+            function identity<|T|>(item: T): T
                 return item
             end
 
-            function accepts<T>(item: T): boolean
+            function accepts<|T|>(item: T): boolean
                 return item is T
             end
 
-            function many<T>(item: T): (T, ...: T)
+            function many<|T|>(item: T): (T, ...: T)
                 return item, item
             end
 
@@ -103,7 +103,7 @@ describe("generic erased core", function()
             function defaulted(): integer
                 local generic = identity
                 local boxed: value = identity
-                local from_box = boxed as (value) -> value
+                local from_box = boxed as function (value): value
                 return generic(40) as integer
                     + (from_box(2) as integer)
             end
@@ -152,37 +152,37 @@ describe("generic erased core", function()
             end
             function Witness:marker(): integer return self.number end
 
-            function id<T>(item: T): T return item end
-            function make_identity<T>(): (T) -> T
+            function id<|T|>(item: T): T return item end
+            function make_identity<|T|>(): function (T): T
                 return function(item: T): T return item end
             end
-            function constrained<T: I>(item: T): T return item end
-            function take<U: I>(left: (U) -> U, right: (U) -> U):
-                    (U) -> U
+            function constrained<|T: I|>(item: T): T return item end
+            function take<|U: I|>(left: function (U): U, right: function (U): U):
+                    function (U): U
                 return left
             end
 
-            interface View<T>
+            interface View<|T|>
                 function get(): T
             end
-            record Box<T>
+            record Box<|T|>
                 item: T
             end
             function Box:get(): T return self.item end
             function Box:integer_identity(item: T): T return item end
-            function pair<U>(left: (U) -> U, right: (U) -> U): (U) -> U
+            function pair<|U|>(left: function (U): U, right: function (U): U): function (U): U
                 return right
             end
 
-            union Maybe<T>
-                none
-                some: T
+            union Maybe<|T|>
+                none()
+                some(T)
             end
-            function consume<T>(left: T, right: T): T return left end
-            function make<T>(): T return (40 as value) as T end
-            function pass<T>(item: T): T return item end
-            function make_view<T>(): View<T>
-                return Box<T>.new((40 as value) as T) as View<T>
+            function consume<|T|>(left: T, right: T): T return left end
+            function make<|T|>(): T return (40 as value) as T end
+            function pass<|T|>(item: T): T return item end
+            function make_view<|T|>(): View<|T|>
+                return Box<|T|>.new((40 as value) as T) as View<|T|>
             end
 
             function constrained_orders(): integer
@@ -208,11 +208,11 @@ describe("generic erased core", function()
                 local second = consume(Maybe.some(42), Maybe.none())
                 local total = 0
                 case first
-                when none then total = total + 1
+                when none() then total = total + 1
                 else total = -100
                 end
                 case second
-                when some: item then total = total + item
+                when some(item) then total = total + item
                 else total = -100
                 end
                 return total
@@ -241,15 +241,15 @@ describe("generic erased core", function()
 
     it("runs dependent constructors once in left-to-right order", function()
         h.run_coder([[
-            record Plain<T>
+            record Plain<|T|>
                 item: T
             end
-            record Pair<T>
+            record Pair<|T|>
                 first: T
                 second: T
             end
-            record Nested<T>
-                inner: Plain<T>
+            record Nested<|T|>
+                inner: Plain<|T|>
                 item: T
             end
 
@@ -259,7 +259,7 @@ describe("generic erased core", function()
                 produced = produced + 1
                 if produced ~= expected then order_okay = false end
             end
-            function make<T>(expected: integer): T
+            function make<|T|>(expected: integer): T
                 mark(expected)
                 return (40 as value) as T
             end
@@ -270,37 +270,37 @@ describe("generic erased core", function()
             function produced_count(): integer return produced end
             function order_preserved(): boolean return order_okay end
 
-            function take_array_left<T>(left: {T}, right: T): (T, T)
+            function take_array_left<|T|>(left: {T}, right: T): (T, T)
                 return left[1], right
             end
-            function take_array_right<T>(left: T, right: {T}): (T, T)
+            function take_array_right<|T|>(left: T, right: {T}): (T, T)
                 return left, right[1]
             end
-            function take_array<T>(items: {T}): (T, T)
+            function take_array<|T|>(items: {T}): (T, T)
                 return items[1], items[2]
             end
-            function take_map_left<T>(left: {string: T}, right: T): (T, T)
+            function take_map_left<|T|>(left: {string: T}, right: T): (T, T)
                 return left["item"], right
             end
-            function take_map_right<T>(left: T, right: {string: T}): (T, T)
+            function take_map_right<|T|>(left: T, right: {string: T}): (T, T)
                 return left, right["item"]
             end
-            function take_map<T>(items: {string: T}): (T, T)
+            function take_map<|T|>(items: {string: T}): (T, T)
                 return items["left"], items["right"]
             end
-            function take_plain_left<T>(left: Plain<T>, right: T): (T, T)
+            function take_plain_left<|T|>(left: Plain<|T|>, right: T): (T, T)
                 return left.item, right
             end
-            function take_plain_right<T>(left: T, right: Plain<T>): (T, T)
+            function take_plain_right<|T|>(left: T, right: Plain<|T|>): (T, T)
                 return left, right.item
             end
-            function take_plain_pair<T>(left: Plain<T>, right: Plain<T>): (T, T)
+            function take_plain_pair<|T|>(left: Plain<|T|>, right: Plain<|T|>): (T, T)
                 return left.item, right.item
             end
-            function take_pair<T>(box: Pair<T>, item: T): (T, T, T)
+            function take_pair<|T|>(box: Pair<|T|>, item: T): (T, T, T)
                 return box.first, box.second, item
             end
-            function take_nested<T>(box: Nested<T>, item: T): (T, T, T)
+            function take_nested<|T|>(box: Nested<|T|>, item: T): (T, T, T)
                 return box.inner.item, box.item, item
             end
 
@@ -413,7 +413,7 @@ describe("generic erased core", function()
 
     it("runs ambient derived projections exactly once in source order", function()
         h.run_coder([[
-            record Box<T>
+            record Box<|T|>
                 item: T
             end
             function Box:id(): T return self.item end
@@ -432,22 +432,22 @@ describe("generic erased core", function()
             function count(): integer return steps end
             function ordered(): boolean return order_okay end
 
-            function make<T>(expected: integer): Box<T>
-                return Box<T>.new((mark(expected) as value) as T)
+            function make<|T|>(expected: integer): Box<|T|>
+                return Box<|T|>.new((mark(expected) as value) as T)
             end
-            function make_array<T>(expected: integer): {T}
+            function make_array<|T|>(expected: integer): {T}
                 return {((mark(expected) as value) as T)}
             end
-            function make_map<K, V>(expected: integer, key: K): {K: V}
+            function make_map<|K, V|>(expected: integer, key: K): {K: V}
                 return {[key] = ((mark(expected) as value) as V)}
             end
-            function make_item<T>(expected: integer): T
+            function make_item<|T|>(expected: integer): T
                 return (mark(expected) as value) as T
             end
-            function agree<T>(left: T, right: T): T return left end
-            function consume<T>(left: T?, right: T): value return right end
-            function take<T>(left: () -> T, right: T): T return left() end
-            function take_reversed<T>(left: T, right: () -> T): T
+            function agree<|T|>(left: T, right: T): T return left end
+            function consume<|T|>(left: T?, right: T): value return right end
+            function take<|T|>(left: function (): T, right: T): T return left() end
+            function take_reversed<|T|>(left: T, right: function (): T): T
                 return right()
             end
 
@@ -498,10 +498,10 @@ describe("generic erased core", function()
     it("runs direct computed calls and option-backed records once in order",
     function()
         h.run_coder([[
-            record FnBox<T>
-                callback: () -> T
+            record FnBox<|T|>
+                callback: function (): T
             end
-            record Box<T>
+            record Box<|T|>
                 item: T
                 callback_step: integer
             end
@@ -509,8 +509,8 @@ describe("generic erased core", function()
                 mark(self.callback_step)
                 return self.item
             end
-            record Holder<T>
-                box: Box<T>
+            record Holder<|T|>
+                box: Box<|T|>
             end
             record Plain
                 item: integer
@@ -530,31 +530,31 @@ describe("generic erased core", function()
             function count(): integer return steps end
             function ordered(): boolean return order_okay end
 
-            function make<T>(expected: integer): FnBox<T>
+            function make<|T|>(expected: integer): FnBox<|T|>
                 mark(expected)
-                return FnBox<T>.new(function(): T
+                return FnBox<|T|>.new(function(): T
                     return (mark(expected + 1) as value) as T
                 end)
             end
-            function make_callbacks<T>(expected: integer): {() -> T}
+            function make_callbacks<|T|>(expected: integer): {function (): T}
                 mark(expected)
                 return {function(): T
                     return (mark(expected + 1) as value) as T
                 end}
             end
-            function make_boxes<T>(expected: integer): {Box<T>}
+            function make_boxes<|T|>(expected: integer): {Box<|T|>}
                 mark(expected)
-                return {Box<T>.new((42 as value) as T, expected + 1)}
+                return {Box<|T|>.new((42 as value) as T, expected + 1)}
             end
-            function make_holder<T>(expected: integer): Holder<T>
+            function make_holder<|T|>(expected: integer): Holder<|T|>
                 mark(expected)
-                return Holder<T>.new(Box<T>.new(
+                return Holder<|T|>.new(Box<|T|>.new(
                     (42 as value) as T, expected + 1))
             end
             function maybe(expected: integer): Plain?
                 return Plain.new(mark(expected))
             end
-            function agree<T>(left: T, right: T): T return left end
+            function agree<|T|>(left: T, right: T): T return left end
 
             function computed_calls(): integer
                 reset_trace()
@@ -604,7 +604,7 @@ describe("generic erased core", function()
             function maybe(expected: integer): Plain?
                 return Plain.new(mark(expected))
             end
-            function agree<T>(left: T, right: T): T return left end
+            function agree<|T|>(left: T, right: T): T return left end
 
             function inferred_left(): Plain?
                 reset_trace()
@@ -640,7 +640,7 @@ describe("generic erased core", function()
     it("runs ordinary later adjustments selected by first evidence",
     function()
         h.run_coder([[
-            function second<T>(left: T, right: T): T return right end
+            function second<|T|>(left: T, right: T): T return right end
             function value_first(item: value): value
                 local got = second(item, 42)
                 return got
@@ -667,7 +667,7 @@ describe("generic erased core", function()
                 if present then return Plain.new(42) end
                 return nil
             end
-            function same<T>(left: T, right: T): T return left end
+            function same<|T|>(left: T, right: T): T return left end
             function interface_first(): integer
                 local got = same(marker(), mark())
                 return got:marker()
@@ -681,7 +681,7 @@ describe("generic erased core", function()
                 return got
             end
 
-            record CallbackBox callback: (integer) -> integer end
+            record CallbackBox callback: function (integer): integer end
             function callback_box(): CallbackBox
                 return CallbackBox.new(
                     function(x: integer): integer return x + 1 end)
@@ -734,29 +734,29 @@ describe("generic erased core", function()
         h.run_coder([[
             local entered: integer = 0
 
-            function identity<K, V>(items: {K: V}): {K: V}
+            function identity<|K, V|>(items: {K: V}): {K: V}
                 entered = entered + 1
                 return items
             end
 
-            function lookup<K, V>(items: ({K: V})?, key: K): V?
+            function lookup<|K, V|>(items: {K: V}?, key: K): V?
                 local present = identity(items)
                 return present[key]
             end
 
-            function next<V>(items: {string: V}, key: string?): (string?, V?)
+            function next<|V|>(items: {string: V}, key: string?): (string?, V?)
                 if key ~= nil then return nil, nil end
                 return "item", items["item"]
             end
 
-            function pairs<V>(items: {string: V}):
-                    (({string: V}, string?) -> (string?, V?),
+            function pairs<|V|>(items: {string: V}):
+                    (function ({string: V}, string?): (string?, V?),
                      {string: V}, nil, nil)
                 entered = entered + 1
                 return next, items, nil, nil
             end
 
-            function copy<T>(items: ({string: T})?): {string: T}
+            function copy<|T|>(items: {string: T}?): {string: T}
                 local result: {string: T} = {}
                 for key, item in pairs(items) do
                     result[key] = item
@@ -787,12 +787,12 @@ describe("generic erased core", function()
                 log = log * 10 + item
                 return item
             end
-            function first<T>(items: ({T})?): T?
+            function first<|T|>(items: {T}?): T?
                 if items == nil then return nil end
                 local present: {T} = items
                 return present[1]
             end
-            function ordinary(items: ({integer})?): integer
+            function ordinary(items: {integer}?): integer
                 if items == nil then return -1 end
                 local present: {integer} = items
                 return #present
@@ -800,24 +800,24 @@ describe("generic erased core", function()
             function constructors(): (integer?, integer?, integer?, integer)
                 log = 0
                 local inferred? = first({mark(1), mark(2)})
-                local explicit? = first<integer>({mark(3)})
+                local explicit? = first<|integer|>({mark(3)})
                 local typed: {integer} = {mark(4)}
                 local from_typed? = first(typed)
                 return inferred, explicit, from_typed, log
             end
             function missing(): (integer?, integer?, integer?, value,
                                  integer, integer, integer)
-                return first({}), first<integer>({}), first<integer>(nil),
+                return first({}), first<|integer|>({}), first<|integer|>(nil),
                     first(nil), ordinary({1}), ordinary({}), ordinary(nil)
             end
-            function optional(items: ({integer})?): integer?
+            function optional(items: {integer}?): integer?
                 return first(items)
             end
-            function project(items: ({value})?): integer?
-                return first<integer>(items)
+            function project(items: {value}?): integer?
+                return first<|integer|>(items)
             end
             function gradual(item: value): integer?
-                return first<integer>({item})
+                return first<|integer|>({item})
             end
             function values(): {value}
                 return {"wrong"}
@@ -841,12 +841,12 @@ describe("generic erased core", function()
 
     it("runs a generic iterator with trailing generic tuple results", function()
         h.run_coder([[
-            function step<T>(state: {T}, control: integer): (integer?, T?)
+            function step<|T|>(state: {T}, control: integer): (integer?, T?)
                 local next = control + 1
                 if next > #state then return nil, nil end
                 return next, state[next]
             end
-            function supply<U>(state: {U}, control: integer): ({U}, integer)
+            function supply<|U|>(state: {U}, control: integer): ({U}, integer)
                 return state, control
             end
             function iterate(): integer
@@ -864,13 +864,13 @@ describe("generic erased core", function()
 
     it("forces iterator item bindings inside an erased generic body", function()
         h.run_coder([[
-            function step<T>(state: {T}, control: integer): (integer?, T?)
+            function step<|T|>(state: {T}, control: integer): (integer?, T?)
                 local next = control + 1
                 if next > #state then return nil, nil end
                 return next, state[next]
             end
 
-            function copy<T>(items: {T}): {T}
+            function copy<|T|>(items: {T}): {T}
                 local result: {T} = {}
                 for index, item in step, items, 0 do
                     result[index] = item
@@ -897,12 +897,12 @@ describe("generic erased core", function()
 
     it("erases an optional initial iterator control inside a generic body", function()
         h.run_coder([[
-            function step<T>(state: T, control: T?): T?
+            function step<|T|>(state: T, control: T?): T?
                 if control == nil then return state end
                 return nil
             end
 
-            function iterate<T>(state: T): integer
+            function iterate<|T|>(state: T): integer
                 local count = 0
                 for item in step, state, nil do
                     if item ~= state then raise "wrong item" end
@@ -922,23 +922,23 @@ describe("generic erased core", function()
             local closes: integer = 0
             local closed_state: value = nil
 
-            function step<T>(state: T, control: T): T?
+            function step<|T|>(state: T, control: T): T?
                 if state ~= control then raise "wrong control" end
                 calls = calls + 1
                 if calls > 2 then return nil end
                 return state
             end
 
-            function close<T>(state: T?)
+            function close<|T|>(state: T?)
                 closes = closes + 1
                 closed_state = state
             end
 
-            function iterate<T>(state: T, mode: integer): integer
+            function iterate<|T|>(state: T, mode: integer): integer
                 calls = 0
                 closes = 0
                 closed_state = nil
-                local finish: (T?) -> () = close
+                local finish: function (T?): () = close
                 local count = 0
                 for item in step, state, state, finish do
                     if item ~= state then raise "wrong item" end
@@ -973,24 +973,24 @@ describe("generic erased core", function()
         h.run_coder([[
             local order: string = ""
 
-            function stop<T>(state: T, control: T): T?
+            function stop<|T|>(state: T, control: T): T?
                 order = order .. "next;"
                 return nil
             end
 
-            function close<T>(state: T)
+            function close<|T|>(state: T)
                 order = order .. "close;"
             end
 
-            function effect<T>(item: T): T
+            function effect<|T|>(item: T): T
                 order = order .. "effect;"
                 return item
             end
 
-            function iterate<T>(state: T): string
+            function iterate<|T|>(state: T): string
                 order = ""
                 local optional: T? = state
-                for item in stop, state, state, close, effect<T>(optional) do
+                for item in stop, state, state, close, effect<|T|>(optional) do
                     order = order .. "body;"
                 end
                 return order
@@ -1003,21 +1003,21 @@ describe("generic erased core", function()
 
     it("runs nested fixed and open generic result projections", function()
         h.run_coder([[
-            function make<T>(): T return (42 as value) as T end
+            function make<|T|>(): T return (42 as value) as T end
 
-            function duo<T>(): (integer, {T})
+            function duo<|T|>(): (integer, {T})
                 return 1, {make()}
             end
 
-            function spread<T>(): (integer, ...: {T})
+            function spread<|T|>(): (integer, ...: {T})
                 return 1, {make()}, {make()}
             end
 
-            function consume_fixed<T>(first: T, second: {T}): integer
+            function consume_fixed<|T|>(first: T, second: {T}): integer
                 return #second
             end
 
-            function consume_open<T>(first: T, ...: {T}): integer
+            function consume_open<|T|>(first: T, ...: {T}): integer
                 local left: {T} = ...[1]
                 local right: {T} = ...[2]
                 return #left + #right
@@ -1038,7 +1038,7 @@ describe("generic erased core", function()
 
     it("lowers generic owner fields, constructors, methods, and union cases", function()
         h.run_coder([[
-            record Box<T>
+            record Box<|T|>
                 item: T
             end
 
@@ -1050,25 +1050,25 @@ describe("generic erased core", function()
                 self.item = item
             end
 
-            function Box:project<U>(item: U): U
+            function Box:project<|U|>(item: U): U
                 return item
             end
 
-            function Box.map<U>(item: U): Box<U>
-                return Box<U>.new(item)
+            function Box.map<|U|>(item: U): Box<|U|>
+                return Box<|U|>.new(item)
             end
 
-            function same_box<A>(left: Box<value>, right: Box<A>): boolean
+            function same_box<|A|>(left: Box<|value|>, right: Box<|A|>): boolean
                 return left == right
             end
 
-            union Maybe<T>
-                present: T
-                absent
+            union Maybe<|T|>
+                present(T)
+                absent()
             end
 
-            function make<T>(item: T): Maybe<T>
-                return Maybe<T>.present(item)
+            function make<|T|>(item: T): Maybe<|T|>
+                return Maybe<|T|>.present(item)
             end
 
             function number(): integer
@@ -1076,17 +1076,17 @@ describe("generic erased core", function()
                 box:put(box:get() + 1)
                 local candidate = make(box.item)
                 case candidate
-                when present: item then
+                when present(item) then
                     return item
                 else
                     return 0
                 end
             end
 
-            type IntBox = Box<integer>
+            type IntBox = Box<|integer|>
 
             function text(): string
-                return Box<value>.map<string>("ok"):get()
+                return Box<|value|>.map<|string|>("ok"):get()
             end
 
             function alias_number(): integer
@@ -1101,9 +1101,9 @@ describe("generic erased core", function()
             end
 
             function distinct_owners(): boolean
-                local loose = Box<value>.new("same contents")
-                local precise = Box<string>.new("same contents")
-                return same_box<string>(loose, precise)
+                local loose = Box<|value|>.new("same contents")
+                local precise = Box<|string|>.new("same contents")
+                return same_box<|string|>(loose, precise)
             end
         ]], [[
             assert(test.number() == 42)
@@ -1116,19 +1116,19 @@ describe("generic erased core", function()
 
     it("wraps callbacks and preserves arrays, maps, and options", function()
         h.run_coder([[
-            function apply<T, U>(callback: (T) -> U, item: T): U
+            function apply<|T, U|>(callback: function (T): U, item: T): U
                 return callback(item)
             end
 
-            function first<T>(items: {T}): T
+            function first<|T|>(items: {T}): T
                 return items[1]
             end
 
-            function lookup<K, V>(items: {K: V}, key: K): V
+            function lookup<|K, V|>(items: {K: V}, key: K): V
                 return items[key]
             end
 
-            function optional<T>(item: T?): T?
+            function optional<|T|>(item: T?): T?
                 return item
             end
 
@@ -1139,14 +1139,14 @@ describe("generic erased core", function()
             function answer(): integer
                 local items: {integer} = {21, 20}
                 local mapped: {string: integer} = { ["answer"] = 42 }
-                local from_map: integer = optional<integer>(
-                    lookup<string, integer>(mapped, "answer"))
+                local from_map: integer = optional<|integer|>(
+                    lookup<|string, integer|>(mapped, "answer"))
                 return apply(twice, first(items)) + from_map - 42
             end
 
             function missing(): integer?
                 local item: integer? = nil
-                return optional<integer>(item)
+                return optional<|integer|>(item)
             end
         ]], [[
             assert(test.answer() == 42)
@@ -1157,20 +1157,20 @@ describe("generic erased core", function()
 
     it("runs missing and bare fixed-nil generic callback results", function()
         h.run_coder([[
-            function invoke<A, B>(callback: () -> A): A
+            function invoke<|A, B|>(callback: function (): A): A
                 return callback()
             end
 
             function missing(): nil
-                return invoke<nil, value>(function () end)
+                return invoke<|nil, value|>(function () end)
             end
 
             function bare(): nil
-                return invoke<nil, value>(function () return end)
+                return invoke<|nil, value|>(function () return end)
             end
 
             function adjusted_zero(): nil
-                return invoke<nil, value>(function (): () end)
+                return invoke<|nil, value|>(function (): () end)
             end
         ]], [[
             assert(select("#", test.missing()) == 1)
@@ -1184,15 +1184,15 @@ describe("generic erased core", function()
 
     it("delays a polluted mutable field guard until its precise read", function()
         h.run_coder([[
-            record Box<T>
+            record Box<|T|>
                 item: T
             end
 
-            function make(): Box<integer>
+            function make(): Box<|integer|>
                 return Box.new(42)
             end
 
-            function read(box: Box<integer>): integer
+            function read(box: Box<|integer|>): integer
                 return box.item
             end
         ]], [[
@@ -1204,7 +1204,7 @@ describe("generic erased core", function()
 
     it("uses an applied Interface constraint as the erased carrier", function()
         h.run_coder([[
-            interface Show<A>
+            interface Show<|A|>
                 function render(item: A): string
             end
 
@@ -1222,15 +1222,15 @@ describe("generic erased core", function()
                 return self.prefix
             end
 
-            function display<A, S: Show<A>>(subject: S, item: A): string
+            function display<|A, S: Show<|A|>|>(subject: S, item: A): string
                 return subject:render(item)
             end
 
-            function identity<A, S: Show<A>>(subject: S): S
+            function identity<|A, S: Show<|A|>|>(subject: S): S
                 return subject
             end
 
-            function take<A, S: Show<A>>(callback: (S) -> S): (S) -> S
+            function take<|A, S: Show<|A|>|>(callback: function (S): S): function (S): S
                 return callback
             end
 
@@ -1245,25 +1245,25 @@ describe("generic erased core", function()
     it("round-trips async-shaped generic status views without runtime arguments",
     function()
         h.run_coder([[
-            union TaskStatus<A, B>
-                succeeded: A
-                failed: B
+            union TaskStatus<|A, B|>
+                succeeded(A)
+                failed(B)
             end
 
-            record Task<A, B>
-                status: TaskStatus<A, B>
+            record Task<|A, B|>
+                status: TaskStatus<|A, B|>
             end
 
-            function Task:snapshot(): TaskStatus<A, B>
-                local loose: TaskStatus<value, value>? = self.status
-                return loose as TaskStatus<A, B>
+            function Task:snapshot(): TaskStatus<|A, B|>
+                local loose: TaskStatus<|value, value|>? = self.status
+                return loose as TaskStatus<|A, B|>
             end
 
             function use(): integer
-                local task = Task.new(TaskStatus<integer, value>.succeeded(42))
+                local task = Task.new(TaskStatus<|integer, value|>.succeeded(42))
                 local status = task:snapshot()
                 case status
-                when succeeded: item then
+                when succeeded(item) then
                     return item
                 else
                     return 0
@@ -1277,37 +1277,37 @@ describe("generic erased core", function()
             {
                 name = "generic_layout_provider",
                 src = [[
-                    record Box<T>
+                    record Box<|T|>
                         local hidden: integer
                         first: T
                         second: T
                         third: T
                     end
 
-                    function make<T>(hidden: integer, first: T,
-                                     second: T, third: T): Box<T>
-                        return Box<T>.new(hidden, first, second, third)
+                    function make<|T|>(hidden: integer, first: T,
+                                     second: T, third: T): Box<|T|>
+                        return Box<|T|>.new(hidden, first, second, third)
                     end
 
-                    function reveal<T>(box: Box<T>): integer
+                    function reveal<|T|>(box: Box<|T|>): integer
                         return box.hidden
                     end
 
-                    union Maybe<T>
-                        local hidden: integer
-                        first: T
-                        second: T
-                        absent
+                    union Maybe<|T|>
+                        local hidden(integer)
+                        first(T)
+                        second(T)
+                        absent()
                     end
 
-                    record PublicBox<T>
+                    record PublicBox<|T|>
                         item: T
                     end
                     type Crate = PublicBox
-                    type IntBox = PublicBox<integer>
+                    type IntBox = PublicBox<|integer|>
 
-                    function hidden<T>(n: integer): Maybe<T>
-                        return Maybe<T>.hidden(n)
+                    function hidden<|T|>(n: integer): Maybe<|T|>
+                        return Maybe<|T|>.hidden(n)
                     end
                 ]],
             },
@@ -1317,38 +1317,38 @@ describe("generic erased core", function()
                     local provider = import "generic_layout_provider"
 
                     function run(): boolean
-                        local crate = provider.Crate<integer>.new(41)
+                        local crate = provider.Crate<|integer|>.new(41)
                         local fixed = provider.IntBox.new(42)
                         if crate.item ~= 41 or fixed.item ~= 42 then
                             return false
                         end
 
-                        local box = provider.make<integer>(7, 10, 20, 30)
+                        local box = provider.make<|integer|>(7, 10, 20, 30)
                         box.first = 11
                         box.second = 22
                         box.third = 33
                         if box.first ~= 11 or box.second ~= 22 or
                            box.third ~= 33 or
-                           provider.reveal<integer>(box) ~= 7 then
+                           provider.reveal<|integer|>(box) ~= 7 then
                             return false
                         end
 
-                        local maybe = provider.Maybe<integer>.second(42)
+                        local maybe = provider.Maybe<|integer|>.second(42)
                         case maybe
-                        when first: item then
+                        when first(item) then
                             return false
-                        when second: item then
+                        when second(item) then
                             if item ~= 42 then return false end
                         else
                             return false
                         end
 
-                        case provider.hidden<integer>(9)
-                        when first: item then
+                        case provider.hidden<|integer|>(9)
+                        when first(item) then
                             return false
-                        when second: item then
+                        when second(item) then
                             return false
-                        when absent then
+                        when absent() then
                             return false
                         else
                             return true
@@ -1369,7 +1369,7 @@ describe("generic erased core", function()
     function()
         local ok, err = h.generate_modules({
             generic_iteration_fixture = [[
-                local function array_next<T>(
+                local function array_next<|T|>(
                     array: {T}, index: integer
                 ): (integer?, T?)
                     local next_index = index + 1
@@ -1379,14 +1379,14 @@ describe("generic erased core", function()
                     return next_index, array[next_index]
                 end
 
-                function ipairs<T>(array: {T}):
-                    (({T}, integer) -> (integer?, T?),
+                function ipairs<|T|>(array: {T}):
+                    (function ({T}, integer): (integer?, T?),
                      {T}, integer, nil)
                     return array_next, array, 0, nil
                 end
             ]],
             generic_gc_fixture = [[
-                function apply<T>(item: T, callback: (T) -> ())
+                function apply<|T|>(item: T, callback: function (T): ())
                     callback(item)
                 end
             ]],

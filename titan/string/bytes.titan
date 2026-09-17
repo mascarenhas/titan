@@ -2,12 +2,12 @@
 -- that target limit without first converting an unrepresentable SIZE_MAX to
 -- a Titan integer.
 local function maximum_string_bytes(): integer
-  if ffi.size_t.sizeof >= ffi.lua_Integer.sizeof then
+  if foreign size_t.sizeof >= foreign lua_Integer.sizeof then
     return ffi.LUA_MAXINTEGER as integer
   end
   local maximum = 0
   local byte = 0
-  while byte < ffi.size_t.sizeof do
+  while byte < foreign size_t.sizeof do
     maximum = maximum * 256 + 255
     byte = byte + 1
   end
@@ -49,10 +49,10 @@ local function copy_interval(subject: string, first: integer,
                              count: integer): string
   if count == 0 then return "" end
   if count < 0 then raise "resulting string is too large" end
-  local storage = CChar.new_array(count)
-  local output = storage as *char
-  local source = subject as const *char
+  local storage = foreign char.new_array(count)
+  local output = storage as foreign *char
+  local source = subject as foreign const *char
   ffi.memcpy(output, source + first - 1,
-                 count as ffi.size_t)
+                 count as foreign size_t)
   return storage as string
 end

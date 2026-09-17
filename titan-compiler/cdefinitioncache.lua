@@ -21,6 +21,7 @@ schemas["Type.CModule"] = { name = "string", members = "type_map", type_members 
 schemas["Type.ModuleMember"] = {
     modname = "string", name = "string", type = "type", paramnames = "names_or_false",
     _foreign_namespace = "boolean?", _c_origin_header = "include?",
+    _c_integer_constant = "string?",
 }
 schemas.header_types = {
     file_scope_tags = "raw_tags", typedef_names = "set",

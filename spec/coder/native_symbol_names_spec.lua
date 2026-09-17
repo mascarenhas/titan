@@ -61,8 +61,8 @@ describe("native callable symbol separators", function()
             end
 
             union Choice
-                item: integer
-                empty
+                item(integer)
+                empty()
             end
 
             function Choice:read(): integer

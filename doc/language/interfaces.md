@@ -78,8 +78,8 @@ and method names share one declaration-order namespace: duplicate fields,
 duplicate methods, and field/method collisions are rejected.
 
 Interface fields are implicitly const. Their syntax is `name: T`; use
-`name: T?` for an optional field because the record-only `name?: T` shorthand
-does not apply here. A field can be read with ordinary dot syntax, but cannot
+`name: T?` for an optional field. Optionality belongs to the type in both
+Interface and record fields. A field can be read with ordinary dot syntax, but cannot
 be assigned through an Interface value. Constness is shallow: if a field
 contains a mutable reference value, that referenced object retains its own
 mutability. See [Const values](const-values.md#interface-fields).
@@ -307,8 +307,8 @@ function Node:clone(): Node
 end
 ```
 
-`Node` does not satisfy `Cloneable`: `() -> Node` is not adjustable to
-`() -> Cloneable`. Instead, replace that method declaration so the scalar
+`Node` does not satisfy `Cloneable`: `function (): (Node)` is not adjustable to
+`function (): (Cloneable)`. Instead, replace that method declaration so the scalar
 conversion occurs in the concrete method's own declared result context:
 
 ```titan
@@ -363,9 +363,9 @@ interface I
     function run()
 end
 
-function rejected(rs: {R}, make_r: () -> R)
+function rejected(rs: {R}, make_r: function (): (R))
     local interfaces: {I} = rs       -- rejected
-    local make_i: () -> I = make_r   -- rejected
+    local make_i: function (): (I) = make_r   -- rejected
 end
 
 function accepted(r: R): {I}
@@ -432,7 +432,7 @@ interface Counter
     function add(n: integer): integer
 end
 
-function bind(counter: Counter): (integer) -> integer
+function bind(counter: Counter): function (integer): (integer)
     return counter:add
 end
 ```

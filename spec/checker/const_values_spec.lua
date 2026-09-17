@@ -217,7 +217,7 @@ describe("const values (typechecker)", function()
         local ok, err = run_checker([[
             record Pair
                 const first: integer
-                local const second?: string
+                local const second: string?
             end
 
             function make(): Pair

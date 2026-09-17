@@ -61,7 +61,7 @@ after default trust succeeds, leaving allocation and configuration failures
 with their exact local cleanup. The callback itself accepts
 `DefaultClientContextOwner`, reads its field directly, and contains no
 `value as DefaultClientContextOwner` recovery. The module calls
-`titan.gc.finalizable<DefaultClientContextOwner>` so the generic boundary
+`titan.gc.finalizable<|DefaultClientContextOwner|>` so the generic boundary
 statically pairs that exact local record with its callback; a callback over a
 different record would be rejected by the checker.
 

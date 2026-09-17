@@ -75,7 +75,7 @@ provider physically carries other logical keys.
 
 * one deterministic ordinary import alias per distinct owner;
 * one explicit `import "titan.test.titan"` alias for the private protocol;
-* one exact `(test.Context) -> ()` wrapper per case, which discards any result;
+* one exact `function (test.Context): ()` wrapper per case, which discards any result;
 * `TestCase` registration statements; and
 * the fixed runner implementation and `main`.
 

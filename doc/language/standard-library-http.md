@@ -18,7 +18,7 @@ socket handle.
 
 ## API
 
-```titan
+```text
 record Header
     name: string
     contents: string
@@ -53,7 +53,7 @@ function ClientResponse:read_until(delimiter: string,
                                    chop: boolean?): string?
 function ClientResponse:close()
 
-type Handler = (Request, Response) -> ()
+type Handler = function (Request, Response): ()
 
 record Request
     method: string

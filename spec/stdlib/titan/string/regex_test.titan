@@ -543,7 +543,7 @@ end
 function test_regex_gc_rooting(context: test.Context)
   local previous_mode = support.set_gc_mode("generational")
   defer support.set_gc_mode(previous_mode)
-  local iterator: () -> strings.RegexMatch? =
+  local iterator: function (): (strings.RegexMatch?) =
     strings.compile_regex("((a|b)+)-\\1"):gmatch(
       "ab-ab xx b-b aa-aa", nil)
   for _ = 1, 12 do support.collect_gc() end

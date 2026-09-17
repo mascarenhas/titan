@@ -16,7 +16,7 @@ Titan keeps `integer` and `float` distinct and does not overload functions by
 parameter type. Operations whose Lua result can dynamically switch between
 integer and float therefore use an explicitly float-typed interface:
 
-```titan
+```text
 function abs(number: float): float
 function acos(number: float): float
 function asin(number: float): float
@@ -91,7 +91,7 @@ direct-C, no-Lua-API boundary.
 
 ## Pseudo-random numbers
 
-```titan
+```text
 function random(lower: integer?, upper: integer?): value
 function randomseed(first: integer?, second: integer?): (integer, integer)
 ```
@@ -130,7 +130,7 @@ module variable, separate Lua states do not share it.
 
 ## Numeric conversion
 
-```titan
+```text
 function tonumber(candidate: value, base: integer?): value?
 function tointeger(candidate: value): integer?
 ```

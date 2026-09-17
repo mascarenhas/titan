@@ -9,7 +9,7 @@ foreign import "string.h"
 foreign import "locale.h"
 foreign import "math.h"
 
-local type CheckedAction = () -> ()
+local type CheckedAction = function (): ()
 
 -- Lua is used only where the original behavior depends on raw numeric tags,
 -- numeral parsing, or a dynamic call which Titan's checker intentionally
@@ -173,7 +173,7 @@ return function()
   return has_type, m.abs(-2), m.ceil(2.25), m.max(-3, 8, 2),
          m.abs(-m.huge) == m.huge
 end
-]]) as () -> (boolean, value, value, value, boolean)
+]]) as function (): (boolean, value, value, value, boolean)
   local has_type, boundary_absolute, boundary_ceiling, boundary_maximum,
         boundary_huge = lua_boundary()
   test.assert(not has_type)
@@ -191,19 +191,19 @@ function test_xoshiro256_star_star_matches_lua(_context: test.Context)
   -- library remains available as a live reference implementation.
   local lua_randomseed = lua_helper([[
 return function(first, second) return math.randomseed(first, second) end
-]]) as (integer, integer) -> (integer, integer)
+]]) as function (integer, integer): (integer, integer)
   local lua_random_unit = lua_helper([[
 return function() return math.random() end
-]]) as () -> float
+]]) as function (): (float)
   local lua_random_full = lua_helper([[
 return function() return math.random(0) end
-]]) as () -> integer
+]]) as function (): (integer)
   local lua_random_upper = lua_helper([[
 return function(upper) return math.random(upper) end
-]]) as (integer) -> integer
+]]) as function (integer): (integer)
   local lua_random_interval = lua_helper([[
 return function(lower, upper) return math.random(lower, upper) end
-]]) as (integer, integer) -> integer
+]]) as function (integer, integer): (integer)
 
   mathlib.randomseed(0x123456789abcdef, -77)
   lua_randomseed(0x123456789abcdef, -77)
@@ -262,10 +262,10 @@ end
 function test_bounded_numerals_and_explicit_bases(_context: test.Context)
   local lua_tonumber = lua_helper([[
 return function(candidate) return tonumber(candidate) end
-]]) as (value) -> value?
+]]) as function (value): (value?)
   local lua_tonumber_base = lua_helper([[
 return function(candidate, base) return tonumber(candidate, base) end
-]]) as (value, integer) -> value?
+]]) as function (value, integer): (value?)
 
   local cases: {value} = {
     0, 2.0, -3.5, "", " ", "+", "-", "0", "-0", "+17",
@@ -350,6 +350,6 @@ return function()
   local m = require "titan.math"
   return pcall(m.max, "not a number")
 end
-]]) as () -> boolean
+]]) as function (): (boolean)
   test.assert(not bad_dynamic_call())
 end

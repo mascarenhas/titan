@@ -12,7 +12,7 @@ record Error
 end
 
 record Connection
-  local handle: *ffi.sqlite3
+  local handle: foreign *sqlite3
   local statements: integer
   local busy: boolean
   local active_statement: Statement?
@@ -20,7 +20,7 @@ end
 
 record Statement
   local const connection: Connection
-  local handle: *ffi.sqlite3_stmt
+  local handle: foreign *sqlite3_stmt
   local parameter_count: integer
 end
 
@@ -32,7 +32,7 @@ record Cursor
   local closed: boolean
 end
 
-local function check_result(packet: *ffi.TitanSqlitePacket,
+local function check_result(packet: foreign *TitanSqlitePacket,
                              operation: string)
   if packet.failed == 0 then return end
   local message = "SQLite operation failed"
@@ -61,7 +61,7 @@ end
 -- A packet is rooted by its suspended caller and this lexical cleanup. Raw
 -- pointers passed to run_foreign alone do not retain their pointees. SQLite
 -- resource retirement remains on a worker even during cancellation unwind.
-local function retire_packet(packet: *ffi.TitanSqlitePacket)
+local function retire_packet(packet: foreign *TitanSqlitePacket)
   if packet.owns_db ~= 0 or packet.owns_stmt ~= 0 or packet.needs_reset ~= 0 then
     uv.run_foreign_cleanup(sqlite_retire_worker, packet)
   end
@@ -90,7 +90,7 @@ function connect(name: string): Connection
   check_no_nul(name, "connect")
   -- Allocate the public shell before acquiring the native handle.
   local connection = Connection.new(nil, 0, false, nil)
-  local packet: owned *ffi.TitanSqlitePacket = ffi.TitanSqlitePacket.new()
+  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   defer retire_packet(packet)
   copy_input(packet, name, "connect")
@@ -106,7 +106,7 @@ function Connection:prepare(sql: string): Statement
   defer self.busy = false
   check_no_nul(sql, "prepare")
   local statement = Statement.new(self, nil, 0)
-  local packet: owned *ffi.TitanSqlitePacket = ffi.TitanSqlitePacket.new()
+  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   defer retire_packet(packet)
   packet.db = self.handle
@@ -127,7 +127,7 @@ function Connection:close()
   if self.statements ~= 0 then
     raise Error.new("connection owns open statements", nil, nil, "close")
   end
-  local packet: owned *ffi.TitanSqlitePacket = ffi.TitanSqlitePacket.new()
+  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   packet.db = self.handle
   -- A failed submission leaves the public owner open and available for retry.
@@ -145,7 +145,7 @@ function Statement:close()
   if self.connection.active_statement == self then
     raise Error.new("statement has an active cursor", nil, nil, "statement.close")
   end
-  local packet: owned *ffi.TitanSqlitePacket = ffi.TitanSqlitePacket.new()
+  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   packet.db = self.connection.handle
   packet.stmt = self.handle
@@ -159,11 +159,11 @@ function Statement:close()
   check_result(packet, "statement.close")
 end
 
-local function Connection:transaction(worker: foreign (*void) -> (),
+local function Connection:transaction(worker: foreign function (*void): void,
                                       operation: string)
   self:reserve(operation, false)
   defer self.busy = false
-  local packet: owned *ffi.TitanSqlitePacket = ffi.TitanSqlitePacket.new()
+  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   packet.db = self.handle
   async.run_foreign(worker, packet)
@@ -181,7 +181,7 @@ end
 function Connection:get_autocommit(): boolean
   self:reserve("get_autocommit", true)
   defer self.busy = false
-  local packet: owned *ffi.TitanSqlitePacket = ffi.TitanSqlitePacket.new()
+  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   packet.db = self.handle
   async.run_foreign(sqlite_autocommit_worker, packet)
@@ -200,7 +200,7 @@ function Statement:execute(...: value): integer
   self:require_open("execute")
   self.connection:reserve("execute", false)
   defer self.connection.busy = false
-  local packet: owned *ffi.TitanSqlitePacket = ffi.TitanSqlitePacket.new()
+  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   defer retire_packet(packet)
   packet.db = self.connection.handle
@@ -215,7 +215,7 @@ function Statement:query(...: value): Cursor
   self:require_open("query")
   self.connection:reserve("query", false)
   defer self.connection.busy = false
-  local packet: owned *ffi.TitanSqlitePacket = ffi.TitanSqlitePacket.new()
+  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   defer retire_packet(packet)
   packet.db = self.connection.handle
@@ -244,7 +244,7 @@ function Cursor:fetch(): Row?
   if self.exhausted then return nil end
   self.statement.connection:reserve("fetch", true)
   defer self.statement.connection.busy = false
-  local packet: owned *ffi.TitanSqlitePacket = ffi.TitanSqlitePacket.new()
+  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   packet.db = self.statement.connection.handle
   packet.stmt = self.statement.handle
@@ -279,7 +279,7 @@ function Cursor:close()
   end
   self.statement.connection:reserve("cursor.close", true)
   defer self.statement.connection.busy = false
-  local packet: owned *ffi.TitanSqlitePacket = ffi.TitanSqlitePacket.new()
+  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   packet.db = self.statement.connection.handle
   packet.stmt = self.statement.handle

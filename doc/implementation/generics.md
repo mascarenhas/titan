@@ -110,7 +110,7 @@ distinguishes nil from an empty list. `TypeParam` is syntax, not a value `Decl`.
 An `ExpCall` has one callable-local `typeargs` list regardless of whether its
 ordinary argument carrier is `ArgsFunc`, `ArgsNamedFunc`, `ArgsMethod`, or
 `ArgsNamedMethod`; generics do not add another `Args` tag. Explicit owner
-arguments in `Pair<T>.member(...)` are a parser decoration on the namespace
+arguments in `Pair<|T|>.member(...)` are a parser decoration on the namespace
 `ExpVar`, `_nominal_typeargs`, with its source location. The checker consumes
 that decoration before member selection, retaining the canonical owner and
 closed owner application separately; erased lowering removes the decoration.
@@ -130,52 +130,36 @@ explicit in the AST. This is important for parser and lowering assertions: an
 omitted list is `{}`, not missing information about whether the spelling was
 named.
 
-### Grammar and contextual angle brackets
+### Explicit type-list delimiters
 
-The declaration grammar accepts a nonempty, comma-separated `typeparams` suffix
-on eligible declarations. A constraint is syntactically a named direct or
-qualified type application; the checker later proves it resolves to an
-Interface in the correct scope. Binder and argument lists use the existing
-100-item `checklist` guard.
+Generic binders and arguments use the distinct longest-match tokens `<|` and
+`|>`. The parser commits when it consumes `<|`; malformed lists cannot fall
+back to comparison syntax. Nested `Outer<|Inner<|T|>|>` applications therefore
+need neither a contextual `>` splitter nor a whole-source candidate scan.
+Ordinary `<`, `>`, and `>>` remain comparison and shift tokens.
 
-The scannerless PEG consumes a generic closing delimiter contextually as one
-literal `>` plus `SKIP*`. It does not change the exported `GT`, `GE`, or `SHR`
-lexer patterns. Consequently `Outer<Inner<T>>` closes two lists while an
-expression still parses `x >> y` as a shift.
+Fold captures accumulate nonempty binder/argument lists. Constraints use named
+type syntax, and the checker proves their Interface meaning and scope. The
+existing 100-item binder/argument guard remains separate from return-type lists
+and later calling-convention limits.
 
-One left-factored expression-suffix production probes `<...>` once, and claims
-it only after lookahead proves both a complete type-argument list and either an
-ordinary call delimiter (`(`, a string literal, or `{`) or the `.` of a nominal
-namespace selection. It then selects positional versus named arguments, or
-consumes the namespace member, without replaying separate generic/ordinary and
-positional/named call alternatives. Method syntax likewise consumes `: Name`
-once before selecting an optional generic call tail or a bound-method
-reference. This keeps the parser cost of generics out of ordinary calls while
-preserving the existing AST tags.
+Base names and dot/colon member suffixes can carry written type arguments.
+The parser records these candidates once; a following call transfers its
+callable-local list into `ExpCall.typeargs`. The checker validates whether the
+base is a generic callable or an applicable nominal namespace, preserves the
+separate owner/callable scopes, and rejects explicit first-class owner-member
+applications. `Pair<|T|>.member(...)` still places owner arguments on the
+namespace rather than on `new`.
 
-The nominal branch produces `Pair<T>.member`; the checker permits it only on a
-record, union, or constructor-preserving alias and only in a direct call. The
-bounded generic branch takes priority when complete, so `f < T > (x)` is a call
-but `a < b > c` remains comparison. Incomplete ambiguous text can still fall
-back to an ordinary expression diagnostic instead of promising a generic-list
-error.
-
-Dedicated syntax labels cover:
-
-- a missing binder name or constraint;
-- a missing declaration-list or application-list `>`;
-- a missing type argument;
-- binder syntax on a foreign function, lambda, or alias; and
-- the ordinary guarded-list overflow.
-
-Every label is registered in `syntax_errors.errors`. Parser specs assert the new
-fields explicitly because the usual subset comparison would otherwise hide a
-missing `{}` list.
+Missing binders, constraints, arguments, or `|>` receive committed syntax
+labels. Eligibility, owner arity, partial application, and direct-call-only
+rules remain semantic checks. There is no arbitrary lookahead for a possible
+generic call.
 
 ### Parse-time constructor elaboration
 
 The parser continues to place synthesized record `new` and union-variant
-`TopLevelStatic` nodes immediately after their owner. For `Pair<T,U>` the
+`TopLevelStatic` nodes immediately after their owner. For `Pair<|T, U|>` the
 synthetic constructor:
 
 - has `typeparams = {}` rather than copying the owner binders;
@@ -238,13 +222,13 @@ schemes.
 Surface `Type.Nominal(fqtn,args)` retains the complete invariant application.
 Equality compares owner and arguments. Gradual consistency is intentionally
 shallow and pointwise only where a rigid argument relates to its recursively
-erased constraint carrier. Thus an unconstrained `Cell<integer>` is consistent
-with the owner-erased `Cell<value>` view, while `ICell<R>` for `R:I` is
-consistent with `ICell<erase(I)>`, not an invalid `ICell<value>`.
+erased constraint carrier. Thus an unconstrained `Cell<|integer|>` is consistent
+with the owner-erased `Cell<|value|>` view, while `ICell<|R|>` for `R:I` is
+consistent with `ICell<|erase(I)|>`, not an invalid `ICell<|value|>`.
 
 All those views share one nominal owner at run time. Equality and `as`/`is`
 plans may use that owner identity without claiming argument identity. A
-`value -> G<t>` test checks the outer `G` metatable only. Static assignment
+`value -> G<|t|>` test checks the outer `G` metatable only. Static assignment
 remains invariant.
 
 `Type.GenericAlias` is a type-namespace descriptor rather than a run-time module
@@ -258,7 +242,7 @@ member. It records:
 Applying it substitutes into the canonical owner and returns the ordinary
 surface `Nominal(target,args)`. A bare scalar use substitutes `value` for every
 argument and then validates constraints. A concrete `TypeAlias` whose RHS is
-already `Pair<integer,integer>` has no arity. Public `GenericAlias` descriptors
+already `Pair<|integer, integer|>` has no arity. Public `GenericAlias` descriptors
 serialize in `Type.Module.type_members`; local ones do not. A source-private
 target is valid only through an explicit `.titan` edge and its direct-owner
 capability, and is never serialized.
@@ -507,14 +491,14 @@ Erasure is a pure recursive type transformation after surface checking:
 
 ```text
 erase(T unconstrained) = value
-erase(T : I<args>)      = erase(I<args>)
-erase(I<args>)          = I<erase(args)>
+erase(T : I<|args|>)      = erase(I<|args|>)
+erase(I<|args|>)          = I<|erase(args)|>
 ```
 
-Suppose `IBar<A>` is generic, `C` is unconstrained, and `B` has constraint
-`IBar<C>`. `C` first erases to `value`, the constraint becomes
-`IBar<value>`, and `B` uses that exact Interface carrier. The code-facing
-nominal then drops the application arguments because every `IBar<...>` shares
+Suppose `IBar<|A|>` is generic, `C` is unconstrained, and `B` has constraint
+`IBar<|C|>`. `C` first erases to `value`, the constraint becomes
+`IBar<|value|>`, and `B` uses that exact Interface carrier. The code-facing
+nominal then drops the application arguments because every `IBar<|...|>` shares
 the existing owner identity and `Udata *` representation.
 
 Erasure recurses through:
@@ -526,10 +510,10 @@ Erasure recurses through:
 - fields, union payloads, locals, captures, and module slots; and
 - the synthesized init/next/close calls of `for ... in`.
 
-Smart reconstruction preserves existing Option/container rules. A `Cell<T>`
-field becomes an ordinary `value` field. A `B:IBar<C>` native formal/result
+Smart reconstruction preserves existing Option/container rules. A `Cell<|T|>`
+field becomes an ordinary `value` field. A `B:IBar<|C|>` native formal/result
 becomes the ordinary `IBar` nominal. A surface
-`IBar<T>:cons(T):IBar<T>` method becomes the code-facing
+`IBar<|T|>:cons(T):IBar<|T|>` method becomes the code-facing
 `IBar:cons(value):IBar` method.
 
 The resulting physical types are exactly those already understood by
@@ -588,7 +572,7 @@ For a closed use, the pass implements the selected direction rules:
 | Same-owner applied Interface views | Retain the wrapper; both erase to the same code-facing Interface nominal. |
 | Concrete callable ↔ erased callable | Realize an ordinary closure-adjustment wrapper with per-component strict projections, Interface actions, and boxing. |
 
-There is no special check elision for `id<integer>(1)`: the input boxes without a
+There is no special check elision for `id<|integer|>(1)`: the input boxes without a
 tag test and the result receives the normal strict integer projection. A value
 stored through unconstrained generic storage can remain polluted until any
 later closed elimination, regardless of which call or provider produced it.
@@ -610,9 +594,9 @@ relation for coder to infer.
 The standard example makes callable elaboration explicit:
 
 ```titan
-function foldl<T, U>(
+function foldl<|T, U|>(
     values: {T},
-    combine: (T, U) -> U,
+    combine: function (T, U): (U),
     initial: U
 ): U
     local accumulator = initial
@@ -626,9 +610,9 @@ end
 At a call closing `T = integer` and `U = string`:
 
 ```text
-surface callback       (integer, string) -> string
-erased foldl callback  (value, value) -> value
-erased foldl body       ({value}, erased callback, value) -> value
+surface callback       function (integer, string): string
+erased foldl callback  function (value, value): value
+erased foldl body       function ({value}, erased callback, value): value
 surface call result     string
 ```
 
@@ -640,8 +624,8 @@ caller then strictly projects the erased `foldl` result to string.
 
 The inverse first-class use assigns a generic declaration either to an expected
 monomorphic type or, without context, to its declared carrier signature. For
-example, assigning `id` to `(integer) -> integer` realizes a concrete outward
-wrapper, while bare `local f = id` yields `(value) -> value`. The concrete
+example, assigning `id` to `function (integer): (integer)` realizes a concrete outward
+wrapper, while bare `local f = id` yields `function (value): (value)`. The concrete
 wrapper boxes
 its concrete argument for the canonical erased entry and strictly projects the
 erased result. The concrete function tag and native relay belong to the wrapper;
@@ -828,7 +812,7 @@ source providers likewise expose one native owner/entry per declaration.
 
 `titan.uv` owns the generic Task, status, cancellation, and listener
 declarations. `titan.async` exports constructor-preserving aliases of those
-owners and owns the public `run`, combinator, and `channel<T>` schemes. The
+owners and owns the public `run`, combinator, and `channel<|T|>` schemes. The
 provider-owned surface owners are:
 
 ```titan
@@ -836,45 +820,45 @@ record ResumeToken
     const source: string?
 end
 
-union CancellationReason<B>
-    simple: string
-    complex: B
+union CancellationReason<|B|>
+    simple(string)
+    complex(B)
 end
 
-union TaskStatus<A, B>
-    ready
-    running
-    waiting
-    succeeded: A
-    failed: Error
-    cancelled: CancellationReason<B>
+union TaskStatus<|A, B|>
+    ready()
+    running()
+    waiting()
+    succeeded(A)
+    failed(Error)
+    cancelled(CancellationReason<|B|>)
 end
 
-record Task<A, B>
+record Task<|A, B|>
     local root: coroutine.Coro
     local runtime: Runtime
-    local state: TaskStatus<A, B>
-    local cancel_value: CancellationReason<B>?
+    local state: TaskStatus<|A, B|>
+    local cancel_value: CancellationReason<|B|>?
     local cancel_action: CancelAction?
     local pending: value
     local root_index: integer
     local cleanup: boolean
-    local terminal_registrations: {TerminalRegistration<A, B>}
+    local terminal_registrations: {TerminalRegistration<|A, B|>}
     local suspended: boolean
     local resume_token: ResumeToken?
     local resume_pending: boolean
     local pending_cancellation_affected: boolean
 end
 
-local record TerminalRegistration<A, B>
-    local listener: (TaskStatus<A, B>) -> ()
+local record TerminalRegistration<|A, B|>
+    local listener: function (TaskStatus<|A, B|>): ()
     local live: boolean
 end
 ```
 
 Every Task field remains in the canonical owner. The generic registration
 record stores the exact adjusted listener and its live bit. `ResumeToken` is a
-separate non-generic nominal owner: all `Task<A,B>` applications store the same
+separate non-generic nominal owner: all `Task<|A, B|>` applications store the same
 optional token type, compare it by record identity, and use its optional source
 only to diagnose a public explicit-resume mismatch. It is not an application
 witness and does not participate in erased payload guards.
@@ -888,47 +872,47 @@ either signature.
 The Runtime remains concretely all-value:
 
 ```text
-task_roots     : {Task<value,value>}
-current_task   : Task<value,value>?
-libuv owners   : Task<value,value>
-running_task() : Task<value,value>
+task_roots     : {Task<|value, value|>}
+current_task   : Task<|value,value|>?
+libuv owners   : Task<|value, value|>
+running_task() : Task<|value, value|>
 ```
 
-Runtime creation spells `Task<value,value>.new` explicitly to state its
+Runtime creation spells `Task<|value,value|>.new` explicitly to state its
 all-value storage invariant; the final carrier rule would choose the same
 application without evidence. There is no existential Task, wildcard, private
-application descriptor, or ambient recovery of `A`/`B`. A public `Task<A,B>` is
+application descriptor, or ambient recovery of `A`/`B`. A public `Task<|A, B|>` is
 a shallow view of the same userdata.
 
 The source-private operational entry remains monomorphic:
 
-```titan
-local function run_internal(func: () -> value): Task<value, value>
+```text
+local function run_internal(func: function (): (value)): Task<|value, value|>
 ```
 
-Public `async.run<A,B>(func: () -> A): Task<A,B>` adapts the callback to the
-real `() -> value` erased shape, calls `run_internal`, and returns the same Task
-userdata through the owner-erased view. A callback annotated `() -> nil`
+Public `async.run<|A, B|>(func: function (): (A)): Task<|A, B|>` adapts the callback to the
+real `function (): (value)` erased shape, calls `run_internal`, and returns the same Task
+userdata through the owner-erased view. A callback annotated `function (): (nil)`
 infers `A = nil`; a complete explicit application or surrounding result context
 can instead supply that application to an unannotated callback. Once the
-callback has the exact `() -> nil` shape, bare return or fallthrough supplies one
+callback has the exact `function (): (nil)` shape, bare return or fallthrough supplies one
 nil by ordinary return adjustment; this is not a generic special case. The
-coroutine stores its raw result in `TaskStatus<value,value>.succeeded`; a later concrete success
+coroutine stores its raw result in `TaskStatus<|value,value|>.succeeded`; a later concrete success
 projection inserts the strict `A` guard. Complex cancellation likewise stores a
-raw `value` in `CancellationReason<value>.complex` and guards only at a concrete
+raw `value` in `CancellationReason<|value|>.complex` and guards only at a concrete
 `B` projection. Scheduler inventory, coroutine dispatch, pending operations,
 cancellation actions, libuv callbacks, and cleanup helpers stay monomorphic.
 
-Public `async.channel<T>(size)` declares `{T}` storage and returns
-`((T) -> (), () -> T, () -> ())`. Because `size` provides no evidence for `T`,
+Public `async.channel<|T|>(size)` declares `{T}` storage and returns
+`(function (T): (), function (): (T), function (): ())`. Because `size` provides no evidence for `T`,
 a result context, a complete explicit application, or final carrier closure
 selects the application. Erased-core lowering recursively maps the Array and
-callbacks to `{value}`, `(value) -> ()`, and `() -> value`, exactly the single
+callbacks to `{value}`, `function (value): ()`, and `function (): (value)`, exactly the single
 pre-generic implementation shape. Closed callers receive ordinary traced
 callable wrappers: send boxes its accepted `T`, receive strictly projects its
 `T`, and close is unchanged. The string-only `ChannelReader` and
 `ChannelWriter` records are not generic owners; their factory closes
-`channel<string>` and stores those exact wrappers. Each channel closure triple
+`channel<|string|>` and stores those exact wrappers. Each channel closure triple
 also captures one fresh private non-generic `ResumeToken`; its blocking paths
 pass that record to `suspend`, and its send, receive, and close paths pass the
 same record to `Task:resume(token)`.
@@ -944,7 +928,7 @@ with that same record. The token carries no generic evidence; it only binds
 those listeners to that exact explicit suspension.
 
 Terminal listener removal no longer depends on closure identity.
-`add_terminal_listener` allocates one fresh `TerminalRegistration<A,B>`, stores
+`add_terminal_listener` allocates one fresh `TerminalRegistration<|A, B|>`, stores
 the adjusted listener, appends that record, and returns a no-argument remover
 closure capturing the Task and registration. The remover is idempotent and
 removes that exact live record. If the Task is already terminal, registration
@@ -976,7 +960,7 @@ Focused tests and reviews therefore establish:
 - no guard on a statically typed closed-to-carrier argument, constructor, or
   write, but every carrier-to-closed edge uses the constraint-appropriate strict
   elimination—`gradual_guard` for unconstrained carriers (including
-  `id<integer>(1)`'s result) and checked Interface downcast for constrained
+  `id<|integer|>(1)`'s result) and checked Interface downcast for constrained
   carriers;
 - immediate `value -> erase(I)` checking for constrained ingress and delayed raw
   unconstrained pollution for fields, Arrays, Maps, Task payloads, and Lua;

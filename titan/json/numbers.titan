@@ -2,7 +2,7 @@ foreign import "stdlib.h"
 foreign import "locale.h"
 
 local function json_byte(subject: string, position: integer): integer
-  local bytes = subject as const *unsigned char
+  local bytes = subject as foreign const *unsigned char
   return bytes[position - 1] as integer
 end
 

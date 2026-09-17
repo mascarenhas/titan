@@ -2,7 +2,7 @@
 
 Titan has a named-only call form for calls whose target is a declaration:
 
-```lua
+```titan
 record Point
     x: float
     y: float
@@ -110,7 +110,7 @@ declaration metadata.
 In particular, storing a declaration in a variable loses its declaration
 provenance for named-call purposes even though the value remains callable:
 
-```lua
+```titan
 function add(left: integer, right: integer): integer
     return left + right
 end
@@ -132,7 +132,7 @@ Interface method satisfaction likewise ignores the concrete method's parameter
 spellings. Once a concrete value is wrapped, a named Interface call uses the
 Interface declaration's labels and maps them to its positions:
 
-```lua
+```titan
 interface PairConsumer
     function consume(left: integer, right: string)
 end
@@ -179,7 +179,7 @@ The parentheses in the second example are required: the record value is the
 one positional union payload. `Message.move { x = ..., y = ... }` selects
 named-call syntax and is rejected.
 
-```lua
+```titan
 function configure(label: string?, enabled: boolean, payload: value)
 end
 
@@ -233,7 +233,7 @@ local p = Point.new { y = 3.0, x = 2.0 }
 
 Context-typed record constructor expressions use the same omission rule:
 
-```lua
+```titan
 record Config
     label: string?
     enabled: boolean

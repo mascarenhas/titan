@@ -194,12 +194,12 @@ describe("named arguments (code generation)", function()
                     return Box.new { text = "boxed" }
                 end
 
-                function make_callback(): (integer) -> integer
+                function make_callback(): function (integer): (integer)
                     ffi.ffi_collect(L)
                     return increment
                 end
 
-                function verify(callback: (integer) -> integer,
+                function verify(callback: function (integer): (integer),
                                 text: string, box: Box): integer
                     ffi.ffi_collect(L)
                     if text ~= "alive42" or box.text ~= "boxed" then
@@ -374,9 +374,9 @@ describe("named arguments (code generation)", function()
                 end
 
                 function ffi_contextual_keywords(): integer
-                    local holder = ffi.ffi_keyword_holder.new()
+                    local holder = foreign ffi_keyword_holder.new()
                     holder.when = 5
-                    local result: ffi.type = ffi.when { when = holder.when }
+                    local result: foreign type = ffi.when { when = holder.when }
                     return result + ffi.repeat
                 end
             ]], [[
@@ -399,7 +399,7 @@ describe("named arguments (code generation)", function()
                 foreign import "]] .. header .. [["
 
                 function ffi_copyback(): integer
-                    local out: ffi.ffi_int = 0 as ffi.ffi_int
+                    local out: foreign ffi_int = 0 as foreign ffi_int
                     ffi.ffi_write { new_value = 42, out = out }
                     return out as integer
                 end
@@ -455,7 +455,7 @@ describe("named arguments (code generation)", function()
                 foreign import "]] .. header .. [["
 
                 function ffi_named_gc_copyback(): integer
-                    local raw: ffi.TValue = nil
+                    local raw: foreign TValue = nil
                     ffi.ffi_named_reset_outparam_finalized {}
                     ffi.ffi_named_write_gc_value { out = raw, state = L }
                     ffi.ffi_named_collect { state = L }

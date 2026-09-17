@@ -10,9 +10,9 @@ local lua = import "lua"
 
 ## Loading a string
 
-```titan
+```text
 function load(chunk: string, name: string?, env: value):
-    (...: value) -> (...: value)
+    function (...: value): (...: value)
 ```
 
 `load` compiles all bytes in `chunk` as a Lua text or binary chunk. It uses
@@ -26,7 +26,7 @@ chunk string itself is the name, matching Lua's default. The returned callable
 forwards a run-time-sized sequence of `value` arguments and results, including
 nil elements:
 
-```titan
+```text
 local lua = import "lua"
 
 local chunk = lua.load("return ...", "=passthrough", nil)
@@ -46,9 +46,9 @@ callable propagate normally.
 
 ## Loading through a Reader
 
-```titan
+```text
 function load_from_reader(reader: io.Reader, name: string?, env: value):
-    (...: value) -> (...: value)
+    function (...: value): (...: value)
 ```
 
 `load_from_reader` uses `reader:read` as a generic-for iterator. Every nonnil
@@ -64,7 +64,7 @@ reading or compilation succeeds or raises; ownership remains with the caller.
 
 ## Executing a file
 
-```titan
+```text
 function dofile(filename: string, ...: value): (...: value)
 ```
 
@@ -81,7 +81,7 @@ reaches those operations must therefore run in an async Task with the usual
 
 ## Loading modules
 
-```titan
+```text
 function require(modname: string): value
 ```
 

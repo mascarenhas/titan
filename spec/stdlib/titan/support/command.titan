@@ -2,9 +2,9 @@
 local common = import "support.common.titan"
 foreign import "stdlib.h"
 
-local type Renderer = ({string}) -> string
-local type Executor = ({string}) -> (boolean?, string, integer)
-local type Capturer = ({string}) -> (string, string, integer)
+local type Renderer = function ({string}): (string)
+local type Executor = function ({string}): (boolean?, string, integer)
+local type Capturer = function ({string}): (string, string, integer)
 
 local renderer: Renderer? = nil
 local executor: Executor? = nil

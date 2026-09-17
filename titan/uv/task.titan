@@ -1,60 +1,60 @@
-local type CancelAction = () -> ()
+local type CancelAction = function (): ()
 
 record ResumeToken
   const source: string?
 end
 
-union CancellationReason<B>
-  simple: string
-  complex: B
+union CancellationReason<|B|>
+  simple(string)
+  complex(B)
 end
 
-union TaskStatus<A, B>
-  ready
-  running
-  waiting
-  succeeded: A
-  failed: Error
-  cancelled: CancellationReason<B>
+union TaskStatus<|A, B|>
+  ready()
+  running()
+  waiting()
+  succeeded(A)
+  failed(Error)
+  cancelled(CancellationReason<|B|>)
 end
 
 function TaskStatus:as_string(): string
   case self
-  when ready then return "ready"
-  when running then return "running"
-  when waiting then return "waiting"
-  when succeeded then return "succeeded"
-  when failed then return "failed"
-  when cancelled then return "cancelled"
+  when ready() then return "ready"
+  when running() then return "running"
+  when waiting() then return "waiting"
+  when succeeded() then return "succeeded"
+  when failed() then return "failed"
+  when cancelled() then return "cancelled"
   end
 end
 
 function TaskStatus:has_finished(): boolean
   case self
-  when succeeded then return true
-  when failed then return true
-  when cancelled then return true
+  when succeeded() then return true
+  when failed() then return true
+  when cancelled() then return true
   else return false
   end
 end
 
 function TaskStatus:has_succeeded(): (boolean, A?)
   case self
-  when succeeded: result then return true, result
+  when succeeded(result) then return true, result
   else return false, nil
   end
 end
 
 function TaskStatus:has_failed(): (boolean, Error?)
   case self
-  when failed: failure then return true, failure
+  when failed(failure) then return true, failure
   else return false, nil
   end
 end
 
-function TaskStatus:has_cancelled(): (boolean, CancellationReason<B>?)
+function TaskStatus:has_cancelled(): (boolean, CancellationReason<|B|>?)
   case self
-  when cancelled: reason then return true, reason
+  when cancelled(reason) then return true, reason
   else return false, nil
   end
 end
@@ -87,45 +87,45 @@ end
 -- or consume/install state on a persistent handle. The case below is only a
 -- router; each record owns its operation-specific dispatch method.
 local union Call
-  turn: TurnCall
-  suspend: SuspendCall
-  sleep: SleepCall
-  run_foreign: WorkCall
-  run_foreign_cleanup: WorkCall
-  ticker_tick: TickerTickCall
-  ticker_close: TickerCloseCall
-  handle_close: HandleCloseCall
+  turn(TurnCall)
+  suspend(SuspendCall)
+  sleep(SleepCall)
+  run_foreign(WorkCall)
+  run_foreign_cleanup(WorkCall)
+  ticker_tick(TickerTickCall)
+  ticker_close(TickerCloseCall)
+  handle_close(HandleCloseCall)
 
-  fs_open: FsOpenCall
-  fs_read: FsReadCall
-  fs_write: FsWriteCall
-  fs_flush: FsFlushCall
-  fs_close: FsCloseCall
-  fs_stat: FsStatCall
-  fs_lstat: FsLstatCall
-  fs_tmpname: FsTmpnameCall
-  fs_mkdir: FsMkdirCall
-  fs_unlink: FsUnlinkCall
-  fs_rmdir: FsRmdirCall
-  fs_rename: FsRenameCall
-  fs_list: FsListCall
+  fs_open(FsOpenCall)
+  fs_read(FsReadCall)
+  fs_write(FsWriteCall)
+  fs_flush(FsFlushCall)
+  fs_close(FsCloseCall)
+  fs_stat(FsStatCall)
+  fs_lstat(FsLstatCall)
+  fs_tmpname(FsTmpnameCall)
+  fs_mkdir(FsMkdirCall)
+  fs_unlink(FsUnlinkCall)
+  fs_rmdir(FsRmdirCall)
+  fs_rename(FsRenameCall)
+  fs_list(FsListCall)
 
-  getaddrinfo: GetaddrinfoCall
-  tcp_connect: TcpConnectCall
-  tcp_read: TcpReadCall
-  tcp_write: TcpWriteCall
-  tcp_shutdown: TcpShutdownCall
-  tcp_close: TcpCloseCall
-  tcp_accept: TcpAcceptCall
+  getaddrinfo(GetaddrinfoCall)
+  tcp_connect(TcpConnectCall)
+  tcp_read(TcpReadCall)
+  tcp_write(TcpWriteCall)
+  tcp_shutdown(TcpShutdownCall)
+  tcp_close(TcpCloseCall)
+  tcp_accept(TcpAcceptCall)
 
-  signal_wait: SignalWaitCall
-  stream_read: StreamReadCall
-  stream_write: StreamWriteCall
-  stream_close: StreamCloseCall
-  process_wait: ProcessWaitCall
-  process_spawn_failure: ProcessSpawnFailureCall
+  signal_wait(SignalWaitCall)
+  stream_read(StreamReadCall)
+  stream_write(StreamWriteCall)
+  stream_close(StreamCloseCall)
+  process_wait(ProcessWaitCall)
+  process_spawn_failure(ProcessSpawnFailureCall)
 
-  cleanup_step: CleanupStepCall
+  cleanup_step(CleanupStepCall)
 end
 
 -- Cancellation-sensitive calls are suspension points at which a pending
@@ -134,14 +134,14 @@ end
 -- so one deferred cleanup can continue through several asynchronous closes.
 local function Call:is_cancellation_affected(): boolean
   case self
-  when run_foreign_cleanup then return false
-  when ticker_close then return false
-  when handle_close then return false
-  when fs_close then return false
-  when tcp_close then return false
-  when stream_close then return false
-  when process_spawn_failure then return false
-  when cleanup_step then return false
+  when run_foreign_cleanup() then return false
+  when ticker_close() then return false
+  when handle_close() then return false
+  when fs_close() then return false
+  when tcp_close() then return false
+  when stream_close() then return false
+  when process_spawn_failure() then return false
+  when cleanup_step() then return false
   else return true
   end
 end
@@ -149,20 +149,20 @@ end
 -- The callback closure retains the Task and result through the timer's close
 -- callback, which is the completion point for every one-shot timer.
 local record TimerOwner
-  local handle: owned *ffi.uv_timer_t
-  local callback: (TimerOwner) -> ()
+  local handle: owned *uv_timer_t
+  local callback: function (TimerOwner): ()
   local root_index: integer
 end
 
-foreign function uv_timer_cb(timer: *ffi.uv_timer_t)
-  local handle = timer as *ffi.uv_handle_t
-  local owner = ffi.uv_handle_get_data(handle) as *ffi.Udata
+foreign function uv_timer_cb(timer: *uv_timer_t)
+  local handle = timer as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(handle) as foreign *Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
   local loop = ffi.uv_handle_get_loop(handle)
-  local L = ffi.uv_loop_get_data(loop) as *ffi.lua_State
+  local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
-      callback.upvalue[2]) as UvNoargCallbackEntry
+      callback.upvalue[2]) as foreign UvNoargCallbackEntry
   local top = ffi.lua_gettop(L)
   entry(L, module, callback, owner)
   ffi.lua_settop(L, top)
@@ -170,29 +170,29 @@ end
 
 -- A repeating timer retains only its latest tick and at most one waiter.
 local record uv_timer_t
-  local handle: owned *ffi.uv_timer_t
-  local callback: (uv_timer_t) -> ()
+  local handle: owned *uv_timer_t
+  local callback: function (uv_timer_t): ()
   local runtime: Runtime
   local waiting: Task?
   local fired: boolean
   local root_index: integer
 end
 
-local record TerminalRegistration<A, B>
-  local listener: (TaskStatus<A, B>) -> ()
+local record TerminalRegistration<|A, B|>
+  local listener: function (TaskStatus<|A, B|>): ()
   local live: boolean
 end
 
-record Task<A, B>
+record Task<|A, B|>
   local root: coroutine.Coro
   local runtime: Runtime
-  local state: TaskStatus<A, B>
-  local cancel_value: CancellationReason<B>?
+  local state: TaskStatus<|A, B|>
+  local cancel_value: CancellationReason<|B|>?
   local cancel_action: CancelAction?
   local pending: value
   local root_index: integer
   local cleanup: boolean
-  local terminal_registrations: {TerminalRegistration<A, B>}
+  local terminal_registrations: {TerminalRegistration<|A, B|>}
   -- Only async.suspend installs this resumable state. A pending zero-timer
   -- wake is coalesced so cancellation and terminal listeners cannot queue the
   -- same continuation twice.
@@ -208,17 +208,17 @@ local function terminal(state: TaskStatus): boolean
   return state:has_finished()
 end
 
-function Task:status(): TaskStatus<A, B>
+function Task:status(): TaskStatus<|A, B|>
   return self.state
 end
 
 function Task:add_terminal_listener(
-    listener: (TaskStatus<A, B>) -> ()): () -> ()
+    listener: function (TaskStatus<|A, B|>): ()): function (): ()
   if self.state:has_finished() then
     return function () end
   end
 
-  local registration = TerminalRegistration<A, B>.new(listener, true)
+  local registration = TerminalRegistration<|A, B|>.new(listener, true)
   self.terminal_registrations[#self.terminal_registrations + 1] = registration
   local task = self
   return function ()
@@ -239,14 +239,14 @@ function Task:add_terminal_listener(
   end
 end
 
-function Task:cancel(reason: CancellationReason<B>?)
+function Task:cancel(reason: CancellationReason<|B|>?)
   if self.state:has_finished() or self.cleanup or
      self.cancel_value then return end
   local actual? = reason
   if actual == nil then
     actual = CancellationReason.simple("cancelled")
   end
-  self.cancel_value = actual as CancellationReason<B>
+  self.cancel_value = actual as CancellationReason<|B|>
   local action? = self.cancel_action
   if action and self.pending_cancellation_affected then
     (action as CancelAction)()
@@ -260,45 +260,45 @@ end
 
 local function dispatch_call(task: Task, call: Call): Immediate?
   case call
-  when turn: operation then return operation:dispatch(task)
-  when suspend: operation then return operation:dispatch(task)
-  when sleep: operation then return operation:dispatch(task)
-  when run_foreign: operation then return operation:dispatch(task)
-  when run_foreign_cleanup: operation then return operation:dispatch(task)
-  when ticker_tick: operation then return operation:dispatch(task)
-  when ticker_close: operation then return operation:dispatch(task)
-  when handle_close: operation then return operation:dispatch(task)
+  when turn(operation) then return operation:dispatch(task)
+  when suspend(operation) then return operation:dispatch(task)
+  when sleep(operation) then return operation:dispatch(task)
+  when run_foreign(operation) then return operation:dispatch(task)
+  when run_foreign_cleanup(operation) then return operation:dispatch(task)
+  when ticker_tick(operation) then return operation:dispatch(task)
+  when ticker_close(operation) then return operation:dispatch(task)
+  when handle_close(operation) then return operation:dispatch(task)
 
-  when fs_open: operation then return operation:dispatch(task)
-  when fs_read: operation then return operation:dispatch(task)
-  when fs_write: operation then return operation:dispatch(task)
-  when fs_flush: operation then return operation:dispatch(task)
-  when fs_close: operation then return operation:dispatch(task)
-  when fs_stat: operation then return operation:dispatch(task)
-  when fs_lstat: operation then return operation:dispatch(task)
-  when fs_tmpname: operation then return operation:dispatch(task)
-  when fs_mkdir: operation then return operation:dispatch(task)
-  when fs_unlink: operation then return operation:dispatch(task)
-  when fs_rmdir: operation then return operation:dispatch(task)
-  when fs_rename: operation then return operation:dispatch(task)
-  when fs_list: operation then return operation:dispatch(task)
+  when fs_open(operation) then return operation:dispatch(task)
+  when fs_read(operation) then return operation:dispatch(task)
+  when fs_write(operation) then return operation:dispatch(task)
+  when fs_flush(operation) then return operation:dispatch(task)
+  when fs_close(operation) then return operation:dispatch(task)
+  when fs_stat(operation) then return operation:dispatch(task)
+  when fs_lstat(operation) then return operation:dispatch(task)
+  when fs_tmpname(operation) then return operation:dispatch(task)
+  when fs_mkdir(operation) then return operation:dispatch(task)
+  when fs_unlink(operation) then return operation:dispatch(task)
+  when fs_rmdir(operation) then return operation:dispatch(task)
+  when fs_rename(operation) then return operation:dispatch(task)
+  when fs_list(operation) then return operation:dispatch(task)
 
-  when getaddrinfo: operation then return operation:dispatch(task)
-  when tcp_connect: operation then return operation:dispatch(task)
-  when tcp_read: operation then return operation:dispatch(task)
-  when tcp_write: operation then return operation:dispatch(task)
-  when tcp_shutdown: operation then return operation:dispatch(task)
-  when tcp_close: operation then return operation:dispatch(task)
-  when tcp_accept: operation then return operation:dispatch(task)
+  when getaddrinfo(operation) then return operation:dispatch(task)
+  when tcp_connect(operation) then return operation:dispatch(task)
+  when tcp_read(operation) then return operation:dispatch(task)
+  when tcp_write(operation) then return operation:dispatch(task)
+  when tcp_shutdown(operation) then return operation:dispatch(task)
+  when tcp_close(operation) then return operation:dispatch(task)
+  when tcp_accept(operation) then return operation:dispatch(task)
 
-  when signal_wait: operation then return operation:dispatch(task)
-  when stream_read: operation then return operation:dispatch(task)
-  when stream_write: operation then return operation:dispatch(task)
-  when stream_close: operation then return operation:dispatch(task)
-  when process_wait: operation then return operation:dispatch(task)
-  when process_spawn_failure: operation then return operation:dispatch(task)
+  when signal_wait(operation) then return operation:dispatch(task)
+  when stream_read(operation) then return operation:dispatch(task)
+  when stream_write(operation) then return operation:dispatch(task)
+  when stream_close(operation) then return operation:dispatch(task)
+  when process_wait(operation) then return operation:dispatch(task)
+  when process_spawn_failure(operation) then return operation:dispatch(task)
 
-  when cleanup_step: operation then return operation:dispatch(task)
+  when cleanup_step(operation) then return operation:dispatch(task)
   end
 end
 
@@ -336,11 +336,11 @@ end
 
 local function finish_cleanup_task(task: Task)
   task.runtime.cleanup_done = true
-  retire_task(task, TaskStatus<value, value>.succeeded(nil))
+  retire_task(task, TaskStatus<|value, value|>.succeeded(nil))
 end
 
 local function fail_cleanup_task(task: Task, err: value, trace: string)
-  retire_task(task, TaskStatus<value, value>.failed(Error.new(err, trace)))
+  retire_task(task, TaskStatus<|value, value|>.failed(Error.new(err, trace)))
   report_task_error(err, trace)
 end
 
@@ -356,7 +356,7 @@ local function finish_user_task(task: Task, state: TaskStatus)
     begin_shutdown(runtime)
   end
   case state
-  when failed: failure then
+  when failed(failure) then
     report_task_error(failure.error, failure.traceback)
   end
 end
@@ -367,10 +367,10 @@ end
 local function finish_user_failure(task: Task, err: value, trace: string)
   local cancellation? = task.cancel_value
   if cancellation then
-    finish_user_task(task, TaskStatus<value, value>.cancelled(
-        cancellation as CancellationReason<value>))
+    finish_user_task(task, TaskStatus<|value, value|>.cancelled(
+        cancellation as CancellationReason<|value|>))
   else
-    finish_user_task(task, TaskStatus<value, value>.failed(Error.new(err, trace)))
+    finish_user_task(task, TaskStatus<|value, value|>.failed(Error.new(err, trace)))
   end
 end
 
@@ -399,7 +399,7 @@ local function advance_task(task: Task, failed: boolean, payload: value,
       next_payload = cancellation
     end
 
-    task.state = TaskStatus<value, value>.running()
+    task.state = TaskStatus<|value, value|>.running()
     local yielded: value = nil
     do
       yielded = resume_root(task, next_failed, next_payload)
@@ -419,10 +419,10 @@ local function advance_task(task: Task, failed: boolean, payload: value,
       else
         local requested? = task.cancel_value
         if requested then
-          finish_user_task(task, TaskStatus<value, value>.cancelled(
-              requested as CancellationReason<value>))
+          finish_user_task(task, TaskStatus<|value, value|>.cancelled(
+              requested as CancellationReason<|value|>))
         else
-          finish_user_task(task, TaskStatus<value, value>.succeeded(yielded))
+          finish_user_task(task, TaskStatus<|value, value|>.succeeded(yielded))
         end
       end
       return
@@ -444,7 +444,7 @@ local function advance_task(task: Task, failed: boolean, payload: value,
       -- not a completion that should itself be replaced before resumption.
       next_cancellation_affected = false
     else
-      task.state = TaskStatus<value, value>.waiting()
+      task.state = TaskStatus<|value, value|>.waiting()
       next_cancellation_affected = call_cancellation_affected
       task.pending_cancellation_affected =
         call_cancellation_affected
@@ -517,9 +517,9 @@ local function ticker_callback(ticker: uv_timer_t)
 end
 
 local function activate_timer(runtime: Runtime,
-                              native: owned *ffi.uv_timer_t,
+                              native: owned *uv_timer_t,
                               owner: value,
-                              owner_pointer: *void,
+                              owner_pointer: foreign *void,
                               milliseconds: integer,
                               repeat_time: integer): integer
   -- Root the native storage before init links the handle into the loop. If
@@ -530,16 +530,16 @@ local function activate_timer(runtime: Runtime,
     unroot_handle(runtime, root_index)
     raise make_error(status, "timer.init")
   end
-  local timer_handle: *ffi.uv_timer_t = native
+  local timer_handle: foreign *uv_timer_t = native
   ffi.uv_handle_set_data(
-      timer_handle as *ffi.uv_handle_t,
+      timer_handle as foreign *uv_handle_t,
       owner_pointer)
   status = ffi.uv_timer_start(
       native, uv_timer_cb,
-      milliseconds as ffi.uint64_t,
-      repeat_time as ffi.uint64_t)
+      milliseconds as foreign uint64_t,
+      repeat_time as foreign uint64_t)
   if status < 0 then
-    close_handle(runtime, timer_handle as *ffi.uv_handle_t,
+    close_handle(runtime, timer_handle as foreign *uv_handle_t,
                  owner, root_index, nil, nil)
     raise make_error(status, "timer.start")
   end
@@ -553,7 +553,7 @@ local function start_timer(task: Task, milliseconds: integer,
                            failed: boolean,
                            payload: value): TimerOwner
   local runtime = task.runtime
-  local native: owned *ffi.uv_timer_t = ffi.uv_timer_t.new()
+  local native: owned *uv_timer_t = foreign uv_timer_t.new()
   local completion = function ()
     if terminal(task.state) then
       task.resume_token = nil
@@ -567,10 +567,10 @@ local function start_timer(task: Task, milliseconds: integer,
     end
   end
   local callback = function (owner: TimerOwner)
-    local timer_handle: *ffi.uv_timer_t = owner.handle
+    local timer_handle: foreign *uv_timer_t = owner.handle
     do
       task.cancel_action = nil
-      begin_close(runtime, timer_handle as *ffi.uv_handle_t,
+      begin_close(runtime, timer_handle as foreign *uv_handle_t,
                   owner, owner.root_index, completion)
       owner.root_index = 0
     catch
@@ -579,7 +579,7 @@ local function start_timer(task: Task, milliseconds: integer,
   end
   local owner = TimerOwner.new(native, callback, 0)
   owner.root_index = activate_timer(
-      runtime, native, owner, owner as *void,
+      runtime, native, owner, owner as foreign *void,
       milliseconds, 0)
   return owner
 end
@@ -609,11 +609,11 @@ end
 local function start_ticker(task: Task,
                             milliseconds: integer): uv_timer_t
   local runtime = task.runtime
-  local native: owned *ffi.uv_timer_t = ffi.uv_timer_t.new()
+  local native: owned *uv_timer_t = foreign uv_timer_t.new()
   local ticker = uv_timer_t.new(native, ticker_callback, runtime,
                                 nil, false, 0)
   ticker.root_index = activate_timer(
-      runtime, native, ticker, ticker as *void,
+      runtime, native, ticker, ticker as foreign *void,
       milliseconds, milliseconds)
   return ticker
 end
@@ -655,9 +655,9 @@ local function SleepCall:dispatch(task: Task): Immediate?
   local timer: TimerOwner? = nil
   local cancel_action: CancelAction = function ()
     local owner = timer as TimerOwner
-    local timer_handle: *ffi.uv_timer_t = owner.handle
+    local timer_handle: foreign *uv_timer_t = owner.handle
     close_handle(task.runtime,
-                 timer_handle as *ffi.uv_handle_t,
+                 timer_handle as foreign *uv_handle_t,
                  owner, owner.root_index,
                  task, nil)
   end
@@ -669,9 +669,9 @@ end
 local function ticker_open_for(ticker: uv_timer_t,
                                task: Task): boolean
   if ticker.runtime ~= task.runtime then return false end
-  local timer_handle: *ffi.uv_timer_t = ticker.handle
+  local timer_handle: foreign *uv_timer_t = ticker.handle
   return ffi.uv_is_closing(
-      timer_handle as *ffi.uv_handle_t) == 0
+      timer_handle as foreign *uv_handle_t) == 0
 end
 
 local function TickerTickCall:dispatch(task: Task): Immediate?
@@ -698,14 +698,14 @@ end
 local function TickerCloseCall:dispatch(task: Task): Immediate?
   local ticker = self.ticker
   if not ticker_open_for(ticker, task) then return immediate_ok(nil) end
-  local timer_handle: *ffi.uv_timer_t = ticker.handle
+  local timer_handle: foreign *uv_timer_t = ticker.handle
   local waiter? = ticker.waiting
   if waiter then
     wake_task_next_turn(waiter as Task, false, false)
     ticker.waiting = nil
   end
   close_handle(ticker.runtime,
-               timer_handle as *ffi.uv_handle_t,
+               timer_handle as foreign *uv_handle_t,
                ticker, ticker.root_index, task, nil)
   ticker.root_index = 0
   return nil
@@ -714,7 +714,7 @@ end
 local function CleanupStepCall:dispatch(task: Task): Immediate?
   local pointer = collect_handle(task.runtime)
   if pointer == nil then return immediate_ok(false) end
-  close_handle(task.runtime, pointer as *ffi.uv_handle_t,
+  close_handle(task.runtime, pointer as foreign *uv_handle_t,
                nil, 0, task, true)
   return nil
 end
@@ -728,21 +728,21 @@ local function begin_shutdown(runtime: Runtime)
   local root = coroutine.create(function (_: value): ()
     cleanup_runtime(runtime)
   end, UV_TAG)
-  local task = Task<value, value>.new(
-      root, runtime, TaskStatus<value, value>.ready(),
+  local task = Task<|value, value|>.new(
+      root, runtime, TaskStatus<|value, value|>.ready(),
                         nil, nil, nil, 0, true, {}, false, nil, false, true)
   task.root_index = root_task(runtime, task)
   start_timer(task, 0, false, nil)
 end
 
-local function run_internal(func: () -> value): Task<value, value>
+local function run_internal(func: function (): (value)): Task<|value, value|>
   local runtime = ensure_runtime()
   accepting_work(runtime, "start a Task")
   local root = coroutine.create(function (_: value): value
     return func()
   end, UV_TAG)
-  local task = Task<value, value>.new(
-      root, runtime, TaskStatus<value, value>.ready(),
+  local task = Task<|value, value|>.new(
+      root, runtime, TaskStatus<|value, value|>.ready(),
                         nil, nil, nil, 0, false, {}, false, nil, false, true)
   task.root_index = root_task(runtime, task)
 
@@ -799,5 +799,5 @@ local function os_exit(code: integer)
     end
     index = index + 1
   end
-  raise task.cancel_value as CancellationReason<value>
+  raise task.cancel_value as CancellationReason<|value|>
 end

@@ -207,7 +207,7 @@ The final direct set is:
 ```text
 all source modules in the invocation
 union
-all logical keys physically carried by every selected archive
+all logical() keys() physically() carried() by() every() selected() archive()
 ```
 
 When the checker walks an exported interface and encounters another module's

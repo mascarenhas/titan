@@ -7,7 +7,7 @@ number* of trailing `t` values without an explicit array — but it is
 deliberately limited so the compiler can pass those values on the C stack
 with no allocation in the common case.
 
-```lua
+```titan
 function sum(base: integer, ...: integer): integer
     local n = #...
     local s = base
@@ -38,7 +38,7 @@ bans.
 An input variadic tail is independent of a
 [flexible result tail](flexible-returns.md). A function may declare both:
 
-```lua
+```titan
 function transform(...: integer): (...: string)
     -- input and output runs have separate element types and counts
 end
@@ -57,7 +57,7 @@ type is [inferred from context](#untyped-lambda-vararg). The same form works on
 top-level functions, anonymous functions, concrete methods, and
 [Interface signatures](interfaces.md#declaring-an-interface):
 
-```lua
+```titan
 function log(level: string, ...: string)          -- top-level function
     -- ...
 end
@@ -83,7 +83,7 @@ the grammar admits `...: t` only as the trailing parameter, and requires the
 `: t` on top-level functions and concrete or Interface methods, both rejected
 forms below are caught as **syntax errors** at parse time:
 
-```lua
+```text
 function bad1(...: integer, a: integer)  -- syntax error: nothing may follow ...
 function bad2(...)                       -- syntax error: a top-level vararg needs `: t`
 function bad3(...integer)                -- syntax error: the colon is required
@@ -100,8 +100,8 @@ type, exactly as it may write an untyped parameter `a`. The element type is then
 **inferred from the context** — the expected variadic function type at the point
 where the lambda is assigned, passed, or returned:
 
-```lua
-function apply(f: (...: integer) -> integer): integer
+```titan
+function apply(f: function (...: integer): (integer)): integer
     return f(1, 2, 3)
 end
 
@@ -125,7 +125,7 @@ Inside the declaring function, `...` names the run of extra arguments. It is
 lambda has its own (possibly absent) `...`, and reaching for the enclosing
 one is a compile-time error.
 
-```lua
+```titan
 function outer(...: integer): integer
     local g = function (): integer
         return ...[1]        -- compile-time error
@@ -141,7 +141,7 @@ test.titan:3:16: type error: '...' is not visible inside an inner function
 A *variadic inner lambda* resolves its **own** `...` normally — the rule
 only forbids reaching *outward*:
 
-```lua
+```titan
 function outer(): integer
     local g = function (...: integer): integer return ...[1] end
     return g(1, 2)           -- ok: g's own ...
@@ -151,20 +151,21 @@ end
 Using `...` in a function that is not variadic at all is the related error
 `'...' can only be used inside a variadic function`.
 
-The parser admits `...` only in an explicit form—`#...`, `...[e]`, `(...)`, a
-collection spread `...subject`, or one of the bracketed spread slices—or as
-the final bare marker of a positional expression list. A bare `...` anywhere
-else, such as `1 + ...`, is a syntax error; it does not reach type checking as
-a scalar operand. At the start of a list item, `... -1` instead has the
-unambiguous collection-spread subject `-1` and reaches the checker, which
-rejects that non-container subject.
+The parser accepts bare varargs as expression atoms and permits markers in any
+written list position. The checker enforces their meaning: unparenthesized
+`...` expands only at the final positional slot, and an ordinary scalar operand
+such as `1 + ...` is rejected. Parentheses request one value, including `(...)`
+and `(...[first, last])`. `#...`, `...[e]`, collection spreads, and ranged
+spreads retain their distinct operations. At the start of an expression,
+`... -1` selects the collection-spread subject `-1` and is rejected because it
+is not a container.
 
 ## Length: `#...`
 
 `#...` is the number of variadic arguments the call supplied, as an
 `integer`:
 
-```lua
+```titan
 function count(...: integer): integer
     return #...
 end
@@ -190,7 +191,7 @@ an array gives `t?`, because Lua arrays can have holes; a variadic run is
 run-time error** instead of reading as `nil`. An index `e < 1` or `e` past
 `#...` both raise:
 
-```lua
+```titan
 function at(i: integer, ...: integer): integer
     return ...[i]            -- type integer; raises if i is out of range
 end
@@ -217,7 +218,7 @@ element. Its intrinsic type is `t?`: when `t` is already optional or is
 variadic argument the value is `nil`, and surplus arguments after the first are
 ignored.
 
-```lua
+```titan
 function first(...: integer): integer?
     return (...)
 end
@@ -245,7 +246,7 @@ consumers include:
 * **a generic `for ... in` iterator tuple**, where it fills the remaining
   iterator, state, control, and optional close positions.
 
-```lua
+```titan
 function tail_call(...: integer): integer
     return sum(0, ...)         -- forward this function's ... into sum
 end
@@ -272,15 +273,15 @@ the latter is not a structural or direct coercion. A target with no assignment
 adjustment is a compile-time error, such as
 `'...' element type integer is not coerceable to array element type string`.
 
-```lua
+```titan
 function as_floats(...: integer): {float}
     return {...}               -- {3, 4} of integers becomes {3.0, 4.0}
 end
 ```
 
-A bare `...` that is not last in a constructor (`{..., 1}`) is a syntax error.
-An explicit collection spread such as `{...items, 1}` parses and is rejected
-by the checker because only the final positional field can expand. A trailing
+Bare varargs (`{..., 1}`) and explicit collection spreads (`{...items, 1}`)
+parse in an earlier constructor position and are rejected by the checker:
+only the final positional field can expand. A trailing
 `...` inside a computed-key [Map](arrays-maps.md#maps) or
 [record](records.md) constructor is
 `'...' can only appear in an all-positional array or integer-keyed map
@@ -305,7 +306,7 @@ slot's type**, generalizing the `...[e]` rule above:
   reads as `nil` rather than raising (`local a: integer, b: integer? = ...`
   leaves `b` as `nil` when only one argument was supplied).
 
-```lua
+```titan
 function third(...: integer): integer
     local a, b, c = ...        -- three non-optional slots: needs #... >= 3
     return a + b + c
@@ -329,7 +330,7 @@ Every surplus expression is still evaluated, while its value is discarded;
 if the surplus is the trailing `...`, no element is read because the sink
 requests none of the run:
 
-```lua
+```titan
 function over(...: integer): integer
     return 1, 2, ...           -- returns 1; the explicit 2 is evaluated then discarded
 end
@@ -359,7 +360,7 @@ becomes the callee's variadic run. The two variadic element types must be
 equal or **gradually consistent**, and the checker records the element
 adjustment consumed by the open run:
 
-```lua
+```titan
 function forward(...: integer): integer
     return sum(0, ...)         -- forward the run; element types must match
 end
@@ -386,9 +387,10 @@ Only the `...` *expression* is non-first-class. A **variadic function** — and
 a variadic method's [bound reference](closures.md#bound-method-references)
 `obj:m` — is a perfectly ordinary value: store it, pass it, return it, call
 it indirectly, hand it across the Lua boundary. Its function type carries the
-variadic element, written with the same `...: t` syntax inside the arrow type:
+variadic element, written with `...: t` inside the function type
+`function (...: t): R`:
 
-```lua
+```titan
 function sum(...: integer): integer
     local s = 0
     for i = 1, #... do s = s + ...[i] end
@@ -396,19 +398,19 @@ function sum(...: integer): integer
 end
 
 function run(): integer
-    local f: (...: integer) -> integer = sum      -- store a variadic function
+    local f: function (...: integer): (integer) = sum      -- store a variadic function
     return f(1, 2, 3) + f() + f(10)             --> 6 + 0 + 10
 end
 ```
 
 A function type with a fixed prefix and a variadic tail is written the
-obvious way, `(integer, ...: integer) -> integer`. Calling a variadic value
+obvious way, `function (integer, ...: integer): (integer)`. Calling a variadic value
 works exactly like calling any [function value](functions.md#functions-as-values):
 when the value's run-time type matches the call's static type, the call takes
 the native path. A statically known non-exact adjustment conditionally creates
 a fresh target-tagged wrapper, so an eligible exact Titan source then reaches a
 native adapter that implements fixed/tail actions. For example, a
-`(...: value) -> integer` slot may hold a `(...: integer) -> integer` source;
+`function (...: value): (integer)` slot may hold a `function (...: integer): (integer)` source;
 the adapter strictly establishes the integer elements before invoking the
 source. If wrapper realization is ineligible, the unchanged branded value uses
 its strict generic trailer. A plain Lua function instead uses the ordinary Lua
@@ -418,7 +420,7 @@ Calling a variadic Interface method follows the same rules. Direct calls use
 the Interface signature's fixed prefix and tail; a bound Interface method is an
 ordinary variadic function value whose receiver has already been captured.
 
-`(...: integer) -> integer` and `(...: value) -> integer` are mutually
+`function (...: integer): (integer)` and `function (...: value): (integer)` are mutually
 **consistent** at their aligned components (gradually, through `value`).
 Callable adjustment with fixed-only function types is directional. A fixed
 actual function may inhabit a slot whose type has a variadic tail and ignore
@@ -449,7 +451,7 @@ converted by the shared dynamic rule for element type `t`, exactly as a fixed
 parameter of type `t` would be, and a wrong-typed one raises the usual
 boundary error.
 
-```lua
+```titan
 function greet(prefix: string, ...: string): string
     local out = prefix
     for i = 1, #... do out = out .. " " .. ...[i] end

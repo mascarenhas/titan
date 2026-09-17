@@ -7,7 +7,7 @@ local function fresh_value_map(name: string?): value
 end
 
 local function fresh_marker(): value
-  local marker: (value) -> value = function(candidate: value): value
+  local marker: function (value): (value) = function(candidate: value): value
     local map = candidate as {value: value}
     return map["name"]
   end

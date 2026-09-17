@@ -3,7 +3,7 @@ record BindingLookalikeBlob
 end
 
 union BindingUnion
-  empty
+  empty()
 end
 
 interface BindingInterface
@@ -91,9 +91,9 @@ function test_binding_rejects_unsupported_reflection_kinds(
   local iface: BindingInterface = BindingInterfaceRecord.new("interface")
   rejected_binding(context, "interface", iface)
   rejected_binding(context, "function", function (): integer return 1 end)
-  local storage: owned *int = int.new()
+  local storage: owned *int = foreign int.new()
   rejected_binding(context, "owned_foreign", storage)
-  local pointer: *void = storage
+  local pointer: foreign *void = storage
   rejected_binding(context, "raw_pointer", pointer)
 end
 

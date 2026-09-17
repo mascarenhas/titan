@@ -20,8 +20,8 @@ record Person
 end
 
 union Message
-  person: Person
-  idle
+  person(Person)
+  idle()
 end
 
 function main(args: {string}): integer
@@ -32,9 +32,9 @@ function main(args: {string}): integer
     reflect.NamedType.new("json_example.Message"))
   local restored: Message = json.decode(text, schema)
   case restored
-  when person: person then
+  when person(person) then
     io.print(person.name, person.score)
-  when idle then
+  when idle() then
     io.print("idle")
   end
   return 0
@@ -79,7 +79,7 @@ Invalid option values raise before processing the input.
 Omit `target` for dynamic decoding. To supply decoding options without a target,
 pass nil explicitly: `json.decode(text, nil, json.DecodeOption.max_bytes(4096))`.
 An annotated local, parameter, or return can recover the concrete result of a
-schema-directed call; there is no `decode<T>` type-inference API.
+schema-directed call; there is no `decode<|T|>` type-inference API.
 
 ## Values and containers
 
@@ -213,8 +213,8 @@ factory when such a type must be reconstructed. JSON does not guess factories
 or expose private fields.
 
 Recursive nominal schemas are resolved as their values are visited. They do not
-need eager expansion. Reflection erases generic arguments: `Box<Person>` and
-`Box<string>` have the same runtime nominal schema, and an erased `T` may look
+need eager expansion. Reflection erases generic arguments: `Box<|Person|>` and
+`Box<|string|>` have the same runtime nominal schema, and an erased `T` may look
 exactly like a declared `value`. Such a leaf decodes dynamically; projecting
 the outer result does not prove a generic specialization. Use an explicit
 application decoding function when specialization-specific reconstruction is

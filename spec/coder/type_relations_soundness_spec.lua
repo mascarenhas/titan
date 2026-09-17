@@ -81,11 +81,11 @@ describe("type-relation soundness (end-to-end)", function()
             function options(a: boolean?, b: string?): (boolean, boolean, boolean)
                 return not a, a and b, a or b
             end
-            local function optional<T>(a: T?): boolean
+            local function optional<|T|>(a: T?): boolean
                 return not a
             end
             function generic_options(): (boolean, boolean, boolean)
-                return optional<string>(nil), optional<string>(""), optional<boolean>(false)
+                return optional<|string|>(nil), optional<|string|>(""), optional<|boolean|>(false)
             end
             local function take_boolean(a: boolean): boolean
                 return a
@@ -203,7 +203,7 @@ describe("type-relation soundness (end-to-end)", function()
                 return values["x"]
             end
 
-            function call_integer(f: () -> integer): integer
+            function call_integer(f: function (): integer): integer
                 return f()
             end
 
@@ -242,12 +242,12 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             function strict_function_number(): integer
-                local f: () -> integer = actual_number
+                local f: function (): integer = actual_number
                 return f()
             end
 
             function strict_function_boolean(): boolean
-                local f: () -> boolean = actual_truth
+                local f: function (): boolean = actual_truth
                 return f()
             end
 
@@ -322,14 +322,14 @@ describe("type-relation soundness (end-to-end)", function()
             item_slot: Item = Item.new(1)
             array_slot: {integer} = {1}
             map_slot: {string: integer} = { ["x"] = 1 }
-            callback_slot: (integer) -> integer =
+            callback_slot: function (integer): integer =
                 function(x: integer): integer return x + 1 end
 
             record KindBox
                 item: Item
                 array: {integer}
                 map: {string: integer}
-                callback: (integer) -> integer
+                callback: function (integer): integer
             end
 
             function new_item(number: integer): Item
@@ -395,15 +395,15 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             function callback_is(v: value): boolean
-                return v is (integer) -> integer
+                return v is function (integer): integer
             end
 
             function callback_as(v: value): integer
-                return (v as (integer) -> integer)(1)
+                return (v as function (integer): integer)(1)
             end
 
             function callback_as_only(v: value): value
-                local callback = v as (integer) -> integer
+                local callback = v as function (integer): integer
                 return callback
             end
 
@@ -419,38 +419,38 @@ describe("type-relation soundness (end-to-end)", function()
                 return v["x"]
             end
 
-            function accept_callback(v: (integer) -> integer): integer
+            function accept_callback(v: function (integer): integer): integer
                 return v(1)
             end
 
             function accept_callback_only(
-                v: (integer) -> integer
+                v: function (integer): integer
             ): value
                 return v
             end
 
-            function item_result(f: () -> Item): integer
+            function item_result(f: function (): Item): integer
                 return f().number
             end
 
-            function array_result(f: () -> {integer}): integer
+            function array_result(f: function (): ({integer})): integer
                 return f()[1]
             end
 
             function map_result(
-                f: () -> {string: integer}
+                f: function (): ({string: integer})
             ): integer
                 return f()["x"]
             end
 
             function callback_result(
-                f: () -> (integer) -> integer
+                f: function (): (function (integer): integer)
             ): integer
                 return f()(1)
             end
 
             function callback_result_only(
-                f: () -> (integer) -> integer
+                f: function (): (function (integer): integer)
             ): value
                 local callback = f()
                 return callback
@@ -468,7 +468,7 @@ describe("type-relation soundness (end-to-end)", function()
                 return {{ ["x"] = 3 }}
             end
 
-            function new_callback_values(): {(integer) -> integer}
+            function new_callback_values(): {function (integer): integer}
                 return {increment}
             end
 
@@ -487,7 +487,7 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             function read_callback_values(
-                values: {(integer) -> integer}
+                values: {function (integer): integer}
             ): integer
                 return values[1](1)
             end
@@ -652,12 +652,12 @@ describe("type-relation soundness (end-to-end)", function()
 
             function bind_counter(
                 counter: Counter
-            ): (integer, boolean) -> integer
+            ): function (integer, boolean): integer
                 return counter:add
             end
 
             union Amount
-                count: integer
+                count(integer)
             end
 
             function Amount:add(
@@ -665,7 +665,7 @@ describe("type-relation soundness (end-to-end)", function()
                 enabled: boolean
             ): integer
                 case self
-                when count: number then
+                when count(number) then
                     if enabled then
                         return number + delta
                     end
@@ -681,7 +681,7 @@ describe("type-relation soundness (end-to-end)", function()
 
             function bind_amount(
                 amount: Amount
-            ): (integer, boolean) -> integer
+            ): function (integer, boolean): integer
                 return amount:add
             end
         ]], [[
@@ -755,7 +755,7 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             function written_callable(): integer
-                local viewed = actual as () -> value
+                local viewed = actual as function (): value
                 return viewed() as integer
             end
 
@@ -853,8 +853,8 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             function compare_callable_views(): (boolean, boolean)
-                local narrow: (integer) -> integer = short
-                local wide: (integer, integer) -> integer = short
+                local narrow: function (integer): integer = short
+                local wide: function (integer, integer): integer = short
                 return narrow == wide, wide == narrow
             end
         ]], [[
@@ -901,27 +901,27 @@ describe("type-relation soundness (end-to-end)", function()
             foreign import "spec/fixtures/c_numeric_soundness.h"
 
             function read_array(): integer
-                local one = 1 as ffi.titan_spec_i8
-                local xs: {ffi.titan_spec_i8} = {one}
+                local one = 1 as foreign titan_spec_i8
+                local xs: {foreign titan_spec_i8} = {one}
                 return xs[1]
             end
 
             function read_map(): integer
-                local one = 1 as ffi.titan_spec_i8
-                local map: {string: ffi.titan_spec_i8} = {
+                local one = 1 as foreign titan_spec_i8
+                local map: {string: foreign titan_spec_i8} = {
                     ["one"] = one
                 }
                 return map["one"]
             end
 
             function new_array(): value
-                local one = 1 as ffi.titan_spec_i8
+                local one = 1 as foreign titan_spec_i8
                 return {one}
             end
 
             function read_array_value(values: value): integer
                 local typed =
-                    values as {ffi.titan_spec_i8}
+                    values as {foreign titan_spec_i8}
                 return typed[1]
             end
         ]], [[
@@ -943,12 +943,12 @@ describe("type-relation soundness (end-to-end)", function()
             foreign import "spec/fixtures/c_numeric_soundness.h"
 
             local record SmallBox
-                number: ffi.titan_spec_i8
+                number: foreign titan_spec_i8
                 optional: integer?
             end
 
             function new_box(): value
-                return SmallBox.new(1 as ffi.titan_spec_i8, 1)
+                return SmallBox.new(1 as foreign titan_spec_i8, 1)
             end
 
             function read_box(v: value): (integer, integer?)
@@ -957,7 +957,7 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             function i8_as(v: value): integer
-                local narrowed = v as ffi.titan_spec_i8
+                local narrowed = v as foreign titan_spec_i8
                 return narrowed
             end
 
@@ -966,12 +966,12 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             function new_values(): value
-                local one = 1 as ffi.titan_spec_i8
+                local one = 1 as foreign titan_spec_i8
                 return {one}
             end
 
             function read_values(v: value): integer
-                local values = v as {ffi.titan_spec_i8}
+                local values = v as {foreign titan_spec_i8}
                 return values[1]
             end
         ]], [[
@@ -1000,14 +1000,14 @@ describe("type-relation soundness (end-to-end)", function()
             foreign import "spec/fixtures/c_numeric_soundness.h"
 
             local record CBox
-                i8: ffi.titan_spec_i8
-                f32: ffi.titan_spec_float
+                i8: foreign titan_spec_i8
+                f32: foreign titan_spec_float
             end
 
             function new_c_box(): value
                 return CBox.new(
-                    1 as ffi.titan_spec_i8,
-                    1.25 as ffi.titan_spec_float)
+                    1 as foreign titan_spec_i8,
+                    1.25 as foreign titan_spec_float)
             end
 
             function read_c_box(v: value): (integer, float)
@@ -1016,39 +1016,39 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             function i8_is(v: value): boolean
-                return v is ffi.titan_spec_i8
+                return v is foreign titan_spec_i8
             end
 
             function i8_as(v: value): integer
-                local narrowed = v as ffi.titan_spec_i8
+                local narrowed = v as foreign titan_spec_i8
                 return narrowed
             end
 
             function f32_is(v: value): boolean
-                return v is ffi.titan_spec_float
+                return v is foreign titan_spec_float
             end
 
             function f32_as(v: value): float
-                local narrowed = v as ffi.titan_spec_float
+                local narrowed = v as foreign titan_spec_float
                 return narrowed
             end
 
-            local function take_i8(v: ffi.titan_spec_i8): integer
+            local function take_i8(v: foreign titan_spec_i8): integer
                 return v
             end
 
-            local function take_f32(v: ffi.titan_spec_float): float
+            local function take_f32(v: foreign titan_spec_float): float
                 return v
             end
 
             local function result_i8(
-                f: () -> ffi.titan_spec_i8
+                f: function (): (foreign titan_spec_i8)
             ): integer
                 return f()
             end
 
             local function result_f32(
-                f: () -> ffi.titan_spec_float
+                f: function (): (foreign titan_spec_float)
             ): float
                 return f()
             end
@@ -1070,22 +1070,22 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             function new_i8_values(): value
-                local one = 1 as ffi.titan_spec_i8
+                local one = 1 as foreign titan_spec_i8
                 return {one}
             end
 
             function read_i8_values(v: value): integer
-                local values = v as {ffi.titan_spec_i8}
+                local values = v as {foreign titan_spec_i8}
                 return values[1]
             end
 
             function new_f32_values(): value
-                local one = 1.25 as ffi.titan_spec_float
+                local one = 1.25 as foreign titan_spec_float
                 return {one}
             end
 
             function read_f32_values(v: value): float
-                local values = v as {ffi.titan_spec_float}
+                local values = v as {foreign titan_spec_float}
                 return values[1]
             end
 
@@ -1116,7 +1116,7 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             function option_result(
-                f: () -> integer?
+                f: function (): integer?
             ): integer?
                 return f()
             end
@@ -1237,15 +1237,15 @@ describe("type-relation soundness (end-to-end)", function()
     function()
         run_coder([[
             foreign import "spec/fixtures/c_tvalue_soundness.h"
-            local type Owner = owned ffi.titan_spec_tvalue_i8[]
+            local type Owner = owned titan_spec_tvalue_i8[]
 
             local record DynamicBox
                 owner: Owner
-                raw: ffi.TValue
+                raw: foreign TValue
             end
 
             function new_owner(): value
-                return ffi.titan_spec_tvalue_i8.new_array(2)
+                return foreign titan_spec_tvalue_i8.new_array(2)
             end
 
             function owner_length(v: value): integer
@@ -1254,14 +1254,14 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             function raw_roundtrip(v: value): value
-                local raw = v as ffi.TValue
+                local raw = v as foreign TValue
                 return raw
             end
 
             function new_box(): value
                 local owner: Owner =
-                    ffi.titan_spec_tvalue_i8.new_array(2)
-                local raw: ffi.TValue = "initial"
+                    foreign titan_spec_tvalue_i8.new_array(2)
+                local raw: foreign TValue = "initial"
                 return DynamicBox.new(owner, raw)
             end
 
@@ -1290,20 +1290,20 @@ describe("type-relation soundness (end-to-end)", function()
         run_coder([[
             foreign import "spec/fixtures/c_numeric_soundness.h"
             foreign import "titan/ffi.h"
-            local type Owner = owned ffi.titan_spec_i8[]
-            local type OtherOwner = owned ffi.titan_spec_u8[]
+            local type Owner = owned titan_spec_i8[]
+            local type OtherOwner = owned titan_spec_u8[]
 
             local record DynamicBox
                 owner: Owner
-                raw: ffi.TValue
+                raw: foreign TValue
             end
 
             function new_owner(): value
-                return ffi.titan_spec_i8.new_array(2)
+                return foreign titan_spec_i8.new_array(2)
             end
 
             function new_other_owner(): value
-                return ffi.titan_spec_u8.new_array(2)
+                return foreign titan_spec_u8.new_array(2)
             end
 
             function owner_is(v: value): boolean
@@ -1320,7 +1320,7 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             local function owner_result(
-                f: () -> Owner
+                f: function (): Owner
             ): integer
                 return #f()
             end
@@ -1335,8 +1335,8 @@ describe("type-relation soundness (end-to-end)", function()
 
             function new_dynamic_box(): value
                 local owner: Owner =
-                    ffi.titan_spec_i8.new_array(2)
-                local raw: ffi.TValue = "initial"
+                    foreign titan_spec_i8.new_array(2)
+                local raw: foreign TValue = "initial"
                 return DynamicBox.new(owner, raw)
             end
 
@@ -1347,7 +1347,7 @@ describe("type-relation soundness (end-to-end)", function()
 
             function new_owner_values(): value
                 local owner: Owner =
-                    ffi.titan_spec_i8.new_array(2)
+                    foreign titan_spec_i8.new_array(2)
                 return {owner}
             end
 
@@ -1357,20 +1357,20 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             function raw_is(v: value): boolean
-                return v is ffi.TValue
+                return v is foreign TValue
             end
 
             function raw_as(v: value): value
-                local raw = v as ffi.TValue
+                local raw = v as foreign TValue
                 return raw
             end
 
-            local function take_raw(v: ffi.TValue): value
+            local function take_raw(v: foreign TValue): value
                 return v
             end
 
             local function raw_result(
-                f: () -> ffi.TValue
+                f: function (): (foreign TValue)
             ): value
                 return f()
             end
@@ -1384,12 +1384,12 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             function new_raw_values(): value
-                local raw: ffi.TValue = "initial"
+                local raw: foreign TValue = "initial"
                 return {raw}
             end
 
             function read_raw_values(v: value): value
-                local values = v as {ffi.TValue}
+                local values = v as {foreign TValue}
                 return values[1]
             end
         ]], [[
@@ -1490,17 +1490,17 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             function raw_option(x: integer?): value
-                local raw: ffi.TValue = x
+                local raw: foreign TValue = x
                 return raw
             end
 
             function force_c_integer(x: value?): integer
-                local raw: ffi.titan_spec_tvalue_int = x
+                local raw: foreign titan_spec_tvalue_int = x
                 return raw
             end
 
             function force_c_float(x: value?): float
-                local raw: ffi.titan_spec_tvalue_double = x
+                local raw: foreign titan_spec_tvalue_double = x
                 return raw
             end
         ]], [[
@@ -1530,7 +1530,7 @@ describe("type-relation soundness (end-to-end)", function()
         run_coder([[
             foreign import "spec/fixtures/c_numeric_soundness.h"
 
-            local function first_entry(input: ffi.titan_spec_i8): integer
+            local function first_entry(input: foreign titan_spec_i8): integer
                 return 0
             end
 
@@ -1551,7 +1551,7 @@ describe("type-relation soundness (end-to-end)", function()
             foreign import "spec/fixtures/c_numeric_soundness.h"
 
             function value_as_i8(v: value): integer
-                return v as ffi.titan_spec_i8
+                return v as foreign titan_spec_i8
             end
 
             function widest_to_value(): value
@@ -1559,7 +1559,7 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             function checked_call(v: value): integer
-                ffi.titan_spec_take_i8(v as ffi.titan_spec_i8)
+                ffi.titan_spec_take_i8(v as foreign titan_spec_i8)
                 return ffi.titan_spec_numeric_mutation_count()
             end
 
@@ -1567,8 +1567,8 @@ describe("type-relation soundness (end-to-end)", function()
                 return ffi.titan_spec_numeric_mutation_count()
             end
 
-            local type I8s = owned ffi.titan_spec_i8[]
-            local values: I8s = ffi.titan_spec_i8.new_array(1)
+            local type I8s = owned titan_spec_i8[]
+            local values: I8s = foreign titan_spec_i8.new_array(1)
 
             function write_owned(v: integer): integer
                 values[0] = v
@@ -1597,44 +1597,44 @@ describe("type-relation soundness (end-to-end)", function()
             foreign import "spec/fixtures/c_numeric_soundness.h"
 
             function value_is_i8(v: value): boolean
-                return v is ffi.titan_spec_i8
+                return v is foreign titan_spec_i8
             end
 
             function value_as_i8(v: value): integer
-                local narrowed = v as ffi.titan_spec_i8
+                local narrowed = v as foreign titan_spec_i8
                 return narrowed
             end
 
             function implicit_i8(v: value): integer
-                local narrowed: ffi.titan_spec_i8 = v
+                local narrowed: foreign titan_spec_i8 = v
                 return narrowed
             end
 
             function value_is_u8(v: value): boolean
-                return v is ffi.titan_spec_u8
+                return v is foreign titan_spec_u8
             end
 
             function value_as_u8(v: value): integer
-                local narrowed = v as ffi.titan_spec_u8
+                local narrowed = v as foreign titan_spec_u8
                 return narrowed
             end
 
             function value_is_c_bool(v: value): boolean
-                return v is ffi.titan_spec_bool
+                return v is foreign titan_spec_bool
             end
 
             function value_as_c_bool(v: value): integer
-                local narrowed = v as ffi.titan_spec_bool
+                local narrowed = v as foreign titan_spec_bool
                 return narrowed
             end
 
             function option_is_i8(v: value?): boolean
-                return v is ffi.titan_spec_i8?
+                return v is (foreign titan_spec_i8)?
             end
 
             function option_as_i8(v: value?): integer
-                local narrowed = v as ffi.titan_spec_i8?
-                local present: ffi.titan_spec_i8 = narrowed
+                local narrowed = v as (foreign titan_spec_i8)?
+                local present: foreign titan_spec_i8 = narrowed
                 return present
             end
 
@@ -1647,13 +1647,13 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             function explicit_integer_wrap(): integer
-                local wide = 300 as ffi.titan_spec_ull
-                local narrow = wide as ffi.titan_spec_u8
+                local wide = 300 as foreign titan_spec_ull
+                local narrow = wide as foreign titan_spec_u8
                 return narrow
             end
 
             function checked_call(v: value): integer
-                ffi.titan_spec_take_i8(v as ffi.titan_spec_i8)
+                ffi.titan_spec_take_i8(v as foreign titan_spec_i8)
                 return ffi.titan_spec_numeric_mutation_count()
             end
 
@@ -1666,9 +1666,9 @@ describe("type-relation soundness (end-to-end)", function()
                 return ffi.titan_spec_numeric_mutation_count()
             end
 
-            local type I8s = owned ffi.titan_spec_i8[]
+            local type I8s = owned titan_spec_i8[]
             local owned_i8s: I8s =
-                ffi.titan_spec_i8.new_array(1)
+                foreign titan_spec_i8.new_array(1)
 
             function write_owned_i8(v: integer): integer
                 owned_i8s[0] = v
@@ -1680,12 +1680,12 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             function new_i8_array(): value
-                local one = 1 as ffi.titan_spec_i8
+                local one = 1 as foreign titan_spec_i8
                 return {one}
             end
 
             function read_i8_array(values: value): integer
-                local typed = values as {ffi.titan_spec_i8}
+                local typed = values as {foreign titan_spec_i8}
                 return typed[1]
             end
         ]], [[
@@ -1772,12 +1772,12 @@ describe("type-relation soundness (end-to-end)", function()
 
             function double_as_float(): float
                 return ffi.titan_spec_double_max()
-                    as ffi.titan_spec_float
+                    as foreign titan_spec_float
             end
 
             function double_as_i8(v: float): integer
-                local source = v as ffi.titan_spec_double
-                return source as ffi.titan_spec_i8
+                local source = v as foreign titan_spec_double
+                return source as foreign titan_spec_i8
             end
 
             function double_infinity(): float
@@ -1800,34 +1800,34 @@ describe("type-relation soundness (end-to-end)", function()
 
             function double_is_float(): boolean
                 return ffi.titan_spec_double_max()
-                    is ffi.titan_spec_float
+                    is foreign titan_spec_float
             end
 
             function double_as_float(): float
                 local narrowed = ffi.titan_spec_double_max()
-                    as ffi.titan_spec_float
+                    as foreign titan_spec_float
                 return narrowed
             end
 
             function infinity_is_float(): boolean
                 return ffi.titan_spec_double_inf()
-                    is ffi.titan_spec_float
+                    is foreign titan_spec_float
             end
 
             function infinity_as_float(): float
                 local narrowed = ffi.titan_spec_double_inf()
-                    as ffi.titan_spec_float
+                    as foreign titan_spec_float
                 return narrowed
             end
 
             function nan_is_float(): boolean
                 return ffi.titan_spec_double_nan()
-                    is ffi.titan_spec_float
+                    is foreign titan_spec_float
             end
 
             function nan_as_float(): float
                 local narrowed = ffi.titan_spec_double_nan()
-                    as ffi.titan_spec_float
+                    as foreign titan_spec_float
                 return narrowed
             end
 
@@ -1848,19 +1848,19 @@ describe("type-relation soundness (end-to-end)", function()
             end
 
             function double_is_i8(v: float): boolean
-                local source = v as ffi.titan_spec_double
-                return source is ffi.titan_spec_i8
+                local source = v as foreign titan_spec_double
+                return source is foreign titan_spec_i8
             end
 
             function double_as_i8(v: float): integer
-                local source = v as ffi.titan_spec_double
-                local narrowed = source as ffi.titan_spec_i8
+                local source = v as foreign titan_spec_double
+                local narrowed = source as foreign titan_spec_i8
                 return narrowed
             end
 
             function c_operator_u128_to_float(): float
                 return ffi.titan_spec_u128_max()
-                    + (0.0 as ffi.titan_spec_float)
+                    + (0.0 as foreign titan_spec_float)
             end
         ]], [[
             local function fails(f, ...)

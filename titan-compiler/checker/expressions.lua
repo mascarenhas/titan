@@ -28,6 +28,14 @@ end
 --   context: expected type for this expression, if applicable
 --   annotates the node with its type in a "_type" field
 checkexp = util.make_visitor({
+    ["Ast.ExpForeignType"] = function(node, st, errors, context)
+        node._type = typefromnode(node.type, st, errors)
+        if context ~= c_type_namespace_context then
+            node._type = invalid(errors, node.loc,
+                "a foreign type expression requires a new, new_array, sizeof, or alignof operation")
+        end
+    end,
+
     ["Ast.ExpNil"] = function(node)
         node._type = types.Nil()
     end,
@@ -263,6 +271,12 @@ checkexp = util.make_visitor({
         if node.var._generic_owner_explicit then
             node._type = invalid(errors, node.loc,
                 "an explicitly applied nominal function can only be used in a direct call")
+        elseif #(node._nominal_typeargs or {}) > 0 then
+            node._type = invalid(errors, node.loc,
+                "explicit type arguments are only supported in a direct call")
+        elseif texp._tag == "Type.Module" and texp._current_module
+               and context == current_module_cast_context then
+            node._type = texp
         elseif texp._tag == "Type.Module" or texp._tag == "Type.CModule" then
             node._type = invalid(errors, node.loc,
                 "trying to access module '%s' as a first-class value",
@@ -692,7 +706,7 @@ checkexp = util.make_visitor({
                 local resolved_payload = c_resolve(pseudo_new.ctype)
                 local literal_count = pseudo_new.array
                     and checker._allocation_integer_literal(
-                        node.args.args[1]) or nil
+                        node.args.args[1], st) or nil
                 local allow_automatic_array = pseudo_new.array
                     and resolved_payload
                     and resolved_payload._tag == "Type.CArray"
@@ -1106,16 +1120,26 @@ checkexp = util.make_visitor({
     end,
 
     ["Ast.ExpAdjust"] = function(node, st, errors, context, demand)
-        -- Bare input varargs are not a general source expression. The parser
-        -- admits them here only through the explicit `(...)` scalar form,
-        -- which selects the first value and adjusts an absent value upward to
-        -- nil just like a parenthesized multiple-result call.
+        node.exp = normalize_spread_expression(node.exp)
+        -- Parenthesized varargs/spreads select exactly one optional value,
+        -- padding an empty run with nil just like a parenthesized call.
         if node.exp._tag == "Ast.ExpDots" then
             local index = ast.ExpInteger(node.exp.loc, 1)
             local projection = ast.ExpDotsIndex(node.exp.loc, index)
             projection._nilfill = true
             checkexp(projection, st, errors)
             node.exp = projection
+            node._type = projection._type
+            return
+        end
+        if node.exp._tag == "Ast.ExpSpread" then
+            local spread = node.exp
+            check_spread_marker(spread, st, errors)
+            local projection = ast.ExpSpreadIndex(
+                node.loc, spread, 1, spread._spread_optional_type)
+            projection._nilfill = true
+            node.exp = projection
+            node._adjusted_spread = spread
             node._type = projection._type
             return
         end
@@ -1296,6 +1320,11 @@ checkexp = util.make_visitor({
         function(operation)
         local written_exp = node.exp
         checkexp(node.exp, st, errors)
+        if #(node._nominal_typeargs or {}) > 0 then
+            node._type = invalid(errors, node.loc,
+                "explicit method type arguments are only supported in a direct call")
+            return node._type
+        end
         local otype = node.exp._type
         -- auto-unwrap an option receiver, like a method call does, so `p:m` on a
         -- Point? unwraps to the underlying record (the cast codegen nil-checks).
@@ -1466,10 +1495,8 @@ checkexp = util.make_visitor({
             or optionize(node.spread._spread_elem)
     end,
 
-    -- Parser-built bare `...` nodes occur only as tail markers, inside the
-    -- explicit `(...)` form, or underneath an explicit subset wrapper. Those
-    -- consumers intercept them before this arm. Keep a defensive diagnostic
-    -- for synthesized or manually-built ASTs that violate that invariant.
+    -- The grammar accepts bare varargs in ordinary expression positions. Valid
+    -- tail/scalar-adjustment consumers intercept them; all other uses fail here.
     ["Ast.ExpDots"] = function(node, st, errors, _)
         node._vararg_elem = resolve_vararg(st, node.loc, errors)
         node._type = node._vararg_elem

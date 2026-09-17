@@ -29,8 +29,8 @@ describe("source-import local visibility (checker)", function()
                 end
 
                 local union Result
-                    ready: Token
-                    failed: string
+                    ready(Token)
+                    failed(string)
                 end
             ]],
             source_local_consumer = [[
@@ -43,9 +43,9 @@ describe("source-import local visibility (checker)", function()
                     local result: provider.Result =
                         provider.Result.ready(token)
                     case result
-                    when ready: found then
+                    when ready(found) then
                         return found.count + count
-                    when failed: message then
+                    when failed(message) then
                         return #message
                     end
                 end
@@ -153,26 +153,26 @@ describe("source-import local visibility (checker)", function()
                 end
 
                 union Choice
-                    local hidden: integer
-                    shown: integer
+                    local hidden(integer)
+                    shown(integer)
                 end
             ]],
             source_member_consumer = [[
                 local provider = import "source_member_provider.titan"
 
                 function inspect(): integer
-                    local construct: (integer, integer) -> provider.Box =
+                    local construct: function (integer, integer): provider.Box =
                         provider.Box.new
-                    local make: (integer, integer) -> provider.Box =
+                    local make: function (integer, integer): provider.Box =
                         provider.Box.make
                     local box = construct(10, 20)
                     box.hidden = make(30, 40):secret()
-                    local secret: () -> integer = box:secret
+                    local secret: function (): integer = box:secret
                     local choice = provider.Choice.hidden(secret())
                     case choice
-                    when hidden: n then
+                    when hidden(n) then
                         return n + box.shown
-                    when shown: n then
+                    when shown(n) then
                         return n
                     end
                 end
@@ -459,14 +459,14 @@ describe("source-import local visibility (checker)", function()
         local modules = {
             source_alias_provider = string.format([[
                 foreign import %q
-                local type Wide = ffi.source_alias_wide_enum
-                local type WideArray = {Wide}
+                foreign type Wide = source_alias_wide_enum
+                local type WideArray = {foreign Wide}
                 local type WideMap = {string: WideArray}
-                local type WideFunction = (WideMap) -> integer
+                local type WideFunction = function (WideMap): integer
             ]], header),
             source_alias_pointer_consumer = [[
                 local provider = import "source_alias_provider.titan"
-                local type Pointer = *provider.Wide
+                foreign type Pointer = *Wide
                 local type Composite = provider.WideFunction?
                 function inspect(): integer return 1 end
             ]],
@@ -525,10 +525,10 @@ describe("source-import local visibility (checker)", function()
             local ok, err, imported = h.run_checker_modules({
                 source_probe_input_provider = string.format([[
                     foreign import %q
-                    local type Left = ffi.SourceProbeInputLeft
-                    local type Right = ffi.SourceProbeInputRight
+                    foreign type Left = SourceProbeInputLeft
+                    foreign type Right = SourceProbeInputRight
 
-                    local function left(): *Left
+                    local function left(): foreign *Left
                         return ffi.source_probe_input_left()
                     end
                 ]], header),
@@ -537,7 +537,7 @@ describe("source-import local visibility (checker)", function()
                         import "source_probe_input_provider.titan"
 
                     function inspect(): integer
-                        local right = provider.left() as *provider.Right
+                        local right = provider.left() as foreign *Right
                         if right == nil then return -1 end
                         return 1
                     end

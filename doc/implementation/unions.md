@@ -45,14 +45,14 @@ semicolon after each variant:
 
 ```text
 ["local"] "union" Name union-variant+ "end"
-union-variant ::= ["local"] Name [":" type] [";"]
+union-variant ::= ["local"] AnyName "(" [type] ")" [";"]
 ```
 
-A case has one or more arms:
+A case parses its sequence of arms before the optional else block:
 
 ```text
 "case" expression
-    ("when" Name [":" Name] "then" block)+
+    ("when" AnyName "(" [Name] ")" "then" block)*
     ["else" block]
 "end"
 ```
@@ -60,7 +60,9 @@ A case has one or more arms:
 The `block` after `then` and `else` is the same grammar production used by
 other compound statements. It may therefore become either a plain
 `Ast.StatBlock` or the `Ast.StatTry` wrapper produced by a trailing `catch`
-and/or `finally`. No restricted "case body" grammar exists.
+clause. Source `finally` remains reserved and unused; internal cleanup
+lowering may populate the existing finally representation. No restricted
+"case body" grammar exists.
 
 `defs.uniondecl` returns the `Ast.TopLevelUnion` followed immediately by one
 synthesized `Ast.TopLevelStatic` per variant. An empty variant produces a

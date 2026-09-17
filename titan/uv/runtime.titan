@@ -1,8 +1,8 @@
 local type Bytes = owned char[]
 
 local record StreamWriteOwner
-  local handle: owned *ffi.uv_write_t
-  local callback: (StreamWriteOwner, integer) -> ()
+  local handle: owned *uv_write_t
+  local callback: function (StreamWriteOwner, integer): ()
 end
 
 local record Immediate
@@ -11,7 +11,7 @@ local record Immediate
 end
 
 local record Runtime
-  local loop: owned *ffi.uv_loop_t
+  local loop: owned *uv_loop_t
   local task_roots: {Task}
   local next_task_root: integer
   local handle_roots: {value}
@@ -24,7 +24,7 @@ end
 
 local record HandleCloseCall
   local runtime: Runtime
-  local handle: *ffi.uv_handle_t
+  local handle: foreign *uv_handle_t
   local keepalive: value
   local root_index: integer
 end
@@ -34,94 +34,94 @@ end
 -- zero-based Udata slot 1 used by uv_close_cb.
 local record CloseOwner
   local root_index: integer
-  local callback: (CloseOwner) -> ()
+  local callback: function (CloseOwner): ()
 end
 
 local record WalkOwner
-  local handle: *void
-  local callback: (WalkOwner, *void) -> ()
+  local handle: foreign *void
+  local callback: function (WalkOwner, foreign *void): ()
 end
 
-foreign function uv_write_cb(req: *ffi.uv_write_t,
+foreign function uv_write_cb(req: *uv_write_t,
                              status: int)
   local owner = ffi.uv_req_get_data(
-      req as *ffi.uv_req_t) as *ffi.Udata
+      req as foreign *uv_req_t) as foreign *Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
-  local handle = req.handle as *ffi.uv_handle_t
+  local handle = req.handle as foreign *uv_handle_t
   local loop = ffi.uv_handle_get_loop(handle)
-  local L = ffi.uv_loop_get_data(loop) as *ffi.lua_State
+  local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
-      callback.upvalue[2]) as UvIntegerCallbackEntry
+      callback.upvalue[2]) as foreign UvIntegerCallbackEntry
   local top = ffi.lua_gettop(L)
-  entry(L, module, callback, owner, status as ffi.lua_Integer)
+  entry(L, module, callback, owner, status as foreign lua_Integer)
   ffi.lua_settop(L, top)
 end
 
-foreign function uv_alloc_cb(handle: *ffi.uv_handle_t,
-                             suggested_size: ffi.size_t,
-                             buf: *ffi.uv_buf_t)
-  local owner = ffi.uv_handle_get_data(handle) as *ffi.Udata
+foreign function uv_alloc_cb(handle: *uv_handle_t,
+                             suggested_size: size_t,
+                             buf: *uv_buf_t)
+  local owner = ffi.uv_handle_get_data(handle) as foreign *Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
   local loop = ffi.uv_handle_get_loop(handle)
-  local L = ffi.uv_loop_get_data(loop) as *ffi.lua_State
+  local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
-      callback.upvalue[2]) as UvSizePointerCallbackEntry
+      callback.upvalue[2]) as foreign UvSizePointerCallbackEntry
   local top = ffi.lua_gettop(L)
   entry(L, module, callback, owner, suggested_size,
-        buf as *void)
+        buf as foreign *void)
   ffi.lua_settop(L, top)
 end
 
-foreign function uv_read_cb(stream: *ffi.uv_stream_t,
-                            nread: ffi.ssize_t,
-                            buf: const *ffi.uv_buf_t)
-  local handle = stream as *ffi.uv_handle_t
-  local owner = ffi.uv_handle_get_data(handle) as *ffi.Udata
+foreign function uv_read_cb(stream: *uv_stream_t,
+                            nread: ssize_t,
+                            buf: const *uv_buf_t)
+  local handle = stream as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(handle) as foreign *Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[2].uv)
   local loop = ffi.uv_handle_get_loop(handle)
-  local L = ffi.uv_loop_get_data(loop) as *ffi.lua_State
+  local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
-      callback.upvalue[2]) as UvIntegerCallbackEntry
+      callback.upvalue[2]) as foreign UvIntegerCallbackEntry
   local top = ffi.lua_gettop(L)
-  entry(L, module, callback, owner, nread as ffi.lua_Integer)
+  entry(L, module, callback, owner, nread as foreign lua_Integer)
   ffi.lua_settop(L, top)
 end
 
-foreign function uv_close_cb(handle: *ffi.uv_handle_t)
-  local owner = ffi.uv_handle_get_data(handle) as *ffi.Udata
+foreign function uv_close_cb(handle: *uv_handle_t)
+  local owner = ffi.uv_handle_get_data(handle) as foreign *Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
   local loop = ffi.uv_handle_get_loop(handle)
-  local L = ffi.uv_loop_get_data(loop) as *ffi.lua_State
+  local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
-      callback.upvalue[2]) as UvNoargCallbackEntry
+      callback.upvalue[2]) as foreign UvNoargCallbackEntry
   local top = ffi.lua_gettop(L)
   entry(L, module, callback, owner)
   ffi.lua_settop(L, top)
 end
 
-foreign function uv_walk_cb(handle: *ffi.uv_handle_t,
+foreign function uv_walk_cb(handle: *uv_handle_t,
                             arg: *void)
-  local owner = arg as *ffi.Udata
+  local owner = arg as foreign *Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
   local loop = ffi.uv_handle_get_loop(handle)
-  local L = ffi.uv_loop_get_data(loop) as *ffi.lua_State
+  local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
-      callback.upvalue[2]) as UvPointerCallbackEntry
+      callback.upvalue[2]) as foreign UvPointerCallbackEntry
   local top = ffi.lua_gettop(L)
   entry(L, module, callback, owner,
-        handle as *void)
+        handle as foreign *void)
   ffi.lua_settop(L, top)
 end
 
-local function main_thread_state(): *ffi.lua_State
+local function main_thread_state(): foreign *lua_State
   local top = ffi.lua_gettop(L)
   ffi.lua_rawgeti(L, ffi.LUA_REGISTRYINDEX,
-                  ffi.LUA_RIDX_MAINTHREAD as ffi.lua_Integer)
+                  ffi.LUA_RIDX_MAINTHREAD as foreign lua_Integer)
   local thread = ffi.lua_tothread(L, -1)
   ffi.lua_settop(L, top)
   if not thread then raise "Lua main thread is unavailable" end
@@ -130,7 +130,7 @@ end
 
 local function make_error(code: integer,
                           operation: string): OperationError
-  local status = code as int
+  local status = code as foreign int
   return OperationError.new(code, ffi.uv_err_name(status) as string,
                             ffi.uv_strerror(status) as string, operation)
 end
@@ -149,7 +149,7 @@ local function check_status(status: integer, operation: string)
 end
 
 local function contains_nul(source: string): boolean
-  return ffi.strlen(source) ~= (#source as ffi.size_t)
+  return ffi.strlen(source) ~= (#source as foreign size_t)
 end
 
 local function checked_text(source: string, operation: string): string
@@ -159,11 +159,11 @@ local function checked_text(source: string, operation: string): string
   return source
 end
 
-local function bytes_string(bytes: const *char,
+local function bytes_string(bytes: foreign const *char,
                             length: integer): string
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
-  ffi.lua_pushlstring(L, bytes, length as ffi.size_t)
+  ffi.lua_pushlstring(L, bytes, length as foreign size_t)
   local result: value = ffi.lua_totvalue(L, -1)
   return result as string
 end
@@ -188,13 +188,13 @@ local function submitted(task: Task, status: integer,
 end
 
 local function submit_stream_write(task: Task,
-                                    stream: *ffi.uv_stream_t,
+                                    stream: foreign *uv_stream_t,
                                     data: string,
                                     operation: string): Immediate?
-  local descriptor = ffi.uv_buf_t.new()
+  local descriptor = foreign uv_buf_t.new()
   descriptor.base = data
-  descriptor.len = #data as ffi.size_t
-  local native: owned *ffi.uv_write_t = ffi.uv_write_t.new()
+  descriptor.len = #data as foreign size_t
+  local native: owned *uv_write_t = foreign uv_write_t.new()
   local callback = function (_owner: StreamWriteOwner, status: integer)
     -- Libuv borrows the string bytes through write_cb, so retain the string.
     local _data = data
@@ -202,9 +202,9 @@ local function submit_stream_write(task: Task,
   end
   local owner = StreamWriteOwner.new(native, callback)
   task.pending = owner
-  local request: *ffi.uv_write_t = native
-  ffi.uv_req_set_data(request as *ffi.uv_req_t,
-                        owner as *void)
+  local request: foreign *uv_write_t = native
+  ffi.uv_req_set_data(request as foreign *uv_req_t,
+                        owner as foreign *void)
   local status = ffi.uv_write {
     req = request,
     handle = stream,
@@ -250,12 +250,12 @@ local function report_task_error(err: value, trace: string)
   -- stderr is a macro on the supported C libraries and therefore is not a
   -- portable FFI object. Descriptor 2 is the POSIX stderr boundary already
   -- required by the libuv runtime.
-  local bytes = text as const *char
+  local bytes = text as foreign const *char
   local offset = 0
   while offset < #text do
     local written = ffi.write(
-        2 as int, bytes + offset,
-        (#text - offset) as ffi.size_t)
+        2 as foreign int, bytes + offset,
+        (#text - offset) as foreign size_t)
     if written < 0 then
       if ffi.errno == ffi.EINTR then
         -- Retry the same suffix.
@@ -319,7 +319,7 @@ local function accepting_work(runtime: Runtime, operation: string)
 end
 
 local function new_runtime(): Runtime
-  local native: owned *ffi.uv_loop_t = ffi.uv_loop_t.new()
+  local native: owned *uv_loop_t = foreign uv_loop_t.new()
   -- Allocate every GC-owned Runtime field before uv_loop_init gives the native
   -- loop resources that require an explicit uv_loop_close.
   local runtime = Runtime.new {
@@ -335,7 +335,7 @@ local function new_runtime(): Runtime
   }
   check_status(ffi.uv_loop_init(native), "runtime.loop.init")
   ffi.uv_loop_set_data(native,
-                         main_thread as *void)
+                         main_thread as foreign *void)
   return runtime
 end
 
@@ -347,9 +347,9 @@ local function ensure_runtime(): Runtime
   return created
 end
 
-local function begin_close(runtime: Runtime, handle: *ffi.uv_handle_t,
+local function begin_close(runtime: Runtime, handle: foreign *uv_handle_t,
                            keepalive: value, old_root_index: integer,
-                           completion: () -> ()): boolean
+                           completion: function (): ()): boolean
   if ffi.uv_is_closing(handle) ~= 0 then return false end
   local callback = function (owner: CloseOwner)
     -- Capturing the native owner keeps its FFI handle alive through close_cb.
@@ -360,12 +360,12 @@ local function begin_close(runtime: Runtime, handle: *ffi.uv_handle_t,
   local owner = CloseOwner.new(0, callback)
   owner.root_index = root_handle(runtime, owner)
   if old_root_index > 0 then unroot_handle(runtime, old_root_index) end
-  ffi.uv_handle_set_data(handle, owner as *void)
+  ffi.uv_handle_set_data(handle, owner as foreign *void)
   ffi.uv_close(handle, uv_close_cb)
   return true
 end
 
-local function close_handle(runtime: Runtime, handle: *ffi.uv_handle_t,
+local function close_handle(runtime: Runtime, handle: foreign *uv_handle_t,
                             keepalive: value, old_root_index: integer,
                             task: Task?, payload: value): boolean
   local completion = function ()
@@ -392,7 +392,7 @@ local function HandleCloseCall:dispatch(task: Task): Immediate?
 end
 
 local function wait_handle_close(runtime: Runtime,
-                                 handle: *ffi.uv_handle_t,
+                                 handle: foreign *uv_handle_t,
                                  keepalive: value,
                                  root_index: integer)
   await(Call.handle_close(HandleCloseCall.new(
@@ -400,8 +400,8 @@ local function wait_handle_close(runtime: Runtime,
 end
 
 local function walk_callback(owner: WalkOwner,
-                             pointer: *void)
-  local handle = pointer as *ffi.uv_handle_t
+                             pointer: foreign *void)
+  local handle = pointer as foreign *uv_handle_t
   -- Select at most one currently live handle. The cleanup Task submits its
   -- close immediately, then walks again only after close_cb; no raw pointer is
   -- retained across an unrelated event-loop turn.
@@ -410,22 +410,22 @@ local function walk_callback(owner: WalkOwner,
   end
 end
 
-local function collect_handle(runtime: Runtime): *void
+local function collect_handle(runtime: Runtime): foreign *void
   local owner = WalkOwner.new(nil, walk_callback)
   ffi.uv_walk(runtime.loop, uv_walk_cb,
-                owner as *void)
+                owner as foreign *void)
   return owner.handle
 end
 
 local function loop_owns_handle(runtime: Runtime,
-                                target: *ffi.uv_handle_t): boolean
+                                target: foreign *uv_handle_t): boolean
   local callback = function (owner: WalkOwner,
-                             pointer: *void)
+                             pointer: foreign *void)
     if pointer == target then owner.handle = pointer end
   end
   local owner = WalkOwner.new(nil, callback)
   ffi.uv_walk(runtime.loop, uv_walk_cb,
-                owner as *void)
+                owner as foreign *void)
   return owner.handle ~= nil
 end
 

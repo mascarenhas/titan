@@ -11,8 +11,12 @@ nominal member.
 ## Frontend and resolution
 
 The parser turns `[local] type Name = T` into `Ast.TopLevelTypeAlias`. The lexer
-reserves `type`, and the right-hand side uses the ordinary type grammar, so all
-compound types are available without a parallel parser.
+reserves `type`. The RHS enters the Titan type category; the checker also
+rejects a grouped direct foreign type that would otherwise cross this boundary.
+`Ast.TypeOwned` is a Titan constructor over a raw foreign pointer or array, so
+ordinary aliases may name owned storage. The `foreign` prefix selects the separate foreign grammar, whose names are
+`Ast.TypeForeignName` nodes and whose pointer, array, and callable shapes keep
+their distinct C-type AST constructors.
 
 `symtab.lua` maintains a top-level alias table separate from lexical value
 blocks and from the C-FFI type namespace. The checker predeclares alias names,
@@ -52,9 +56,25 @@ permits `Event.move(...)` to select the original public constructor.
 Export validation walks resolved alias targets recursively. Public aliases
 containing local nominal types or nonexportable C descriptors are rejected by
 the same rules as function signatures, variables, and public nominal members.
-Contextual C primitives and portable pointer/function/owned graphs are valid
-targets; an imported `CTypedef` remains invalid regardless of its resolved
-target.
+Portable owned graphs and Titan constructors containing portable foreign
+components remain eligible public targets; a direct raw foreign alias uses the
+separate declaration below. A header-defined `CTypedef` remains nonexportable
+regardless of its resolved target.
+
+## Foreign aliases are a separate C declaration
+
+`Ast.TopLevelForeignTypeAlias` represents `foreign type Name = foreigntype`.
+It is always local and has no `local` modifier. The symbol table keeps foreign
+aliases separate from ordinary Titan aliases, checks their dependency graph,
+and emits real C typedefs into the module's `.ffi.h`. The RHS cannot contain
+Titan types, including owned storage. This path uses C declaration identity
+and collision rules rather than transparent Titan alias expansion.
+
+An explicit source import inherits the generated header and its unqualified
+foreign typedef names. A regular module import does not acquire a `module.Name`
+foreign alias. The header plan persists typedef declarations and dependency
+identity so restored source manifests rebuild the same C environment. See
+[FFI internals](ffi-internals.md) for the complete publication path.
 
 ## Module interfaces
 
@@ -63,6 +83,7 @@ target.
 * `members` contains run-time variables, functions, and record/union namespaces;
 * `type_members` maps exported alias names directly to their resolved targets.
 
+Foreign aliases belong to the header environment, not either of these maps.
 The two maps are serialized independently and deterministically by
 `types.serialize`. A compiled-interface importer therefore rehydrates a
 transparent alias with the same nominal owner name and structural component

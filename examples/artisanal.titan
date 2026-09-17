@@ -16,7 +16,7 @@ function doubleb(): integer
     return b
 end
 
-function setc(t: { integer })
+function setc(t: {integer})
     c = t
 end
 
@@ -44,8 +44,8 @@ local c: {integer} = {1,2,3}
 
 d: {integer} = {3,4,5}
 
-function filltable(N: integer): { integer }
-    local xs: { integer } = {}
+function filltable(N: integer): {integer}
+    local xs: {integer} = {}
     for i=1,N do
         xs[i] = 10*i
     end

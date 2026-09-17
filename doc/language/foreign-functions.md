@@ -7,14 +7,14 @@ need a hand-written C trampoline.
 ```titan
 foreign import "callback_api.h"
 
-foreign function compare(left: *ffi.Item,
-                         right: *ffi.Item): ffi.int
-  if left.key < right.key then return -1 as ffi.int end
-  if left.key > right.key then return 1 as ffi.int end
-  return 0 as ffi.int
+foreign function compare(left: *Item,
+                         right: *Item): int
+  if left.key < right.key then return -1 as foreign int end
+  if left.key > right.key then return 1 as foreign int end
+  return 0 as foreign int
 end
 
-local function sort(items: *ffi.Item, count: ffi.size_t)
+local function sort(items: foreign *Item, count: foreign size_t)
   ffi.sort_items(items, count, compare)
 end
 ```
@@ -24,8 +24,8 @@ an ordinary Titan function with an automatically generated callback adapter.
 The [C FFI chapter](ffi.md) remains the reference for imported declarations,
 C types, calls, ownership, and allocation.
 
-Portable C primitives such as `int`, `unsigned long`, `foreign float`, and
-`double` are contextual Titan type spellings and need no header import. Public
+Portable C primitives such as `int`, `unsigned long`, `float`, and
+`double` belong to the foreign type category and need no header import. Public
 Titan signatures may also expose foreign function-pointer types built only
 from those primitives and their pointers. That exports the structural C type,
 not a source `foreign function` declaration; the declaration itself retains
@@ -35,7 +35,7 @@ the source-only visibility described below.
 
 A foreign function is a top-level declaration:
 
-```titan
+```text
 foreign function name(p1: C1, p2: C2): CResult
   body
 end
@@ -44,7 +44,7 @@ end
 Omit the result annotation for a C `void` function:
 
 ```titan
-foreign function notify(item: *ffi.Item)
+foreign function notify(item: *Item)
   ffi.mark_notified(item)
 end
 ```
@@ -70,30 +70,30 @@ when the declaration has one complete fixed parameter-name list.
 
 The source-written type
 
-```titan
-foreign (P1, P2) -> R
+```text
+foreign function (P1, P2): R
 ```
 
-denotes a pointer to a C function taking `P1, P2` and returning `R`. Use `()`
+denotes a pointer to a C function taking `P1, P2` and returning `R`. Use `void`
 for a C `void` result:
 
 ```titan
-local type Compare = foreign (*ffi.Item, *ffi.Item) -> ffi.int
-local type Notify = foreign (*ffi.Item) -> ()
+foreign type Compare = function (*Item, *Item): int
+foreign type Notify = function (*Item): void
 ```
 
-The type is already a pointer. Consequently, `*foreign (...) -> ...` means a
+The type is already a pointer. Consequently, `foreign *(function(...): ...)` means a
 pointer to a function pointer, not another spelling of the callback type.
 
 A foreign declaration is a C function designator. It can be called directly or
 used where an exactly compatible foreign function-pointer type is expected:
 
 ```titan
-local callback: Compare = compare
+local callback: foreign Compare = compare
 ffi.install_compare(compare)
 ```
 
-It is not a Titan function value. It cannot inhabit `(P...) -> R`, cross through
+It is not a Titan function value. It cannot inhabit `function(P...): R`, cross through
 Lua, be boxed in `value`, or receive Titan callable adjustment. Conversely, an
 ordinary Titan function or closure is not automatically adapted to a C callback
 ABI. Write a foreign function that implements the required C boundary.
@@ -173,7 +173,7 @@ Literals in a foreign body are C values:
 | `nil` | contextual `NULL` for a pointer or function pointer |
 
 An untyped `local p = nil` has no pointee type and is rejected; write an
-annotation such as `local p: *ffi.Item = nil`.
+annotation such as `local p: foreign *Item = nil`.
 
 `T.sizeof` and `T.alignof` keep the configured C `size_t` type inside a
 foreign body. They can be passed directly to `malloc`/`calloc` or stored in a
@@ -279,8 +279,9 @@ the UCN spellings; object and tool names contain UTF-8 `ℳ` and `ℱ`.
 
 The callable hierarchy, source-defined standard-library callbacks, generic
 interface metadata, and affected public standard-library signatures are all
-part of ABI 2. Providers built for another ABI must be rebuilt and are rejected
-before metadata is decoded.
+part of the current prerelease ABI 2. Function and owned type registry
+identities use the revised type spellings. The grammar change keeps the
+prerelease ABI and language versions unchanged.
 
 ## Related chapters
 

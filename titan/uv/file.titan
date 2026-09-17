@@ -11,7 +11,7 @@ local record FsStatResult
 end
 
 -- A uv_file is a process descriptor, not a Runtime-owned uv_handle_t.
-local type uv_file = ffi.uv_file
+
 
 local record FsOpenCall
   local path: string
@@ -19,22 +19,22 @@ local record FsOpenCall
 end
 
 local record FsReadCall
-  local file: uv_file
+  local file: foreign uv_file
   local maximum: integer
 end
 
 local record FsWriteCall
-  local file: uv_file
+  local file: foreign uv_file
   local data: string
   local offset: integer
 end
 
 local record FsFlushCall
-  local file: uv_file
+  local file: foreign uv_file
 end
 
 local record FsCloseCall
-  local file: uv_file
+  local file: foreign uv_file
   local accepted: boolean
 end
 
@@ -75,24 +75,24 @@ end
 -- path and uv_buf_t arguments before returning. Its callback closure retains
 -- the Task and any pointed-to read or write data through completion.
 local record uv_fs_t
-  local handle: owned *ffi.uv_fs_t
-  local callback: (uv_fs_t) -> ()
+  local handle: owned *uv_fs_t
+  local callback: function (uv_fs_t): ()
 end
 
-foreign function uv_fs_cb(req: *ffi.uv_fs_t)
+foreign function uv_fs_cb(req: *uv_fs_t)
   local owner = ffi.uv_req_get_data(
-      req as *ffi.uv_req_t) as *ffi.Udata
+      req as foreign *uv_req_t) as foreign *Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
-  local L = ffi.uv_loop_get_data(req.loop) as *ffi.lua_State
+  local L = ffi.uv_loop_get_data(req.loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
-      callback.upvalue[2]) as UvNoargCallbackEntry
+      callback.upvalue[2]) as foreign UvNoargCallbackEntry
   local top = ffi.lua_gettop(L)
   entry(L, module, callback, owner)
   ffi.lua_settop(L, top)
 end
 
-local type FsResult = (Task, uv_fs_t, integer, value) -> value
+local type FsResult = function (Task, uv_fs_t, integer, value): (value)
 
 local function fs_open_flags(mode: string): integer
   if mode == "r" or mode == "rb" then return ffi.UV_FS_O_RDONLY end
@@ -118,15 +118,15 @@ local function fs_open_flags(mode: string): integer
   raise "invalid file mode '" .. mode .. "'"
 end
 
-local function validate_file(file: uv_file)
+local function validate_file(file: foreign uv_file)
   if file < 0 then raise "File is closed" end
 end
 
 -- Process descriptors are not loop-owned handles. A negative value is the
 -- local no-descriptor sentinel used by deferred cleanup after ownership moves.
-local function close_descriptor(descriptor: ffi.uv_file): integer
+local function close_descriptor(descriptor: foreign uv_file): integer
   if descriptor < 0 then return 0 end
-  local request = ffi.uv_fs_t.new()
+  local request = foreign uv_fs_t.new()
   local status = ffi.uv_fs_close(nil, request, descriptor, nil)
   ffi.uv_fs_req_cleanup(request)
   return status
@@ -137,15 +137,15 @@ local function new_fs_request(task: Task,
                               keepalive: value,
                               success: FsResult): uv_fs_t
   accepting_work(task.runtime, operation)
-  local native: owned *ffi.uv_fs_t = ffi.uv_fs_t.new()
+  local native: owned *uv_fs_t = foreign uv_fs_t.new()
   local callback = function (owner: uv_fs_t)
     local result = ffi.uv_fs_get_result(owner.handle) as integer
     complete_fs(task, owner, result, operation, keepalive, success)
   end
   local owner = uv_fs_t.new(native, callback)
-  local request: *ffi.uv_fs_t = native
-  ffi.uv_req_set_data(request as *ffi.uv_req_t,
-                        owner as *void)
+  local request: foreign *uv_fs_t = native
+  ffi.uv_req_set_data(request as foreign *uv_req_t,
+                        owner as foreign *void)
   task.pending = owner
   return owner
 end
@@ -179,8 +179,8 @@ local function stat_result(task: Task, owner: uv_fs_t, result: integer,
     kind = "symlink"
   end
   return FsStatResult.new(statbuf.st_size, kind, mode,
-                          statbuf.st_dev as ffi.lua_Integer,
-                          statbuf.st_ino as ffi.lua_Integer,
+                          statbuf.st_dev as foreign lua_Integer,
+                          statbuf.st_ino as foreign lua_Integer,
                           statbuf.st_mtim.tv_sec,
                           statbuf.st_mtim.tv_nsec)
 end
@@ -189,7 +189,7 @@ local function list_result(task: Task, owner: uv_fs_t,
                            result: integer,
                            keepalive: value): value
   local names: {string} = {}
-  local entry = ffi.uv_dirent_t.new()
+  local entry = foreign uv_dirent_t.new()
   while true do
     local status = ffi.uv_fs_scandir_next(owner.handle, entry)
     if status == ffi.UV_EOF then break end
@@ -208,7 +208,7 @@ end
 
 local function open_result(task: Task, owner: uv_fs_t, result: integer,
                            keepalive: value): value
-  local descriptor = result as ffi.uv_file
+  local descriptor = result as foreign uv_file
   local transferred = false
   defer if not transferred then
     check_status(close_descriptor(descriptor),
@@ -234,7 +234,7 @@ end
 
 local function tmpname_result(task: Task, owner: uv_fs_t, result: integer,
                               keepalive: value): value
-  local descriptor = result as ffi.uv_file
+  local descriptor = result as foreign uv_file
   defer check_status(close_descriptor(descriptor),
                      "fs.tmpname.close")
   if task.cancel_value then
@@ -267,18 +267,18 @@ local function FsOpenCall:dispatch(task: Task): Immediate?
     loop = task.runtime.loop,
     req = owner.handle,
     path = self.path,
-    flags = self.flags as int,
-    mode = 438 as int,
+    flags = self.flags as foreign int,
+    mode = 438 as foreign int,
     cb = uv_fs_cb,
   }
   return submitted_fs_request(task, owner, status, "fs.open")
 end
 
 local function FsReadCall:dispatch(task: Task): Immediate?
-  local bytes = char.new_array(self.maximum)
-  local descriptor = ffi.uv_buf_t.new()
+  local bytes = foreign char.new_array(self.maximum)
+  local descriptor = foreign uv_buf_t.new()
   descriptor.base = bytes
-  descriptor.len = self.maximum as ffi.size_t
+  descriptor.len = self.maximum as foreign size_t
   local owner = new_fs_request(
       task, "fs.read", bytes, read_result)
   local status = ffi.uv_fs_read {
@@ -294,10 +294,10 @@ local function FsReadCall:dispatch(task: Task): Immediate?
 end
 
 local function FsWriteCall:dispatch(task: Task): Immediate?
-  local descriptor = ffi.uv_buf_t.new()
-  local base: *char = self.data
+  local descriptor = foreign uv_buf_t.new()
+  local base: foreign *char = self.data
   descriptor.base = base + self.offset
-  descriptor.len = (#self.data - self.offset) as ffi.size_t
+  descriptor.len = (#self.data - self.offset) as foreign size_t
   local owner = new_fs_request(
       task, "fs.write", self.data, write_result)
   local status = ffi.uv_fs_write {
@@ -362,7 +362,7 @@ local function FsMkdirCall:dispatch(task: Task): Immediate?
     loop = task.runtime.loop,
     req = owner.handle,
     path = self.path,
-    mode = 511 as int,
+    mode = 511 as foreign int,
     cb = uv_fs_cb,
   }
   return submitted_fs_request(task, owner, status, "fs.mkdir")
@@ -404,17 +404,17 @@ local function FsListCall:dispatch(task: Task): Immediate?
   return submitted_fs_request(task, owner, status, "fs.list")
 end
 
-local function fs_open(path: string, mode: string): uv_file
+local function fs_open(path: string, mode: string): foreign uv_file
   return await(Call.fs_open(FsOpenCall.new(
-      checked_text(path, "fs.open"), fs_open_flags(mode)))) as uv_file
+      checked_text(path, "fs.open"), fs_open_flags(mode)))) as foreign uv_file
 end
 
-local function fs_read(file: uv_file, max_bytes: integer): string?
+local function fs_read(file: foreign uv_file, max_bytes: integer): string?
   validate_file(file)
   return await(Call.fs_read(FsReadCall.new(file, max_bytes)))
 end
 
-local function fs_write(file: uv_file, data: string,
+local function fs_write(file: foreign uv_file, data: string,
                         offset: integer): integer
   validate_file(file)
   if #data == 0 then return 0 end
@@ -422,7 +422,7 @@ local function fs_write(file: uv_file, data: string,
       Call.fs_write(FsWriteCall.new(file, data, offset))) as integer
 end
 
-local function fs_flush(file: uv_file)
+local function fs_flush(file: foreign uv_file)
   validate_file(file)
   await(Call.fs_flush(FsFlushCall.new(file)))
 end

@@ -55,11 +55,11 @@ describe("optional function parameter code generation", function()
             end
 
             function call_exact(): integer
-                local f: (integer?, boolean) -> integer = target
+                local f: function (integer?, boolean): integer = target
                 return f()
             end
 
-            function call_generic(f: (integer?, boolean) -> integer): integer
+            function call_generic(f: function (integer?, boolean): integer): integer
                 return f()
             end
         ]], [[
@@ -81,8 +81,8 @@ describe("optional function parameter code generation", function()
             end
 
             function exercise(): boolean
-                local fixed: (value) -> value = second
-                local tailed: (value, ...: value) -> value = second
+                local fixed: function (value): value = second
+                local tailed: function (value, ...: value): value = second
                 return fixed("a") == nil and
                     tailed("a") == nil and
                     tailed("a", "b") == "b" and

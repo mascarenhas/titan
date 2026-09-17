@@ -1,608 +1,223 @@
 # The lexer and the parser
 
-Titan's front end is a single scannerless parser built on
-[LPegLabel](https://github.com/sqmedeiros/lpeglabel) (LPeg extended with
-*labeled failures*) and its `re`-style grammar notation, `relabel`. There is
-no token stream and no separate lexing pass: `titan-compiler/lexer.lua`
-defines one LPeg pattern per token and exports them by name, and
-`titan-compiler/parser.lua` references those patterns as terminals inside
-one `relabel` grammar that goes straight from source text to the AST
-described in [AST and typedecl](ast-typedecl.md).
-`parser.parse(filename, input)` returns the AST (a dense list of ordinary
-toplevel nodes)
-or `false, { label = <string>, loc = <location> }`. The user-facing grammar
-all of this implements is in the [language reference](../language/grammar.md).
-For a [folder module](folder-modules.md), the driver invokes this same function
-independently and sequentially for the main and every contributor, then
-concatenates their root nodes. The parser itself has no folder, source-unit,
-or per-file-namespace concept.
+Titan uses one scannerless [LPegLabel](https://github.com/sqmedeiros/lpeglabel)
+parser, written with `relabel`. `lexer.lua` supplies token patterns and
+`parser.lua` combines them with ordinary captures and fold captures. There is
+no separate token stream, whole-source generic scanner, or speculative type
+parser. The [language grammar](../language/grammar.md) defines the surface
+language; [AST and typedecl](ast-typedecl.md) describes its representation.
+
+`parser.parse(filename, input)` returns a dense list of top-level AST nodes or
+`false, {label = name, loc = location}`. It consumes the complete input. The
+driver parses folder-module contributors separately, then combines their nodes;
+folder discovery and cross-file ordering do not belong to this parser.
 
 ## One grammar, no token stream
 
-`lexer.lua` exports each token as a raw LPeg pattern under an ALLCAPS name
-(`lexer.NAME`, `lexer.NUMBER`, `lexer.LPAREN`, ...). The parser copies every
-one of them into the grammar's definitions table (`defs[tokname] = tokpat`),
-and every AST constructor too (`defs[tag] = cons`). Inside the grammar,
-`%NAME` is therefore the lexer pattern itself, and a semantic action like
-`-> TopLevelFunc` calls `ast.TopLevelFunc` directly — grammar rules build AST
-nodes with no intermediate representation. (The ALLCAPS convention is for
-parser-gen's `re`-style grammars, which expect terminals uppercase and
-non-terminals lowercase — per the comment atop `lexer.lua`.)
+The parser copies exported lexer patterns and AST constructors into its `defs`
+table. Uppercase token rules wrap the raw patterns with trailing whitespace and
+comments, for example `LPAREN <- %LPAREN SKIP*`. The program consumes leading
+whitespace and requires EOF after its optional final module initializer.
 
-Whitespace is handled once, by hand, at the bottom of the grammar: for every
-token there is a wrapper rule of the shape `LPAREN <- %LPAREN SKIP*`, with
-`SKIP <- (%SPACE / %COMMENT)`, so every token consumes trailing whitespace
-and comments. The start rule, `program`, begins with `SKIP*` (leading
-comments work) and ends with `!.` — trailing garbage is a parse failure. Two
-synonym rules, `NEG <- SUB` and `BNEG <- BXOR`, let unary minus and unary
-`~` reuse the `-` and `~` tokens.
-
-A few tokens get the whitespace wrapper even when they are rarely used.
-`break`, `defer`, `in`, `type`, and `DOTS` (`...`) are real syntax; `goto` and `DBLCOLON`
-(`::`) remain reserved/recognized but unused, so there is no `goto`
-statement or label syntax.
+A **terminal** in the grammar is a lexical token, regardless of the number of
+bytes in its spelling. A long string or comment is scanned as one lexical unit;
+this is distinct from looking ahead through an expression or type.
 
 ## Longest match by construction
 
-Because the parser tries token patterns directly at arbitrary positions, the
-lexer must guarantee the *longest match* property on its own: at any input
-position, at most one exported token pattern matches (`spec/lexer_spec.lua`
-enforces this at every position its scan visits — see the testing section).
-Three layers provide it:
+Reserved words require an identifier boundary. `NAME` accepts ASCII identifiers
+except reserved words, while `ANYNAME` also accepts reserved-word spellings in
+selected declaration, member, and label positions. Primitive Titan type words
+are contextual: `integer` can be a value name even though its type-position
+pattern denotes the primitive. C type words are contextual foreign-type names.
+`ffi`, `L`, `M`, and `self` are bindings established by checking, not lexer
+keywords.
 
-1. **Keywords vs. names.** Each keyword pattern is `P(keyword) * -idrest`, so
-   `local` does not match the front of `localx`; and `lexer.NAME` is a
-   match-time capture (`lpeg.Cmt`) that matches an identifier and then
-   *fails* if it is a keyword — `andy`, `return17` and `_end` are NAMEs.
-   `lexer.NAMEDLABEL` and `lexer.CNAME` are contextual exceptions: both
-   capture the raw identifier shape without keyword rejection.
-   `NAMEDLABEL` is used only before `=` inside a named-call list, while
-   `CNAME` is used only for source-nameable C members and qualified C types.
-   A header symbol spelled `when`, `repeat`, or `type` therefore remains
-   usable without making that spelling an ordinary Titan name. The parser
-   stamps the resulting `Ast.VarDot` or `Ast.TypeQualName` with
-   `_contextual_c_name`; the checker accepts that marker only after the
-   qualifier resolves to the corresponding C context, and the coder emits the
-   stored spelling unchanged.
+The symbolic-token builder excludes every longer symbol sharing a shorter
+symbol's prefix. This includes `<|` and `|>` as indivisible generic delimiters,
+alongside `<`, `>`, comparison operators, shifts, and bitwise `|`. Function
+arrows are no longer a token or a type constructor.
 
-2. **Symbols vs. longer symbols, generically.** A loop at the end of
-   `lexer.lua` makes every symbol pattern subtract every longer symbol it is
-   a prefix of:
+Three lexical exclusions remain necessary: a dot before a decimal digit starts
+a numeral, a bracket with a long-string opener starts a string, and `--` starts
+a comment rather than subtraction. `ANYNAME` and contextual primitive-word
+patterns deliberately overlap `NAME`; they are selected by grammatical context,
+not by a global lexer priority.
 
-   ```lua
-   for tokname, symbol in pairs(symbols) do
-       local pat = P(symbol)
-       for _ , symbol2 in pairs(symbols) do
-           if #symbol < #symbol2 and symbol == string.sub(symbol2, 1, #symbol) then
-               pat = pat - P(symbol2)
-           end
-       end
-       lexer[tokname] = pat
-   end
-   ```
+## Lexing numbers and strings
 
-   This keeps `<` from matching the front of `<=` or `<<` with no per-token
-   case analysis; a new multi-character symbol added to `symbols`
-   automatically fixes all its prefixes.
+Numeral recognition consumes a deliberately broad candidate and validates it
+with Lua's `tonumber`; malformed candidates report `MalformedNumber`. Ordinary
+captures produce the integer or float value after validation. Validation-only
+match-time captures return no dynamic values, avoiding a retained runtime
+capture per numeral in a wide constructor.
 
-3. **Three manual exclusions** where a symbol collides with a *non*-symbol
-   token, which the generic loop cannot see:
+Quoted strings decode Lua-style escapes. Decimal escapes remain bounded to
+0–255, hexadecimal escapes require two digits, and Unicode escapes validate the
+code-point range up to U+10FFFF before the ordinary conversion capture emits UTF-8.
+Backslash-newline, whitespace-eating `\z`, and invalid-escape labels retain their
+existing behavior. Long strings and long comments match their opening delimiter's
+equals level and do not decode escapes. Delimiter/validation predicates are
+lexical operations, not syntactic lookahead over recursive productions.
 
-   ```lua
-   lexer.DOT      = lexer.DOT      - (P(".") * R("09"))           -- ".5" is a NUMBER
-   lexer.LBRACKET = lexer.LBRACKET - (P("[") * P("=")^0 * P("[")) -- long-string opener
-   lexer.SUB      = lexer.SUB      - P("--")                      -- comment
-   ```
+## Committed alternatives and bounded lookahead
 
-Consequences, all spec-asserted: `---` is one COMMENT; `///` is `IDIV DIV`;
-`-->` is a COMMENT but `->-` is `RARROW SUB`; `<==` is `LE ASSIGN`; `..2` is
-`CONCAT NUMBER`.
+The parser has three mandatory review rules:
 
-## Lexing numbers: an over-general pattern plus `tonumber`
+1. Every positive or negative syntactic predicate inspects a constant number of
+   terminals. It may inspect a bounded convenience helper, but never an
+   expression, type, parameter list, block, or complete declaration.
+2. Alternatives do not share a prefix containing a syntactic nonterminal.
+   Consume that prefix once and choose the suffix from the next terminal.
+3. Once a bounded terminal prefix selects an alternative, each syntactic
+   nonterminal in that branch carries `^ErrorLabel`. Failure reports the error
+   rather than retrying another alternative. Helpers whose entire expansion
+   consumes a bounded number of terminals are the exception.
 
-The number pattern does not encode Lua's numeral syntax. It matches a
-deliberately over-general blob — any run of alphanumerics, dots and signed
-exponent markers — and delegates validity to Lua:
+Examples of bounded conveniences are positions/fresh-list captures (zero
+tokens), operator/field-separator selectors (one token), modifier selectors,
+and declaration-head tests. They must not grow into hidden recursive probes.
+FIRST(expression) tests inspect token starts; they do not call the expression
+parser. In particular, a malformed committed string or numeral must reach its
+lexical error rather than disappear inside a failed lookahead.
 
-```lua
-local good_number = Cmt(possible_number, function(_, i, s)
-    local n = tonumber(s)
-    if n then return i, n else return false end
-end)
-lexer.NUMBER = #number_start * (good_number + T("MalformedNumber"))
-```
+Declarations sharing `local`, `const`, `foreign`, or `function` are selected by
+bounded heads. A module variable has a name followed by `:` or `=`, so
+keyword-named variables do not swallow `record` declarations or `do ... end`.
+The checker validates the meaning and visibility of the resulting name.
 
-If `tonumber` accepts the blob, the capture is the *numeric value*; if not,
-the label `MalformedNumber` is raised. The over-generality is intentional:
-the blob swallows the whole run, `tonumber` rejects it, and `1337require`,
-`1e2e3` and `1.2.3.4` are all single `MalformedNumber` errors rather than
-surprising token pairs. (A comment in `lexer.lua` worries that real Lua
-would lex `1337require` as `1337` then `require`; empirically Lua 5.5's
-lexer rejects all three blobs as malformed numbers too, so the outcomes
-match Lua.)
+A `{` in type context consumes one first type, then chooses an Array or Map from
+`}` versus `:`. A `(` consumes one grouped/result shape before validating any
+optional-type suffix; it is no longer a possible start of an arrow function
+type. A colon following `function(...)` is greedily a return annotation:
+`{function(): T}` is an Array, and `{(function()): T}` is the disambiguated Map.
 
-Because the capture is already a number, the parser never sees numeral text:
-`defs.number_exp` splits the value with `math.type` into `Ast.ExpInteger` or
-`Ast.ExpFloat`, so the integer/float distinction is exactly Lua's (`0x1ap2`
-is a float, `0x1abcdef` an integer, `4.` the float `4.0`).
+Foreign types cannot consume `.`, so `foreign T.new_array(n)` has an explicit
+boundary between its foreign type and pseudo-operation. Another pointer
+constructor requires parentheses, as in `foreign *(*int)`. `owned` belongs to
+Titan type syntax and takes a complete foreign pointer/array operand. Typedef,
+owner eligibility, and foreign-function body restrictions belong to checking.
 
-## Lexing strings: decoding during the match
+## Fold captures and expression precedence
 
-Short strings are fully decoded at lex time — the token capture is the
-resulting string, not the quoted source. Open and close quotes are named
-group captures compared in a `Cmt` over back-captures
-(`Cb("open")`/`Cb("close")`), so `"` can close only `"` and `'` only `'`. A
-raw newline inside a short string, or end of input, raises
-`UnclosedShortString`.
+Repeated source lists use `~>` fold captures with a fresh accumulator for each
+match. They do not expand an unbounded list into Lua function results. Records
+and unions return a declaration bundle that the program fold flattens; a union
+with many constructors still contributes one capture at that boundary.
 
-Escapes are processed by substitution-style captures — each escape pattern
-produces its replacement directly, as in `(P("n") / "\n")`,
-`(linebreak / "\n")` for backslash-newline, or
-`C(decimal_escape) / tonumber / string.char` — and the parts are
-`table.concat`ed at the end. Three escapes deserve attention.
-**Decimal escapes** `\ddd` enforce the "< 256" rule *structurally*:
-`decimal_escape` is an ordered choice of digit-range patterns covering
-exactly 0–255, plus a final alternative raising `MalformedEscape_decimal`
-for the remaining 3-digit values (`"\555"`); like Lua it is greedy up to
-three digits, so `"\12340"` is `"{40"`. **Unicode escapes** `\u{XXX}` use a
-`Cmt` to enforce the real Unicode range, because the host's `utf8.char`
-(Lua 5.5) accepts code points up to 0x7FFFFFFF:
+The ordinary binary operators use one incremental precedence stack and the
+explicit `binary_precedence` table. Reductions reproduce the language manual's
+`e1` through `e10` tiers, including left-associative comparisons and arithmetic
+and right-associative concatenation. This avoids ten nested capture wrappers
+for each genuinely nested expression. Concatenation chains are flattened once
+and constant suffixes retain their existing folding behavior.
 
-```lua
-function(_, pos, digits)
-    local n = tonumber(digits, 16)
-    if n > 0x10FFFF then return false end
-    return pos, utf8.char(n)
-end
-```
+Power, unary operators, and `as`/`is` retain their separate syntactic boundary.
+Power collects its operands and intervening unary prefixes, then folds from the
+right: `a ^ -b ^ -c` means `a ^ (-(b ^ (-c)))`. Unary minus binds outside a
+power on its left. Written casts/type tests are non-associative; an additional
+cast requires parentheses.
 
-— any malformation (missing brace, empty braces, non-hex digit, out-of-range
-value) raises `MalformedEscape_u`. **`\xXX`** requires exactly two hex digits
-(`MalformedEscape_x` otherwise); `\z` skips a run of whitespace and produces
-nothing; any unknown `\c` raises `InvalidEscape`.
+Suffixes fold over their receiver in written order. A dot/colon selector can
+carry explicit type arguments; subsequent call syntax decides whether it is a
+call or a reference candidate. Checking preserves the existing restriction
+that explicit callable specialization requires a direct call. Brackets consume
+the first expression once, then inspect a comma/closing bracket to distinguish
+indexing and full/partial ranges.
 
-Long strings (`[[...]]`, `[=[...]=]`) match their equals-level the same way
-short strings match quotes, do no escape processing, and skip one linebreak
-after the opening bracket. Long comments are `--` followed by a long string
-(capture dropped) — hence `UnclosedLongString`'s message, "Unclosed long
-string or long comment.".
+The existing parameter, type-argument, and expression-list guardrails remain
+separate from genuine nesting and runtime arity limits. Return-type lists retain
+their own contract; they must not accidentally inherit a parameter-list cap.
+List-length and shape validation use ordinary captures and the parser's private
+structured syntax-failure path, not value-retaining match-time captures.
 
-## Grammar organization
+## Semantic boundaries
 
-The grammar is one `re.compile([[...]], defs)` call, compiled **once at
-module load time**: parsing pays no per-call compilation, and a mistake in
-the grammar text fails at `require "titan-compiler.parser"`. Every
-node-producing production starts with the rule `P <- {} => get_loc`, a
-match-time capture that converts the current byte position into a location
-table (`defs.get_loc` calls `location.from_pos`); since `loc` is the first
-field of every constructor in `ast.lua`, putting `P` first lands the location
-in the right positional argument with no extra plumbing.
+Assignment and standalone-expression parsing preserve prefix-expression
+candidates. `StatAssign._parsed_candidates` tells the checker to validate and
+extract lvalues; `StatCall` checking requires an actual call. Parenthesized or
+explicitly applied names cannot silently become ordinary assignment targets.
+The parser does not reparse the expression merely to improve these diagnostics.
 
-The top-level `interface` production commits to a nonempty sequence of field
-declarations and bodyless `function` signatures. It builds one ordered
-`members` list plus `fields` and `methods` projections on
-`Ast.TopLevelInterface`; fields reuse `Ast.Decl`, while methods use
-`Ast.InterfaceMethod`. It has
-dedicated labels for a local/nested or empty declaration, local members,
-missing field types, missing method names/parentheses/types, unexpected
-members, and a missing final `end`. `interface` is a Titan keyword, but
-`CNAME` still captures it in contextual C typedef, field/member, and
-prototype-parameter positions; this mirrors the other C-legal Titan keywords.
-See [Interfaces](interfaces.md#frontend-representation).
+Bare `...` is syntactically an expression. Following `[` selects its index/range
+suffix; otherwise a token in FIRST(expression) commits to one full collection
+spread subject. Other following tokens leave bare varargs. `#...` retains its
+dedicated count atom, so `#... - 1` differs from the spread `... - 1`.
 
-The declaration grammar preserves constness on `Ast.Decl`, record fields, and
-`Ast.TopLevelVar`. Const locals commit to an expression list, while mutable
-locals alone use the optional initializer production. Type parsing tries
-`const { T }` as a qualified Array before the existing C `const *T` form, so
-the two meanings of `const` remain syntactically unambiguous. See
-[Const values](const-values.md#frontend-and-ast-contract).
-
-### Function result-shape carriers
-
-Fixed and flexible results are parsed separately. `resulttypelist` captures a
-dense fixed list plus an optional final `flexrettypeann` (`...: T`), with the
-comma before the tail required when a fixed prefix exists. The parser packages
-those captures temporarily as:
-
-```lua
-{ rettypes = fixed_dense_list, flexrettype = type_node_or_false }
-```
-
-`defs.rettypeopt` returns the pair to `TopLevelFunc`, `TopLevelMethod`, and
-`TopLevelStatic`; `defs.lambdarettypeopt` additionally preserves the
-no-annotation sentinel needed for contextual lambda inference. Function-type
-nodes carry `argtypes`, `rettypes`, `varargtype`, and `flexrettype` as four
-separate fields. No tail sentinel is inserted into either dense list.
-
-Function arrows form one flat operand chain, folded from the right after
-parsing. A final parenthesized operand supplies a result shape; before another
-arrow it supplies that function's parameter shape. Thus `(...: T)` is a
-flex-only result list, while `(...: T) -> R` is a function type with an input
-vararg. A flexible return must be parenthesized, typed, last, and
-comma-separated from a fixed prefix;
-`FlexRetColon`, `FlexRetType`, `FlexRetLast`, and `FlexRetParens` give those
-failures return-specific labels. See
-[Flexible returns](flexible-returns.md#parser-carriers-and-disambiguation).
-
-### Parenthesized type grouping
-
-A singleton, nonvariadic `typelist` becomes a simple type operand, so `(T)`
-returns the existing `T` node with its original source location. The parser
-creates no grouping node. A suffix on the group creates the existing
-`Ast.TypeOption`, allowing `(T)?` and `((T) -> U)?`. Parenthesized return
-operands likewise accept `?` only for one fixed result; empty, multiple, and
-flexible lists report `OptionTypeList`. Their unsuffixed list forms keep the
-ordinary zero/multiple/flexible return semantics.
-
-`groupedtype` permits the same syntax inside a prefix constructor's payload,
-including `*(int)` and `owned *(int)`. It stops at the matching `)`, so
-`*(int) -> int` remains a function taking a pointer. This production does not
-retry the parenthesized list at the start of an ordinary type operand.
-
-Type-operand and result-shape finalization uses immediate match-time captures.
-Each carrier is materialized before a named back-reference can read it;
-an outer match-time capture returns only the finished type or result shape.
-Nested type constructors are therefore evaluated once, and internal carriers
-never become named keys in AST lists such as `typeargs` or `rettypes`. A standalone
-empty, multiple, or variadic parameter list reports `TypeFunctionNoRet`
-instead of reaching the right fold's internal assertion. The flat arrow
-fold remains intact; parser tests bound successful and malformed grouped
-types, nested return shapes, and long arrow chains by Lua instruction counts.
-
-### The precedence ladder
-
-Expression precedence is a ladder of twelve rules, `e1` (loosest, `or`) down
-to `e12` (`^`), each consuming the next-tighter level as its operands. Most
-levels are left-associative and share one shape and one fold function —
-`e9 <- (P {| e10 (op9 e10^OpExp)* |}) -> fold_binop_left` — where
-`fold_binop_left` (`parser.lua`) walks the captured list pairwise, building
-left-nested `Ast.ExpBinop` nodes. The operator rules capture the operator as
-its literal string (`ADD -> '+'`); note `op10`'s `MOD -> '%%'` — `%` is the
-`re` escape character so it must be doubled, but the captured string is plain
-`"%"`.
-
-| Level | Operators | Shape |
-| --- | --- | --- |
-| `e1` | `or` | left fold |
-| `e2` | `and` | left fold |
-| `e3` | `==` `~=` `<` `>` `<=` `>=` | left fold |
-| `e4`–`e7` | `\|`, `~`, `&`, `<<` `>>` | left fold |
-| `e8` | `..` | **right recursion**, flattened by `binop_concat` |
-| `e9`, `e10` | `+` `-`, `*` `%` `/` `//` | left fold |
-| `e11` / `castexp` | `as`, `is` | `unopexp (AS type -> ExpCast / IS type -> ExpIs) / unopexp` |
-| `unopexp` | unary `not` `#` `-` `~` | `{\| unop* \|} e12`, `fold_unops` innermost-first |
-| `e12` | `^` | **right**: `simpleexp (op12 e11)?` via `binop_right` |
-
-The two right-associative operators do not use the list shape:
-
-* `e8 <- (P e9 (op8 e8^OpExp)?) -> binop_concat` recurses into itself on the
-  right. `binop_concat` then does two extra things: if the right operand is
-  already an `Ast.ExpConcat`, the left operand is pushed onto its front, so
-  chained `..` becomes one flat n-ary `ExpConcat`; and if both operands are
-  literals (`ExpString`/`ExpInteger`/`ExpFloat`) they are **constant-folded**
-  into a single `Ast.ExpString` with Lua's `..` — `"a" .. "b" .. "c"` parses
-  as the literal `"abc"`, `x .. 1 .. 2` as `ExpConcat{x, ExpString "12"}`.
-  The parser is not a pure syntax mapper; the source comment itself asks
-  "Should this go on a separate constant propagation pass?".
-
-* `e12` makes `^` right-associative, and its asymmetric operands (`simpleexp`
-  left, `e11` right) reproduce Lua's quirk that `^` binds tighter than unary
-  operators on its left while its right operand may carry them:
-  `-1 ^ -2 ^ 3 * 4` parses as `(-(1 ^ (-(2 ^ 3)))) * 4`.
-
-`as` casts and `is` type tests sit below the ladder in `castexp`: the subject
-is one `unopexp` (so `2 + foo is integer` is
-`2 + (foo is integer)`) and the two forms do not chain —
-`y as integer is float` is a syntax error. Their keywords have distinct
-`AS`/`IS` tokens, and a labeled missing target reports `CastMissingType` or
-`IsMissingType` respectively.
-
-The `e11` right operand of `^` may itself contain either form, so
-`x ^ 2 is integer` builds `ExpBinop("^", x, ExpIs(2, integer))`. Testing the
-whole power requires `(x ^ 2) is integer`; `x is integer ^ 2` does not parse.
-
-### Expression suffixes as closures
-
-Postfix syntax — calls, method calls, indexing, dot access — is a prefix
-followed by suffixes: `suffixedexp <- (prefixexp {| expsuffix+ |}) ->
-fold_suffixes`. Each `expsuffix` alternative's action (`defs.suffix_funccall`,
-`suffix_methodcall`, `suffix_bracket`, `suffix_dot`) does not build a node;
-it returns a *closure* from base expression to wrapped expression —
-`defs.suffix_bracket(pos, index)`, for instance, returns
-`function(exp) return ast.ExpVar(pos, ast.VarBracket(pos, exp, index)) end`.
-`fold_suffixes` then applies the closures left to right, so `x()()[2]` builds
-`ExpVar(VarBracket(ExpCall(ExpCall(x))))` with correct nesting — left
-recursion (which PEGs cannot express) sidestepped without a rebuild loop.
-The four call closures preserve their delimiter and receiver choice:
-`suffix_funccall` and `suffix_methodcall` produce `ArgsFunc`/`ArgsMethod` from
-parentheses or a bare string, while `suffix_namedfunccall` and
-`suffix_namedmethodcall` produce `ArgsNamedFunc`/`ArgsNamedMethod` from
-`namedargs`. Bare braces are never `funcargs`; a positional constructor must be
-inside parentheses (`f({1, 2})`). `namedargs` accepts only
-`NAMEDLABEL '=' exp`, with constructor-style comma/semicolon separators and a
-trailing separator. The checker later normalizes a valid named node to its
-positional `Args*` counterpart; see
-[named-argument internals](named-arguments.md).
-
-### Match-time predicates: lvalues and call statements
-
-Two `Cmt` predicates, `defs.exp_is_var` and `defs.exp_is_call`, inspect an
-already-built node during the match, accepting it only if its `_tag` is
-`Ast.ExpVar` (respectively `Ast.ExpCall`). The `var` rule (assignment
-targets) is `(suffixedexp => exp_is_var) -> exp2var`, plus a bare-`NAME`
-alternative for unsuffixed names — parse a full suffixed expression, accept
-it only if its last suffix produced a variable. The bare parenthesized
-lvalue `(x) = 42` is also rejected, though not by the predicate
-(parentheses vanish in the AST, so `(x)` *is* an `ExpVar`): `(x)` carries no
-suffix, so `suffixedexp` does not match it, and the `NAME` alternative does
-not allow parentheses — while the suffixed `(x).f = 1` is a legal
-assignment. Likewise the only expression allowed as a statement is
-`(suffixedexp => exp_is_call) -> StatCall`. Both predicates fail *without
-raising a label*, letting ordered choice fall through to the explicit
-`%{...}` throws described below — which is how `(x) = 42` and `1 + 1` in
-statement position get specific messages.
+Expression-list and constructor checking classifies vararg ranges as spreads,
+rejects non-tail expansion, and preserves parentheses' one-result adjustment.
+An adjusted spread owns one evaluated carrier plus an optional first projection;
+it participates in read/write flow analysis just like a list-tail carrier.
+Ordinary collection subsets without a spread remain invalid scalar expressions.
 
 ## Parse-time desugarings
 
-The parser performs several rewrites that later passes rely on:
+Record declarations retain an adjacent synthesized `new` function. Union
+variants written `empty()` or `payload(T)` retain their adjacent positional
+constructors and source-order tags. Visibility and constructor markers are
+unchanged. Short standard-library imports normalize to their `titan.*` logical
+names; the `.titan` source-required marker remains independent of that identity.
 
-* **Import markers are separated from identity.** `defs.importdecl` calls
-  `parser.normalize_import`, which removes one terminal `.titan` marker before
-  applying standard-library shorthand. It constructs
-  `Ast.TopLevelImport(localname, canonical_modname, source_required)`, so
-  `uv.titan` and `titan.uv.titan` both carry canonical name `titan.uv` plus a
-  true request bit. Later passes never need to parse the marker out of a name.
-
-* **Type alias declarations are direct.** `[local] type Name = T` is not a
-  desugaring: it produces one `Ast.TopLevelTypeAlias` whose `type` field is the
-  ordinary type-annotation AST. The checker keeps the declaration out of the
-  value namespace and code generation. See [Type aliases](type-aliases.md).
-
-* **`record` declarations produce two toplevels.** `defs.recorddecl` returns
-  an `Ast.TopLevelRecord` plus a synthesized `Ast.TopLevelStatic` named
-  `new`, whose parameters are the fields in declaration order and whose body
-  returns an init list mapping each field to its parameter. So
-
-  ```lua
-  record Point
-      x: float
-      y: float
-  end
-  ```
-
-  parses as if the programmer had also written
-  `function Point.new(x: float, y: float): Point return {x = x, y = y} end` —
-  the same `Ast.TopLevelStatic` node that user-declared record functions use,
-  and why `Point.new(2, 3)` is positional in field order. `local record` marks
-  both the `TopLevelRecord` and synthesized `new`
-  local, and any local field also makes `new` local so outside code cannot
-  construct private slots positionally.
-
-* **`union` declarations synthesize positional constructors.**
-  `defs.uniondecl` returns an `Ast.TopLevelUnion` followed by one
-  `Ast.TopLevelStatic` for each source-order `Ast.UnionVariant`. An empty
-  variant gets no parameters; a payload variant gets one hidden
-  `__union_payload` parameter and returns `Ast.ExpUnionInit`. The static is
-  marked `_union_constructor` and `_union_variant`, so the checker can
-  distinguish it from a user function and publish `paramnames = false`.
-  Consequently `Message.move(value)` is positional and first-class, while
-  `Message.move{...}` remains named-call syntax rather than constructor
-  sugar.
-  Variant-looking type targets add no parser form: local `Message.move` fits
-  the ordinary two-component qualified type and is rejected semantically,
-  while imported `m.Message.move` has three components and fails the type
-  grammar before checking.
-
-* **Record functions share the static node.** A declaration
-  `function Point.origin(): Point ... end` parses to `Ast.TopLevelStatic`.
-  The parser sets `islocal` when the declaration is written
-  `local function Point.origin(...)`.
-
-* **The root module initializer keeps an explicit parser role.** The optional
-  final root `do ... end` produces the ordinary `Ast.StatBlock`, or the
-  `Ast.StatTry` already used when its block has a `catch` trailer.
-  The small `moduleinit` action sets `_module_initializer` and changes the
-  node location to the `do` keyword. Folder assembly can therefore remove the
-  main initializer and append it after all contributor roots, or report a
-  contributor initializer at the construct that is disallowed, without
-  guessing from the statement tag or adding an AST tag.
-
-* **`if`/`elseif` chains flatten to a list.** `defs.ifstat` prepends the
-  initial condition/block pair to the captured `elseif` clauses, yielding one
-  `Ast.StatIf` whose `thens` is a flat list of `Ast.Then` nodes (plus
-  `elsestat`, a block or `false`) — not nested ifs.
-
-* **`case` arms are ordinary blocks.** The grammar requires one or more
-  `when Name [: binding] then block` arms and an optional `else block`.
-  It builds `Ast.StatCase` and `Ast.CaseArm` directly. Each `block` is the
-  same production used elsewhere, including its trailing `catch`
-  support and the normal recursive `defer` transformation. There is
-  no fallthrough-oriented or statement-list-only arm grammar.
-
-* **Numeric and generic `for` share their prefix.** The grammar parses
-  `FOR decl` once and then dispatches to `forrest`: `= exp, exp ...` builds
-  `Ast.StatFor`, while `in explist do ... end` or `, decl ... in explist`
-  builds `Ast.StatForIn`. Keeping the labeled numeric-`=` failure inside
-  `forrest` lets malformed numeric loops still report `AssignFor` without
-  swallowing valid generic loops.
-
-* **Missing return types default to zero results.** `defs.rettypeopt` turns an
-  absent `: rettype` annotation into an empty fixed list and no flexible tail,
-  so `function f() end` has `() -> ()`. A written `: nil` remains one fixed
-  nil result. For lambdas, `defs.lambdarettypeopt` keeps absence distinct from
-  an explicit `: ()`, because the former may copy fixed and flexible results
-  from an expected function type.
-
-* **Parenthesized calls and exact input dots become `ExpAdjust`.**
-  `defs.adjust_exp` wraps `( f() )` and the explicit scalar form `(...)` in an
-  `Ast.ExpAdjust` node. Other parentheses vanish from the AST (`((1))` is just
-  `ExpInteger 1`). Bare input dots are not a general `simpleexp`: a dedicated
-  `parenexp` branch admits them only when the next token is the closing `)`,
-  while `(...[index])` and `(...[subset])` fall through to ordinary expression
-  parsing. The complementary `Ast.ExpExtra` node for
-  finite result positions after the first is synthesized only by
-  [the checker](checker.md), never the parser; runtime-sized flexible tails
-  stay on the call's checker decorations rather than becoming parser nodes.
-
-* **Concat flattening and constant folding** (see the ladder section), and
-  the **option-mark desugarings**: the type suffix `T?` becomes
-  `Ast.TypeOption` immediately (`defs.typeopt`); a declaration `x?: T`
-  eagerly wraps its annotation in `TypeOption` while a bare `x?` defers to
-  inference (`Decl{type = false, option = true}`, `defs.optiondecl`).
-
-A non-rewrite worth knowing: the numeric `for`'s step is captured as `false`
-when omitted; the default step of `1` is synthesized by the checker.
+`defer` is lowered within its owning statement-list block into nested `StatTry`
+nodes with `finallyblock`. The lowering walks the list without repeatedly
+copying its remaining suffix. It preserves LIFO cleanup, block boundaries,
+catch/rethrow behavior, and source locations. The reserved `finally` keyword
+does not introduce a surface clause.
 
 ## The error-label system
 
 ### Raising a label
 
-A label is raised in one of three ways:
-
-1. **In the lexer**, with `lpeg.T(Label)` as an ordered-choice alternative
-   inside a token pattern — e.g. `good_number + T("MalformedNumber")`.
-2. **In the grammar**, with relabel's expectation sugar `pattern^Label`: if
-   `pattern` fails at that point, `Label` is raised instead of ordinary
-   backtracking. This is the pervasive form (`NAME^NameFunc`, `END^EndFunc`,
-   `exp^ExpWhile`, ...); placing `^` is choosing where backtracking ends and
-   committed error reporting begins.
-3. **Explicitly**, with `%{Label}` guarded by a lookahead, for errors that
-   ordered choice would otherwise swallow. The statement rule ends with
-   `&(exp ASSIGN) %{ExpAssign}` (an expression followed by `=` that did not
-   parse as a `varlist`) and, after the `StatCall` alternative,
-   `&exp %{ExpStat}` (a non-call expression in statement position); also
-   `!RCURLY %{ExpFieldList}` inside `fieldlist`, for `y{42,,}`.
-
-On failure, `grammar:match` returns `nil, label, errpos`; `parser.parse`
-converts `errpos` into a location and returns `false, {label, loc}`. A
-failure with no specific label gets relabel's default label `fail`, whose
-registry message is just "Syntax Error".
+`nonterminal^Label` commits that parse; `%{Label}` raises a label directly. Every
+referenced name must appear in `syntax_errors.errors`. The public label/location
+contract also covers ordinary-capture validation failures such as an overlong
+list or an optional annotation applied to a multiple-result shape.
 
 ### From label to message
 
-`parser.error_to_string(err)` looks the label up in `syntax_errors.errors`
-and renders it via `location.format_error` as, e.g.,
-`myfile.titan:2:2: syntax error: Expected a valid lvalue in the left side of
-assignment but found a regular expression.`
-
-**The registry contract: every label used anywhere — in `lexer.lua` or
-`parser.lua`, by any of the three mechanisms — must have an entry in
-`syntax_errors.errors`.** There is no fallback: a missing entry makes
-`error_to_string` format `nil` (which Lua 5.5's `%s` stringifies rather
-than rejecting), so the user sees `file:line:col: syntax error: nil`
-instead of a message.
-
-### Quirks to know about
-
-* **`ExpAssign` is defined twice** in `syntax_errors.lua` — once as
-  "Expected an expression after '='.", later as "Expected a valid lvalue in
-  the left side of assignment...". In a Lua table constructor the later key
-  wins, so only the lvalue message survives — yet the label is raised in
-  *both* situations, so `x =` (missing right-hand side) gets the misleading
-  lvalue message; `spec/parser_spec.lua` asserts the `ExpAssign` label for
-  both `x =` and `(x) = 42`.
-* **`AssignImport` is unreachable** — both the `import` and `foreign` rules
-  need `local NAME =`, but `toplevelvar` is tried first and raises
-  `AssignVar` at the missing `=` — and a comment in the table says so. The
-  comment on `ImportImport` claims the same, and the `import` rule indeed
-  never raises it (`toplevelvar`'s `!(IMPORT / FOREIGN)` only fails quietly)
-  — but the `foreign` rule does raise it: `local x = foreign 42` reports
-  `ImportImport`.
-* Preserved typos: `RParSimpleExp` is `"Expected ')'to match '('."` and
-  `RCurlyInitList` the backwards `"Expected '{' to match '}'."` (raised when
-  `}` is missing).
+`parser.error_to_string` combines the label's message with
+`location.format_error`. Preserve a location at the relevant token or missing
+component. An arbitrary Lua exception in a capture remains an exception; it
+must not be mistaken for a user syntax error.
 
 ### Adding a new labeled error
 
-Raise the label (`pattern^MyLabel`, a lookahead-guarded `%{MyLabel}`, or
-`T("MyLabel")` in the lexer); add `MyLabel = "message"` to
-`syntax_errors.errors` — mandatory, per the contract above; and add an
-`assert_program_syntax_error(program, "MyLabel")` test to the "uses specific
-error labels for some errors" block of `spec/parser_spec.lua` (or the label
-tests in `spec/lexer_spec.lua`).
+Add the registry entry and a focused invalid-source test. Prove that a branch
+has been selected by a terminal before making its recursive component committed.
+Test nearby valid alternatives, not only the newly rejected input.
 
 ## Location tracking
 
-A location is a plain table `{filename, line, col}` (1-based).
-`location.from_pos(filename, source, pos)` converts a byte offset via
-`location.get_line_number`, which is lazy and cached: the first query for a
-given subject string builds a sorted list of the byte offsets of its `\n`s,
-stored in a cache declared **weak-keyed** (`__mode = "k"`) — intended to let
-source strings be collected, but ineffective: Lua strings behave as values
-in weak tables and are never removed, so entries persist for the life of the
-module; the line is then a binary search, and
-`col = pos - (newlines[line - 1] or 0)`. The laziness covers building the
-index — the parser still computes a location *eagerly for every captured
-node* through `P`. `location.format_error(loc, fmt, ...)` produces the
-standard `file:line:col: ...` prefix used by both syntax and
-[checker](checker.md) errors.
-Every folder contributor is parsed with its real filename, so these existing
-locations survive plain-node concatenation. Cross-file checker diagnostics
-can use `location.format` to name the earlier declaration's complete
-`filename:line:col` as well as the primary node.
+`P` is an ordinary position/function capture. It consults the current input and
+interns the immutable location by byte position for that parse. `location.lua`
+caches newline offsets and uses binary search to produce one-based lines and
+byte columns. Name, module, owner, end, and structural locations are preserved
+for diagnostics and language-server consumers.
 
-The ordinary `loc` remains the diagnostic start of a complete construct. The
-parser additionally records private exact-source locations for semantic tools:
-`_name_loc` points at the selected identifier (including declarations, member
-selectors, named labels, and method names), `_module_loc` points at a qualified
-type's module spelling, and `_owner_loc` points at a method/static declaration's
-nominal owner. `_end_loc` points at the first byte of the closing `end` or
-`until`; an explicit statement `do ... end` also uses `_structure_loc` for its
-opening `do`, because its block's diagnostic location otherwise belongs to its
-first child. These fields do not change AST constructor arity or error
-locations. They are 1-based compiler locations; clients convert them to their
-own coordinate system at the protocol boundary.
+Ordinary captures avoid retaining one dynamic LPeg result per source location.
+The lexer likewise separates value production from match-time validation. Wide
+flat inputs must not overflow the dynamic capture-result limit merely because
+there are many tokens; deeply nested syntax remains a separate grammar-depth
+consideration.
 
 ## Non-reentrancy
 
-The grammar cannot thread extra arguments to its actions (the source comment
-laments: "If only lpeg.re had Carg..."), so the current filename lives in the
-module-global `THIS_FILENAME`, set by `parser.parse` around `grammar:match`
-and guarded by `assert(THIS_FILENAME == nil)` on entry. The parser is
-therefore **not reentrant**: a recursive or concurrent `parser.parse` trips
-the assert. The normal pipeline never nests parses. A folder module's files
-are parsed one after another, and all have returned before its one checker
-invocation; imported modules are then parsed by the
-[driver's loader](driver.md) from inside `checker.checkimport`. A tool parsing
-from inside another parse will still hit the guard. `grammar:match` is also not
-run protected, so an
-error raised inside a semantic action escapes `parse` without restoring
-`THIS_FILENAME`, poisoning later calls in the same process.
+The parser remains non-reentrant. `parser.parse` installs its filename, input,
+and per-parse location table, executes the match under `pcall`, and clears all
+three on success, labeled failure, structured capture failure, and unexpected
+Lua error. It converts only its private structured-failure marker to the public
+syntax-error result; other exceptions are rethrown. No prior source/location
+state may contaminate the next parse.
 
 ## Testing parser changes
 
-* **Lexer changes** go through `spec/lexer_spec.lua`, whose harness does not
-  parse: it tries every exported token pattern at each token-start position
-  as it scans the input,
-  asserting both the expected token/capture sequence and the uniqueness
-  property — two patterns matching the same position is itself a failure, so
-  adding a token that violates longest match is caught here.
-* **Parser tests compare AST subsets.** `spec/parser_spec.lua`'s
-  `assert_program_ast` runs `restrict(expected, actual)` — recursively
-  keeping only the keys present in the expected table — before
-  `assert.are.same`. Write expected trees with only the fields you care
-  about (`_tag` plus the relevant children); new node fields and decorations
-  then never break old tests. Error tests assert labels, via
-  `assert_program_syntax_error`.
-* **Folder assembly is driver behavior.** Filesystem ordering, main-only
-  initializers, privacy blocks, and cross-file locations belong in
-  `spec/driver_spec.lua`; the parser specs continue to exercise one input
-  string per call and the unchanged AST vocabulary.
-* **The `TableFormatLevel` gotcha.** Failing AST comparisons print the
-  table, and luassert's print depth is a *global* parameter.
-  `parser_spec.lua` raises it to 100 in `setup()` and restores it in
-  `teardown()`, but a stray `assert:set_parameter("TableFormatLevel", -1)`
-  in the describe body runs at collection time — and printing a
-  self-referential post-checker AST at unlimited depth hangs busted.
-* **Select checkout sources explicitly for focused Busted runs.** From the
-  repository root, use the prefix's `busted --run=checkout` with command-scoped
-  `TITAN_ROCKS_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1`. The `.busted`
-  profile prepends local Lua paths after the LuaRocks launcher, so
-  `require "titan-compiler.parser"` sees front-end edits. The root option
-  preserves installed headers and runtime libraries; the C module path stays
-  unchanged. Its standard Busted helper prepares direct checker C-header lookup
-  through the existing driver APIs and rejects a missing root option. Default
-  Busted and installed `titanc` still require reinstalling
-  compiler edits. Reinstall runtime and standard-library changes as well;
-  `make test` retains the full install-first gate
-  (see [repository test execution](test-runner.md#repository-dogfooding)).
+`spec/lexer_spec.lua` and `spec/parser_spec.lua` own token, AST, label, source
+location, associativity, commitment, and deterministic scaling regressions.
+Use instruction/capture growth checks rather than wall-clock thresholds. Cover
+large declaration/constructor lists, very wide unions, nested calls/indexes,
+malformed committed suffixes, and failure followed by another parse.
+
+Checker tests own invalid lvalues, non-call statements, alias categories, and
+spread placement. Coder tests own their runtime consequences. The final audit
+must inspect every actual predicate and alternative against the rules above;
+green tests alone do not prove bounded lookahead or committed parsing.

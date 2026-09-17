@@ -54,17 +54,17 @@ local record RegexBackreferenceNode
 end
 
 local union RegexNode
-  empty: integer
-  literal: RegexTextNode
-  any: integer
-  class: RegexTextNode
-  sequence: RegexChildrenNode
-  choice: RegexChildrenNode
-  group: RegexGroupNode
-  repetition: RegexRepeatNode
-  backreference: RegexBackreferenceNode
-  word_start: integer
-  word_end: integer
+  empty(integer)
+  literal(RegexTextNode)
+  any(integer)
+  class(RegexTextNode)
+  sequence(RegexChildrenNode)
+  choice(RegexChildrenNode)
+  group(RegexGroupNode)
+  repetition(RegexRepeatNode)
+  backreference(RegexBackreferenceNode)
+  word_start(integer)
+  word_end(integer)
 end
 
 local record ParsedRegex
@@ -110,27 +110,27 @@ end
 
 local function RegexNode:position(): integer
   case self
-  when empty: position then
+  when empty(position) then
     return position
-  when literal: node then
+  when literal(node) then
     return node.position
-  when any: position then
+  when any(position) then
     return position
-  when class: node then
+  when class(node) then
     return node.position
-  when sequence: node then
+  when sequence(node) then
     return node.position
-  when choice: node then
+  when choice(node) then
     return node.position
-  when group: node then
+  when group(node) then
     return node.position
-  when repetition: node then
+  when repetition(node) then
     return node.position
-  when backreference: node then
+  when backreference(node) then
     return node.position
-  when word_start: position then
+  when word_start(position) then
     return position
-  when word_end: position then
+  when word_end(position) then
     return position
   end
 end
@@ -158,37 +158,37 @@ end
 
 local function regex_nullable(node: RegexNode): boolean
   case node
-  when empty then
+  when empty() then
     return true
-  when literal then
+  when literal() then
     return false
-  when any then
+  when any() then
     return false
-  when class then
+  when class() then
     return false
-  when sequence: sequence then
+  when sequence(sequence) then
     local index = 1
     while index <= #sequence.children do
       if not regex_nullable(sequence.children[index]) then return false end
       index = index + 1
     end
     return true
-  when choice: choice then
+  when choice(choice) then
     local index = 1
     while index <= #choice.children do
       if regex_nullable(choice.children[index]) then return true end
       index = index + 1
     end
     return false
-  when group: group then
+  when group(group) then
     return regex_nullable(group.child)
-  when repetition: repetition then
+  when repetition(repetition) then
     return repetition.minimum == 0 or regex_nullable(repetition.child)
-  when backreference: backreference then
+  when backreference(backreference) then
     return backreference.nullable
-  when word_start then
+  when word_start() then
     return true
-  when word_end then
+  when word_end() then
     return true
   end
 end
@@ -201,7 +201,7 @@ end
 local function regex_byte(source: string,
                           position: integer): integer
   local bytes =
-    source as const *unsigned char
+    source as foreign const *unsigned char
   return bytes[position - 1] as integer
 end
 
@@ -643,7 +643,7 @@ end
 local function regex_validate_backreference(
     node: RegexNode, state: RegexParseState)
   case node
-  when backreference: backreference then
+  when backreference(backreference) then
     if not state.closed_groups[backreference.number] then
       raise_regex_diagnostic(
         "invalid_backreference",

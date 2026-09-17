@@ -31,7 +31,7 @@ function test_signal_watcher_validation_delivery_cancellation_and_replacement(
     end, "embedded-NUL signal name was accepted")
 
     local received = ""
-    local waiter = async.run<value, value>(function (): value
+    local waiter = async.run<|value, value|>(function (): value
       received = system.wait_signal("usr1")
       return nil
     end)
@@ -44,7 +44,7 @@ function test_signal_watcher_validation_delivery_cancellation_and_replacement(
                 "one-shot signal continuation returned the wrong result")
 
     local cancelled_resumed = false
-    local cancelled = async.run<value, value>(function (): value
+    local cancelled = async.run<|value, value|>(function (): value
       system.wait_signal("usr2")
       cancelled_resumed = true
       return nil
@@ -62,7 +62,7 @@ function test_signal_watcher_validation_delivery_cancellation_and_replacement(
                 "cancelled signal continuation resumed")
 
     local replacement_received = ""
-    local replacement = async.run<value, value>(function (): value
+    local replacement = async.run<|value, value|>(function (): value
       replacement_received = system.wait_signal("usr2")
       return nil
     end)

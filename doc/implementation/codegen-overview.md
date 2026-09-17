@@ -160,7 +160,7 @@ registry is unchanged.
 
 A trimmed but real example (elisions marked `...`) — this module:
 
-```lua
+```titan
 -- counter.titan
 x = 1
 function inc(n: integer): integer
@@ -525,7 +525,7 @@ minimum and reads the tag's raw pointer bits, so no `ttis*` discriminator is
 needed on this trusted private slot.
 
 Matching the tag is stricter than gradual consistency. A Titan
-`(value) -> integer` viewed as `(integer) -> integer` through a dynamic
+`function (value): (integer)` viewed as `function (integer): (integer)` through a dynamic
 `value` round trip has no statically known source Function edge, so its tag does
 not match and it cannot use this branch. By contrast, a direct checker-approved
 non-exact `A -> B` cast may conditionally realize a closure tagged B; that
@@ -708,7 +708,7 @@ inventing side storage.
 
 Each lambda's native, coercive-Lua, and strict-generic entries are **hoisted
 to file scope** and
-emitted alongside the top-level functions, named `<modprefix>lambda_<N>`.
+emitted alongside the top-level functions, named `<modprefix>lambda_<|N|>`.
 Because a lambda nested inside another lambda is discovered only while the
 outer one's body is generated, the emission loop drains the lambda list
 with an index-based `while` that re-reads its length each iteration rather

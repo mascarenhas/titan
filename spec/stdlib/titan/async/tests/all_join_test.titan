@@ -5,10 +5,10 @@ local function caught_all_two(first: async.Task,
   catch
     local rejected = error as async.AllTwoError
     case rejected
-    when first: status then
+    when first(status) then
       support.cancelled_payload(status)
       return "1"
-    when second: status then
+    when second(status) then
       support.cancelled_payload(status)
       return "2"
     end
@@ -23,13 +23,13 @@ local function caught_all_three(first: async.Task, second: async.Task,
   catch
     local rejected = error as async.AllThreeError
     case rejected
-    when first: status then
+    when first(status) then
       support.cancelled_payload(status)
       return "1"
-    when second: status then
+    when second(status) then
       support.cancelled_payload(status)
       return "2"
-    when third: status then
+    when third(status) then
       support.cancelled_payload(status)
       return "3"
     end
@@ -45,16 +45,16 @@ local function caught_all_four(first: async.Task, second: async.Task,
   catch
     local rejected = error as async.AllFourError
     case rejected
-    when first: status then
+    when first(status) then
       support.cancelled_payload(status)
       return "1"
-    when second: status then
+    when second(status) then
       support.cancelled_payload(status)
       return "2"
-    when third: status then
+    when third(status) then
       support.cancelled_payload(status)
       return "3"
-    when fourth: status then
+    when fourth(status) then
       support.cancelled_payload(status)
       return "4"
     end
@@ -70,19 +70,19 @@ local function caught_all_five(first: async.Task, second: async.Task,
   catch
     local rejected = error as async.AllFiveError
     case rejected
-    when first: status then
+    when first(status) then
       support.cancelled_payload(status)
       return "1"
-    when second: status then
+    when second(status) then
       support.cancelled_payload(status)
       return "2"
-    when third: status then
+    when third(status) then
       support.cancelled_payload(status)
       return "3"
-    when fourth: status then
+    when fourth(status) then
       support.cancelled_payload(status)
       return "4"
-    when fifth: status then
+    when fifth(status) then
       support.cancelled_payload(status)
       return "5"
     end
@@ -200,7 +200,7 @@ function test_all_combinators_values_and_error_positions(context: test.Context)
     catch
       local failure = error as async.AllFiveError
       case failure
-      when fifth: status then
+      when fifth(status) then
         local failed, details? = status:has_failed()
         test.assert(failed and details ~= nil,
               "live all_five listener lost failed Task status")
@@ -235,7 +235,7 @@ function test_all_combinators_values_and_error_positions(context: test.Context)
     catch
       local failure = error as async.AllTwoError
       case failure
-      when second: status then
+      when second(status) then
         local failed, details? = status:has_failed()
         test.assert(failed and details ~= nil,
               "all did not preserve failed Task status")
@@ -250,7 +250,7 @@ end
 function test_join_arities_and_complete_status_payloads(context: test.Context)
   runtime_test.run(function ()
     context:log("BEGIN expected uncaught async Task diagnostics")
-    local timer_task = async.run<value, value>(function (): value
+    local timer_task = async.run<|value, value|>(function (): value
       timer.sleep(2)
       return "joined-timer"
     end)
@@ -261,7 +261,7 @@ function test_join_arities_and_complete_status_payloads(context: test.Context)
     task_support.cleanup_task(cancelled_task, "join cancelled cleanup")
     local failed_task = support.failing("join-logged-failure")
     task_support.cleanup_task(failed_task, "join failure cleanup")
-    local operation_task = async.run<value, value>(function (): value
+    local operation_task = async.run<|value, value|>(function (): value
       timer.sleep(-1)
       return nil
     end)
@@ -287,13 +287,13 @@ function test_join_arities_and_complete_status_payloads(context: test.Context)
     local marker: value = {}
     local complex_cancelled = support.sleeping(60000, "complex cancellation returned")
     task_support.cleanup_task(complex_cancelled, "complex cancellation cleanup")
-    complex_cancelled:cancel(async.CancellationReason<value>.complex(marker))
+    complex_cancelled:cancel(async.CancellationReason<|value|>.complex(marker))
     local complex_status = async.join(complex_cancelled)
     local has_complex, complex_reason? = complex_status:has_cancelled()
     test.assert(has_complex and complex_reason ~= nil,
           "complex cancellation did not produce cancelled status")
     case complex_reason as async.CancellationReason
-    when complex: payload then
+    when complex(payload) then
       test.assert(payload == marker, "complex cancellation payload changed")
     else
       raise "complex cancellation became a simple reason"
@@ -386,22 +386,22 @@ end
 
 function test_generic_all_and_join_operand_positions(context: test.Context)
   runtime_test.run(function ()
-    local number = async.run<integer, string>(function (): integer
+    local number = async.run<|integer, string|>(function (): integer
       return 41
     end)
     task_support.cleanup_task(number, "generic all/join number cleanup")
-    local text = async.run<string, integer>(function (): string
+    local text = async.run<|string, integer|>(function (): string
       return "typed"
     end)
     task_support.cleanup_task(text, "generic all/join text cleanup")
-    local flag = async.run<boolean, {string: integer}>(function (): boolean
+    local flag = async.run<|boolean, {string: integer}|>(function (): boolean
       return true
     end)
     task_support.cleanup_task(flag, "generic all/join flag cleanup")
-    local nothing = async.run<nil, boolean>(function ()
+    local nothing = async.run<|nil, boolean|>(function ()
     end)
     task_support.cleanup_task(nothing, "generic all/join nil cleanup")
-    local decimal = async.run<float, string>(function (): float
+    local decimal = async.run<|float, string|>(function (): float
       return 2.5
     end)
     task_support.cleanup_task(decimal, "generic all/join float cleanup")

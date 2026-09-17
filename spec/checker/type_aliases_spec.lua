@@ -30,7 +30,7 @@ describe("Titan type aliases", function()
         local ok, err, ast = run_checker([[
             type Count = integer
             type AlsoCount = Count
-            type Counter = (Count) -> AlsoCount
+            type Counter = function (Count): AlsoCount
 
             function id(x: AlsoCount): Count
                 return x
@@ -216,13 +216,13 @@ describe("Titan type aliases", function()
                 end
 
                 union Reason
-                    simple: string
-                    empty
+                    simple(string)
+                    empty()
                 end
 
                 function Reason.describe(reason: Reason): string
                     case reason
-                    when simple: message then
+                    when simple(message) then
                         return message
                     else
                         return "empty"
@@ -239,13 +239,13 @@ describe("Titan type aliases", function()
                 local facade = import "facade"
 
                 function make(): (facade.Error, facade.Reason, string)
-                    local new_error: (integer) -> facade.Error =
+                    local new_error: function (integer): facade.Error =
                         facade.ErrorAgain.new
-                    local from: (integer) -> facade.Error =
+                    local from: function (integer): facade.Error =
                         facade.Error.from
-                    local simple: (string) -> facade.Reason =
+                    local simple: function (string): facade.Reason =
                         facade.Reason.simple
-                    local describe: (facade.Reason) -> string =
+                    local describe: function (facade.Reason): string =
                         facade.Reason.describe
                     local reason = simple("cancelled")
                     return new_error(from(1).code), reason, describe(reason)
@@ -266,8 +266,8 @@ describe("Titan type aliases", function()
             end
 
             union Result
-                success: Box
-                failure: string
+                success(Box)
+                failure(string)
             end
 
             type PublicBox = Box
@@ -275,9 +275,9 @@ describe("Titan type aliases", function()
             type PublicResult = Result
 
             function make(n: integer): PublicResult
-                local new_box: (integer) -> Box = PrivateBox.new
-                local from: (integer) -> Box = PublicBox.from
-                local success: (Box) -> Result = PublicResult.success
+                local new_box: function (integer): Box = PrivateBox.new
+                local from: function (integer): Box = PublicBox.from
+                local success: function (Box): Result = PublicResult.success
                 return success(new_box(from(n).n))
             end
         ]])
@@ -300,8 +300,8 @@ describe("Titan type aliases", function()
                 end
 
                 union Choice
-                    shown: integer
-                    local hidden: integer
+                    shown(integer)
+                    local hidden(integer)
                 end
             ]],
             facade = [[
@@ -388,19 +388,19 @@ describe("Titan type aliases", function()
         assert.truthy(ok, err)
     end)
 
-    it("rejects exported aliases to C FFI types but permits local aliases", function()
+    it("rejects direct foreign Titan aliases but permits private foreign aliases", function()
         with_header("typedef int ffi_int;\n", function(header)
             local errors = h.check_errs([[
                 foreign import "]] .. header .. [["
-                type Public = ffi.ffi_int
-                local type Private = ffi.ffi_int
+                type Public = (foreign ffi_int)
+                foreign type Private = ffi_int
 
-                local function keep(x: Private): Private
+                local function keep(x: foreign Private): foreign Private
                     return x
                 end
             ]])
             assert.same(1, #errors)
-            assert.match("cannot export C FFI type '.-ffi_int'", errors[1])
+            assert.match("type alias 'Public' cannot name a direct foreign type", errors[1])
         end)
     end)
 

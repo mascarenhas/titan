@@ -6,29 +6,18 @@ foreign import "string.h"
 foreign import "unistd.h"
 foreign import "signal.h"
 foreign import "errno.h"
-local type Sigaction = ffi.sigaction
+foreign type Sigaction = sigaction
 local coroutine = import "coroutine"
 
 -- Exact native entries carried by the Titan closures stored in callback-owner
 -- record slots. The foreign libuv callbacks below recover and invoke these
 -- entries without changing the closure protocol.
-local type UvNoargCallbackEntry =
-  foreign (*ffi.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata) -> ()
-local type UvIntegerCallbackEntry =
-  foreign (*ffi.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
-           ffi.lua_Integer) -> ()
-local type UvTwoIntegerCallbackEntry =
-  foreign (*ffi.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
-           ffi.lua_Integer, ffi.lua_Integer) -> ()
-local type UvSizePointerCallbackEntry =
-  foreign (*ffi.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
-           ffi.size_t, *void) -> ()
-local type UvIntegerPointerCallbackEntry =
-  foreign (*ffi.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
-           ffi.lua_Integer, *void) -> ()
-local type UvPointerCallbackEntry =
-  foreign (*ffi.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
-           *void) -> ()
+foreign type UvNoargCallbackEntry = function (*lua_State, *Udata, *CClosure, *Udata): void
+foreign type UvIntegerCallbackEntry = function (*lua_State, *Udata, *CClosure, *Udata, lua_Integer): void
+foreign type UvTwoIntegerCallbackEntry = function (*lua_State, *Udata, *CClosure, *Udata, lua_Integer, lua_Integer): void
+foreign type UvSizePointerCallbackEntry = function (*lua_State, *Udata, *CClosure, *Udata, size_t, *void): void
+foreign type UvIntegerPointerCallbackEntry = function (*lua_State, *Udata, *CClosure, *Udata, lua_Integer, *void): void
+foreign type UvPointerCallbackEntry = function (*lua_State, *Udata, *CClosure, *Udata, *void): void
 
 -- titan.uv is deliberately a thin callback/continuation adapter. There is one
 -- tag identity per module instance and one outer uv_run driver per Runtime.
@@ -36,7 +25,7 @@ local type UvPointerCallbackEntry =
 -- consume immediate outcomes until its next callback-bearing operation is
 -- accepted, then returns to the non-reentrant event loop.
 local UV_TAG: value = {}
-local main_thread: *ffi.lua_State = nil
+local main_thread: foreign *lua_State = nil
 local active_runtime: Runtime? = nil
 local program_args_ready = false
 
@@ -52,7 +41,7 @@ record OperationError
   operation: string
 end
 
-local function bootstrap(main_callable: ({string}) -> integer,
+local function bootstrap(main_callable: function ({string}): (integer),
                          args: {string}): integer
   local result = 1
   local task = run_internal(function (): ()
@@ -76,11 +65,11 @@ local function setup_program_args(): boolean
   defer ffi.lua_settop(L, top)
   ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGC_KEY)
   if ffi.lua_type(L, -1) == ffi.LUA_TNIL then return false end
-  local argc = ffi.lua_tointegerx(L, -1, nil) as int
+  local argc = ffi.lua_tointegerx(L, -1, nil) as foreign int
   ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGV_KEY)
-  local argv = ffi.lua_touserdata(L, -1) as **char
+  local argv = ffi.lua_touserdata(L, -1) as foreign *(*char)
   local configured = ffi.uv_setup_args(argc, argv)
-  ffi.lua_pushlightuserdata(L, configured as *void)
+  ffi.lua_pushlightuserdata(L, configured as foreign *void)
   ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGV_KEY)
   return true
 end
@@ -89,7 +78,7 @@ end
 -- terminate the process first. Preserve inherited application policy and
 -- change only the default Unix disposition.
 local function ignore_sigpipe_if_default(): integer
-  local current = Sigaction.new()
+  local current = foreign Sigaction.new()
   if ffi.sigaction(ffi.SIGPIPE, nil, current) ~= 0 then
     return ffi.uv_translate_sys_error(ffi.errno)
   end

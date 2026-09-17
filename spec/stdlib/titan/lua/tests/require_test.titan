@@ -53,7 +53,7 @@ function test_lua_require_uses_appended_custom_searcher(
     local searcher: lua_support.PackageSearcher =
       function (actual: string): (value, value)
         if actual ~= modname then return "custom miss", nil end
-        local loader: (string, value) -> value =
+        local loader: function (string, value): (value) =
           function (loaded_name: string, data: value): value
             test.assert(loaded_name == modname and data == "custom-data",
                         "custom searcher loader arguments changed")
@@ -86,7 +86,7 @@ function test_lua_require_loads_stock_c_modules(_context: test.Context)
         return type(module) == "table" and
                type(module.attributes) == "function"
       end
-    ]==]) as (value) -> boolean
+    ]==]) as function (value): (boolean)
     test.assert(has_attributes(lfs_module),
                 "titan.lua.require did not use Lua's C searcher")
   end)

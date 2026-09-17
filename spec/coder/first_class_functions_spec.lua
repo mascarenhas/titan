@@ -24,7 +24,7 @@ describe("first-class function values (end-to-end)", function()
     function()
         local csrc = h.compile_and_read_c([[
             function invoke(
-                f: (string) -> string,
+                f: function (string): string,
                 text: string
             ): string
                 return f(text)
@@ -74,7 +74,7 @@ describe("first-class function values (end-to-end)", function()
     it("references a top-level function and calls it through a value", function()
         run_coder([[
             function dbl(x: integer): integer return x * 2 end
-            function apply(f: (integer) -> integer, x: integer): integer
+            function apply(f: function (integer): integer, x: integer): integer
                 return f(x)
             end
             function run(): integer
@@ -89,7 +89,7 @@ describe("first-class function values (end-to-end)", function()
         run_coder([[
             function inc(x: integer): integer return x + 1 end
             function run(): integer
-                local f: (integer) -> integer = inc
+                local f: function (integer): integer = inc
                 return f(f(f(10)))
             end
         ]], [[
@@ -100,7 +100,7 @@ describe("first-class function values (end-to-end)", function()
     it("gives an exported function value a stable identity", function()
         run_coder([[
             function foo(x: integer): integer return x end
-            function get(): (integer) -> integer
+            function get(): function (integer): integer
                 return foo
             end
         ]], [[
@@ -111,7 +111,7 @@ describe("first-class function values (end-to-end)", function()
 
     it("calls a Lua closure passed into Titan", function()
         run_coder([[
-            function callwith(f: (integer) -> integer, x: integer): integer
+            function callwith(f: function (integer): integer, x: integer): integer
                 return f(x)
             end
         ]], [[
@@ -121,10 +121,10 @@ describe("first-class function values (end-to-end)", function()
 
     it("calls other Lua callables passed into Titan", function()
         run_coder([[
-            function callint(f: (integer) -> integer, x: integer): integer
+            function callint(f: function (integer): integer, x: integer): integer
                 return f(x)
             end
-            function callfloat(f: (float) -> float, x: float): float
+            function callfloat(f: function (float): float, x: float): float
                 return f(x)
             end
         ]], [[
@@ -142,7 +142,7 @@ describe("first-class function values (end-to-end)", function()
                 return a // b, a % b
             end
             function run(): integer
-                local f: (integer, integer) -> (integer, integer) = dm
+                local f: function (integer, integer): (integer, integer) = dm
                 local q, r = f(13, 5)
                 return q * 100 + r
             end
@@ -156,7 +156,7 @@ describe("first-class function values (end-to-end)", function()
             function inc(x: integer): integer return x + 1 end
             function dec(x: integer): integer return x - 1 end
             function run(): integer
-                local arr: {(integer) -> integer} = {inc, dec, inc}
+                local arr: {function (integer): integer} = {inc, dec, inc}
                 local s = 0
                 for i = 1, 3 do
                     s = s + arr[i](10)
@@ -171,7 +171,7 @@ describe("first-class function values (end-to-end)", function()
     it("holds a function value in a record field", function()
         run_coder([[
             record Box
-                fn: (integer) -> integer
+                fn: function (integer): integer
             end
             function inc(x: integer): integer return x + 1 end
             function run(): integer
@@ -188,7 +188,7 @@ describe("first-class function values (end-to-end)", function()
             function inc(x: integer): integer return x + 1 end
             function run(): integer
                 local v: value = inc
-                local f: (integer) -> integer = v
+                local f: function (integer): integer = v
                 return f(41)
             end
         ]], [[
@@ -199,7 +199,7 @@ describe("first-class function values (end-to-end)", function()
     it("keeps a function value in a record alive across a collection", function()
         run_coder([[
             record Box
-                fn: (integer) -> integer
+                fn: function (integer): integer
             end
             function inc(x: integer): integer return x + 1 end
             function make(): Box return Box.new(inc) end
@@ -214,7 +214,7 @@ describe("first-class function values (end-to-end)", function()
 
     it("raises cleanly when calling a non-callable value", function()
         run_coder([[
-            function callit(f: (integer) -> integer, x: integer): integer
+            function callit(f: function (integer): integer, x: integer): integer
                 return f(x)
             end
         ]], [[
@@ -229,7 +229,7 @@ describe("first-class function values (end-to-end)", function()
                 a: integer
                 b: integer
             end
-            function mk(f: (integer, integer) -> Pair): Pair
+            function mk(f: function (integer, integer): Pair): Pair
                 return f(3, 4)
             end
             function run(): integer
@@ -246,7 +246,7 @@ describe("first-class function values (end-to-end)", function()
         run_coder([[
             function inc(x: integer): integer return x + 1 end
             function dec(x: integer): integer return x - 1 end
-            function pick(up: boolean): (integer) -> integer
+            function pick(up: boolean): function (integer): integer
                 if up then return inc else return dec end
             end
             function run(up: boolean, x: integer): integer
@@ -264,7 +264,7 @@ describe("first-class function values (end-to-end)", function()
         -- the value is actually called and turns out not to be callable.
         run_coder([[
             function tryit(v: value): integer
-                local f: (integer) -> integer = v
+                local f: function (integer): integer = v
                 return f(10)
             end
         ]], [[
@@ -279,8 +279,8 @@ describe("first-class function values (end-to-end)", function()
         -- frame -- so the stack seen by the probe is one frame shallower than
         -- with a Lua closure, which goes through luaD_callnoyield (the slow path).
         run_coder([[
-            function inner(p: () -> integer): integer return p() end
-            function outer(g: (() -> integer) -> integer, p: () -> integer): integer
+            function inner(p: function (): integer): integer return p() end
+            function outer(g: function (function (): integer): integer, p: function (): integer): integer
                 return g(p)
             end
         ]], h.DEPTH_PROBE .. [[
@@ -304,7 +304,7 @@ describe("first-class function values (end-to-end)", function()
             end
             function run(): integer
                 local v: value = f
-                local g: (integer) -> integer = v
+                local g: function (integer): integer = v
                 return g(41)
             end
         ]], [[
@@ -319,13 +319,13 @@ describe("first-class function values (end-to-end)", function()
 
             function strict_integer(x: value): integer
                 local dynamic: value = takes_integer
-                local f: (value) -> integer = dynamic
+                local f: function (value): integer = dynamic
                 return f(x)
             end
 
             function strict_boolean(x: value): boolean
                 local dynamic: value = takes_boolean
-                local f: (value) -> boolean = dynamic
+                local f: function (value): boolean = dynamic
                 return f(x)
             end
         ]], [[
@@ -351,21 +351,21 @@ describe("first-class function values (end-to-end)", function()
 
             function strict_integer_result(): integer
                 local dynamic: value = float_as_value
-                local f: () -> integer = dynamic
+                local f: function (): integer = dynamic
                 return f()
             end
 
             function strict_boolean_result(): boolean
                 local dynamic: value = string_as_value
-                local f: () -> boolean = dynamic
+                local f: function (): boolean = dynamic
                 return f()
             end
 
-            function lua_integer_result(f: () -> integer): integer
+            function lua_integer_result(f: function (): integer): integer
                 return f()
             end
 
-            function lua_boolean_result(f: () -> boolean): boolean
+            function lua_boolean_result(f: function (): boolean): boolean
                 return f()
             end
         ]], [[
@@ -385,7 +385,7 @@ describe("first-class function values (end-to-end)", function()
 
     it("keeps foreign C closures on the ordinary Lua-call branch", function()
         run_coder([[
-            function next_string(f: () -> string): string
+            function next_string(f: function (): string): string
                 return f()
             end
         ]], [[
@@ -408,24 +408,24 @@ describe("first-class function values (end-to-end)", function()
         -- non-exact Titan->Titan call is one frame deeper than the exact one and
         -- the same depth as a Lua closure.
         run_coder([[
-            function inner(p: () -> integer): integer return p() end
+            function inner(p: function (): integer): integer return p() end
             function inner_compat(q: value): integer
-                local fp: () -> integer = q
+                local fp: function (): integer = q
                 return fp()
             end
-            function outer(g: (() -> integer) -> integer, p: () -> integer): integer
+            function outer(g: function (function (): integer): integer, p: function (): integer): integer
                 return g(p)
             end
-            function run_fast(p: () -> integer): integer
+            function run_fast(p: function (): integer): integer
                 return outer(inner, p)
             end
-            function run_nonexact(p: () -> integer): integer
+            function run_nonexact(p: function (): integer): integer
                 local v: value = inner_compat
-                local g: (() -> integer) -> integer = v
+                local g: function (function (): integer): integer = v
                 return outer(g, p)
             end
-            function run_slow(p: () -> integer,
-                              g: (() -> integer) -> integer): integer
+            function run_slow(p: function (): integer,
+                              g: function (function (): integer): integer): integer
                 return outer(g, p)
             end
         ]], h.DEPTH_PROBE .. [[
@@ -448,19 +448,19 @@ describe("first-class function values (end-to-end)", function()
         -- round-trip (inner handed out through the module table and passed back
         -- into Titan). Both stay one frame shallower than a real Lua closure.
         run_coder([[
-            function inner(p: () -> integer): integer return p() end
-            function outer(g: (() -> integer) -> integer, p: () -> integer): integer
+            function inner(p: function (): integer): integer return p() end
+            function outer(g: function (function (): integer): integer, p: function (): integer): integer
                 return g(p)
             end
-            function direct(p: () -> integer): integer
+            function direct(p: function (): integer): integer
                 return outer(inner, p)
             end
-            function via_value(p: () -> integer): integer
+            function via_value(p: function (): integer): integer
                 local v: value = inner
-                local g: (() -> integer) -> integer = v   -- back to inner's own type
+                local g: function (function (): integer): integer = v   -- back to inner's own type
                 return outer(g, p)
             end
-            function slow(p: () -> integer, g: (() -> integer) -> integer): integer
+            function slow(p: function (): integer, g: function (function (): integer): integer): integer
                 return outer(g, p)
             end
         ]], h.DEPTH_PROBE .. [[
@@ -483,7 +483,7 @@ describe("first-class function values (end-to-end)", function()
             b = [[
                 local a = import "a"
                 function run(): integer
-                    local f: (integer) -> integer = a.dbl
+                    local f: function (integer): integer = a.dbl
                     return f(21)
                 end
                 function direct(): integer
@@ -500,7 +500,7 @@ describe("first-class function values (end-to-end)", function()
         local ok, err = generate_modules({
             a = [[
                 function inc(x: integer): integer return x + 1 end
-                function twice(f: (integer) -> integer, x: integer): integer
+                function twice(f: function (integer): integer, x: integer): integer
                     return f(f(x))
                 end
             ]],
@@ -524,7 +524,7 @@ describe("first-class function values (end-to-end)", function()
     it("passes a function value into another module's higher-order function", function()
         local ok, err = generate_modules({
             a = [[
-                function compose2(f: (integer) -> integer, x: integer): integer
+                function compose2(f: function (integer): integer, x: integer): integer
                     return f(x) + f(x)
                 end
             ]],
@@ -547,15 +547,15 @@ describe("first-class function values (end-to-end)", function()
         -- fires only if a's and b's tags for the same function type agree, so a
         -- shallower stack confirms the cross-module tag agreement.
         local ok, err = generate_modules({
-            spa = [[ function inner(p: () -> integer): integer return p() end ]],
+            spa = [[ function inner(p: function (): integer): integer return p() end ]],
             spb = [[
                 local a = import "spa"
-                function outer(g: (() -> integer) -> integer, p: () -> integer): integer
+                function outer(g: function (function (): integer): integer, p: function (): integer): integer
                     return g(p)
                 end
-                function run_fast(p: () -> integer): integer return outer(a.inner, p) end
-                function run_slow(p: () -> integer,
-                                  g: (() -> integer) -> integer): integer
+                function run_fast(p: function (): integer): integer return outer(a.inner, p) end
+                function run_slow(p: function (): integer,
+                                  g: function (function (): integer): integer): integer
                     return outer(g, p)
                 end
             ]],
@@ -596,7 +596,7 @@ describe("variadic function values (end-to-end)", function()
                 return s
             end
             function run(): integer
-                local f: (...: integer) -> integer = sum
+                local f: function (...: integer): integer = sum
                 return f(1, 2, 3, 4) + f() + f(10)
             end
         ]], [[
@@ -613,7 +613,7 @@ describe("variadic function values (end-to-end)", function()
                 while i <= n do s = s + ...[i]; i = i + 1 end
                 return s
             end
-            function apply3(f: (...: integer) -> integer): integer
+            function apply3(f: function (...: integer): integer): integer
                 return f(1, 2, 3)
             end
             function run(): integer
@@ -633,7 +633,7 @@ describe("variadic function values (end-to-end)", function()
                 while i <= n do s = s + ...[i]; i = i + 1 end
                 return s
             end
-            function get(): (...: integer) -> integer
+            function get(): function (...: integer): integer
                 return sum
             end
             function run(): integer
@@ -658,10 +658,10 @@ describe("variadic function values (end-to-end)", function()
                 while i <= n do s = s + ...[i]; i = i + 1 end
                 return s
             end
-            function forward(f: (...: integer) -> integer, ...: integer): integer
+            function forward(f: function (...: integer): integer, ...: integer): integer
                 return f(...)          -- pass-through: forward ... into the value
             end
-            function forward_prefix(f: (...: integer) -> integer, ...: integer): integer
+            function forward_prefix(f: function (...: integer): integer, ...: integer): integer
                 return f(100, ...)     -- fresh copy: prefix grows the tail
             end
             function run(): (integer, integer)
@@ -692,7 +692,7 @@ describe("variadic function values (end-to-end)", function()
             end
             function run(): integer
                 local v: value = sum
-                local g: (...: value) -> integer = v   -- compatible, different tag
+                local g: function (...: value): integer = v   -- compatible, different tag
                 return g(10, 20, 30)
             end
         ]], [[
@@ -713,15 +713,15 @@ describe("variadic function values (end-to-end)", function()
             end
 
             function direct(...: value): integer
-                local g: (...: value) -> integer = h
-                local gi: (...: integer) -> integer = g
+                local g: function (...: value): integer = h
+                local gi: function (...: integer): integer = g
                 return gi(...)
             end
 
             function erased(...: value): integer
-                local g: (...: value) -> integer = h
+                local g: function (...: value): integer = h
                 local v: value = g
-                local gi: (...: integer) -> integer = v
+                local gi: function (...: integer): integer = v
                 return gi(...)
             end
         ]], [[
@@ -751,7 +751,7 @@ describe("variadic function values (end-to-end)", function()
             end
             function f(...: integer): integer
                 local v: value = sum
-                local g: (...: value) -> integer = v   -- compatible, different tag => generic
+                local g: function (...: value): integer = v   -- compatible, different tag => generic
                 return g(...)
             end
         ]], [[
@@ -766,7 +766,7 @@ describe("variadic function values (end-to-end)", function()
         -- the Lua side is the Lua function itself (no Titan entry), and the
         -- arguments arrive as plain Lua values.
         run_coder([[
-            function callwith(f: (...: integer) -> integer): integer
+            function callwith(f: function (...: integer): integer): integer
                 return f(3, 4, 5)
             end
         ]], [[
@@ -797,7 +797,7 @@ describe("variadic function values (end-to-end)", function()
                 return s
             end
             function run(a: string, b: string, c: string): integer
-                local f: (...: string) -> integer = totallen
+                local f: function (...: string): integer = totallen
                 return f(a, b, c)
             end
         ]], [[
@@ -826,7 +826,7 @@ describe("variadic function values (end-to-end)", function()
             end
             function run(): integer
                 local a: Acc = Acc.new(100)
-                local m: (...: integer) -> integer = a:total
+                local m: function (...: integer): integer = a:total
                 return m(1, 2, 3)
             end
         ]], [[
@@ -841,22 +841,22 @@ describe("variadic function values (end-to-end)", function()
         -- value's runtime tag matches; a real Lua closure (the slow `g`) is one
         -- frame deeper. The probe `p` records the stack depth at which it runs.
         run_coder([[
-            function inner(f: () -> integer, ...: integer): integer
+            function inner(f: function (): integer, ...: integer): integer
                 local s = f()
                 local i = 1
                 local n = #...
                 while i <= n do s = s + ...[i]; i = i + 1 end
                 return s
             end
-            function outer(g: (() -> integer, ...: integer) -> integer,
-                           p: () -> integer): integer
+            function outer(g: function (function (): integer, ...: integer): integer,
+                           p: function (): integer): integer
                 return g(p, 1, 2, 3)
             end
-            function run_fast(p: () -> integer): integer
+            function run_fast(p: function (): integer): integer
                 return outer(inner, p)   -- exact tag -> fast native path
             end
-            function run_slow(p: () -> integer,
-                              g: (() -> integer, ...: integer) -> integer): integer
+            function run_slow(p: function (): integer,
+                              g: function (function (): integer, ...: integer): integer): integer
                 return outer(g, p)       -- a Lua closure g -> slow path
             end
         ]], h.DEPTH_PROBE .. [[

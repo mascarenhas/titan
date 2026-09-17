@@ -149,8 +149,8 @@ describe("generic for loops", function()
     it("runs computed record-field iterators and close functions", function()
         h.run_coder([[
             record H
-                iter: (value, value) -> integer?
-                close: (value) -> nil
+                iter: function (value, value): integer?
+                close: function (value): nil
             end
 
             local built: integer = 0
@@ -337,8 +337,8 @@ describe("generic for loops", function()
                 end
             end
 
-            function make_closures(): {() -> integer}
-                local fns: {() -> integer} = {}
+            function make_closures(): {function (): integer}
+                local fns: {function (): integer} = {}
                 local i = 1
                 for x: integer in step, nil, 0 do
                     fns[i] = function (): integer
@@ -358,7 +358,7 @@ describe("generic for loops", function()
 
     it("calls a Lua iterator through the generic value path", function()
         h.run_coder([[
-            function sum(step: (nil) -> integer?): integer
+            function sum(step: function (nil): integer?): integer
                 local total = 0
                 for x: integer in step do
                     total = total + x
@@ -433,7 +433,7 @@ describe("generic for loops", function()
             end
 
             function strict(step: value, closev: value): nil
-                local typed: () -> () = closev
+                local typed: function (): () = closev
                 for x: integer in step, nil, nil, typed do
                 end
                 return nil
@@ -583,7 +583,7 @@ describe("generic for loops", function()
                 function sum(): integer
                     ffi.ffi_reset()
                     local total = 0
-                    for p: ffi.ffi_int_ptr in ffi.ffi_next, nil, nil, ffi.ffi_close do
+                    for p: foreign ffi_int_ptr in ffi.ffi_next, nil, nil, ffi.ffi_close do
                         total = total + (p[0] as integer)
                     end
                     return total + (ffi.ffi_closed as integer)
@@ -592,7 +592,7 @@ describe("generic for loops", function()
                 function pointer_sum(): integer
                     ffi.ffi_reset()
                     local total = 0
-                    for p: ffi.ffi_int_ptr in ffi.ffi_next_pointer, nil, nil,
+                    for p: foreign ffi_int_ptr in ffi.ffi_next_pointer, nil, nil,
                             ffi.ffi_close_pointer do
                         total = total + (p[0] as integer)
                     end
@@ -646,7 +646,7 @@ describe("generic for loops", function()
                 return nil
             end
 
-            function go(...: (nil) -> nil): integer
+            function go(...: function (nil): nil): integer
                 local total = 0
                 for x: integer in step, nil, 0, ... do
                     total = total + x

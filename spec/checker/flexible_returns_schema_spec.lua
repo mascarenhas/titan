@@ -50,10 +50,10 @@ describe("flexible return schemas (typechecker)", function()
     it("infers complete results unless explicit `: ()` overrides them", function()
         local ok, err, tree = run_checker([[
             function run(): nil
-                local inferred: () -> (boolean, ...: integer) = function()
+                local inferred: function (): (boolean, ...: integer) = function()
                     return true
                 end
-                local explicit: () -> (value, ...: integer) = function(): ()
+                local explicit: function (): (value, ...: integer) = function(): ()
                 end
                 return nil
             end
@@ -98,9 +98,9 @@ describe("flexible return schemas (typechecker)", function()
         ]], function(header)
             local errs = check_errs([[
                 foreign import "]] .. header .. [["
-                function bad_pointer(): (...: ffi.ffi_int_ptr)
+                function bad_pointer(): (...: foreign ffi_int_ptr)
                 end
-                function bad_scalar(): (...: ffi.ffi_int)
+                function bad_scalar(): (...: foreign ffi_int)
                 end
             ]])
             assert.truthy(#errs >= 2)
@@ -121,11 +121,11 @@ describe("flexible return schemas (typechecker)", function()
             local ok, err = run_checker([[
                 foreign import "]] .. header .. [["
 
-                local function take(...: ffi.TValue): nil
+                local function take(...: foreign TValue): nil
                     return nil
                 end
 
-                local function give(): (...: ffi.TValue)
+                local function give(): (...: foreign TValue)
                 end
             ]])
             assert.truthy(ok, err)
@@ -203,7 +203,7 @@ describe("flexible return schemas (typechecker)", function()
                 foreign import "]] .. header .. [["
 
                 function run(): nil
-                    for n: ffi.ffi_int_ptr in ffi.ffi_next, nil, nil do
+                    for n: foreign ffi_int_ptr in ffi.ffi_next, nil, nil do
                     end
                     return nil
                 end

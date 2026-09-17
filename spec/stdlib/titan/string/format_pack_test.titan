@@ -40,8 +40,8 @@ local function assert_unpack_parity(format_string: string, data: string)
     actual, expected, "unpack result differs for " .. format_string)
 end
 
-local function assert_same_success(titan_call: () -> (),
-                                   lua_call: () -> (),
+local function assert_same_success(titan_call: function (): (),
+                                   lua_call: function (): (),
                                    message: string)
   test.assert(support.succeeds(titan_call) == support.succeeds(lua_call),
               message)

@@ -4,7 +4,7 @@ local runtime_test = import "support.runtime.titan"
 local async = import "async"
 local net = import "net"
 
-local type CheckedAction = () -> ()
+local type CheckedAction = function (): ()
 
 local function expect_failure(action: CheckedAction, message: string)
   local failed = false

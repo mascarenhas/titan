@@ -3,28 +3,28 @@ foreign import "lua.h"
 foreign import "lauxlib.h"
 foreign import "titan/ffi.h"
 
-local type Contains = (string, string) -> boolean
-local type UnaryString = (string) -> string
-local type LuaLength = (string) -> integer
-local type LuaSub = (string, integer, integer?) -> string
-local type LuaByte = (string, integer?, integer?) -> (...: integer)
+local type Contains = function (string, string): (boolean)
+local type UnaryString = function (string): (string)
+local type LuaLength = function (string): (integer)
+local type LuaSub = function (string, integer, integer?): (string)
+local type LuaByte = function (string, integer?, integer?): (...: integer)
 local type LuaFind =
-  (string, string, integer?) -> (integer?, integer?)
-local type LuaRepeat = (string, integer, string?) -> string
-local type LuaChar = (...: integer) -> string
-local type LuaToString = (value) -> string
-local type LuaFormat = (string, ...: value) -> string
-local type LuaPack = (string, ...: value) -> string
-local type LuaPacksize = (string) -> integer
+  function (string, string, integer?): (integer?, integer?)
+local type LuaRepeat = function (string, integer, string?): (string)
+local type LuaChar = function (...: integer): (string)
+local type LuaToString = function (value): (string)
+local type LuaFormat = function (string, ...: value): (string)
+local type LuaPack = function (string, ...: value): (string)
+local type LuaPacksize = function (string): (integer)
 local type LuaUnpack =
-  (string, string, integer?) -> (value, ...: value)
-local type MakeValue = (string) -> value
-local type ReplaceToString = () -> value
-local type RestoreToString = (value) -> ()
-local type SetLocale = () -> string?
-local type RestoreLocale = (string) -> ()
-local type SetGcMode = (string) -> string
-local type CollectGc = () -> ()
+  function (string, string, integer?): (value, ...: value)
+local type MakeValue = function (string): (value)
+local type ReplaceToString = function (): (value)
+local type RestoreToString = function (value): ()
+local type SetLocale = function (): (string?)
+local type RestoreLocale = function (string): ()
+local type SetGcMode = function (string): (string)
+local type CollectGc = function (): ()
 
 local contains_function: Contains? = nil
 local lua_len_function: LuaLength? = nil
@@ -91,7 +91,7 @@ local function contains(subject: string, needle: string): boolean
   return exact(subject, needle)
 end
 
-local function expect_error(callback: () -> (), fragment: string?): string
+local function expect_error(callback: function (): (), fragment: string?): string
   local raised = false
   local message = ""
   do
@@ -108,7 +108,7 @@ local function expect_error(callback: () -> (), fragment: string?): string
   return message
 end
 
-local function succeeds(callback: () -> ()): boolean
+local function succeeds(callback: function (): ()): boolean
   local succeeded = true
   do
     callback()
@@ -118,7 +118,7 @@ local function succeeds(callback: () -> ()): boolean
   return succeeded
 end
 
-local function attempt_string(callback: () -> string): (boolean, string)
+local function attempt_string(callback: function (): (string)): (boolean, string)
   local succeeded = true
   local result = ""
   do

@@ -11,17 +11,17 @@ local function _initialize_native()
   _engine = raw_engine as {string: value}
 
   _P = _engine["P"] as NativeUnary
-  _S = _engine["S"] as (string) -> value
+  _S = _engine["S"] as function (string): (value)
   _R = _engine["R"] as NativeRange
   _utfR = _engine["utfR"] as NativeUtfRange
-  _V = _engine["V"] as (string) -> value
+  _V = _engine["V"] as function (string): (value)
   _B = _engine["B"] as NativeUnary
-  _T = _engine["T"] as (string) -> value
+  _T = _engine["T"] as function (string): (value)
   _C = _engine["C"] as NativeUnary
   _Cc = _engine["Cc"] as NativeConstant
   _Cmt = _engine["Cmt"] as NativeBinary
   _Cb = _engine["Cb"] as NativeUnary
-  _Carg = _engine["Carg"] as (integer) -> value
+  _Carg = _engine["Carg"] as function (integer): (value)
   _Cp = _engine["Cp"] as NativePosition
   _Cs = _engine["Cs"] as NativeUnary
   _Ct = _engine["Ct"] as NativeUnary
@@ -43,7 +43,7 @@ local function _initialize_native()
   _difference = metatable["__sub"] as NativeBinary
   _lookahead = metatable["__len"] as NativeUnary
   _negative = metatable["__unm"] as NativeUnary
-  _repeat = metatable["__pow"] as (value, integer) -> value
+  _repeat = metatable["__pow"] as function (value, integer): (value)
   _capture_replace =
     metatable["__div"] as NativeBinary
 

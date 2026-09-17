@@ -106,9 +106,16 @@ Titan visibility and C compilation context are separate. An explicit `.titan`
 edge carries the dependency's validated `.ffi.h` descriptor. The consumer's
 `.ffi.h` includes all explicit-source dependency FFI headers in written import
 order before its own foreign directives. The C driver preprocesses and parses
-that actual combined header once, preserving include guards, final macro state,
+that actual combined header, preserving include guards, final macro state,
 and C declaration/tag scopes. The resulting C names populate the consumer's
-reserved `ffi` namespace throughout its Titan module.
+builtin `ffi` value namespace and separate foreign type namespace throughout its Titan module.
+
+`foreign type Name = foreigntype` declarations are raw C typedefs in these
+headers. They are always local to source, have no `local` modifier, and do not
+occupy the exported or source-private Titan type-member maps. An explicit
+source importer sees their unqualified foreign names through the header graph,
+including transitive typedefs. Ordinary `type` aliases retain their existing
+Titan namespace and direct source-private visibility.
 
 This C include chain is transitive. Private Titan declarations still require a
 direct explicit source-import capability; a transitive C include does not make
@@ -166,6 +173,8 @@ The overlay itself introduces no serialized constructor. ABI 2 covers the
 localized `titan.uv` public schema and closure prefix, every module's physical-
 provider identity slot, source foreign collaboration, callable symbol families,
 generic declarations, and current public standard-library and const metadata.
+The grammar change retains prerelease ABI 2, language version 0.6.0, and
+language-server API marker 1.
 A mismatched provider is rejected before decoding or native linking. Earlier
 installations are neither migrated nor deleted. The explicit `.titan` parser marker and
 source-required request add no serialized field or native identity and

@@ -83,12 +83,12 @@ describe("source-import local visibility (end-to-end)", function()
                 end
 
                 function first_class(): integer
-                    local combine: (integer, integer) -> integer =
+                    local combine: function (integer, integer): integer =
                         provider.combine
-                    local make: (integer) -> provider.Counter =
+                    local make: function (integer): provider.Counter =
                         provider.Counter.from
                     local counter = make(10)
-                    local bump: (integer) -> integer = counter:bump
+                    local bump: function (integer): integer = counter:bump
                     return combine(bump(5), 27)
                 end
 
@@ -220,8 +220,8 @@ describe("source-import local visibility (end-to-end)", function()
                 end
 
                 local union Outcome
-                    ready: Pair
-                    failed: string
+                    ready(Pair)
+                    failed(string)
                 end
             ]],
             source_runtime_nominal_consumer = [[
@@ -236,9 +236,9 @@ describe("source-import local visibility (end-to-end)", function()
                     local outcome: provider.Outcome =
                         provider.Outcome.ready(first)
                     case outcome
-                    when ready: pair then
+                    when ready(pair) then
                         return pair.left + pair.right + 9
-                    when failed: message then
+                    when failed(message) then
                         return #message
                     end
                 end
@@ -262,10 +262,10 @@ struct SourceOwnedRuntime { int field; };
         generate({
             source_runtime_owned_owner = string.format([[
                 foreign import %q
-                local type Item = ffi.SourceOwnedRuntime
+                foreign type Item = SourceOwnedRuntime
 
                 local function make(): owned *Item
-                    return ffi.SourceOwnedRuntime.new()
+                    return foreign Item.new()
                 end
 
                 local function id(
@@ -277,13 +277,13 @@ struct SourceOwnedRuntime { int field; };
             source_runtime_owned_forwarder = [[
                 local owner = import "source_runtime_owned_owner.titan"
 
-                local function make(): owned *owner.Item
+                local function make(): owned *Item
                     return owner.make()
                 end
 
                 local function id(
-                    item: owned *owner.Item
-                ): owned *owner.Item
+                    item: owned *Item
+                ): owned *Item
                     return owner.id(item)
                 end
             ]],
@@ -292,7 +292,7 @@ struct SourceOwnedRuntime { int field; };
                 local owner = import "source_runtime_owned_owner.titan"
 
                 function run(): integer
-                    local item: owned *owner.Item = forwarder.make()
+                    local item: owned *Item = forwarder.make()
                     item.field = 42
                     return forwarder.id(item).field as integer
                 end
@@ -335,9 +335,9 @@ static struct SourceRuntimeFileMacro *source_runtime_file_macro_make(void) {
         generate({
             source_runtime_file_macro_owner = string.format([[
                 foreign import %q
-                local type Item = ffi.SourceRuntimeFileMacro
+                foreign type Item = SourceRuntimeFileMacro
 
-                local function get(): *Item
+                local function get(): foreign *Item
                     return ffi.source_runtime_file_macro_make()
                 end
             ]], header),
@@ -396,15 +396,15 @@ static struct SourceRuntimeFileMacro *source_runtime_file_macro_make(void) {
                 foreign import %q
                 foreign import %q
                 foreign import %q
-                local type Count = ffi.source_runtime_count
-                local type Left = ffi.SourceRuntimeLeft
-                local type Right = ffi.SourceRuntimeRight
+                foreign type Count = source_runtime_count
+                foreign type Left = SourceRuntimeLeft
+                foreign type Right = SourceRuntimeRight
 
-                local function count(): Count
+                local function count(): foreign Count
                     return ffi.source_runtime_count_value()
                 end
 
-                local function left(): *Left
+                local function left(): foreign *Left
                     return ffi.source_runtime_left()
                 end
             ]], count_header, left_header, right_header),
@@ -414,7 +414,7 @@ static struct SourceRuntimeFileMacro *source_runtime_file_macro_make(void) {
                 function run(): integer
                     local count = owner.count()
                     local doubled = count + count
-                    local right = owner.left() as *owner.Right
+                    local right = owner.left() as foreign *Right
                     if right == nil then return -1 end
                     return doubled as integer
                 end
@@ -462,9 +462,9 @@ static struct SourceRuntimeFileMacro *source_runtime_file_macro_make(void) {
             source_runtime_retained_owner = string.format([[
                 foreign import %q
                 foreign import %q
-                local type Retained = ffi.SourceRuntimeRetainedAlias
+                foreign type Retained = SourceRuntimeRetainedAlias
 
-                local function get(): *Retained
+                local function get(): foreign *Retained
                     return ffi.source_runtime_retained_get()
                 end
             ]], base_header, alias_header),
@@ -497,32 +497,32 @@ static struct SourceRuntimeFileMacro *source_runtime_file_macro_make(void) {
             source_runtime_ffi_leaf = [[
                 foreign import "stdio.h"
                 foreign import "stdatomic.h"
-                local type File = ffi.FILE
+                foreign type File = FILE
 
-                local function open(): *File
+                local function open(): foreign *File
                     return ffi.tmpfile()
                 end
 
-                local function write(file: *File): integer
+                local function write(file: foreign *File): integer
                     return ffi.fputs("source visibility", file) as integer
                 end
 
-                local function close(file: *File): integer
+                local function close(file: foreign *File): integer
                     return ffi.fclose(file) as integer
                 end
             ]],
             source_runtime_ffi_bridge = [[
                 local leaf = import "source_runtime_ffi_leaf.titan"
 
-                local function open(): *leaf.File
+                local function open(): foreign *File
                     return leaf.open()
                 end
 
-                local function write(file: *leaf.File): integer
+                local function write(file: foreign *File): integer
                     return leaf.write(file)
                 end
 
-                local function close(file: *leaf.File): integer
+                local function close(file: foreign *File): integer
                     return leaf.close(file)
                 end
             ]],

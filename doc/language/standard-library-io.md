@@ -94,7 +94,7 @@ policy. Consult the concrete module's chapter for those details.
 
 ## Printing
 
-```titan
+```text
 function print(...: value)
 ```
 
@@ -111,10 +111,10 @@ error behavior; `print` does not convert failures into status values.
 
 ## Line iteration
 
-```titan
+```text
 function lines(reader: ReaderCloser):
-    ((ReaderCloser) -> string?, ReaderCloser, nil,
-     (ReaderCloser) -> ())
+    (function (ReaderCloser): (string?), ReaderCloser, nil,
+     function (ReaderCloser): ())
 ```
 
 `lines` transfers responsibility for closing `reader` to a generic-for
@@ -123,7 +123,7 @@ iterator. Each step calls exactly
 omitted. An empty line is returned as `""` and remains a real iteration;
 only nil EOF stops the loop.
 
-```titan
+```text
 local fs = import "fs"
 local io = import "io"
 
@@ -150,7 +150,7 @@ iterator owns it.
 
 ## Shell commands
 
-```titan
+```text
 record InputOutputStream
 
 function InputOutputStream:read(): string?

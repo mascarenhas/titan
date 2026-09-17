@@ -5,11 +5,11 @@ local function table_extend(t1, t2)
     table.move(t2, 1, #t2, #t1+1, t1)
 end
 
--- The parser uses NAMEDLABEL only in the contextual `label = exp` position
--- and CNAME only for C member/type spellings after `.`. They deliberately
--- overlap both NAME and keyword patterns, so neither is one of the
--- mutually-exclusive top-level tokens exercised by run_lexer.
-local contextual_patterns = { NAMEDLABEL = true, CNAME = true }
+-- ANYNAME and the contextual primitive words intentionally overlap NAME or
+-- reserved-word patterns; the grammar chooses them at their specific sites.
+-- They are not mutually exclusive top-level tokens exercised by run_lexer.
+local contextual_patterns = { ANYNAME = true,
+    BOOLEAN = true, INTEGER = true, FLOAT = true, STRING = true, VALUE = true }
 
 -- Find out how the lexer lexes a given string.
 -- Produces an error message if the string cannot be lexed or if there
@@ -75,21 +75,36 @@ end
 
 describe("Titan lexer", function()
 
+    it("keeps contextual Titan primitive words in the Name category", function()
+        for _, name in ipairs({"boolean", "integer", "float", "string", "value"}) do
+            assert_lex(name, {"NAME"}, {name})
+        end
+    end)
+
+    it("takes longest-match generic delimiters without changing comparisons", function()
+        assert_lex("Box<|Box<|T|>|>",
+            {"NAME", "TYPEOPEN", "NAME", "TYPEOPEN", "NAME", "TYPECLOSE", "TYPECLOSE"},
+            {"Box", "Box", "T"})
+        assert_lex("<|< << <= |> > >> >= |",
+            {"TYPEOPEN", "LT", "SPACE", "SHL", "SPACE", "LE", "SPACE",
+             "TYPECLOSE", "SPACE", "GT", "SPACE", "SHR", "SPACE", "GE", "SPACE", "BOR"}, {})
+    end)
+
     it("captures ordinary and keyword spellings as contextual named labels",
     function()
-        assert.equal("label", lpeg.match(lexer.NAMEDLABEL, "label"))
-        assert.equal("repeat", lpeg.match(lexer.NAMEDLABEL, "repeat"))
-        assert.equal("when", lpeg.match(lexer.NAMEDLABEL, "when"))
-        assert.equal("interface", lpeg.match(lexer.NAMEDLABEL, "interface"))
+        assert.equal("label", lpeg.match(lexer.ANYNAME, "label"))
+        assert.equal("repeat", lpeg.match(lexer.ANYNAME, "repeat"))
+        assert.equal("when", lpeg.match(lexer.ANYNAME, "when"))
+        assert.equal("interface", lpeg.match(lexer.ANYNAME, "interface"))
     end)
 
     it("captures ordinary and keyword spellings as contextual C names",
     function()
-        assert.equal("field", lpeg.match(lexer.CNAME, "field"))
-        assert.equal("repeat", lpeg.match(lexer.CNAME, "repeat"))
-        assert.equal("type", lpeg.match(lexer.CNAME, "type"))
-        assert.equal("when", lpeg.match(lexer.CNAME, "when"))
-        assert.equal("interface", lpeg.match(lexer.CNAME, "interface"))
+        assert.equal("field", lpeg.match(lexer.ANYNAME, "field"))
+        assert.equal("repeat", lpeg.match(lexer.ANYNAME, "repeat"))
+        assert.equal("type", lpeg.match(lexer.ANYNAME, "type"))
+        assert.equal("when", lpeg.match(lexer.ANYNAME, "when"))
+        assert.equal("interface", lpeg.match(lexer.ANYNAME, "interface"))
     end)
 
     it("can lex some keywords", function()
@@ -142,6 +157,7 @@ describe("Titan lexer", function()
         assert_lex("+++", {"ADD", "ADD", "ADD"}, {})
         assert_lex(".",   {"DOT"},               {})
         assert_lex("?",   {"OPT"},               {})
+        assert_lex("::", {"COLON", "COLON"}, {})
         assert_lex("..",  {"CONCAT"},            {})
         assert_lex("...", {"DOTS"},              {})
         assert_lex("<==", {"LE", "ASSIGN"},      {})
@@ -149,7 +165,7 @@ describe("Titan lexer", function()
         assert_lex("///", {"IDIV", "DIV"},       {})
         assert_lex("~=",  {"NE"},                {})
         assert_lex("~~=", {"BXOR", "NE"},        {})
-        assert_lex("->-", {"RARROW", "SUB"},     {})
+        assert_lex("->-", {"SUB", "GT", "SUB"},     {})
         assert_lex("-->", {"COMMENT"},           {})
     end)
 
@@ -346,8 +362,8 @@ describe("Titan lexer", function()
 
     it("can lex some programs", function()
         assert_lex("local x: float = 10.0",
-            {"LOCAL", "SPACE", "NAME", "COLON", "SPACE", "FLOAT",
+            {"LOCAL", "SPACE", "NAME", "COLON", "SPACE", "NAME",
              "SPACE", "ASSIGN", "SPACE", "NUMBER"},
-            {"x", 10.0})
+            {"x", "float", 10.0})
     end)
 end)

@@ -25,7 +25,7 @@ describe("bound methods (end-to-end)", function()
             end
             function run(): integer
                 local a = Adder.new(100)
-                local f: (integer) -> integer = a:add
+                local f: function (integer): integer = a:add
                 return f(5) + f(7)
             end
         ]], [[
@@ -43,21 +43,21 @@ describe("bound methods (end-to-end)", function()
         -- fast path).
         run_coder([[
             record Caller tag: integer end
-            function Caller:call(p: () -> integer): integer
+            function Caller:call(p: function (): integer): integer
                 return p() + self.tag
             end
-            function outer(g: (() -> integer) -> integer,
-                           p: () -> integer): integer
+            function outer(g: function (function (): integer): integer,
+                           p: function (): integer): integer
                 return g(p)
             end
             -- fast path: the bound method `c:call` called at its exact type
-            function run_fast(p: () -> integer): integer
+            function run_fast(p: function (): integer): integer
                 local c = Caller.new(0)
                 return outer(c:call, p)
             end
             -- slow path: g arrives as a value whose tag is unknown statically
-            function run_slow(g: (() -> integer) -> integer,
-                              p: () -> integer): integer
+            function run_slow(g: function (function (): integer): integer,
+                              p: function (): integer): integer
                 return outer(g, p)
             end
         ]], h.DEPTH_PROBE .. [[
@@ -75,7 +75,7 @@ describe("bound methods (end-to-end)", function()
                 self.n = self.n + 1
                 return self.n
             end
-            function make(): () -> integer
+            function make(): function (): integer
                 local c = Counter.new(0)
                 return c:bump
             end
@@ -97,7 +97,7 @@ describe("bound methods (end-to-end)", function()
             function Greeter:greet(name: string): string
                 return self.prefix .. name
             end
-            function make(p: string): (string) -> string
+            function make(p: string): function (string): string
                 local g = Greeter.new(p)
                 return g:greet
             end
@@ -115,7 +115,7 @@ describe("bound methods (end-to-end)", function()
                 self.n = self.n + 1
                 return self.n
             end
-            function make(): () -> integer
+            function make(): function (): integer
                 local c = Counter.new(0)
                 return c:bump
             end
@@ -139,7 +139,7 @@ describe("bound methods (end-to-end)", function()
             end
             function run(): integer
                 local p = Pair.new(3, 4)
-                local f: () -> (integer, integer) = p:both
+                local f: function (): (integer, integer) = p:both
                 local x, y = f()
                 return x * 10 + y
             end
@@ -156,7 +156,7 @@ describe("bound methods (end-to-end)", function()
             end
             function run(): integer
                 local b = Box.new(0)
-                local f: (integer) -> () = b:set
+                local f: function (integer): () = b:set
                 f(99)
                 return b.v
             end
@@ -181,7 +181,7 @@ describe("bound methods (end-to-end)", function()
                 local f = import "bmsofoo"
                 function run(): integer
                     local c = f.newc(10)
-                    local g: () -> integer = c:bump
+                    local g: function (): integer = c:bump
                     return g() + g()
                 end
             ]] },
@@ -203,25 +203,25 @@ describe("bound methods (end-to-end)", function()
         -- check alone would not.
         local ok, err = h.build_so_chain({
             { name = "fpbmf", src = [[
-                function inner(g: (() -> integer) -> integer,
-                               p: () -> integer): integer
+                function inner(g: function (function (): integer): integer,
+                               p: function (): integer): integer
                     return g(p)
                 end
             ]] },
             { name = "fpbmb", src = [[
                 local a = import "fpbmf"
                 record Caller tag: integer end
-                function Caller:call(p: () -> integer): integer
+                function Caller:call(p: function (): integer): integer
                     return p() + self.tag
                 end
                 -- fast: the bound method `c:call` is the function value `g`
-                function run_fast(p: () -> integer): integer
+                function run_fast(p: function (): integer): integer
                     local c = Caller.new(0)
                     return a.inner(c:call, p)
                 end
                 -- slow: g arrives as a value whose tag is unknown statically
-                function run_slow(g: (() -> integer) -> integer,
-                                  p: () -> integer): integer
+                function run_slow(g: function (function (): integer): integer,
+                                  p: function (): integer): integer
                     return a.inner(g, p)
                 end
             ]] },

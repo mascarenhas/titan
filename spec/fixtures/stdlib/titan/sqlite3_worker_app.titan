@@ -8,15 +8,15 @@ local test = import "test"
 foreign import "sqlite3_worker_fixture.h"
 
 local function arm(point: integer)
-  test.assert(ffi.titan_sqlite_fixture_arm(point as int) == 0,
+  test.assert(ffi.titan_sqlite_fixture_arm(point as foreign int) == 0,
               "could not arm SQLite worker fixture")
 end
 
 local function join_cancelled(target: async.Task, reason: string)
   case async.join(target)
-  when cancelled: cancellation then
+  when cancelled(cancellation) then
     case cancellation
-    when simple: message then
+    when simple(message) then
       test.assert(message == reason, "SQLite changed cancellation reason")
     else
       raise "SQLite changed simple cancellation into complex cancellation"
@@ -59,7 +59,7 @@ local function execute_sql(connection: sqlite3.Connection, sql: string)
   statement:execute()
 end
 
-local function assert_overlap_rejected(action: () -> ())
+local function assert_overlap_rejected(action: function (): ())
   local caught = false
   do
     action()
@@ -78,7 +78,7 @@ end
 
 local function assert_unrelated_progress()
   local ticked = false
-  local ticker = async.run<nil, value>(function (): nil
+  local ticker = async.run<|nil, value|>(function (): nil
     timer.yield()
     ticked = true
     return nil
@@ -110,7 +110,7 @@ end
 local function cancelled_open()
   local published = false
   arm(ffi.TITAN_SQLITE_GATE_OPEN)
-  local target = async.run<nil, value>(function (): nil
+  local target = async.run<|nil, value|>(function (): nil
     local connection = sqlite3.connect(":memory:")
     defer connection:close()
     published = true
@@ -135,7 +135,7 @@ local function cancelled_prepare()
   defer connection:close()
   local published = false
   arm(ffi.TITAN_SQLITE_GATE_PREPARE)
-  local target = async.run<nil, value>(function (): nil
+  local target = async.run<|nil, value|>(function (): nil
     local statement = connection:prepare("SELECT 11")
     defer statement:close()
     published = true
@@ -160,7 +160,7 @@ local function cancelled_step()
   local published = false
   local destroyed = ffi.titan_sqlite_fixture_released_blobs() as integer
   arm(ffi.TITAN_SQLITE_GATE_STEP)
-  local target = async.run<nil, value>(function (): nil
+  local target = async.run<|nil, value|>(function (): nil
     -- This temporary Blob is owned solely by the suspended operation while
     -- the supervisor requests cancellation and forces full GC.
     local cursor = statement:query(
@@ -204,7 +204,7 @@ local function cancelled_execute()
   defer statement:close()
   local returned = false
   arm(ffi.TITAN_SQLITE_GATE_STEP)
-  local target = async.run<nil, value>(function (): nil
+  local target = async.run<|nil, value|>(function (): nil
     statement:execute()
     returned = true
     return nil
@@ -223,7 +223,7 @@ local function cancelled_close()
   defer connection:close()
   local completed = false
   arm(ffi.TITAN_SQLITE_GATE_CLOSE)
-  local target = async.run<nil, value>(function (): nil
+  local target = async.run<|nil, value|>(function (): nil
     connection:close()
     completed = true
     return nil
@@ -254,7 +254,7 @@ local function cancelled_reset()
   local completed = false
   local destroyed = ffi.titan_sqlite_fixture_released_blobs() as integer
   arm(ffi.TITAN_SQLITE_GATE_RESET)
-  local target = async.run<nil, value>(function (): nil
+  local target = async.run<|nil, value|>(function (): nil
     cursor:close()
     completed = true
     return nil

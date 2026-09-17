@@ -8,8 +8,8 @@ either path, and crossed to and from Lua. What this chapter adds on top of
 that is the *expression* form, the type **inference** that lets you leave
 its annotations off, and the **lexical capture** of enclosing variables.
 
-```lua
-function make_counter(): () -> integer
+```titan
+function make_counter(): function (): (integer)
     local n = 0
     return function (): integer
         n = n + 1
@@ -49,7 +49,7 @@ It is an expression, so it appears wherever an expression may: as a
 declaration or assignment right-hand side, a call argument, a `return`
 value, a record/union-constructor or array/map element, and so on.
 
-```lua
+```titan
 local g = function (x: integer): integer return x + 1 end   -- in a local
 apply(function (x) return x * 3 end, 14)                     -- as an argument
 return function (): integer return 42 end                   -- as a return value
@@ -81,14 +81,14 @@ fixed parameter is filled in from the expected function type. A trailing bare
 `...` similarly inherits the expected input-tail element type; explicit
 `...: T` wins. See [Variadic parameters](variadic-parameters.md).
 
-```lua
+```titan
 function f(): integer
     -- g's parameter and return both come from the annotation on g
-    local g: (integer) -> (integer) = function (x) return x + 1 end
+    local g: function (integer): (integer) = function (x) return x + 1 end
     return g(2)
 end
 
-function apply(g: (integer) -> (integer), x: integer): integer
+function apply(g: function (integer): (integer), x: integer): integer
     return g(x)
 end
 
@@ -101,7 +101,7 @@ end
 If an unannotated parameter has no usable context — there is no expected
 function type to read it from — it is a clean compile-time error:
 
-```lua
+```titan
 function f(): integer
     local g = function (x) return x end   -- compile-time error
     return 1
@@ -123,14 +123,14 @@ complete return shape is taken from the expected function type when there is
 one. The body is then checked against those results, exactly as a top-level
 function body is checked against its declared returns:
 
-```lua
+```titan
 function f(): integer
     -- g's return (integer) comes from the annotation on g; the body's
     -- `return x + 1` is checked against it
-    local g: (integer) -> (integer) = function (x) return x + 1 end
+    local g: function (integer): (integer) = function (x) return x + 1 end
     -- h returns two values, again from h's annotation
-    local h: (integer) -> (integer, integer) = function (x) return x, x + 1 end
-    local many: () -> (...: integer) = function () return 1, 2, 3 end
+    local h: function (integer): (integer, integer) = function (x) return x, x + 1 end
+    local many: function (): (...: integer) = function () return 1, 2, 3 end
     return g(2)
 end
 ```
@@ -139,8 +139,8 @@ An explicit annotation always wins. In particular, write `: ()` when the lambda
 deliberately produces no results even though its context has a result-bearing
 function type:
 
-```lua
-function install(callback: () -> value)
+```text
+function install(callback: function (): (value))
     -- ...
 end
 
@@ -149,7 +149,7 @@ install(function (): ()
 end)
 ```
 
-The explicit source shape here is `() -> ()`. Ordinary callable adjustment then
+The explicit source shape here is `function (): ()`. Ordinary callable adjustment then
 decides whether it can flow to the target: `value` admits the missing nil result,
 while a non-nilable target such as `integer` does not. See
 [Callable adjustment wrappers](closure-adjustment-wrappers.md).
@@ -158,9 +158,9 @@ When there is no return annotation and no expected function type, the return
 type defaults to the **zero-return** type `()` — exactly the default an
 unannotated top-level function gets:
 
-```lua
+```titan
 function f(): integer
-    local g = function (x: integer) end   -- (integer) -> ()
+    local g = function (x: integer) end   -- function (integer): ()
     g(1)
     return 1
 end
@@ -172,9 +172,9 @@ the lambda has no expected type, `g`'s return type is `()`. Expressions in a
 instead of becoming inferred results — consistent with an unannotated
 top-level function:
 
-```lua
+```titan
 function f(): integer
-    -- no annotation, no expected type -> g is (integer) -> ();
+    -- no annotation, no expected type -> g is function (integer): ();
     -- x + 1 is evaluated and its value is discarded
     local g = function (x: integer) return x + 1 end
     g(4)
@@ -192,8 +192,8 @@ A lambda may use the locals and parameters of the function(s) around it.
 This *just works* — no explicit capture list, no special syntax — and it
 follows the same lexical scoping as Lua:
 
-```lua
-function make_adder(k: integer): (integer) -> integer
+```titan
+function make_adder(k: integer): function (integer): (integer)
     local base = k * 10                  -- a local of make_adder
     return function (x: integer): integer
         return base + x                  -- base is captured from make_adder
@@ -212,8 +212,8 @@ A few details worth knowing:
   iteration's* value, so loop-created closures are independent:
 
   ```lua
-  function make_closures(): {(integer) -> integer}
-      local fns: {(integer) -> integer} = {}
+  function make_closures(): {function (integer): integer}
+      local fns: {function (integer): integer} = {}
       local i = 1
       while i <= 3 do
           local captured = i                 -- a fresh local per iteration
@@ -272,9 +272,9 @@ as `local x = x` reads an outer `x`, not the one being declared. A
 self-reference is therefore a clean "not declared" compile-time error, not
 a silent miscompile:
 
-```lua
+```titan
 function g(): integer
-    local f: (integer) -> (integer) = function (n: integer): integer
+    local f: function (integer): (integer) = function (n: integer): integer
         return f(n)     -- compile-time error: variable 'f' not declared
     end
     return 1
@@ -291,14 +291,14 @@ A lambda is a valid module-variable initializer. Constructing the closure does
 not execute its body or read the values mentioned there, so the ordinary
 module-initialization frontier remains sound:
 
-```lua
+```titan
 local transform = function (x: integer): integer return x + 1 end
 
 function apply(x: integer): integer
     return transform(x)
 end
 
-function replace(f: (integer) -> integer)
+function replace(f: function (integer): (integer))
     transform = f
 end
 ```
@@ -319,7 +319,7 @@ whose type is the method's type with the implicit `self` removed, and
 calling that value runs the method on the nominal receiver `obj` was when the
 reference was taken:
 
-```lua
+```titan
 record Adder
     base: integer
 end
@@ -330,7 +330,7 @@ end
 
 function use(): integer
     local a = Adder.new(100)
-    local f: (integer) -> integer = a:add   -- bound: (integer) -> integer
+    local f: function (integer): (integer) = a:add   -- bound: function (integer): integer
     return f(5) + f(7)                       --> 105 + 107 == 212
 end
 ```
@@ -345,7 +345,7 @@ receiver is a reference,
 calling a bound method that mutates record state is visible through the
 record:
 
-```lua
+```titan
 record Counter
     n: integer
 end
@@ -355,7 +355,7 @@ function Counter:bump(): integer
     return self.n
 end
 
-function make(): () -> integer
+function make(): function (): (integer)
     local c = Counter.new(0)
     return c:bump          -- the receiver c is captured
 end

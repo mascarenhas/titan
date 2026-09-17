@@ -10,9 +10,10 @@ return typedecl("Ast", {
         TypeValue       = {"loc"},
         TypeQualName    = {"loc", "module", "name", "typeargs"},
         TypeName        = {"loc", "name", "typeargs"},
+        TypeForeignName = {"loc", "name"},
         TypeCPointer    = {"loc", "subtype", "const"},
         TypeCArray      = {"loc", "base", "length"},
-        TypeCOwned      = {"loc", "subtype", "count"},
+        TypeOwned       = {"loc", "subtype"}, -- complete raw foreign operand; checker resolves pointer/array aliases
         TypeArray       = {"loc", "subtype", "isconst"},
         TypeMap         = {"loc", "keystype", "valuestype"},
         TypeFunction    = {"loc", "argtypes", "rettypes", "varargtype", "flexrettype"},
@@ -27,6 +28,7 @@ return typedecl("Ast", {
         TopLevelForeignFunc = {"loc", "name", "params", "rettypes", "flexrettype", "block"},
         TopLevelVar     = {"loc", "islocal", "isconst", "decl", "value"},
         TopLevelTypeAlias = {"loc", "islocal", "name", "type"},
+        TopLevelForeignTypeAlias = {"loc", "name", "type"},
         TopLevelRecord  = {"loc", "name", "fields", "typeparams"},
         TopLevelUnion   = {"loc", "name", "variants", "typeparams"},
         TopLevelInterface = {"loc", "name", "members", "fields", "methods", "typeparams"},
@@ -57,7 +59,7 @@ return typedecl("Ast", {
         StatIf          = {"loc", "thens", "elsestat"},
         StatFor         = {"loc", "decl", "start", "finish", "inc", "block"},
         StatForIn       = {"loc", "decls", "exps", "block"},
-        StatAssign      = {"loc", "vars", "exps"},
+        StatAssign      = {"loc", "vars", "exps"}, -- parser candidates are Exp nodes until checker lvalue validation
         StatDecl        = {"loc", "decls", "exps"},
         StatCall        = {"loc", "callexp"},
         StatReturn      = {"loc", "exps"},
@@ -83,6 +85,7 @@ return typedecl("Ast", {
 
     Exp = {
         ExpNil          = {"loc"},
+        ExpForeignType  = {"loc", "type"},
         ExpBool         = {"loc", "value"},
         ExpInteger      = {"loc", "value"},
         ExpFloat        = {"loc", "value"},
@@ -95,7 +98,7 @@ return typedecl("Ast", {
         ExpBinop        = {"loc", "lhs", "op", "rhs"},
         ExpCast         = {"loc", "exp", "target"},
         ExpIs           = {"loc", "exp", "target"},
-        ExpAdjust       = {"loc", "exp"},                   -- adjust call or input varargs to one value
+        ExpAdjust       = {"loc", "exp"},                   -- adjust calls, varargs, spreads, or ranges to one value
         ExpExtra        = {"loc", "exp", "index", "_type"}, -- index-th (>1) value of call
         ExpFunction     = {"loc", "params", "rettypes", "flexrettype", "block"}, -- anonymous function expression
         ExpMethodRef    = {"loc", "exp", "name"}, -- bound method reference `obj:m` (no call)

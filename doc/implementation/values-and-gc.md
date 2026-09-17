@@ -63,7 +63,7 @@ for locals, parameters, return values and temporaries alike:
 | `{T}` (array) | `Table*` | internal backing Table; the Lua-visible value is its canonical proxy Udata |
 | `{K:V}` (map) | `Table*` | ordinary Lua table in both domains |
 | `value` | `TValue` | a full boxed Lua value, held **by value** |
-| function type (`(P..., ...: I) -> (R..., ...: O)`) | `TValue` | boxed callable value; input/output tails change the callable type and native entry ABI, not the boxed representation |
+| function type (`function (P..., ...: I): (R..., ...: O)`) | `TValue` | boxed callable value; input/output tails change the callable type and native entry ABI, not the boxed representation |
 | record or union type (`Type.Nominal`) | `Udata*` | the nominal value *is* this userdata (below) |
 | `T?` (option) | `TValue` | boxed: nil or the payload |
 | foreign pointer except Lua `Udata *` | per `foreignctype` | e.g. `void*`, `char*`; ordinary borrowed pointers are not GC objects ([FFI internals](ffi-internals.md)) |
@@ -191,7 +191,7 @@ preserves the already rooted operand for generic fallback. See
 A Titan record value is **one** Lua object — a full userdata (`Udata`).
 For
 
-```lua
+```titan
 -- Titan
 record Point
     x: float
@@ -513,7 +513,7 @@ it never publishes a tracing-only call-activation slot. Fresh allocations and
 native results already acquired their mandatory roots; other inputs retain their
 ordinary semantic or VM homes. For
 
-```lua
+```titan
 -- Titan
 function greet(s: string): string
     local t: string = s

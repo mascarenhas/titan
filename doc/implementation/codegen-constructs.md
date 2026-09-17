@@ -195,7 +195,7 @@ step's direction.
 
 The body tail gets the same allocation-gated `luaC_checkGC(L);` as
 `while`. `codereturn` evaluates the checker's adjusted return list once,
-stores fixed returns 2..n through `*_outparam_<i>`, fills a requested
+stores fixed returns 2..n through `foreign *_outparam_<i>`, fills a requested
 flexible-output descriptor when the function has one, resets
 `L->top.p = _base`, and returns the first fixed value in C (or `void` when
 there is no fixed result). See [Calls](#calls).
@@ -834,7 +834,7 @@ the stored plan rather than treating every unequal pair as a scalar cast:
 9. **nil → `t?`** emits `setnilvalue`.
 10. **t → `t?`** boxes the present value with the plan's `option_wrap`.
 11. **`t?` → t** checks nil before lowering `option_force`'s inner plan, so
-    absence raises a clean `expected <T> but found nil`.
+    absence raises a clean `expected<|T|> but found nil`.
 12. **→ foreign pointer** lets `nativetoforeignexp` lower the exact C
     conversion plan. A `value` source needs the separately written unsafe
     raw-pointer operation; it is never an implicit gradual projection.

@@ -1,5 +1,5 @@
 local type CaptureCallback =
-  (value, ...: value) -> (...: value)
+  function (value, ...: value): (...: value)
 
 local function build_titan_callback_pattern(
     weak: {value: value}): pattern.Pattern

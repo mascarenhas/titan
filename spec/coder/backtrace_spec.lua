@@ -159,7 +159,7 @@ describe("libbacktrace unified stack trace", function()
         -- the unified trace must show EVERY one of those pure-Lua frames AND
         -- every Titan native frame, in one innermost->outer section.
         local out = compile_and_run([[
-            function apply(f: integer -> integer, n: integer): integer
+            function apply(f: function (integer): integer, n: integer): integer
                 return f(n)
             end
             function boom(n: integer): integer
@@ -234,7 +234,7 @@ describe("libbacktrace unified stack trace", function()
 
     it("keeps genuine Lua C functions in a Lua<->Titan trace chain", function()
         local out = compile_and_run([[
-            function call(f: () -> integer): integer
+            function call(f: function (): integer): integer
                 return f()
             end
             function boom(): integer
@@ -330,7 +330,7 @@ describe("libbacktrace unified stack trace", function()
         -- on the module's 3rd line, so the frame names that line.
         local out = compile_and_run(
             "function run(): integer\n" ..
-            "    local f: () -> integer = function(): integer\n" ..
+            "    local f: function (): (integer) = function(): integer\n" ..
             "        local v: value = {}\n" ..
             "        return v\n" ..
             "    end\n" ..

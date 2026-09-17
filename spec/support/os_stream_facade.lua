@@ -84,11 +84,11 @@ function sub(subject: string, first: integer,
   local ending = ending_position(actual_last, #subject)
   if initial > ending then return "" end
   local count = ending - initial + 1
-  local storage = char.new_array(count)
+  local storage = foreign char.new_array(count)
   ffi.memcpy(
-    storage as *char,
-    (subject as const *char) + initial - 1,
-    count as ffi.size_t)
+    storage as foreign *char,
+    (subject as foreign const *char) + initial - 1,
+    count as foreign size_t)
   return storage as string
 end
 
@@ -102,14 +102,14 @@ function find(subject: string, needle: string,
   if first > #subject or #needle > #subject - first + 1 then
     return nil, nil
   end
-  local subject_bytes = subject as const *char
-  local needle_bytes = needle as const *char
+  local subject_bytes = subject as foreign const *char
+  local needle_bytes = needle as foreign const *char
   local offset = first - 1
   local limit = #subject - #needle
   while offset <= limit do
     if ffi.memcmp(
         subject_bytes + offset, needle_bytes,
-        #needle as ffi.size_t) == 0 then
+        #needle as foreign size_t) == 0 then
       return offset + 1, offset + #needle
     end
     offset = offset + 1

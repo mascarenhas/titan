@@ -94,11 +94,11 @@ describe("named file-scope C tags", function()
             local ok, err, ast = run_checker([[
                 foreign import "]] .. header .. [["
 
-                local function forward(p: *ffi.Forward): *ffi.ForwardRef
+                local function forward(p: foreign *Forward): foreign *ForwardRef
                     return p
                 end
 
-                local function pointer(): *ffi.PointerOnly
+                local function pointer(): foreign *PointerOnly
                     return ffi.pointer_value
                 end
             ]])
@@ -147,7 +147,7 @@ describe("named file-scope C tags", function()
                 end
 
                 local function read_field(): integer
-                    local result: ffi.stat = ffi.make_stat()
+                    local result: foreign stat = ffi.make_stat()
                     return result.new as integer
                 end
             ]])
@@ -180,7 +180,7 @@ describe("named file-scope C tags", function()
         end)
     end)
 
-    it("diagnoses pseudo-members hidden by an ordinary collision", function()
+    it("resolves explicit foreign pseudo-members despite ordinary collisions", function()
         with_header([[
             struct stat { int value; };
             static int stat(void) { return 9; }
@@ -189,13 +189,10 @@ describe("named file-scope C tags", function()
                 foreign import "]] .. header .. [["
 
                 local function bad()
-                    local result = ffi.stat.new()
+                    local result = foreign stat.new()
                 end
             ]])
-            assert.falsy(ok)
-            assert.matches(
-                "C type pseudo%-member 'stat%.new' is unavailable",
-                err)
+            assert.truthy(ok, err)
         end)
     end)
 
@@ -241,11 +238,7 @@ describe("named file-scope C tags", function()
                         local result = ]] .. collided.expression
                     .. "\n                    end\n")
                 assert.falsy(ok)
-                assert.matches(
-                    "C type pseudo%-member '"
-                    .. collided.diagnostic
-                    .. "' is unavailable",
-                    err)
+                assert.matches("not found in C type", err)
             end
         end)
     end)
@@ -258,7 +251,7 @@ describe("named file-scope C tags", function()
                 foreign import "]] .. header .. [["
 
                 local function identity(
-                    pointer: *ffi.Forward): *ffi.Forward
+                    pointer: foreign *Forward): foreign *Forward
                     return pointer
                 end
             ]])
@@ -270,7 +263,7 @@ describe("named file-scope C tags", function()
         {
             name = "parameter",
             code = [[
-                local function bad(item: ffi.Forward)
+                local function bad(item: foreign Forward)
                 end
             ]],
             diagnostic = "parameter 'item'",
@@ -278,7 +271,7 @@ describe("named file-scope C tags", function()
         {
             name = "return",
             code = [[
-                local function bad(): ffi.Forward
+                local function bad(): foreign Forward
                     return ffi.impossible()
                 end
             ]],
@@ -288,7 +281,7 @@ describe("named file-scope C tags", function()
             name = "initialized local",
             code = [[
                 local function bad()
-                    local item: ffi.Forward = ffi.impossible()
+                    local item: foreign Forward = ffi.impossible()
                 end
             ]],
             diagnostic = "declaration of local variable 'item'",
@@ -296,8 +289,8 @@ describe("named file-scope C tags", function()
         {
             name = "cast target",
             code = [[
-                local function bad(pointer: *ffi.Forward)
-                    local item = pointer as ffi.Forward
+                local function bad(pointer: foreign *Forward)
+                    local item = pointer as foreign Forward
                 end
             ]],
             diagnostic = "by%-value C cast target",
@@ -305,7 +298,7 @@ describe("named file-scope C tags", function()
         {
             name = "field access",
             code = [[
-                local function bad(pointer: *ffi.Forward): integer
+                local function bad(pointer: foreign *Forward): integer
                     return pointer.count as integer
                 end
             ]],
@@ -314,14 +307,14 @@ describe("named file-scope C tags", function()
         {
             name = "sizeof",
             code = [[
-                local item_size = ffi.Forward.sizeof
+                local item_size = foreign Forward.sizeof
             ]],
             diagnostic = "C pseudo%-member '%.sizeof'",
         },
         {
             name = "alignof",
             code = [[
-                local item_alignment = ffi.Forward.alignof
+                local item_alignment = foreign Forward.alignof
             ]],
             diagnostic = "C pseudo%-member '%.alignof'",
         },
@@ -329,7 +322,7 @@ describe("named file-scope C tags", function()
             name = "allocation",
             code = [[
                 local function bad()
-                    local item = ffi.Forward.new()
+                    local item = foreign Forward.new()
                 end
             ]],
             diagnostic = "cannot allocate incomplete C struct",
@@ -364,7 +357,7 @@ describe("named file-scope C tags", function()
                 local ok, err = run_checker([[
                     foreign import "]]
                     .. forward_header .. [["
-                    local item: ffi.Shared = ffi.make_shared()
+                    local item: foreign Shared = ffi.make_shared()
                     foreign import "]]
                     .. definition_header .. [["
                 ]])
@@ -387,7 +380,7 @@ describe("named file-scope C tags", function()
                     local ok, err = run_checker(
                         "foreign import \""
                         .. forward_header .. '"\n'
-                        .. "local metric = ffi.Shared."
+                        .. "local metric = foreign Shared."
                         .. member .. "\n"
                         .. "foreign import \""
                         .. definition_header .. '"\n')
@@ -413,7 +406,7 @@ describe("named file-scope C tags", function()
                     foreign import "]] .. definition_header .. [["
 
                     local function read(): integer
-                        local item: ffi.Shared = ffi.make_shared()
+                        local item: foreign Shared = ffi.make_shared()
                         return item.count as integer
                     end
                 ]])
@@ -551,8 +544,8 @@ describe("named file-scope C tags", function()
         ]], function(header)
             local ok, err = run_checker([[
                 foreign import "]] .. header .. [["
-                local packet_size = ffi.Packet.sizeof
-                local packet_alignment = ffi.Packet.alignof
+                local packet_size = foreign Packet.sizeof
+                local packet_alignment = foreign Packet.alignof
             ]])
             assert.truthy(ok, err)
         end)

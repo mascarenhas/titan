@@ -575,7 +575,7 @@ end
 
 function owned_c_metatable(ctx, typ)
     local tlcontext = ctx.tlcontext or ctx
-    local key = types.tostring(typ)
+    local key = types.runtime_identity(typ)
     local entry = tlcontext.owned_c_metatables[key]
     if not entry then
         local display = "Titan owned C " .. key .. " metatable"
@@ -606,7 +606,7 @@ end
 
 
 function function_type_tag(tlcontext, ftype --[[:table]])
-    local key = types.tostring(ftype)
+    local key = types.runtime_identity(ftype)
     local entry = tlcontext.functags[key]
     if not entry then
         local n = tlcontext.functag_count

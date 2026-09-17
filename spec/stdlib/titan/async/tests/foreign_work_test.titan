@@ -1,5 +1,5 @@
 foreign import "async_foreign_work.h"
-local type ForeignWorkFixture = ffi.titan_async_work_fixture
+foreign type ForeignWorkFixture = titan_async_work_fixture
 
 local record ForeignWorkProbe
   finalized: boolean
@@ -14,15 +14,15 @@ end
 
 local function new_foreign_work_fixture(
     input: integer): owned *ForeignWorkFixture
-  local fixture: owned *ForeignWorkFixture = ForeignWorkFixture.new()
+  local fixture: owned *ForeignWorkFixture = foreign ForeignWorkFixture.new()
   local status = ffi.titan_async_work_fixture_init(
-      fixture, input as int) as integer
+      fixture, input as foreign int) as integer
   test.assert(status == 0, "could not initialize foreign-work fixture")
   return fixture
 end
 
 local function mark_foreign_work_finalizable(
-    candidate: value, callback: (value) -> ())
+    candidate: value, callback: function (value): ())
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   test.assert(ffi.lua_checkstack(L, 3) ~= 0,
@@ -37,13 +37,13 @@ end
 
 local function release_foreign_work(descriptor: integer)
   local status = ffi.titan_async_work_fixture_release(
-      descriptor as int) as integer
+      descriptor as foreign int) as integer
   test.assert(status == 0, "could not release blocked foreign work")
 end
 
 local function run_cancelled_foreign_work_probe(probe: ForeignWorkProbe)
   local release_descriptor = -1
-  local target = async.run<nil, value>(function (): nil
+  local target = async.run<|nil, value|>(function (): nil
     local fixture = new_foreign_work_fixture(63)
     defer ffi.titan_async_work_fixture_destroy(fixture)
     release_descriptor =
@@ -52,7 +52,7 @@ local function run_cancelled_foreign_work_probe(probe: ForeignWorkProbe)
       probe.finalized = true
     end)
 
-    async.run_foreign(blocking_foreign_work, fixture as *void)
+    async.run_foreign(blocking_foreign_work, fixture as foreign *void)
     probe.resumed_after_cancellation = true
     return nil
   end)
@@ -83,15 +83,15 @@ function test_run_foreign_keeps_the_event_loop_live_and_publishes_result(
     local release_descriptor =
       ffi.titan_async_work_fixture_release_fd(fixture) as integer
     local release_status = -1
-    local releaser = async.run<nil, value>(function (): nil
+    local releaser = async.run<|nil, value|>(function (): nil
       timer.yield()
       release_status = ffi.titan_async_work_fixture_release(
-          release_descriptor as int) as integer
+          release_descriptor as foreign int) as integer
       return nil
     end)
     task_support.cleanup_task(releaser, "foreign-work releaser cleanup")
 
-    async.run_foreign(blocking_foreign_work, fixture as *void)
+    async.run_foreign(blocking_foreign_work, fixture as foreign *void)
     test.assert(async.join(releaser):has_succeeded() and release_status == 0,
           "event-loop Task did not release blocked foreign work")
     test.assert(ffi.titan_async_work_fixture_result(
@@ -114,7 +114,7 @@ end
 
 function test_run_foreign_rejects_a_null_callback(context: test.Context)
   runtime_test.run(function ()
-    local callback: foreign (*void) -> () = nil
+    local callback: foreign function (*void): void = nil
     local message = ""
     do
       async.run_foreign(callback, nil)
@@ -136,10 +136,10 @@ function test_run_foreign_pending_cancellation_does_not_submit_work(
     release_foreign_work(
         ffi.titan_async_work_fixture_release_fd(fixture) as integer)
     local resumed = false
-    local target = async.run<nil, value>(function (): nil
+    local target = async.run<|nil, value|>(function (): nil
       async.running():cancel(async.CancellationReason.simple(
           "cancel before foreign submission"))
-      async.run_foreign(blocking_foreign_work, fixture as *void)
+      async.run_foreign(blocking_foreign_work, fixture as foreign *void)
       resumed = true
       return nil
     end)

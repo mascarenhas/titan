@@ -65,40 +65,29 @@ flexible tail is still recovered from a compiled dependency.
 
 ### Parser carriers and disambiguation
 
-The parser uses a return-specific production rather than reusing the input
-vararg production:
+Input and output tails use separate productions. `flextail` supplies a
+function type's input `...: T`, while `returntail` supplies an output tail and
+commits to the return-specific error labels. Fold captures append fixed types
+and the optional final tail incrementally. `split_types` removes the private
+`_type_tail` carrier and returns the dense fixed list plus its separate tail.
 
-```text
-flexrettypeann        <- DOTS COLON type (!COMMA / FlexRetLast)
-flexrettypeafterfixed <- (COMMA flexrettypeann)?
-flexrettypeonlyopt    <- flexrettypeann?
-resulttypelist        <- LPAREN
-                           (fixed-result-types flexrettypeafterfixed
-                            / empty-list flexrettypeonlyopt)
-                         RPAREN
-```
+`resulttypes` requires a comma before a tail following fixed results:
+`(integer, ...: string)` is valid, while `(integer ...: string)` is not. A
+flex-only result is `(...: string)`. Every flexible return annotation therefore
+uses a parenthesized result list.
 
-The separate alternatives enforce the comma before a tail following fixed
-results: `(integer, ...: string)` is valid, while
-`(integer ...: string)` is not. The comma-less path exists only for the
-flex-only shape `(...: string)`.
-
-`defs.flexrettype` drops the position capture and returns the element type
-node. `defs.returnshape` wraps the two captures in an untagged carrier:
+`parenthesized_returns` and `singlereturn` construct the same transient carrier:
 
 ```lua
 { rettypes = fixed_dense_list, flexrettype = type_node_or_false }
 ```
 
-`defs.singlereturn`, `defs.functionreturnshape`, and `defs.typefunc` produce the
-same shape for bare fixed returns, nested function-return types, and arrow
-types. This carrier exists only while parsing; no sentinel enters the numeric
-`rettypes` sequence.
-
-`rettype` tries `resulttypelist !RARROW` before the arrow alternatives. The
-negative lookahead is what distinguishes `(...: T)` as a flexible result list
-from `(...: T) -> R` as a function with an input vararg. A bare `...: T`
-return is rejected: every flexible result tail is parenthesized.
+`functiontype` combines independent input and result captures into
+`Ast.TypeFunction`. Function types start with `function`; a leading parenthesis
+in return position is always a result list or grouped type. No arrow probe or
+negative lookahead over a recursive type is needed. Return/type lists retain
+their own capacity policy rather than inheriting the 100-item written-parameter
+and ordinary-expression-list guard.
 
 The four dedicated syntax labels keep return diagnostics separate from
 variadic-parameter diagnostics:
@@ -283,8 +272,8 @@ and serialized shapes; binding or selecting either produces a
 declaration metadata and do not participate in structural function equality.
 
 `types.tostring` renders every flexible result in a parenthesized list, even
-when it is the only result, so `() -> T`, `() -> (T, ...: U)`, and
-`() -> (...: U)` remain distinct in C-free function-tag keys. Exportable
+when it is the only result, so `function (): (T)`, `function (): (T, ...: U)`, and
+`function (): (...: U)` remain distinct in C-free function-tag keys. Exportable
 C-bearing tags use the canonical serialized descriptor instead; it carries the
 same flexible-result distinction without relying on diagnostic rendering. Two
 merely consistent types therefore never share a native-entry cast by accident.

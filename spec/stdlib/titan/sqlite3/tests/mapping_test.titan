@@ -224,7 +224,7 @@ function test_explicit_row_factory_constructs_const_fields_without_a_task(
     defer connection:close()
     snapshot = first_row(connection, "SELECT 5 AS identifier, 'domain' AS name")
   end)
-  local factory: (sqlite3.Row) -> MappingFactory = MappingFactory.from_row
+  local factory: function (sqlite3.Row): (MappingFactory) = MappingFactory.from_row
   local result = factory(snapshot)
   test.assert(result.identifier == 5 and result.name == "domain",
               "explicit row factory did not initialize const fields")

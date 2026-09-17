@@ -11,24 +11,24 @@ protocol already implemented by the language.
 
 The module deliberately dogfoods the generic declaration and call machinery:
 
-```titan
-function next<K, V>(map: {K: V}, key: K?): (K?, V?)
+```text
+function next<|K, V|>(map: {K: V}, key: K?): (K?, V?)
 
-function pairs<K, V>(map: {K: V}):
-    (({K: V}, K?) -> (K?, V?), {K: V}, nil, nil)
+function pairs<|K, V|>(map: {K: V}):
+    (function ({K: V}, K?): (K?, V?), {K: V}, nil, nil)
 
-local function array_next<T>(array: {T}, index: integer):
+local function array_next<|T|>(array: {T}, index: integer):
     (integer?, T?)
 
-function ipairs<T>(array: {T}):
-    (({T}, integer) -> (integer?, T?), {T}, integer, nil)
+function ipairs<|T|>(array: {T}):
+    (function ({T}, integer): (integer?, T?), {T}, integer, nil)
 ```
 
 `K`, `V`, and `T` are unconstrained rigid parameters. Each therefore erases to
 `value`, and optionizing `value` remains `value`. The one code-facing body of
 `next` has the same ordinary representation as
-`({value: value}, value) -> (value, value)`; `array_next` similarly becomes
-`({value}, integer) -> (integer?, value)`. Maps and Arrays keep their existing
+`function ({value: value}, value): (value, value)`; `array_next` similarly becomes
+`function ({value}, integer): (integer?, value)`. Maps and Arrays keep their existing
 backing representations. There is no run-time type-argument vector, iterator
 witness, or specialized body.
 
@@ -39,9 +39,9 @@ A complete first-class function context can likewise instantiate `next`; the
 erased-core pass uses the ordinary callable-adjustment machinery when a closed
 outward wrapper is required.
 
-Inside `pairs<K,V>`, the declared result type provides the complete context for
+Inside `pairs<|K, V|>`, the declared result type provides the complete context for
 the `next` function value. It binds that declaration to the active rigid `K,V`
-application. `ipairs<T>` does the same for private `array_next<T>`. After erasure
+application. `ipairs<|T|>` does the same for private `array_next<|T|>`. After erasure
 the iterator and tuple slot have identical ordinary callable shapes, so the
 canonical bodies need no hand-written adapter or `value` forwarding closure.
 
@@ -84,7 +84,7 @@ exhaustion supplies nil in both result slots. Generic-for can force the first
 `K?` control result and a caller may request either `V?` or a nonnil `V` loop
 variable through the ordinary result adjustment.
 
-Array iteration needs no raw API. `array_next<T>` increments the integer control
+Array iteration needs no raw API. `array_next<|T|>` increments the integer control
 value, compares it with the Array's deterministic `#` result, and returns
 `(index, array[index])`. The index is deliberately first, so an inner hole
 produces an ordinary iteration with a nil `T?` item instead of signaling
@@ -101,8 +101,8 @@ state. Neither the container nor the iterator carries a run-time application
 witness.
 
 A closed call application reconnects the erased result with its frozen surface
-type. Thus `next<string,integer>` strictly projects the successful key/item
-carriers to `string?` and `integer?`, and `ipairs<integer>` does the same for its
+type. Thus `next<|string, integer|>` strictly projects the successful key/item
+carriers to `string?` and `integer?`, and `ipairs<|integer|>` does the same for its
 step result. A bad string in the dependent integer slot raises the existing
 `expected integer` gradual-guard error at that precise result consumption. A
 copy that remains `value`, a discarded result, or another erased generic
@@ -111,7 +111,7 @@ does not rewrite the aliased container.
 
 First-class contextual instantiation uses the same boundary in callable form.
 For example, adapting `next` to
-`({string: integer}, string?) -> (string?, integer?)` may realize an ordinary
+`function ({string: integer}, string?): (string?, integer?)` may realize an ordinary
 traced closure-adjustment wrapper that boxes its inputs for the canonical erased
 entry and strictly projects the outputs. Such wrappers have fresh identity, as
 specified for generic function values generally.

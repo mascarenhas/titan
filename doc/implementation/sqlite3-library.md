@@ -50,7 +50,7 @@ error status, and autocommit, is inside a worker batch. Pure allocation,
 memcpy/free, UTF-8 validation, reflection and Titan-value construction run on
 the loop thread.
 
-Each operation uses its own exact `foreign (*void) -> ()` entry. There is no
+Each operation uses its own exact `foreign function (*void): void` entry. There is no
 second operation dispatcher or actor. `sqlite_copy_bytes` always allocates
 one extra terminator byte, including for an empty BLOB; binding lengths remain
 explicit and use `SQLITE_TRANSIENT`.

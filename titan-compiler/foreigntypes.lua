@@ -699,9 +699,9 @@ local function primitive_from_tokens(profile, tokens)
 end
 
 -- Titan exposes exactly the portable C99 arithmetic spellings below. The map
--- deliberately differs at the two collision points: `bool` names C `_Bool`,
--- while C `float` is written `foreign float` so Titan's own `float` remains
--- unambiguous. C typedefs never enter this table, even when their targets do.
+-- spells C `_Bool` as `bool`. These names are resolved only in foreign type
+-- context; Titan's scalar `float` lives in a separate syntactic namespace.
+-- C typedefs never enter this table, even when their targets do.
 local surface_primitive_spellings = {
     void = "void",
     bool = "_Bool",
@@ -716,7 +716,7 @@ local surface_primitive_spellings = {
     ["unsigned long"] = "unsigned long",
     ["long long"] = "long long",
     ["unsigned long long"] = "unsigned long long",
-    ["foreign float"] = "float",
+    float = "float",
     double = "double",
     ["long double"] = "long double",
     lua_State = "lua_State",
@@ -1215,7 +1215,12 @@ local function convert_declaration(st, ftype, member_name)
             return nil, "unsupported target integer macro expression: " ..
                 tostring(evaluation_error)
         end
-        return evaluated.type
+        return evaluated.type, nil, {
+            qualifiers = {},
+            provenance = ftype._declaration_provenance,
+            origin_header = st._c_origin_header,
+            integer_constant = evaluated.value,
+        }
     end
     local converted, err, declaration_qualifiers
     if ftype.type == "function" then

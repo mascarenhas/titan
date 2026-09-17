@@ -307,7 +307,15 @@ function check_explicit_cast_relation(node, st, errors)
     node.target = typefromnode(node.target, st, errors)
     report_incomplete_c_object(node.target, st,
         "by-value C cast target", node.loc, errors)
-    checkexp(node.exp, st, errors, node.target)
+    local cast_context = node.target
+    if node.exp._tag == "Ast.ExpVar"
+       and node.exp.var._tag == "Ast.VarName" then
+        local binding = st:find_symbol(node.exp.var.name)
+        if binding and binding._current_module then
+            cast_context = current_module_cast_context
+        end
+    end
+    checkexp(node.exp, st, errors, cast_context)
     local source = node.exp._type
     local target = node.target
     if source._tag == "Type.Invalid" or target._tag == "Type.Invalid" then

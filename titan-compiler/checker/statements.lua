@@ -870,7 +870,7 @@ checkstat_visitor = util.make_visitor({
                    and not decl.type.length then
                     local written = typefromnode(decl.type, st, errors)
                     decl._written_c_array_view = written
-                    decl._type = types.CPointer(written.elem, {})
+                    decl._type = types.CPointer(written.elem, written.quals or {})
                     checktype(decl._type, decl.loc, errors)
                 else
                     checkdecl(decl, st, errors)
@@ -1123,6 +1123,24 @@ checkstat_visitor = util.make_visitor({
     end,
 
     ["Ast.StatAssign"] = function(node, st, errors)
+        if node._parsed_candidates then
+            local vars, valid = {}, true
+            for i, exp in ipairs(node.vars) do
+                if exp._tag == "Ast.ExpVar" and not exp._parenthesized
+                   and not exp._nominal_typeargs then
+                    vars[i] = exp.var
+                else
+                    checker.typeerror(errors, exp.loc,
+                        "left-hand side of assignment is not an assignable variable")
+                    valid = false
+                end
+            end
+            if not valid then
+                for _, exp in ipairs(node.exps) do checkexp(exp, st, errors) end
+                return false
+            end
+            node.vars, node._parsed_candidates = vars, nil
+        end
         for _, var in ipairs(node.vars) do
             -- The outer lvalue is not an observation. In particular, a typed
             -- Array/Map write may store a raw C pointer even though reading
@@ -1219,6 +1237,11 @@ checkstat_visitor = util.make_visitor({
     end,
 
     ["Ast.StatCall"] = function(node, st, errors)
+        if node.callexp._tag ~= "Ast.ExpCall" then
+            checker.typeerror(errors, node.callexp.loc,
+                "only a function call may be used as a statement")
+            return false
+        end
         -- A call in statement position may discard its result, including a
         -- zero-return `() -> ()` call that produces no value at all.
         node.callexp._voidok = true

@@ -27,9 +27,10 @@ Lua error (see [Error handling](error-handling.md)).
 | unions | `Message`, `mod.Message` | [Unions](unions.md) |
 | interfaces | `Reader`, `mod.Reader` | [Interfaces](interfaces.md) |
 | aliases | `type Name = t` | [Type aliases](type-aliases.md) |
+| owned C storage | `owned *T`, `owned T[]` | [The C FFI](ffi.md) |
 | option types | `t?` | [Option types](option-types.md) |
-| function types | `(t1, t2) -> t3` | below |
-| foreign types | from C headers | [The C FFI](ffi.md) |
+| function types | `function (t1, t2): (t3)` | below |
+| foreign types | `foreign int`, `foreign *FILE` | [The C FFI](ffi.md) |
 
 ### Basic types
 
@@ -41,7 +42,7 @@ Lua's immutable byte strings. Unlike Lua, Titan keeps `integer` and
 the implicit numeric coercions described below keep mixed arithmetic
 working the way a Lua programmer expects.
 
-```lua
+```titan
 local n: integer = 10
 local x: float = 3.5
 local s: string = "hello"
@@ -67,7 +68,7 @@ C-pointer element is also rejected because the Array cannot provide its
 required sound Lua writer; a Map may store a statically typed raw pointer, but
 that typed value view cannot be indexed.
 
-```lua
+```titan
 function sum(xs: {float}): float
     local s: float = 0.0
     for i = 1, #xs do
@@ -107,7 +108,7 @@ name is qualified by its module: the `Point` declared in module `geom` is the ty
 `geom.Point`, written `Point` inside its own module and `geom.Point`
 elsewhere (for an `import "geom"` bound to `geom`).
 
-```lua
+```titan
 record Point
     x: float
     y: float
@@ -136,38 +137,30 @@ same type as `value` — a `value` can already hold nil. The full story
 
 ### Function types
 
-Functions are first-class values in Titan, and function types are real,
-usable types. A function type is written with the `->` constructor:
-`(a, b) -> c` is the type of a function from an `a` and a `b` to a `c`.
-Parentheses are optional around a single parameter or a single return
-type, so `(integer) -> integer` and `integer -> integer` denote the same
-type. The forms are:
+A function type starts with `function`, followed by a parenthesized parameter
+type list and an optional return annotation: `function (A, B): C`. Parameter
+parentheses are required even for one parameter. A single return type may be
+written directly; multiple or flexible results use a parenthesized list.
 
-* **Parameters.** `(P1, ..., Pn) -> R` takes `n` parameters; `() -> R`
-  takes none.
-* **Single return.** `(P...) -> R` returns one value of type `R`.
-* **Multiple return.** `(P...) -> (R1, ..., Rm)` returns the `m` values
-  of the parenthesized return list, the same shape used by a function's
-  own return annotation.
-* **Zero return.** `(P...) -> ()` returns *nothing* — the empty return
-  list. This is distinct from `(P...) -> nil`, which returns a single
-  `nil` value; the unannotated function default is the zero-return form
-  (see [Functions](functions.md)).
-* **Input and output tails.** `(P1, ...: P) -> R` accepts a homogeneous
-  variadic argument run. `(P...) -> (...: R)` returns a run-time-sized
-  homogeneous result run, and `(P...) -> (R1, ...: R)` combines a fixed
-  result prefix with that flexible tail. Input and output tails are
-  independent and may coexist.
+- `function (A, B): C` takes two parameters and returns one `C`.
+- `function (): (A, B)` takes no parameters and returns two values.
+- `function (A): ()`, or `function (A)`, returns no values.
+- `function (A): nil` returns one nil value.
+- `function (A, ...: B): (C, ...: D)` has independent input and result tails.
 
-`->` is right-associative — `a -> b -> c` is `a -> (b -> c)` — and
-function types nest, so a higher-order type like
-`(integer -> integer, integer) -> integer` (a function taking an
-`integer -> integer` and an `integer`, returning an `integer`) is
-written directly. A function value can be stored in a variable, passed as
-an argument, returned, and called like any other; it may be a named
-function, a record's `new` static, an anonymous function (lambda), or a
-bound method reference `obj:m`. See
-[Functions](functions.md), [closures](closures.md), and
+Function types nest directly. `function (function (integer): integer): integer`
+takes a function, and `function (): function (integer): integer` returns one.
+An opening parenthesis in type position groups a type or begins a result list;
+it never begins an arrow-style function type.
+
+A colon immediately after a function type's parameter list belongs to that
+function's return annotation. Consequently, `{function (): T}` is an Array of
+functions. To use a zero-return function as a Map key, group it:
+`{(function ()): T}`.
+
+Function values can be named functions, record constructors, anonymous
+functions, or bound method references. They can be stored, passed, returned,
+and called. See [Functions](functions.md), [closures](closures.md), and
 [Expressions](expressions.md).
 
 ### Parenthesized types
@@ -176,40 +169,46 @@ Parentheses can group any single type: `(T)` and `T` denote the same type,
 and extra layers such as `((T))` are also allowed. Grouping works in ordinary
 annotations, function parameters and results, generic type arguments, casts,
 type tests, and C pointer or owned payloads. For example, `({string: T})?`
-makes the entire Map optional, and `*(int)` is the same C pointer type as
-`*int`. Parentheses do not change the restrictions on the enclosed type.
+makes the entire Map optional, and `foreign *(int)` is the same C pointer type as
+`foreign *int`. Nested pointers require grouping: `foreign *(*int)`. Parentheses do not change the restrictions on the enclosed type.
 
 The `?` suffix applies to the complete preceding group. These function types
 therefore have different meanings:
 
 | Type | Meaning |
 | --- | --- |
-| `(T) -> (U)?` | A function taking `T` and returning `U` or nil |
-| `((T) -> U)?` | A function taking `T` and returning `U`, or nil in place of the function |
-| `(T -> U) -> V` | A function taking a `T -> U` function and returning `V` |
+| `function (T): (U?)` | A function taking `T` and returning `U` or nil |
+| `(function (T): (U))?` | A function taking `T` and returning `U`, or nil in place of the function |
+| `function (function (T): (U)): (V)` | A function taking a `function (T): U` function and returning `V` |
 
 A group contains exactly one type. `(T, U)` is a parameter or result list,
 not a tuple type, and `()` is an empty parameter or result list. Such lists
-remain valid in `() -> (T, U)` and function result annotations, but cannot
+remain valid in `function (): (T, U)` and function result annotations, but cannot
 stand alone as a variable's type or receive an outer `?`. A flexible result
 list such as `(...: T)` follows the same rule. To make the function optional,
-group the whole function type, as in `(() -> (T, U))?`.
+group the whole function type, as in `(function (): (T, U))?`.
 
 ### Foreign types
 
-Titan has contextual spellings for portable C primitives such as `int`,
-`unsigned long`, `foreign float`, and `double`. They are distinct from Titan's
-`integer`, `boolean`, and `float`. Public compiled interfaces may use those
-self-contained primitives and pointer, foreign-function-pointer, and owned
-graphs built entirely from them.
+Titan and C types have separate namespaces. In an ordinary annotation, cast,
+type test, or Titan type constructor, prefix a raw C type with `foreign`:
+`foreign int`, `foreign unsigned long`, `foreign float`, or `foreign *FILE`.
+Names inside that foreign type are unqualified C names; `ffi.` belongs to
+expressions such as `ffi.fclose(handle)`, not to type spellings.
 
-`foreign import` additionally introduces header-derived arrays, structs,
-unions, typedefs, enum identities, and other C types through a namespace such
-as `c.size_t`, `c.FILE`, or `c.ffi_point`. Those types participate in the
-relations below through explicit FFI conversion rules but remain local to the
-module importing their header. In particular, an imported typedef remains
-nonexportable even when its target is a portable primitive. The full boundary
-is specified in [The C FFI](ffi.md).
+`foreign import` supplies header declarations. `foreign type Name = T` adds a
+module-local C typedef and makes it available through explicit source-import
+headers. These typedefs are distinct from transparent Titan `type` aliases.
+Portable primitives, pointers, and function pointers can appear in public
+compiled interfaces; a header-dependent typedef remains nonexportable even when
+its target is a portable primitive.
+
+Ownership is a Titan type constructor: write `owned *T`, `owned T[]`, or
+`owned Alias` when a foreign alias resolves to a pointer or array. Do not prefix
+`owned` with `foreign`. Ordinary Titan aliases may name owned types, and Titan
+Arrays, Maps, Options, and function types can contain foreign or owned types
+subject to their representation and export rules. A raw foreign type cannot
+contain a Titan type. See [The C FFI](ffi.md) for the complete boundary.
 
 ## Type equality
 
@@ -226,7 +225,7 @@ Titan's types are *structural* except for records, unions, and Interfaces, which
 * Two record, union, or Interface types are equal only if they are *the same declaration* —
   their fully-qualified names match. Field structure is irrelevant:
 
-```lua
+```titan
 record PointF
     x: float
     y: float
@@ -266,8 +265,8 @@ through an Array, Map, or Function. In particular:
 integer -> float                 direct coercion
 integer -> integer?              direct coercion
 {integer} -> {float}             rejected
-() -> integer -> () -> float    rejected
-() -> integer -> () -> integer? rejected
+function (): integer -> function (): float    rejected
+function (): integer -> function (): integer? rejected
 ```
 
 The compiler instead keeps several deliberately separate relations and
@@ -503,7 +502,7 @@ were a coercion context; the current compiler instead requires the start,
 finish and step expressions to match the control variable's type exactly
 (options are unwrapped, but no conversions are inserted):
 
-```lua
+```titan
 local s: float = 0.0
 for x: float = 1, 10 do   -- compile-time error: types in 'for' start
     s = s + x             -- expression do not match, expected float
@@ -536,7 +535,7 @@ operator semantics are in [Expressions](expressions.md).
 
 An initialized declaration without a type annotation takes its type from its
 initializer. An initializer-less mutable local instead requires an explicit
-nil-bearing type, and an initializer-less const module variable has the same
+nil-bearing type. Mutable and const module variables have the same omission
 requirement; see [Const values](const-values.md#binding-declarations).
 
 ```lua
@@ -559,20 +558,21 @@ should fail fast at the point where the programmer assumed a real value,
 not silently propagate through inferred types. To opt in to propagating
 the option, put a `?` on the *name*:
 
-```lua
-local arr: {integer} = {1, 2, 3}
-local x = arr[1]      -- x: integer  (checked at run time, raises if nil)
-local y? = arr[1]     -- y: integer? (nil flows through)
+```titan
+function infer_options()
+    local arr: {integer} = {1, 2, 3}
+    local x = arr[1]      -- integer; a missing value raises here
+    local y? = arr[1]     -- integer?; nil flows through
+end
 ```
 
-`local y?: integer = arr[1]` is accepted too, as pure sugar for
+Inside a block, `local y?: integer = arr[1]` is accepted too, as sugar for
 `local y: integer? = arr[1]`.
 
-The `?` marker is honored everywhere a name is inferred, including for
-names bound to the extra values of a multiple-return call (`local a, b? = f()`
-infers an option type for `b` when `b` comes from `f`'s second return) and
-on module-level variables (`y? = 18` at the top level infers `y` as an
-option type).
+The marker preserves optional inference for block-local names, including
+extra values from a multiple-return call (`local a, b? = f()` preserves an
+option for `b`). Module variables instead require an explicit optional type,
+such as `y: integer? = 18`; their names do not accept `?`.
 
 Two other positions are inferred: the control variable of a numeric `for`
 takes the type of the start expression when not annotated (and must end
@@ -598,7 +598,7 @@ conversion used by the FFI. Implicit projections *from* `value` are accepted in 
 contexts listed above only when the requested type is guardable, and compile
 to a strict run-time type check:
 
-```lua
+```titan
 function double(v: value): integer
     local n: integer = v     -- implicit value -> integer, checked
     return n * 2

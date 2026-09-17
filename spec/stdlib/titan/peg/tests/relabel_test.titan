@@ -322,7 +322,7 @@ function test_relabel_search_spans_captures_and_gsub(
   test.assert(found.first == 3)
   test.assert(pattern.match("abc", "'c'", 99) == nil)
 
-  local nil_callback: (value, ...: value) -> (...: value) =
+  local nil_callback: function (value, ...: value): (...: value) =
     function(_, ...)
       return nil, "middle", nil
     end
@@ -345,7 +345,7 @@ function test_relabel_search_spans_captures_and_gsub(
 
   local attempts = 0
   local inspect_byte:
-      (string, integer, value, ...: value) -> (...: value) =
+      function (string, integer, value, ...: value): (...: value) =
     function(subject, position, byte, ...)
       attempts = attempts + 1
       return byte == "b"
@@ -355,22 +355,22 @@ function test_relabel_search_spans_captures_and_gsub(
   found = support.require_match(pattern.match("ab", inspected))
   test.assert(found.first == 2 and found.last == 2 and attempts == 2)
 
-  local replace_x: (string) -> string =
+  local replace_x: function (string): (string) =
     function(_) return "x" end
-  local replace_dot: (string) -> string =
+  local replace_dot: function (string): (string) =
     function(_) return "." end
   test.assert(pattern.gsub("alo alo", "[abc]", replace_x) == "xlo xlo")
   test.assert(pattern.gsub("alo alo", "%w+", replace_dot) == ". .")
   test.assert(pattern.gsub(
     "hi, how are you", "[aeiou]", upper_vowel) ==
     "hI, hOw ArE yOU")
-  local capital_x: (string) -> string =
+  local capital_x: function (string): (string) =
     function(_) return "X" end
   test.assert(pattern.gsub(
     "abc", pattern.literal("b"), capital_x) == "aXc")
 
   local seen = ""
-  local bracket_whole: (string) -> string =
+  local bracket_whole: function (string): (string) =
     function(found)
       seen = found
       return "[" .. found .. "]"

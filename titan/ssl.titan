@@ -10,7 +10,7 @@ foreign import "openssl/ssl.h"
 foreign import "stddef.h"
 foreign import "string.h"
 
-local type VoidPointer = *void
+foreign type VoidPointer = *void
 
 local TLS_RECORD_BYTES = 16 * 1024
 local MAX_PEM_BYTES = 2147483647
@@ -23,14 +23,14 @@ local STATE_FAILED = "failed"
 local STATE_CLOSED = "closed"
 
 local record DefaultClientContextOwner
-  local context: *ffi.SSL_CTX
+  local context: foreign *SSL_CTX
 end
 
 -- This private record is the module's owning full-userdata GC root. The raw
 -- pointer is only a borrowed fast path; each default-trust connection takes
 -- and releases an independent reference around SSL_new.
 local default_client_context_owner: DefaultClientContextOwner? = nil
-local default_client_context: *ffi.SSL_CTX = nil
+local default_client_context: foreign *SSL_CTX = nil
 
 local function finalize_default_client_context(
     owner: DefaultClientContextOwner)
@@ -49,7 +49,7 @@ local function allocate_default_client_context_owner():
     DefaultClientContextOwner
   local owner = DefaultClientContextOwner.new(nil)
   default_client_context_owner = owner
-  gc.finalizable<DefaultClientContextOwner>(
+  gc.finalizable<|DefaultClientContextOwner|>(
       owner, finalize_default_client_context)
   return owner
 end
@@ -63,9 +63,9 @@ end
 
 record Connection
   local transport: net.Connection
-  local handle: *ffi.SSL
-  local input: *ffi.BIO
-  local output: *ffi.BIO
+  local handle: foreign *SSL
+  local input: foreign *BIO
+  local output: foreign *BIO
   local client: boolean
   local state: string
   local busy: boolean
@@ -77,32 +77,32 @@ end
 
 record Server
   local listener: net.Server
-  local context: *ffi.SSL_CTX
+  local context: foreign *SSL_CTX
   local closed: boolean
   local listener_closed: boolean
 end
 
 local record PemBlock
-  local name_buffer: *void
-  local header_buffer: *void
-  local data_buffer: *void
+  local name_buffer: foreign *void
+  local header_buffer: foreign *void
+  local data_buffer: foreign *void
   local name: string
   local header: string
   local length: integer
 end
 
 local record CertificateResult
-  local pointer: *ffi.X509
+  local pointer: foreign *X509
   local found: boolean
 end
 
 local record PrivateKeyResult
-  local pointer: *ffi.EVP_PKEY
+  local pointer: foreign *EVP_PKEY
   local found: boolean
 end
 
 local function checked_text(text: string, operation: string): string
-  if ffi.strlen(text) ~= (#text as ffi.size_t) then
+  if ffi.strlen(text) ~= (#text as foreign size_t) then
     raise Error.new(0, "INVALID_TEXT",
                     "text must not contain an embedded NUL", operation)
   end
@@ -203,18 +203,18 @@ end
 local function verify_error(code: integer): Error
   local message = "certificate verification failed"
   local reason = ffi.X509_verify_cert_error_string(
-      code as long)
+      code as foreign long)
   if reason then message = reason as string end
   return Error.new(code, "CERTIFICATE_VERIFY_FAILED", message,
                    "ssl.handshake.verify")
 end
 
-local function bytes_string(bytes: const *char,
+local function bytes_string(bytes: foreign const *char,
                             length: integer): string
   if length == 0 then return "" end
   local storage: owned char[] =
-    char.new_array(length)
-  ffi.memcpy(storage, bytes, length as ffi.size_t)
+    foreign char.new_array(length)
+  ffi.memcpy(storage, bytes, length as foreign size_t)
   return storage as string
 end
 
@@ -270,13 +270,13 @@ local function drain_output(connection: Connection): integer
   while pending > 0 do
     local requested = pending
     if requested > TLS_RECORD_BYTES then requested = TLS_RECORD_BYTES end
-    local buffer = char.new_array(requested)
-    local lengths = ffi.size_t.new_array(1)
-    lengths[0] = 0 as ffi.size_t
+    local buffer = foreign char.new_array(requested)
+    local lengths = foreign size_t.new_array(1)
+    lengths[0] = 0 as foreign size_t
     ffi.ERR_clear_error()
     local ok = ffi.BIO_read_ex(
         connection.output, buffer,
-        requested as ffi.size_t, lengths)
+        requested as foreign size_t, lengths)
     if ok ~= 1 or lengths[0] == 0 then
       raise openssl_error("ssl.output.read",
                           "failed to drain the TLS output BIO")
@@ -292,10 +292,10 @@ end
 -- BIO_set_mem_eof_return is a public function-like macro unavailable to the
 -- FFI. BIO_ctrl with BIO_C_SET_BUF_MEM_EOF_RETURN is its documented primitive
 -- expansion for configuring a memory BIO's empty-read result.
-local function set_memory_bio_eof_return(bio: *ffi.BIO,
+local function set_memory_bio_eof_return(bio: foreign *BIO,
                                          result: integer)
   ffi.BIO_ctrl(bio, ffi.BIO_C_SET_BUF_MEM_EOF_RETURN,
-                   result as long, nil)
+                   result as foreign long, nil)
 end
 
 local function mark_transport_eof(connection: Connection)
@@ -329,15 +329,15 @@ local function feed_input(connection: Connection, operation: string)
   end
 
   local input = encrypted as string
-  local bytes = input as const *char
+  local bytes = input as foreign const *char
   local offset = 0
   while offset < #input do
-    local lengths = ffi.size_t.new_array(1)
-    lengths[0] = 0 as ffi.size_t
+    local lengths = foreign size_t.new_array(1)
+    lengths[0] = 0 as foreign size_t
     ffi.ERR_clear_error()
     local ok = ffi.BIO_write_ex(
         connection.input, bytes + offset,
-        (#input - offset) as ffi.size_t, lengths)
+        (#input - offset) as foreign size_t, lengths)
     if ok ~= 1 or lengths[0] == 0 then
       raise openssl_error("ssl.input.write",
                           "failed to feed the TLS input BIO")
@@ -455,14 +455,14 @@ local function read_locked(connection: Connection): string?
      connection.state == STATE_SHUTDOWN then return nil end
   handshake_locked(connection)
 
-  local buffer = char.new_array(TLS_RECORD_BYTES)
+  local buffer = foreign char.new_array(TLS_RECORD_BYTES)
   while true do
-    local lengths = ffi.size_t.new_array(1)
-    lengths[0] = 0 as ffi.size_t
+    local lengths = foreign size_t.new_array(1)
+    lengths[0] = 0 as foreign size_t
     ffi.ERR_clear_error()
     local result = ffi.SSL_read_ex(
         connection.handle, buffer,
-        TLS_RECORD_BYTES as ffi.size_t, lengths)
+        TLS_RECORD_BYTES as foreign size_t, lengths)
     if result == 1 then
       drain_output(connection)
       local length = lengths[0] as integer
@@ -504,14 +504,14 @@ local function read_locked(connection: Connection): string?
 end
 
 local function write_piece_locked(connection: Connection, piece: string)
-  local bytes = piece as const *char
+  local bytes = piece as foreign const *char
   while true do
-    local lengths = ffi.size_t.new_array(1)
-    lengths[0] = 0 as ffi.size_t
+    local lengths = foreign size_t.new_array(1)
+    lengths[0] = 0 as foreign size_t
     ffi.ERR_clear_error()
     local result = ffi.SSL_write_ex(
         connection.handle, bytes,
-        #piece as ffi.size_t, lengths)
+        #piece as foreign size_t, lengths)
     if result == 1 then
       if (lengths[0] as integer) ~= #piece then
         raise Error.new(0, "TLS_PARTIAL_WRITE",
@@ -552,7 +552,7 @@ local function write_locked(connection: Connection, data: string)
 end
 
 local function new_connection(transport: net.Connection,
-                              context: *ffi.SSL_CTX,
+                              context: foreign *SSL_CTX,
                               client: boolean): Connection
   ffi.ERR_clear_error()
   local handle = ffi.SSL_new(context)
@@ -592,18 +592,18 @@ end
 -- SSL_CTX_set_min_proto_version is a public function-like macro unavailable
 -- to the FFI. This direct SSL_CTX_ctrl expansion applies its documented TLS
 -- version control without a C wrapper.
-local function configure_context(context: *ffi.SSL_CTX,
+local function configure_context(context: foreign *SSL_CTX,
                                  operation: string)
   ffi.ERR_clear_error()
   if ffi.SSL_CTX_ctrl(context,
       ffi.SSL_CTRL_SET_MIN_PROTO_VERSION,
-      ffi.TLS1_2_VERSION as long, nil) ~= 1 then
+      ffi.TLS1_2_VERSION as foreign long, nil) ~= 1 then
     raise openssl_error(operation,
                         "failed to require TLS 1.2 or newer")
   end
 end
 
-local function new_client_context(): *ffi.SSL_CTX
+local function new_client_context(): foreign *SSL_CTX
   ffi.ERR_clear_error()
   local context = ffi.SSL_CTX_new(ffi.TLS_client_method())
   if not context then
@@ -622,17 +622,17 @@ local function new_client_context(): *ffi.SSL_CTX
 end
 
 local function pem_memory_bio(data: string,
-                              operation: string): *ffi.BIO
+                              operation: string): foreign *BIO
   if #data > MAX_PEM_BYTES then
     raise Error.new(0, "PEM_TOO_LARGE",
                     "PEM data is too large for OpenSSL", operation)
   end
 
-  local source = data as const *char
+  local source = data as foreign const *char
   ffi.ERR_clear_error()
   local bio = ffi.BIO_new_mem_buf(
-      source as const *void,
-      #data as int)
+      source as foreign const *void,
+      #data as foreign int)
   if not bio then
     raise openssl_error(operation,
                         "failed to allocate a PEM memory BIO")
@@ -643,15 +643,15 @@ end
 -- OPENSSL_free is a public function-like macro unavailable to Titan's FFI.
 -- CRYPTO_free is its exported primitive; nil and zero are valid source
 -- attribution because Titan is not using OpenSSL's allocation diagnostics.
-local function openssl_free(pointer: *void)
+local function openssl_free(pointer: foreign *void)
   if pointer then
     ffi.CRYPTO_free(pointer, nil, 0)
   end
 end
 
-local function free_pem_buffers(name: *void,
-                                header: *void,
-                                data: *void)
+local function free_pem_buffers(name: foreign *void,
+                                header: foreign *void,
+                                data: foreign *void)
   openssl_free(name)
   openssl_free(header)
   openssl_free(data)
@@ -674,23 +674,23 @@ local function pem_no_start_line(packed: integer): boolean
          reason == (ffi.PEM_R_NO_START_LINE as integer)
 end
 
-local function read_pem_block(bio: *ffi.BIO,
+local function read_pem_block(bio: foreign *BIO,
                               operation: string): PemBlock?
-  local names = VoidPointer.new_array(1)
-  local headers = VoidPointer.new_array(1)
-  local data = VoidPointer.new_array(1)
-  local lengths = long.new_array(1)
+  local names = foreign VoidPointer.new_array(1)
+  local headers = foreign VoidPointer.new_array(1)
+  local data = foreign VoidPointer.new_array(1)
+  local lengths = foreign long.new_array(1)
   names[0] = nil
   headers[0] = nil
   data[0] = nil
-  lengths[0] = 0 as long
+  lengths[0] = 0 as foreign long
 
   ffi.ERR_clear_error()
   local result = ffi.PEM_read_bio(
       bio,
-      names as **char,
-      headers as **char,
-      data as **unsigned char,
+      names as foreign *(*char),
+      headers as foreign *(*char),
+      data as foreign *(*unsigned char),
       lengths)
   if result ~= 1 then
     local packed = ffi.ERR_peek_last_error() as integer
@@ -708,8 +708,8 @@ local function read_pem_block(bio: *ffi.BIO,
                     operation)
   end
   do
-    local name = (names[0] as *char) as string
-    local header = (headers[0] as *char) as string
+    local name = (names[0] as foreign *char) as string
+    local header = (headers[0] as foreign *char) as string
     return PemBlock.new(names[0], headers[0], data[0], name, header,
                         lengths[0] as integer)
   catch
@@ -730,26 +730,26 @@ local function private_key_pem_name(name: string): boolean
 end
 
 local function decode_certificate(block: PemBlock,
-                                  operation: string): *ffi.X509
-  local cursors = VoidPointer.new_array(1)
+                                  operation: string): foreign *X509
+  local cursors = foreign VoidPointer.new_array(1)
   cursors[0] = block.data_buffer
   ffi.ERR_clear_error()
-  local certificate: *ffi.X509 = nil
+  local certificate: foreign *X509 = nil
   if block.name == "TRUSTED CERTIFICATE" then
     certificate = ffi.d2i_X509_AUX(
-        nil, cursors as *const *unsigned char,
-        block.length as long)
+        nil, cursors as foreign *(const *unsigned char),
+        block.length as foreign long)
   else
     certificate = ffi.d2i_X509(
-        nil, cursors as *const *unsigned char,
-        block.length as long)
+        nil, cursors as foreign *(const *unsigned char),
+        block.length as foreign long)
   end
   if not certificate then
     raise openssl_error(operation, "failed to decode a PEM certificate")
   end
   local expected =
-    (block.data_buffer as const *unsigned char) + block.length
-  if (cursors[0] as const *unsigned char) ~= expected then
+    (block.data_buffer as foreign const *unsigned char) + block.length
+  if (cursors[0] as foreign const *unsigned char) ~= expected then
     ffi.X509_free(certificate)
     raise Error.new(0, "OPENSSL",
                     "certificate PEM block has trailing DER data", operation)
@@ -757,25 +757,25 @@ local function decode_certificate(block: PemBlock,
   return certificate
 end
 
-local function decode_private_key(block: PemBlock): *ffi.EVP_PKEY
+local function decode_private_key(block: PemBlock): foreign *EVP_PKEY
   if #block.header > 0 then
     raise Error.new(0, "OPENSSL",
                     "encrypted private keys are not supported",
                     "ssl.server.private-key")
   end
-  local cursors = VoidPointer.new_array(1)
+  local cursors = foreign VoidPointer.new_array(1)
   cursors[0] = block.data_buffer
   ffi.ERR_clear_error()
   local private_key = ffi.d2i_AutoPrivateKey(
-      nil, cursors as *const *unsigned char,
-      block.length as long)
+      nil, cursors as foreign *(const *unsigned char),
+      block.length as foreign long)
   if not private_key then
     raise openssl_error("ssl.server.private-key",
                         "failed to decode a PEM private key")
   end
   local expected =
-    (block.data_buffer as const *unsigned char) + block.length
-  if (cursors[0] as const *unsigned char) ~= expected then
+    (block.data_buffer as foreign const *unsigned char) + block.length
+  if (cursors[0] as foreign const *unsigned char) ~= expected then
     ffi.EVP_PKEY_free(private_key)
     raise Error.new(0, "OPENSSL",
                     "private-key PEM block has trailing DER data",
@@ -785,18 +785,18 @@ local function decode_private_key(block: PemBlock): *ffi.EVP_PKEY
 end
 
 local function decode_certificate_block(
-    block: PemBlock, operation: string): *ffi.X509
+    block: PemBlock, operation: string): foreign *X509
   defer free_pem_block(block)
   return decode_certificate(block, operation)
 end
 
 local function decode_private_key_block(
-    block: PemBlock): *ffi.EVP_PKEY
+    block: PemBlock): foreign *EVP_PKEY
   defer free_pem_block(block)
   return decode_private_key(block)
 end
 
-local function next_certificate(bio: *ffi.BIO,
+local function next_certificate(bio: foreign *BIO,
                                 operation: string): CertificateResult
   while true do
     local block? = read_pem_block(bio, operation)
@@ -812,7 +812,7 @@ local function next_certificate(bio: *ffi.BIO,
 end
 
 local function next_private_key(
-    bio: *ffi.BIO): PrivateKeyResult
+    bio: foreign *BIO): PrivateKeyResult
   while true do
     local block? = read_pem_block(bio, "ssl.server.private-key")
     if not block then return PrivateKeyResult.new(nil, false) end
@@ -831,7 +831,7 @@ local function next_private_key(
   return PrivateKeyResult.new(nil, false)
 end
 
-local function load_ca_certificates(context: *ffi.SSL_CTX,
+local function load_ca_certificates(context: foreign *SSL_CTX,
                                     data: string)
   local bio = pem_memory_bio(data, "ssl.client.trust")
   defer ffi.BIO_free(bio)
@@ -868,7 +868,7 @@ local function load_ca_certificates(context: *ffi.SSL_CTX,
   end
 end
 
-local function explicit_client_context(data: string): *ffi.SSL_CTX
+local function explicit_client_context(data: string): foreign *SSL_CTX
   local context = new_client_context()
   do
     load_ca_certificates(context, data)
@@ -880,7 +880,7 @@ local function explicit_client_context(data: string): *ffi.SSL_CTX
   return context
 end
 
-local function acquire_default_client_context(): *ffi.SSL_CTX
+local function acquire_default_client_context(): foreign *SSL_CTX
   local context = default_client_context
   if not context then
     raise Error.new(0, "OPENSSL", "default trust context is unavailable",
@@ -897,7 +897,7 @@ end
 -- SSL_CTX_add1_chain_cert is a public function-like macro, which the Titan
 -- FFI cannot call directly. SSL_CTX_ctrl with SSL_CTRL_CHAIN_CERT and arg 1
 -- is its documented expansion and makes the context retain each chain cert.
-local function load_certificate_chain(context: *ffi.SSL_CTX,
+local function load_certificate_chain(context: foreign *SSL_CTX,
                                       data: string)
   local bio = pem_memory_bio(data, "ssl.server.certificate")
   defer ffi.BIO_free(bio)
@@ -915,7 +915,7 @@ local function load_certificate_chain(context: *ffi.SSL_CTX,
         end
       elseif ffi.SSL_CTX_ctrl(
           context, ffi.SSL_CTRL_CHAIN_CERT, 1,
-          certificate as *void) ~= 1 then
+          certificate as foreign *void) ~= 1 then
         raise openssl_error("ssl.server.certificate",
                             "failed to load the certificate chain")
       end
@@ -935,7 +935,7 @@ local function load_certificate_chain(context: *ffi.SSL_CTX,
   end
 end
 
-local function load_private_key(context: *ffi.SSL_CTX, data: string)
+local function load_private_key(context: foreign *SSL_CTX, data: string)
   local bio = pem_memory_bio(data, "ssl.server.private-key")
   defer ffi.BIO_free(bio)
   local next_result = next_private_key(bio)
@@ -969,7 +969,7 @@ local function load_private_key(context: *ffi.SSL_CTX, data: string)
 end
 
 local function server_context(certificate_data: string,
-                              private_key_data: string): *ffi.SSL_CTX
+                              private_key_data: string): foreign *SSL_CTX
   ffi.ERR_clear_error()
   local context = ffi.SSL_CTX_new(ffi.TLS_server_method())
   if not context then
@@ -996,17 +996,17 @@ end
 -- SSL_set_tlsext_host_name is a public function-like macro unavailable to the
 -- FFI. SSL_ctrl with SSL_CTRL_SET_TLSEXT_HOSTNAME is its documented primitive
 -- expansion. OpenSSL consumes the mutable NUL-terminated copy during the call.
-local function configure_server_name(handle: *ffi.SSL, host: string)
-  local server_name = char.new_array(#host + 1)
+local function configure_server_name(handle: foreign *SSL, host: string)
+  local server_name = foreign char.new_array(#host + 1)
   ffi.memcpy(server_name,
-                 host as const *char,
-                 #host as ffi.size_t)
-  server_name[#host] = 0 as char
+                 host as foreign const *char,
+                 #host as foreign size_t)
+  server_name[#host] = 0 as foreign char
   ffi.ERR_clear_error()
   if ffi.SSL_ctrl(
       handle, ffi.SSL_CTRL_SET_TLSEXT_HOSTNAME,
-      ffi.TLSEXT_NAMETYPE_host_name as long,
-      server_name as *void) ~= 1 then
+      ffi.TLSEXT_NAMETYPE_host_name as foreign long,
+      server_name as foreign *void) ~= 1 then
     raise openssl_error("ssl.connect.sni",
                         "failed to configure TLS server name indication")
   end
@@ -1017,7 +1017,7 @@ function connect(host: string, port: integer,
   checked_text(host, "ssl.connect.host")
   if ca_file then checked_text(ca_file as string, "ssl.connect.ca-file") end
 
-  local context: *ffi.SSL_CTX = nil
+  local context: foreign *SSL_CTX = nil
   if ca_file then
     local trust_data = fs.read_file(ca_file as string)
     context = explicit_client_context(trust_data)
@@ -1052,7 +1052,7 @@ function connect(host: string, port: integer,
     ffi.SSL_set_hostflags(
         exact.handle,
         ffi.X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS as
-          unsigned int)
+          foreign unsigned int)
     if not ip_identity then
       configure_server_name(exact.handle, host)
     end

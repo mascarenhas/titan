@@ -131,16 +131,16 @@ describe("interfaces (end-to-end)", function()
         local csrc = normalize_c_whitespace(h.compile_and_read_c([[
             interface Transformer
                 function swap(
-                    callback: (value) -> value
-                ): (value) -> value
+                    callback: function (value): value
+                ): function (value): value
             end
 
             record Impl
             end
 
             function Impl:swap(
-                callback: (integer) -> integer
-            ): (integer) -> integer
+                callback: function (integer): integer
+            ): function (integer): integer
                 return callback
             end
 
@@ -241,8 +241,8 @@ describe("interfaces (end-to-end)", function()
             end
 
             union Choice
-                number: integer
-                empty
+                number(integer)
+                empty()
             end
 
             function Box:get(): integer
@@ -259,7 +259,7 @@ describe("interfaces (end-to-end)", function()
 
             function Choice:score(): integer
                 case self
-                when number: n then
+                when number(n) then
                     return n
                 else
                     return 0
@@ -289,12 +289,12 @@ describe("interfaces (end-to-end)", function()
                 return getter:get()
             end
 
-            function bind_getter(getter: Getter): () -> integer
+            function bind_getter(getter: Getter): function (): integer
                 return getter:get
             end
 
             function call_adjusted(getter: Getter): value
-                local get: () -> value = getter:get
+                local get: function (): value = getter:get
                 return get()
             end
 
@@ -330,7 +330,7 @@ describe("interfaces (end-to-end)", function()
                 return adder:add { x = 2 }
             end
 
-            function bind_adder(adder: Adder): (integer) -> integer
+            function bind_adder(adder: Adder): function (integer): integer
                 return adder:add
             end
 
@@ -338,7 +338,7 @@ describe("interfaces (end-to-end)", function()
                 adder: Adder,
                 v: value
             ): integer
-                local add: (value) -> integer = adder:add
+                local add: function (value): integer = adder:add
                 return add(v)
             end
 
@@ -639,7 +639,7 @@ describe("interfaces (end-to-end)", function()
 
             interface Bundle
                 leaf: Leaf
-                apply: (integer) -> value
+                apply: function (integer): value
             end
 
             record LeafRecord
@@ -647,7 +647,7 @@ describe("interfaces (end-to-end)", function()
             end
 
             record BundleRecord
-                const apply: (value) -> integer
+                const apply: function (value): integer
                 const leaf: LeafRecord
             end
 
@@ -686,27 +686,27 @@ describe("interfaces (end-to-end)", function()
 
     it("preserves generic Interface field carriers", function()
         h.run_coder([[
-            interface View<T>
+            interface View<|T|>
                 item: T
             end
 
-            record Box<T>
+            record Box<|T|>
                 const item: T
             end
 
-            function integer_view(): View<integer>
-                return Box<integer>.new(42)
+            function integer_view(): View<|integer|>
+                return Box<|integer|>.new(42)
             end
 
-            function string_view(): View<string>
-                return Box<string>.new("forty-two")
+            function string_view(): View<|string|>
+                return Box<|string|>.new("forty-two")
             end
 
-            function integer_item(view: View<integer>): integer
+            function integer_item(view: View<|integer|>): integer
                 return view.item
             end
 
-            function string_item(view: View<string>): string
+            function string_item(view: View<|string|>): string
                 return view.item
             end
         ]], [[
@@ -747,8 +747,8 @@ describe("interfaces (end-to-end)", function()
             end
 
             union Choice
-                number: integer
-                empty
+                number(integer)
+                empty()
             end
 
             function Box:get(): integer
@@ -765,7 +765,7 @@ describe("interfaces (end-to-end)", function()
 
             function Choice:score(): integer
                 case self
-                when number: n then
+                when number(n) then
                     return n
                 else
                     return 0
@@ -1187,7 +1187,7 @@ describe("interfaces (end-to-end)", function()
             end
 
             function Concrete:budgeted(): (integer, ...: integer)
-                local f: () -> (...: value) = boxed_bad_tail
+                local f: function (): (...: value) = boxed_bad_tail
                 return 19, f()
             end
 
@@ -1275,13 +1275,13 @@ describe("interfaces (end-to-end)", function()
                     number: value,
                     array: {integer},
                     map: {string: integer},
-                    callback: (integer) -> integer
+                    callback: function (integer): integer
                 ): (
                     value,
                     integer,
                     {value},
                     {value: value},
-                    (integer, integer) -> integer
+                    function (integer, integer): integer
                 )
                 function box(array: {integer})
                 function box_optional(array: {integer}?)
@@ -1308,13 +1308,13 @@ describe("interfaces (end-to-end)", function()
                 number: integer,
                 array: {value},
                 map: {value: value},
-                callback: (integer, integer) -> integer
+                callback: function (integer, integer): integer
             ): (
                 integer,
                 value,
                 {integer},
                 {string: integer},
-                (integer) -> integer
+                function (integer): integer
             )
                 local called = callback(3, 999)
                 local boxed_number: value = number
@@ -1361,7 +1361,7 @@ describe("interfaces (end-to-end)", function()
                     checked: integer,
                     array: {value},
                     map: {value: value},
-                    callback: (integer, integer) -> integer =
+                    callback: function (integer, integer): integer =
                         views:bridge(
                             item, 40, {2}, {["x"] = 3}, plus_one)
                 views:box({ 21 })
@@ -1849,16 +1849,16 @@ describe("interfaces (end-to-end)", function()
         function()
             local source = [[
             interface Callback
-                function call(p: () -> integer): integer
+                function call(p: function (): integer): integer
             end
 
-            type CallbackFn = (() -> integer) -> integer
+            type CallbackFn = function (function (): integer): integer
 
             record Caller
                 tag: integer
             end
 
-            function Caller:call(p: () -> integer): integer
+            function Caller:call(p: function (): integer): integer
                 return p() + self.tag
             end
 
@@ -1869,24 +1869,24 @@ describe("interfaces (end-to-end)", function()
             local interface_bound: CallbackFn? = nil
             local lambda: CallbackFn? = nil
 
-            function run_record(p: () -> integer): integer
+            function run_record(p: function (): integer): integer
                 local f: CallbackFn = record_bound as CallbackFn
                 return f(p)
             end
 
-            function run_interface(p: () -> integer): integer
+            function run_interface(p: function (): integer): integer
                 local f: CallbackFn = interface_bound as CallbackFn
                 return f(p)
             end
 
-            function run_lambda(p: () -> integer): integer
+            function run_lambda(p: function (): integer): integer
                 local f: CallbackFn = lambda as CallbackFn
                 return f(p)
             end
 
             function run_slow(
                 f: CallbackFn,
-                p: () -> integer
+                p: function (): integer
             ): integer
                 return f(p)
             end
@@ -1894,7 +1894,7 @@ describe("interfaces (end-to-end)", function()
             do
                 record_bound = Caller.new(0):call
                 interface_bound = eager:call
-                lambda = function(p: () -> integer): integer
+                lambda = function(p: function (): integer): integer
                     return p()
                 end
             end
@@ -2047,7 +2047,7 @@ describe("interfaces (end-to-end)", function()
 
                 function bind(
                     adder: api.Adder
-                ): (integer) -> integer
+                ): function (integer): integer
                     return adder:add
                 end
 
@@ -2057,7 +2057,7 @@ describe("interfaces (end-to-end)", function()
 
                 function bind_adjust(
                     adder: api.Adder
-                ): (value) -> value
+                ): function (value): value
                     return adder:adjust
                 end
 
@@ -2130,13 +2130,13 @@ describe("interfaces (end-to-end)", function()
                 return Box.new(item)
             end
 
-            function bind(getter: Getter): () -> integer
+            function bind(getter: Getter): function (): integer
                 return getter:get
             end
 
             function bind_adjust(
                 getter: Getter
-            ): (value) -> value
+            ): function (value): value
                 return getter:adapt
             end
         ]])
@@ -2252,7 +2252,7 @@ int main(void) {
             end
 
             function bound(fallible: Fallible): integer
-                local fail: () -> integer = fallible:fail
+                local fail: function (): integer = fallible:fail
                 local res = fail()
                 return res
             end

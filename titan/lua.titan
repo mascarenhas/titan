@@ -8,9 +8,9 @@ local fs = import "fs"
 local io = import "io"
 local str = import "string"
 
-local type LuaChunk = (...: value) -> (...: value)
-local type Searcher = (string) -> (value, value)
-local type Loader = (string, value) -> value
+local type LuaChunk = function (...: value): (...: value)
+local type Searcher = function (string): (value, value)
+local type Loader = function (string, value): (value)
 
 -- A cooperative require may yield while expanding, probing, or reading Lua
 -- source candidates. A second load of that same logical name is an explicit
@@ -52,7 +52,7 @@ local function is_lua_function(candidate: value): boolean
 end
 
 function load(chunk: string, name: string?, env: value):
-    (...: value) -> (...: value)
+    function (...: value): (...: value)
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 2) == 0 then
@@ -62,7 +62,7 @@ function load(chunk: string, name: string?, env: value):
   local chunkname = chunk
   if name then chunkname = name as string end
   local status = ffi.luaL_loadbufferx(
-    L, chunk, #chunk as ffi.size_t, chunkname, nil)
+    L, chunk, #chunk as foreign size_t, chunkname, nil)
   if status ~= ffi.LUA_OK then
     local failure: value = ffi.lua_totvalue(L, -1)
     raise failure
@@ -85,7 +85,7 @@ function load(chunk: string, name: string?, env: value):
 end
 
 function load_from_reader(reader: io.Reader, name: string?, env: value):
-    (...: value) -> (...: value)
+    function (...: value): (...: value)
   local builder = str.writer()
   for chunk in reader:read do
     builder:write(chunk)

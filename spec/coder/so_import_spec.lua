@@ -75,7 +75,7 @@ describe(".so-only cross-module imports", function()
                     return value_ + 1
                 end
 
-                function source(): (integer) -> integer
+                function source(): function (integer): integer
                     return increment
                 end
 
@@ -91,33 +91,33 @@ describe(".so-only cross-module imports", function()
                 end
 
                 function direct(): integer
-                    local adjusted: (integer, value) -> value =
+                    local adjusted: function (integer, value): value =
                         provider.increment
                     return adjusted(41, "ignored") as integer
                 end
 
                 function relayed(): integer
-                    local adjusted: (integer, value) -> value =
+                    local adjusted: function (integer, value): value =
                         provider.increment
                     local erased: value = adjusted
-                    local wider: (integer, value, value) -> value = erased
+                    local wider: function (integer, value, value): value = erased
                     return wider(41, "a", "b") as integer
                 end
 
-                function source(): (integer) -> integer
+                function source(): function (integer): integer
                     return provider.source()
                 end
 
-                function view(): (value) -> value
-                    local adjusted: (value) -> value = provider.source()
+                function view(): function (value): value
+                    local adjusted: function (value): value = provider.source()
                     return adjusted
                 end
 
                 function nominal_relayed(): integer
-                    local broad: (value) -> value = provider.identity
-                    local narrowed: (Box) -> Box = broad
+                    local broad: function (value): value = provider.identity
+                    local narrowed: function (Box): Box = broad
                     local erased: value = narrowed
-                    local wider: (Box, value) -> Box = erased
+                    local wider: function (Box, value): Box = erased
                     return wider(Box.new(42), "ignored").n                end
             ]] },
         })
@@ -154,7 +154,7 @@ describe(".so-only cross-module imports", function()
                 local api = import "interface_api"
 
                 function use(value_: api.Incrementer): integer
-                    local add: (integer) -> integer = value_:add
+                    local add: function (integer): integer = value_:add
                     return add(2)
                 end
 
@@ -162,7 +162,7 @@ describe(".so-only cross-module imports", function()
                     value_: api.Dynamic,
                     input: value
                 ): value
-                    local convert: (value) -> value = value_:convert
+                    local convert: function (value): value = value_:convert
                     return convert(input)
                 end
 
@@ -610,7 +610,7 @@ describe(".so-only cross-module imports", function()
                     return items
                 end
 
-                function count(items: (const? { integer })?): integer
+                function count(items: const? {integer}?): integer
                     if items == nil then return -1 end
                     return #items
                 end
@@ -841,13 +841,13 @@ describe(".so-only cross-module imports", function()
                 end
 
                 union Reason
-                    simple: integer
-                    empty
+                    simple(integer)
+                    empty()
                 end
 
                 function Reason.amount(reason: Reason): integer
                     case reason
-                    when simple: amount then
+                    when simple(amount) then
                         return amount
                     else
                         return 0
@@ -866,17 +866,17 @@ describe(".so-only cross-module imports", function()
             { name = "alias_consumer", src = [[
                 local facade = import "alias_facade"
                 function run(): integer
-                    local make: (integer) -> facade.Foo =
+                    local make: function (integer): facade.Foo =
                         facade.Foo.make
-                    local new: (integer) -> facade.Foo =
+                    local new: function (integer): facade.Foo =
                         facade.FooAgain.new
-                    local simple: (integer) -> facade.Reason =
+                    local simple: function (integer): facade.Reason =
                         facade.Reason.simple
-                    local amount: (facade.Reason) -> integer =
+                    local amount: function (facade.Reason): integer =
                         facade.Reason.amount
                     local foo = make(40)
                     local other = new(39)
-                    local plus: (integer) -> integer = foo:plus
+                    local plus: function (integer): integer = foo:plus
                     return foo:plus(1) + plus(2) + other.n
                         + amount(simple(3))
                         + facade.Foo.make(38).n
@@ -940,10 +940,10 @@ describe(".so-only cross-module imports", function()
         local ok, err = build_so_chain({
             { name = "fcfa", src = [[
                 function inc(x: integer): integer return x + 1 end
-                function twice(f: (integer) -> integer, x: integer): integer
+                function twice(f: function (integer): integer, x: integer): integer
                     return f(f(x))
                 end
-                function getinc(): (integer) -> integer
+                function getinc(): function (integer): integer
                     return inc
                 end
             ]] },
@@ -951,7 +951,7 @@ describe(".so-only cross-module imports", function()
                 local a = import "fcfa"
                 function binc(x: integer): integer return x + 1 end
                 function run(): integer
-                    local f: (integer) -> integer = a.inc  -- reference across the .so
+                    local f: function (integer): integer = a.inc  -- reference across the .so
                     local r1 = f(10)                       -- call a's value
                     local r2 = a.twice(binc, 0)            -- pass b's value into a
                     local r3 = a.twice(a.inc, 5)           -- pass a's value into a
@@ -976,17 +976,17 @@ describe(".so-only cross-module imports", function()
         -- falls back to a stack entry and the depth assertion fails.
         local ok, err = build_so_chain({
             { name = "fpa", src = [[
-                function inner(p: () -> integer): integer return p() end
+                function inner(p: function (): integer): integer return p() end
             ]] },
             { name = "fpb", src = [[
                 local a = import "fpa"
-                function outer(g: (() -> integer) -> integer, p: () -> integer): integer
+                function outer(g: function (function (): integer): integer, p: function (): integer): integer
                     return g(p)
                 end
-                function run_direct(p: () -> integer): integer return a.inner(p) end
-                function run_fast(p: () -> integer): integer return outer(a.inner, p) end
-                function run_slow(p: () -> integer,
-                                  g: (() -> integer) -> integer): integer
+                function run_direct(p: function (): integer): integer return a.inner(p) end
+                function run_fast(p: function (): integer): integer return outer(a.inner, p) end
+                function run_slow(p: function (): integer,
+                                  g: function (function (): integer): integer): integer
                     return outer(g, p)
                 end
             ]] },
@@ -1018,16 +1018,16 @@ describe(".so-only cross-module imports", function()
                 local provider = import "entrysoa"
 
                 function strict_result(): integer
-                    local f: (integer) -> integer = provider.boundary
+                    local f: function (integer): integer = provider.boundary
                     return f(3)
                 end
 
                 function strict_argument(x: value): value
-                    local f: (value) -> value = provider.boundary
+                    local f: function (value): value = provider.boundary
                     return f(x)
                 end
 
-                function boundary_function(): (integer) -> value
+                function boundary_function(): function (integer): value
                     return provider.boundary
                 end
             ]] },
@@ -1072,9 +1072,9 @@ describe(".so-only cross-module imports", function()
         -- provides the generic-path depth comparison.
         local ok, err = build_so_chain({
             { name = "flexsoa", src = [[
-                function values(probe: value, force: () -> (),
+                function values(probe: value, force: function (): (),
                                 prefix: string): (integer, ...: string)
-                    local p: () -> integer = probe
+                    local p: function (): integer = probe
                     local a = prefix .. "-one"
                     local b = prefix .. "-two"
                     force()
@@ -1084,23 +1084,21 @@ describe(".so-only cross-module imports", function()
             { name = "flexsob", src = [[
                 local a = import "flexsoa"
 
-                function direct(probe: () -> integer, force: () -> (),
+                function direct(probe: function (): integer, force: function (): (),
                                 prefix: string): (integer, ...: string)
                     return a.values(probe, force, prefix)
                 end
 
-                function exact(probe: () -> integer, force: () -> (),
+                function exact(probe: function (): integer, force: function (): (),
                                prefix: string): (integer, ...: string)
-                    local f: (value, () -> (), string)
-                        -> (integer, ...: string) = a.values
+                    local f: function (value, function (): (), string): (integer, ...: string) = a.values
                     return f(probe, force, prefix)
                 end
 
-                function generic(probe: () -> integer, force: () -> (),
+                function generic(probe: function (): integer, force: function (): (),
                                  prefix: string): (integer, ...: string)
                     local v: value = a.values
-                    local f: (() -> integer, () -> (), string)
-                        -> (integer, ...: string) = v
+                    local f: function (function (): integer, function (): (), string): (integer, ...: string) = v
                     return f(probe, force, prefix)
                 end
             ]] },
@@ -1196,7 +1194,7 @@ describe(".so-only cross-module imports", function()
                     return foo.sum()             -- empty vararg across the .so
                 end
                 function asvalue(): integer
-                    local f: (...: integer) -> integer = foo.sum  -- value across .so
+                    local f: function (...: integer): integer = foo.sum  -- value across .so
                     return f(10, 20)
                 end
             ]] },

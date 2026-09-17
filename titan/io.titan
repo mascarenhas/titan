@@ -75,8 +75,8 @@ local function next_line(reader: ReaderCloser): string?
 end
 
 function lines(reader: ReaderCloser):
-    ((ReaderCloser) -> string?, ReaderCloser, nil,
-     (ReaderCloser) -> ())
+    (function (ReaderCloser): (string?), ReaderCloser, nil,
+     function (ReaderCloser): ())
   return next_line, reader, nil, close_reader
 end
 

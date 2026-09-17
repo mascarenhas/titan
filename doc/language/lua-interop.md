@@ -62,7 +62,7 @@ self-publishes along the way. This includes private dependencies pulled from a
 static archive. A linked module outside that initialized closure, or an unused
 archive sibling, remains absent from `package.preload`.
 
-```lua
+```titan
 -- counter.titan          -- Titan
 count: integer = 0
 
@@ -312,7 +312,7 @@ Lua calling convention.
 Multiple return values work exactly as in Lua — a Titan function declared
 with several return types returns that many values to Lua:
 
-```lua
+```titan
 -- test.titan             -- Titan
 function f(x: integer): (integer, string)
     return x * 2, "foo"
@@ -340,7 +340,7 @@ A Titan Map *is* an ordinary Lua table. Passing one in either direction passes
 a reference to the same object, with no copying. Mutations made on one side
 are immediately visible on the other:
 
-```lua
+```titan
 -- test.titan             -- Titan
 function f(m: {string:integer}): {string:integer}
     m["foo"] = m["foo"] + 10
@@ -454,7 +454,7 @@ like an object:
   the module value: `mod.Point.new(2, 3)`. Local records are not module members,
   and a local `new` static is absent from the namespace table.
 
-```lua
+```titan
 -- test.titan             -- Titan
 record Point
     x: float
@@ -572,7 +572,7 @@ code — and writes to a mutable variable made from Lua are immediately visible
 to Titan, because both sides share one storage location. Those mutable writes
 use the target-directed dynamic conversion at run time:
 
-```lua
+```titan
 -- counter.titan          -- Titan
 count: integer = 0
 ```
@@ -611,9 +611,9 @@ of a Lua *module* — `import` loads Titan modules and `foreign import` binds
 C headers (see [the C FFI](ffi.md)) — but a Lua callable passed in as an
 argument is fully usable:
 
-```lua
+```titan
 -- apply.titan            -- Titan
-function apply(f: (integer) -> integer, x: integer): integer
+function apply(f: function (integer): (integer), x: integer): integer
     return f(x)
 end
 ```
@@ -662,11 +662,11 @@ For storing, passing, returning, and the three call paths in general, see
 
 ## Unannotated functions return nothing
 
-A Titan function with no return annotation is a zero-return `() -> ()`
+A Titan function with no return annotation is a zero-return `function (): ()`
 function (see [Functions](functions.md)), so from Lua it returns **no**
 values, exactly like a Lua `function f() end`:
 
-```lua
+```titan
 -- log.titan              -- Titan
 function note(msg: string)   -- no annotation: returns ()
 end
@@ -688,7 +688,7 @@ failed casts, arithmetic errors — is an ordinary Lua error. It propagates
 to the Lua caller and is catchable with `pcall`, like an error from any
 Lua or C function:
 
-```lua
+```titan
 -- test.titan             -- Titan
 function double(x: integer): integer
     return x * 2

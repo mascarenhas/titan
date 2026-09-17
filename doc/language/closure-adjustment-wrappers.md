@@ -18,7 +18,7 @@ use the existing generic call path.
 
 Callers of the expected type `B` supply `B` arguments, while the immediate
 source closure consumes `A` arguments and produces `A` results. An adjustment
-therefore acts in opposite directions on the two sides of the arrow:
+therefore acts in opposite directions on parameter and result types:
 
 * **Arguments flow from `B` to `A`.** An actual function may ignore fixed
   arguments or an input tail that only `B` exposes. If `A` has an additional
@@ -52,13 +52,13 @@ function notify(): ()
 end
 
 function accepted()
-    local maybe_code: () -> integer? = notify  -- call returns one nil option
-    local opaque: () -> value = notify         -- call returns one nil value
-    local only_nil: () -> nil = notify         -- call returns one nil value
+    local maybe_code: function (): (integer?) = notify  -- call returns one nil option
+    local opaque: function (): (value) = notify         -- call returns one nil value
+    local only_nil: function (): (nil) = notify         -- call returns one nil value
 end
 
 function rejected()
-    local code: () -> integer = notify         -- compile-time error
+    local code: function (): (integer) = notify         -- compile-time error
 end
 ```
 
@@ -128,8 +128,8 @@ A realized `B` wrapper carries two intentional call surfaces:
   count, dynamic conversions, and result behavior. Titan never synthesizes a
   target-`B` Lua entry.
 
-For example, a static `A = (integer) -> integer` function may be viewed as
-`B = (value) -> integer`. A Titan call through `B` first applies the strict
+For example, a static `A = function (integer): (integer)` function may be viewed as
+`B = function (value): (integer)`. A Titan call through `B` first applies the strict
 `value`-to-`integer` component observation required on the route to `A`. A Lua
 call of the realized wrapper instead uses `A`'s genuine-Lua integer conversion,
 which accepts an integral in-range Lua float. The wrapper does not turn the
@@ -153,8 +153,8 @@ function first(n: integer): integer
     return n
 end
 
-function make_view(): (integer, string) -> integer
-    return first as (integer, string) -> integer
+function make_view(): function (integer, string): (integer)
+    return first as function (integer, string): (integer)
 end
 ```
 

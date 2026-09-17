@@ -175,13 +175,13 @@ describe("Array, Map, and vararg spread expressions (typechecker)", function()
     it("links nested generic Array and Map producers to finite and open sinks",
     function()
         local ok, err, tree = run_checker([[
-            function make_array<T>(): {T} return {} end
-            function make_map<T>(): {integer: T} return {} end
+            function make_array<|T|>(): {T} return {} end
+            function make_map<|T|>(): {integer: T} return {} end
 
-            function fixed<T>(head: T, middle: T, tail: T)
+            function fixed<|T|>(head: T, middle: T, tail: T)
             end
 
-            function open<T>(head: T, ...: T)
+            function open<|T|>(head: T, ...: T)
             end
 
             function use()
@@ -191,8 +191,8 @@ describe("Array, Map, and vararg spread expressions (typechecker)", function()
                 open(1, ...make_map())
 
                 -- Explicit arguments are controls for the same carrier paths.
-                fixed(1, ...make_array<integer>())
-                open(1, ...make_map<integer>())
+                fixed(1, ...make_array<|integer|>())
+                open(1, ...make_map<|integer|>())
             end
         ]])
         assert.truthy(ok, err)
@@ -227,11 +227,11 @@ describe("Array, Map, and vararg spread expressions (typechecker)", function()
     it("distinguishes optional finite and raw open generic spread evidence",
     function()
         local ok, err, tree = run_checker([[
-            function box<T>(item: T?): {T}
+            function box<|T|>(item: T?): {T}
                 return {}
             end
 
-            function gather<T>(...: T): {T}
+            function gather<|T|>(...: T): {T}
                 return {}
             end
 
@@ -253,11 +253,11 @@ describe("Array, Map, and vararg spread expressions (typechecker)", function()
     it("refreshes generic-for spread projections in the iterator context",
     function()
         local ok, err, tree = run_checker([[
-            function step<T>(state: T, control: T): T?
+            function step<|T|>(state: T, control: T): T?
                 return nil
             end
 
-            function supply<U>(): {U}
+            function supply<|U|>(): {U}
                 return {}
             end
 
@@ -278,16 +278,16 @@ describe("Array, Map, and vararg spread expressions (typechecker)", function()
     it("closes spread evidence in inferred Array and positional Map constructors",
     function()
         local ok, err, tree = run_checker([[
-            function make_array<T>(): {T} return {} end
-            function make_map<T>(): {integer: T} return {} end
-            function make_optional_array<T>(): {T}? return {} end
-            function make_optional_map<T>(): {integer: T}? return {} end
+            function make_array<|T|>(): {T} return {} end
+            function make_map<|T|>(): {integer: T} return {} end
+            function make_optional_array<|T|>(): {T}? return {} end
+            function make_optional_map<|T|>(): {integer: T}? return {} end
 
-            function choose_array<T>(items: {T}, witness: T): {T}
+            function choose_array<|T|>(items: {T}, witness: T): {T}
                 return items
             end
 
-            function choose_map<T>(
+            function choose_map<|T|>(
                 items: {integer: T}, witness: T
             ): {integer: T}
                 return items
@@ -323,12 +323,12 @@ describe("Array, Map, and vararg spread expressions (typechecker)", function()
     it("forces Option containers returned by explicit generic producers",
     function()
         local ok, err, tree = run_checker([[
-            function make_array<T>(): {T}? return {} end
-            function make_map<T>(): {integer: T}? return {} end
+            function make_array<|T|>(): {T}? return {} end
+            function make_map<|T|>(): {integer: T}? return {} end
 
             function use()
-                local number: integer? = ...make_array<integer>()
-                local text: string? = ...(make_map<string>())
+                local number: integer? = ...make_array<|integer|>()
+                local text: string? = ...(make_map<|string|>())
             end
         ]])
         assert.truthy(ok, err)
@@ -400,18 +400,18 @@ spread_int spread_vararg(spread_int first, ...);
                 "foreign import %q\n", header)
             assert_type_check(prelude .. [[
                 local function finite(
-                    items: {ffi.spread_int}
-                ): ffi.spread_int
+                    items: {foreign spread_int}
+                ): foreign spread_int
                     return ffi.spread_fixed(...items)
                 end
             ]])
             assert_error("runtime%-open Titan result sequence", prelude .. [[
-                function open(items: {ffi.spread_int})
+                function open(items: {foreign spread_int})
                     ffi.spread_vararg(0, ...items)
                 end
             ]])
             assert_error("runtime%-open Titan result sequence", prelude .. [[
-                function open_input(...: ffi.spread_int)
+                function open_input(...: foreign spread_int)
                     ffi.spread_vararg(0, ...[2,])
                 end
             ]])
@@ -448,15 +448,14 @@ spread_int spread_vararg(spread_int first, ...);
                 end
             ]])
         end
+    end)
 
-
-        local errors = check_errs([[
+    it("adjusts parenthesized vararg ranges to one value", function()
+        assert_type_check([[
             function use(...: integer)
                 local item = (...[1, 2])
             end
         ]])
-        assert.same(1, #errors)
-        assert.match("subset.*spread", errors[1])
     end)
 
     it("checks explicitly parsed non-tail spreads as placement errors",
@@ -473,13 +472,13 @@ spread_int spread_vararg(spread_int first, ...);
             end
         ]])
 
-        assert_error("subset.*spread", [[
+        assert_error("spread can only be used as the last item", [[
             function sink(a: integer, b: integer) end
             function use(...: integer)
                 sink(...[1, 2], 1)
             end
         ]])
-        assert_error("subset.*spread", [[
+        assert_error("spread must be the last field", [[
             function use(...: integer)
                 local out = {...[1, 2], 1}
             end

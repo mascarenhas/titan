@@ -650,10 +650,10 @@ describe("finally / defer cleanup", function()
             function lognum(): integer
                 return log
             end
-            function call_lua3(f: () -> integer): integer
+            function call_lua3(f: function (): integer): integer
                 return f()
             end
-            function run(f: () -> integer): integer
+            function run(f: function (): integer): integer
                 do
                     defer note()
                     raise "body"
@@ -1011,10 +1011,10 @@ describe("catch", function()
 
     it("closes Lua to-be-closed variables while unwinding through Lua callbacks into a Titan catch", function()
         local out = compile_and_run([[
-            function call_lua3(f: () -> integer): integer
+            function call_lua3(f: function (): integer): integer
                 return f()
             end
-            function catch_lua2(f: () -> integer): integer
+            function catch_lua2(f: function (): integer): integer
                 do
                     return f()
                 catch
@@ -1052,10 +1052,10 @@ describe("catch", function()
 
     it("catches a Lua __close error raised during protected-boundary recovery", function()
         local out = compile_and_run([[
-            function call_lua3(f: () -> integer): integer
+            function call_lua3(f: function (): integer): integer
                 return f()
             end
-            function catch_lua2_error(f: () -> integer): (string, string)
+            function catch_lua2_error(f: function (): integer): (string, string)
                 do
                     local n: integer = f()
                     return "unreached " .. n, ""

@@ -7,7 +7,7 @@ local math = import "math"
 local lua = import "lua"
 local gc = import "gc"
 
-local function expect_json_error(action: () -> ()): json.Error
+local function expect_json_error(action: function (): ()): json.Error
   local caught: json.Error?
   do
     action()

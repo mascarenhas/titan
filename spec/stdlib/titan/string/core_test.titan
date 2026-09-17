@@ -232,7 +232,7 @@ function test_tostring_fixed_adjustment_and_state(context: test.Context)
   test.assert(converted == "42" and observed == "leftright")
 
   local direct_seen = ""
-  local extra: (string) -> string = function(text: string): string
+  local extra: function (string): (string) = function(text: string): string
     direct_seen = direct_seen .. text
     return text
   end

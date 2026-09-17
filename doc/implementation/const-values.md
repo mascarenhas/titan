@@ -8,8 +8,9 @@ cross-pass invariants that must stay aligned when the implementation changes.
 
 ## Frontend and AST contract
 
-`const` was already a token because the C FFI uses `const *T`; the feature adds
-grammar placements without changing keyword recognition.
+`const` qualifies bindings and Titan Arrays. Inside a raw foreign type it
+qualifies the C pointer or array; ordinary mixed type positions spell that
+boundary explicitly, for example `foreign const *T`.
 
 The relevant AST constructors are:
 
@@ -29,17 +30,17 @@ created with `isconst == true`.
 
 The parser admits:
 
-- `[local] const decl [= exp]` at module scope;
+- `[local] [const] decl [= exp]` at module scope, with an annotation or RHS;
 - `(local? const) decllist = explist` in a statement block;
 - `local decllist [= explist]` for mutable locals;
-- `[local] const name [?] : type` in records;
+- `[local] [const] name : type` in records; optionality belongs to the type;
 - `name: type` and bodyless method signatures in Interface bodies; and
 - `const { type }` and `const? { type }` as qualified Array types.
 
-The `const { T }` production precedes `const *T`/ordinary Array parsing and
-rejects a colon before the closing brace, so no const Map form is created.
-`{ const *c.T }` still parses as a mutable Array whose element is a const C
-pointer. Const-local grammar always commits to `= explist`; only mutable
+The Titan `const { T }` production is separate from foreign pointer parsing
+and rejects Map syntax. `{ foreign const *T }` is a mutable Titan Array
+whose element type is a const C pointer, subject to its normal representation
+and operation restrictions. Const-local grammar always commits to `= explist`; only mutable
 `local` uses the optional expression-list production.
 
 Parser record desugaring still synthesizes `Record.new`. Its parameters retain
@@ -87,7 +88,7 @@ mismatched metadata is rejected before a descriptor can be interpreted as ABI
 ## Checker rules for declarations
 
 `types.accepts_missing_nil` is the shared narrow predicate for omitted local
-initializers, initializer-less const module variables, callable missing-result
+initializers, initializer-less module variables, callable missing-result
 fill, and other existing missing-slot rules. It admits the actual nil-bearing
 representation domain, not general assignment adjustment; in particular,
 truthiness cannot make a Boolean declaration initializer-less.
@@ -106,9 +107,9 @@ checked after lvalue resolution and before `_assigned` bookkeeping, which keeps
 rejected closure and direct writes from incorrectly selecting mutable capture
 storage.
 
-An initializer-less const `TopLevelVar` receives `_initializerless_const` and
-its owning module name. The checker requires an explicit nil-bearing type and
-replaces `value == false` with a checked `ExpNil`. `checkfuncbody` marks the
+Every initializer-less `TopLevelVar` requires an explicit nil-bearing type;
+the checker replaces `value == false` with a checked `ExpNil`. A const one also
+receives `_initializerless_const` and its owning module name. `checkfuncbody` marks the
 synthetic root initializer frame with its owner module. Assignment to that
 module slot is authorized only when this marked frame is the current function
 frame and the owners match; nested blocks remain in the frame, while a nested

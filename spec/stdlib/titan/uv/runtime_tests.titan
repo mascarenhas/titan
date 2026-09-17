@@ -54,7 +54,7 @@ function test_runtime_shutdown_closes_native_handles_but_not_files(
   end)
 end
 
-local type BootstrapFixtureCase = (string) -> ()
+local type BootstrapFixtureCase = function (string): ()
 
 local function compile_bootstrap_fixture(workspace: string, name: string)
   local source = fs.read_file(
@@ -168,7 +168,7 @@ function test_default_bootstrap_finishes_child_after_failed_main(
   end)
 end
 
-local type StdioFixtureCase = (string) -> ()
+local type StdioFixtureCase = function (string): ()
 
 local function compile_stdio_fixture(workspace: string)
   fs.write_file(workspace .. "/uv_stdio_probe.h",

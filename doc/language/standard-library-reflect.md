@@ -13,7 +13,7 @@ end
 function increment(counter: Counter, amount: integer): integer
   local inspected = reflect.inspect(counter)
   case inspected
-  when is_record: record_value then
+  when is_record(record_value) then
     local total: integer = record_value:get(1)
     record_value:set(1, total + amount)
     return counter.total
@@ -152,14 +152,14 @@ descriptor. Use `wrapped` when inspecting the concrete value separately.
 ### Functions
 
 All three function-value records retain a callable `val` with type
-`(...: value) -> (...: value)`. Calling it follows ordinary dynamic callable
+`function (...: value): (...: value)`. Calling it follows ordinary dynamic callable
 argument and result adjustment.
 
 | Record | Additional public fields |
 | --- | --- |
-| `TitanFunctionValue` | `native_entry: *void`, `lua_entry: foreign (*lua_State) -> int`, `descriptor: FunctionType` |
+| `TitanFunctionValue` | `native_entry: foreign *void`, `lua_entry: foreign function (*lua_State): int`, `descriptor: FunctionType` |
 | `LuaFunctionValue` | `descriptor: LuaFunctionType` |
-| `LuaCFunctionValue` | `entry: foreign (*lua_State) -> int` |
+| `LuaCFunctionValue` | `entry: foreign function (*lua_State): int` |
 
 `LuaFunctionType` contains `source`, `short_source`, `line_defined`,
 `last_line_defined`, `what`, `is_vararg`, and `n_params`, as reported by Lua's
@@ -176,14 +176,14 @@ signature. Using those low-level entries requires the corresponding
 ```text
 record OwnedForeignPointerValue
   const val: value
-  const payload: *void
+  const payload: foreign *void
   const size: integer
   const descriptor: OwnedForeignPointerType
 end
 
 record OwnedForeignArrayValue
   const val: value
-  const payload: *void
+  const payload: foreign *void
   const size: integer
   const count: integer
   const descriptor: OwnedForeignArrayType
@@ -201,9 +201,9 @@ add a destructor or extend the lifetime of borrowed external C pointers.
 function find_nominal(name: string): NominalType?
 
 union NominalType
-  is_record: RecordType
-  is_union: UnionType
-  is_interface: InterfaceType
+  is_record(RecordType)
+  is_union(UnionType)
+  is_interface(InterfaceType)
 end
 
 record NamedType
@@ -226,9 +226,9 @@ function public_field_count(name: string): integer?
   local found: reflect.NominalType? = reflect.find_nominal(name)
   if found == nil then return nil end
   case found
-  when is_record: descriptor then
+  when is_record(descriptor) then
     return #descriptor.fields
-  when is_interface: descriptor then
+  when is_interface(descriptor) then
     return #descriptor.fields
   else
     return nil
@@ -253,32 +253,32 @@ Repeated nominal lookups reuse cached descriptors.
 
 ```text
 union Type
-  is_nil
-  is_boolean
-  is_integer
-  is_float
-  is_string
-  is_value
-  is_named: NamedType
-  is_array: ArrayType
-  is_map: MapType
-  is_record: RecordType
-  is_union: UnionType
-  is_interface: InterfaceType
-  is_option: Type
-  is_function: FunctionType
-  is_foreign_function: ForeignFunctionType
-  is_owned_foreign_pointer: OwnedForeignPointerType
-  is_owned_foreign_array: OwnedForeignArrayType
-  is_foreign_void
-  is_foreign_named: ForeignNamedType
-  is_foreign_integer: ForeignIntegerType
-  is_foreign_float: ForeignFloatType
-  is_foreign_pointer: ForeignPointerType
-  is_foreign_array: ForeignArrayType
-  is_foreign_struct: ForeignStructType
-  is_foreign_union: ForeignUnionType
-  is_foreign_typedef: ForeignTypedefType
+  is_nil()
+  is_boolean()
+  is_integer()
+  is_float()
+  is_string()
+  is_value()
+  is_named(NamedType)
+  is_array(ArrayType)
+  is_map(MapType)
+  is_record(RecordType)
+  is_union(UnionType)
+  is_interface(InterfaceType)
+  is_option(Type)
+  is_function(FunctionType)
+  is_foreign_function(ForeignFunctionType)
+  is_owned_foreign_pointer(OwnedForeignPointerType)
+  is_owned_foreign_array(OwnedForeignArrayType)
+  is_foreign_void()
+  is_foreign_named(ForeignNamedType)
+  is_foreign_integer(ForeignIntegerType)
+  is_foreign_float(ForeignFloatType)
+  is_foreign_pointer(ForeignPointerType)
+  is_foreign_array(ForeignArrayType)
+  is_foreign_struct(ForeignStructType)
+  is_foreign_union(ForeignUnionType)
+  is_foreign_typedef(ForeignTypedefType)
 end
 ```
 
@@ -332,7 +332,7 @@ record VariantType
   const name: string
   const tag: integer
   const descriptor: Type?
-  const callable: (value) -> value
+  const callable: function (value): (value)
 end
 ```
 
@@ -347,8 +347,8 @@ are sorted by name. Interface methods retain their declaration order.
 the declared arguments; a method's receiver is supplied separately:
 
 ```text
-MethodType.callable: (value, ...: value) -> (...: value)
-StaticFunctionType.callable: (...: value) -> (...: value)
+MethodType.callable: function (value, ...: value): (...: value)
+StaticFunctionType.callable: function (...: value): (...: value)
 ```
 
 Pass the corresponding inspected `val` as the first argument of a method
@@ -361,8 +361,8 @@ functions.
 ### Erased generics
 
 Reflection reports the shared runtime schema of a generic declaration. It does
-not recover a particular value's source type arguments: `Box<integer>` and
-`Box<string>` share the nominal name `module.Box`.
+not recover a particular value's source type arguments: `Box<|integer|>` and
+`Box<|string|>` share the nominal name `module.Box`.
 
 An unconstrained type parameter appears as `Type.is_value()`. A parameter
 constrained by an Interface appears as `Type.is_named` for that outer

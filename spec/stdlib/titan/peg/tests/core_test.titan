@@ -445,14 +445,14 @@ function test_core_capture_forms(context: test.Context)
   lookup["a"] = "<a>"
   test.assert(pattern.query_capture(
     pattern.literal("a"), lookup):match("a") == "<a>")
-  local surround: (value, ...: value) -> (...: value) =
+  local surround: function (value, ...: value): (...: value) =
     function(found, ...)
       return "<" .. (found as string) .. ">"
     end
   test.assert(pattern.function_capture(
     pattern.literal("a"), surround):match("a") == "<a>")
 
-  local preserve: (value, ...: value) -> (...: value) =
+  local preserve: function (value, ...: value): (...: value) =
     function(first, ...)
       test.assert(#... == 1)
       return nil, first, ...[1], nil
@@ -466,7 +466,7 @@ function test_core_capture_forms(context: test.Context)
 
   local callback_count = 0
   local match_time_callback:
-      (string, integer, value, ...: value) -> (...: value) =
+      function (string, integer, value, ...: value): (...: value) =
     function(subject, position, first, ...)
       callback_count = #... + 1
       test.assert(subject == "abx" and position == 3)
@@ -480,7 +480,7 @@ function test_core_capture_forms(context: test.Context)
   test.assert(callback_count == 1 and matched == "matched" and after == 3)
 
   local runtime_count = 0
-  local runtime: (string, integer, string) -> (...: value) =
+  local runtime: function (string, integer, string): (...: value) =
     function(subject, position, whole)
       runtime_count = 1
       test.assert(subject == "abc" and position == 1 and whole == "")
@@ -517,14 +517,14 @@ function test_core_callback_timing_and_titan_callables(context: test.Context)
     first_only):match("") == "first")
 
   local events: {string} = {}
-  local delayed_event: (value, ...: value) -> (...: value) =
+  local delayed_event: function (value, ...: value): (...: value) =
     function(first, ...)
       events[#events + 1] = "delayed"
       return first
     end
   local delayed_branch = pattern.function_capture(
     pattern.capture(pattern.literal("a")), delayed_event)
-  local runtime_event: (string, integer, string) -> (...: value) =
+  local runtime_event: function (string, integer, string): (...: value) =
     function(subject, position, whole)
       events[#events + 1] = "runtime"
       return position
@@ -537,7 +537,7 @@ function test_core_callback_timing_and_titan_callables(context: test.Context)
   test.assert(#events == 1 and events[1] == "runtime")
 
   local fold_arities: {integer} = {}
-  local record_fold: (value, ...: value) -> value =
+  local record_fold: function (value, ...: value): (value) =
     function(accumulator, ...)
       fold_arities[#fold_arities + 1] = #...
       return fold_callback(accumulator, ...)
@@ -549,7 +549,7 @@ function test_core_callback_timing_and_titan_callables(context: test.Context)
   test.assert(grouped_fold:match("") == 6)
   test.assert(fold_arities[1] == 0 and fold_arities[2] == 2)
 
-  local explode: (value, ...: value) -> (...: value) =
+  local explode: function (value, ...: value): (...: value) =
     function(_, ...)
       raise "callback exploded"
     end

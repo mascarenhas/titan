@@ -7,24 +7,24 @@ constraint carriers. Calls and constructors infer a fresh, complete set of type
 arguments locally, or the caller can write the complete set explicitly.
 
 ```titan
-record Pair<T, U>
+record Pair<|T, U|>
     first: T
     second: U
 end
 
-function id<T>(x: T): T
+function id<|T|>(x: T): T
     return x
 end
 
 function example(): integer
-    local pair = Pair.new(1, "one")      -- Pair<integer, string>
-    local n = id<integer>(pair.first)     -- integer
+    local pair = Pair.new(1, "one")      -- Pair<|integer, string|>
+    local n = id<|integer|>(pair.first)     -- integer
     return n
 end
 ```
 
 There is no monomorphization and no run-time type-argument object. For example,
-calls to `id<integer>(...)` and `id<string>(...)` use the same erased native body. Titan preserves
+calls to `id<|integer|>(...)` and `id<|string|>(...)` use the same erased native body. Titan preserves
 their different static types by inserting ordinary boxing, Interface adapters,
 callable wrappers, and strict projections at the closed use site.
 
@@ -43,28 +43,28 @@ A nonempty type-parameter list follows the declared name. Each parameter is
 unconstrained or names an applied Interface constraint:
 
 ```text
-type-parameters = "<" type-parameter { "," type-parameter } ">"
+type-parameters = "<|" type-parameter { "," type-parameter } "|>"
 type-parameter  = Name [ ":" Interface-application ]
 ```
 
 ```titan
-record Pair<T, U>
+record Pair<|T, U|>
     first: T
     second: U
 end
 
-union Result<T, E>
-    ok: T
-    error: E
+union Result<|T, E|>
+    ok(T)
+    error(E)
 end
 
-interface Stack<E>
-    function push<R: Stack<E>>(item: E): R
+interface Stack<|E|>
+    function push<|R: Stack<|E|>|>(item: E): R
 end
 
-function foldl<T, U>(
+function foldl<|T, U|>(
     values: {T},
-    combine: (T, U) -> U,
+    combine: function (T, U): (U),
     initial: U
 ): U
     local accumulator = initial
@@ -103,26 +103,26 @@ all of its method and nominal-function signatures and bodies. A method or
 nominal function can add a separate callable-local list:
 
 ```titan
-record Pair<T, U>
+record Pair<|T, U|>
     first: T
     second: U
 end
 
-function Pair:map<V>(f: (T) -> V): Pair<V, U>
+function Pair:map<|V|>(f: function (T): (V)): Pair<|V, U|>
     return Pair.new(f(self.first), self.second)
 end
 
-function Pair.replace_first<V>(
-    pair: Pair<T, U>,
+function Pair.replace_first<|V|>(
+    pair: Pair<|T, U|>,
     item: V
-): Pair<V, U>
+): Pair<|V, U|>
     return Pair.new(item, pair.second)
 end
 ```
 
-The owner name in a definition remains bare: write `function Pair:map<V>`, not
-`function Pair<T,U>:map<V>`. The implicit `self` in `Pair:map` has type
-`Pair<T,U>`. A callable-local parameter may not reuse an active owner-parameter
+The owner name in a definition remains bare: write `function Pair:map<|V|>`, not
+`function Pair<|T, U|>:map<|V|>`. The implicit `self` in `Pair:map` has type
+`Pair<|T, U|>`. A callable-local parameter may not reuse an active owner-parameter
 name; Titan rejects shadowing instead of making the two parameters ambiguous.
 
 Owner and callable parameters have distinct identities even when their source
@@ -135,11 +135,11 @@ A constraint is written after `:` and must resolve to a visible Interface
 application:
 
 ```titan
-interface Container<E>
+interface Container<|E|>
     function get(): E
 end
 
-function read<T, C: Container<T>>(container: C): T
+function read<|T, C: Container<|T|>|>(container: C): T
     return container:get()
 end
 ```
@@ -153,7 +153,7 @@ a subtype bound. A closed argument for `C` must be:
 
 Distinct Interface constraints do not entail one another structurally. Within
 the body, a value of type `C` exposes exactly the fields and methods declared by
-`Container<T>`—not statics or extra members of a later concrete
+`Container<|T|>`—not statics or extra members of a later concrete
 implementation. Required Interface fields remain read-only snapshots. Where a
 concrete record or union is accepted, Titan uses the
 ordinary [Interface wrapper conversion](interfaces.md#structural-satisfaction-at-the-coercion-site).
@@ -175,16 +175,16 @@ may perform.
 
 A complete argument list can follow a direct or qualified named type:
 
-```titan
-Pair<integer, string>
-api.Result<{string}, api.Error>
-Pair<T, U>?
-{Pair<T, U>}
+```text
+Pair<|integer, string|>
+api.Result<|{string}, api.Error|>
+Pair<|T, U|>?
+{Pair<|T, U|>}
 ```
 
-The application binds more tightly than `?`, so `Pair<T,U>?` is an option of an
+The application binds more tightly than `?`, so `Pair<|T, U|>?` is an option of an
 applied `Pair`, not an application whose final argument is optional. Nested
-applications close one `>` at a time: `Outer<Inner<T>>` needs no separating
+applications close one `|>` at a time: `Outer<|Inner<|T|>|>` needs no separating
 space.
 
 Only a named record, union, Interface, or constructor-preserving alias is
@@ -205,13 +205,13 @@ In an ordinary scalar type position, a generic owner without arguments means
 that every argument is literally `value`:
 
 ```titan
-local p: Pair = Pair<value, value>.new(1, "one")
--- Pair above means Pair<value, value>.
+local p: Pair = Pair<|value, value|>.new(1, "one")
+-- Pair above means Pair<|value, value|>.
 ```
 
 It is not a wildcard, existential, partially applied constructor, or unknown
 application. The bare spelling is valid only if `value` satisfies every owner
-constraint. Consequently an owner such as `Constrained<T: Show>` normally
+constraint. Consequently an owner such as `Constrained<|T: Show|>` normally
 requires an explicit argument because `value` does not implement `Show`.
 
 This all-`value` rule applies to ordinary scalar uses, including fields,
@@ -228,14 +228,14 @@ constraints, and nominal namespace:
 
 ```titan
 type Either = Pair
-local type IntPair = Pair<integer, integer>
+local type IntPair = Pair<|integer, integer|>
 
-local e = Either<string, integer>.new("ok", 200)
+local e = Either<|string, integer|>.new("ok", 200)
 local p = IntPair.new(1, 2)
 ```
 
-`Either<A,B>` is exactly `Pair<A,B>` and creates no new run-time identity. Bare
-`Either` means `Either<value,value>`. `IntPair` is already concrete and has no
+`Either<|A, B|>` is exactly `Pair<|A, B|>` and creates no new run-time identity. Bare
+`Either` means `Either<|value, value|>`. `IntPair` is already concrete and has no
 arity. Alias chains preserve the same rule, subject to ordinary visibility and
 cycle checks. Public forwarding aliases are available through compiled module
 interfaces; local aliases remain source-private.
@@ -257,8 +257,8 @@ The precedence for an inferred call is:
 Expected-result context is static: using it before evaluated arguments does not
 change run-time evaluation. For example, `local x: float = id(1)` selects
 `T = float` and checks the integer argument against `float`; the call elaborates
-like `id<float>(1)`. A receiver-selected owner remains earlier: if `box` is a
-`Box<integer>`, an expected `float` result from `box:get()` adjusts the integer
+like `id<|float|>(1)`. A receiver-selected owner remains earlier: if `box` is a
+`Box<|integer|>`, an expected `float` result from `box:get()` adjusts the integer
 result rather than changing the receiver's owner argument.
 
 Evaluated evidence is consumed exactly in source order: positional arguments
@@ -284,7 +284,7 @@ unannotated result is closed; the loop's first control value is then ordinarily
 forced to `integer`:
 
 ```titan
-function step<T>(state: T?, control: T?): T? return nil end
+function step<|T|>(state: T?, control: T?): T? return nil end
 function consume(...: integer)
     for item in step, ... do
         -- item is the forced integer control value
@@ -293,7 +293,7 @@ end
 ```
 
 ```titan
-function same<T>(left: T, right: T): T return left end
+function same<|T|>(left: T, right: T): T return left end
 
 local i = same(1, 2.5)  -- T is integer; argument 2 converts float -> integer
 local f = same(1.0, 2)  -- T is float; argument 2 converts integer -> float
@@ -324,7 +324,7 @@ evidence may close that occurrence's local cells, but the value is not replayed
 or moved behind its siblings. Thus:
 
 ```titan
-function agree<T>(left: T, right: T): T return left end
+function agree<|T|>(left: T, right: T): T return left end
 
 function from_dynamic(callback: value): integer
     return agree(callback(), 42)
@@ -332,7 +332,7 @@ end
 ```
 
 `callback()` cannot synthesize its result type, so the later `42` selects
-`integer` and the earlier call is finished as `() -> integer`. This is not an
+`integer` and the earlier call is finished as `function (): (integer)`. This is not an
 order-independence rule for an already typed `value`: `agree(v, 42)` selects
 `value`, while `agree(42, v)` selects `integer` and checks `v` at that boundary.
 
@@ -350,7 +350,7 @@ constructor's integer-element default for itself. The same postorder rule
 applies to computed Map keys and values. A context-only record constructor
 builds the selected record base and then takes any ordinary outer Option wrap
 or force. An optional Array parameter preserves the Array context in the same
-way: `first<T>(items: ({T})?)` accepts `first({1})` with `T = integer`, checking
+way: `first<|T|>(items: ({T})?)` accepts `first({1})` with `T = integer`, checking
 the literal as `{integer}` before applying the outer Option wrap. Explicit
 type arguments, already typed Arrays, and `{}` use the same ordinary argument
 rules; an empty optional-Array argument can take its element type from explicit
@@ -399,10 +399,10 @@ is not an inference default or a way around ordinary container rules.
 A call may instead supply the complete unresolved list:
 
 ```titan
-foldl<integer, string>(numbers, combine, "")
-Pair<integer, string>.new(1, "one")
-stack:push<MyStack>(item)
-make<integer>{ item = 1 }       -- named-call syntax is also supported
+foldl<|integer, string|>(numbers, combine, "")
+Pair<|integer, string|>.new(1, "one")
+stack:push<|MyStack|>(item)
+make<|integer|>{ item = 1 }       -- named-call syntax is also supported
 ```
 
 There is no partial explicit list. The order is:
@@ -412,22 +412,21 @@ There is no partial explicit list. The order is:
   already fixed the owner arguments); and
 - for a constructor or nominal function, the complete owner list is attached to
   the nominal namespace, while any complete callable-local list remains after
-  the member name: `Pair<T,U>.new(...)` and `Pair<T,U>.from<V>(...)`.
+  the member name: `Pair<|T,U|>.new(...)` and `Pair<|T,U|>.from<|V|>(...)`.
 
 Constructors synthesized for records and union variants have only the owner's
-parameters. The old member-attached spelling `Pair.new<T,U>(...)` is rejected.
+parameters. The old member-attached spelling `Pair.new<|T,U|>(...)` is rejected.
 When a nominal function has both owner and callable-local binders, write both
-lists or neither; `Pair<T,U>.from(...)` and `Pair.from<V>(...)` do not request
+lists or neither; `Pair<|T,U|>.from(...)` and `Pair.from<|V|>(...)` do not request
 partial inference. A concrete alias such as `IntPair` has already fixed its
 owner arguments, so only a nominal function's callable-local list can remain.
 
 Generic-call suffixes use the same positional, named, and method-call argument
-forms as ordinary calls. Whitespace is insignificant, so `f<T>(x)` and
-`f < T > (x)` are the same call. The parser treats an angle list as type
-arguments only when a complete list is followed by a call delimiter. Thus
-`a < b > c` remains two comparisons, while `a < b > (c)` is a generic call;
-write `(a < b) > (c)` to force the comparison in that ambiguous shape. `>>`
-and `>=` retain their ordinary operator meanings.
+forms as ordinary calls. Whitespace is insignificant, so `f<|T|>(x)` and
+`f <| T |> (x)` are the same call. `<|` commits to a type list; the checker
+then validates the resulting application and its use. Comparisons retain
+ordinary `<` and `>`: `a < b > c` is a comparison chain and never triggers a
+generic-call probe. `>>` and `>=` keep their ordinary meanings.
 
 ### Generic declarations as function values
 
@@ -436,17 +435,17 @@ expected monomorphic function type can instantiate it:
 
 ```titan
 function use_function_values(): integer
-    local int_id: (integer) -> integer = id
-    local constructor: (integer, string) -> Pair<integer, string> = Pair.new
+    local int_id: function (integer): (integer) = id
+    local constructor: function (integer, string): (Pair<|integer, string|>) = Pair.new
     local pair = constructor(1, "one")
     return int_id(pair.first)
 end
 ```
 
 Without an expected function type, `local f = id` closes `T` to its declared
-erased carrier and therefore gives `f` the ordinary type `(value) -> value`.
+erased carrier and therefore gives `f` the ordinary type `function (value): (value)`.
 Version one has no written specialization form that produces a value without a
-call: `Pair<integer>.new` is rejected, while the bare `Pair.new` can still be
+call: `Pair<|integer|>.new` is rejected, while the bare `Pair.new` can still be
 instantiated by context or by the final carrier rule. The instantiated value may
 be an ordinary adjustment wrapper, and wrappers are
 fresh values: generic instantiation does not promise that function identity is
@@ -476,11 +475,11 @@ For one rigid unconstrained parameter `T`, the body permits:
 For example, identity, uniform equality, and storage are valid:
 
 ```titan
-function same<T>(left: T, right: T): boolean
+function same<|T|>(left: T, right: T): boolean
     return left == right
 end
 
-function append<T>(items: {T}, item: T)
+function append<|T|>(items: {T}, item: T)
     items[#items + 1] = item
 end
 ```
@@ -503,18 +502,18 @@ entry on bare full userdata, without structurally inspecting the erased value.
 
 ### Constrained parameters
 
-A parameter constrained by `I<...>` has the same transport, Option, container,
+A parameter constrained by `I<|...|>` has the same transport, Option, container,
 equality, and written-cast operations, but its carrier is the substituted
 Interface. It may read exactly that Interface's fields and call exactly its
 methods:
 
 ```titan
-interface Stack<E>
-    function push<R: Stack<E>>(item: E): R
+interface Stack<|E|>
+    function push<|R: Stack<|E|>|>(item: E): R
 end
 
-function add<S: Stack<integer>>(stack: S, item: integer): S
-    return stack:push<S>(item)
+function add<|S: Stack<|integer|>|>(stack: S, item: integer): S
+    return stack:push<|S|>(item)
 end
 ```
 
@@ -576,8 +575,8 @@ uses its recursively erased constraint:
 
 ```text
 erase(T)             = value                 when T is unconstrained
-erase(T : I<args>)   = erase(I<args>)
-erase(I<args>)       = I<erase(args)>
+erase(T : I<|args|>)   = erase(I<|args|>)
+erase(I<|args|>)       = I<|erase(args)|>
 ```
 
 At the native representation level, unconstrained leaves use Titan's canonical
@@ -591,18 +590,18 @@ container, or callback ABI.
 For example, in:
 
 ```titan
-interface Boxed<E>
+interface Boxed<|E|>
     function get(): E
 end
 
-function get<T, B: Boxed<T>>(box: B): T
+function get<|T, B: Boxed<|T|>|>(box: B): T
     return box:get()
 end
 ```
 
-`T` erases to `value`, `Boxed<T>` erases recursively to `Boxed<value>`, and `B`
+`T` erases to `value`, `Boxed<|T|>` erases recursively to `Boxed<|value|>`, and `B`
 uses that Interface carrier. The generated code still has only the ordinary
-run-time `Boxed` Interface identity; `<value>` is declared metadata, not a
+run-time `Boxed` Interface identity; `<|value|>` is declared metadata, not a
 per-wrapper descriptor.
 
 ### Forward boxing and reverse projection
@@ -618,12 +617,12 @@ The selected safety contract is asymmetric:
    consumed as its erased Interface transports without either check.
 
 ```titan
-function id<T>(x: T): T
+function id<|T|>(x: T): T
     return x
 end
 
 function use_id(): integer
-    local n = id<integer>(1)
+    local n = id<|integer|>(1)
     return n
 end
 ```
@@ -655,16 +654,16 @@ storage deliberately admits a literal `value` without converting it to a
 closed instantiation first:
 
 ```titan
-record Cell<T>
+record Cell<|T|>
     item: T
 end
 
-function replace<T>(cell: Cell<T>, replacement: value)
+function replace<|T|>(cell: Cell<|T|>, replacement: value)
     cell.item = replacement
 end
 
 function demonstrate_delayed_failure(): integer
-    local cell = Cell.new(1)        -- Cell<integer>
+    local cell = Cell.new(1)        -- Cell<|integer|>
     replace(cell, "wrong")          -- raw TValue store; returns normally
     local n: integer = cell.item    -- strict integer projection raises here
     return n
@@ -703,29 +702,29 @@ generic writer kind and no deep traversal of existing container contents.
 
 Applications of one owner are different invariant static types but share one
 run-time owner identity, metatable, userdata layout, methods, statics, fields,
-and native code. `Box<integer>` and `Box<string>` cannot be assigned to one
+and native code. `Box<|integer|>` and `Box<|string|>` cannot be assigned to one
 another, but they may be compared for reference equality because that operation
 observes only their shared owner.
 
 For an unconstrained owner parameter, gradual consistency relates a closed
 application pointwise to its erased `value` view—for example,
-`Box<integer>` with `Box<value>`. For `IBox<T: I>`, the erased view is
-`IBox<erase(I)>`, never `IBox<value>` unless `value` actually satisfies the
+`Box<|integer|>` with `Box<|value|>`. For `IBox<|T: I|>`, the erased view is
+`IBox<|erase(I)|>`, never `IBox<|value|>` unless `value` actually satisfies the
 constraint. These views preserve the same userdata; they are not conversions to
 new instantiations.
 
-A written `value as Box<integer>` or `value is Box<integer>` checks only the
+A written `value as Box<|integer|>` or `value is Box<|integer|>` checks only the
 outer `Box` owner. It does not prove the historical element argument or field
 contents. Therefore a phantom type parameter or typestate distinction that is
 not present in an Interface constraint is not dynamically enforced authority:
-a `Box<value>` or Lua round trip erases it.
+a `Box<|value|>` or Lua round trip erases it.
 
 ### Generic callbacks and function wrappers
 
 Functions are eligible arguments because Titan can adapt a concrete callable to
 the erased callable shape and back. Consider the earlier `foldl` call. Surface
-inference gives the lambda type `(integer,string) -> string`, while the one
-`foldl` body expects `(value,value) -> value`. Titan supplies an ordinary traced
+inference gives the lambda type `function (integer, string): (string)`, while the one
+`foldl` body expects `function (value, value): (value)`. Titan supplies an ordinary traced
 closure-adjustment wrapper:
 
 - when erased `foldl` invokes the callback, the wrapper strictly projects its
@@ -736,7 +735,7 @@ closure-adjustment wrapper:
 
 The final result returned by erased `foldl` is strictly projected to `string` at
 the caller. The inverse first-class edge uses the opposite wrapper. In
-`local int_id: (integer) -> integer = id`, the concrete outward wrapper boxes
+`local int_id: function (integer): (integer) = id`, the concrete outward wrapper boxes
 its integer argument for canonical erased `id`, invokes that erased entry, and
 strictly projects the returned `TValue` to integer. It never exposes the erased
 native pointer under a concrete function tag.
@@ -796,54 +795,54 @@ type CancellationReason = uv.CancellationReason
 type TaskStatus = uv.TaskStatus
 type Task = uv.Task
 type ResumeToken = uv.ResumeToken
-type SuspendCancelAction = () -> ()
+type SuspendCancelAction = function (): ()
 ```
 
-`Task<A,B>` is an opaque generic record. The public generic shapes are:
+`Task<|A, B|>` is an opaque generic record. The public generic shapes are:
 
-```titan
+```text
 record ResumeToken
     const source: string?
 end
 
-union CancellationReason<B>
-    simple: string
-    complex: B
+union CancellationReason<|B|>
+    simple(string)
+    complex(B)
 end
 
-union TaskStatus<A, B>
-    ready
-    running
-    waiting
-    succeeded: A
-    failed: Error
-    cancelled: CancellationReason<B>
+union TaskStatus<|A, B|>
+    ready()
+    running()
+    waiting()
+    succeeded(A)
+    failed(Error)
+    cancelled(CancellationReason<|B|>)
 end
 
 function TaskStatus:as_string(): string
 function TaskStatus:has_finished(): boolean
 function TaskStatus:has_succeeded(): (boolean, A?)
 function TaskStatus:has_failed(): (boolean, Error?)
-function TaskStatus:has_cancelled(): (boolean, CancellationReason<B>?)
+function TaskStatus:has_cancelled(): (boolean, CancellationReason<|B|>?)
 
-function Task:cancel(reason: CancellationReason<B>?)
-function Task:status(): TaskStatus<A, B>
+function Task:cancel(reason: CancellationReason<|B|>?)
+function Task:status(): TaskStatus<|A, B|>
 function Task:add_terminal_listener(
-    listener: (TaskStatus<A, B>) -> ()
-): () -> ()
+    listener: function (TaskStatus<|A, B|>): ()
+): function (): ()
 function Task:resume(token: ResumeToken)
 
-function run<A, B>(func: () -> A): Task<A, B>
+function run<|A, B|>(func: function (): (A)): Task<|A, B|>
 function running(): Task
 function suspend(token: ResumeToken,
                  cancel_action: SuspendCancelAction?)
-function channel<T>(size: integer?):
-    ((T) -> (), () -> T, () -> ())
+function channel<|T|>(size: integer?):
+    (function (T): (), function (): (T), function (): ())
 ```
 
 `A` is the Task's success type and `B` is the payload of a complex
 cancellation reason. `running()` is deliberately
-monomorphic: bare `Task` is exactly `Task<value,value>`.
+monomorphic: bare `Task` is exactly `Task<|value, value|>`.
 
 `ResumeToken` is nominal and non-generic. Every Task application uses the same
 owner, and only the exact record passed to `suspend` can resume that explicit
@@ -852,35 +851,35 @@ evidence; it adds no run-time type argument or generic witness.
 A wrong token raises in the caller with the stored expected source, and a
 wrong-time call reports `unknown source`; neither check depends on `A` or `B`.
 
-`B` is result-only in `run<A,B>`. An expected `Task<A,B>` infers it;
+`B` is result-only in `run<|A, B|>`. An expected `Task<|A, B|>` infers it;
 without that evidence it closes to `value`. A complete explicit list remains
 useful when the caller wants to state both arguments:
 
 ```titan
-function start(): async.Task<string, value>
-    return async.run<string, value>(function(): string
+function start(): async.Task<|string, value|>
+    return async.run<|string, value|>(function(): string
         return "done"
     end)
 end
 ```
 
-There is no partial explicit `async.run<string>` list. A callback already typed
+There is no partial explicit `async.run<|string|>` list. A callback already typed
 with the zero-result list `()`, such as a named function whose body falls
 through, gives no result evidence for `A`; the final carrier rule chooses
 `value`, and ordinary callable adjustment supplies the missing value. An inline
 unannotated lambda is different because it is still waiting for context. If no
 other evidence binds `A`, `A` closes to `value`, the lambda receives a
-`() -> value` context, and its fallthrough is rejected because that result is
+`function (): (value)` context, and its fallthrough is rejected because that result is
 not nil.
 
 A Task that succeeds without a data payload uses one fixed nil result, not the
 zero-result list `()`. Prefer `async.run(function (): nil end)`: the lambda
 annotation infers `A = nil`, and its fallthrough supplies that nil through
-ordinary return adjustment. A complete `run<nil, value>` application can
+ordinary return adjustment. A complete `run<|nil, value|>` application can
 provide the same context when needed.
 
-`channel<T>` has no payload-bearing argument, so `T` is likewise result-only.
-Write `channel<string>()`, or give the returned callback slots an expected
+`channel<|T|>` has no payload-bearing argument, so `T` is likewise result-only.
+Write `channel<|string|>()`, or give the returned callback slots an expected
 shape, to select a precise application. A bare unconstrained `channel()` closes
 to the backward-compatible `value` application. The returned send and receive
 callbacks have exact `T` shapes even though they share one erased body.
@@ -888,48 +887,48 @@ callbacks have exact `T` shapes even though they share one erased body.
 The fixed-arity combinators preserve each operand independently. Their
 one- and two-operand forms make the per-operand types explicit:
 
-```titan
-function join<A, B>(task: Task<A, B>): TaskStatus<A, B>
-function join_two<A1, B1, A2, B2>(
-    first: Task<A1, B1>,
-    second: Task<A2, B2>
-): (TaskStatus<A1, B1>, TaskStatus<A2, B2>)
+```text
+function join<|A, B|>(task: Task<|A, B|>): TaskStatus<|A, B|>
+function join_two<|A1, B1, A2, B2|>(
+    first: Task<|A1, B1|>,
+    second: Task<|A2, B2|>
+): (TaskStatus<|A1, B1|>, TaskStatus<|A2, B2|>)
 
-function any_two<A1, B1, A2, B2>(
-    first: Task<A1, B1>,
-    second: Task<A2, B2>
-): AnyTwoResult<A1, A2>
+function any_two<|A1, B1, A2, B2|>(
+    first: Task<|A1, B1|>,
+    second: Task<|A2, B2|>
+): AnyTwoResult<|A1, A2|>
 
-function race_two<A1, B1, A2, B2>(
-    first: Task<A1, B1>,
-    second: Task<A2, B2>
-): RaceTwoResult<A1, B1, A2, B2>
+function race_two<|A1, B1, A2, B2|>(
+    first: Task<|A1, B1|>,
+    second: Task<|A2, B2|>
+): RaceTwoResult<|A1, B1, A2, B2|>
 
-function all_two<A1, B1, A2, B2>(
-    first: Task<A1, B1>,
-    second: Task<A2, B2>
+function all_two<|A1, B1, A2, B2|>(
+    first: Task<|A1, B1|>,
+    second: Task<|A2, B2|>
 ): (A1, A2)
 ```
 
 The same interleaved `(A_i,B_i)` parameter order extends through arity five.
 Only `join` has a unary form; unary `any`, `race`, and `all` are intentionally
 absent. `join_three` through `join_five` return the corresponding statuses.
-`AnyNResult<A1,...,AN>` has a success-payload arm for each operand plus `none`;
-it does not need cancellation parameters. `RaceNResult<A1,B1,...,AN,BN>` and
-`AllNError<A1,B1,...,AN,BN>` have one `TaskStatus<A_i,B_i>` arm per operand.
+`AnyNResult<|A1,...,AN|>` has a success-payload arm for each operand plus `none`;
+it does not need cancellation parameters. `RaceNResult<|A1,B1,...,AN,BN|>` and
+`AllNError<|A1,B1,...,AN,BN|>` have one `TaskStatus<|A_i, B_i|>` arm per operand.
 `all_*` returns every `A_i` on success and raises the corresponding `AllNError`
 on failure or cancellation. Expected type information closes a payload-free or
 result-incomplete union constructor precisely; without it, remaining binders
 close to their declared carriers like any other result-only generic constructor.
 
 The scheduler and libuv ownership machinery intentionally store
-`Task<value,value>`. A public `Task<A,B>` is a shallow view of that same userdata:
+`Task<|value, value|>`. A public `Task<|A, B|>` is a shallow view of that same userdata:
 the coroutine stores a raw success `value`, and complex cancellation stores a
 raw `value`. A precise `succeeded`, `has_succeeded`, `complex`, or
 `has_cancelled` projection supplies the ordinary strict `A` or `B` guard.
 Inspecting status tags, `as_string`, `has_finished`, equality, scheduling, and
 resource ownership needs no hidden type-argument check. The scheduler's
-operational helpers retain their concrete all-`value` APIs. Public `channel<T>`
+operational helpers retain their concrete all-`value` APIs. Public `channel<|T|>`
 likewise erases to one all-value buffer and callback triple, while closed uses
 receive ordinary precise callback wrappers; Task projections, combinators, and
 channels form the generic async surface.
@@ -961,11 +960,11 @@ or application is malformed or cannot close. Common categories include:
   larger type; and
 - using an explicitly owner-applied nominal member without a direct call.
 
-The parser gives focused errors after a declaration or type-application angle
-list has committed. Because call syntax is intentionally ambiguous with
-comparisons, an incomplete `f<T...` may instead receive the deterministic
-ordinary-expression diagnostic reached after the parser declines the generic
-call suffix.
+The `<|` and `|>` tokens distinguish type lists from `<`/`>` comparisons.
+After `<|`, parsing commits to the type list and reports a local missing-type
+or missing-`|>` diagnostic. Ordinary comparison expressions never trigger a
+generic-call probe. The checker still owns application eligibility, arity,
+constraints, and direct-call restrictions.
 
 Version one deliberately has:
 

@@ -1991,7 +1991,10 @@ function checker._foreign_function_signature(
     end
 
     if varargtype then
-        checker.typeerror(errors, varargtype.loc,
+        checker.typeerror(errors, type(varargtype) == "table" and varargtype.loc
+            or argnodes[1] and argnodes[1].loc
+            or rettypenodes[1] and rettypenodes[1].loc
+            or { filename = st.filename, line = 1, col = 1 },
             "%s cannot have variadic parameters", subject)
     end
     if flexrettype then
@@ -2007,7 +2010,7 @@ function checker._foreign_function_signature(
     if rettypenodes[1] then
         ret = checker._foreign_signature_component(
             rettypenodes[1], st, errors,
-            "return type of " .. subject, false)
+            "return type of " .. subject, true)
     end
     return types.CFunction(params, ret, false, false)
 end

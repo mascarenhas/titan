@@ -36,8 +36,8 @@ describe("adapter registry elimination and module invariants", function()
                     return Item.new(x.count + #arr)
                 end
 
-                function wrap(): (value, value) -> value
-                    local f: (value, value) -> value = item_fn
+                function wrap(): function (value, value): value
+                    local f: function (value, value): value = item_fn
                     return f
                 end
             ]])
@@ -74,7 +74,7 @@ describe("adapter registry elimination and module invariants", function()
                         return r.val * scale + extra
                     end
 
-                    function get_func(): (Rec, integer) -> integer
+                    function get_func(): function (Rec, integer): integer
                         return compute
                     end
                 ]],
@@ -82,12 +82,12 @@ describe("adapter registry elimination and module invariants", function()
                     local m = import "callable_mod"
 
                     function call_boxed(r: m.Rec, extra: integer): integer
-                        local f: (m.Rec, value) -> value = m.get_func()
+                        local f: function (m.Rec, value): value = m.get_func()
                         return f(r, extra) as integer
                     end
 
                     function call_fully_boxed(r: value, extra: value): integer
-                        local f: (value, value) -> value = m.get_func()
+                        local f: function (value, value): value = m.get_func()
                         return f(r, extra) as integer
                     end
                 ]],

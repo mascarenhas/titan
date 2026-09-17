@@ -77,15 +77,15 @@ describe("erased coder boundary", function()
     it("ignores private generic and named-argument source metadata", function()
         h.reset(true)
         local source = [[
-            record Box<T>
+            record Box<|T|>
                 item: T
             end
-            function choose<T>(first: T, second: T): T
+            function choose<|T|>(first: T, second: T): T
                 return first
             end
             function Box:get(): T return self.item end
             function run(): integer
-                local box: Box<integer> = { item = 1 }
+                local box: Box<|integer|> = { item = 1 }
                 local item = box:get()
                 return choose { second = box.item, first = 2 }
             end

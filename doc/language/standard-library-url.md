@@ -15,7 +15,7 @@ identity. Lua loads the same module with `require "titan.url"`.
 
 ## API
 
-```titan
+```text
 record Url
     scheme: string
     host: string

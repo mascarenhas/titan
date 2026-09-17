@@ -141,20 +141,20 @@ describe("automatic C object code generation", function()
                 end
 
                 function all_zero(): boolean
-                    local point = ffi.ffi_point.new()
-                    local cell = ffi.ffi_cell.new()
-                    local values: ffi.ffi_int[3] = ffi.ffi_int.new_array(3)
-                    local matrix: ffi.ffi_row[2] = ffi.ffi_row.new_array(2)
-                    local tag_point = ffi.ffi_tag_point.new()
-                    local tag_cell = ffi.ffi_tag_cell.new()
+                    local point = foreign ffi_point.new()
+                    local cell = foreign ffi_cell.new()
+                    local values = foreign ffi_int.new_array(3)
+                    local matrix = foreign ffi_row.new_array(2)
+                    local tag_point = foreign ffi_tag_point.new()
+                    local tag_cell = foreign ffi_tag_cell.new()
                     return ffi.ffi_all_zero(
                         point, cell, values, matrix, tag_point, tag_cell
                     ) ~= 0
                 end
 
                 function direct_fill(): integer
-                    local point = ffi.ffi_point.new()
-                    local values: ffi.ffi_int[3] = ffi.ffi_int.new_array(3)
+                    local point = foreign ffi_point.new()
+                    local values = foreign ffi_int.new_array(3)
                     ffi.ffi_fill_point(point)
                     ffi.ffi_fill_values(values)
                     return point.x as integer
@@ -166,10 +166,10 @@ describe("automatic C object code generation", function()
                 end
 
                 function pointer_fill(): integer
-                    local point = ffi.ffi_point.new()
-                    local values: ffi.ffi_int[3] = ffi.ffi_int.new_array(3)
-                    local point_pointer: *ffi.ffi_point = point
-                    local values_pointer: *ffi.ffi_int = values
+                    local point = foreign ffi_point.new()
+                    local values = foreign ffi_int.new_array(3)
+                    local point_pointer: foreign *ffi_point = point
+                    local values_pointer: foreign *ffi_int = values
                     ffi.ffi_fill_point(point_pointer)
                     ffi.ffi_fill_values(values_pointer)
                     return point_pointer.x as integer
@@ -177,7 +177,7 @@ describe("automatic C object code generation", function()
                 end
 
                 function indexed(): integer
-                    local values: ffi.ffi_int[3] = ffi.ffi_int.new_array(3)
+                    local values = foreign ffi_int.new_array(3)
                     values[0] = 5
                     values[1] = 7
                     values[2] = 11
@@ -188,20 +188,20 @@ describe("automatic C object code generation", function()
                 end
 
                 function out_of_range(): integer
-                    local values: ffi.ffi_int[3] = ffi.ffi_int.new_array(3)
+                    local values = foreign ffi_int.new_array(3)
                     return values[3] as integer
                 end
 
                 function struct_copy(): integer
-                    local source: ffi.ffi_point =
+                    local source: foreign ffi_point =
                         ffi.ffi_make_point(43, 47)
-                    local target = ffi.ffi_point.new()
+                    local target = foreign ffi_point.new()
                     target = source
                     return target.x as integer + target.y as integer
                 end
 
                 function anonymous_subobjects(): integer
-                    local holder = ffi.ffi_anonymous_holder.new()
+                    local holder = foreign ffi_anonymous_holder.new()
                     anonymous_seen = 0
                     holder.cell.count = 13
                     holder.items[anonymous_index()].number =
@@ -211,7 +211,7 @@ describe("automatic C object code generation", function()
                 end
 
                 function anonymous_longjmp(): integer
-                    local holder = ffi.ffi_anonymous_holder.new()
+                    local holder = foreign ffi_anonymous_holder.new()
                     do
                         holder.cell.count = 19
                         holder.items[1].number = 23
@@ -304,8 +304,8 @@ describe("automatic C object code generation", function()
                 end
 
                 function direct_writes(): integer
-                    local point = ffi.ffi_point.new()
-                    local values: ffi.ffi_int[3] = ffi.ffi_int.new_array(3)
+                    local point = foreign ffi_point.new()
+                    local values = foreign ffi_int.new_array(3)
                     do
                         point.x = 5
                         values[0] = 7
@@ -317,8 +317,8 @@ describe("automatic C object code generation", function()
                 end
 
                 function foreign_writes(): integer
-                    local point = ffi.ffi_point.new()
-                    local values: ffi.ffi_int[3] = ffi.ffi_int.new_array(3)
+                    local point = foreign ffi_point.new()
+                    local values = foreign ffi_int.new_array(3)
                     do
                         ffi.ffi_fill_point(point)
                         ffi.ffi_fill_values(values)
@@ -333,7 +333,7 @@ describe("automatic C object code generation", function()
                 end
 
                 function unsafe_foreign_write(): integer
-                    local point = ffi.ffi_point.new()
+                    local point = foreign ffi_point.new()
                     do
                         ffi.ffi_fill_other_point(point)
                         raise "unsafe-foreign"
@@ -344,13 +344,13 @@ describe("automatic C object code generation", function()
                 end
 
                 function variadic_foreign_writes(): integer
-                    local direct = ffi.ffi_point.new()
-                    local indirect = ffi.ffi_point.new()
+                    local direct = foreign ffi_point.new()
+                    local indirect = foreign ffi_point.new()
                     do
                         ffi.ffi_variadic_fill(
-                            3, direct as *ffi.ffi_point)
+                            3, direct as foreign *ffi_point)
                         local fill = ffi.ffi_get_variadic_fill()
-                        fill(4, indirect as *ffi.ffi_point)
+                        fill(4, indirect as foreign *ffi_point)
                         raise "variadic-foreign"
                     catch
                         return direct.x as integer
@@ -361,10 +361,10 @@ describe("automatic C object code generation", function()
                 end
 
                 function nested_unsafe_foreign_write(): integer
-                    local point = ffi.ffi_point.new()
+                    local point = foreign ffi_point.new()
                     do
                         ffi.ffi_fill_other_point(
-                            point as *ffi.ffi_point)
+                            point as foreign *ffi_point)
                         raise "nested-unsafe-foreign"
                     catch
                         return point.x as integer
@@ -373,7 +373,7 @@ describe("automatic C object code generation", function()
                 end
 
                 function nested(): integer
-                    local point = ffi.ffi_point.new()
+                    local point = foreign ffi_point.new()
                     do
                         do
                             point.x = 11
@@ -389,10 +389,10 @@ describe("automatic C object code generation", function()
                 end
 
                 function catch_finally(): integer
-                    local point = ffi.ffi_point.new()
+                    local point = foreign ffi_point.new()
                     do
                         defer point.y =
-                            (point.x as integer + 19) as ffi.ffi_int
+                            (point.x as integer + 19) as foreign ffi_int
                         do
                             raise "body"
                         catch
@@ -405,7 +405,7 @@ describe("automatic C object code generation", function()
                 end
 
                 function loop_edges(): integer
-                    local values: ffi.ffi_int[3] = ffi.ffi_int.new_array(3)
+                    local values = foreign ffi_int.new_array(3)
                     local i: integer = 0
                     while i < 3 do
                         do
@@ -422,7 +422,7 @@ describe("automatic C object code generation", function()
 
                 function defer_tail(): integer
                     defer cleanup()
-                    local point = ffi.ffi_point.new()
+                    local point = foreign ffi_point.new()
                     do
                         point.x = 61
                         raise "defer-tail"
@@ -432,8 +432,8 @@ describe("automatic C object code generation", function()
                 end
 
                 function alias_untracked(): integer
-                    local aliased = ffi.ffi_point.new()
-                    local pointer: *ffi.ffi_point = aliased
+                    local aliased = foreign ffi_point.new()
+                    local pointer: foreign *ffi_point = aliased
                     do
                         ffi.ffi_fill_point(pointer)
                         raise "unsafe-alias"
@@ -520,15 +520,15 @@ describe("automatic C object code generation", function()
                 foreign import "]] .. header .. [["
 
                 function shape(): integer
-                    local options = ffi.ffi_process_options.new()
-                    local stdio: ffi.ffi_stdio_container[3] =
-                        ffi.ffi_stdio_container.new_array(3)
-                    local address = ffi.ffi_address.new()
+                    local options = foreign ffi_process_options.new()
+                    local stdio =
+                        foreign ffi_stdio_container.new_array(3)
+                    local address = foreign ffi_address.new()
 
                     options.stdio = stdio
                     options.stdio_count = #stdio
                     stdio[0].data.stream =
-                        ffi.ffi_pipe_pointer as *ffi.ffi_stream
+                        ffi.ffi_pipe_pointer as foreign *ffi_stream
                     address.flags = 0
                     return options.stdio_count as integer
                         + address.flags as integer
