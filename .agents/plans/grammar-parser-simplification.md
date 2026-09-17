@@ -1,9 +1,12 @@
 # Titan grammar and parser simplification
 
 Status: implementation and full local validation complete. All design questions
-are resolved; final ownership regressions pass. PR delivery is in progress.
+are resolved; final ownership regressions pass. Published as PR #162.
+Hosted verification evidence is maintained on the PR checks and description.
 
 Issue: https://github.com/mascarenhas/titan/issues/161
+
+PR: https://github.com/mascarenhas/titan/pull/162
 
 Branch: `codex/grammar-parser-simplification`
 
@@ -242,7 +245,7 @@ Primary files: `checker/{common,c_types,type_syntax,declarations,imports}.lua`,
   stop and ask the maintainer rather than introducing another scanner.
 - [x] Verify both manuals, skills/examples, repository syntax migration, and
   `git diff --check`; record exact local test outcomes before publication.
-- [ ] Commit/push and open the issue-linked PR only after local implementation,
+- [x] Commit/push and open the issue-linked PR only after local implementation,
   documentation, tests, and review are complete. Monitor Linux producer,
   compiler/coverage, and sanitizer results for the actual PR head; fix failures.
   Include enabled Codecov project/patch checks in that same head verification.
@@ -342,6 +345,7 @@ explicit-reference checker validation: 303 successes.
   construct to allocate and initialize const owned storage together. This
   preserves the tested checker behavior. Both manuals and skills record the
   restriction; focused regressions make the accepted boundary explicit.
-- Remaining delivery: commit/push, open the issue-linked PR, and monitor
-  Linux/Codecov to green.
-  Do not dispatch macOS and do not merge.
+- Published PR #162 from the validated implementation commit `147cd01c`.
+  The PR checks and description hold the hosted Linux/Codecov results for the
+  actual branch head. Completion requires all enabled Linux and Codecov checks
+  to pass. Do not dispatch macOS and do not merge.
