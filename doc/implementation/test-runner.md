@@ -113,7 +113,8 @@ their normal compiler phases. Make owns invalidation when cases, imports,
 compiler settings, or headers change.
 
 
-Before emitting any C, `validate_program_output_paths` checks every source,
+For executable test builds, before emitting any C,
+`validate_program_output_paths` checks every source,
 support, runner, entrypoint, executable, and Darwin dSYM destination in both
 normalized and physical-parent form. It rejects output/output and output/input
 aliases, ancestor/descendant conflicts, symlink leaves, and an existing leaf of

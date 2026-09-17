@@ -1519,9 +1519,10 @@ substitution, recursive; error on missing keys). Key facts:
   flat/folder source is compiled in and linked directly; a DSO dependency is
   loaded by generated `_init`, while a static dependency contributes its
   selected archive once and generates direct calls. Explicit `titanc` roots
-  are forced through source, so the same ordinary rule builds all twenty-one
-  standard roots from source in one process. There is no separate
-  standard-module origin or loader. An import spelling ending in `.titan`
+  require source identities; incremental mode may supply their declarations
+  and code from source-adjacent objects. The stdlib Make DAG builds individual
+  objects, then links all twenty-one roots in one incremental invocation.
+  There is no separate standard-module origin or loader. An import spelling ending in `.titan`
   strips that marker, requires source for the canonical name, and neither
   probes nor falls back to a compiled provider; source resolution without that
   spelling remains public-only. Within one source root folder beats flat;

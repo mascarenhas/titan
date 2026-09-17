@@ -1373,7 +1373,8 @@ and reuses standalone linking. Input application mains are ignored; the first
 requested root determines the executable path. Only case-owning modules receive
 the trailing sibling-call-preservation flag.
 
-All source modules reachable from every root are compiled once. Dynamic
+Fresh source modules reachable from every root are compiled once; incremental
+object hits reuse their declarations and machine code. Dynamic
 dependencies retain exact selected DSO handles. Selected static dependencies
 contribute deduplicated physical archives: their complete validated
 membership is direct native input and is repackaged into both output forms,
@@ -1382,11 +1383,12 @@ libraries](multi-module-libraries.md) documents logical grouping and DSO
 loading; [Static compiled modules](static-compiled-modules.md) documents the
 archive resolver, binding constraints, composition, and paired publication.
 
-The standard library uses the same generic path with all twenty-one qualified roots
-in one command:
+After its per-module object targets complete, the standard library uses the
+same generic path to link all twenty-one qualified roots:
 
 ```sh
-titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.net \
+titanc --source-first --incremental \
+  titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.net \
   titan.ssl titan.url titan.http titan.os \
   titan.peg titan.string \
   titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json \
