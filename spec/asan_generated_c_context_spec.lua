@@ -193,12 +193,23 @@ describe("ASan generated-C context diagnostics", function()
 
     if not is_darwin then
         local workspace
+        local previous_compile_flags, previous_link_flags
 
         before_each(function()
             workspace = temporary_directory()
+            -- This diagnostic proves one saved translation unit against its
+            -- shadow. Cross-unit LTO intentionally changes that byte layout.
+            previous_compile_flags, previous_link_flags =
+                driver.EXTRA_CFLAGS, driver.EXTRA_LDFLAGS
+            driver.EXTRA_CFLAGS = copy_argv(previous_compile_flags)
+            driver.EXTRA_LDFLAGS = copy_argv(previous_link_flags)
+            driver.EXTRA_CFLAGS[#driver.EXTRA_CFLAGS + 1] = "-fno-lto"
+            driver.EXTRA_LDFLAGS[#driver.EXTRA_LDFLAGS + 1] = "-fno-lto"
         end)
 
         after_each(function()
+            driver.EXTRA_CFLAGS, driver.EXTRA_LDFLAGS =
+                previous_compile_flags, previous_link_flags
             remove_tree(workspace)
         end)
 

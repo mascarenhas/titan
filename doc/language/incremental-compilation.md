@@ -69,6 +69,39 @@ companions are left untouched. Source-foreign headers include eligible inline
 function bodies, so consumer rebuild rules must include these headers or the
 producer object.
 
+## Optimization and toolchain settings
+
+Titan-generated C defaults to `-O3` on Linux and macOS. On Linux, GCC and Clang
+also receive `-flto -ffat-lto-objects` during compilation and linking. These
+objects retain native code and readable Titan metadata alongside the compiler's
+intermediate representation. The final provider or executable link can inline
+and propagate constants across separately compiled source objects and members
+of Titan-produced archives. Normal export, private visibility, and provider
+identity rules still apply. A dependency used through an existing DSO remains
+a dynamic boundary.
+
+The Linux compiler/linker toolchain must support fat LTO objects and the
+matching LTO backend. Titan keeps the ordinary native-container contract; it
+does not silently fall back to bitcode-only objects or omit requested LTO.
+
+macOS does not enable LTO by default: its objects retain the ordinary Mach-O
+representation consumed by Titan's metadata reader. Bitcode-only object files
+are not supported module inputs.
+
+Use the same compiler and build configuration for objects and their final link.
+Make must invalidate objects when those settings change. Fixture and debugging
+builds can explicitly override the defaults:
+
+```sh
+TITAN_EXTRA_CFLAGS='-O0 -fno-lto' TITAN_EXTRA_LDFLAGS='-O0 -fno-lto' \
+  titanc project.main
+```
+
+Extra C flags are appended to compilation commands; extra linker flags are
+appended to final links. Set both when disabling the complete optimization
+pipeline. They do not themselves invalidate cached objects: rebuild affected
+objects with the same override before an incremental final link.
+
 ## A Make build
 
 For two flat modules, where `project.feature` imports `project.base`:

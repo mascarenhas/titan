@@ -523,7 +523,11 @@ a formatter.
 
 Compilation goes through C: each logical module becomes one C translation
 unit, written beside its canonical source, and the system C compiler (`cc`,
-with `--std=c99 -O2 -Wall -fPIC`) does the rest. A single-root library build
+with `--std=c99 -O3 -Wall -fPIC`) does the rest. Linux also enables
+`-flto -ffat-lto-objects` so final links can optimize across object boundaries
+while objects retain native metadata sections. macOS uses ordinary native
+objects without default LTO. See [Optimization and toolchain settings](incremental-compilation.md#optimization-and-toolchain-settings).
+A single-root library build
 uses that root as its physical provider:
 
 | Source form for `foo.bar` | Generated C/object | Lua loader | Provider pair | Entrypoint | Executable |

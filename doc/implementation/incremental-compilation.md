@@ -72,6 +72,34 @@ consume only public metadata. `LANGUAGE_SERVER_API_VERSION` remains 1, and the
 source record does not itself change the generated-code ABI. Make must rebuild
 objects after prerelease compiler/record representation changes within that ABI.
 
+## Optimization across native objects
+
+`driver.CFLAGS` supplies `-O3` on supported platforms. Platform initialization
+adds `-flto -ffat-lto-objects` on Linux for GCC and Clang; macOS retains native
+Mach-O objects without default LTO. Both generated-object compilation and
+the shared/executable link helpers use these defaults, including archive-backed
+validation images and executable protocol probes.
+
+Linux fat objects retain native ELF sections for target inspection and both
+Titan metadata protocols, alongside compiler IR. Archive extraction and
+repacking preserve the member bytes, so the final compiler-driver link can
+optimize across source objects or selected archive members. The public
+provider protocol and dynamic binding boundaries are unchanged. Do not replace
+these objects with bitcode-only containers or disable native metadata gates to
+accommodate an incompatible toolchain.
+
+Compile overrides follow default flags; link overrides follow default link
+flags. Cheap fixtures use `TITAN_EXTRA_CFLAGS='-O0 -fno-lto'` and
+`TITAN_EXTRA_LDFLAGS='-fno-lto'`. Ordinary extra C flags remain compile-only.
+Make owns invalidation after compiler or optimization policy changes.
+
+The focused `spec/coder/lto_spec.lua` uses an unresolved symbol in a branch
+which can only be eliminated after seeing another module's implementation. It
+checks direct executable linking, shared publication, and a later standalone
+consumer of Titan's own archive; disabling LTO exposes the unresolved symbol.
+This proves inter-module optimization rather than merely checking accepted
+flags or successful runtime results.
+
 ## Headers without an AST
 
 An object stores both the `.ffi.h` declaration environment and, when present,

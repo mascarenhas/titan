@@ -283,10 +283,13 @@ jobs:
       - name: Run all stdlib/runtime tests without coverage
         # These tests compile disposable fixtures and alternate images. The
         # installed bundled provider packed above remains the optimized
-        # production image, and macOS repeats the complete suite at -O2.
+        # production image, and macOS repeats the complete suite at -O3.
+        # Disposable fixtures skip Linux LTO at both compile and link time.
         env:
-          TITAN_EXTRA_CFLAGS: "-O0"
-          TITAN_TEST_EXTRA_CFLAGS: "-O0"
+          TITAN_EXTRA_CFLAGS: "-O0 -fno-lto"
+          TITAN_EXTRA_LDFLAGS: "-fno-lto"
+          TITAN_TEST_EXTRA_CFLAGS: "-O0 -fno-lto"
+          TITAN_TEST_EXTRA_LDFLAGS: "-fno-lto"
         run: |
           make stdlib-test EXTRA_TEST_FLAGS="-o gtest -v"
           make titan-stdlib-test-run \
@@ -322,7 +325,8 @@ jobs:
       # production smoke owns the complete installed runtime behavior.
       - name: Canary source-rock installation with system libuv and OpenSSL
         run: |
-          LIBUV_MODE=system OPENSSL_MODE=system TITAN_EXTRA_CFLAGS=-O0 \
+          LIBUV_MODE=system OPENSSL_MODE=system TITAN_EXTRA_CFLAGS='-O0 -fno-lto' \
+            TITAN_EXTRA_LDFLAGS=-fno-lto \
             luarocks make --force
           TITAN_EXPECT_LIBUV_MODE=system TITAN_EXPECT_OPENSSL_MODE=system \
             TITAN_PROBE_CACHE_DISABLE=1 \
@@ -384,7 +388,8 @@ jobs:
       # and publishes their merged stats only after both pass.
       - name: Run two isolated compiler shards with covered and stress invocations
         env:
-          TITAN_EXTRA_CFLAGS: "-O0"
+          TITAN_EXTRA_CFLAGS: "-O0 -fno-lto"
+          TITAN_EXTRA_LDFLAGS: "-fno-lto"
         run: bash spec/support/ci_parallel_compiler_tests.sh "${{ matrix.shard-pair }}"
 
       - name: Upload compiler pair coverage
@@ -699,8 +704,9 @@ jobs:
       # Generated Titan translation units are large enough that combining
       # optimization with sanitizer instrumentation can exhaust this job's
       # budget. O0 retains the complete ASan/UBSan instrumentation;
-      # Lua and bundled native dependencies remain at O1 below.
-      SANITIZER_FLAGS: "-O0 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      # Lua and bundled native dependencies remain at O1 below. Keep LTO off
+      # so saved translation-unit bytes still match the diagnostic shadow.
+      SANITIZER_FLAGS: "-O0 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       # Make's content stamps deliberately revisit native dependencies from
       # later targets, so their complete O1 configuration must remain in the
       # environment for the whole job rather than being supplied to only the
@@ -716,8 +722,8 @@ jobs:
       SQLITE3_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       OPENSSL_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       OPENSSL_EXTRA_CONFIGURE_FLAGS: "no-asm"
-      TITAN_EXTRA_CFLAGS: "-O0 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-      TITAN_EXTRA_LDFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      TITAN_EXTRA_CFLAGS: "-O0 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      TITAN_EXTRA_LDFLAGS: "-O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       # Every Titan image intentionally embeds the vendored static Lua archive;
       # disable only ASan's cross-image ODR diagnostic for those duplicate Lua
       # globals. Address, bounds, lifetime, and leak checks remain enabled.

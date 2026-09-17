@@ -971,15 +971,23 @@ invocation-wide source-header plan when the CLI owns the compilation:
    concurrently, bounded by `--jobs`/`TITAN_JOBS`:
 
    ```sh
-   cc --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls -c foo/bar.c \
+   cc --std=c99 -O3 -flto -ffat-lto-objects -Wall -fPIC -g -c foo/bar.c \
       -I <root>/include -I <root>/src/lua-5.5.1 -o foo/bar.o
    ```
 
+   These command examples show Linux defaults. Both GCC and Clang use
+   `-O3 -flto -ffat-lto-objects` there, retaining native object sections for
+   metadata loading while enabling LTO. Other platforms, including macOS,
+   use `-O3` without the two LTO options. Compilation and final links share
+   those defaults; an explicit LTO opt-out requires `-fno-lto` in both
+   `TITAN_EXTRA_CFLAGS` and `TITAN_EXTRA_LDFLAGS`.
+
    Checkout mode substitutes `titan-runtime`, `lua-5.5.1/src`, and
-   `libbacktrace` include paths. `-g` emits the DWARF that carries the `#line` file/line a unified
-   trace needs; `-fno-optimize-sibling-calls` keeps tail frames on the
-   stack so libbacktrace can unwind them; `-I libbacktrace` finds
-   `backtrace.h`.
+   `libbacktrace` include paths. `-g` emits the DWARF carrying `#line`
+   file/line attribution. Native test functions additionally receive
+   `-fno-optimize-sibling-calls` to retain their tail frames. Sanitizer CI
+   explicitly disables LTO so saved object functions can be compared with
+   the generated-C diagnostic shadow.
 
 The native-tool strings, and `CLANG_FORMAT` when `--pretty-print` actually
 selects it, are parsed into dense argument arrays with a small shell-word grammar
@@ -1093,7 +1101,7 @@ explicitly named DSO from the complete logical source-module object union.
 The final argument is an optional Darwin install name:
 
 ```sh
-cc --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls -shared \
+cc --std=c99 -O3 -flto -ffat-lto-objects -Wall -fPIC -g -shared \
    -o app.so app_model.o app_view.o dep.o ... \
    [force-load selected-provider.a ...] \
    [ordered extra.o ... force-load native-payload.a ...] \
@@ -1175,11 +1183,11 @@ srlua-derived C `main` — compiles it with the normal extra compile flags,
 and then links its object with the same object set as a library:
 
 ```sh
-cc [TITAN_EXTRA_CPPFLAGS...] --std=c99 -O2 -Wall -fPIC -g \
-   -fno-optimize-sibling-calls [TITAN_EXTRA_CFLAGS...] \
+cc [TITAN_EXTRA_CPPFLAGS...] --std=c99 -O3 -flto -ffat-lto-objects -Wall -fPIC -g \
+   [TITAN_EXTRA_CFLAGS...] \
    -c foo/bar__entrypoint.c -I <root>/include -I <root>/src/lua-5.5.1 \
    -o foo/bar__entrypoint.o
-cc --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls -o foo/bar \
+cc --std=c99 -O3 -flto -ffat-lto-objects -Wall -fPIC -g -o foo/bar \
    foo/bar__entrypoint.o foo/bar.o ... \
    [selected-provider.a ...] [extra.o ...] \
    <root>/lib/titan/0.6/libtitan.a [selected-provider.a ...] \
@@ -1807,7 +1815,7 @@ the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 | `CC` / `driver.CC` | environment / `driver.lua` | `"cc"` | C compiler command, parsed as shell words and shared with foreign-import probing. |
 | `TITAN_JOBS` / `titanc --jobs` | environment / CLI | `1` | Positive bound for concurrent generated logical-module C object compilations. The CLI wins over the environment. It does not affect checker probes, code generation, formatting, entrypoints, linking, archiving, or provider validation. |
 | `CLANG_FORMAT` / `driver.CLANG_FORMAT` | environment / `driver.lua` | `"clang-format"` | Formatter command used only by `titanc --pretty-print`, then parsed as shell words. The driver appends its in-place operation, fixed explicit style with include sorting disabled, and generated-source path; default builds neither parse nor invoke it. |
-| `driver.CFLAGS` | `driver.lua` | `"--std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls"` | Flags for every compile and link step. |
+| `driver.CFLAGS` | `driver.lua` | C99, `-O3`, warnings, PIC and debug info; Linux additionally uses `-flto -ffat-lto-objects` | Shared compile/link defaults for both GCC and Clang. macOS keeps native objects without LTO. |
 | `TITAN_EXTRA_CPPFLAGS` / `driver.EXTRA_CPPFLAGS` | environment / `driver.lua` | empty | Parsed `-I`/`-D` and other preprocessing inputs; used by foreign-import compiler probes and prepended to every Titan/runtime/entrypoint compilation. |
 | `TITAN_EXTRA_CFLAGS` / `driver.EXTRA_CFLAGS` | environment / `driver.lua` | empty | Parsed compilation-only flags, after fixed defaults; never used by final links. |
 | `TITAN_EXTRA_LDFLAGS` / `driver.EXTRA_LDFLAGS` | environment / `driver.lua` | empty | Parsed ordered linker inputs appended to final module and program links. |

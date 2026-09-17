@@ -74,7 +74,7 @@ local function compiler_arguments()
     return {
         "env", "MAKE=true", "CCACHE_DISABLE=1", "TITAN_PROBE_CACHE_DISABLE=1",
         "TITAN_ROCKS_ROOT=" .. assert(prefix, "incremental CLI specs require an installed SDK"),
-        "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=-O0", "TITAN_EXTRA_LDFLAGS=",
+        "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=-O0 -fno-lto", "TITAN_EXTRA_LDFLAGS=-fno-lto",
         LUA, "-E", "-e",
         string.format("package.path = %q .. package.path; package.cpath = %q .. package.cpath",
             REPOSITORY .. "/?.lua;" .. REPOSITORY .. "/?/init.lua;",

@@ -403,7 +403,9 @@ driver.TITAN_SOURCE_PATH = "."
 driver.EMIT_LINE_DIRECTIVES = os.getenv("TITAN_NO_LINE_DIRECTIVES") ~= "1"
 driver.TITAN_RUNTIME_PATH = "titan-runtime/"
 driver.LIBBACKTRACE_PATH = "libbacktrace"
-driver.CFLAGS = "--std=c99 -O2 -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g"
+local base_cflags = "--std=c99 -O3 -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g"
+local default_cflags = base_cflags
+driver.CFLAGS = default_cflags
 
 function driver.test_support_source_descriptor(context)
     local filename = driver.TEST_SUPPORT_SOURCE_PATH
@@ -467,6 +469,19 @@ function driver.foreign_include_dirs()
     return include_dirs
 end
 
+local function select_platform_defaults(uname, is_darwin)
+    local defaults = base_cflags
+    if uname == "Linux" then
+        -- Fat objects retain the native sections needed by the metadata and
+        -- target readers, plus IR for GCC/Clang's optimizing final link.
+        defaults = defaults .. " -flto -ffat-lto-objects"
+    end
+    if driver.CFLAGS == default_cflags then driver.CFLAGS = defaults end
+    default_cflags = defaults
+    driver.UNAME = uname
+    driver.IS_DARWIN = is_darwin
+end
+
 function driver.initialize_platform(context)
     context = context or driver.new_resolver_context()
     if type(context) ~= "table" or context.io == nil then
@@ -474,6 +489,7 @@ function driver.initialize_platform(context)
     end
     compiler_io.validate(context.io, 2)
     if context._platform_initialized then
+        select_platform_defaults(context.uname, context.is_darwin)
         return true, context.uname, context.is_darwin
     end
 
@@ -498,8 +514,7 @@ function driver.initialize_platform(context)
     -- Retain the historical process-visible fields for build/publication APIs.
     -- The subprocess which populates them now belongs to an explicit resolver
     -- context instead of running while this module is loaded.
-    driver.UNAME = uname
-    driver.IS_DARWIN = context.is_darwin
+    select_platform_defaults(uname, context.is_darwin)
     return true, uname, context.is_darwin
 end
 
@@ -1033,8 +1048,19 @@ function driver.format_generated_file(
     return true
 end
 
-local function compiler_argv(include_extra_compile_flags)
+local function compiler_argv(include_extra_compile_flags, context)
     if driver.TOOLCHAIN_ERROR then return nil, driver.TOOLCHAIN_ERROR end
+    if context or not driver.UNAME then
+        local owns_context = context == nil
+        context = context or driver.new_resolver_context()
+        local ok, err = driver.initialize_platform(context)
+        local closed, close_error = true
+        if owns_context then
+            closed, close_error = driver.close_resolver_context(context)
+        end
+        if not ok then return nil, err end
+        if not closed then return nil, close_error end
+    end
     local cc, err = parsed_words(driver.CC, "CC")
     if not cc then return nil, err end
     if #cc == 0 then return nil, "CC command is empty" end
@@ -1080,7 +1106,7 @@ function driver.toolchain_descriptor(context)
     if not cc then return nil, err end
     if #cc == 0 then return nil, "CC command is empty" end
 
-    local effective, compile_err = compiler_argv(true)
+    local effective, compile_err = compiler_argv(true, context)
     if not effective then return nil, compile_err end
     local flags = {}
     for index = #cc + 1, #effective do
@@ -5808,6 +5834,17 @@ local function prepare_compile(
     local args, flags_err = driver.generated_compile_prefix()
     if not args then return nil, flags_err end
     append_argv(args, options and options.extra_compile_flags)
+    local lto = false
+    for _, argument in ipairs(args) do
+        if argument == "-fno-lto" then lto = false
+        elseif argument == "-flto" or argument:match("^%-flto=") then lto = true end
+    end
+    if lto then
+        -- GCC otherwise gives identical LTO input random section identities.
+        -- A distinct stable seed per logical module preserves deterministic
+        -- archive bytes across recompilation and private output staging.
+        append_argv(args, { "-frandom-seed=" .. modname })
+    end
     append_argv(args, { static_flag(), filename })
     -- An interrupted/failed compiler may leave a partial output. Only publish
     -- its successful result under the source object's reusable pathname.

@@ -375,6 +375,63 @@ describe("trusted object source metadata", function()
         end
     end)
 
+    it("reads native compiler metadata sections with Linux fat LTO enabled", function()
+        local cdriver = require "c-parser.cdriver"
+        local strategy = require("titan-compiler.io").new_sync()
+        local core = require "titan-compiler.coder.core"
+        require "titan-compiler.coder.module"
+        local util = require "titan-compiler.util"
+        local platform = strategy:run({ "uname" })
+        assert.is_true(platform.ok, platform.output or platform.diagnostic)
+        local linux = platform.output:match("^Linux") ~= nil
+        local entry = source_entry()
+        local public = assert(staticmetadata.render(entry.type.name,
+            version.TITAN_ABI_VERSION, types.serialize(entry.type)))
+        local payload = assert(objectmetadata.encode(entry, {}))
+        local code = util.render(core.coder.modmetadata, {
+            METADATANAME = "native_public_metadata",
+            METADATA = assert(staticmetadata.c_initializer(public)),
+        }) .. assert(objectmetadata.render(payload, "native_source_metadata"))
+        local stem = os.tmpname()
+        local source, output = stem .. ".c", stem .. ".o"
+        local ok, failure = xpcall(function()
+            assert(util.set_file_contents(source, code))
+            local argv = assert(cdriver.split_shell_words(os.getenv("CC") or "cc"))
+            for _, flag in ipairs({ "-std=c99", "-O3", "-fPIC" }) do
+                argv[#argv + 1] = flag
+            end
+            if linux then
+                argv[#argv + 1], argv[#argv + 2] = "-flto", "-ffat-lto-objects"
+            end
+            for _, argument in ipairs({ "-c", source, "-o", output }) do
+                argv[#argv + 1] = argument
+            end
+            local compiled = strategy:run(argv)
+            assert.is_true(compiled.ok, compiled.output or compiled.diagnostic)
+            local bytes = assert(util.get_file_contents(output))
+            local object = assert(staticmetadata.classify_object(bytes, output))
+            assert.equal(public, object.metadata.payload)
+            local restored = assert(objectmetadata.read(bytes, output))
+            assert.equal(entry.type.name, restored.type.name)
+            local structure = restored.type.source_members.head.type.pointee
+            assert.equal(structure, structure.fields.next.owner)
+            if linux then
+                assert.equal("elf", object.format)
+                local has_lto = false
+                for _, section in ipairs(object.sections) do
+                    if section.name == ".llvm.lto" or section.name:match("^%.gnu%.lto_") then
+                        has_lto = true
+                    end
+                end
+                assert.is_true(has_lto, "compiler did not emit a native fat LTO object")
+            end
+        end, debug.traceback)
+        os.remove(source)
+        os.remove(output)
+        os.remove(stem)
+        assert.is_true(ok, failure)
+    end)
+
     it("treats absent sections, Lua failures and incompatible ABI as cache misses", function()
         local payload = assert(objectmetadata.encode(source_entry(), {}))
         assert.is_nil(objectmetadata.read(elf_object("", { section_name = ".other" })))

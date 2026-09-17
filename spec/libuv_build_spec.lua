@@ -683,6 +683,36 @@ local function stdlib_command(output)
 end
 
 describe("libuv Makefile configuration", function()
+    it("uses O3 with Linux fat LTO for both compilers and preserves explicit flags", function()
+        local root = make_temp_dir()
+        local tested, test_error = xpcall(function()
+            local print_makefile = root .. "/flags.mk"
+            write_file(print_makefile,
+                "print-titan-flags:\n\t@printf '%s\\n' '$(CFLAGS)'\n")
+            local function flags(host, compiler, override)
+                local argv = { "env", "-u", "CFLAGS", "make", "--no-print-directory", "-s", "-f", "Makefile",
+                    "-f", print_makefile, "HOST_OS=" .. host, "CC=" .. compiler,
+                    "print-titan-flags" }
+                if override then argv[#argv + 1] = "CFLAGS=" .. override end
+                local ok, output = run_argv(argv)
+                assert.truthy(ok, output)
+                return output
+            end
+            for _, compiler in ipairs({ "gcc", "clang" }) do
+                local linux = flags("Linux", compiler)
+                assert.matches("-O3 -flto -ffat-lto-objects", linux, 1, true)
+                local darwin = flags("Darwin", compiler)
+                assert.matches("-O3", darwin, 1, true)
+                assert.falsy(darwin:find("-flto", 1, true), darwin)
+                assert.falsy(darwin:find("-ffat-lto-objects", 1, true), darwin)
+            end
+            assert.equal("-O1 -DCUSTOM_DEFAULTS=1\n",
+                flags("Linux", "gcc", "-O1 -DCUSTOM_DEFAULTS=1"))
+        end, debug.traceback)
+        remove_tree(root)
+        if not tested then error(test_error, 0) end
+    end)
+
     it("keeps the stdlib object graph equal to all source import edges", function()
         local imports = {}
         for _, module in ipairs(STDLIB_MODULES) do imports[module] = {} end
@@ -4430,9 +4460,13 @@ done
                 assert.truthy(makefile:find(retained, 1, true), retained)
             end
             assert.equal(1, count_literal(stdlib_job,
-                'TITAN_EXTRA_CFLAGS: "-O0"'), stdlib_job)
+                'TITAN_EXTRA_CFLAGS: "-O0 -fno-lto"'), stdlib_job)
             assert.equal(1, count_literal(stdlib_job,
-                'TITAN_TEST_EXTRA_CFLAGS: "-O0"'), stdlib_job)
+                'TITAN_TEST_EXTRA_CFLAGS: "-O0 -fno-lto"'), stdlib_job)
+            assert.equal(1, count_literal(stdlib_job,
+                'TITAN_EXTRA_LDFLAGS: "-fno-lto"'), stdlib_job)
+            assert.equal(1, count_literal(stdlib_job,
+                'TITAN_TEST_EXTRA_LDFLAGS: "-fno-lto"'), stdlib_job)
             assert.truthy(stdlib_job:find(
                 'static_archive="${provider%.so}.a"', 1, true), stdlib_job)
             assert.truthy(stdlib_job:find(
@@ -4553,7 +4587,9 @@ done
             assert.falsy(compiler_job:find(
                 "ci_test_groups.sh compiler", 1, true), compiler_job)
             assert.equal(1, count_literal(compiler_job,
-                'TITAN_EXTRA_CFLAGS: "-O0"'), compiler_job)
+                'TITAN_EXTRA_CFLAGS: "-O0 -fno-lto"'), compiler_job)
+            assert.equal(1, count_literal(compiler_job,
+                'TITAN_EXTRA_LDFLAGS: "-fno-lto"'), compiler_job)
             assert.falsy(compiler_job:find(
                 "ci_stdlib_snapshot.sh", 1, true), compiler_job)
             local compiler_unpack_index = assert(compiler_job:find(
@@ -4863,8 +4899,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 28, 34, 31, 33 }, shard_counts)
-            assert.equal(126, assigned_count)
+            assert.same({ 28, 34, 31, 34 }, shard_counts)
+            assert.equal(127, assigned_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")
@@ -4899,10 +4935,13 @@ done
             assert.falsy(sanitizer_job:find("\n    needs:", 1, true),
                 sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
-                    'SANITIZER_FLAGS: "-O0 -g -fsanitize=address,undefined'),
+                    'SANITIZER_FLAGS: "-O0 -fno-lto -g -fsanitize=address,undefined'),
                 sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
-                'TITAN_EXTRA_CFLAGS: "-O0 -g ' ..
+                'TITAN_EXTRA_CFLAGS: "-O0 -fno-lto -g ' ..
+                '-fsanitize=address,undefined'), sanitizer_job)
+            assert.equal(1, count_literal(sanitizer_job,
+                'TITAN_EXTRA_LDFLAGS: "-O1 -fno-lto -g ' ..
                 '-fsanitize=address,undefined'), sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
                 'LUA_MYCFLAGS: "-fPIC -O1 -g ' ..

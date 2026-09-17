@@ -82,6 +82,7 @@
 3 spec/coder/incremental_compilation_spec.lua 27.000
 4 spec/coder/interfaces_spec.lua 18.208
 4 spec/coder/line_directives_spec.lua 0.920
+4 spec/coder/lto_spec.lua 4.000
 2 spec/coder/map_metamethods_spec.lua 0.899
 2 spec/coder/multi_module_grouping_spec.lua 3.241
 4 spec/coder/multi_module_libraries_spec.lua 37.496
