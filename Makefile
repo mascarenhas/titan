@@ -2472,7 +2472,9 @@ TITAN_STDLIB_TEST_ROOTS := $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
 	url.tests os.tests os.process_tests uv.runtime_tests reflect.tests sqlite3.tests json.tests
 TITAN_TEST_BUILD_DIR ?= .titan-tests
 TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)
-TITAN_TEST_TIMEOUT ?= 120
+# The suite deadline includes fresh child-fixture compilation at the selected
+# optimization level, including Linux LTO. Focused gates may set a lower bound.
+TITAN_TEST_TIMEOUT ?= 300
 TEST_TITANC ?= titanc
 TEST_LUA ?= lua
 BUSTED ?= busted

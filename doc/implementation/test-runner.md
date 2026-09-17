@@ -295,7 +295,10 @@ because it reinstalls the current compiler and provider before testing;
 `luarocks test` does not.
 
 `run_with_timeout.sh` uses Bash monitor mode to give the executable its own
-process group and polls it at a coarse interval. At the deadline it sends
+process group and polls it at a coarse interval. Make's default
+`TITAN_TEST_TIMEOUT=300` covers the whole suite, including fresh child-fixture
+compilation under O3/LTO. Explicit overrides, including the 15-second CI
+shutdown check, remain independent of that default. At the deadline it sends
 `TERM`, then `KILL` after a short grace period, maps the timeout to status 124,
 and otherwise preserves the child's status. Make streams combined
 stdout/stderr through a pipe rather than redirecting either stream to a regular

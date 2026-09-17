@@ -688,7 +688,10 @@ the installed provider, compiler/SDK inputs, and compile settings; a no-op
 build invokes no compiler. `make clean` removes generated outputs by ownership
 patterns without deleting author-written native fixtures.
 
-The native executable runs under a Bash process-group deadline. Its combined
+The native executable runs under a Bash process-group deadline of 300 seconds
+by default, including fresh child-fixture compilation with the selected
+optimization flags. Override it with `TITAN_TEST_TIMEOUT`; focused CI shutdown
+checks retain their explicit 15-second limit. Its combined
 output is streamed through a pipe, preserving the parent-descriptor behavior
 exercised by OS/stdio tests. Tests that intentionally provoke uncaught async
 Task errors use flushed `Context:log` lines to bracket those expected

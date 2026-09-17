@@ -589,7 +589,10 @@ native executable. There are no per-suite native scripts, named host group
 selectors, root standard-library boundary specs, or Busted wrappers around
 Titan cases. `run_with_timeout.sh` gives the
 executable its own Bash process group, enforces a bounded deadline with
-`TERM`/`KILL`, and preserves its exit status. The Make recipe streams merged
+`TERM`/`KILL`, and preserves its exit status. The default 300-second suite
+budget includes fresh child-fixture compilation under O3/Linux LTO;
+`TITAN_TEST_TIMEOUT` overrides it, and focused CI shutdown checks retain their
+explicit 15-second limit. The Make recipe streams merged
 stdout/stderr through a pipe rather than a regular file, preserving the parent
 pipe semantics exercised by OS/stdio tests. Cases that intentionally cause
 uncaught async Task diagnostics bracket the expected region with flushed
