@@ -390,6 +390,75 @@ describe("incremental and separate compilation (CLI)", function()
         exit_code(APP .. "/main", 42)
     end)
 
+    it("reuses direct and indirect dynamic owners across separate test builds", function()
+        local wrapper = NAMESPACE .. ".wrapper"
+        local wrapper_stem = source(wrapper, [[
+            local sqlite3 = import "sqlite3"
+            record Access
+                const connection: sqlite3.Connection
+            end
+            function open(): Access
+                return Access.new(sqlite3.connect(":memory:"))
+            end
+        ]])
+        local indirect_stem = source(APP, 'local wrapper = import "' .. wrapper .. [["
+            local test = import "test"
+            function test_indirect(context: test.Context)
+                local access = wrapper.open()
+                defer access.connection:close()
+                test.assert(access.connection:get_autocommit())
+            end
+        ]])
+        local direct_stem = source(OTHER, [[
+            local sqlite3 = import "sqlite3"
+            local test = import "test"
+            function test_direct(context: test.Context)
+                local connection = sqlite3.connect(":memory:")
+                defer connection:close()
+                test.assert(connection:get_autocommit())
+            end
+        ]])
+        assert(lfs.chdir(workspace))
+        local ok, result = xpcall(function()
+            -- A fresh source build already supports the indirect method call.
+            compiled("--test", APP)
+            local ran, output = run({ "./" .. APP })
+            assert.is_true(ran, output)
+            assert.matches("[  PASSED  ] 1 test.", output, 1, true)
+
+            compiled("-c", "--test", "--incremental", "titan.test")
+            compiled("-c", "--test", "--incremental", wrapper)
+            compiled("-c", "--test", "--incremental", APP)
+            output = compiled("--test", "--incremental", "-v", APP)
+            assert.matches("Titan object hit " .. APP .. ":", output, 1, true)
+            assert.matches("Titan object hit " .. wrapper .. ":", output, 1, true)
+            ran, output = run({ "./" .. APP })
+            assert.is_true(ran, output)
+            assert.matches("[  PASSED  ] 1 test.", output, 1, true)
+
+            compiled("-c", "--test", "--incremental", OTHER)
+            local saved = {}
+            for _, stem in ipairs({ wrapper_stem, indirect_stem, direct_stem,
+                    workspace .. "/titan/test__test_support" }) do
+                saved[stem .. ".o"] = read(stem .. ".o")
+            end
+            for _, roots in ipairs({ {APP, OTHER}, {OTHER, APP} }) do
+                output = compiled("--test", "--incremental", "-v", table.unpack(roots))
+                for _, name in ipairs({ APP, OTHER, wrapper, "titan.test" }) do
+                    assert.matches("Titan object hit " .. name .. ":", output, 1, true)
+                end
+                for filename, bytes in pairs(saved) do assert.equal(bytes, read(filename)) end
+                ran, output = run({ "./" .. roots[1] })
+                assert.is_true(ran, output)
+                assert.matches("[  PASSED  ] 2 tests.", output, 1, true)
+                assert.matches(APP .. ".test_indirect", output, 1, true)
+                assert.matches(OTHER .. ".test_direct", output, 1, true)
+            end
+        end, debug.traceback)
+        assert(lfs.chdir(REPOSITORY))
+        assert.is_true(ok, result)
+    end)
+
     it("links separately compiled test owners with shared support and cached discovery", function()
         local helper = NAMESPACE .. ".support"
         local helper_stem = source(helper, [[

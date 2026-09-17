@@ -5023,15 +5023,30 @@ function driver.finalize_resolver_context(context)
     for name in pairs(source_names) do
         local native = driver.imported[name].object_metadata
         if native then
+            local imports
             for dependency, binding in pairs(native.bindings) do
                 local selected = driver.imported[dependency]
+                local expected = native_bindings[dependency]
+                -- Codegen chooses a handle only for this module's written
+                -- imports. An indirectly exposed dynamic owner uses globals
+                -- even when another module independently imports its DSO.
+                -- Keep absent owners absent and native-direct owners direct.
+                if expected == "handle" or expected == "global" then
+                    if not imports then
+                        imports = {}
+                        for _, imported in ipairs(native.imports) do
+                            imports[imported.name] = true
+                        end
+                    end
+                    expected = imports[dependency] and "handle" or "global"
+                end
                 if binding == "handle" and selected and selected.kind == "dynamic" then
                     if selected.type.file ~= native.providers[dependency] then
                         errors[#errors + 1] = "object for module '" .. name ..
                             "' loads a different provider for '" .. dependency ..
                             "'; rebuild it with the selected dependency providers"
                     end
-                elseif native_bindings[dependency] ~= binding then
+                elseif expected ~= binding then
                     errors[#errors + 1] = "object for module '" .. name ..
                         "' requires " .. binding .. " binding for '" .. dependency ..
                         "'; rebuild it with the selected dependency providers"

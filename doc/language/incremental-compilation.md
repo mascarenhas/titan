@@ -55,13 +55,21 @@ Metadata emitted by the compiler is trusted. Explicit roots and direct `.titan`
 imports still require actual source files; an orphan object, archive, or DSO
 does not substitute for source-private access.
 
+Reused objects preserve their own native access paths. A module can directly
+import a dynamic provider while another module uses that provider's record
+methods through a returned value, without importing it. Those objects can be
+reused together: the direct importer keeps its provider handle and the indirect
+consumer keeps its global symbol lookup. Reuse still rejects incompatible
+provider changes and changes between direct native and dynamic binding.
+
 The timestamp check is deliberately limited. **The build system owns every
 other invalidation input:** imported modules, C headers, folder membership
 changes, compiler changes, flags, SDK/toolchain settings, selected binary
-providers, and native payloads. Titan does not compare these inputs against a
-previous build. Use the same source-selection and compilation settings in all
-phases. A clean rebuild is required after changing settings unless the build
-graph already invalidates the affected objects.
+providers, and native payloads. Timestamp eligibility does not compare these
+inputs against a previous build; the native-binding compatibility checks do not
+replace dependency invalidation. Use the same source-selection and compilation
+settings in all phases. A clean rebuild is required after changing settings
+unless the build graph already invalidates the affected objects.
 
 Missing generated headers needed by a newly compiled importer can be restored
 from a current producer object without rechecking its source. Existing complete
