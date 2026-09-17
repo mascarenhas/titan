@@ -50,7 +50,7 @@ local function client_request_headers(parsed_url: url.Url,
       raise "HTTP Content-Length does not match the request body"
     end
   elseif body then
-    result:add("Content-Length", str.tostring(body_length))
+    result:add("Content-Length", string.tostring(body_length))
   end
   result:set("Connection", "close")
   return result
@@ -88,7 +88,7 @@ function request(method: string, source_url: string,
   local connection = client_connection(parsed_url, ca_file)
   local parser: Parser? = nil
   do
-    local builder = str.writer()
+    local builder = string.writer()
     builder:write(method .. " " .. parsed_url.target ..
                   " HTTP/1.1\r\n")
     builder:write(render_headers(request_headers))

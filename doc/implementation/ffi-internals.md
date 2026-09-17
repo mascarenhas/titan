@@ -117,8 +117,23 @@ and dependency descriptors. Their v2 digest covers the final contents and
 dependency digests. Restoration validates the declaration plan and materializes
 actual header files; it never reconstructs typedefs from public Titan metadata.
 Project manifest version 4 includes this schema. Foreign conversion cache
-version 4 additionally retains exact integer macro constants used in allocation
-selection; older snapshots miss rather than silently losing that behavior.
+version 6 retains exact integer macro constants used in allocation selection
+and C declaration origins; older snapshots miss rather than silently losing them.
+
+The C driver maps parsed declaration positions through the preprocessor's
+existing output origins. Runtime identity is nominal: the declaring header and
+C declaration determine identity independently of the consuming Titan module.
+Generated FFI headers use their stable logical source identity; temporary
+checking paths never become runtime keys. Anonymous aggregates retain distinct
+declaration sites. Typedef and tag origins survive conversion and cache restore,
+including named payloads reached after an owned pointer or array alias is
+unwrapped. Direct imports, source imports, and forced headers follow this same
+rule; intrinsic `lua_State` retains its built-in identity.
+
+This bookkeeping adds no preprocessing pass, macro-environment fingerprint,
+layout digest, or native compatibility probe. Compatible C build configuration
+is a program precondition, as in ordinary C linking. The origin metadata is not
+a certificate of matching C layouts under different compiler options or macros.
 
 ## Header Support Files
 
@@ -641,7 +656,8 @@ type and a scalar-cast marker, not the parsed operand. Parser bodies, ordinary
 source-location maps, raw macro environments, CPP spelling/spacing sidecars,
 and registrar bookkeeping do not survive this boundary.
 
-The `c-header-v3` byte payload uses this same read-only extracted graph. A live
+The `c-header-v5` byte payload uses this same read-only extracted graph, including
+declaration origins for typedefs and tags. A live
 hit shares it, while a disk restore reconstructs the closed schema once after
 codec/checksum and envelope validation. Real dependencies/search observations
 still validate the input closure. Forced `-include`/`-imacros` preprocessing
@@ -673,11 +689,11 @@ produced by concatenating a type spelling and a name. `COwned` renders as
 `Udata *`; its payload is reached through `getudatamem`. The Titan diagnostic
 renderer preserves its logical shape as `owned *T` or `owned T[]`.
 `types.tostring` prints legal unqualified source spellings, while
-`types.runtime_identity` uses the same formatting rules with the existing
-`_ffi_scope` of named header types retained. The owner metatable cache and
+`types.runtime_identity` uses the same formatting rules with each header type's
+declaration-origin `_ffi_scope` retained. The owner metatable cache and
 registry both use that scoped identity string; the serialized descriptor is
 separate runtime type metadata. Portable primitive graphs remain shared, and
-header-dependent owners retain their defining module's C namespace.
+header-dependent owners share keys when they refer to the same C declaration.
 
 The general `ctype` function routes C values through `cdeclarator`, applying C
 parameter adjustment where appropriate. `COwned` remains a Lua full-userdata
@@ -993,16 +1009,16 @@ C-bearing callable registry keys follow the same `types.runtime_identity`
 policy as owned metatables. A function whose components contain only portable
 primitive graphs has a structural key shared across modules. A function that
 contains a named header type retains that type's `_ffi_scope`, because the
-same C spelling in separately compiled modules may denote unrelated layouts.
+same C spelling may name unrelated declarations. These are nominal keys, not
+an attestation of C layout compatibility under different build settings.
 Source-facing `types.tostring` remains unqualified and is not used for these
 runtime keys.
 
-Foreign name lookup preserves the existing scope annotation. When `owned P`
-resolves an alias P and removes its outer pointer/array layer, the checker also
-retains scope on the selected payload's named leaves through pointer, array,
-and function-signature wrappers. It stops at typedef/tag boundaries rather
-than traversing aggregate fields. Existing scopes survive source collaboration;
-plain primitives and the intrinsic `lua_State` remain unscoped.
+Conversion establishes declaration origins before foreign name lookup or owned
+alias unwrapping. When `owned P` removes P's outer pointer/array layer, the
+selected payload retains its origin through pointer, array, and function-type
+wrappers. Imports and cache restoration preserve those origins; plain
+primitives and the intrinsic `lua_State` remain unscoped.
 
 This is deliberately different from adopted/borrowed C pointers. Borrowed
 pointers are raw C pointer values and are not GC-managed; adopted pointers are

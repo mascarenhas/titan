@@ -16,7 +16,7 @@ local DECIMAL_PATTERN = "^[0-9]+$"
 
 local function validate_header_name(name: string)
   if #name == 0 then raise "HTTP header name must not be empty" end
-  if not str.match(name, HTTP_TOKEN_PATTERN) then
+  if not string.match(name, HTTP_TOKEN_PATTERN) then
     raise "HTTP header name contains an invalid byte"
   end
 end
@@ -24,19 +24,19 @@ end
 local function validate_header_value(contents: string)
   -- RFC 9110 field values admit HTAB, SP/VCHAR, and obs-text. Reject the
   -- remaining controls and DEL even though only CR/LF would split a line.
-  if str.match(contents, FORBIDDEN_FIELD_BYTE_PATTERN) then
+  if string.match(contents, FORBIDDEN_FIELD_BYTE_PATTERN) then
     raise "HTTP header value contains a forbidden byte"
   end
 end
 
 local function lower_ascii_letter(upper: string): string
-  return str.char(str.byte(upper, 1) + 32)
+  return string.char(string.byte(upper, 1) + 32)
 end
 
 local function lower_header_name(name: string): string
-  -- HTTP field names use ASCII case folding. str.lower follows the mutable
+  -- HTTP field names use ASCII case folding. string.lower follows the mutable
   -- process C locale, so it cannot provide that protocol invariant.
-  local lowered = str.gsub(name, "[A-Z]", lower_ascii_letter, nil)
+  local lowered = string.gsub(name, "[A-Z]", lower_ascii_letter, nil)
   return lowered
 end
 
@@ -128,17 +128,17 @@ local function trim_header_value(contents: string): string
   local first = 1
   local last = #contents
   while first <= last do
-    local byte = str.byte(contents, first)
+    local byte = string.byte(contents, first)
     if byte ~= 32 and byte ~= 9 then break end
     first = first + 1
   end
   while last >= first do
-    local byte = str.byte(contents, last)
+    local byte = string.byte(contents, last)
     if byte ~= 32 and byte ~= 9 then break end
     last = last - 1
   end
   if first > last then return "" end
-  return str.sub(contents, first, last)
+  return string.sub(contents, first, last)
 end
 
 local function header_has_token(headers_value: Headers, name: string,
@@ -148,7 +148,7 @@ local function header_has_token(headers_value: Headers, name: string,
   local index = 1
   while index <= #found do
     local contents = found[index]
-    for item in str.split(contents, ",") do
+    for item in string.split(contents, ",") do
       if lower_header_name(trim_header_value(item)) == lower_wanted then
         return true
       end
@@ -160,13 +160,13 @@ end
 
 local function validate_http_token(token: string, subject: string)
   if #token == 0 then raise subject .. " must not be empty" end
-  if not str.match(token, HTTP_TOKEN_PATTERN) then
+  if not string.match(token, HTTP_TOKEN_PATTERN) then
     raise subject .. " contains an invalid byte"
   end
 end
 
 local function render_headers(headers_value: Headers): string
-  local builder = str.writer()
+  local builder = string.writer()
   local entries = headers_value:all()
   local index = 1
   while index <= #entries do
@@ -182,7 +182,7 @@ local function decimal_header(contents: string,
   -- llhttp owns received Content-Length framing. This path parses a value
   -- supplied through Titan's outbound API and bounds it to Titan's integer.
   if #contents == 0 then raise subject .. " must not be empty" end
-  if not str.match(contents, DECIMAL_PATTERN) then
+  if not string.match(contents, DECIMAL_PATTERN) then
     raise subject .. " must contain only decimal digits"
   end
   local result? = math.tointeger(contents)

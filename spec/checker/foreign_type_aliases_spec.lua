@@ -52,17 +52,67 @@ describe("foreign type declarations", function()
                 local type BuiltinCallback = owned *(function(*lua_State): void)
             ]], header))
             assert.truthy(ok, err)
-            assert.equal("test.ffi", ast[2]._type._ffi_scope)
-            assert.equal("test.ffi", ast[3]._type._ffi_scope)
-            assert.equal("test.ffi", ast[4]._type._ffi_scope)
-            assert.equal("test.ffi", ast[5]._type.pointee._ffi_scope)
-            assert.equal("test.ffi", ast[6]._type.pointee._ffi_scope)
+            local alias_scope = ast[2]._type._ffi_scope
+            local payload_scope = ast[5]._type.pointee._ffi_scope
+            assert.matches("^c%-header%-%x+%.typedef$", alias_scope)
+            assert.matches("^c%-header%-%x+%.typedef$", payload_scope)
+            assert.not_equal(alias_scope, payload_scope)
+            assert.equal(alias_scope, ast[3]._type._ffi_scope)
+            assert.equal(alias_scope, ast[4]._type._ffi_scope)
+            assert.equal(payload_scope, ast[6]._type.pointee._ffi_scope)
             assert.equal("Type.CPointer", ast[7]._type.pointee._tag)
-            assert.equal("test.ffi", ast[7]._type.pointee.pointee._ffi_scope)
-            assert.equal("test.ffi", ast[8]._type.pointee._ffi_scope)
+            assert.equal(payload_scope, ast[7]._type.pointee.pointee._ffi_scope)
+            assert.equal(alias_scope, ast[8]._type.pointee._ffi_scope)
             assert.is_nil(ast[9]._type.pointee._ffi_scope)
             local callback = ast[10]._type.pointee.pointee
             assert.is_nil(callback.params[1].pointee._ffi_scope)
+        end)
+    end)
+
+    it("distinguishes anonymous declaration sites while sharing one typedef base", function()
+        with_header([[
+            typedef struct { int number; } *First, *Same;
+            typedef struct { int number; } *Different;
+            typedef struct { struct { int number; } left; struct { int number; } right; } Envelope;
+        ]], function(header)
+            local ok, err, ast = check(string.format([[
+                foreign import %q
+                local type FirstOwner = owned First
+                local type SameOwner = owned Same
+                local type OtherOwner = owned Different
+            ]], header))
+            assert.truthy(ok, err)
+            assert.equal(types.runtime_identity(ast[2]._type), types.runtime_identity(ast[3]._type))
+            assert.not_equal(types.runtime_identity(ast[2]._type), types.runtime_identity(ast[4]._type))
+            local envelope = types.resolve_c_typedef(ast._ffi_namespace._type.type_members.Envelope)
+            assert.not_equal(envelope.fields.left.type._ffi_scope, envelope.fields.right.type._ffi_scope)
+            assert.matches("%.site%d+_%d+$", envelope.fields.left.type._ffi_scope)
+        end)
+    end)
+
+    it("uses a complete tag's definition origin rather than an earlier forward header", function()
+        with_header("struct completed_item;\n", function(forward)
+            with_header("struct completed_item { int number; };\n", function(definition)
+                local ok, err, imported = h.run_checker_modules({
+                    scope_with_forward = string.format([[
+                        foreign import %q
+                        foreign import %q
+                        local type Owner = owned *completed_item
+                    ]], forward, definition),
+                    scope_definition_only = string.format([[
+                        foreign import %q
+                        local type Owner = owned *completed_item
+                    ]], definition),
+                    scope_both = [[
+                        local first = import "scope_with_forward"
+                        local second = import "scope_definition_only"
+                    ]],
+                }, "scope_both")
+                assert.truthy(ok, err)
+                local first = imported.scope_with_forward.source_type.source_type_members.Owner
+                local second = imported.scope_definition_only.source_type.source_type_members.Owner
+                assert.equal(types.runtime_identity(first), types.runtime_identity(second))
+            end)
         end)
     end)
 

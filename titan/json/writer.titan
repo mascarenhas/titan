@@ -39,7 +39,7 @@ local function emit_quoted(subject: string, path: Path, emit: function (string):
   while position <= #subject do
     local byte = json_byte(subject, position)
     if byte == 34 or byte == 92 or byte < 32 then
-      if position > first then emit(strings.sub(subject, first, position - 1)) end
+      if position > first then emit(string.sub(subject, first, position - 1)) end
       if byte == 34 then emit('\\"')
       elseif byte == 92 then emit('\\\\')
       elseif byte == 8 then emit('\\b')
@@ -47,7 +47,7 @@ local function emit_quoted(subject: string, path: Path, emit: function (string):
       elseif byte == 10 then emit('\\n')
       elseif byte == 12 then emit('\\f')
       elseif byte == 13 then emit('\\r')
-      else emit(strings.format('\\u%04x', byte)) end
+      else emit(string.format('\\u%04x', byte)) end
       position = position + 1
       first = position
     elseif byte < 128 then
@@ -56,12 +56,12 @@ local function emit_quoted(subject: string, path: Path, emit: function (string):
       position = position + utf8_width(subject, position, path)
     end
   end
-  if first <= #subject then emit(strings.sub(subject, first)) end
+  if first <= #subject then emit(string.sub(subject, first)) end
   emit('"')
 end
 
 local function quoted_string(subject: string, path: Path): string
-  local output = strings.writer()
+  local output = string.writer()
   defer output:close()
   emit_quoted(subject, path, function(chunk: string) output:write(chunk) end)
   return output:drain()
@@ -69,7 +69,7 @@ end
 
 local record Encoder
   const settings: Settings
-  const output: strings.StringWriter
+  const output: string.StringWriter
   const active: {value: boolean}
   bytes: integer
   nodes: integer
@@ -213,8 +213,8 @@ local function Encoder:union_value(subject: value, inspected: reflect.UnionValue
   self:enter(subject, path)
   defer self.active[subject] = nil
   local found: reflect.VariantType?
-  for index = 1, #inspected.descriptor.variants do
-    local variant = inspected.descriptor.variants[index]
+  for index = 1, #inspected.type.variants do
+    local variant = inspected.type.variants[index]
     if variant.tag == inspected.tag then found = variant; break end
   end
   if found == nil then
@@ -223,7 +223,7 @@ local function Encoder:union_value(subject: value, inspected: reflect.UnionValue
   self:append('{"tag":', path)
   self:count_node(field_path(path, "tag"))
   self:quoted(found.name, field_path(path, "tag"))
-  if found.descriptor ~= nil then
+  if found.type ~= nil then
     self:append(',"value":', path)
     self:visit(inspected.payload, field_path(path, "value"), depth)
   end
@@ -263,17 +263,17 @@ local function Encoder:visit(subject: value, path: Path, depth: integer)
   when is_nil() then self:append("null", path)
   when is_boolean(boolean_value) then
     if boolean_value then self:append("true", path) else self:append("false", path) end
-  when is_integer(integer_value) then self:append(strings.format("%d", integer_value), path)
+  when is_integer(integer_value) then self:append(string.format("%d", integer_value), path)
   when is_float(float_value) then self:append(float_text(float_value, path), path)
   when is_string(string_value) then self:quoted(string_value, path)
-  when is_array(array_value) then self:array(subject, array_value.val, path, depth)
-  when is_const_array(array_value) then self:array(subject, array_value.val, path, depth)
-  when is_map(map_value) then self:map(subject, map_value.val, path, depth)
+  when is_array(array_value) then self:array(subject, array_value.value, path, depth)
+  when is_const_array(array_value) then self:array(subject, array_value.value, path, depth)
+  when is_map(map_value) then self:map(subject, map_value.value, path, depth)
   when is_record(record_value) then
-    self:record_fields(subject, record_value.descriptor.fields,
+    self:record_fields(subject, record_value.type.fields,
       function(index: integer): value return record_value:get(index) end, path, depth)
   when is_interface(interface_value) then
-    self:record_fields(subject, interface_value.descriptor.fields,
+    self:record_fields(subject, interface_value.type.fields,
       function(index: integer): value return interface_value:get(index) end, path, depth)
   when is_union(union_value) then self:union_value(subject, union_value, path, depth)
   else json_fail("unsupported_type", "value has no JSON representation", path, nil, nil)
@@ -281,7 +281,7 @@ local function Encoder:visit(subject: value, path: Path, depth: integer)
 end
 
 local function encode_value(subject: value, settings: Settings): string
-  local output = strings.writer()
+  local output = string.writer()
   defer output:close()
   local encoder = Encoder.new(settings, output, {}, 0, 0)
   encoder:visit(subject, root_path(), 0)

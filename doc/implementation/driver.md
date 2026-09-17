@@ -372,9 +372,9 @@ exception objects propagate unchanged through the graph boundary. Required
 header content hashing also uses this callback when available; a broken string
 result/error falls back to the ordinary Lua digest, while cancellation propagates.
 
-The `c-header-v3` payload stores extracted C declarations through a closed
+The `c-header-v5` payload stores extracted C declarations through a closed
 schema: CType shapes, canonical tags, typedef identity, qualifiers, callable
-signatures, field and array extents, exact integer tokens, final object-macro
+signatures, declaration origins, field and array extents, exact integer tokens, final object-macro
 field classifications, and the finite predefined macro facts needed by target
 profiles. It excludes CPP macro environments, token/spacing/raw-spelling
 sidecars, body definitions, source parser records and conversion memo state.

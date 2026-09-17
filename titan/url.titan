@@ -1,5 +1,5 @@
 local peg = import "peg"
-local str = import "string"
+local string = import "string"
 
 -- The RFC 3986 productions below are a Titan relabel-syntax translation of
 -- daurnimator/lpeg_patterns' URI grammar at commit
@@ -197,7 +197,7 @@ end
 
 local function url_parse_error(kind: string, position: integer): Error
   local message = "URL parse error [" .. kind .. "] at byte " ..
-    str.tostring(position) .. ": " .. url_parse_detail(kind)
+    string.tostring(position) .. ": " .. url_parse_detail(kind)
   return Error.new(position, kind, message)
 end
 
@@ -225,27 +225,27 @@ local HEX_UPPER = "0123456789ABCDEF"
 -- additionally use the case-insensitive normalization from lpeg_patterns.
 local function normalize_component(source: string,
                                    lowercase: boolean): string
-  local builder = str.writer()
+  local builder = string.writer()
   local index = 1
   while index <= #source do
-    local byte = str.byte(source, index)
+    local byte = string.byte(source, index)
     if byte == 37 then
-      local high = hex_value(str.byte(source, index + 1))
-      local low = hex_value(str.byte(source, index + 2))
+      local high = hex_value(string.byte(source, index + 1))
+      local low = hex_value(string.byte(source, index + 2))
       local decoded = high * 16 + low
       if is_unreserved(decoded) then
         if lowercase and decoded >= 65 and decoded <= 90 then
           decoded = decoded + 32
         end
-        builder:write(str.char(decoded))
+        builder:write(string.char(decoded))
       else
-        builder:write("%" .. str.sub(HEX_UPPER, high + 1, high + 1) ..
-                      str.sub(HEX_UPPER, low + 1, low + 1))
+        builder:write("%" .. string.sub(HEX_UPPER, high + 1, high + 1) ..
+                      string.sub(HEX_UPPER, low + 1, low + 1))
       end
       index = index + 3
     else
       if lowercase and byte >= 65 and byte <= 90 then byte = byte + 32 end
-      builder:write(str.char(byte))
+      builder:write(string.char(byte))
       index = index + 1
     end
   end
@@ -256,28 +256,28 @@ end
 -- spelling for the Host header. RFC 6874's encoded zone separator is decoded
 -- only for the connection address.
 local function normalize_host(raw: string): (string, string)
-  local first = str.byte(raw, 1)
+  local first = string.byte(raw, 1)
   if first ~= 91 then
     local host = normalize_component(raw, true)
     return host, host
   end
 
-  local inner = str.sub(raw, 2, #raw - 1)
-  local inner_first = str.byte(inner, 1)
+  local inner = string.sub(raw, 2, #raw - 1)
+  local inner_first = string.byte(inner, 1)
   if inner_first == 118 or inner_first == 86 then
-    local dot = str.find(inner, ".") as integer
+    local dot = string.find(inner, ".") as integer
     local version = normalize_component(
-      str.sub(inner, 1, dot - 1), true)
-    local future = version .. str.sub(inner, dot)
+      string.sub(inner, 1, dot - 1), true)
+    local future = version .. string.sub(inner, dot)
     return future, "[" .. future .. "]"
   end
 
-  local zone_marker? = str.find(inner, "%25")
+  local zone_marker? = string.find(inner, "%25")
   if zone_marker then
     local marker = zone_marker as integer
     local address = normalize_component(
-      str.sub(inner, 1, marker - 1), true)
-    local zone = normalize_component(str.sub(inner, marker + 3), false)
+      string.sub(inner, 1, marker - 1), true)
+    local zone = normalize_component(string.sub(inner, marker + 3), false)
     return address .. "%" .. zone,
       "[" .. address .. "%25" .. zone .. "]"
   end
@@ -290,7 +290,7 @@ local function parse_port(text: string, position: integer):
   local port = 0
   local index = 1
   while index <= #text do
-    local digit = str.byte(text, index) - 48
+    local digit = string.byte(text, index) - 48
     if port > (65535 - digit) // 10 then
       return nil, url_parse_error("port", position)
     end
@@ -339,7 +339,7 @@ function parse(source: string): (Url?, Error?)
 
   local authority = authority_host
   if port_text ~= nil then
-    authority = authority .. ":" .. str.tostring(port)
+    authority = authority .. ":" .. string.tostring(port)
   end
 
   local path = normalize_component(parts["path"] as string, false)

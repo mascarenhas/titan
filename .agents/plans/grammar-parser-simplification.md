@@ -1,8 +1,8 @@
 # Titan grammar and parser simplification
 
-Status: implementation and full local validation complete. All design questions
-are resolved; final ownership regressions pass. Published as PR #162.
-Hosted verification evidence is maintained on the PR checks and description.
+Status: implementation, independent reviews, and canonical full local validation
+are complete. PR #162 is the delivery record; final-head Linux/Codecov evidence
+is maintained in its checks and description. Do not dispatch macOS or merge.
 
 Issue: https://github.com/mascarenhas/titan/issues/161
 
@@ -349,3 +349,85 @@ explicit-reference checker validation: 303 successes.
   The PR checks and description hold the hosted Linux/Codecov results for the
   actual branch head. Completion requires all enabled Linux and Codecov checks
   to pass. Do not dispatch macOS and do not merge.
+
+## Final independent review and validation
+
+The final contract uses nominal C declaration identity: the declaring header
+and declaration/site determine owner/callable identity across modules, explicit
+source imports, and forced headers. Generated checking paths map to stable
+source-header identities; anonymous/prototype sites remain distinct, complete
+tags use their definition origin, and intrinsic lua_State remains unscoped.
+The maintainer explicitly approved programmer responsibility for compatible C
+build settings, as with C itself. No macro-environment scan, layout fingerprint,
+compatibility probe, or extra preprocessing pass was added. Compiled-probe keys
+remain complete raw probe source only. Cache versions are header 5, converted 6,
+and project 4; ABI 2, language 0.6.0, and language-server API 1 remain unchanged.
+
+A fresh independent code reviewer reproduced the PR's original imported-type
+scope defect, then verified the corrected direct/forced/transitive cases,
+both orders of independently compiled providers using the same header,
+anonymous sites, forward-to-definition identity, and cold/warm/restored cache
+identity. No remaining actionable finding was reported. Independently comparing
+53,361 operator expressions with the original parser found no unexpected
+rejection or AST difference. Parser/lexer hashes above remain unchanged.
+
+Fresh independent documentation reviews checked both manuals, AGENTS, and all
+eight Titan skills. Reported stale parser/token descriptions, optional-callable
+and lambda-result guidance, FFI initialization/allocation descriptions, runtime
+tag claims, placeholders, and legacy spellings were corrected and rechecked.
+Final nominal-identity and reflection API descriptions have no outstanding
+review findings. All eight skill validators pass.
+
+The requested reflection cleanup renames standalone public val/descriptor
+fields to value/type, including field and variant type metadata. Compound
+names and unrelated locals/fixture fields remain unchanged. JSON/SQLite
+callers, native tests, both reflection manuals, the reflection skill, and the
+serialized interface fixture are updated. Independent fixture decoding proves
+all 37 reflection records match public names/indexes/constness; the other 20
+module entries are unchanged. The new native Lua-boundary case exercises the
+renamed fields. The stdlib string aliases are now string. A separate 23-file
+pass made 420 binding/reference edits; normalized AST comparison proves no
+literal, shadowing, or other structural change. All affected source roots
+passed checking before the final integrated build.
+
+Canonical final validation completed with exit 0:
+
+```sh
+env -u ROCKS_TREE -u TITAN_ROCKS_ROOT -u TITAN_EXTRA_CPPFLAGS \
+  -u TITAN_NO_LINE_DIRECTIVES -u LUA_PATH -u LUA_CPATH \
+  CCACHE_DIR=/tmp/titan-161-ccache \
+  CCACHE_TEMPDIR=/tmp/titan-161-ccache-tmp \
+  PATH=/tmp/titan-161-sdk/bin:$PATH TITAN_JOBS=4 TITAN_ROCK_TEST_JOBS=4 \
+  make -j4 PREFIX=/tmp/titan-161-sdk test
+```
+
+It ran in `/tmp/titan-161-build`, a private Git verification checkout:
+131 build/runtime/packaging checks; all 3,417 compiler tests
+(807+872+599+1,139); and all 456 native tests. Complete log:
+`/tmp/titan-161-full-r5.log`. Code, tests, manuals and skills match the
+verification snapshot; only this plan's completion notes changed afterward.
+`git diff --check` passes. Earlier full logs r3/r4 remain diagnostic history,
+not substitutes for this final run.
+
+The final identity correction separately passed 313 focused checker/header/
+cache/CPP/C-type cases and 4 native scope cases. A small same-host benchmark
+compared 1,806 extracted synthetic-header declarations and 3,119 libuv-header
+declarations against the published code. Three cold CPU samples stayed in
+comparable ranges: synthetic 0.08-0.10s baseline and 0.07-0.10s changed; libuv
+0.91-1.04s baseline and 0.95-1.01s changed. Both versions used the same two initial
+toolchain commands and zero commands during cold parsing or ten warm hits.
+New pathname canonicalization ran once per encountered header on cold parsing
+(one synthetic, 125 libuv) and zero times on warm hits. These small local samples
+are not a broad performance guarantee. Reproduction script/logs:
+`/tmp/titan-161-origin-bench.lua`,
+`/tmp/titan-161-origin-bench-baseline.log`,
+`/tmp/titan-161-origin-bench-new.log`,
+`/tmp/titan-161-origin-bench-uv-baseline.log`,
+`/tmp/titan-161-origin-bench-uv-new.log`.
+
+Hosted delivery evidence belongs to PR #162's actual head. Its initial
+`1d80bdd4` run 35167331116 passed all Linux jobs and Codecov, but final completion
+requires the correction head's checks to pass too. The PR description records
+that final run after it completes. macOS is waived and must stay undispatched;
+the PR stays unmerged. Tooling bundles must use the revised compiler to read
+this syntax; the sibling VS Code repository is outside this change.

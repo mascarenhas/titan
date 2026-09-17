@@ -1,5 +1,5 @@
 local function check_no_nul(subject: string, operation: string)
-  local position? = strings.find(subject, "\0")
+  local position? = string.find(subject, "\0")
   if position ~= nil then
     raise Error.new("embedded NUL is not permitted", nil, nil, operation)
   end
@@ -10,7 +10,7 @@ end
 local function valid_text(subject: string): boolean
   local index = 1
   while index <= #subject do
-    local first: integer = strings.byte(subject, index)
+    local first: integer = string.byte(subject, index)
     if first == 0 then return false end
     if first < 128 then
       index = index + 1
@@ -32,10 +32,10 @@ local function valid_text(subject: string): boolean
         return false
       end
       if length > #subject - index + 1 then return false end
-      local second: integer = strings.byte(subject, index + 1)
+      local second: integer = string.byte(subject, index + 1)
       if second < lower or second > upper then return false end
       for offset = 2, length - 1 do
-        local byte: integer = strings.byte(subject, index + offset)
+        local byte: integer = string.byte(subject, index + offset)
         if byte < 128 or byte > 191 then return false end
       end
       index = index + length
@@ -97,8 +97,8 @@ local function bind_argument(cell: foreign *TitanSqliteCell,
     cell.kind = ffi.SQLITE_TEXT
     copy_argument_bytes(cell, bytes, operation)
   when is_record(inspected) then
-    if inspected.val is Blob then
-      local blob: Blob = inspected.val
+    if inspected.value is Blob then
+      local blob: Blob = inspected.value
       cell.kind = ffi.SQLITE_BLOB
       copy_argument_bytes(cell, blob.bytes, operation)
     else

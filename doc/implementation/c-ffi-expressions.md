@@ -53,16 +53,12 @@ Anonymous aggregates and enum tags receive no source alias in this iteration.
 An incomplete file-scope tag does receive an alias for pointer-only use; layout
 sinks consult visibility/completeness separately.
 
-Source-nameable C selectors use the raw contextual `lexer.CNAME`, not
-ordinary Titan `NAME`. It accepts the C identifier shape without rejecting a
-Titan keyword and is referenced only by C member/type grammar positions.
-Consequently headers may expose `when`, `repeat`, `type`, or another
-Titan-only keyword without reserving an escape syntax or making that spelling
-legal in ordinary Titan declarations. Named C prototype arguments retain the
-separate contextual `NAMEDLABEL` path. The parser marks the corresponding
-`Ast.VarDot`/`Ast.TypeQualName` with `_contextual_c_name`; the checker accepts
-that marker only after proving the qualifier is a C namespace/receiver, while
-the coder simply emits the stored spelling unchanged.
+Member selectors, named argument labels, and foreign type names use
+`lexer.ANYNAME`, which accepts keyword spellings such as `when`, `repeat`, and
+`type`. The same token serves the ordinary Titan grammar positions that admit
+keyword names. There is no C-only selector token or `_contextual_c_name`
+marker. The checker resolves the receiver or type namespace normally, and the
+coder emits the accepted C member spelling unchanged.
 
 ### One tag namespace per C scope
 

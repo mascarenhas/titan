@@ -1,5 +1,5 @@
 local test = import "test"
-local strings = import "string"
+local string = import "string"
 local support = import "string.test_support.titan"
 
 local observed = ""
@@ -17,7 +17,7 @@ end
 local function assert_format_parity(format_string: string, operand: value)
   local titan_ok, titan_result = support.attempt_string(
     function(): string
-      return strings.format(format_string, operand)
+      return string.format(format_string, operand)
     end)
   local lua_ok, lua_result = support.attempt_string(
     function(): string
@@ -32,7 +32,7 @@ local function assert_format_parity(format_string: string, operand: value)
 end
 
 local function assert_unpack_parity(format_string: string, data: string)
-  local actual: {value} = {strings.unpack(format_string, data, nil)}
+  local actual: {value} = {string.unpack(format_string, data, nil)}
   local expected: {value} = {
     support.lua_unpack(format_string, data, nil)
   }
@@ -56,64 +56,64 @@ function test_format_lua_compatibility(context: test.Context)
   local nan = 0.0 / 0.0
   local pointer_object: {string: string} = {["kind"] = "pointer"}
 
-  test.assert(strings.format("literal %% tail") ==
+  test.assert(string.format("literal %% tail") ==
               support.lua_format("literal %% tail"))
-  test.assert(strings.format("%c|%5c|%-5c", 65, 66, 67) ==
+  test.assert(string.format("%c|%5c|%-5c", 65, 66, 67) ==
               support.lua_format("%c|%5c|%-5c", 65, 66, 67))
-  test.assert(strings.format("%d|%+08i|%u|%#o|%#08x|%X",
+  test.assert(string.format("%d|%+08i|%u|%#o|%#08x|%X",
                              minimum, -42, -1, 10, 255, -1) ==
               support.lua_format("%d|%+08i|%u|%#o|%#08x|%X",
                                  minimum, -42, -1, 10, 255, -1))
-  test.assert(strings.format("%a|%A|%.3e|%10.2f|%g|%G",
+  test.assert(string.format("%a|%A|%.3e|%10.2f|%g|%G",
                              1.5, -0.0, 1.0 / 3.0, 1.0 / 3.0,
                              infinity, nan) ==
               support.lua_format("%a|%A|%.3e|%10.2f|%g|%G",
                                  1.5, -0.0, 1.0 / 3.0, 1.0 / 3.0,
                                  infinity, nan))
-  test.assert(strings.format("%p|%15p", nil, pointer_object) ==
+  test.assert(string.format("%p|%15p", nil, pointer_object) ==
               support.lua_format("%p|%15p", nil, pointer_object))
-  test.assert(strings.format("%q|%q|%q|%q|%q|%q",
+  test.assert(string.format("%q|%q|%q|%q|%q|%q",
                              "a\0b\n\"\\\1", minimum,
                              infinity, -infinity, false, nil) ==
               support.lua_format("%q|%q|%q|%q|%q|%q",
                                  "a\0b\n\"\\\1", minimum,
                                  infinity, -infinity, false, nil))
-  test.assert(strings.format("%s|%10s|%.2s|%s",
+  test.assert(string.format("%s|%10s|%.2s|%s",
                              true, "abc", "abcd",
-                             strings.rep("long", 40)) ==
+                             string.rep("long", 40)) ==
               support.lua_format("%s|%10s|%.2s|%s",
                                  true, "abc", "abcd",
-                                 strings.rep("long", 40)))
+                                 string.rep("long", 40)))
 
   local binary_format =
     "\0A%%B%+05d\0C%%%#06x\0D%%E%.2f\0F%s\0tail%%\0"
   local binary_actual =
-    strings.format(binary_format, 12, 255, 1.0 / 3.0, "x\0y")
+    string.format(binary_format, 12, 255, 1.0 / 3.0, "x\0y")
   test.assert(binary_actual ==
               support.lua_format(
                 binary_format, 12, 255, 1.0 / 3.0, "x\0y"))
   test.assert(binary_actual ==
               "\0A%B+0012\0C%0x00ff\0D%E0.33\0Fx\0y\0tail%\0")
-  test.assert(strings.format("%c", 0) == "\0")
+  test.assert(string.format("%c", 0) == "\0")
 
-  test.assert(strings.format("%d|%x", 42.0, 255.0) ==
+  test.assert(string.format("%d|%x", 42.0, 255.0) ==
               support.lua_format("%d|%x", 42, 255))
-  test.assert(strings.format("%q", 42.0) == "42")
+  test.assert(string.format("%q", 42.0) == "42")
   support.expect_error(function()
-    strings.format("%c", "65")
+    string.format("%c", "65")
   end, nil)
   support.expect_error(function()
-    strings.format("%d", "42")
+    string.format("%d", "42")
   end, nil)
   support.expect_error(function()
-    strings.format("%f", "1.5")
+    string.format("%f", "1.5")
   end, nil)
   support.expect_error(function()
-    strings.format("%d", 1.5)
+    string.format("%d", 1.5)
   end, nil)
 
   local qualified = "%+05d|%-6i|%#08x|%#6o|%.3f|%8.2e|%-7.3s"
-  test.assert(strings.format(
+  test.assert(string.format(
                 qualified, 12, 13, 255, 10,
                 1.0 / 3.0, 1.0 / 3.0, "abcdef") ==
               support.lua_format(
@@ -154,72 +154,72 @@ function test_format_lua_compatibility(context: test.Context)
     end
   end
 
-  test.assert(strings.format("%99d", 7) ==
+  test.assert(string.format("%99d", 7) ==
               support.lua_format("%99d", 7))
-  test.assert(strings.format("%.99s", "abc") ==
+  test.assert(string.format("%.99s", "abc") ==
               support.lua_format("%.99s", "abc"))
-  test.assert(strings.format("%99.99f", 1.0 / 3.0) ==
+  test.assert(string.format("%99.99f", 1.0 / 3.0) ==
               support.lua_format("%99.99f", 1.0 / 3.0))
-  test.assert(strings.format("%-99.99s", "abc") ==
+  test.assert(string.format("%-99.99s", "abc") ==
               support.lua_format("%-99.99s", "abc"))
-  local many_flags = "%" .. strings.rep("-", 20) .. "d"
-  test.assert(strings.format(many_flags, 1) ==
+  local many_flags = "%" .. string.rep("-", 20) .. "d"
+  test.assert(string.format(many_flags, 1) ==
               support.lua_format(many_flags, 1))
 end
 
 function test_format_accounting_and_recovery(context: test.Context)
-  test.assert(strings.format("%%:%d:%%:%s:%%", 7, "x", "surplus") ==
+  test.assert(string.format("%%:%d:%%:%s:%%", 7, "x", "surplus") ==
               "%:7:%:x:%")
   observed = ""
-  local rendered = strings.format("%%:%s", mark("used"), mark("extra"))
+  local rendered = string.format("%%:%s", mark("used"), mark("extra"))
   test.assert(rendered == "%:used" and observed == "usedextra")
   support.expect_error(function()
-    strings.format("%%:%d:%%:%s:%%", 7)
+    string.format("%%:%d:%%:%s:%%", 7)
   end, "no value for format conversion")
 
   support.expect_error(function()
-    strings.format("%+s")
+    string.format("%+s")
   end, "no value for format conversion")
   support.expect_error(function()
-    strings.format("%+s", nil)
+    string.format("%+s", nil)
   end, "invalid conversion specification")
   support.expect_error(function()
-    strings.format("%10q")
+    string.format("%10q")
   end, "no value for format conversion")
   support.expect_error(function()
-    strings.format("%10q", nil)
+    string.format("%10q", nil)
   end, "specifier '%q' cannot have modifiers")
   support.expect_error(function()
-    strings.format("%y")
+    string.format("%y")
   end, "no value for format conversion")
   support.expect_error(function()
-    strings.format("%y", nil)
+    string.format("%y", nil)
   end, "invalid conversion to 'format'")
-  local too_long = "%" .. strings.rep("-", 21) .. "d"
+  local too_long = "%" .. string.rep("-", 21) .. "d"
   support.expect_error(function()
-    strings.format(too_long)
+    string.format(too_long)
   end, "no value for format conversion")
   support.expect_error(function()
-    strings.format(too_long, nil)
+    string.format(too_long, nil)
   end, "invalid format (too long)")
 
   local object = support.custom_tostring_value("custom\0text")
-  test.assert(strings.format("%s", object) ==
+  test.assert(string.format("%s", object) ==
               support.lua_format("%s", object))
   local bad = support.failing_tostring_value("format conversion failed")
   support.expect_error(function()
-    strings.format("%s", bad)
+    string.format("%s", bad)
   end, "format conversion failed")
   support.expect_error(function()
-    strings.format("%s%+s", bad, "unused")
+    string.format("%s%+s", bad, "unused")
   end, "format conversion failed")
   for index = 1, 100 do
-    test.assert(strings.format("%d:%q", index, "x") ==
+    test.assert(string.format("%d:%q", index, "x") ==
                 support.lua_format("%d:%q", index, "x"))
   end
 
   assert_same_success(
-    function() strings.format("%") end,
+    function() string.format("%") end,
     function() support.lua_format("%") end,
     "bare percent acceptance differs")
   assert_format_parity("%q", pointer_object_for_failure())
@@ -230,7 +230,7 @@ function test_format_accounting_and_recovery(context: test.Context)
   assert_format_parity("%#d", 1)
   assert_format_parity("%0c", 65)
   assert_format_parity("%1.2c", 65)
-  assert_format_parity("%" .. strings.rep("-", 21) .. "d", 1)
+  assert_format_parity("%" .. string.rep("-", 21) .. "d", 1)
   assert_format_parity("%y", 1)
   assert_format_parity("%5s", "a\0b")
 end
@@ -243,17 +243,17 @@ end
 function test_target_native_pack_and_unpack(context: test.Context)
   local minimum = -9223372036854775807 - 1
   local maximum = 9223372036854775807
-  local packed = strings.pack("bBhH", -128, 255, -32768, 65535)
+  local packed = string.pack("bBhH", -128, 255, -32768, 65535)
   test.assert(packed == support.lua_pack(
     "bBhH", -128, 255, -32768, 65535))
   assert_unpack_parity("bBhH", packed)
 
-  packed = strings.pack("lLjJT", minimum, -1, maximum, -1, 123)
+  packed = string.pack("lLjJT", minimum, -1, maximum, -1, 123)
   test.assert(packed == support.lua_pack(
     "lLjJT", minimum, -1, maximum, -1, 123))
   assert_unpack_parity("lLjJT", packed)
 
-  packed = strings.pack("i1I1i2I2i8I8i16I16",
+  packed = string.pack("i1I1i2I2i8I8i16I16",
                         -7, 250, -1234, 54321,
                         minimum, -1, -1, -1)
   test.assert(packed == support.lua_pack(
@@ -261,60 +261,60 @@ function test_target_native_pack_and_unpack(context: test.Context)
     -7, 250, -1234, 54321, minimum, -1, -1, -1))
   assert_unpack_parity("i1I1i2I2i8I8i16I16", packed)
 
-  packed = strings.pack("fnd", 1.25, 1.0 / 3.0, -3.141592653589793)
+  packed = string.pack("fnd", 1.25, 1.0 / 3.0, -3.141592653589793)
   test.assert(packed == support.lua_pack(
     "fnd", 1.25, 1.0 / 3.0, -3.141592653589793))
   assert_unpack_parity("fnd", packed)
 
-  packed = strings.pack("c0c4s1s2s8z",
+  packed = string.pack("c0c4s1s2s8z",
                         "", "a\0", "abc", "a\0b", "hello", "a b")
   test.assert(packed == support.lua_pack(
     "c0c4s1s2s8z", "", "a\0", "abc", "a\0b", "hello", "a b"))
   assert_unpack_parity("c0c4s1s2s8z", packed)
 
-  packed = strings.pack("<i2I4", -100, 4000000000)
+  packed = string.pack("<i2I4", -100, 4000000000)
   test.assert(packed == support.lua_pack("<i2I4", -100, 4000000000))
   assert_unpack_parity("<i2I4", packed)
-  packed = strings.pack(">i2I4", -100, 4000000000)
+  packed = string.pack(">i2I4", -100, 4000000000)
   test.assert(packed == support.lua_pack(">i2I4", -100, 4000000000))
   assert_unpack_parity(">i2I4", packed)
-  packed = strings.pack("=i2", -100)
+  packed = string.pack("=i2", -100)
   test.assert(packed == support.lua_pack("=i2", -100))
   assert_unpack_parity("=i2", packed)
 
-  packed = strings.pack("!4bXi4i4", 1, 12345)
+  packed = string.pack("!4bXi4i4", 1, 12345)
   test.assert(packed == support.lua_pack("!4bXi4i4", 1, 12345))
   assert_unpack_parity("!4bXi4i4", packed)
-  packed = strings.pack("!8bXd d", 1, 1.5, 2.5)
+  packed = string.pack("!8bXd d", 1, 1.5, 2.5)
   test.assert(packed == support.lua_pack("!8bXd d", 1, 1.5, 2.5))
   assert_unpack_parity("!8bXd d", packed)
-  packed = strings.pack("!bXi16i16", 1, 2)
+  packed = string.pack("!bXi16i16", 1, 2)
   test.assert(packed == support.lua_pack("!bXi16i16", 1, 2))
   assert_unpack_parity("!bXi16i16", packed)
-  packed = strings.pack("x b x B", -2, 200)
+  packed = string.pack("x b x B", -2, 200)
   test.assert(packed == support.lua_pack("x b x B", -2, 200))
   assert_unpack_parity("x b x B", packed)
-  packed = strings.pack("<i2 c3 z s2 f d",
+  packed = string.pack("<i2 c3 z s2 f d",
                         -5, "xy", "abc", "qq", 1.5, -2.25)
   test.assert(packed == support.lua_pack(
     "<i2 c3 z s2 f d", -5, "xy", "abc", "qq", 1.5, -2.25))
   assert_unpack_parity("<i2 c3 z s2 f d", packed)
 
-  test.assert(strings.pack("i4I2", 42.0, 255.0) ==
+  test.assert(string.pack("i4I2", 42.0, 255.0) ==
               support.lua_pack("i4I2", 42, 255))
-  test.assert(strings.pack("fd", 1, 2) ==
+  test.assert(string.pack("fd", 1, 2) ==
               support.lua_pack("fd", 1, 2))
-  test.assert(strings.pack("c3s1z", "a\0", "\0", "x") ==
+  test.assert(string.pack("c3s1z", "a\0", "\0", "x") ==
               support.lua_pack("c3s1z", "a\0", "\0", "x"))
 
-  support.expect_error(function() strings.pack("i4", "42") end, nil)
-  support.expect_error(function() strings.pack("f", "1.5") end, nil)
-  support.expect_error(function() strings.pack("c3", 42) end, nil)
-  support.expect_error(function() strings.pack("s1", 42) end, nil)
-  support.expect_error(function() strings.pack("z", 42) end, nil)
-  support.expect_error(function() strings.pack("i4", 1.5) end, nil)
+  support.expect_error(function() string.pack("i4", "42") end, nil)
+  support.expect_error(function() string.pack("f", "1.5") end, nil)
+  support.expect_error(function() string.pack("c3", 42) end, nil)
+  support.expect_error(function() string.pack("s1", 42) end, nil)
+  support.expect_error(function() string.pack("z", 42) end, nil)
+  support.expect_error(function() string.pack("i4", 1.5) end, nil)
 
-  local empty: {value} = {strings.unpack("", "", nil)}
+  local empty: {value} = {string.unpack("", "", nil)}
   test.assert(#empty == 1 and (empty[1] as integer) == 1)
 
   local fixed: {string} = {
@@ -323,7 +323,7 @@ function test_target_native_pack_and_unpack(context: test.Context)
   }
   for format_index = 1, #fixed do
     local format_string = fixed[format_index]
-    test.assert(strings.packsize(format_string) ==
+    test.assert(string.packsize(format_string) ==
                 support.lua_packsize(format_string))
   end
 
@@ -334,13 +334,13 @@ function test_target_native_pack_and_unpack(context: test.Context)
   for position_index = 1, #positions do
     local position = positions[position_index]
     assert_same_success(
-      function() strings.unpack("i2", data, position) end,
+      function() string.unpack("i2", data, position) end,
       function() support.lua_unpack("i2", data, position) end,
       "unpack position acceptance differs")
     if support.succeeds(function()
-         strings.unpack("i2", data, position)
+         string.unpack("i2", data, position)
        end) then
-      local actual: {value} = {strings.unpack("i2", data, position)}
+      local actual: {value} = {string.unpack("i2", data, position)}
       local expected: {value} = {
         support.lua_unpack("i2", data, position)
       }
@@ -351,54 +351,54 @@ end
 
 function test_pack_failures_and_value_bounds(context: test.Context)
   assert_same_success(
-    function() strings.pack("i0", 1) end,
+    function() string.pack("i0", 1) end,
     function() support.lua_pack("i0", 1) end, "i0 pack differs")
   assert_same_success(
-    function() strings.pack("i17", 1) end,
+    function() string.pack("i17", 1) end,
     function() support.lua_pack("i17", 1) end, "i17 pack differs")
   assert_same_success(
-    function() strings.pack("c", "x") end,
+    function() string.pack("c", "x") end,
     function() support.lua_pack("c", "x") end, "c pack differs")
   assert_same_success(
-    function() strings.pack("c1", "xx") end,
+    function() string.pack("c1", "xx") end,
     function() support.lua_pack("c1", "xx") end, "long c pack differs")
   assert_same_success(
-    function() strings.pack("z", "a\0b") end,
+    function() string.pack("z", "a\0b") end,
     function() support.lua_pack("z", "a\0b") end, "z pack differs")
   assert_same_success(
-    function() strings.pack("I1", 256) end,
+    function() string.pack("I1", 256) end,
     function() support.lua_pack("I1", 256) end, "I1 overflow differs")
   assert_same_success(
-    function() strings.pack("I1", -1) end,
+    function() string.pack("I1", -1) end,
     function() support.lua_pack("I1", -1) end, "I1 sign differs")
   assert_same_success(
-    function() strings.pack("i1", 128) end,
+    function() string.pack("i1", 128) end,
     function() support.lua_pack("i1", 128) end, "i1 high differs")
   assert_same_success(
-    function() strings.pack("i1", -129) end,
+    function() string.pack("i1", -129) end,
     function() support.lua_pack("i1", -129) end, "i1 low differs")
-  local long_string = strings.rep("x", 256)
+  local long_string = string.rep("x", 256)
   assert_same_success(
-    function() strings.pack("s1", long_string) end,
+    function() string.pack("s1", long_string) end,
     function() support.lua_pack("s1", long_string) end,
     "s1 overflow differs")
   assert_same_success(
-    function() strings.pack("X") end,
+    function() string.pack("X") end,
     function() support.lua_pack("X") end, "X pack differs")
   assert_same_success(
-    function() strings.pack("Xc1") end,
+    function() string.pack("Xc1") end,
     function() support.lua_pack("Xc1") end, "Xc1 pack differs")
   assert_same_success(
-    function() strings.pack("Xz") end,
+    function() string.pack("Xz") end,
     function() support.lua_pack("Xz") end, "Xz pack differs")
   assert_same_success(
-    function() strings.pack("!3i4", 1) end,
+    function() string.pack("!3i4", 1) end,
     function() support.lua_pack("!3i4", 1) end, "alignment differs")
   assert_same_success(
-    function() strings.pack("?", 1) end,
+    function() string.pack("?", 1) end,
     function() support.lua_pack("?", 1) end, "option differs")
   assert_same_success(
-    function() strings.pack("i4") end,
+    function() string.pack("i4") end,
     function() support.lua_pack("i4") end, "missing pack arg differs")
 
   local variable_formats: {string} = {
@@ -407,59 +407,59 @@ function test_pack_failures_and_value_bounds(context: test.Context)
   for format_index = 1, #variable_formats do
     local format_string = variable_formats[format_index]
     assert_same_success(
-      function() strings.packsize(format_string) end,
+      function() string.packsize(format_string) end,
       function() support.lua_packsize(format_string) end,
       "packsize acceptance differs")
   end
 
   local too_short_i4 = "\0"
   assert_same_success(
-    function() strings.unpack("i4", too_short_i4, nil) end,
+    function() string.unpack("i4", too_short_i4, nil) end,
     function() support.lua_unpack("i4", too_short_i4, nil) end,
     "short i4 unpack differs")
   assert_same_success(
-    function() strings.unpack("z", "abc", nil) end,
+    function() string.unpack("z", "abc", nil) end,
     function() support.lua_unpack("z", "abc", nil) end,
     "unfinished z unpack differs")
   assert_same_success(
-    function() strings.unpack("s1", "\5abc", nil) end,
+    function() string.unpack("s1", "\5abc", nil) end,
     function() support.lua_unpack("s1", "\5abc", nil) end,
     "short s1 unpack differs")
-  local all_ff = strings.rep("\255", 16)
+  local all_ff = string.rep("\255", 16)
   assert_same_success(
-    function() strings.unpack("I16", all_ff, nil) end,
+    function() string.unpack("I16", all_ff, nil) end,
     function() support.lua_unpack("I16", all_ff, nil) end,
     "wide unsigned unpack differs")
-  local wide_signed = strings.rep("\0", 8) .. strings.rep("\1", 8)
+  local wide_signed = string.rep("\0", 8) .. string.rep("\1", 8)
   assert_same_success(
-    function() strings.unpack("i16", wide_signed, nil) end,
+    function() string.unpack("i16", wide_signed, nil) end,
     function() support.lua_unpack("i16", wide_signed, nil) end,
     "wide signed unpack differs")
   assert_same_success(
-    function() strings.unpack("?", "", nil) end,
+    function() string.unpack("?", "", nil) end,
     function() support.lua_unpack("?", "", nil) end,
     "invalid unpack option differs")
   assert_same_success(
-    function() strings.unpack("X", "", nil) end,
+    function() string.unpack("X", "", nil) end,
     function() support.lua_unpack("X", "", nil) end,
     "invalid unpack alignment differs")
 
-  local octets = strings.rep("\1", 200)
-  local format200 = strings.rep("%d", 200) .. "\0%%tail"
-  test.assert(strings.format(
+  local octets = string.rep("\1", 200)
+  local format200 = string.rep("%d", 200) .. "\0%%tail"
+  test.assert(string.format(
                 format200, support.lua_byte(octets, 1, 200)) ==
               support.lua_format(
                 format200, support.lua_byte(octets, 1, 200)))
-  test.assert(#strings.pack(
-                strings.rep("B", 200),
+  test.assert(#string.pack(
+                string.rep("B", 200),
                 support.lua_byte(octets, 1, 200)) == 200)
 
-  local format199 = strings.rep("B", 199)
-  local packed199 = strings.rep("\1", 199)
-  local returned: {value} = {strings.unpack(format199, packed199, nil)}
+  local format199 = string.rep("B", 199)
+  local packed199 = string.rep("\1", 199)
+  local returned: {value} = {string.unpack(format199, packed199, nil)}
   test.assert(#returned == 200)
   test.assert((returned[200] as integer) == 200)
   support.expect_error(function()
-    strings.unpack(strings.rep("B", 200), strings.rep("\1", 200), nil)
+    string.unpack(string.rep("B", 200), string.rep("\1", 200), nil)
   end, "too many flexible return values")
 end

@@ -72,14 +72,14 @@ local r: Reader?            = nil      -- option of an Interface type
 local s: api.Reader?        = nil      -- imported Interface type
 ```
 
-The suffix does not nest (`integer??` is a syntax error), and it cannot be
-applied directly to a whole function type because function types are not
-simple types in this grammar. Name the function type with an alias and apply
-the suffix to that name instead:
+The suffix does not nest (`integer??` is a syntax error). Parenthesize a whole
+function type before making it optional, so the suffix cannot be consumed by
+the return annotation. An alias is also convenient:
 
 ```titan
 local type Handler = function (string): (boolean)
 local handler: Handler? = nil
+local other: (function(string): boolean)? = nil
 ```
 
 Writing `value?` is accepted but means exactly `value`: the `value` type
@@ -167,7 +167,7 @@ raised with this message shape (catchable with `pcall` from Lua, like every
 Titan run-time error — see [error handling](error-handling.md)):
 
 ```
-<file>:<line>:<col>: type error, expected<|T|> but found nil
+<file>:<line>:<col>: type error, expected <T> but found nil
 ```
 
 Gradually consistent option bases retain the same strict policy. For example,
@@ -224,7 +224,7 @@ value, whether the option is the direct result of an array or map read or
 is held in a plain *variable* — a local, a parameter, a module variable, or
 a record field — and whether the consuming context is arithmetic, a call
 argument, an array or map index, or string concatenation. A nil at run time
-raises the `expected<|T|> but found nil` error shown above.
+raises the `expected <T> but found nil` error shown above.
 
 The same unwrap fires when you **call through** an option-of-function. An
 array or map whose element type is a function yields a `T?` on indexing, so

@@ -472,7 +472,9 @@ local function get_structunion(lst, spec)
     if spec.fields and not spec.fields[1] then
         spec.fields = { spec.fields }
     end
-    return get_composite_type(lst, spec.id, spec.type, spec.fields, "fields", get_fields)
+    local typ, key = get_composite_type(lst, spec.id, spec.type, spec.fields, "fields", get_fields)
+    if typ then typ._tag_provenance = typ._tag_provenance or spec._c_tag_provenance end
+    return typ, key
 end
 
 local function get_enum(lst, spec)
@@ -524,6 +526,7 @@ local function refer(lst, item, get_fn)
                 if converted then typ.fields = converted end
             end
             if not converted then return nil, err end
+            typ._tag_provenance = item._c_tag_provenance or typ._tag_provenance
         end
         return typ
     end
@@ -1495,6 +1498,7 @@ local register_typedef_item = typed("TypeList, table, table, table? -> boolean, 
         _declarator_base = def._declarator_base,
         _declarator_ops = def._declarator_ops,
         _declaration_provenance = provenance,
+        _ffi_scope = provenance and provenance.ffi_scope,
     })
 
     if lst[name] then
@@ -1502,6 +1506,9 @@ local register_typedef_item = typed("TypeList, table, table, table? -> boolean, 
             return false, "inconsistent declaration for " .. name .. " - " .. inspect(lst[name]) .. " VERSUS " .. inspect(typ)
         end
         complete_declarator_bounds(lst[name], typ)
+        -- Compatible redeclarations name the original C typedef; a later
+        -- include does not move it into that consumer's module namespace.
+        typ._ffi_scope = lst[name]._ffi_scope or typ._ffi_scope
     end
     add_type(lst, name, typ)
 
@@ -1591,18 +1598,36 @@ local function prescan_declarations(parsed, options)
         next_prototype_scope = 0,
     }
     local visible_tags = {}
+    local current_position
 
-    local function provenance(order, scope, definition)
+    local function provenance(order, scope, definition, spec)
+        local nominal_scope, line, column
+        if options.declaration_scope then
+            nominal_scope, line, column = options.declaration_scope(
+                spec and spec._source_position or current_position)
+        end
+        if nominal_scope then
+            nominal_scope = nominal_scope .. "." .. (spec and spec.type or "typedef")
+            if spec and (not spec.id or scope:match("^prototype")) then
+                nominal_scope = nominal_scope .. ".site" .. line .. "_" .. column
+            end
+        end
         return {
             header = options.header,
             declaration_order = order,
             scope = scope,
             definition = definition and true or false,
+            ffi_scope = nominal_scope,
         }
     end
 
     local function record_file_tag(spec, order)
-        if not spec.id then return true end
+        if not spec.id then
+            if options.declaration_scope then
+                spec._c_tag_provenance = provenance(order, "file", true, spec)
+            end
+            return true
+        end
         local name = spec.id
         local kind = spec.type
         local previous = visible_tags[name]
@@ -1626,7 +1651,7 @@ local function prescan_declarations(parsed, options)
             metadata.file_scope_tags[name] = record
             table.insert(metadata.file_scope_tag_order, record)
         end
-        local prov = provenance(order, "file", spec.fields or spec.values)
+        local prov = provenance(order, "file", spec.fields or spec.values, spec)
         table.insert(record.declarations, prov)
         record.defined = record.defined or prov.definition
         spec._c_tag_binding = "file"
@@ -1669,13 +1694,19 @@ local function prescan_declarations(parsed, options)
         spec._c_tag_scope_id = owner_scope.id
         spec._c_tag_allow_outer = tag.allow_outer
         spec._c_tag_provenance =
-            provenance(order, "prototype:" .. owner_scope.id, is_definition)
+            provenance(order, "prototype:" .. owner_scope.id, is_definition, spec)
     end
 
     local function annotate_prototype_type(type_spec, scope, order)
         local ok, err = true
         each_tag_spec(type_spec, function(spec)
-            if not ok or not spec.id then return end
+            if not ok then return end
+            if not spec.id then
+                if options.declaration_scope then
+                    spec._c_tag_provenance = provenance(order, "prototype:" .. scope.id, true, spec)
+                end
+                return
+            end
             local is_definition = spec.fields or spec.values
             if is_definition then
                 -- A definition introduces or completes a tag in this exact
@@ -1728,7 +1759,7 @@ local function prescan_declarations(parsed, options)
                 spec._c_tag_binding = "file"
                 spec._c_tag_raw_key = visible.raw_key
                 spec._c_tag_provenance =
-                    provenance(order, "prototype-reference", false)
+                    provenance(order, "prototype-reference", false, spec)
                 return
             end
 
@@ -1810,6 +1841,10 @@ local function prescan_declarations(parsed, options)
     end
 
     for order, item in ipairs(parsed) do
+        current_position = item._source_position
+        if options.declaration_scope then
+            item._declaration_provenance = provenance(order, "file", false)
+        end
         local spec_set = util.to_set(item.spec)
         if spec_set.typedef then
             for _, id in ipairs(item.ids or {}) do

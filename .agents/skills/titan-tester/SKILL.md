@@ -117,7 +117,7 @@ end
 ```
 
 The exact case name is
-`<logical-module>.<|function-name|>`. Top-level cases are sorted by complete name
+`<logical-module>.<function-name>`. Top-level cases are sorted by complete name
 using bytewise order, not source traversal order. Subtests retain registration
 order. Avoid coupling cases through mutable module state even though root order
 is deterministic; each case should establish its own preconditions.

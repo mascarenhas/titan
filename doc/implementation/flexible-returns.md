@@ -273,10 +273,11 @@ declaration metadata and do not participate in structural function equality.
 
 `types.tostring` renders every flexible result in a parenthesized list, even
 when it is the only result, so `function (): (T)`, `function (): (T, ...: U)`, and
-`function (): (...: U)` remain distinct in C-free function-tag keys. Exportable
-C-bearing tags use the canonical serialized descriptor instead; it carries the
-same flexible-result distinction without relying on diagnostic rendering. Two
-merely consistent types therefore never share a native-entry cast by accident.
+`function (): (...: U)` remain distinct. Function-tag keys use
+`types.runtime_identity`, which preserves the same structural distinctions and
+adds defining C scopes to named foreign components. Source-facing diagnostic
+rendering omits those scopes. Two merely consistent types therefore never share
+a native-entry cast by accident.
 
 `types.callable_adjustment(source_actual, target_expected)` is the directional
 operation used
@@ -705,7 +706,7 @@ The reserved Function position and an absent tail serialize explicitly as
 `false`; the decoder rejects a non-false reserved value. The flexible field precedes
 declaration-only `paramnames` on methods and statics. Interface recovery and
 all recursive nominal walkers consume the same position, while both
-`types.tostring` and the serialized structural tag identity include a present
+`types.tostring` and the structural `types.runtime_identity` tag key include a present
 tail.
 
 Two independent incompatibilities make these shapes ABI-visible:

@@ -187,7 +187,7 @@ function test_row_fill_uses_checked_numeric_conversion_and_partial_writes(
     end)
     test.assert(partial.first == 7 and partial.second == 91,
                 "field conversion did not preserve the documented partial write")
-    test.assert(str.find(failure.message, "second") ~= nil,
+    test.assert(string.find(failure.message, "second") ~= nil,
                 "record conversion error omitted the destination field name")
   end)
 end

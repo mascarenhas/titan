@@ -91,12 +91,10 @@ An imported `m.Message.move` has three components and is rejected by the
 parser. Both outcomes enforce the same v1 boundary without adding a
 variant-type AST node.
 
-`lexer.CNAME` is the raw-identifier token used only in contextual C member and
-qualified-type positions. It allows imported C symbols whose spelling is a
-Titan keyword, including the new `when`, while `lexer.NAME` continues to
-reject keywords in ordinary Titan declarations and expressions. It
-generalizes the same separation already used by `NAMEDLABEL` for C prototype
-parameter labels.
+`lexer.ANYNAME` admits keyword spellings in member selectors, named argument
+labels, and declaration positions that permit them, including union variants.
+`lexer.NAME` still rejects reserved words in bare expression-name positions.
+These rules apply to Titan and C members without a C-only selector token.
 
 ## Type descriptors
 

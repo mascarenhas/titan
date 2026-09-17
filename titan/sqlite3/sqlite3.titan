@@ -1,7 +1,7 @@
 local async = import "async"
 local uv = import "uv.titan"
 local reflect = import "reflect"
-local strings = import "string"
+local string = import "string"
 local math = import "math"
 
 record Error

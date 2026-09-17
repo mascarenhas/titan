@@ -199,13 +199,13 @@ local function start_idle_timeout_plain(first_port: integer): async.Task
       "GET /buffered-one HTTP/1.1\r\nHost: localhost\r\n\r\n" ..
       "GET /buffered-two HTTP/1.1\r\nHost: localhost\r\n" ..
       "Connection: close\r\n\r\n")
-    local buffered_output = str.writer()
+    local buffered_output = string.writer()
     for chunk in buffered:read do buffered_output:write(chunk) end
     local rendered = buffered_output:drain()
-    local first_response? = str.find(rendered, "HTTP/1.1 200 OK")
+    local first_response? = string.find(rendered, "HTTP/1.1 200 OK")
     local second_response: integer? = nil
     if first_response then
-      second_response = str.find(
+      second_response = string.find(
         rendered, "HTTP/1.1 200 OK", (first_response as integer) + 1)
     end
     test.assert(first_response ~= nil and second_response ~= nil,
@@ -476,7 +476,7 @@ local function start_https(first_port: integer): async.Task
       support.outcome = "https-requesting"
       do
         local response = http.get(
-          "https://localhost:" .. str.tostring(port) ..
+          "https://localhost:" .. string.tostring(port) ..
           "/secure?value=1", nil, support.TRUST_ROOT)
         defer response:close()
         response_status = response.status
@@ -487,7 +487,7 @@ local function start_https(first_port: integer): async.Task
           client_failure = failure.name .. ": " .. failure.message ..
             " (" .. failure.operation .. ")"
         else
-          client_failure = str.tostring(error)
+          client_failure = string.tostring(error)
         end
       end
       return nil

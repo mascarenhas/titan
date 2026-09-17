@@ -4860,8 +4860,8 @@ function types.tostring(t, wrap, scoped)
 end
 
 -- Source spelling is unqualified in the foreign namespace, but runtime tags
--- must retain the checker-established C declaration scope. This preserves
--- existing owner/callable identity without exposing obsolete source syntax.
+-- must retain C declaration origins. This shares matching header declarations
+-- across modules without exposing internal identity keys in source syntax.
 function types.runtime_identity(t)
     return types.tostring(t, false, true)
 end

@@ -513,10 +513,9 @@ if (TITAN_LIKELY(runtime_tag == <function-type tag>)) {
 Those tags are the `static const void *` identities allocated by
 `function_type_tag` and publish-or-recovered through the Lua registry so
 source-linked and `.so`-loaded modules agree on the pointer for the same exact
-type. C-free shapes use `types.tostring(ftype)`; exportable C-bearing shapes
-use their canonical serialized descriptor so nested declarator qualifiers
-cannot collide; header-dependent C shapes add their defining module scope.
-Exact
+type. All shapes use `types.runtime_identity(ftype)`, which retains nested
+declarator qualifiers and adds C declaration origins to header-dependent shapes.
+The same C declaration shares identity across modules. Exact
 pointer equality is sufficient evidence for the private Titan layout under
 the same trusted-debug/C-API invariant as the closure upvalues themselves; the
 hot branch neither queries the Lua registry nor rechecks the module, native

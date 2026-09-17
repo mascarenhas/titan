@@ -167,6 +167,9 @@ outlive all native owners.
 Row filling first validates a one-to-one mapping from unique column names to
 every public record field and rejects const/unsupported destinations. Writes
 use 1-based public descriptor ordinals, never physical FieldType.index values.
+The inspected record exposes its schema through `.type.fields`; each
+`FieldType.type` supplies the destination's type. Reflected Blob bindings
+recover the original object through `.value`.
 The existing reflect setter owns dynamic conversion and the GC write barrier.
 Boolean conversion accepts only SQL integer 0/1; Options retain NULL. Named
 Blob fields recognize the one exact nominal owner without recursively

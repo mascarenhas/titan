@@ -164,7 +164,7 @@ function test_core_options_and_limits(_context: test.Context)
 end
 
 function test_core_default_depth_limit(_context: test.Context)
-  local source = strings.rep("[", 32) .. "true" .. strings.rep("]", 32)
+  local source = string.rep("[", 32) .. "true" .. string.rep("]", 32)
   local decoded: value = json.decode(source)
   test.assert(json.encode(decoded) == source)
   local failure = core_error(function() json.decode("[" .. source .. "]") end,
@@ -198,8 +198,8 @@ function test_core_cycles_sharing_and_unsupported_values(_context: test.Context)
   local length = 4
   local owner = foreign char.new_array(length)
   core_error(function() json.encode(owner) end, "unsupported_type")
-  local malformed: {string} = {strings.char(128), strings.char(192, 175),
-    strings.char(237, 160, 128), strings.char(244, 144, 128, 128), strings.char(226, 130)}
+  local malformed: {string} = {string.char(128), string.char(192, 175),
+    string.char(237, 160, 128), string.char(244, 144, 128, 128), string.char(226, 130)}
   for index = 1, #malformed do
     local text = malformed[index] as string
     core_error(function() json.encode(text) end, "invalid_utf8")

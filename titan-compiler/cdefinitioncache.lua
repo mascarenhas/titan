@@ -36,6 +36,7 @@ schemas.ctype = {
     _declarator_base = "parts?", _declarator_ops = "parts?", _paramstyle = "string?",
     _file_scope_tag = "boolean?", _file_scope_tag_metadata = "raw_tag?",
     _canonical_tag = "ctype?", _tag_provenance = "tag_provenance?",
+    _ffi_scope = "string?",
     _prototype_scope_id = "integer?", _allow_outer_binding = "boolean?",
     macro_expression = "extent?", has_integer_literals = "boolean?", _macro_cast = "boolean?",
 }
@@ -44,6 +45,7 @@ schemas.enumerator = { name = "string", value = "extent?" }
 schemas.raw_tag = { name = "string", kind = "string", raw_key = "string", declarations = "provenances" }
 schemas.tag_provenance = {
     header = "string?", declaration_order = "integer?", scope = "string?", definition = "boolean?",
+    ffi_scope = "string?",
 }
 schemas.macro = { name = "string", replacement = "string", path = "names?", unsupported = "boolean?" }
 schemas.file_tag = { name = "string", kind = "string", scope = "string", order = "integer", canonical = "type?" }

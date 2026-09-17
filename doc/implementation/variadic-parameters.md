@@ -506,12 +506,11 @@ parameter:
 A variadic function is an ordinary first-class value; `codevaluecall` dispatches
 it exactly like a non-variadic value. The runtime function-type tag is a
 `static const void *` published/recovered through the Lua registry. C-free
-callable shapes use the full `types.tostring(ftype)` key so different modules
-agree. A callable built only from exportable C descriptors instead uses its
-canonical serialized structure and is likewise shared across modules; a
-header-dependent C shape keeps its defining module's private namespace. The
-module-local cache separately marks C-bearing keys so a C typedef whose
-spelling resembles a Titan type cannot alias it. The tag **folds in the vararg
+callable shapes use `types.runtime_identity(ftype)` so different modules agree.
+That key preserves the full callable structure and the declaration origins of
+header-dependent C types. The same C declaration shares identity across modules;
+unrelated declarations with matching spellings remain distinct. The tag
+**folds in the vararg
 element** because the full callable shape
 distinguishes `...: integer` from `...: value`. So:
 

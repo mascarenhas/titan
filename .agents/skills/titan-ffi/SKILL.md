@@ -56,7 +56,7 @@ function-like macro, and the adjacent comment must say why it exists.
 
 1. A foreign namespace is compile-time-only. It cannot be stored, passed,
    returned, or exported.
-2. Header-dependent C types are module-local implementation types. Public
+2. Header-dependent C types are nonexportable implementation types. Public
    interfaces may use only Titan's contextual C primitives and recursively
    portable pointer, foreign-function-pointer, and owned graphs built from
    them. An imported typedef remains nonexportable even when it resolves to a
@@ -176,10 +176,11 @@ The C type and value namespaces are distinct. `extern int count` gives a value
 C variable name is rejected. Mutation through an imported array element,
 pointer, or aggregate field is supported; use a C setter for a scalar global.
 
-C member/type selectors are contextual C identifiers. A header member, field,
-tag, or named parameter spelled `when`, `type`, `repeat`, or another Titan
-keyword remains available as `ffi.when`, `value.repeat`, and so on. This does not
-make that spelling legal as an ordinary Titan declaration name.
+Member selectors, foreign type names, and named argument labels accept keyword
+spellings. A header member, field, tag, or named parameter spelled `when`,
+`type`, or `repeat` remains available as `ffi.when`, `value.repeat`, and so on.
+Titan declaration positions that use `AnyName` also admit keyword names; bare
+expression names still follow the reserved-word rules.
 
 ## Supported C types and where they may appear
 
@@ -202,6 +203,13 @@ cycles and ordinary C name conflicts are errors. The typedef is emitted in the
 module's `.ffi.h` and inherited by unqualified foreign name through explicit
 source imports and their transitive C headers. Ordinary imports do not acquire
 it, and it is absent from Titan type-member metadata.
+
+Runtime identity is nominal by declaring header and C declaration; the same
+declaration shares owned/callable identity across Titan modules, including
+source imports and forced headers. Separate anonymous declaration sites remain
+distinct. Use compatible declarations and build settings across those modules,
+as when programming in C. Titan does not fingerprint preprocessing conditions
+or certify C ABI compatibility for these identities.
 
 `owned foreigntype` is a Titan constructor whose operand resolves to a C pointer
 or array. An outer `const`, including one inherited through an alias, is
@@ -239,8 +247,9 @@ and eligible private state, but cannot be serialized through a public
 interface. A public type may recursively contain only contextual C primitives,
 pointers or const pointers to portable C types, structural `foreign function(...): ...` pointers whose parameters/results are portable, and `owned` forms over
 portable allocatable payloads. Imported typedefs, aggregates, arrays, enums,
-and imported function-pointer typedefs remain module-scoped even when their C
-definition happens to resolve to a portable primitive or function signature.
+and imported function-pointer typedefs remain excluded from public compiled
+interfaces even when their C definition resolves to a portable primitive or
+function signature.
 This is wrong:
 
 ```text
@@ -427,7 +436,7 @@ local function set_count(n: integer)
 end
 ```
 
-Do not mechanically write `as integer` on every C result or `as ffi.api_int` on every
+Do not mechanically write `as integer` on every C result or `as foreign api_int` on every
 C argument. Use `as` when it communicates a real choice:
 
 * select Titan semantics before an operator;
@@ -1004,7 +1013,9 @@ C `void`.
 
 The body is a deliberately closed raw-C subset. It may use:
 
-* parameters and initialized direct-C locals;
+* parameters and direct-C locals; a mutable local with an explicit nil-bearing
+  pointer type may omit its initializer, which supplies `NULL`; aggregates,
+  scalars, and const locals require an initializer;
 * imported C namespaces and their functions, values, fields, types, size and
   alignment;
 * other foreign functions in the module or through an explicit `.titan`
@@ -1522,7 +1533,7 @@ Remember that implicit projection is strict while written `as` is dynamic.
 ### Redundant casts -> destination-driven conversion
 
 **Wrong:** `return ffi.count() as integer` when the declared return already is
-`integer`, or `ffi.set(n as ffi.api_int)` when its header typedef supplies `ffi.api_int`.
+`integer`, or `ffi.set(n as foreign api_int)` when its header typedef supplies `api_int`.
 
 **Right:** `return ffi.count()` and `ffi.set(n)`. Keep `as` when choosing C versus
 Titan operator behavior, numeric variadic ABI, or an unsafe explicit edge.
@@ -1851,8 +1862,10 @@ allocate owners, catch/defer, or receive implicit `L`.
 for later use?
 
 **Pass criteria:** `a` is fixed automatic `[4]`, checked and length-aware; `b`
-is uncounted borrowed view; `p` has hidden owner only for frame; `o` is explicit
-counted GC owner. None of the raw pointers alone proves escape safety; long-term
+is an uncounted borrowed view; pointer/view targets use automatic backing for
+an eligible positive constant array count and hidden owned backing otherwise,
+with the latter owner rooted only for the frame; `o` is an explicit counted GC
+owner. None of the raw pointers alone proves escape safety; long-term
 C use requires retaining `o` (or another true external owner) for the complete
 borrow. Notes 0-based indexing and `#` only for fixed/counted forms.
 

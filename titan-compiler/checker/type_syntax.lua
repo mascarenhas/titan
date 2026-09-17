@@ -48,9 +48,10 @@ function resolve_surface_c_type(name, st, errors, loc)
     return typ
 end
 
--- Header-defined names retain their defining module's C namespace for native
--- owner/callable registry identities. Follow structural wrappers only: a named
--- typedef or aggregate is the identity boundary, not its fields or definition.
+-- Preserve converter-supplied C declaration origins for owner/callable keys.
+-- Module scope is only a fallback for synthetic descriptors without an origin.
+-- Follow structural wrappers only: a named typedef or aggregate is the identity
+-- boundary, not its fields or definition.
 local function scope_foreign_type_surface(typ, st, seen)
     if type(typ) ~= "table" then return end
     seen = seen or {}

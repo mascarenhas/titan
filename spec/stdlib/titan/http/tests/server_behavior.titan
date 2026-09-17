@@ -19,7 +19,7 @@ local function start_server_streaming(first_port: integer): async.Task
 
       local header_control_rejected = false
       do
-        response:add_header("X-Bad", "control" .. str.char(1))
+        response:add_header("X-Bad", "control" .. string.char(1))
       catch
         header_control_rejected = true
       end
@@ -28,7 +28,7 @@ local function start_server_streaming(first_port: integer): async.Task
 
       local reason_control_rejected = false
       do
-        response:set_status(200, "bad" .. str.char(127))
+        response:set_status(200, "bad" .. string.char(127))
       catch
         reason_control_rejected = true
       end
@@ -71,7 +71,7 @@ local function start_server_streaming(first_port: integer): async.Task
     test.assert(support.contains(response_text, "HTTP/1.1 201 Created\r\n") and
           support.contains(response_text, "Transfer-Encoding: chunked\r\n"),
           "HTTP server sent the wrong response headers")
-    local body = str.writer()
+    local body = string.writer()
     for chunk in client:read do body:write(chunk) end
     test.assert(body:drain() ==
           "5\r\nfirst\r\n6\r\nsecond\r\n0\r\n\r\n",
@@ -93,7 +93,7 @@ local function start_expect_continue(first_port: integer): async.Task
       handled = handled + 1
       test.assert(request.target == "/continue",
             "HTTP Expect request reached the wrong handler path")
-      local body = str.writer()
+      local body = string.writer()
       for chunk in request:read do body:write(chunk) end
       test.assert(body:drain() == "body",
             "HTTP Expect request body was not delivered after 100 Continue")
@@ -146,12 +146,12 @@ local function start_expect_continue(first_port: integer): async.Task
           "HTTP server did not acknowledge 100-continue before the body")
     support.outcome = "expect-sending-body"
     client:write("body")
-    local final = str.writer()
+    local final = string.writer()
     for chunk in client:read do final:write(chunk) end
     local final_text = final:drain()
     test.assert(support.contains(final_text, "HTTP/1.1 200 OK\r\n") and
           support.contains(final_text, "Content-Length: 2\r\n") and
-          str.sub(final_text, #final_text - 1) == "ok",
+          string.sub(final_text, #final_text - 1) == "ok",
           "HTTP server did not complete the continued request")
     client:close()
     current = nil
@@ -162,7 +162,7 @@ local function start_expect_continue(first_port: integer): async.Task
       "Expect: 100-continue\r\nExpect: 100-continue\r\n",
     }
     for index = 1, #rejected do
-      support.outcome = "expect-rejecting-" .. str.tostring(index)
+      support.outcome = "expect-rejecting-" .. string.tostring(index)
       local rejected_client = net.connect("127.0.0.1", port)
       defer rejected_client:close()
       current = rejected_client
@@ -172,7 +172,7 @@ local function start_expect_continue(first_port: integer): async.Task
         "Content-Length: 4\r\n" .. rejected[index] .. "\r\n")
       -- No body follows. A final 417 must arrive and close the connection
       -- without entering the handler or trying to drain the declared body.
-      local refusal = str.writer()
+      local refusal = string.writer()
       for chunk in rejected_client:read do refusal:write(chunk) end
       test.assert(refusal:drain() ==
               "HTTP/1.1 417 Expectation Failed\r\n" ..
@@ -203,9 +203,9 @@ local function start_buffered_next_requests(first_port: integer): async.Task
     local handler: http.Handler = function (_: http.Request,
                                             response: http.Response)
       handled = handled + 1
-      support.outcome = "buffered-handler-" .. str.tostring(handled)
+      support.outcome = "buffered-handler-" .. string.tostring(handled)
       response:set_header("Content-Length", "1")
-      response:write(str.tostring(handled))
+      response:write(string.tostring(handled))
     end
     local server, port = support.http_listen(first_port, handler)
     defer server:close()
@@ -231,7 +231,7 @@ local function start_buffered_next_requests(first_port: integer): async.Task
       "GET /two HTTP/1.1\r\nHost: localhost\r\n" ..
       "Connection: close\r\n\r\n")
     support.outcome = "buffered-reading"
-    local all = str.writer()
+    local all = string.writer()
     for chunk in client:read do all:write(chunk) end
     server:close()
     watchdog:cancel(async.CancellationReason.simple(
@@ -240,10 +240,10 @@ local function start_buffered_next_requests(first_port: integer): async.Task
     test.assert(not watchdog_fired,
           "buffered HTTP requests required the watchdog: " .. support.outcome)
     local responses = all:drain()
-    local first: integer? = str.find(responses, "HTTP/1.1 200 OK")
+    local first: integer? = string.find(responses, "HTTP/1.1 200 OK")
     local second: integer? = nil
     if first then
-      second = str.find(responses, "HTTP/1.1 200 OK",
+      second = string.find(responses, "HTTP/1.1 200 OK",
                         (first as integer) + 1)
     end
     test.assert(first ~= nil and second ~= nil and handled == 2,
@@ -275,7 +275,7 @@ local function start_unread_request_drain(first_port: integer): async.Task
       -- must drain both fixed and chunked framing before advancing to the
       -- already-buffered next-request suffix.
       response:set_header("Content-Length", "1")
-      response:write(str.char(64 + handled))
+      response:write(string.char(64 + handled))
     end
     local server, port = support.http_listen(first_port, handler)
     defer server:close()
@@ -305,7 +305,7 @@ local function start_unread_request_drain(first_port: integer): async.Task
       "GET /last HTTP/1.1\r\nHost: localhost\r\n" ..
       "Connection: close\r\n\r\n")
     support.outcome = "request-drain-reading"
-    local all = str.writer()
+    local all = string.writer()
     for chunk in client:read do all:write(chunk) end
     client:close()
     server:close()
@@ -390,14 +390,14 @@ local function start_server_failure_isolation(first_port: integer): async.Task
       defer connection:close()
       current = connection
       connection:write(request_text)
-      local received = str.writer()
+      local received = string.writer()
       for chunk in connection:read do received:write(chunk) end
       connection:close()
       current = nil
       return received:drain()
     end
 
-    local authority = "127.0.0.1:" .. str.tostring(port)
+    local authority = "127.0.0.1:" .. string.tostring(port)
     support.outcome = "server-rejecting-204-length"
     local bad_204 = exchange(
       "GET /bad-204 HTTP/1.1\r\nHost: " .. authority .. "\r\n" ..
@@ -413,7 +413,7 @@ local function start_server_failure_isolation(first_port: integer): async.Task
     }
     for index = 1, #non_origin_lines do
       support.outcome = "server-rejecting-non-origin-target-" ..
-        str.tostring(index)
+        string.tostring(index)
       local non_origin = exchange(
         non_origin_lines[index] .. "Host: " .. authority .. "\r\n" ..
         "Connection: close\r\n\r\n")
@@ -428,7 +428,7 @@ local function start_server_failure_isolation(first_port: integer): async.Task
       "user@localhost",
     }
     for index = 1, #malicious_hosts do
-      support.outcome = "server-rejecting-host-" .. str.tostring(index)
+      support.outcome = "server-rejecting-host-" .. string.tostring(index)
       local rejected = exchange(
         "GET /never HTTP/1.1\r\nHost: " .. malicious_hosts[index] ..
         "\r\nConnection: close\r\n\r\n")
@@ -453,9 +453,9 @@ local function start_server_failure_isolation(first_port: integer): async.Task
           support.contains(reset, "\r\nContent-Length: 0\r\n") and
           not support.contains(reset, "\r\nTransfer-Encoding:"),
           "HTTP 205 response did not use zero-length framing")
-    local header_end? = str.find(reset, "\r\n\r\n")
+    local header_end? = string.find(reset, "\r\n\r\n")
     test.assert(header_end ~= nil and
-          str.sub(reset, (header_end as integer) + 4) == "",
+          string.sub(reset, (header_end as integer) + 4) == "",
           "HTTP 205 response emitted body bytes")
 
     server:close()
@@ -563,7 +563,7 @@ local function start_cancelled_client_close(first_port: integer): async.Task
     defer task_support.cancel_and_join_task(peer, "nested HTTP peer cleanup")
 
     local response = http.get(
-      "http://127.0.0.1:" .. str.tostring(port) .. "/close", nil, nil)
+      "http://127.0.0.1:" .. string.tostring(port) .. "/close", nil, nil)
     defer response:close()
     local closer: async.Task? = nil
     local close_returned = false
@@ -626,7 +626,7 @@ local function start_idle_timeout_api(first_port: integer,
       unexpected:close()
     catch
       plain_rejected =
-        str.tostring(error) == "HTTP idle timeout must be non-negative"
+        string.tostring(error) == "HTTP idle timeout must be non-negative"
     end
     occupied:close()
     test.assert(plain_rejected,
@@ -641,7 +641,7 @@ local function start_idle_timeout_api(first_port: integer,
       unexpected:close()
     catch
       tls_rejected =
-        str.tostring(error) == "HTTP idle timeout must be non-negative"
+        string.tostring(error) == "HTTP idle timeout must be non-negative"
     end
     test.assert(tls_rejected,
           "HTTPS listener read PEM input before timeout validation")
@@ -662,7 +662,7 @@ local function start_idle_timeout_api(first_port: integer,
       default_server:idle_timeout(-2)
     catch
       setter_rejected =
-        str.tostring(error) == "HTTP idle timeout must be non-negative"
+        string.tostring(error) == "HTTP idle timeout must be non-negative"
     end
     test.assert(setter_rejected and default_server:idle_timeout(nil) == 0,
           "HTTP Server mutated its timeout after rejecting a value")

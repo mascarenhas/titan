@@ -1,5 +1,5 @@
 local uv = import "uv.titan"
-local str = import "string"
+local string = import "string"
 foreign import "uv.h"
 foreign import "lua.h"
 foreign import "titan/ffi.h"
@@ -100,8 +100,8 @@ function File:read(max_bytes: integer?): string?
   if #self.excess > 0 then
     local length = requested
     if length > #self.excess then length = #self.excess end
-    local result = str.sub(self.excess, 1, length)
-    self.excess = str.sub(self.excess, length + 1)
+    local result = string.sub(self.excess, 1, length)
+    self.excess = string.sub(self.excess, length + 1)
     return result
   end
   return uv.fs_read(self.handle, requested)
@@ -117,21 +117,21 @@ function File:read_until(delimiter: string,
     raise "read delimiter must not be empty"
   end
 
-  local builder = str.writer()
+  local builder = string.writer()
   local tail = ""
   for chunk in self:read do
     local boundary = chunk
     if #tail > 0 then boundary = tail .. chunk end
-    local match: integer? = str.find(boundary, delimiter)
+    local match: integer? = string.find(boundary, delimiter)
     if match then
       local match_first = match
       local match_end = match_first + #delimiter - 1
       local result_end = match_end
       if chop then result_end = match_first - 1 end
       if result_end > 0 then
-        builder:write(str.sub(boundary, 1, result_end))
+        builder:write(string.sub(boundary, 1, result_end))
       end
-      self.excess = str.sub(boundary, match_end + 1)
+      self.excess = string.sub(boundary, match_end + 1)
       return builder:drain()
     end
     local keep = #delimiter - 1
@@ -141,10 +141,10 @@ function File:read_until(delimiter: string,
       if committed == #boundary then
         builder:write(boundary)
       else
-        builder:write(str.sub(boundary, 1, committed))
+        builder:write(string.sub(boundary, 1, committed))
       end
     end
-    tail = str.sub(boundary, committed + 1)
+    tail = string.sub(boundary, committed + 1)
   end
   if #tail > 0 then builder:write(tail) end
   local result = builder:drain()
@@ -189,7 +189,7 @@ function read_file(path: string): string
   local file = open(path, "r")
   defer file:close()
 
-  local builder = str.writer()
+  local builder = string.writer()
   for bytes in file:read do
     builder:write(bytes)
   end

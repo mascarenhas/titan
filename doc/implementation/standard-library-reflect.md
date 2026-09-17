@@ -6,6 +6,12 @@ The public API is documented in the
 runtime. The compiler emits its discoverable metadata in ordinary nominal
 metatables and callable closures.
 
+Inspection wrappers expose the retained object or callable as `value`. Where
+a wrapper exposes a type descriptor, that field is `type`. Field and variant
+metadata likewise use `type` for their described type. These are ordinary
+record fields admitted by the grammar;
+hydration and accessors use the same names when constructing and reading them.
+
 ## Metadata ownership
 
 The per-state registry table at `TITAN_METATABLES_KEY` maps fully qualified
@@ -118,7 +124,7 @@ every field were a `TValue`.
 
 `RecordValue:get` and `set` validate `1 <= i <= n_fields`; the generated
 accessor enforces constness on writes. `InterfaceValue:get` applies the
-same ordinal/bounds rules to captured fields. The corresponding `.val` keeps
+same ordinal/bounds rules to captured fields. The corresponding `.value` keeps
 the receiver reachable; the private module value in `FieldType` keeps the
 declaring owner reachable. A local `TValue` supplies the accessor's input or
 output and the module value is unboxed only for the native call.
@@ -160,7 +166,7 @@ as a generic `TValue` is insufficient.
 An Interface wrapper retains its concrete receiver in user value 1. Its
 captured fields begin at user value 2. Field access uses generated accessors
 to box those snapshots correctly; `.wrapped` exposes the concrete receiver
-as a value, while `.val` remains the Interface method receiver.
+as a value, while `.value` remains the Interface method receiver.
 
 ## Function inspection
 
@@ -176,7 +182,7 @@ state. Ordinary C closures and light C functions both produce
 `LuaCFunctionValue`.
 
 The public `lua_entry`/`entry` fields are typed foreign Lua C function
-pointers. `native_entry` is an untyped address. The retained `.val` callable
+pointers. `native_entry` is an untyped address. The retained `.value` callable
 is the ordinary application invocation path.
 
 ## Owned C storage
@@ -184,7 +190,7 @@ is the ordinary application invocation path.
 The `TITAN_OWNED` brand selects an owned pointer or counted Array descriptor.
 The wrapper exposes `getudatamem(u)` as its payload address and `u->len` as
 the storage size. Counted Arrays also carry their element count in user value
-0. A traced `.val` retains the storage owner; its raw payload pointer alone
+0. A traced `.value` retains the storage owner; its raw payload pointer alone
 does not root it or acquire any external resource lifetime.
 
 ## Verification boundaries

@@ -176,8 +176,10 @@ namedtype ::= AnyName [typeargs] | AnyName '.' AnyName [typeargs]
 ```
 
 A missing named Titan function return annotation means zero results; a missing foreign
-function return annotation means C `void`. Lambda results are inferred when
-the lambda omits its return annotation. A module variable needs an
+function return annotation means C `void`. When a lambda omits its return
+annotation, its expected function type supplies the results when available;
+otherwise it has zero results. Results are not inferred from the body.
+A module variable needs an
 annotation or initializer. An omitted initializer supplies nil, which its type
 must admit; const initialization authority in the final initializer is
 unchanged. A keyword followed by `:` or `=` may name a module variable before

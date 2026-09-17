@@ -207,7 +207,7 @@ local function Decoder:decode_union(node: Node, descriptor: reflect.UnionType,
               tag_path, self.source, tag.position)
   end
   local payload_path = field_path(path, "value")
-  local payload_type? = variant.descriptor
+  local payload_type? = variant.type
   if payload_type == nil then
     if payload ~= nil then
       json_fail("invalid_union", "empty union variant must not have a value",

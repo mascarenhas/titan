@@ -101,7 +101,7 @@ local a = xs[1]    -- a: integer  (run-time error if xs[1] is nil)
 local b? = xs[1]   -- b: integer? (nil is fine)
 ```
 
-`local b: integer? = e` is also accepted and means the same as
+`local b?: integer = e` is also accepted and means the same as
 `local b: integer? = e`. The full inference and assignment-adjustment rules
 are in [The type system](types.md); the initializer receives the admitted
 identity, direct coercion, gradual view, or callable adjustment for the

@@ -470,7 +470,7 @@ local function execute_input(parser: Parser, input: string)
     end
   end
   if consumed < #input then
-    parser.input_excess = str.sub(input, consumed + 1)
+    parser.input_excess = string.sub(input, consumed + 1)
   end
   raise_callback_failure(parser)
   drain_events(parser)
@@ -579,7 +579,7 @@ end
 local function parser_read_until(parser: Parser, delimiter: string,
                                   chop: boolean?): string?
   if #delimiter == 0 then raise "read delimiter must not be empty" end
-  local builder = str.writer()
+  local builder = string.writer()
   local tail = ""
   while true do
     local chunk? = parser_read(parser)
@@ -590,25 +590,25 @@ local function parser_read_until(parser: Parser, delimiter: string,
       return result
     end
     local boundary = tail .. (chunk as string)
-    local match? = str.find(boundary, delimiter)
+    local match? = string.find(boundary, delimiter)
     if match then
       local match_first = match as integer
       local match_end = match_first + #delimiter - 1
       local result_end = match_end
       if chop then result_end = match_first - 1 end
       if result_end > 0 then
-        builder:write(str.sub(boundary, 1, result_end))
+        builder:write(string.sub(boundary, 1, result_end))
       end
-      parser.body_excess = str.sub(boundary, match_end + 1)
+      parser.body_excess = string.sub(boundary, match_end + 1)
       return builder:drain()
     end
     local keep = #delimiter - 1
     if keep > #boundary then keep = #boundary end
     local committed = #boundary - keep
     if committed > 0 then
-      builder:write(str.sub(boundary, 1, committed))
+      builder:write(string.sub(boundary, 1, committed))
     end
-    tail = str.sub(boundary, committed + 1)
+    tail = string.sub(boundary, committed + 1)
   end
   return nil
 end

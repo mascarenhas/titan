@@ -834,7 +834,7 @@ the stored plan rather than treating every unequal pair as a scalar cast:
 9. **nil → `t?`** emits `setnilvalue`.
 10. **t → `t?`** boxes the present value with the plan's `option_wrap`.
 11. **`t?` → t** checks nil before lowering `option_force`'s inner plan, so
-    absence raises a clean `expected<|T|> but found nil`.
+    absence raises a clean `expected <T> but found nil`.
 12. **→ foreign pointer** lets `nativetoforeignexp` lower the exact C
     conversion plan. A `value` source needs the separately written unsafe
     raw-pointer operation; it is never an implicit gradual projection.

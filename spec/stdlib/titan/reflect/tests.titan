@@ -34,7 +34,7 @@ end
 
 local function function_type(candidate: value): reflect.FunctionType
   case reflect.inspect(candidate)
-  when is_titan_function(fn) then return fn.descriptor
+  when is_titan_function(fn) then return fn.type
   else raise "expected a reflected Titan function"
   end
 end
@@ -74,7 +74,7 @@ local function field_index(rec: reflect.RecordType, name: string): integer
 end
 
 local function field_type(rec: reflect.RecordType, name: string): reflect.Type
-  return rec.fields[field_index(rec, name)].descriptor
+  return rec.fields[field_index(rec, name)].type
 end
 
 local function assert_value_type(descriptor: reflect.Type)
@@ -195,7 +195,7 @@ function test_inspect_arrays(_context: test.Context)
   local v = reflect.inspect(arr)
   case v
   when is_array(av) then
-    local elements = av.val
+    local elements = av.value
     test.assert(#elements == 3)
     test.assert(elements[1] as integer == 10)
     test.assert(elements[2] as integer == 20)
@@ -210,7 +210,7 @@ function test_inspect_maps(_context: test.Context)
   local v = reflect.inspect(m)
   case v
   when is_map(mv) then
-    local map_val = mv.val
+    local map_val = mv.value
     test.assert(map_val["alpha"] as integer == 1)
     test.assert(map_val["beta"] as integer == 2)
   else
@@ -260,6 +260,27 @@ function test_inspect_records(_context: test.Context)
   end
 end
 
+function test_value_and_type_fields_cross_lua_boundary(_context: test.Context)
+  local original = SimpleRecord.new(13, 21)
+  local inspected = record_value(original)
+  test.assert(inspected.value == original as value)
+  test.assert(inspected.type == required_record("reflect.tests.SimpleRecord"))
+
+  local variants = required_union("reflect.tests.TestShape").variants
+  local read_fields = lua.load([[
+    local reflected, payload, empty = ...
+    return reflected.value, reflected.type, reflected.type.fields[1].type,
+           payload.type, empty.type
+  ]])
+  local candidate, schema, field, payload, empty =
+    read_fields(inspected, variants[1], variants[3])
+  test.assert(candidate == original as value)
+  test.assert(schema == inspected.type as value)
+  assert_integer_type(field as reflect.Type)
+  assert_integer_type(payload as reflect.Type)
+  test.assert(empty == nil)
+end
+
 function test_inspect_record_const_and_barrier(_context: test.Context)
   local p: PersonRecord = { id = 7, name = "initial", items = {"item1"} }
   local v = reflect.inspect(p)
@@ -296,8 +317,8 @@ function test_inspect_unions(_context: test.Context)
   when is_union(uv) then
     test.assert(uv.tag == 0)
     test.assert(uv.payload as integer == 42)
-    test.assert(#uv.descriptor.variants == 3)
-    test.assert(uv.descriptor.variants[1].name == "circle")
+    test.assert(#uv.type.variants == 3)
+    test.assert(uv.type.variants[1].name == "circle")
   else
     test.assert(false, "expected is_union")
   end
@@ -308,7 +329,7 @@ function test_inspect_unions(_context: test.Context)
   when is_union(uve) then
     test.assert(uve.tag == 2)
     test.assert(uve.payload == nil)
-    test.assert(uve.descriptor.variants[3].name == "empty")
+    test.assert(uve.type.variants[3].name == "empty")
   else
     test.assert(false, "expected is_union")
   end
@@ -320,7 +341,7 @@ function test_inspect_interfaces(_context: test.Context)
   local v = reflect.inspect(g)
   case v
   when is_interface(iv) then
-    test.assert(iv.descriptor.name ~= "")
+    test.assert(iv.type.name ~= "")
     test.assert(iv.n_fields == 1)
     test.assert(iv:get(1) as string == "hello")
 
@@ -342,7 +363,7 @@ function test_inspect_functions(_context: test.Context)
   when is_titan_function(tf) then
     test.assert(tf.native_entry ~= nil)
     test.assert(tf.lua_entry ~= nil)
-    test.assert(#tf.descriptor.param_descriptors >= 1)
+    test.assert(#tf.type.param_descriptors >= 1)
   else
     test.assert(false, "expected is_titan_function")
   end
@@ -354,13 +375,13 @@ function test_nominal_descriptors(_context: test.Context)
   test.assert(#rt.fields == 2)
   test.assert(rt.fields[1].name == "x")
   test.assert(rt.fields[2].name == "y")
-  assert_integer_type(rt.fields[1].descriptor)
+  assert_integer_type(rt.fields[1].type)
 
   local ut = required_union("reflect.tests.TestShape")
   test.assert(ut.name == "reflect.tests.TestShape")
   test.assert(#ut.variants == 3)
   test.assert(ut.variants[1].name == "circle")
-  test.assert(ut.variants[3].descriptor == nil)
+  test.assert(ut.variants[3].type == nil)
 
   local ift = required_interface("reflect.tests.Greeter")
   test.assert(ift.name == "reflect.tests.Greeter")
@@ -379,7 +400,7 @@ end
 
 function test_named_type_resolve(_context: test.Context)
   local ut = required_union("reflect.tests.TestShape")
-  local payload = ut.variants[2].descriptor as reflect.Type
+  local payload = ut.variants[2].type as reflect.Type
   case payload
   when is_named(named) then
     test.assert(named.name == "reflect.tests.SimpleRecord")
@@ -441,10 +462,10 @@ function test_record_field_casts_and_private_gaps(_context: test.Context)
   local candidate = access_record()
   local rv = record_value(candidate)
   test.assert(rv.n_fields == 9)
-  test.assert(rv.descriptor.fields[1].name == "number")
-  test.assert(rv.descriptor.fields[1].index == 1)
-  test.assert(rv.descriptor.fields[2].name == "fixed")
-  test.assert(rv.descriptor.fields[2].index == 3)
+  test.assert(rv.type.fields[1].name == "number")
+  test.assert(rv.type.fields[1].index == 1)
+  test.assert(rv.type.fields[2].name == "fixed")
+  test.assert(rv.type.fields[2].index == 3)
   test.assert(rv:get(1) as integer == 11)
   test.assert(rv:get(2) as integer == 12)
   rv:set(1, 45)
@@ -467,7 +488,7 @@ function test_record_field_casts_and_private_gaps(_context: test.Context)
   test.assert(candidate.number == 45)
   test.assert(candidate.fixed == 12)
 
-  local optional = field_index(rv.descriptor, "optional")
+  local optional = field_index(rv.type, "optional")
   test.assert(rv:get(optional) == false)
   rv:set(optional, nil)
   test.assert(candidate.optional == nil)
@@ -482,8 +503,8 @@ end
 function test_record_container_and_nominal_accessors(_context: test.Context)
   local candidate = access_record()
   local rv = record_value(candidate)
-  local items = field_index(rv.descriptor, "items")
-  local frozen = field_index(rv.descriptor, "frozen")
+  local items = field_index(rv.type, "items")
+  local frozen = field_index(rv.type, "frozen")
   test.assert(rv:get(items) == candidate.items as value)
   test.assert(rv:get(frozen) == candidate.frozen as value)
   local replacement: {integer} = {10, 20, 30}
@@ -497,7 +518,7 @@ function test_record_container_and_nominal_accessors(_context: test.Context)
   expect_failure(function() rv:set(items, "not an Array") end)
   test.assert(candidate.items == replacement)
 
-  local child = field_index(rv.descriptor, "child")
+  local child = field_index(rv.type, "child")
   local point: SimpleRecord = {x = 6, y = 9}
   rv:set(child, point)
   test.assert(rv:get(child) == point as value)
@@ -507,14 +528,14 @@ function test_record_container_and_nominal_accessors(_context: test.Context)
   rv:set(child, nil)
   test.assert(candidate.child == nil)
 
-  local choice = field_index(rv.descriptor, "choice")
+  local choice = field_index(rv.type, "choice")
   local shape = TestShape.circle(31)
   rv:set(choice, shape)
   test.assert(rv:get(choice) == shape as value)
   expect_failure(function() rv:set(choice, point) end)
   test.assert(candidate.choice == shape)
 
-  local greeter = field_index(rv.descriptor, "greeter")
+  local greeter = field_index(rv.type, "greeter")
   local impl: GreeterImpl = {prefix = "new"}
   local iface: Greeter = impl
   rv:set(greeter, iface)
@@ -522,7 +543,7 @@ function test_record_container_and_nominal_accessors(_context: test.Context)
   test.assert(candidate.greeter:greet() == "new world")
   expect_failure(function() rv:set(greeter, point) end)
 
-  local callback = field_index(rv.descriptor, "callback")
+  local callback = field_index(rv.type, "callback")
   local from_field = rv:get(callback) as function (integer): (integer)
   test.assert(from_field(4) == 5)
   local double = function(n: integer): integer return n * 2 end
@@ -556,8 +577,8 @@ function test_record_accessors_keep_owner_and_new_values_alive(_context: test.Co
   end
   local rv = retained_record_view()
   gc.collect()
-  local child = field_index(rv.descriptor, "child")
-  local items = field_index(rv.descriptor, "items")
+  local child = field_index(rv.type, "child")
+  local items = field_index(rv.type, "items")
   for i = 1, 32 do
     -- The helper frame is gone before collection; only the old record keeps
     -- either newly allocated payload alive.
@@ -589,20 +610,20 @@ function test_interface_field_boxing_and_ordered_methods(_context: test.Context)
   local candidate: SnapshotImpl = {values = values}
   local iface: ArraySnapshot = candidate
   local iv = interface_value(iface)
-  test.assert(iv.val == iface as value)
+  test.assert(iv.value == iface as value)
   test.assert(iv.wrapped == candidate as value)
   test.assert(iv:get(1) == values as value)
   local array = iv:get(1) as {integer}
   array[1] = 30
   test.assert(candidate.values[1] == 30)
-  test.assert(iv.descriptor.fields[1].is_const)
-  test.assert(#iv.descriptor.methods == 2)
-  test.assert(iv.descriptor.methods[1].name == "zeta")
-  test.assert(iv.descriptor.methods[2].name == "alpha")
-  test.assert(iv.descriptor.methods[1].param_names[1] == "n")
-  local added: value = iv.descriptor.methods[1].callable(iv.val, 7)
+  test.assert(iv.type.fields[1].is_const)
+  test.assert(#iv.type.methods == 2)
+  test.assert(iv.type.methods[1].name == "zeta")
+  test.assert(iv.type.methods[2].name == "alpha")
+  test.assert(iv.type.methods[1].param_names[1] == "n")
+  local added: value = iv.type.methods[1].callable(iv.value, 7)
   test.assert(added as integer == 37)
-  local count: value = iv.descriptor.methods[2].callable(iv.val)
+  local count: value = iv.type.methods[2].callable(iv.value)
   test.assert(count as integer == 2)
   expect_failure(function() local _ = iv:get(0) end)
   expect_failure(function() local _ = iv:get(2) end)
@@ -663,7 +684,7 @@ function test_callable_descriptors_and_invocation(_context: test.Context)
   end
   case reflect.inspect(variadic_echo)
   when is_titan_function(fn) then
-    local head, first, second = fn.val(9, "a", "b")
+    local head, first, second = fn.value(9, "a", "b")
     test.assert(head as integer == 9)
     test.assert(first as string == "a" and second as string == "b")
   else raise "expected Titan function"
@@ -696,7 +717,7 @@ function test_unconstrained_generic_descriptors(_context: test.Context)
     callback = plus_one, optional = nil
   }
   local rv = record_value(rec)
-  local desc = rv.descriptor
+  local desc = rv.type
   assert_value_type(field_type(desc, "item"))
   assert_value_type(field_type(desc, "optional"))
   case field_type(desc, "items")
@@ -723,7 +744,7 @@ function test_unconstrained_generic_descriptors(_context: test.Context)
   assert_value_type(desc.methods[1].return_descriptors[1])
   test.assert(desc.statics[1].name == "identity")
   assert_value_type(desc.statics[1].param_descriptors[1])
-  local answer: value = desc.methods[1].callable(rv.val, false)
+  local answer: value = desc.methods[1].callable(rv.value, false)
   test.assert(answer == false)
   answer = desc.statics[1].callable("generic")
   test.assert(answer == "generic")
@@ -733,13 +754,13 @@ function test_unconstrained_generic_descriptors(_context: test.Context)
     item = "text", items = {}, by_name = {}, optional = nil,
     callback = function(item: string): string return item end
   }
-  test.assert(record_value(other).descriptor == desc)
+  test.assert(record_value(other).type == desc)
   local un = GenericUnion<|integer|>.item(19)
   case reflect.inspect(un)
   when is_union(uv) then
-    assert_value_type(uv.descriptor.variants[1].descriptor as reflect.Type)
+    assert_value_type(uv.type.variants[1].type as reflect.Type)
     test.assert(uv.payload as integer == 19)
-    local made: value = uv.descriptor.variants[1].callable(false)
+    local made: value = uv.type.variants[1].callable(false)
     case reflect.inspect(made)
     when is_union(created) then test.assert(created.payload == false)
     else raise "expected reflected variant constructor result"
@@ -783,7 +804,7 @@ function test_constrained_descriptors_keep_outer_nominal_identity(_context: test
   local item: IntegerGetter = {item = 41}
   local candidate: ConstrainedRecord<|IntegerGetter|> = {item = item}
   local rv = record_value(candidate)
-  local carrier = field_type(rv.descriptor, "item")
+  local carrier = field_type(rv.type, "item")
   assert_interface_type(carrier, "reflect.tests.GenericGetter")
   case carrier:resolve()
   when is_interface(iface) then
@@ -835,13 +856,13 @@ function test_const_arrays_preserve_identity_and_values(_context: test.Context)
   local frozen = source as const {integer}
   case reflect.inspect(frozen)
   when is_const_array(arr) then
-    test.assert(arr.val as value == frozen as value)
-    test.assert(#arr.val == 3)
-    test.assert(arr.val[2] as integer == 4)
+    test.assert(arr.value as value == frozen as value)
+    test.assert(#arr.value == 3)
+    test.assert(arr.value[2] as integer == 4)
   else raise "expected const Array value"
   end
   case reflect.inspect(source)
-  when is_array(arr) then test.assert(arr.val as value == source as value)
+  when is_array(arr) then test.assert(arr.value as value == source as value)
   else raise "snapshot must preserve mutable source"
   end
 end
@@ -860,14 +881,14 @@ function test_lua_function_c_function_and_thread_variants(_context: test.Context
   local candidate: value = make_function()
   case reflect.inspect(candidate)
   when is_lua_function(fn) then
-    test.assert(fn.descriptor.source == "=reflection-fixture")
-    test.assert(fn.descriptor.short_source == "reflection-fixture")
-    test.assert(fn.descriptor.what == "Lua")
-    test.assert(fn.descriptor.line_defined == 1)
-    test.assert(fn.descriptor.last_line_defined == 1)
-    test.assert(fn.descriptor.n_params == 2)
-    test.assert(fn.descriptor.is_vararg)
-    local a, b, c = fn.val(3, false, "tail")
+    test.assert(fn.type.source == "=reflection-fixture")
+    test.assert(fn.type.short_source == "reflection-fixture")
+    test.assert(fn.type.what == "Lua")
+    test.assert(fn.type.line_defined == 1)
+    test.assert(fn.type.last_line_defined == 1)
+    test.assert(fn.type.n_params == 2)
+    test.assert(fn.type.is_vararg)
+    local a, b, c = fn.value(3, false, "tail")
     test.assert(a as integer == 3 and b == false and c == "tail")
   else raise "expected Lua function"
   end
@@ -877,15 +898,15 @@ function test_lua_function_c_function_and_thread_variants(_context: test.Context
   case reflect.inspect(light)
   when is_lua_c_function(fn) then
     test.assert(fn.entry ~= nil)
-    local callable = fn.val
+    local callable = fn.value
     test.assert(callable(-4) as integer == 4)
   else raise "expected light Lua C function"
   end
   case reflect.inspect(closure)
   when is_lua_c_function(fn) then
     test.assert(fn.entry ~= nil)
-    test.assert(fn.val() == "a")
-    test.assert(fn.val() == "b")
+    test.assert(fn.value() == "a")
+    test.assert(fn.value() == "b")
   else raise "expected Lua C closure"
   end
 
@@ -893,7 +914,7 @@ function test_lua_function_c_function_and_thread_variants(_context: test.Context
   local thread: value = create_thread()
   case reflect.inspect(thread)
   when is_lua_thread(inspected) then
-    test.assert(inspected.val == thread)
+    test.assert(inspected.value == thread)
     test.assert(inspected.thread ~= nil)
   else raise "expected Lua thread"
   end
@@ -902,7 +923,7 @@ end
 function test_userdata_and_raw_pointer_variants(_context: test.Context)
   local candidate = plain_lua_userdata()
   case reflect.inspect(candidate)
-  when is_lua_userdata(udata) then test.assert(udata.val == candidate)
+  when is_lua_userdata(udata) then test.assert(udata.value == candidate)
   else raise "expected unbranded Lua userdata"
   end
   local storage = foreign char.new_array(1)
@@ -932,10 +953,10 @@ function test_owned_foreign_scalar_and_array_descriptors(_context: test.Context)
   owned_storage[0] = 2.5
   case reflect.inspect(owner)
   when is_owned_foreign_pointer(pointer) then
-    test.assert(pointer.val == owner as value)
+    test.assert(pointer.value == owner as value)
     test.assert(pointer.payload ~= nil)
     test.assert(pointer.size == foreign double.sizeof)
-    case pointer.descriptor.pointee_descriptor
+    case pointer.type.pointee_descriptor
     when is_foreign_float(scalar) then test.assert(scalar.spelling == "double")
     else raise "expected owned double descriptor"
     end
@@ -949,10 +970,10 @@ function test_owned_foreign_scalar_and_array_descriptors(_context: test.Context)
   numbers[1] = 42
   case reflect.inspect(numbers)
   when is_owned_foreign_array(arr) then
-    test.assert(arr.val == numbers as value)
+    test.assert(arr.value == numbers as value)
     test.assert(arr.count == 3)
     test.assert(arr.size == 3 * foreign int.sizeof)
-    case arr.descriptor.elem_descriptor
+    case arr.type.elem_descriptor
     when is_foreign_integer(scalar) then
       test.assert(scalar.spelling == "int")
       test.assert(scalar.is_signed)
@@ -982,7 +1003,7 @@ function test_owned_struct_describes_public_c_fields(_context: test.Context)
   case reflect.inspect(owner)
   when is_owned_foreign_pointer(pointer) then
     test.assert(pointer.size == foreign div_t.sizeof)
-    case without_typedef(pointer.descriptor.pointee_descriptor)
+    case without_typedef(pointer.type.pointee_descriptor)
     when is_foreign_struct(aggregate) then
       test.assert(aggregate.is_complete)
       test.assert(not aggregate.has_fam)
@@ -991,7 +1012,7 @@ function test_owned_struct_describes_public_c_fields(_context: test.Context)
       test.assert(aggregate.fields[2].name == "rem")
       test.assert(not aggregate.fields[1].is_flexible_array)
       test.assert(aggregate.fields[1].bitfield == false)
-      case without_typedef(aggregate.fields[1].descriptor)
+      case without_typedef(aggregate.fields[1].type)
       when is_foreign_integer(scalar) then
         test.assert(scalar.is_signed)
         test.assert(scalar.bits == 8 * foreign int.sizeof)
@@ -1096,11 +1117,11 @@ function test_union_payload_readers_box_arrays_and_preserve_sparse_tags(_context
   local roundtrip = mutable.payload as {integer}
   roundtrip[1] = 55
   test.assert(values[1] == 55)
-  test.assert(#mutable.descriptor.variants == 4)
-  test.assert(mutable.descriptor.variants[1].name == "mutable")
-  test.assert(mutable.descriptor.variants[1].tag == 1)
-  test.assert(mutable.descriptor.variants[4].name == "empty")
-  test.assert(mutable.descriptor.variants[4].tag == 4)
+  test.assert(#mutable.type.variants == 4)
+  test.assert(mutable.type.variants[1].name == "mutable")
+  test.assert(mutable.type.variants[1].tag == 1)
+  test.assert(mutable.type.variants[4].name == "empty")
+  test.assert(mutable.type.variants[4].tag == 4)
 
   local present = union_value(ArrayPayloads.optional(values))
   test.assert(present.payload == values as value)
@@ -1110,7 +1131,7 @@ function test_union_payload_readers_box_arrays_and_preserve_sparse_tags(_context
   local frozen = union_value(ArrayPayloads.frozen(snapshot))
   test.assert(frozen.payload == snapshot as value)
   case reflect.inspect(frozen.payload)
-  when is_const_array(arr) then test.assert(arr.val[2] as integer == 34)
+  when is_const_array(arr) then test.assert(arr.value[2] as integer == 34)
   else raise "expected boxed const Array payload"
   end
 
@@ -1119,7 +1140,7 @@ function test_union_payload_readers_box_arrays_and_preserve_sparse_tags(_context
   local hidden = union_value(ArrayPayloads.private_array(values))
   test.assert(hidden.tag == 0)
   test.assert(hidden.payload == values as value)
-  test.assert(hidden.descriptor == mutable.descriptor)
+  test.assert(hidden.type == mutable.type)
   local generic = union_value(GenericUnion<|{integer}|>.item(values))
   test.assert(generic.payload == values as value)
   gc.collect()
@@ -1202,7 +1223,7 @@ function test_foreign_field_accessors_check_and_box_values(_context: test.Contex
   gc.collect()
   test.assert(candidate.storage[0] as integer == 23)
 
-  case field_type(rv.descriptor, "pointer")
+  case field_type(rv.type, "pointer")
   when is_foreign_pointer(ptr) then
     test.assert(#ptr.quals == 0)
     case ptr.pointee_descriptor
@@ -1221,7 +1242,7 @@ function test_record_without_public_fields(_context: test.Context)
   local candidate: PrivateOnly = {hidden = 91}
   local rv = record_value(candidate)
   test.assert(rv.n_fields == 0)
-  test.assert(#rv.descriptor.fields == 0)
+  test.assert(#rv.type.fields == 0)
   expect_failure(function() local _ = rv:get(1) end)
   expect_failure(function() rv:set(1, 0) end)
   test.assert(candidate.hidden == 91)
@@ -1229,7 +1250,7 @@ end
 
 local function owned_pointee(candidate: value): reflect.Type
   case reflect.inspect(candidate)
-  when is_owned_foreign_pointer(owner) then return owner.descriptor.pointee_descriptor
+  when is_owned_foreign_pointer(owner) then return owner.type.pointee_descriptor
   else raise "expected owned foreign pointer descriptor"
   end
 end
@@ -1254,7 +1275,7 @@ function test_recursive_foreign_descriptors_resolve_with_retained_context(_conte
   test.assert(#self_type.fields == 2)
   test.assert(self_type.fields[1].name == "marker")
   test.assert(self_type.fields[2].name == "next")
-  local back_reference = foreign_pointer(self_type.fields[2].descriptor).pointee_descriptor
+  local back_reference = foreign_pointer(self_type.fields[2].type).pointee_descriptor
   case back_reference
   when is_foreign_named(named) then
     test.assert(named.name ~= "")
@@ -1278,9 +1299,9 @@ function test_recursive_foreign_descriptors_resolve_with_retained_context(_conte
   local left_owner: owned *titan_reflect_left = foreign titan_reflect_left.new()
   local left_type = foreign_struct(owned_pointee(left_owner))
   test.assert(#left_type.fields == 1 and left_type.fields[1].name == "right")
-  local right_type = foreign_struct(foreign_pointer(left_type.fields[1].descriptor).pointee_descriptor)
+  local right_type = foreign_struct(foreign_pointer(left_type.fields[1].type).pointee_descriptor)
   test.assert(#right_type.fields == 1 and right_type.fields[1].name == "left")
-  local left_reference = foreign_pointer(right_type.fields[1].descriptor).pointee_descriptor
+  local left_reference = foreign_pointer(right_type.fields[1].type).pointee_descriptor
   case left_reference
   when is_foreign_named() then
   else raise "mutually recursive C structs should close with a named link"

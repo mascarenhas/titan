@@ -299,6 +299,14 @@ its typedefs available by unqualified foreign name. This inheritance follows
 transitive C includes and header guards. Ordinary `import "other"` does not
 import these names.
 
+Foreign runtime identity follows the declaring header and C declaration, not
+the importing Titan module. Modules using the same declaration can exchange
+owners through `value`, including through source imports and forced headers.
+Distinct anonymous declarations retain distinct identities. As with ordinary
+C linking, modules exchanging C values must use compatible C declarations and
+build settings; Titan does not fingerprint preprocessing conditions or verify
+C ABI compatibility for these runtime identities.
+
 `owned foreigntype` is a Titan constructor. Its operand must resolve to a C
 pointer or array, including through a foreign alias. The pointed-to/element
 type is the owned payload, and an array operand produces a counted owner.

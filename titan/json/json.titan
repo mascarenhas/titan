@@ -1,5 +1,5 @@
 local reflect = import "reflect"
-local strings = import "string"
+local string = import "string"
 local math = import "math"
 local peg = import "peg"
 local iteration = import "iteration"

@@ -3,14 +3,16 @@ local ffiheaders = require "titan-compiler.ffiheaders"
 local types = require "titan-compiler.types"
 
 describe("foreign alias header manifests", function()
-    local loaders, previous_imported, previous_registry
+    local loaders, headers, previous_imported, previous_registry
     before_each(function()
         loaders = {}
+        headers = {}
         previous_imported, previous_registry = driver.imported, types.registry
         driver.imported, types.registry = {}, {}
     end)
     after_each(function()
         for _, loader in ipairs(loaders) do assert(driver.close_loader(loader)) end
+        for _, header in ipairs(headers) do os.remove(header) end
         driver.imported, types.registry = previous_imported, previous_registry
     end)
 
@@ -52,6 +54,39 @@ describe("foreign alias header manifests", function()
         local dependency = consumer.ast._ffi_header.dependencies[1]
         assert.same(plan.typedef_declarations, dependency.typedef_declarations)
         assert.equal(plan.digest, dependency.digest)
+    end)
+
+    it("retains raw payload scopes through restored transitive source headers", function()
+        local path = os.tmpname() .. ".h"
+        headers[#headers + 1] = path
+        local file = assert(io.open(path, "w"))
+        assert(file:write("struct restored_raw { int member; };\n"))
+        assert(file:close())
+        local provider = load_module("scope_origin.item", string.format([[
+            foreign import %q
+            foreign type Item = restored_raw
+            foreign type Pointer = *restored_raw
+            foreign type Array = restored_raw[]
+        ]], path))
+        local members = provider.ast._ffi_namespace._type.type_members
+        local item_scope, raw_scope = members.Item._ffi_scope, members.restored_raw._ffi_scope
+        local restored = assert(driver.decode_project_entry(assert(driver.encode_project_entry(provider))))
+        driver.imported, types.registry = {}, {}
+        local middle = load_module("scope_bridge.middle", [[
+            local source = import "scope_origin.item.titan"
+        ]], { ["scope_origin.item"] = restored })
+        local restored_middle = assert(driver.decode_project_entry(assert(driver.encode_project_entry(middle))))
+        driver.imported, types.registry = {}, {}
+        local consumer = load_module("scope_user.consumer", [[
+            local middle = import "scope_bridge.middle.titan"
+            local type ItemOwner = owned *Item
+            local type PointerOwner = owned Pointer
+            local type ArrayOwner = owned Array
+        ]], { ["scope_origin.item"] = restored, ["scope_bridge.middle"] = restored_middle })
+        assert.equal(item_scope, consumer.ast[2]._type.pointee._ffi_scope)
+        for index = 3, 4 do
+            assert.equal(raw_scope, consumer.ast[index]._type.pointee._ffi_scope)
+        end
     end)
 
     it("rejects a persisted declaration payload that disagrees with its header", function()

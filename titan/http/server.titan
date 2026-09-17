@@ -107,7 +107,7 @@ end
 local function validate_reason(reason: string)
   -- The HTTP/1.1 reason phrase has the same byte repertoire as a field value:
   -- HTAB, SP/VCHAR, and obs-text, but no other control or DEL byte.
-  if str.match(reason, FORBIDDEN_FIELD_BYTE_PATTERN) then
+  if string.match(reason, FORBIDDEN_FIELD_BYTE_PATTERN) then
     raise "HTTP reason phrase contains a forbidden byte"
   end
 end
@@ -221,8 +221,8 @@ function Response:send_headers()
   if self.headers_sent then return end
   if self.closed then raise "HTTP response is closed" end
   prepare_response_headers(self)
-  local builder = str.writer()
-  builder:write("HTTP/1.1 " .. str.tostring(self.status_number) ..
+  local builder = string.writer()
+  builder:write("HTTP/1.1 " .. string.tostring(self.status_number) ..
                 " " .. self.reason_text .. "\r\n")
   builder:write(render_headers(self.response_headers))
   builder:write("\r\n")
@@ -244,7 +244,7 @@ function Response:write(data: string)
   end
   if self.chunked then
     self.connection:write(
-      str.format("%x", #data) .. "\r\n" .. data .. "\r\n")
+      string.format("%x", #data) .. "\r\n" .. data .. "\r\n")
   else
     self.connection:write(data)
   end

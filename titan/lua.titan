@@ -6,7 +6,7 @@ foreign import "titan/ffi.h"
 local async = import "async"
 local fs = import "fs"
 local io = import "io"
-local str = import "string"
+local string = import "string"
 
 local type LuaChunk = function (...: value): (...: value)
 local type Searcher = function (string): (value, value)
@@ -86,7 +86,7 @@ end
 
 function load_from_reader(reader: io.Reader, name: string?, env: value):
     function (...: value): (...: value)
-  local builder = str.writer()
+  local builder = string.writer()
   for chunk in reader:read do
     builder:write(chunk)
   end
@@ -95,20 +95,20 @@ end
 
 local function replace_literal(subject: string, needle: string,
                                replacement: string): string
-  local builder = str.writer()
+  local builder = string.writer()
   local position = 1
   while position <= #subject do
-    local found: integer? = str.find(subject, needle, position)
+    local found: integer? = string.find(subject, needle, position)
     if not found then break end
     local first = found as integer
     if first > position then
-      builder:write(str.sub(subject, position, first - 1))
+      builder:write(string.sub(subject, position, first - 1))
     end
     builder:write(replacement)
     position = first + #needle
   end
   if position <= #subject then
-    builder:write(str.sub(subject, position))
+    builder:write(string.sub(subject, position))
   end
   return builder:drain()
 end
@@ -129,19 +129,19 @@ end
 local function source_search(modname: string, path: string):
     (value, value, string)
   local module_path = replace_literal(modname, ".", "/")
-  local messages = str.writer()
+  local messages = string.writer()
   local position = 1
   local finished = false
 
   while not finished do
-    local separator: integer? = str.find(path, ";", position)
+    local separator: integer? = string.find(path, ";", position)
     local template = ""
     if separator then
       local separator_position = separator as integer
-      template = str.sub(path, position, separator_position - 1)
+      template = string.sub(path, position, separator_position - 1)
       position = separator_position + 1
     else
-      template = str.sub(path, position)
+      template = string.sub(path, position)
       finished = true
     end
 
@@ -156,7 +156,7 @@ local function source_search(modname: string, path: string):
       catch
         raise "error loading module '" .. modname ..
               "' from file '" .. filename .. "':\n\t" ..
-              str.tostring(error)
+              string.tostring(error)
       end
       return loaded as LuaChunk, filename, ""
     end
@@ -181,7 +181,7 @@ end
 local function find_loader(modname: string,
                            searchers: {integer: value},
                            path: string): (value, value)
-  local messages = str.writer()
+  local messages = string.writer()
 
   -- Slot 1 is Lua's preload searcher and remains replaceable by a custom
   -- searcher. Slot 2 is deliberately reserved for the asynchronous source pass

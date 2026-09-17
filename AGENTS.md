@@ -1704,9 +1704,10 @@ to its corresponding raw object pointer where C code borrows it. Casting an
 character pointer cast retains NUL-terminated C-string semantics. Do not
 manufacture an intermediate Lua stack value, parallel `value` storage field,
 or duplicate length record for capabilities already carried by an owner.
-Automatic C aggregates/arrays and every foreign-function local require an
-initializer; ordinary nil-bearing pointer locals may use the existing omitted-
-RHS rule. At a direct local sink, allocation of a complete non-pointer struct/
+Automatic C aggregates/arrays require an initializer. Mutable locals with an
+explicit nil-bearing pointer type may omit the RHS, including inside foreign
+functions; every const local requires an initializer. At a direct local sink,
+allocation of a complete non-pointer struct/
 union or an eligible positive constant-sized array may select automatic C
 storage. Fixed-array annotations are no longer written in Titan source.
 Inferred arrays preserve their fixed type for eligible literals and proven
@@ -1724,10 +1725,14 @@ incomplete, and GC-bearing objects. Imported/static C functions can
 be converted to compatible C function pointers and called through them;
 adapting a Titan function to a C callback ABI remains a parked follow-up
 alongside `CAdopted` lifetimes and stronger Lua C API coverage. Generated
-C-bearing callable and owned tags must preserve their declaration scope through
-the existing structural/scoped identity machinery. Portable graphs follow the
-portable sharing contract; never globally coalesce header-dependent types by
-rendered spelling alone. `c-parser/typed.lua` (used only
+C-bearing callable and owned tags must preserve their C declaration origin
+through the structural identity machinery. The same header declaration shares
+identity across modules, including forced-header and source-import paths;
+anonymous declaration sites remain distinct. Compatible C build settings are
+a program precondition: do not add preprocessing-condition or layout
+fingerprints, macro-environment scans, or compatibility probes for these keys.
+Portable graphs follow the portable sharing contract; never coalesce unrelated
+declarations by rendered spelling alone. `c-parser/typed.lua` (used only
 by c-parser) is a runtime signature-checking DSL that ships **disabled** —
 `typed.off()` is the last line; flip to `typed.on()` to debug c-parser type
 confusion.
