@@ -235,6 +235,64 @@ describe("Titan driver generic build flags", function()
             "titan-runtime/libtitan.a", 1, true), runtime_checks[1])
     end)
 
+    it("uses O3 everywhere and native-container LTO by default on Linux", function()
+        local ok, platform = run({ "uname", "-s" })
+        assert.truthy(ok, platform)
+        local linux = platform:match("Linux") ~= nil
+        local checked = 0
+        for _, line in ipairs(command_lines(verbose_output, "'-O3'")) do
+            if line:find("'-c'", 1, true) or line:find("'-shared'", 1, true) then
+                checked = checked + 1
+                assert.equal(linux, line:find("'-flto'", 1, true) ~= nil, line)
+                assert.equal(linux, line:find("'-ffat-lto-objects'", 1, true) ~= nil, line)
+            end
+        end
+        assert.is_true(checked >= 3, verbose_output)
+        for _, line in ipairs(command_lines(verbose_output, "'-shared'")) do
+            assert.truthy(line:find("'-O3'", 1, true), line)
+        end
+    end)
+
+    it("lets explicit compile and link flags disable optimization and LTO", function()
+        local ok, output = titanc({
+            MAKE = "true",
+            CC = "cc -DTITAN_DRIVER_CC_HONORED=1",
+            TITAN_EXTRA_CPPFLAGS = "-iquote '" .. INCLUDE .. "' " ..
+                "-DTITAN_DRIVER_CPP_BRANCH=37",
+            TITAN_EXTRA_CFLAGS = "-O0 -fno-lto",
+            TITAN_EXTRA_LDFLAGS = "-O0 -fno-lto",
+        }, "-v", "--tree", APPLICATION, MODULE)
+        assert.truthy(ok, output)
+        local checked = 0
+        for line in output:gmatch("[^\n]+") do
+            if line:find("'-c'", 1, true) or line:find("'-shared'", 1, true) then
+                local baseline = line:find("'-O3'", 1, true)
+                if baseline then
+                    local override = assert(line:find("'-O0'", 1, true), line)
+                    assert.is_true(baseline < override, line)
+                    local disabled = assert(line:find("'-fno-lto'", 1, true), line)
+                    local enabled = line:find("'-flto'", 1, true)
+                    assert.is_true(not enabled or enabled < disabled, line)
+                    checked = checked + 1
+                end
+            end
+        end
+        assert.is_true(checked >= 3, output)
+    end)
+
+    it("preserves an explicitly selected compiler random seed", function()
+        local ok, output = titanc({
+            MAKE = "true",
+            CC = "cc -DTITAN_DRIVER_CC_HONORED=1",
+            TITAN_EXTRA_CPPFLAGS = "-iquote '" .. INCLUDE .. "' " ..
+                "-DTITAN_DRIVER_CPP_BRANCH=37",
+            TITAN_EXTRA_CFLAGS = "-frandom-seed=explicit-seed",
+        }, "-v", "--tree", APPLICATION, MODULE)
+        assert.truthy(ok, output)
+        assert.truthy(output:find("'-frandom-seed=explicit-seed'", 1, true), output)
+        assert.falsy(output:find("'-frandom-seed=" .. MODULE .. "'", 1, true), output)
+    end)
+
     it("builds the source runtime against the Lua tree selected by --lua",
        function()
         local lua_source = lfs.currentdir() .. "/lua-5.5.1/src"

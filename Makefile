@@ -300,7 +300,11 @@ CLANG_FORMAT ?= clang-format
 LUA_CC    ?= $(CC)
 LUA_AR    ?= $(AR) rcu
 LUA_RANLIB ?= $(RANLIB)
-CFLAGS    ?= --std=c99 -O2 -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g
+TITAN_DEFAULT_OPTFLAGS := -O3
+ifeq ($(HOST_OS),Linux)
+  TITAN_DEFAULT_OPTFLAGS += -flto -ffat-lto-objects
+endif
+CFLAGS    ?= --std=c99 $(TITAN_DEFAULT_OPTFLAGS) -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g
 LUA_MYCFLAGS  ?= -fPIC
 LUA_MYLDFLAGS ?=
 LUA_MYLIBS    ?=
@@ -393,7 +397,40 @@ STDLIB_GENERATED_FFI_HEADERS := $(addsuffix .ffi.h, \
 STDLIB_GENERATED_FOREIGN_HEADERS := $(STDLIB_GENERATED_FFI_HEADERS) \
 	titan/coroutine.titan.h \
 	titan/fs.titan.h titan/uv/uv.titan.h titan/http/http.titan.h \
-	titan/sqlite3/sqlite3.titan.h titan/json/json.titan.h
+	titan/sqlite3/sqlite3.titan.h
+# One native compilation unit per logical module, including folder ensembles.
+# This reviewed import graph owns rebuild propagation and parallel ordering;
+# titanc's object fast path deliberately does not track dependency freshness.
+STDLIB_STEM_uv := titan/uv/uv
+STDLIB_STEM_http := titan/http/http
+STDLIB_STEM_peg := titan/peg/peg
+STDLIB_STEM_string := titan/string/string
+STDLIB_STEM_sqlite3 := titan/sqlite3/sqlite3
+STDLIB_STEM_json := titan/json/json
+stdlib_stem = $(if $(STDLIB_STEM_$(1)),$(STDLIB_STEM_$(1)),titan/$(1))
+stdlib_outputs = $(call stdlib_stem,$(1)).o $(call stdlib_stem,$(1)).c $(filter $(call stdlib_stem,$(1)).%,$(STDLIB_GENERATED_FOREIGN_HEADERS))
+STDLIB_MODULE_OBJECTS := $(foreach module,$(STDLIB_MODULES),$(call stdlib_stem,$(module)).o)
+STDLIB_IMPORTS_coroutine :=
+STDLIB_IMPORTS_uv := coroutine
+STDLIB_IMPORTS_async := uv string
+STDLIB_IMPORTS_timer := uv
+STDLIB_IMPORTS_io := os string
+STDLIB_IMPORTS_fs := uv string
+STDLIB_IMPORTS_net := uv string
+STDLIB_IMPORTS_ssl := async fs net string gc
+STDLIB_IMPORTS_url := peg string
+STDLIB_IMPORTS_http := async io math net ssl string timer url
+STDLIB_IMPORTS_os := uv string
+STDLIB_IMPORTS_peg := gc
+STDLIB_IMPORTS_string := peg gc
+STDLIB_IMPORTS_math :=
+STDLIB_IMPORTS_lua := async fs io string
+STDLIB_IMPORTS_iteration :=
+STDLIB_IMPORTS_gc :=
+STDLIB_IMPORTS_test :=
+STDLIB_IMPORTS_reflect := iteration lua string
+STDLIB_IMPORTS_sqlite3 := async uv reflect string math
+STDLIB_IMPORTS_json := reflect string math peg iteration
 STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua titan/async.lua \
 	titan/timer.lua titan/io.lua titan/fs.lua titan/net.lua titan/ssl.lua \
 	titan/url.lua titan/http.lua titan/os.lua \
@@ -493,7 +530,7 @@ RECURSIVE_WRAPPER_GUARD = flags=$${MAKEFLAGS%% *}; case "$$flags" in -*) ;; *q*)
 	check-llhttp-tools sqlite3 check-sqlite3-tools openssl openssl-config check-openssl-tools \
 	check-system-openssl invalid-openssl-mode lpeglabel \
 	check-libuv-tools check-system-libuv invalid-libuv-mode runtime titan \
-	stage-titan-bootstrap install-titan-sdk stdlib install-stdlib \
+	stage-titan-bootstrap install-titan-sdk stdlib stdlib-objects install-stdlib \
 	publish-stdlib \
 	rock-post-install rock-test test rock-build \
 	examples clean clean-lua clean-readline clean-luarocks clean-libbacktrace clean-libuv \
@@ -2110,6 +2147,74 @@ else
   STDLIB_UV_LDFLAGS := $(strip $(LIBUV_PROVIDER_LDFLAGS))
 endif
 
+# Compiler/SDK changes invalidate every module; native header changes enter at
+# their owning modules and propagate through the explicit source import graph.
+# Track the SDK's source inputs, not freshly copied installed-header mtimes.
+STDLIB_COMPILER_PREREQS = titanc $(TITAN_COMPILER_LUA) Makefile \
+	$(TITAN_SDK_ROOT_HEADERS) $(TITAN_SDK_NAMESPACED_HEADERS) \
+	$(wildcard $(LUA_DIR)/src/*.h)
+ifeq ($(LIBUV_MODE),bundled)
+  STDLIB_UV_HEADER_DIRS = $(LIBUV_INCLUDE_DIR)
+else
+  STDLIB_UV_HEADER_DIRS = $(shell $(LIBUV_PKG_CONFIG) --variable=includedir libuv 2>/dev/null)
+endif
+ifeq ($(OPENSSL_MODE),bundled)
+  STDLIB_OPENSSL_HEADER_DIRS = $(OPENSSL_SRC_DIR)/include $(OPENSSL_BUILD_DIR)/include
+else
+  STDLIB_OPENSSL_HEADER_DIRS = $(shell $(OPENSSL_PKG_CONFIG) --variable=includedir openssl 2>/dev/null)
+endif
+STDLIB_C_INPUTS_uv = $(foreach dir,$(STDLIB_UV_HEADER_DIRS),$(wildcard $(dir)/uv.h $(dir)/uv/*.h))
+STDLIB_C_INPUTS_fs = $(STDLIB_C_INPUTS_uv)
+STDLIB_C_INPUTS_peg = $(LPEGLABEL_HEADERS)
+STDLIB_C_INPUTS_http = $(LLHTTP_HEADER)
+STDLIB_C_INPUTS_ssl = $(foreach dir,$(STDLIB_OPENSSL_HEADER_DIRS),$(wildcard $(dir)/openssl/*.h))
+STDLIB_C_INPUTS_sqlite3 = $(SQLITE3_HEADER) $(SQLITE3_TITAN_HEADERS)
+
+# The command is identical for object builds and the final link. Only the
+# latter receives native payload. Make schedules modules; each compiler gets
+# one generated-C slot so nested parallelism stays within the jobserver bound.
+STDLIB_COMPILER_ENV = CC=$(call make_shell_quote,$(CC)) \
+	AR=$(call make_shell_quote,$(AR)) RANLIB=$(call make_shell_quote,$(RANLIB)) \
+	TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+	TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)) TITAN_RUNTIME_PREBUILT=1 \
+	TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_SQLITE3_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
+	TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))) \
+	TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS) $(STDLIB_OPENSSL_LDFLAGS)))
+
+stdlib-objects: $(foreach module,$(STDLIB_MODULES),$(call stdlib_outputs,$(module))) ## Compile standard-library objects without linking a provider
+
+# A real object target owns its generated C and headers, including the exact
+# source/object pair needed by sanitizer diagnostic snapshots. FORCE runs an
+# inexpensive completeness check; unchanged outputs keep their timestamps.
+# This also works with the GNU Make shipped by macOS, without grouped targets.
+define stdlib_object_rule
+$(call stdlib_stem,$(1)).o: FORCE $(filter titan/$(1).titan titan/$(1)/%.titan,$(STDLIB_TITAN_SOURCES)) \
+	$(foreach dependency,$(STDLIB_IMPORTS_$(1)),$(call stdlib_outputs,$(dependency))) \
+	$(STDLIB_C_INPUTS_$(1)) $(STDLIB_COMPILER_PREREQS) $(STDLIB_CONFIG_STAMP) \
+	$(STDLIB_TOOL_PREREQS) | $(STDLIB_NATIVE_PREREQS) $(STDLIB_BOOTSTRAP_PREREQ) \
+	$(STDLIB_RUNTIME_ARCHIVE_PREREQ) $(STDLIB_PLATFORM_PREREQS)
+	@set -e; \
+	stale=0; \
+	newer=$$(call make_shell_quote,$$(filter-out FORCE,$$?)); \
+	test -z "$$$$newer" || stale=1; \
+	for output in $(call stdlib_outputs,$(1)); do \
+	  test -f "$$$$output" && test ! -L "$$$$output" || stale=1; \
+	done; \
+	if test "$$$$stale" = 1; then \
+	  rm -f "$$@"; \
+	  unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
+	  $$(STDLIB_COMPILER_ENV) $$(TITANC) --source-first --incremental -j1 -c titan.$(1); \
+	  for output in $(call stdlib_outputs,$(1)); do \
+	    test -f "$$$$output" && test ! -L "$$$$output" || { \
+	      echo "ERROR: stdlib compilation did not produce $$$$output" >&2; exit 1; \
+	    }; \
+	  done; \
+	fi
+$(filter-out $(call stdlib_stem,$(1)).o,$(call stdlib_outputs,$(1))): $(call stdlib_stem,$(1)).o
+	@test -f "$$@" && test ! -L "$$@"
+endef
+$(foreach module,$(STDLIB_MODULES),$(eval $(call stdlib_object_rule,$(module))))
+
 stdlib: $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS) ## Build the paired standard-library provider
 
 $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS): $(STDLIB_COMPLETION_STAMP)
@@ -2137,6 +2242,7 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 		$(call make_shell_quote,RANLIB=$(RANLIB)) \
 		$(call make_shell_quote,TITANC=$(TITANC)) \
 		$(call make_shell_quote,TITAN_LUA=$(TITAN_LUA)) \
+		$(call make_shell_quote,TITAN_ROCKS_ROOT=$(TITAN_ROCKS_ROOT)) \
 		$(call make_shell_quote,STDLIB_USE_INSTALLED_RUNTIME=$(STDLIB_USE_INSTALLED_RUNTIME)) \
 		$(call make_shell_quote,STDLIB_ROOTS=$(STDLIB_ROOTS)) \
 		$(call make_shell_quote,STDLIB_TITAN_SOURCES=$(STDLIB_TITAN_SOURCES)) \
@@ -2193,17 +2299,16 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
 		rm -f "$$tmp"; \
 	else \
-		rm -f "$(STDLIB_COMPLETION_STAMP)" && \
+		rm -f "$(STDLIB_COMPLETION_STAMP)" $(STDLIB_MODULE_OBJECTS) && \
 		mv -f "$$tmp" "$@"; \
 	fi
 
 # FORCE runs the inexpensive completeness check on every invocation. The
-# compiler itself runs only when an input is newer, configuration changed, or
-# one public output is absent. All twenty-one roots are explicit source roots in one
-# process, so their internal imports are linked into the paired titan.so/titan.a
+# final link runs only when an object/input changed or a public output is
+# absent. All twenty-one objects supply their metadata to this one paired
 # provider. The warm check rescans the archive without rewriting either output.
-$(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) $(SQLITE3_TITAN_HEADERS) titanc \
-		$(TITAN_COMPILER_LUA) Makefile $(STDLIB_CONFIG_STAMP) \
+$(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_MODULE_OBJECTS) \
+		$(STDLIB_COMPILER_PREREQS) $(STDLIB_CONFIG_STAMP) \
 		$(STDLIB_NATIVE_PREREQS) $(STDLIB_BOOTSTRAP_PREREQ) \
 		$(STDLIB_TOOL_PREREQS) | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
 		$(STDLIB_PLATFORM_PREREQS)
@@ -2235,16 +2340,8 @@ $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) $(SQLITE3_TITAN_HEADER
 	  rm -rf $(addsuffix .dSYM,$(STDLIB_SOS)) \
 		$(addsuffix .dSYM,$(STDLIB_QUALIFIED_SOS)); \
 	  unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
-	  CC=$(call make_shell_quote,$(CC)) \
-	    AR=$(call make_shell_quote,$(AR)) \
-	    RANLIB=$(call make_shell_quote,$(RANLIB)) \
-	    TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
-	    TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)) \
-	    TITAN_RUNTIME_PREBUILT=1 \
-	    TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_SQLITE3_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
-	    TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))) \
-	    TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS) $(STDLIB_OPENSSL_LDFLAGS))) \
-	    $(TITANC) $(STDLIB_ROOTS) -X $(STDLIB_EXTRA_OBJECTS); \
+	  $(STDLIB_COMPILER_ENV) $(TITANC) --source-first --incremental \
+	    $(STDLIB_ROOTS) -X $(STDLIB_EXTRA_OBJECTS); \
 	  for output in $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS); do \
 	    test -f "$$output" && test ! -L "$$output" || { \
 	      echo "ERROR: stdlib build did not produce $$output" >&2; exit 1; \
@@ -2297,8 +2394,9 @@ install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 STDLIB_STAGED_EXTRA_OBJECTS = $(foreach object,$(STDLIB_EXTRA_OBJECTS),$(abspath $(object)))
 
 # LuaRocks invokes this only after deploying titanc and its Lua compiler
-# modules. Build all twenty-one source roots once in a private directory on the
-# destination filesystem. The Lua publisher validates the complete protocol
+# modules. Reuse the ordinary object DAG with that deployed compiler, then link
+# the paired provider in a private directory on the destination filesystem.
+# The Lua publisher validates the complete protocol
 # and exact staged titan.test compiler source, commits twenty-one shims, that
 # source, the archive, and the one macOS dSYM before renaming titan.so last;
 # any caught failure restores the prior pair or first-install bootstrap.
@@ -2312,6 +2410,11 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 	@test -n "$(strip $(ROCK_LUA))" && test -x "$(ROCK_LUA)" || { \
 	  echo "ERROR: rock-post-install requires ROCK_LUA" >&2; exit 1; \
 	}
+	+$(RECURSIVE_WRAPPER_GUARD) $(MAKE) --no-print-directory stdlib-objects \
+	  $(call make_shell_quote,TITANC=$(call make_shell_quote,$(ROCK_TITANC))) \
+	  TITAN_LUA=$(call make_shell_quote,$(ROCK_LUA)) \
+	  TITAN_ROCKS_ROOT=$(call make_shell_quote,$(abspath $(ROCKS_TREE))) \
+	  STDLIB_USE_INSTALLED_RUNTIME=1
 	@set -e; \
 	mkdir -p "$(ROCKS_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)"; \
 	rocks_tree=$$(CDPATH= cd "$(ROCKS_TREE)" && pwd -P); \
@@ -2338,7 +2441,7 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 	  export TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_SQLITE3_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))); \
 	  export TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))); \
 	  export TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS) $(STDLIB_OPENSSL_LDFLAGS))); \
-	  $(call make_shell_quote,$(ROCK_TITANC)) --tree \
+	  $(call make_shell_quote,$(ROCK_TITANC)) --source-first --incremental --tree \
 	    $(call make_shell_quote,$(CURDIR)) $(STDLIB_ROOTS) \
 	    -X $(STDLIB_STAGED_EXTRA_OBJECTS); \
 	  if test -n $(call make_shell_quote,$(strip $(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT))); then \
@@ -2369,7 +2472,9 @@ TITAN_STDLIB_TEST_ROOTS := $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
 	url.tests os.tests os.process_tests uv.runtime_tests reflect.tests sqlite3.tests json.tests
 TITAN_TEST_BUILD_DIR ?= .titan-tests
 TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)
-TITAN_TEST_TIMEOUT ?= 120
+# The suite deadline includes fresh child-fixture compilation at the selected
+# optimization level, including Linux LTO. Focused gates may set a lower bound.
+TITAN_TEST_TIMEOUT ?= 300
 TEST_TITANC ?= titanc
 TEST_LUA ?= lua
 BUSTED ?= busted
@@ -2378,6 +2483,33 @@ TITAN_FILTER ?=
 TITAN_TEST_CPPFLAGS = $(if $(strip $(TITAN_EXTRA_CPPFLAGS)),$(TITAN_EXTRA_CPPFLAGS),$(TITAN_TEST_EXTRA_CPPFLAGS))
 TITAN_TEST_CFLAGS = $(if $(strip $(TITAN_EXTRA_CFLAGS)),$(TITAN_EXTRA_CFLAGS),$(TITAN_TEST_EXTRA_CFLAGS))
 TITAN_TEST_LDFLAGS = $(if $(strip $(TITAN_EXTRA_LDFLAGS)),$(TITAN_EXTRA_LDFLAGS),$(TITAN_TEST_EXTRA_LDFLAGS))
+TITAN_TEST_MODULE_MANIFEST := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))spec/support/stdlib_test_modules.mk
+include $(TITAN_TEST_MODULE_MANIFEST)
+
+titan_test_stem = $(patsubst %.titan,%,$(firstword $(TITAN_TEST_SOURCES_$(1))))
+titan_test_outputs = $(call titan_test_stem,$(1)).o $(call titan_test_stem,$(1)).c $(call titan_test_stem,$(1)).ffi.h $(if $(TITAN_TEST_FOREIGN_$(1)),$(call titan_test_stem,$(1)).titan.h)
+TITAN_TEST_MODULE_OBJECTS := $(foreach module,$(TITAN_TEST_MODULES),$(call titan_test_stem,$(module)).o)
+TITAN_TEST_SUPPORT_STEM := $(TITAN_TEST_BUILD_DIR)/titan/test__test_support
+TITAN_TEST_SUPPORT_OUTPUTS := $(addprefix $(TITAN_TEST_SUPPORT_STEM),.o .c .ffi.h)
+TITAN_TEST_NATIVE_OBJECTS := $(addprefix $(TITAN_TEST_BUILD_DIR)/,async_foreign_work.o uv_stdio_probe.o sqlite3_worker_fixture.o)
+TITAN_TEST_FIXTURE_OUTPUTS := $(TITAN_TEST_NATIVE_OBJECTS) $(addprefix $(TITAN_TEST_BUILD_DIR)/,async_foreign_work.h uv_stdio_probe.h sqlite3_worker_fixture.h os_process_host_child)
+TITAN_TEST_CONFIG_STAMP := $(TITAN_TEST_BUILD_DIR)/build.config
+# TEST_LUA selects the installed SDK, just as it does for the compiler and the
+# native fixtures. A cold non-test Make invocation need not have one installed.
+TITAN_TEST_INSTALL_ROOT := $(shell $(TEST_LUA) -E -e 'io.write(assert(require("titan-compiler.driver").TITAN_ROOT))' 2>/dev/null)
+TITAN_TEST_PROVIDER_PREREQS := $(if $(TITAN_TEST_INSTALL_ROOT),$(TITAN_TEST_INSTALL_ROOT)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.so $(TITAN_TEST_INSTALL_ROOT)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.a)
+TITAN_TEST_SUPPORT_SOURCE := $(if $(TITAN_TEST_INSTALL_ROOT),$(TITAN_TEST_INSTALL_ROOT)/share/titan/$(TITAN_LIBRARY_VERSION)/src/titan/test.titan)
+TITAN_TEST_COMPILER_PREREQS := Makefile $(TITAN_TEST_MODULE_MANIFEST) \
+	$(if $(TITAN_TEST_INSTALL_ROOT),$(TITAN_TEST_INSTALL_ROOT)/bin/titanc \
+	$(wildcard $(TITAN_TEST_INSTALL_ROOT)/share/lua/5.5/titan-compiler/*.lua \
+	$(TITAN_TEST_INSTALL_ROOT)/share/lua/5.5/titan-compiler/checker/*.lua \
+	$(TITAN_TEST_INSTALL_ROOT)/share/lua/5.5/titan-compiler/coder/*.lua \
+	$(TITAN_TEST_INSTALL_ROOT)/share/lua/5.5/c-parser/*.lua \
+	$(TITAN_TEST_INSTALL_ROOT)/src/$(LUA_DIR)/*.h \
+	$(TITAN_TEST_INSTALL_ROOT)/include/*.h $(TITAN_TEST_INSTALL_ROOT)/include/titan/*.h))
+TITAN_TEST_COMPILER_ENV = TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CPPFLAGS) -I.)) \
+	TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CFLAGS))) \
+	TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_LDFLAGS)))
 STDLIB_BUSTED_TESTS := \
 	spec/asan_generated_c_context_spec.lua spec/dense_array_runtime_spec.lua \
 	spec/libuv_build_spec.lua spec/lpeglabel_build_spec.lua \
@@ -2385,7 +2517,7 @@ STDLIB_BUSTED_TESTS := \
 	spec/rockspec_spec.lua spec/stdlib_installer_spec.lua
 
 .PHONY: busted-test stdlib-busted-test stdlib-test \
-	titan-stdlib-test-build titan-stdlib-test-run titan-stdlib-test
+	titan-stdlib-test-build titan-stdlib-test-objects titan-stdlib-test-run titan-stdlib-test
 
 busted-test: ## Run retained Busted specs, optionally with BUSTED_FILTER
 	BUSTED=$(call make_shell_quote_value,BUSTED) \
@@ -2401,54 +2533,106 @@ stdlib-busted-test: ## Run retained stdlib/runtime Busted specs without coverage
 		bash spec/support/run_rock_tests.sh \
 		$(STDLIB_BUSTED_TESTS) $(EXTRA_TEST_FLAGS)
 
-titan-stdlib-test-build: $(SQLITE3_HEADER) ## Build every native Titan stdlib test into one executable
-	@bash spec/support/clean_generated_test_artifacts.sh
+$(TITAN_TEST_CONFIG_STAMP): FORCE
 	@mkdir -p $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR))
-	@set +e; \
-	fixture_lua_include="$$( $(TEST_LUA) -E -e \
-	  'io.write(assert(require("titan-compiler.driver").LUA_SOURCE_PATH))' )" || exit $$?; \
-	test -n "$$fixture_lua_include" && test -f "$$fixture_lua_include/lua.h" || { \
-	  echo "ERROR: native test fixture cannot locate matching Lua headers" >&2; exit 1; \
+	@set -e; \
+	test -n $(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) && \
+	  test -f $(call make_shell_quote,$(TITAN_TEST_SUPPORT_SOURCE)) || { \
+	  echo "ERROR: native tests require TEST_LUA from an installed Titan SDK" >&2; exit 1; \
 	}; \
-	fixture_lua_include="$$(CDPATH= cd "$$fixture_lua_include" && pwd -P)" || exit $$?; \
-	( cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); \
-	  cp $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/async_foreign_work.h)) \
-	    async_foreign_work.h && \
-	  $(CC) -std=c99 -Wall -Wextra -Werror -fPIC \
-	    $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
-	    -I$(call make_shell_quote,$(abspath spec/fixtures/stdlib/native)) \
-	    -c $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/async_foreign_work.c)) \
-	    -o async_foreign_work.o && \
-	  cp $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/uv_stdio_probe.h)) \
-	    uv_stdio_probe.h && \
-	  $(CC) -std=c99 -Wall -Wextra -Werror -fPIC \
-	    $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
-	    -I$(call make_shell_quote,$(abspath spec/fixtures/stdlib/native)) \
-	    -c $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/uv_stdio_probe.c)) \
-	    -o uv_stdio_probe.o && \
-	  cp $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/sqlite3_worker_fixture.h)) \
-	    sqlite3_worker_fixture.h && \
-	  $(CC) -std=c99 -Wall -Wextra -Werror -fPIC -pthread \
-	    $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) $(SQLITE3_CPPFLAGS) \
-	    -I"$$fixture_lua_include" \
-	    -I$(call make_shell_quote,$(abspath spec/fixtures/stdlib/native)) \
-	    -c $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/sqlite3_worker_fixture.c)) \
-	    -o sqlite3_worker_fixture.o && \
-	  $(CC) -std=c99 -Wall -Wextra -Werror \
-	    $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
-	    $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/os_process_host_child.c)) \
-	    $(TITAN_TEST_LDFLAGS) -o os_process_host_child && \
-	  TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CPPFLAGS) -I.)) \
-	  TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CFLAGS))) \
-	  TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_LDFLAGS))) \
-	    $(TEST_TITANC) --test --no-uv-bootstrap --tree \
-	      $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
-	      $(TITAN_STDLIB_TEST_ROOTS) \
-	      -X async_foreign_work.o uv_stdio_probe.o ); \
-	status=$$?; \
-	bash spec/support/clean_generated_test_artifacts.sh --keep-output; \
-	if test $$status -ne 0; then rm -rf -- $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); fi; \
-	exit $$status
+	tmp="$@.tmp"; \
+	printf '%s\n' $(call make_shell_quote,TEST_TITANC=$(TEST_TITANC)) \
+	  $(call make_shell_quote,TEST_LUA=$(TEST_LUA)) \
+	  $(call make_shell_quote,CC=$(CC)) $(call make_shell_quote,AR=$(AR)) \
+	  $(call make_shell_quote,RANLIB=$(RANLIB)) \
+	  $(call make_shell_quote,SDK=$(TITAN_TEST_INSTALL_ROOT)) \
+	  $(call make_shell_quote,CPPFLAGS=$(TITAN_TEST_CPPFLAGS)) \
+	  $(call make_shell_quote,CFLAGS=$(TITAN_TEST_CFLAGS)) \
+	  $(call make_shell_quote,LDFLAGS=$(TITAN_TEST_LDFLAGS)) \
+	  $(call make_shell_quote,LINE_DIRECTIVES=$(TITAN_NO_LINE_DIRECTIVES)) \
+	  $(call make_shell_quote,ROOTS=$(TITAN_STDLIB_TEST_ROOTS)) > "$$tmp"; \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; \
+	else \
+	  rm -f $(TITAN_TEST_MODULE_OBJECTS) $(TITAN_TEST_SUPPORT_STEM).o \
+	    $(TITAN_TEST_NATIVE_OBJECTS) $(TITAN_TEST_BUILD_DIR)/os_process_host_child \
+	    $(TITAN_TEST_EXECUTABLE); \
+	  mv -f "$$tmp" "$@"; \
+	fi
+
+$(TITAN_TEST_SUPPORT_STEM).o: FORCE $(TITAN_TEST_SUPPORT_SOURCE) \
+		$(TITAN_TEST_COMPILER_PREREQS) $(TITAN_TEST_PROVIDER_PREREQS) $(TITAN_TEST_CONFIG_STAMP)
+	@set -e; stale=0; \
+	newer=$(call make_shell_quote,$(filter-out FORCE,$?)); \
+	test -z "$$newer" || stale=1; \
+	for output in $(TITAN_TEST_SUPPORT_OUTPUTS); do test -f "$$output" || stale=1; done; \
+	if test "$$stale" = 1; then \
+	  rm -f "$@"; \
+	  cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); \
+	  $(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --test --incremental -j1 -c titan.test; \
+	fi
+
+$(filter-out $(TITAN_TEST_SUPPORT_STEM).o,$(TITAN_TEST_SUPPORT_OUTPUTS)): $(TITAN_TEST_SUPPORT_STEM).o
+	@test -f "$@"
+
+define titan_test_object_rule
+$(call titan_test_stem,$(1)).o: FORCE $(TITAN_TEST_SOURCES_$(1)) $(TITAN_TEST_C_INPUTS_$(1)) \
+	$(TITAN_TEST_SUPPORT_OUTPUTS) \
+	$(foreach dependency,$(TITAN_TEST_IMPORTS_$(1)),$(call titan_test_outputs,$(dependency))) \
+	$(TITAN_TEST_COMPILER_PREREQS) $(TITAN_TEST_PROVIDER_PREREQS) $(TITAN_TEST_CONFIG_STAMP)
+	@set -e; stale=0; \
+	newer=$$(call make_shell_quote,$$(filter-out FORCE,$$?)); \
+	test -z "$$$$newer" || stale=1; \
+	for output in $(call titan_test_outputs,$(1)); do test -f "$$$$output" || stale=1; done; \
+	if test "$$$$stale" = 1; then \
+	  rm -f "$$@"; \
+	  ( cd $$(call make_shell_quote,$$(TITAN_TEST_BUILD_DIR)); \
+	    $$(TITAN_TEST_COMPILER_ENV) $$(TEST_TITANC) --test --incremental -j1 -c \
+	      --tree $$(call make_shell_quote,$$(abspath spec/stdlib/titan)) $(1) ); \
+	  for output in $(call titan_test_outputs,$(1)); do \
+	    test -f "$$$$output" || { echo "ERROR: test compilation did not produce $$$$output" >&2; exit 1; }; \
+	  done; \
+	fi
+$(filter-out $(call titan_test_stem,$(1)).o,$(call titan_test_outputs,$(1))): $(call titan_test_stem,$(1)).o
+	@test -f "$$@"
+endef
+$(foreach module,$(TITAN_TEST_MODULES),$(eval $(call titan_test_object_rule,$(module))))
+
+titan-stdlib-test-objects: $(TITAN_TEST_MODULE_OBJECTS) $(TITAN_TEST_SUPPORT_OUTPUTS) ## Compile native test modules without linking the runner
+
+$(TITAN_TEST_BUILD_DIR)/async_foreign_work.h: spec/fixtures/stdlib/native/async_foreign_work.h $(TITAN_TEST_CONFIG_STAMP)
+	cp "$<" "$@"
+$(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h: spec/fixtures/stdlib/native/uv_stdio_probe.h $(TITAN_TEST_CONFIG_STAMP)
+	cp "$<" "$@"
+$(TITAN_TEST_BUILD_DIR)/sqlite3_worker_fixture.h: spec/fixtures/stdlib/native/sqlite3_worker_fixture.h $(TITAN_TEST_CONFIG_STAMP)
+	cp "$<" "$@"
+
+$(TITAN_TEST_BUILD_DIR)/async_foreign_work.o: spec/fixtures/stdlib/native/async_foreign_work.c $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h $(TITAN_TEST_CONFIG_STAMP)
+	$(CC) -std=c99 -Wall -Wextra -Werror -fPIC $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
+	  -Ispec/fixtures/stdlib/native -c "$<" -o "$@"
+$(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.o: spec/fixtures/stdlib/native/uv_stdio_probe.c $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h $(TITAN_TEST_CONFIG_STAMP)
+	$(CC) -std=c99 -Wall -Wextra -Werror -fPIC $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
+	  -Ispec/fixtures/stdlib/native -c "$<" -o "$@"
+$(TITAN_TEST_BUILD_DIR)/sqlite3_worker_fixture.o: spec/fixtures/stdlib/native/sqlite3_worker_fixture.c $(TITAN_TEST_BUILD_DIR)/sqlite3_worker_fixture.h $(SQLITE3_HEADER) $(TITAN_TEST_COMPILER_PREREQS) $(TITAN_TEST_CONFIG_STAMP)
+	@set -e; \
+	fixture_lua_include="$$( $(TEST_LUA) -E -e \
+	  'io.write(assert(require("titan-compiler.driver").LUA_SOURCE_PATH))' )"; \
+	test -n "$$fixture_lua_include" && test -f "$$fixture_lua_include/lua.h"; \
+	$(CC) -std=c99 -Wall -Wextra -Werror -fPIC -pthread \
+	  $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) $(SQLITE3_CPPFLAGS) \
+	  -I"$$fixture_lua_include" -Ispec/fixtures/stdlib/native -c "$<" -o "$@"
+$(TITAN_TEST_BUILD_DIR)/os_process_host_child: spec/fixtures/stdlib/native/os_process_host_child.c $(TITAN_TEST_CONFIG_STAMP)
+	$(CC) -std=c99 -Wall -Wextra -Werror $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
+	  "$<" $(TITAN_TEST_LDFLAGS) -o "$@"
+
+$(TITAN_TEST_EXECUTABLE): $(TITAN_TEST_MODULE_OBJECTS) $(TITAN_TEST_SUPPORT_OUTPUTS) \
+		$(TITAN_TEST_FIXTURE_OUTPUTS) $(TITAN_TEST_COMPILER_PREREQS) \
+		$(TITAN_TEST_PROVIDER_PREREQS) $(TITAN_TEST_CONFIG_STAMP)
+	@cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)) && \
+	  $(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --test --incremental --no-uv-bootstrap \
+	    --tree $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
+	    $(TITAN_STDLIB_TEST_ROOTS) -X async_foreign_work.o uv_stdio_probe.o
+
+titan-stdlib-test-build: $(TITAN_TEST_EXECUTABLE) ## Build every native Titan stdlib test into one incremental executable
 
 titan-stdlib-test-run: ## Run the built native suite, optionally with TITAN_FILTER
 	@test -x $(call make_shell_quote,$(TITAN_TEST_EXECUTABLE)) || { \

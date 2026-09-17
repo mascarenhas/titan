@@ -271,7 +271,7 @@ describe("standalone-prefix source installation", function()
             "/share/lua/5.5/titan-compiler/pretty.lua")
         for _, module in ipairs({
             "cdeclarator.lua", "cpreamble.lua", "cprobe.lua",
-            "cprobe_cache.lua", "ffiheaders.lua",
+            "cprobe_cache.lua", "ffiheaders.lua", "objectmetadata.lua",
             "csemantics.lua", "io.lua", "sha256.lua", "test_runner.lua",
             "version.lua",
         }) do
@@ -450,7 +450,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             '["staticmetadata.lua"]', 1, true), manifest)
         for _, module in ipairs({
             "cdeclarator.lua", "cpreamble.lua", "cprobe.lua",
-            "cprobe_cache.lua", "ffiheaders.lua",
+            "cprobe_cache.lua", "ffiheaders.lua", "objectmetadata.lua",
             "csemantics.lua", "io.lua", "sha256.lua", "test_runner.lua",
             "version.lua",
         }) do
@@ -741,6 +741,8 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "doc/implementation/json-library.md",
             "titan-compiler/test_runner.lua",
             "titan-compiler/ffiheaders.lua",
+            "titan-compiler/objectmetadata.lua",
+            "spec/support/stdlib_test_modules.mk",
             "LICENSES/lpeglabel-LICENSE",
             "LICENSES/lpeg-LICENSE",
             "LICENSES/lpeg-patterns-LICENSE",

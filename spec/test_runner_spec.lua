@@ -121,6 +121,33 @@ describe("Titan test-runner source generation", function()
             "function main(args: {string}): integer", 1, true), source)
     end)
 
+    it("discovers the same checked cases from source objects without ASTs", function()
+        local ast = {
+            test_node("test_public", CONTEXT),
+            test_node("test_private", CONTEXT, { islocal = true }),
+            test_node("test_wrong", types.Integer()),
+            test_node("test_variadic", CONTEXT, { varargtype = CONTEXT }),
+            test_node("test_returns", CONTEXT, { rettypes = { types.Integer() } }),
+        }
+        local cached = {
+            kind = "source",
+            object_metadata = {},
+            test_functions = test_runner.function_names(ast),
+        }
+        local function closure() return { suite = true, binary = true } end
+        local cold, cold_modules = test_runner.discover({ "suite" }, {
+            suite = { ast = ast }, binary = { test_functions = { "test_hidden" } },
+        }, closure)
+        local warm, warm_modules = test_runner.discover({ "suite" }, {
+            suite = cached, binary = { test_functions = { "test_hidden" } },
+        }, closure)
+        assert.same(cold, warm)
+        assert.same(cold_modules, warm_modules)
+        assert.equal(2, #warm)
+        assert.equal("suite.test_public", warm[1].full_name)
+        assert.equal("suite.test_returns", warm[2].full_name)
+    end)
+
     it("renders a valid zero-test executable and owns adjacent outputs",
        function()
         local source, render_err = test_runner.render({})

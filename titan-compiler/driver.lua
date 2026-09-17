@@ -18,6 +18,7 @@ local foreigncache = require "titan-compiler.foreigncache"
 local graphcodec = require "titan-compiler.graphcodec"
 local sha256 = require "titan-compiler.sha256"
 local ffiheaders = require "titan-compiler.ffiheaders"
+local objectmetadata = require "titan-compiler.objectmetadata"
 
 local lfs = require "lfs"
 
@@ -402,7 +403,9 @@ driver.TITAN_SOURCE_PATH = "."
 driver.EMIT_LINE_DIRECTIVES = os.getenv("TITAN_NO_LINE_DIRECTIVES") ~= "1"
 driver.TITAN_RUNTIME_PATH = "titan-runtime/"
 driver.LIBBACKTRACE_PATH = "libbacktrace"
-driver.CFLAGS = "--std=c99 -O2 -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g"
+local base_cflags = "--std=c99 -O3 -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g"
+local default_cflags = base_cflags
+driver.CFLAGS = default_cflags
 
 function driver.test_support_source_descriptor(context)
     local filename = driver.TEST_SUPPORT_SOURCE_PATH
@@ -466,6 +469,19 @@ function driver.foreign_include_dirs()
     return include_dirs
 end
 
+local function select_platform_defaults(uname, is_darwin)
+    local defaults = base_cflags
+    if uname == "Linux" then
+        -- Fat objects retain the native sections needed by the metadata and
+        -- target readers, plus IR for GCC/Clang's optimizing final link.
+        defaults = defaults .. " -flto -ffat-lto-objects"
+    end
+    if driver.CFLAGS == default_cflags then driver.CFLAGS = defaults end
+    default_cflags = defaults
+    driver.UNAME = uname
+    driver.IS_DARWIN = is_darwin
+end
+
 function driver.initialize_platform(context)
     context = context or driver.new_resolver_context()
     if type(context) ~= "table" or context.io == nil then
@@ -473,6 +489,7 @@ function driver.initialize_platform(context)
     end
     compiler_io.validate(context.io, 2)
     if context._platform_initialized then
+        select_platform_defaults(context.uname, context.is_darwin)
         return true, context.uname, context.is_darwin
     end
 
@@ -497,8 +514,7 @@ function driver.initialize_platform(context)
     -- Retain the historical process-visible fields for build/publication APIs.
     -- The subprocess which populates them now belongs to an explicit resolver
     -- context instead of running while this module is loaded.
-    driver.UNAME = uname
-    driver.IS_DARWIN = context.is_darwin
+    select_platform_defaults(uname, context.is_darwin)
     return true, uname, context.is_darwin
 end
 
@@ -1032,8 +1048,19 @@ function driver.format_generated_file(
     return true
 end
 
-local function compiler_argv(include_extra_compile_flags)
+local function compiler_argv(include_extra_compile_flags, context)
     if driver.TOOLCHAIN_ERROR then return nil, driver.TOOLCHAIN_ERROR end
+    if context or not driver.UNAME then
+        local owns_context = context == nil
+        context = context or driver.new_resolver_context()
+        local ok, err = driver.initialize_platform(context)
+        local closed, close_error = true
+        if owns_context then
+            closed, close_error = driver.close_resolver_context(context)
+        end
+        if not ok then return nil, err end
+        if not closed then return nil, close_error end
+    end
     local cc, err = parsed_words(driver.CC, "CC")
     if not cc then return nil, err end
     if #cc == 0 then return nil, "CC command is empty" end
@@ -1079,7 +1106,7 @@ function driver.toolchain_descriptor(context)
     if not cc then return nil, err end
     if #cc == 0 then return nil, "CC command is empty" end
 
-    local effective, compile_err = compiler_argv(true)
+    local effective, compile_err = compiler_argv(true, context)
     if not effective then return nil, compile_err end
     local flags = {}
     for index = #cc + 1, #effective do
@@ -3467,6 +3494,8 @@ function driver.defaultloader(static_deps, options)
     local owns_context = options.context == nil
     local context = options.context or driver.new_resolver_context(options)
     local source_roots = options.source_roots or {}
+    local forced_source_roots = options.forced_source_roots or {}
+    local object_loaded = {}
     local source_overrides = options.source_overrides or {}
     local known_source_modules = options.known_source_modules or {}
     local cached_source_entries = options.cached_source_entries or {}
@@ -4039,6 +4068,110 @@ function driver.defaultloader(static_deps, options)
         end
     end
 
+    local function load_source_object(modname, source, loader)
+        if not options.incremental or source.contents then return nil end
+        local function miss(reason)
+            if context.probe_verbose then
+                io.stderr:write("Titan object miss ", modname, ": ", tostring(reason), "\n")
+            end
+            return nil
+        end
+        if forced_source_roots[modname] then return miss("explicit compile-only root") end
+        local object_path = (source.native_output or source.main):gsub("[.]titan$", ".o")
+        local object_stat = context.io:stat(object_path)
+        if not object_stat or object_stat.kind ~= "file" then return miss("no object") end
+        for _, filename in ipairs(source.files) do
+            local attr = context.io:stat(filename)
+            if not attr or attr.modified_seconds > object_stat.modified_seconds
+                or (attr.modified_seconds == object_stat.modified_seconds
+                    and attr.modified_nanoseconds > object_stat.modified_nanoseconds) then
+                return miss("source is newer: " .. filename)
+            end
+        end
+        local bytes, read_error = context.io:read_file(object_path)
+        if not bytes then return miss(read_error) end
+        local entry, metadata_error = objectmetadata.read(bytes, object_path)
+        if not entry then return miss(metadata_error) end
+        local native = entry.object_metadata
+        -- A valid record is compiler-owned data. Build-system prerequisites
+        -- own dependency/configuration freshness; replay only its link inputs.
+        driver.imported[modname] = CIRCULAR_MARK
+        entry.filename, entry.source_files = source.main, source.files
+        entry.native_output = source.native_output or source.main
+        entry.program_output = source.program_output
+        entry.compiled = object_path
+        entry.has_main = native.has_main
+        entry.test_functions = native.test_functions
+        entry.external_symbols = native.external_symbols
+        entry.native_references = native.native_references
+        entry.deps = {}
+        table.insert(dependency_stack, entry.deps)
+        for _, import in ipairs(native.imports) do
+            local ok, result, errors = loader(import.name,
+                import.source_required and { kind = "source-import" } or nil)
+            if not ok or #errors ~= 0 then
+                table.remove(dependency_stack)
+                driver.imported[modname] = nil
+                return false, ok and table.concat(errors, "\n") or result
+            end
+        end
+        table.remove(dependency_stack)
+        for name, owner in pairs(entry.declared_registry) do
+            if name:match("^(.*)%.") == modname or not types.registry[name] then
+                types.registry[name] = owner
+            end
+        end
+        local descriptor = entry.ffi_header_descriptor
+        if descriptor then
+            -- Reattach source environments to the dependencies selected in
+            -- this invocation, without a content/fingerprint freshness check.
+            for index, name in ipairs(entry.source_imports) do
+                local dependency = driver.imported[name]
+                descriptor.dependencies[index] = dependency.ffi_header_descriptor
+                    or dependency.ast._ffi_header
+            end
+            local restored, err = ffiheaders.materialize(context, descriptor)
+            if not restored then driver.imported[modname] = nil; return false, err end
+            entry.ffi_header_descriptor = restored
+            entry.ffi_header = normalized_absolute_filename(
+                driver.ffi_header_filename(entry.native_output))
+            entry.checking_ffi_header = restored.filename
+        end
+        if native.foreign_header then
+            entry.foreign_header = driver.foreign_header_filename(entry.native_output)
+            local logical = modname:gsub("[.]", "/") .. ".titan.h"
+            local filename, err = ffiheaders.filename(context, logical)
+            if not filename then driver.imported[modname] = nil; return false, err end
+            local contents = ffiheaders.foreign_contents(native.foreign_header,
+                ffiheaders.relative(logical, descriptor.logical_name), function(name)
+                    return ffiheaders.relative(logical, name:gsub("[.]", "/") .. ".titan.h")
+                end)
+            ffiheaders.remember_file(context, filename)
+            local wrote, write_error = context.io:write_file(filename, contents)
+            if not wrote then driver.imported[modname] = nil; return false, write_error end
+            entry.checking_foreign_header = filename
+        end
+        driver.imported[modname] = entry
+        object_loaded[modname] = true
+        static_deps[modname] = true
+        local registered, register_error = checker.register_module_interface(
+            modname, entry.type, loader, modname, {}, true, {})
+        if not registered then return false, register_error end
+        if context.probe_verbose then
+            io.stderr:write("Titan object hit ", modname, ": ", object_path, "\n")
+        end
+        return true, entry.type, {}, {
+            kind = "source", filename = entry.filename,
+            foreign_header = entry.checking_foreign_header,
+            foreign_header_for_check = entry.checking_foreign_header ~= nil,
+            foreign_header_probe_identity = entry.foreign_header and
+                normalized_absolute_filename(entry.foreign_header),
+            ffi_header = entry.ffi_header,
+            checking_ffi_header = entry.checking_ffi_header,
+            ffi_header_descriptor = entry.ffi_header_descriptor,
+        }
+    end
+
     local function parse_source_inner(modname, source, loader, profile_frame)
         local ast = {}
         local main_input
@@ -4339,6 +4472,10 @@ function driver.defaultloader(static_deps, options)
         if driver.imported[modname] == CIRCULAR_MARK then
             return false, "circular reference to module"
         end
+        if driver.imported[modname] and driver.imported[modname].object_metadata
+            and not object_loaded[modname] then
+            driver.imported[modname] = nil
+        end
 
         -- Command-line roots and `.titan` import spellings both require a
         -- source implementation. The latter is an edge-local request: it may
@@ -4380,8 +4517,10 @@ function driver.defaultloader(static_deps, options)
             rebound, rebound_err =
                 rebind_overlapping_static_providers(modname)
             if not rebound then return false, rebound_err end
-            local ok, modt, errors, info =
-                parse_source(modname, candidate, loader)
+            local ok, modt, errors, info = load_source_object(modname, candidate, loader)
+            if ok == nil then
+                ok, modt, errors, info = parse_source(modname, candidate, loader)
+            end
             if ok then remember_direct_dependency(modname) end
             return ok, modt, errors, info
         end
@@ -4406,7 +4545,7 @@ function driver.defaultloader(static_deps, options)
         local dirty_source_requested = source_roots[modname] == true or
             source_overrides[modname] ~= nil
         if source_preferred and driver.imported[modname] and
-           ((not driver.imported[modname].ast and
+           ((not driver.imported[modname].ast and not object_loaded[modname] and
                 (not driver.imported[modname]._analysis_manifest or context.source_first
                     or not context.analysis_only)) or
             (dirty_source_requested and
@@ -4878,6 +5017,29 @@ function driver.finalize_resolver_context(context)
         end
     end
 
+    -- Reused machine code has already chosen direct, handle, or global
+    -- references. A later invocation may select different providers, but may
+    -- not silently treat this object as freshly generated under that policy.
+    for name in pairs(source_names) do
+        local native = driver.imported[name].object_metadata
+        if native then
+            for dependency, binding in pairs(native.bindings) do
+                local selected = driver.imported[dependency]
+                if binding == "handle" and selected and selected.kind == "dynamic" then
+                    if selected.type.file ~= native.providers[dependency] then
+                        errors[#errors + 1] = "object for module '" .. name ..
+                            "' loads a different provider for '" .. dependency ..
+                            "'; rebuild it with the selected dependency providers"
+                    end
+                elseif native_bindings[dependency] ~= binding then
+                    errors[#errors + 1] = "object for module '" .. name ..
+                        "' requires " .. binding .. " binding for '" .. dependency ..
+                        "'; rebuild it with the selected dependency providers"
+                end
+            end
+        end
+    end
+
     context.source_names = source_names
     context.dynamic_names = dynamic_names
     context.selected_embedded_modules = selected_embedded_modules
@@ -5103,7 +5265,7 @@ function driver.compile_module(modname, mod, static_deps, verbose, options)
     if mod.compiled then return true, nil, nil end
     local ok, err, libname, native_references = driver.compile(
         modname, mod.ast, mod.native_output or mod.filename,
-        static_deps, verbose, options)
+        static_deps, verbose, options, mod)
     if not ok then return nil, err end
     mod.compiled = libname
     mod.native_references = native_references or {}
@@ -5359,9 +5521,9 @@ function driver.plan_foreign_header(modname, ast, sourcef, defer_render)
     local absolute_ffi_header = normalized_absolute_filename(ffi_headername)
     ast._foreign_header_output = has_foreign and absolute_header or nil
     ast._ffi_header_output = absolute_ffi_header
-    local contents
+    local contents, recipe
     if has_foreign and not defer_render then
-        contents = coder.generate_foreign_header(
+        contents, recipe = coder.generate_foreign_header(
             modname, ast, { module = modname })
     end
     return {
@@ -5372,6 +5534,7 @@ function driver.plan_foreign_header(modname, ast, sourcef, defer_render)
         marker = driver.FOREIGN_HEADER_MARKER,
         has_foreign = has_foreign,
         contents = contents,
+        recipe = recipe,
         ffi_header = {
             filename = ffi_headername,
             absolute = absolute_ffi_header,
@@ -5416,11 +5579,55 @@ function driver.plan_foreign_headers(names, imported)
     local plans = {}
     local by_name = {}
     local occupied = {}
+    local plan_names, planned = {}, {}
     for _, name in ipairs(names) do
+        plan_names[#plan_names + 1], planned[name] = name, true
+    end
+    local index = 1
+    while plan_names[index] do
+        local mod = assert(imported[plan_names[index]])
+        local source_imports = mod.source_imports or {}
+        if mod.ast then
+            source_imports = {}
+            for _, node in ipairs(mod.ast) do
+                if not node._ignore and node._tag == "Ast.TopLevelImport"
+                    and node._source_import then
+                    source_imports[#source_imports + 1] = node.modname
+                end
+            end
+        end
+        for _, dependency in ipairs(source_imports) do
+            local selected = imported[dependency]
+            if selected and selected.object_metadata and not planned[dependency] then
+                plan_names[#plan_names + 1], planned[dependency] = dependency, true
+            end
+        end
+        index = index + 1
+    end
+    for _, name in ipairs(plan_names) do
         local mod = assert(imported[name])
-        if mod.ast and not mod.compiled then
-            local plan = driver.plan_foreign_header(
-                name, mod.ast, mod.native_output or mod.filename, true)
+        if (mod.ast and not mod.compiled) or mod.object_metadata then
+            local plan
+            if mod.object_metadata then
+                local sourcef = mod.native_output or mod.filename
+                local headername = driver.foreign_header_filename(sourcef)
+                local ffi_headername = driver.ffi_header_filename(sourcef)
+                plan = {
+                    modname = name, mod = mod,
+                    filename = headername,
+                    absolute = normalized_absolute_filename(headername),
+                    marker = driver.FOREIGN_HEADER_MARKER,
+                    has_foreign = mod.object_metadata.foreign_header ~= nil,
+                    ffi_header = {
+                        filename = ffi_headername,
+                        absolute = normalized_absolute_filename(ffi_headername),
+                        marker = driver.FFI_HEADER_MARKER,
+                    },
+                }
+            else
+                plan = driver.plan_foreign_header(
+                    name, mod.ast, mod.native_output or mod.filename, true)
+            end
             for _, entry in ipairs(generated_header_entries(plan)) do
                 local identity = physical_absolute_filename(entry.filename):lower()
                 local previous = occupied[identity]
@@ -5436,27 +5643,26 @@ function driver.plan_foreign_headers(names, imported)
         end
     end
 
+    local function dependency_plan(name)
+        if by_name[name] then return by_name[name] end
+        local selected = imported[name]
+        if not selected or not selected.ast or not selected.compiled then return nil end
+        local sourcef = selected.native_output or selected.filename
+        return {
+            has_foreign = driver.ast_has_foreign_functions(selected.ast),
+            absolute = normalized_absolute_filename(driver.foreign_header_filename(sourcef)),
+            ffi_header = { absolute = normalized_absolute_filename(driver.ffi_header_filename(sourcef)) },
+        }
+    end
+
     -- Header identity follows the finalized physical native output, not the
     -- source lookup filename. Resolve every direct source edge from the full
     -- plan before rendering any consumer header or C translation unit.
     for _, plan in ipairs(plans) do
-        for _, node in ipairs(plan.ast) do
+        for _, node in ipairs(plan.ast or {}) do
             if not node._ignore and node._tag == "Ast.TopLevelImport"
                and node._source_import then
-                local dependency = by_name[node.modname]
-                if not dependency then
-                    local selected = imported[node.modname]
-                    if selected and selected.ast and selected.compiled then
-                        local sourcef = selected.native_output or selected.filename
-                        dependency = {
-                            has_foreign = driver.ast_has_foreign_functions(selected.ast),
-                            absolute = normalized_absolute_filename(
-                                driver.foreign_header_filename(sourcef)),
-                            ffi_header = { absolute = normalized_absolute_filename(
-                                driver.ffi_header_filename(sourcef)) },
-                        }
-                    end
-                end
+                local dependency = dependency_plan(node.modname)
                 if not dependency then
                     return nil, "source import '" .. node.modname ..
                         "' has no native output header plan"
@@ -5468,11 +5674,35 @@ function driver.plan_foreign_headers(names, imported)
         end
     end
     for _, plan in ipairs(plans) do
-        plan.ffi_header.contents = coder.generate_ffi_header(
-            plan.modname, plan.ast)
-        if plan.has_foreign then
-            plan.contents = coder.generate_foreign_header(
-                plan.modname, plan.ast, { module = plan.modname })
+        if plan.mod then
+            local descriptor = plan.mod.ffi_header_descriptor
+            local dependencies = {}
+            for _, dependency in ipairs(descriptor.dependencies) do
+                dependencies[#dependencies + 1] = {
+                    logical_name = assert(dependency_plan(dependency.modname)).ffi_header.absolute,
+                }
+            end
+            plan.ffi_header.contents = ffiheaders.plan_contents(
+                plan.modname, plan.ffi_header.absolute, dependencies,
+                descriptor.direct_includes, descriptor.typedef_declarations)
+            if plan.has_foreign then
+                plan.contents = ffiheaders.foreign_contents(
+                    plan.mod.object_metadata.foreign_header,
+                    plan.ffi_header.absolute, function(name)
+                        return assert(dependency_plan(name)).absolute
+                    end)
+            end
+            for _, entry in ipairs(generated_header_entries(plan)) do
+                entry.preserve = entry.contents ~= nil and
+                    lfs.attributes(entry.filename, "mode") == "file"
+            end
+        else
+            plan.ffi_header.contents = coder.generate_ffi_header(
+                plan.modname, plan.ast)
+            if plan.has_foreign then
+                plan.contents, plan.recipe = coder.generate_foreign_header(
+                    plan.modname, plan.ast, { module = plan.modname })
+            end
         end
         local ok, err = driver.validate_foreign_header_plan(plan)
         if not ok then return nil, err end
@@ -5498,7 +5728,7 @@ function driver.write_foreign_header_plans(plans, verbose, pretty_print)
     -- A formatter failure must leave the existing environment and signatures
     -- together, including when several source modules are being compiled.
     for _, entry in ipairs(entries) do
-        if entry.contents then
+        if entry.contents and not entry.preserve then
             local ok, err = ensure_output_parent(entry.filename)
             if not ok then return abandon(err) end
             local temporary = driver.sibling_temporary_path(
@@ -5517,17 +5747,20 @@ function driver.write_foreign_header_plans(plans, verbose, pretty_print)
             ok, err = os.rename(staged[entry], entry.filename)
             if not ok then return abandon(err) end
             staged[entry] = nil
-        elseif entry.managed then
+        elseif entry.managed and not entry.preserve then
             ok, err = os.remove(entry.filename)
             if not ok then return abandon(err) end
         end
     end
     for _, plan in ipairs(plans or {}) do
-        plan.ast._foreign_header_contents = plan.contents
-        plan.ast._foreign_header_prepared = true
-        if plan.ffi_header then
-            plan.ast._ffi_header_contents = plan.ffi_header.contents
-            plan.ast._ffi_header_prepared = true
+        if plan.ast then
+            plan.ast._foreign_header_contents = plan.contents
+            plan.ast._foreign_header_recipe = plan.recipe
+            plan.ast._foreign_header_prepared = true
+            if plan.ffi_header then
+                plan.ast._ffi_header_contents = plan.ffi_header.contents
+                plan.ast._ffi_header_prepared = true
+            end
         end
     end
     return true
@@ -5541,7 +5774,7 @@ function driver.prepare_foreign_headers(
 end
 
 local function prepare_compile(
-        modname, ast, sourcef, static_deps, verbose, options)
+        modname, ast, sourcef, static_deps, verbose, options, source_entry)
     if not staticmetadata.valid_module_name(modname) then
         return nil, "invalid logical Titan module name " ..
             string.format("%q", modname)
@@ -5558,9 +5791,37 @@ local function prepare_compile(
             header_plan, verbose, options and options.pretty_print)
         if not header_ok then return nil, header_err end
     end
-    local code, native_references =
+    local code, native_references, _, native_bindings =
         coder.generate(modname, ast, static_deps, driver.TITAN_ABI_VERSION,
             driver.EMIT_LINE_DIRECTIVES)
+    local imports, deps, providers = {}, {}, {}
+    for _, node in ipairs(ast) do
+        if not node._ignore and node._tag == "Ast.TopLevelImport" then
+            imports[#imports + 1] = {
+                name = node.modname, source_required = node._source_import == true,
+            }
+            if static_deps[node.modname] then deps[node.modname] = true
+            else providers[node.modname] = node._type.file end
+        end
+    end
+    local entry = {
+        kind = "source", ast = ast,
+        type = ast._declared_type or ast._type,
+        filename = source_entry and source_entry.filename or sourcef,
+        source_files = source_entry and source_entry.source_files or { sourcef }, deps = deps,
+        c_header_dependencies = ast._c_header_dependencies or {},
+    }
+    local payload, metadata_error = objectmetadata.encode(entry, {
+        imports = imports, bindings = native_bindings, providers = providers,
+        has_main = checker.has_main(ast) and true or false,
+        test_functions = require("titan-compiler.test_runner").function_names(ast),
+        external_symbols = coder.external_symbols(modname, ast),
+        native_references = native_references,
+        foreign_header = ast._foreign_header_recipe,
+    })
+    if not payload then return nil, metadata_error end
+    code = code .. "\n" .. objectmetadata.render(payload,
+        "titan_object_source_" .. driver.mangle_module_name(modname))
     local output_ok, output_err = ensure_output_parent(filename)
     if not output_ok then return nil, output_err end
     os.remove(filename)
@@ -5573,21 +5834,49 @@ local function prepare_compile(
     local args, flags_err = driver.generated_compile_prefix()
     if not args then return nil, flags_err end
     append_argv(args, options and options.extra_compile_flags)
+    local lto, explicit_seed = false, false
+    for _, argument in ipairs(args) do
+        if argument == "-fno-lto" then lto = false
+        elseif argument == "-flto" or argument:match("^%-flto=") then lto = true end
+        if argument == "-frandom-seed" or argument:match("^%-frandom%-seed=") then
+            explicit_seed = true
+        end
+    end
+    if lto and not explicit_seed then
+        -- GCC otherwise gives identical LTO input random section identities.
+        -- A distinct stable seed per logical module preserves deterministic
+        -- archive bytes across recompilation and private output staging.
+        append_argv(args, { "-frandom-seed=" .. modname })
+    end
     append_argv(args, { static_flag(), filename })
-    append_argv(args, { "-o", libname })
+    -- An interrupted/failed compiler may leave a partial output. Only publish
+    -- its successful result under the source object's reusable pathname.
+    local reserved, temporary, temporary_error = pcall(
+        driver.sibling_temporary_path, libname .. ".compile")
+    if not reserved then return nil, temporary end
+    if not temporary then return nil, temporary_error end
+    append_argv(args, { "-o", temporary })
     return {
         args = args,
         libname = libname,
+        temporary = temporary,
         native_references = native_references,
         generated_bytes = #code,
     }
 end
 
-function driver.compile(modname, ast, sourcef, static_deps, verbose, options)
+local function publish_compiled_object(prepared, ok, err)
+    if ok then ok, err = os.rename(prepared.temporary, prepared.libname) end
+    if not ok then os.remove(prepared.temporary) end
+    return ok, err
+end
+
+function driver.compile(modname, ast, sourcef, static_deps, verbose, options, source_entry)
     local prepared, prepare_err = prepare_compile(
-        modname, ast, sourcef, static_deps, verbose, options)
+        modname, ast, sourcef, static_deps, verbose, options, source_entry)
     if not prepared then return nil, prepare_err end
     local ok, err = run_argv(prepared.args, verbose)
+    ok, err = publish_compiled_object(prepared, ok, err)
     if ok then
         return ok, nil, prepared.libname, prepared.native_references
     else
@@ -6086,7 +6375,7 @@ function driver.compile_modules(requests, parallelism, verbose)
         else
             local compilation, prepare_err = prepare_compile(
                 request.modname, mod.ast, mod.native_output or mod.filename,
-                request.static_deps, verbose, request.options)
+                request.static_deps, verbose, request.options, mod)
             if not compilation then
                 results[index] = { err = prepare_err }
             else
@@ -6099,6 +6388,7 @@ function driver.compile_modules(requests, parallelism, verbose)
     local compiled = run_prepared_compiles(prepared, parallelism, verbose)
     for prepared_index, compilation in ipairs(prepared) do
         local result = compiled[prepared_index]
+        result.ok, result.err = publish_compiled_object(compilation, result.ok, result.err)
         local request_index = compilation.request_index
         if result.ok then
             local request = requests[request_index]
@@ -6388,6 +6678,7 @@ function driver.sibling_temporary_path(filename, strategy)
         if not removed then return nil, remove_error end
     else
         unique = os.tmpname()
+        if not unique then return nil, "os.tmpname returned no path" end
         os.remove(unique)
     end
     unique = unique:match("([^/]+)$") or unique:gsub("[^%w]", "_")

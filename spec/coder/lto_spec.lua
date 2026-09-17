@@ -1,0 +1,180 @@
+local assert = require "luassert"
+local cdriver = require "c-parser.cdriver"
+local lfs = require "lfs"
+local objectmetadata = require "titan-compiler.objectmetadata"
+local staticmetadata = require "titan-compiler.staticmetadata"
+
+local PREFIX = require("spec.support.installed_prefix").active()
+local LUA = PREFIX .. "/bin/lua"
+local REPOSITORY = assert(lfs.currentdir())
+local CC = os.getenv("CC") or "cc"
+local SENTINEL = "titan_lto_unresolved_without_optimization"
+
+local function quote(arguments)
+    local result = {}
+    for index, argument in ipairs(arguments) do
+        result[index] = assert(cdriver.shell_quote(argument))
+    end
+    return table.concat(result, " ")
+end
+
+local function run(arguments)
+    local pipe = assert(io.popen(quote(arguments) .. " 2>&1", "r"))
+    local output = assert(pipe:read("*a"))
+    local ok, why, code = pipe:close()
+    return ok == true, output, why, code
+end
+
+local platform_ok, platform = run({ "uname", "-s" })
+assert.truthy(platform_ok, platform)
+local LINUX = platform:match("Linux") ~= nil
+
+local function mkdir(path)
+    if lfs.attributes(path, "mode") == "directory" then return end
+    local parent = path:match("^(.*)/[^/]+$")
+    if parent and parent ~= "" then mkdir(parent) end
+    assert(lfs.mkdir(path))
+end
+
+local function write(path, contents)
+    mkdir(path:match("^(.*)/[^/]+$") or ".")
+    local file = assert(io.open(path, "wb"))
+    assert(file:write(contents))
+    assert(file:close())
+end
+
+local function read(path)
+    local file = assert(io.open(path, "rb"))
+    local contents = assert(file:read("*a"))
+    assert(file:close())
+    return contents
+end
+
+local function remove(path)
+    local mode = lfs.symlinkattributes(path, "mode")
+    if mode == "directory" then
+        for name in lfs.dir(path) do
+            if name ~= "." and name ~= ".." then remove(path .. "/" .. name) end
+        end
+        assert(lfs.rmdir(path))
+    elseif mode then
+        assert(os.remove(path))
+    end
+end
+
+describe("Titan link-time optimization", function()
+    local workspace
+    local source_root
+
+    before_each(function()
+        if not LINUX then return end
+        workspace = os.tmpname()
+        assert(os.remove(workspace))
+        source_root = workspace .. "/sources"
+        mkdir(source_root)
+        assert(lfs.chdir(workspace))
+    end)
+
+    after_each(function()
+        assert(lfs.chdir(REPOSITORY))
+        if workspace then remove(workspace) end
+    end)
+
+    local function titanc(extra_compile, extra_link, ...)
+        local arguments = {
+            "env", "CC=" .. CC, "CCACHE_DISABLE=1", "MAKE=true",
+            "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_ROCKS_ROOT=" .. PREFIX,
+            "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=" .. (extra_compile or ""),
+            "TITAN_EXTRA_LDFLAGS=" .. (extra_link or ""),
+            LUA, "-E", "-e", string.format("package.path = %q .. package.path",
+                REPOSITORY .. "/?.lua;" .. REPOSITORY .. "/?/init.lua;"),
+            REPOSITORY .. "/titanc", "--tree", source_root,
+        }
+        for _, argument in ipairs({ ... }) do arguments[#arguments + 1] = argument end
+        return run(arguments)
+    end
+
+    local function compiled(...)
+        local ok, output = titanc(nil, nil, ...)
+        assert.is_true(ok, output)
+        return output
+    end
+
+    it("optimizes separate modules into providers and a source-free archive consumer", function()
+        if not LINUX then pending("default LTO is Linux-only"); return end
+        local base = source_root .. "/lto_fixture/base"
+        local facade = source_root .. "/lto_fixture/facade"
+        write(source_root .. "/oracle.h", "void " .. SENTINEL .. "(void);\n")
+        write(base .. ".titan", [[
+            foreign function answer(): int
+                local total = 0
+                while total < 42 do total = total + 1 end
+                return total
+            end
+        ]])
+        write(facade .. ".titan", [[
+            local base = import "lto_fixture.base.titan"
+            foreign import "]] .. source_root .. [[/oracle.h"
+            function answer(): integer
+                local result = base.answer()
+                if result ~= 42 then ffi.]] .. SENTINEL .. [[() end
+                return result as integer
+            end
+        ]])
+        write(source_root .. "/direct_app.titan", [[
+            local facade = import "lto_fixture.facade.titan"
+            function main(args: {string}): integer return facade.answer() - 42 end
+        ]])
+
+        compiled("-c", "--incremental", "lto_fixture.base")
+        compiled("-c", "--incremental", "lto_fixture.facade")
+        compiled("-c", "--incremental", "direct_app")
+        -- The caller must not have seen a header-inline callee, or this would
+        -- merely demonstrate ordinary per-translation-unit optimization.
+        assert.falsy(read(base .. ".titan.h"):find("static inline", 1, true))
+        local nm_ok, unresolved = run({ "nm", "-u", facade .. ".o" })
+        assert.is_true(nm_ok, unresolved)
+        assert.matches(SENTINEL, unresolved, 1, true)
+        for _, item in ipairs({ { base, "lto_fixture.base" }, { facade, "lto_fixture.facade" } }) do
+            local bytes = read(item[1] .. ".o")
+            local public = assert(staticmetadata.classify_object(bytes, item[1] .. ".o"))
+            assert.equal(item[2], public.metadata.module)
+            local source = assert(objectmetadata.read(bytes, item[1] .. ".o"))
+            assert.equal(item[2], source.type.name)
+        end
+
+        local direct_output = compiled("--incremental", "--verbose", "direct_app")
+        assert.matches("Titan object hit lto_fixture.facade:", direct_output, 1, true)
+        local ok, output = run({ "./direct_app" })
+        assert.is_true(ok, output)
+
+        compiled("--incremental", "lto_fixture.base", "lto_fixture.facade")
+        nm_ok, unresolved = run({ "nm", "-u", "lto_fixture.so" })
+        assert.is_true(nm_ok, unresolved)
+        assert.falsy(unresolved:find(SENTINEL, 1, true), unresolved)
+        ok, output = run({ LUA, "-E", "-e",
+            [[package.path = "./?.lua;" .. package.path; assert(require("lto_fixture.facade").answer() == 42)]] })
+        assert.is_true(ok, output)
+
+        -- Only the compiled provider remains resolvable. The archive must
+        -- preserve the original inter-module optimization input after Titan's
+        -- own extraction, validation, and repacking path.
+        assert(os.rename(source_root .. "/lto_fixture", workspace .. "/unavailable-sources"))
+        write(source_root .. "/archive_app.titan", [[
+            local facade = import "lto_fixture.facade"
+            function main(args: {string}): integer return facade.answer() - 42 end
+        ]])
+        compiled("-c", "--incremental", "--static", "archive_app")
+        compiled("--incremental", "--static", "archive_app")
+        ok, output = run({ "./archive_app" })
+        assert.is_true(ok, output)
+
+        -- Fat objects also contain ordinary native code. Turning off the
+        -- link optimizer must expose the unresolved sentinel in that code;
+        -- otherwise successful links above would not prove cross-object LTO.
+        ok, output = titanc("-O0 -fno-lto", "-O0 -fno-lto",
+            "--incremental", "--static", "archive_app")
+        assert.is_false(ok, output)
+        assert.matches(SENTINEL, output, 1, true)
+    end)
+end)

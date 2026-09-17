@@ -159,6 +159,36 @@ function staticmetadata.c_initializer(payload)
     return table.concat(lines, "\n")
 end
 
+-- Source records are independent of the canonical public archive section.
+-- Keep their bytes equally relocation-free and immune to Clang ASan global
+-- redzones, which would otherwise become part of the serialized payload.
+function staticmetadata.source_declaration(payload, symbol)
+    local initializer, err = staticmetadata.c_initializer(payload)
+    if not initializer then return nil, err end
+    assert(type(symbol) == "string" and symbol:match("^[A-Za-z_][A-Za-z0-9_]*$"),
+        "source metadata symbol must be a C identifier")
+    return [[
+#if defined(__APPLE__)
+#define TITAN_SOURCE_META_SECTION \
+    __attribute__((used, aligned(1), section("__TEXT,__titansrc")))
+#elif defined(__ELF__)
+#define TITAN_SOURCE_META_SECTION \
+    __attribute__((used, aligned(1), section(".titan.source")))
+#else
+#error unsupported object format for Titan source metadata
+#endif
+
+#if defined(__clang__)
+#define TITAN_SOURCE_META_NO_ADDRESS_SANITIZE \
+    __attribute__((no_sanitize("address")))
+#else
+#define TITAN_SOURCE_META_NO_ADDRESS_SANITIZE
+#endif
+
+TITAN_SOURCE_META_SECTION TITAN_SOURCE_META_NO_ADDRESS_SANITIZE
+static const unsigned char ]] .. symbol .. "[] = " .. initializer .. ";\n"
+end
+
 local function public_origin(origin)
     if origin == nil then origin = "<memory>" end
     return format("%q", tostring(origin))

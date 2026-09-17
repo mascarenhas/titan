@@ -86,6 +86,7 @@ build = {
       ["titan-compiler.graphcodec"] = "titan-compiler/graphcodec.lua",
       ["titan-compiler.declarationschemas"] = "titan-compiler/declarationschemas.lua",
       ["titan-compiler.projectcache"] = "titan-compiler/projectcache.lua",
+      ["titan-compiler.objectmetadata"] = "titan-compiler/objectmetadata.lua",
       ["titan-compiler.cacheadapter"] = "titan-compiler/cacheadapter.lua",
       ["titan-compiler.foreigncache"] = "titan-compiler/foreigncache.lua",
       ["titan-compiler.cdefinitioncache"] = "titan-compiler/cdefinitioncache.lua",

@@ -11,6 +11,7 @@ local coder = require "titan-compiler.coder"
 local sourceinterface = require "titan-compiler.sourceinterface"
 local ffiheaders = require "titan-compiler.ffiheaders"
 local staticmetadata = require "titan-compiler.staticmetadata"
+local objectmetadata = require "titan-compiler.objectmetadata"
 local types = require "titan-compiler.types"
 local util = require "titan-compiler.util"
 local titan = require "titan"
@@ -2477,6 +2478,262 @@ describe("compiler module loader", function()
         types.registry = previous.registry
         titan._loadlib = previous.loadlib
         remove_tree(root)
+    end)
+
+    describe("incremental source objects", function()
+        local loaders
+        before_each(function() loaders = {} end)
+        after_each(function()
+            for _, loader in ipairs(loaders) do driver.close_loader(loader) end
+        end)
+
+        local function fresh_loader(options)
+            driver.imported, types.registry = {}, {}
+            options = options or {}
+            options.source_first = true
+            local dependencies = {}
+            local loader = driver.defaultloader(dependencies, options)
+            loaders[#loaders + 1] = loader
+            return loader, dependencies
+        end
+
+        local function load_ok(loader, name)
+            local ok, result, errors = loader(name)
+            assert.is_true(ok, tostring(result))
+            assert.equal(0, #errors, table.concat(errors, "\n"))
+            return driver.imported[name]
+        end
+
+        -- These driver tests only load metadata. A small real native object
+        -- isolates the source fast path from code generation and final linking.
+        local function write_source_object(entry, payload)
+            local stem = (entry.native_output or entry.filename):gsub("[.]titan$", "")
+            local object = stem .. ".o"
+            local native = {
+                has_main = false, imports = {}, native_references = {},
+                external_symbols = {},
+                foreign_header = entry.ast and entry.ast._foreign_header_recipe,
+            }
+            if payload == nil then payload = assert(objectmetadata.encode(entry, native)) end
+            local code = payload == false and "int ordinary_object;\n"
+                or assert(objectmetadata.render(payload, "source_metadata"))
+            write_file(stem .. ".metadata.c", code)
+            local argv = assert(driver.generated_compile_prefix())
+            for _, argument in ipairs({ "-c", stem .. ".metadata.c", "-o", object }) do
+                argv[#argv + 1] = argument
+            end
+            local result = compiler_io.new_sync():run(argv)
+            assert.is_true(result.ok, result.output or result.diagnostic)
+            local latest = 0
+            for _, filename in ipairs(entry.source_files) do
+                local modified = assert(lfs.attributes(filename, "modification"))
+                latest = math.max(latest, modified)
+            end
+            assert(lfs.touch(object, latest + 2, latest + 2))
+            return object
+        end
+
+        it("skips parsing, checking, generation and native compilation on an object hit", function()
+            local name = "incremental_driver_warm"
+            write_file(source .. "/" .. name .. ".titan",
+                "local function hidden(): integer return 42 end\n"
+                .. "function answer(): integer return hidden() end\n")
+            local entry = load_ok(fresh_loader(), name)
+            local object = write_source_object(entry)
+            local before = lfs.attributes(object, "modification")
+            local parser = require "titan-compiler.parser"
+            local checker = require "titan-compiler.checker"
+            local originals = { parse = parser.parse, check = checker.check,
+                generate = coder.generate, compile = driver.compile_module }
+            local counts = { parse = 0, check = 0, generate = 0, compile = 0 }
+            parser.parse = function(...)
+                counts.parse = counts.parse + 1
+                return originals.parse(...)
+            end
+            checker.check = function(...)
+                counts.check = counts.check + 1
+                return originals.check(...)
+            end
+            coder.generate = function(...)
+                counts.generate = counts.generate + 1
+                return originals.generate(...)
+            end
+            driver.compile_module = function(...)
+                counts.compile = counts.compile + 1
+                return originals.compile(...)
+            end
+            local ok, failure = xpcall(function()
+                local loader, dependencies = fresh_loader({ incremental = true })
+                local restored = load_ok(loader, name)
+                assert.equal(object, restored.compiled)
+                assert.is_nil(restored.ast)
+                assert.is_true(dependencies[name])
+                assert.is_nil(restored._analysis_manifest)
+                assert.is_table(restored.type.source_members.hidden)
+                local results = driver.compile_modules({ {
+                    modname = name, mod = restored, static_deps = dependencies,
+                } }, 1, false)
+                assert.is_true(results[1].ok)
+                assert.equal(object, results[1].libname)
+            end, debug.traceback)
+            parser.parse, checker.check = originals.parse, originals.check
+            coder.generate, driver.compile_module = originals.generate, originals.compile
+            assert.is_true(ok, failure)
+            assert.same({ parse = 0, check = 0, generate = 0, compile = 0 }, counts)
+            assert.equal(before, lfs.attributes(object, "modification"))
+        end)
+
+        it("ignores object metadata by default and falls back for missing or unusable records", function()
+            local name = "incremental_driver_fallback"
+            local filename = source .. "/" .. name .. ".titan"
+            write_file(filename, "function answer(): integer return 42 end\n")
+            local entry = load_ok(fresh_loader(), name)
+            local payload = assert(objectmetadata.encode(entry, {
+                has_main = false, imports = {}, native_references = {}, external_symbols = {},
+            }))
+            for _, scenario in ipairs({
+                { label = "absent object" },
+                { label = "absent source section", payload = false },
+                { label = "Lua syntax error", payload = "return {" },
+                { label = "Lua execution error", payload = "return missing.field" },
+                { label = "ABI mismatch", payload = "return {abi='unsupported'}" },
+                { label = "older object", payload = payload, older = true },
+                { label = "default ignores current object", payload = payload, default = true },
+            }) do
+                local object = filename:gsub("[.]titan$", ".o")
+                if scenario.payload ~= nil then write_source_object(entry, scenario.payload)
+                else os.remove(object) end
+                if scenario.older then
+                    local modified = assert(lfs.attributes(filename, "modification"))
+                    assert(lfs.touch(object, modified - 1, modified - 1))
+                end
+                local restored = load_ok(fresh_loader({ incremental = not scenario.default }), name)
+                assert.is_table(restored.ast, scenario.label)
+                assert.is_nil(restored.compiled, scenario.label)
+            end
+        end)
+
+        it("compares every folder contributor and permits equal source/object timestamps", function()
+            local name = "incremental_driver_folder"
+            local directory = source .. "/" .. name
+            assert(lfs.mkdir(directory))
+            local filename = directory .. "/" .. name .. ".titan"
+            local contributor = directory .. "/part.titan"
+            write_file(filename, "function answer(): integer return hidden() end\n")
+            write_file(contributor, "local function hidden(): integer return 42 end\n")
+            local entry = load_ok(fresh_loader(), name)
+            local object = write_source_object(entry)
+            local timestamp = os.time() - 10
+            for _, path in ipairs({ filename, contributor, object }) do
+                assert(lfs.touch(path, timestamp, timestamp))
+            end
+            assert.equal(object, load_ok(fresh_loader({ incremental = true }), name).compiled)
+            assert(lfs.touch(contributor, timestamp + 1, timestamp + 1))
+            assert.is_table(load_ok(fresh_loader({ incremental = true }), name).ast)
+        end)
+
+        it("restores missing native headers from cached inline bodies and preserves complete companions", function()
+            local name = "incremental_driver_headers"
+            local filename = source .. "/" .. name .. ".titan"
+            write_file(filename, [[
+                foreign function increment(value: int): int
+                    return value + 1
+                end
+            ]])
+            local entry = load_ok(fresh_loader(), name)
+            assert(driver.prepare_foreign_headers({ name }, driver.imported, false, false))
+            local ffi_path = driver.ffi_header_filename(filename)
+            local foreign_path = driver.foreign_header_filename(filename)
+            local ffi_contents = assert(util.get_file_contents(ffi_path))
+            local foreign_contents = assert(util.get_file_contents(foreign_path))
+            assert.matches("static inline", foreign_contents, 1, true)
+            local object = write_source_object(entry)
+            local object_mtime = lfs.attributes(object, "modification")
+            assert(os.remove(ffi_path))
+            assert(os.remove(foreign_path))
+
+            local restored = load_ok(fresh_loader({ incremental = true }), name)
+            assert.is_nil(restored.ast)
+            assert(driver.prepare_foreign_headers({ name }, driver.imported, false, false))
+            assert.equal(ffi_contents, assert(util.get_file_contents(ffi_path)))
+            assert.equal(foreign_contents, assert(util.get_file_contents(foreign_path)))
+            local preserved_mtime = os.time() - 20
+            assert(lfs.touch(ffi_path, preserved_mtime, preserved_mtime))
+            assert(lfs.touch(foreign_path, preserved_mtime, preserved_mtime))
+            assert(driver.prepare_foreign_headers({ name }, driver.imported, false, false))
+            assert.equal(preserved_mtime, lfs.attributes(ffi_path, "modification"))
+            assert.equal(preserved_mtime, lfs.attributes(foreign_path, "modification"))
+            assert.equal(object_mtime, lfs.attributes(object, "modification"))
+        end)
+
+        it("includes cached source dependencies outside the requested native header plan", function()
+            local producer = "incremental_driver_partial"
+            local directory = source .. "/" .. producer
+            assert(lfs.mkdir(directory))
+            local filename = directory .. "/" .. producer .. ".titan"
+            write_file(filename, [[
+                foreign function increment(value: int): int
+                    return value + 1
+                end
+            ]])
+            local entry = load_ok(fresh_loader(), producer)
+            assert(driver.prepare_foreign_headers({ producer }, driver.imported, false, false))
+            local ffi_path = driver.ffi_header_filename(filename)
+            local foreign_path = driver.foreign_header_filename(filename)
+            local ffi_contents = assert(util.get_file_contents(ffi_path))
+            local foreign_contents = assert(util.get_file_contents(foreign_path))
+            write_source_object(entry)
+            assert(os.remove(ffi_path))
+            assert(os.remove(foreign_path))
+
+            local consumer = "incremental_driver_partial_consumer"
+            local consumer_filename = source .. "/" .. consumer .. ".titan"
+            write_file(consumer_filename,
+                "local provider = import '" .. producer .. ".titan'\n"
+                .. "foreign function answer(value: int): int\n"
+                .. "    return provider.increment(value)\nend\n")
+            load_ok(fresh_loader({ incremental = true }), consumer)
+            assert.is_nil(driver.imported[producer].ast)
+            local plans = assert(driver.plan_foreign_headers({ consumer }, driver.imported))
+            local planned = {}
+            for _, plan in ipairs(plans) do planned[plan.modname] = true end
+            assert.same({ [producer] = true, [consumer] = true }, planned)
+            assert(driver.write_foreign_header_plans(plans, false, false))
+            assert.equal(ffi_contents, assert(util.get_file_contents(ffi_path)))
+            assert.equal(foreign_contents, assert(util.get_file_contents(foreign_path)))
+            local consumer_header = assert(util.get_file_contents(
+                driver.foreign_header_filename(consumer_filename)))
+            assert.matches(foreign_path, consumer_header, 1, true)
+        end)
+
+        it("requires source presence and direct source capability despite a surviving object", function()
+            local name = "incremental_driver_private"
+            local filename = source .. "/" .. name .. ".titan"
+            write_file(filename, "local function hidden(): integer return 42 end\n")
+            local entry = load_ok(fresh_loader(), name)
+            write_source_object(entry)
+            local consumer = "incremental_driver_consumer"
+            write_file(source .. "/" .. consumer .. ".titan",
+                "local provider = import '" .. name .. "'\n"
+                .. "function answer(): integer return provider.hidden() end\n")
+            local loader = fresh_loader({ incremental = true })
+            local ok, result, errors = loader(consumer)
+            assert.is_true(ok, tostring(result))
+            assert.is_true(#errors > 0)
+            assert.is_string(driver.imported[name].compiled)
+
+            write_file(source .. "/" .. consumer .. ".titan",
+                "local provider = import '" .. name .. ".titan'\n"
+                .. "function answer(): integer return provider.hidden() end\n")
+            load_ok(fresh_loader({ incremental = true }), consumer)
+            assert(os.remove(filename))
+            loader = fresh_loader({ incremental = true, source_roots = { [name] = true } })
+            ok = loader(name)
+            assert.is_false(ok)
+            loader = fresh_loader({ incremental = true })
+            ok, result, errors = loader(consumer)
+            assert.is_true(not ok or #errors > 0, tostring(result))
+        end)
     end)
 
     it("validates a closed embedded-interface provider at context creation",

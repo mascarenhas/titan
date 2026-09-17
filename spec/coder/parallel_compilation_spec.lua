@@ -614,7 +614,8 @@ describe("parallel generated-C compilation", function()
         configure_counting_compiler(nil, nil, 3)
         local requests = requests_with_headers()
         local temporary_logs = {}
-        local calls = 0
+        -- Each object reserves its private output before FIFO/log creation.
+        local calls = -#requests
         os.tmpname = function()
             calls = calls + 1
             if calls == 4 then error("injected tmpname failure", 0) end
@@ -647,7 +648,7 @@ describe("parallel generated-C compilation", function()
         configure_counting_compiler(nil, nil, 3)
         local requests = requests_with_headers()
         local temporary_logs = {}
-        local calls = 0
+        local calls = -#requests
         os.tmpname = function()
             calls = calls + 1
             if calls == 3 then return nil end
@@ -743,7 +744,7 @@ describe("parallel generated-C compilation", function()
         configure_counting_compiler(nil, nil, 3)
         local requests = requests_with_headers()
         local temporary_logs = {}
-        local calls = 0
+        local calls = -#requests
         os.tmpname = function()
             calls = calls + 1
             if calls == 2 then error("injected tmpname failure", 0) end

@@ -3,8 +3,9 @@
 *.so
 *.dSYM/
 
-# Compiler-generated module C declaration environments
+# Compiler-generated module C declaration environments and foreign interfaces
 *.ffi.h
+*.titan.h
 
 # lua source trees (downloaded from lua.org)
 /lua-5.*/
@@ -98,6 +99,9 @@
 
 # Unified native standard-library test build
 /.titan-tests/
+# Native test C stays beside its Titan source for incremental reuse. Authored
+# C fixtures live under spec/fixtures/stdlib/native instead.
+/spec/stdlib/titan/**/*.c
 /luacov.stats.out
 /luacov.report.out
 

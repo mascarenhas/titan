@@ -916,17 +916,26 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
     -- gate uses this use-site set so an exported but unused nominal type does
     -- not force an unrelated carried object out of a selected archive.
     local direct_native_modules = {}
+    local native_bindings = {}
+    local function remember_binding(name)
+        native_bindings[name] = static_deps[name] == true and "direct"
+            or (mprefixes[name] and "handle" or "global")
+    end
+    for name in pairs(mprefixes) do remember_binding(name) end
     for _, func in pairs(tlcontext.functions) do
+        remember_binding(func.module)
         if static_deps[func.module] == true then
             direct_native_modules[func.module] = true
         end
     end
     for _, info in pairs(tlcontext.bound_luas) do
+        remember_binding(info.module)
         if static_deps[info.module] == true then
             direct_native_modules[info.module] = true
         end
     end
     for _, info in pairs(tlcontext.bound_stricts) do
+        remember_binding(info.module)
         if static_deps[info.module] == true then
             direct_native_modules[info.module] = true
         end
@@ -948,7 +957,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         source, removed = source:gsub(
             "([ \t]*#line[^\n]*\n)[ \t]*\n", "%1")
     until removed == 0
-    return source, direct_native_modules, foreign_header
+    return source, direct_native_modules, foreign_header, native_bindings
 end
 
 return core.coder

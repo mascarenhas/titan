@@ -54,7 +54,14 @@ support translation unit is therefore emitted as
 `<program>__test_support.c/.o` rather than modifying the installed or checkout
 source tree.
 
-## Checked-AST discovery
+In separate (`-c --test`) or incremental test mode, the CLI assigns
+`titan/test__test_support.titan` as the support's `native_output` before loading
+any roots. Commands in the same build directory therefore share one support
+object regardless of requested-root order. Its canonical source filename and
+source-private provider identity remain unchanged. Default `--test` keeps the
+historical per-program output above.
+
+## Source discovery
 
 After requested roots and their source closures check, `test_runner.discover`
 walks only source-backed entries in the union of those closures. A candidate is
@@ -66,8 +73,10 @@ restricted because the generated wrapper calls the function as a statement.
 Source module names and then full case names are sorted with
 `util.bytewise_less`; discovery never depends on `pairs` order. It returns both
 the case descriptors and the exact owner-module set used for compilation
-flags. Binary modules have no AST and are never discovered, even when a static
-provider physically carries other logical keys.
+flags. Generated source-object metadata retains the `function_names` result;
+an object-backed source entry exposes it as `test_functions` for the same
+discovery traversal without an AST. Binary providers are never discovered,
+even when a static provider physically carries other logical keys.
 
 ## Synthetic source and native outputs
 
@@ -96,8 +105,16 @@ The first requested root's `program_output` owns the executable, including the
 folder `__main` convention. Input application mains do not participate in main
 selection under `--test`.
 
+`-c --test` performs discovery so owner objects retain their test-only C flags,
+but stops before creating the synthetic runner, selecting the executable, or
+linking. An incremental final test invocation discovers all current cases and
+always generates a fresh runner and entrypoint; source/support object hits skip
+their normal compiler phases. Make owns invalidation when cases, imports,
+compiler settings, or headers change.
 
-Before emitting any C, `validate_program_output_paths` checks every source,
+
+For executable test builds, before emitting any C,
+`validate_program_output_paths` checks every source,
 support, runner, entrypoint, executable, and Darwin dSYM destination in both
 normalized and physical-parent form. It rejects output/output and output/input
 aliases, ancestor/descendant conflicts, symlink leaves, and an existing leaf of
@@ -218,14 +235,22 @@ lifecycle protocol.
 ## Repository dogfooding
 
 The Makefile's `TITAN_STDLIB_TEST_ROOTS` manifest names 25 module-owned roots
-under `spec/stdlib/titan/`. `make titan-stdlib-test-build` makes every one an
-explicit root in a single `titanc --test --no-uv-bootstrap` invocation: source
-remains authoritative, discovery sees the complete checked closure, and no import-only
-aggregator can be shadowed by a compiled provider. The command runs from
-`.titan-tests/` with an absolute source tree. The designated first program
-root, `test.tests`, owns the one `.titan-tests/test/tests` executable; synthetic
-support, runner, entrypoint, and Darwin dSYM outputs are owned below the same directory. Ordinary
-module translation units are temporarily generated beside their Titan sources.
+under `spec/stdlib/titan/`. The reviewed `spec/support/stdlib_test_modules.mk`
+inventory names their 42 test/helper compilation units, folder contributors,
+and direct source imports. Make compiles shared `titan.test` support once with
+`-c --test --incremental titan.test`, then schedules per-module
+`-c --test --incremental` commands after their source dependencies. Every
+command runs from `.titan-tests/` with the same absolute source tree and flags.
+The shared support output is `titan/test__test_support.o` within that directory.
+
+One final `--test --incremental --no-uv-bootstrap` invocation keeps all 25
+roots explicit and discovers the complete source/object closure. The designated
+first root, `test.tests`, owns `.titan-tests/test/tests`; the current synthetic
+runner, entrypoint, and Darwin dSYM are also owned there. Ordinary module
+objects/C/headers remain beside their sources. Make owns their source-import,
+private-header, installed-provider, compiler/SDK, and configuration prerequisites.
+Native fixture objects and the host child executable are separate targets.
+A no-op `titan-stdlib-test-build` invokes neither the compiler nor the linker.
 
 `make titan-stdlib-test-run` returns to the repository root before executing,
 because several fixtures use repository-relative paths. `TITAN_FILTER` supplies
@@ -271,7 +296,10 @@ because it reinstalls the current compiler and provider before testing;
 `luarocks test` does not.
 
 `run_with_timeout.sh` uses Bash monitor mode to give the executable its own
-process group and polls it at a coarse interval. At the deadline it sends
+process group and polls it at a coarse interval. Make's default
+`TITAN_TEST_TIMEOUT=300` covers the whole suite, including fresh child-fixture
+compilation under O3/LTO. Explicit overrides, including the 15-second CI
+shutdown check, remain independent of that default. At the deadline it sends
 `TERM`, then `KILL` after a short grace period, maps the timeout to status 124,
 and otherwise preserves the child's status. Make streams combined
 stdout/stderr through a pipe rather than redirecting either stream to a regular
@@ -282,7 +310,8 @@ diagnostics` and `END expected uncaught async Task diagnostics` around the
 operation. Those prefixed brackets make a successful aggregate log readable
 and keep the expectation owned by the case that produces it.
 
-Cleanup is generic within a narrow ownership boundary. `.titan-tests/` is a
+Builds retain their reusable outputs; explicit `make clean` performs generic
+cleanup within a narrow ownership boundary. `.titan-tests/` is a
 Make-owned directory and may be removed recursively. Under `spec/`, the cleanup
 helper removes all generated `.o` files and removes a `.c` only when a
 same-stem `.titan` source exists. It does not consult Git, so it also works in a

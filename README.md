@@ -349,9 +349,11 @@ absent, the build atomically stages that bootstrap at
 `$ROCKS_TREE/lib/titan/0.6/titan.so` so the just-installed compiler can load
 its native support table; a repeated install preserves an already valid full
 image. After LuaRocks deploys the compiler, the source-only `post_install` hook
-invokes that `titanc` once for all twenty-one current standard roots, with private
-LPegLabel, selected libuv, HTTP/llhttp, and TLS/OpenSSL payload after
-`ltitanlib.o`. It stages the paired providers, generated loaders, and exact `titan.test`
+uses that `titanc` with the same `stdlib-objects` Make dependency graph as a
+checkout build. Each logical module owns an object and its generated headers;
+unchanged objects are reused. One final incremental invocation links all
+twenty-one roots, with private LPegLabel, selected libuv, HTTP/llhttp, SQLite,
+and TLS/OpenSSL payload after `ltitanlib.o`. It stages the paired providers, generated loaders, and exact `titan.test`
 compiler source privately, validates them, and publishes them with rollback, committing
 `titan.a` before `titan.so` and using the DSO rename as the final commit point.
 Publication recognizes the bootstrap and current complete pair as recoverable
@@ -377,6 +379,7 @@ runtime, ABI, and interoperation machinery.
 
 ```sh
 $ titanc [--print-ast] [-j jobs] [--static] [--test] [--no-uv-bootstrap] \
+    [--source-first] [--incremental] [-c|--compile-only] \
     [--no-line-directives] \
     [--lua <path>] [--tree <path>] <module> [<module>]
 ```
@@ -392,6 +395,22 @@ but you can override this with the `--tree` option), as well as in the Titan
 binary path, a semicolon-separated list of paths. By default this is the
 current directory plus `<root>/lib/titan/0.6`, where `<root>` is recovered
 from `package.cpath`; override it with `TITAN_PATH_0_6` or `TITAN_PATH`.
+
+For a Make-managed build, `-c --incremental` rebuilds explicit module roots
+while reusing current source dependency objects. A final `--incremental`
+invocation links the usual provider pair or executable. Use `--source-first`
+consistently when available project source should take precedence over binary
+providers. Default invocations ignore existing objects. Make owns imported
+module/header, compiler, and configuration invalidation; see
+[Incremental and separate compilation](doc/language/incremental-compilation.md)
+for the complete contract and an example.
+
+Generated C defaults to `-O3`. Linux GCC/Clang builds also use
+`-flto -ffat-lto-objects`, retaining native object metadata while allowing the
+final provider/executable link to optimize across module objects and archives.
+macOS keeps ordinary native objects without default LTO. For a cheap fixture
+build, set `TITAN_EXTRA_CFLAGS='-O0 -fno-lto'` and
+`TITAN_EXTRA_LDFLAGS='-fno-lto'`; Make must rebuild objects after such changes.
 
 Titan caches C-FFI probe results by their complete, unpreprocessed C source.
 Both successful and rejected probes are remembered. The cache does not track
@@ -501,14 +520,16 @@ pool, with cancellation-insensitive resource retirement. Its private pinned
 amalgamation enters both provider forms in either libuv/OpenSSL mode.
 GC-backed
 owners can attach table/full-userdata finalizers
-without discarding an existing metatable. Clean validation builds pass all
-twenty-one roots to one `titanc` invocation, while the six high-level libuv
+without discarding an existing metatable. Make compiles the twenty-one logical
+modules through separate object targets, then passes all roots to one
+incremental `titanc` link. Source contributors, imported objects/headers,
+compiler inputs, and build configuration drive recompilation. The high-level libuv
 facades explicitly import `uv.titan` for their private collaboration edges; the
 source graph is statically resolved
 inside the paired `titan.so` and `titan.a` providers. Bundled mode carries
 libuv's objects into both forms; system mode keeps the pkg-config-selected
 library as a repeated final-link input. The private LPegLabel objects enter
-both forms in either libuv mode. Twenty generated Lua loaders expose the
+both forms in either libuv mode. Twenty-one generated Lua loaders expose the
 qualified logical entries.
 Its source is the reviewed folder ensemble rooted at `titan/uv/uv.titan`, with
 `file.titan`, `os.titan`, `process.titan`, `runtime.titan`, `task.titan`, and
@@ -652,18 +673,25 @@ under `spec/stdlib/` and no root-level standard-library boundary specs.
 Module-owned standard-library behavior, including fresh-process and host-stdio
 cases, lives under `spec/stdlib/titan/`: compiled Titan parents launch focused
 standalone fixtures through C99 `system`, consume explicit temporary result
-files, and clean them with `defer`. The Makefile names
-all 25 roots explicitly and compiles them together with one `titanc --test`
-invocation. `make titan-stdlib-test-build` places the executable and synthetic
-runner outputs below `.titan-tests/`; it passes `--no-uv-bootstrap` so each
+files, and clean them with `defer`. The Makefile names all 25 test roots
+explicitly. It compiles the 42 test/helper modules and shared `titan.test`
+support through separate `titanc -c --test --incremental` targets, then links
+one test executable with `--test --incremental`. `make titan-stdlib-test-build`
+places that executable and synthetic runner outputs below `.titan-tests/`;
+it passes `--no-uv-bootstrap` on the final link so each
 async test explicitly owns one Runtime and completes Runtime-bound cleanup
 before that session returns. `make titan-stdlib-test-run` executes the binary
 from the repository root, and `make titan-stdlib-test` performs both.
-Temporary source-adjacent generated C/object files and reserved `__test_*`
-outputs are cleaned by ownership patterns rather than per-test names, without
-deleting author-written native fixtures.
+Source-adjacent generated C/object/header files and shared support outputs
+persist for incremental builds. Make tracks source imports, native fixtures,
+the installed provider, compiler/SDK inputs, and compile settings; a no-op
+build invokes no compiler. `make clean` removes generated outputs by ownership
+patterns without deleting author-written native fixtures.
 
-The native executable runs under a Bash process-group deadline. Its combined
+The native executable runs under a Bash process-group deadline of 300 seconds
+by default, including fresh child-fixture compilation with the selected
+optimization flags. Override it with `TITAN_TEST_TIMEOUT`; focused CI shutdown
+checks retain their explicit 15-second limit. Its combined
 output is streamed through a pipe, preserving the parent-descriptor behavior
 exercised by OS/stdio tests. Tests that intentionally provoke uncaught async
 Task errors use flushed `Context:log` lines to bracket those expected
@@ -824,11 +852,14 @@ when it is no longer needed.
 ```
         --print-ast                       Print the AST.
         --pretty-print                    Format generated C and headers with clang-format.
-        --test                            Build a native Titan test executable.
+        --test                            Build native Titan tests (objects only with --compile-only).
         --no-uv-bootstrap                 Call standalone main directly even if titan.uv installs its bootstrap hook.
         -v, --verbose                     Print safely quoted executed toolchain commands.
         -j <jobs>, --jobs <jobs>          Bound concurrent generated-C object compilations.
         --static                          Prefer static Titan archive providers.
+        --source-first                    Prefer available source modules to compiled providers.
+        --incremental                     Reuse current source objects; build system owns dependencies.
+        -c, --compile-only                Emit objects/headers only; always rebuild explicit roots.
         --no-line-directives              Omit Titan source #line directives from generated C.
         --lua <path>                      Path to a Lua source/build tree (source checkouts only).
         --tree <path>                     Path to the source tree for Titan modules (default '.').

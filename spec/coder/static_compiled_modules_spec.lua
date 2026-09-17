@@ -518,7 +518,11 @@ int main(void) {
 
         local function whole_archive(input, output)
             local argv = configured_words(driver.CC)
+            -- This fixture checks native ELF partial linking. Select the fat
+            -- object's native body: an LTO-enabled GNU -r link otherwise
+            -- produces intermediate IR without the native metadata section.
             for _, argument in ipairs({
+                "-fno-lto",
                 "-r",
                 "-Wl,--whole-archive",
                 input,
