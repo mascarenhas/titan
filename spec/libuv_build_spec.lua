@@ -981,6 +981,9 @@ printf '%s\n' "$module" >> ../build.log
             local function build()
                 local succeeded, message = run_argv(argv)
                 assert.truthy(succeeded, message)
+                assert.equal("file", lfs.attributes(
+                    root .. "/.titan-tests/test/tests", "mode"),
+                    "successful native test build omitted its executable")
                 local result = {}
                 for name in read_file(root .. "/build.log"):gmatch("[^\n]+") do
                     assert.falsy(result[name], "compiled twice: " .. name)
@@ -1012,6 +1015,41 @@ printf '%s\n' "$module" >> ../build.log
             assert.same({}, build())
             argv[#argv + 1] = "TITAN_FILTER=arbitrary-runtime-filter"
             assert.same({}, build())
+
+            -- Model a filesystem whose timestamp precision cannot separate
+            -- this flag change from the previous build. Make has already
+            -- cached the executable's mtime when the config recipe deletes
+            -- it, so equal replacement-object mtimes must still trigger link.
+            local clock = root .. "/coarse-clock"
+            ok, output = run_argv({ "touch", "-r",
+                root .. "/.titan-tests/test/tests", clock })
+            assert.truthy(ok, output)
+            local coarse_outputs = {
+                root .. "/.titan-tests/build.config",
+                root .. "/.titan-tests/test/tests",
+            }
+            for _, suffix in ipairs({ "o", "c", "ffi.h" }) do
+                coarse_outputs[#coarse_outputs + 1] = root ..
+                    "/.titan-tests/titan/test__test_support." .. suffix
+                for _, path in ipairs(sources) do
+                    coarse_outputs[#coarse_outputs + 1] = root .. "/" ..
+                        path:gsub("titan$", suffix)
+                end
+            end
+            local quoted_outputs = {}
+            for _, path in ipairs(coarse_outputs) do
+                quoted_outputs[#quoted_outputs + 1] = quote(path)
+            end
+            local coarse_shell = root .. "/coarse-shell"
+            write_file(coarse_shell, string.format([[#!/bin/sh
+/bin/sh "$@" || exit $?
+for output in %s; do
+    if test -f "$output"; then touch -r %s "$output" || exit $?; fi
+done
+]], table.concat(quoted_outputs, " "), quote(clock)))
+            ok, output = run_argv({ "chmod", "+x", coarse_shell })
+            assert.truthy(ok, output)
+            argv[#argv + 1] = "SHELL=" .. coarse_shell
             argv[#argv + 1] = "TITAN_EXTRA_CFLAGS=-DCHANGED_TEST_FLAGS=1"
             assert.same(all, build())
             assert.same({}, build())

@@ -2643,13 +2643,19 @@ $(TITAN_TEST_BUILD_DIR)/os_process_host_child: spec/fixtures/stdlib/native/os_pr
 	$(CC) -std=c99 -Wall -Wextra -Werror $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
 	  "$<" $(TITAN_TEST_LDFLAGS) -o "$@"
 
-$(TITAN_TEST_EXECUTABLE): $(TITAN_TEST_MODULE_OBJECTS) $(TITAN_TEST_SUPPORT_OUTPUTS) \
+# A changed configuration can remove the executable after Make has cached its
+# timestamp. Recheck its existence even when fast rebuilds share that timestamp.
+$(TITAN_TEST_EXECUTABLE): FORCE $(TITAN_TEST_MODULE_OBJECTS) $(TITAN_TEST_SUPPORT_OUTPUTS) \
 		$(TITAN_TEST_FIXTURE_OUTPUTS) $(TITAN_TEST_COMPILER_PREREQS) \
 		$(TITAN_TEST_PROVIDER_PREREQS) $(TITAN_TEST_CONFIG_STAMP)
-	@cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)) && \
+	@set -e; \
+	newer=$(call make_shell_quote,$(filter-out FORCE,$?)); \
+	if test -n "$$newer" || test ! -f "$@"; then \
+	  cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); \
 	  $(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --test --incremental --no-uv-bootstrap \
 	    --tree $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
-	    $(TITAN_STDLIB_TEST_ROOTS) -X async_foreign_work.o uv_stdio_probe.o
+	    $(TITAN_STDLIB_TEST_ROOTS) -X async_foreign_work.o uv_stdio_probe.o; \
+	fi
 
 titan-stdlib-test-build: $(TITAN_TEST_EXECUTABLE) ## Build every native Titan stdlib test into one incremental executable
 
