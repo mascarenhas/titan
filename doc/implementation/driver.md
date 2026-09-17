@@ -1287,6 +1287,7 @@ policy.
 ```sh
 ./titanc [--print-ast] [--pretty-print] [-v|--verbose] \
   [-j|--jobs <jobs>] [-u|--lua <luasrc>] [--static] [--test] \
+  [--source-first] [--incremental] [-c|--compile-only] \
   [--no-uv-bootstrap] [--no-line-directives] \
   [-t|--tree <srcroot>] [-l|--link lib1,lib2] \
   [-X|--extra-object obj.o...] <module>...
@@ -1333,10 +1334,24 @@ installed builds select them from `libtitan.a`. The standard provider's
 `ltitanlib.o` is the deliberate support payload. Bundled libuv joins it in
 `-X`; system libuv remains a final-link setting.
 
+`--incremental` enables source-object metadata reuse, and `-c/--compile-only`
+stops after object/header emission. Compile-only roots always rebuild; the
+complete requested-root set becomes `forced_source_roots` before traversal.
+`--source-first` selects the same source preference already used by `--test`
+without changing ordinary-import visibility. Cached roots supply `has_main`
+and `external_symbols` facts when their AST is absent. The CLI rejects
+`--incremental` with `--print-ast`, and compile-only mode with
+`-l`, `-X`, or `--no-uv-bootstrap`. Separate/incremental test builds share
+`titan/test__test_support.o`; cached discovery records supply test function
+names, and only the final test invocation synthesizes the runner. See
+[Object-backed source modules](incremental-compilation.md) for record replay,
+header restoration, and Make-owned invalidation.
+
 Every CLI module name is placed in one `requested_roots` set and passed to the
 filesystem loader. Those roots are source-first; everything they import runs
 the configured complete compiled-format passes before source (`.so`, then
-`.a` by default; swapped by `--static`). After checking, library mode derives
+`.a` by default; swapped by `--static`), unless `--source-first` was selected.
+After checking, linking in library mode derives
 one physical provider base from the requested roots' longest common dotted
 prefix. It rejects an empty prefix, the reserved logical module `titan`,
 conflicting mangled C prefixes/protocol symbols, unsafe physical overlaps,
@@ -1390,10 +1405,20 @@ them into `titan.a`; the llhttp and SQLite archives remain private payload in ei
 The eight llhttp callbacks are source-defined in the generated `titan.http`
 object, so there is no HTTP adapter object.
 
+Make owns one object target per standard module, including one object for each
+whole folder ensemble. Explicit imports order the object/header prerequisites;
+each stale target invokes `titanc --source-first --incremental -j1 -c` with its
+own logical root. The compiler reuses dependencies already built by Make. An
+inexpensive completeness check repairs missing generated headers while leaving
+valid object/header mtimes unchanged. `make stdlib-objects` runs this graph
+without linking a provider.
+
 Make tracks every standard source explicitly, the compiler/runtime/support and
 embedded-format inputs, effective `CC`/`AR`/`RANLIB`, extra flags, libuv and
-OpenSSL configurations, and the private llhttp/SQLite identities in a
-completion/config stamp. A missing `titan.so`, `titan.a`, generated shim, canonical test-support source,
+OpenSSL configurations, and the private llhttp/SQLite identities. Configuration
+changes invalidate the module objects. The final completion stamp depends on
+those objects and invokes one source-first incremental link for the paired
+provider. A missing `titan.so`, `titan.a`, generated shim, canonical test-support source,
 or Darwin dSYM invalidates the stamp. A warm invocation also
 rescans `titan.a` for the exact twenty-one logical keys without changing pair
 mtimes. Exact child DSOs are removed as stale production outputs; the isolated
@@ -1407,11 +1432,13 @@ absent; an existing valid bootstrap or full image is preserved, and an
 incompatible image is left untouched with an error. The rock manifest then
 deploys the compiler script/Lua modules but does not own a `titan` C module.
 
-The source-only post-install hook invokes the just-deployed `titanc` once in a
-private staging directory on the destination filesystem under the same
-effective native toolchain, extra flags, rocks root, runtime mode, and
-libuv/OpenSSL policies. The hook snapshots `titan/test.titan` into that exact
-stage before compilation. The publisher validates the twenty-two Lua entries, twenty-one logical
+The source-only post-install hook runs the same `stdlib-objects` graph using the
+just-deployed `titanc`, then links once in a private staging directory on the
+destination filesystem. Source-adjacent objects remain in the persistent
+checkout, selected through `--tree`; a fresh publication stage does not force
+recompilation. Both phases use the same effective native toolchain, extra flags,
+rocks root, runtime mode, and libuv/OpenSSL policies. The hook snapshots
+`titan/test.titan` into that exact stage before linking. The publisher validates the twenty-two Lua entries, twenty-one logical
 protocols, exact twenty-one-key archive metadata, three-way
 embedded/DSO/archive-backed ABI/types equality, twenty-one shims, the canonical test-support source, and Darwin dSYM. It backs up
 the active `0.6` public set and stale active-layout copies, commits shims and
@@ -1756,9 +1783,11 @@ the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 | `driver.TITAN_SOURCE_PATH` | `driver.lua` | `"."` (overridden by `titanc --tree`) | Semicolon-separated roots searched for folder `P/B.titan` before flat `P.titan`, including contributor privacy checks. |
 | `driver.LANGUAGE_SERVER_API_VERSION` | `driver.lua` | `1` | Exact compiler/semantic-client handshake, independent from generated-code ABI; covers private source metadata, exact C-header dependencies, context-owned I/O/checkpoints, the embedded interface/target provider, and compiler-owned declared analysis manifests. |
 | `TITAN_NO_LINE_DIRECTIVES` / `driver.EMIT_LINE_DIRECTIVES` | environment / `driver.lua` | unset / true | Exact environment value `1`, or `titanc --no-line-directives`, disables generated Titan `#line` directives for physical generated-C diagnostics; this can omit ordinary native Titan frames from logical tracebacks. |
-| `options.source_roots` | `titanc` / `driver.defaultloader` | every CLI module name | Requires explicit build roots to come from flat/folder source; other ordinary edges retain the resolver context's binary-first or test-mode source-first policy, while `.titan` edges remain source-required. Selected source descriptors also provide `program_output`. |
+| `options.source_roots` | `titanc` / `driver.defaultloader` | every CLI module name | Requires explicit build roots to come from flat/folder source; other ordinary edges retain the resolver context's binary-first or source-first policy, while `.titan` edges remain source-required. Selected source descriptors also provide `program_output`. |
+| `options.incremental` | `titanc` / `driver.defaultloader` | `false` | Allows source companion objects no older than current source constituents to supply trusted declarations and native code; Make owns other invalidation. |
+| `options.forced_source_roots` | `titanc` / `driver.defaultloader` | `{}` | Complete explicit-root set for compile-only mode; bypasses object reuse even if a root is first reached through another import. |
 | `options.known_source_modules` | semantic clients / `driver.defaultloader` | `{}` | Validated module-name set used for resolver-wide source identity and source/provider overlap planning without marking modules dirty. |
-| `options.analysis_only` | semantic clients / `driver.new_resolver_context` | `false` | Enables compact source-manifest reuse and skips `.titan.h` body generation; native compilation continues to require checked ASTs. |
+| `options.analysis_only` | semantic clients / `driver.new_resolver_context` | `false` | Enables compact analysis-manifest reuse and skips `.titan.h` body generation; these manifests cannot substitute for native source objects or checked ASTs. |
 | `options.cached_source_entries` | semantic clients / `driver.defaultloader` | `{}` | Caller-certified checked or compact declared source entries, including exact C-header inputs; compact entries require analysis-only mode and restore C include plans without AST replay. |
 | `options.cached_interfaces` | semantic clients / `driver.defaultloader` | `{}` | Serialized clean source interfaces plus exact source and C-header provenance; used without AST for ordinary imports and as transient reparse input for explicit `.titan` edges. |
 | `options.embedded_interface_provider` | semantic clients / `driver.new_resolver_context` | `nil` | Closed `{ provider_file, entries, target_profile? }` ABI/type inventory with an optional declarative build target profile, copied from a trusted host; it precedes disk compiled lookup but never becomes a static dependency or link input. |

@@ -22,12 +22,22 @@ end
 
 test_runner.is_test_function = is_test_function
 
+function test_runner.function_names(ast)
+    local names = {}
+    for _, node in ipairs(ast) do
+        if is_test_function(node) then names[#names + 1] = node.name end
+    end
+    return names
+end
+
 function test_runner.discover(requested_roots, imported, dependency_closure)
     local source_names = {}
     for _, root in ipairs(requested_roots) do
         for name in pairs(dependency_closure(root)) do
             local mod = imported[name]
-            if mod and mod.ast then source_names[name] = true end
+            if mod and (mod.ast or mod.kind == "source" and mod.object_metadata) then
+                source_names[name] = true
+            end
         end
     end
 
@@ -39,15 +49,15 @@ function test_runner.discover(requested_roots, imported, dependency_closure)
     local test_modules = {}
     for _, modname in ipairs(names) do
         local mod = imported[modname]
-        for _, node in ipairs(mod.ast) do
-            if is_test_function(node) then
-                cases[#cases + 1] = {
-                    modname = modname,
-                    function_name = node.name,
-                    full_name = modname .. "." .. node.name,
-                }
-                test_modules[modname] = true
-            end
+        local functions = mod.ast and test_runner.function_names(mod.ast)
+            or mod.test_functions
+        for _, name in ipairs(functions) do
+            cases[#cases + 1] = {
+                modname = modname,
+                function_name = name,
+                full_name = modname .. "." .. name,
+            }
+            test_modules[modname] = true
         end
     end
     table.sort(cases, function(left, right)

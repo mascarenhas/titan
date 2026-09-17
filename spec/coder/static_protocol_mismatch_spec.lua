@@ -202,6 +202,17 @@ local function replace_argument(argv, old, new)
     return copy
 end
 
+local function replace_output(argv, output)
+    for index, argument in ipairs(argv) do
+        if argument == "-o" then
+            -- Module compilation publishes from a temporary object. Replay
+            -- the actual command's output operand, not the final pathname.
+            return replace_argument(argv, assert(argv[index + 1]), output)
+        end
+    end
+    error("compile command has no -o output", 0)
+end
+
 local function insert_argument_before(argv, marker, argument)
     local inserted = 0
     local copy = {}
@@ -269,7 +280,6 @@ end
 
         local original_c = original_titan:gsub("[.]titan$", ".c")
         local alternate_c = alternate_titan:gsub("[.]titan$", ".c")
-        local original_o = original_titan:gsub("[.]titan$", ".o")
         local original_csource = read_file(original_c)
         local alternate_csource = read_file(alternate_c)
         local original_initializer, original_start, original_end =
@@ -295,7 +305,7 @@ end
         local argv =
             compile_command(original_verbose, original_c)
         argv = replace_argument(argv, original_c, forged_c)
-        argv = replace_argument(argv, original_o, forged_o)
+        argv = replace_output(argv, forged_o)
         ok, output, why, code = run(argv, workspace)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
@@ -404,7 +414,6 @@ end
             tostring(code) .. ")")
         local provider_verbose = output
         local provider_c = provider_titan:gsub("[.]titan$", ".c")
-        local provider_o = provider_titan:gsub("[.]titan$", ".o")
         local provider_archive = scan_archive(
             provider .. "/protocol/api.a")
         local provider_entry = assert(provider_archive.entries[modname])
@@ -441,8 +450,7 @@ end
         make_directory(workspace .. "/protocol")
 
         for _, protocol in ipairs(protocols) do
-            local argv = replace_argument(
-                compile_template, provider_o, forged_o)
+            local argv = replace_output(compile_template, forged_o)
             argv = insert_argument_before(
                 argv, provider_c,
                 "-D" .. protocol.symbol .. "=" ..

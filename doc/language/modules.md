@@ -451,6 +451,7 @@ file paths:
 
 ```sh
 titanc [--print-ast] [--pretty-print] [-v] [-j jobs] [--static] [--test] \
+  [--source-first] [--incremental] [-c|--compile-only] \
   [--no-uv-bootstrap] [--no-line-directives] [--lua <luasrc>] \
   [--tree <srcroot>] [-l lib1,lib2] [-X object...] <module>...
 ```
@@ -473,6 +474,15 @@ titanc [--print-ast] [--pretty-print] [-v] [-j jobs] [--static] [--test] \
 * `--static` prefers self-describing Titan `.a` providers over `.so`
   providers for ordinary dependencies. It still permits DSO/source fallback
   and does not request a fully static system executable.
+* `--source-first` prefers available source dependencies to compiled providers,
+  with compiled fallback for ordinary source misses. It does not grant private
+  visibility to ordinary imports.
+* `--incremental` allows current source objects to supply declarations and code.
+  The build system owns dependency/configuration invalidation; default builds
+  ignore old objects. `-c/--compile-only` emits objects and headers without
+  linking and always rebuilds explicit roots, while `-c --incremental` can reuse
+  their source dependencies. See [Incremental and separate compilation](incremental-compilation.md)
+  for the Make contract and incompatible options.
 * `--test` source-prefers the requested roots' complete dependency graph,
   discovers public `test_*` functions, and links a standalone native test
   executable even without an application `main`. See
@@ -498,10 +508,11 @@ titanc [--print-ast] [--pretty-print] [-v] [-j jobs] [--static] [--test] \
 * `-v/--verbose` prints every C tool command line and, with `--pretty-print`,
   the formatter command line; `--print-ast` dumps the parsed AST.
 
-`titanc` first typechecks every requested module and every transitive
-dependency, reports *all* errors, and exits with status 1 before
-generating any code if any module failed. Only when everything checks
-does it compile and link.
+By default, `titanc` first typechecks every selected source module, reports
+*all* errors, and exits with status 1 before generating any code if a module
+failed. `--incremental` can supply previously checked declarations from current
+objects. Once loading/checking succeeds, the compiler emits needed objects and,
+unless `-c` was requested, links the result.
 
 `clang-format` is needed only for `--pretty-print`; `CLANG_FORMAT` selects a
 different compatible command. In that mode Titan formats every generated `.c`
@@ -662,6 +673,10 @@ Module dependencies are resolved *compiled first*:
   `titanc titan.uv` rebuilds the `titan/uv/uv.titan` folder module while that
   module's own imports
   still resolve through the selected compiled-format order first.
+
+`--source-first` changes ordinary dependency selection to prefer available
+source. `--incremental` may reuse a selected source module's companion object;
+it does not change source or binary search precedence.
 
 `--static` is a preference rather than a static-only mode: a missing archive
 can fall back to a DSO and then source, and the system linker is not passed

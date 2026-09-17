@@ -1,4 +1,7 @@
 local staticmetadata = require "titan-compiler.staticmetadata"
+local objectmetadata = require "titan-compiler.objectmetadata"
+local types = require "titan-compiler.types"
+local version = require "titan-compiler.version"
 
 local function uint(value, width, endian)
     local bytes = {}
@@ -289,6 +292,104 @@ describe("bounded raw object sections", function()
         assert.is_nil(extract(macho({ section_type = 1 })))
         assert.is_nil(extract("!<arch>\n"))
         assert.is_nil(extract("not an object"))
+    end)
+end)
+
+describe("trusted object source metadata", function()
+    local function source_entry()
+        local name = "cache.producer"
+        local scope = types.GenericScope(name, false, "identity", "function", "function")
+        local parameter = types.Parameter(scope, 1, "T", false)
+        local scheme = types.FunctionScheme(scope, { types.TypeParameter("T", false) },
+            types.Function({ parameter }, { parameter }, false, false, false))
+        local public = types.ModuleMember(name, "identity", scheme, { "item" })
+        local private = types.ModuleMember(name, "secret", scheme, { "item" })
+        private.islocal = true
+        local structure = types.CStruct(false, "Node", false, {}, true, false)
+        local pointer = types.CPointer(structure, {})
+        local field = types.CField(structure, "next", pointer, false, false)
+        structure.fields[1], structure.fields.next = field, field
+        local head = types.ModuleVariable(name, "head", pointer, false)
+        head.islocal = true
+        local owner = types.Record(name .. ".Hidden", {}, {}, {}, 0, false, {})
+        owner.islocal, owner._source_complete = true, true
+        local module = types.Module(name, { public }, {})
+        module._source = true
+        module.source_members = { private, head, secret = private, head = head }
+        module.source_type_members = { Hidden = owner }
+        -- Checked-body annotations must not leak into a persistent declaration.
+        private._decl = { _tag = "Ast.TopLevelFunc", body = {} }
+        return {
+            kind = "source", type = module, filename = "cache/producer.titan",
+            source_files = { "cache/producer.titan" }, deps = {},
+            declared_registry = { [owner.name] = owner },
+        }
+    end
+
+    it("restores shared generic declarations, private owners, C cycles and inline headers", function()
+        local entry = source_entry()
+        local native = {
+            native_output = "cache/producer.titan", has_main = false,
+            imports = { { module = "external", binding = "dynamic" } },
+            headers = { foreign = "static inline int answer(void) { return 42; }\n" },
+        }
+        local payload = assert(objectmetadata.encode(entry, native))
+        local restored = assert(objectmetadata.decode(payload))
+        assert.is_nil(restored.ast)
+        assert.is_nil(restored._analysis_manifest)
+        assert.is_nil(restored.source_manifest)
+        assert.is_true(restored.type._source)
+        assert.same(native, restored.object_metadata)
+        assert.equal(restored.type.members.identity.type,
+            restored.type.source_members.secret.type)
+        local scheme = restored.type.members.identity.type
+        assert.equal(scheme.scope, scheme.signature.params[1].scope)
+        assert.equal(scheme.signature.params[1], scheme.signature.rettypes[1])
+        local structure = restored.type.source_members.head.type.pointee
+        assert.equal(structure, structure.fields.next.owner)
+        assert.equal(structure, structure.fields.next.type.pointee)
+        assert.equal(structure.fields[1], structure.fields.next)
+        assert.equal(restored.type.source_type_members.Hidden,
+            restored.declared_registry["cache.producer.Hidden"])
+        assert.is_nil(restored.type.members.secret)
+        assert.is_nil(restored.type.source_members.secret._decl)
+        assert.is_not.equal(entry.type, restored.type)
+        assert.equal(payload, assert(objectmetadata.encode(entry, native)))
+    end)
+
+    it("reads source records from ELF and Mach-O without interpreting them as public metadata", function()
+        local payload = assert(objectmetadata.encode(source_entry(), {}))
+        for _, width in ipairs({ 32, 64 }) do
+            for _, endian in ipairs({ "little", "big" }) do
+                for _, bytes in ipairs({
+                    elf_object(payload, { word_size = width, endian = endian,
+                        section_name = ".titan.source" }),
+                    macho_object(payload, { word_size = width, endian = endian,
+                        sectname = "__titansrc" }),
+                }) do
+                    local restored = assert(objectmetadata.read(bytes, "producer.o"))
+                    assert.equal("cache.producer", restored.type.name)
+                    assert.equal("secret", restored.type.source_members[1].name)
+                end
+            end
+        end
+    end)
+
+    it("treats absent sections, Lua failures and incompatible ABI as cache misses", function()
+        local payload = assert(objectmetadata.encode(source_entry(), {}))
+        assert.is_nil(objectmetadata.read(elf_object("", { section_name = ".other" })))
+        assert.is_nil(objectmetadata.decode("return {"))
+        assert.is_nil(objectmetadata.decode("return missing.field"))
+        local restored, err = objectmetadata.decode(payload, "producer.o", "other-abi")
+        assert.is_nil(restored)
+        assert.matches("ABI mismatch", err, 1, true)
+    end)
+
+    it("loads compiler records without a second declaration schema validation", function()
+        local payload = "return { abi=" .. string.format("%q", version.TITAN_ABI_VERSION)
+            .. ", entry={compiler_owned_extension=true} }"
+        assert.same({ compiler_owned_extension = true },
+            assert(objectmetadata.decode(payload)))
     end)
 end)
 

@@ -79,6 +79,7 @@
 2 spec/coder/grammar_semantics_spec.lua 3.000
 3 spec/coder/foreign_functions_spec.lua 10.204
 3 spec/coder/generics_spec.lua 22.919
+3 spec/coder/incremental_compilation_spec.lua 27.000
 4 spec/coder/interfaces_spec.lua 18.208
 4 spec/coder/line_directives_spec.lua 0.920
 2 spec/coder/map_metamethods_spec.lua 0.899

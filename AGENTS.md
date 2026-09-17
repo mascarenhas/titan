@@ -304,8 +304,10 @@ change them only when their own compatibility rules require it.
   validates and preserves an existing usable bootstrap or full image, and
   refuses to clobber an incompatible file; a repeated build must never shrink
   a full image back to bootstrap form. After LuaRocks deploys the compiler, the
-  source-only `post_install` hook invokes the just-installed `titanc` once with
-  all twenty-one roots and a shared `-X` payload beginning with `ltitanlib.o` followed
+  source-only `post_install` hook builds the shared per-module Make object DAG
+  using the just-installed `titanc --source-first --incremental -c`, then
+  invokes `titanc --source-first --incremental` with all twenty-one roots and
+  a shared `-X` payload beginning with `ltitanlib.o` followed
   by the private namespaced LPegLabel archive. The
   standard sources are
   `titan/coroutine.titan`, the explicit eight-file `UV_TITAN_SOURCES` folder
@@ -432,10 +434,21 @@ TITAN_ROCKS_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 busted --run=checkout spe
 TITAN_ROCKS_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 busted --run=checkout spec/coder/coder_spec.lua --filter='for loop' # single test
 
 ./titanc [--print-ast] [--pretty-print] [--test] [--no-uv-bootstrap] \
-  [-v] [-j jobs] [--static] [--no-line-directives] \
+  [-v] [-j jobs] [--static] [--source-first] [--incremental] [-c] [--no-line-directives] \
   [--lua <luasrc>] [--tree <srcroot>] \
   [-l lib1,lib2] [-X object...] <module>...
 ```
+
+`--incremental` loads compiler-produced source metadata from source-adjacent
+objects that are no older than their current source constituents. Make owns
+dependency, header, compiler, SDK, provider, and flag invalidation. Without
+that option the loader ignores objects. `-c`/`--compile-only` stops after
+object/header generation and always rebuilds every explicit root; with
+`--incremental`, its dependencies can be reused. Both modes support `--test`:
+test object recipes use `-c --test --incremental`, while the final
+`--test --incremental` invocation discovers cached cases and emits the current
+runner/entrypoint before linking. These separate test modes share the reserved
+`titan/test__test_support` output stem in their common build directory.
 
 `--no-uv-bootstrap` is valid only for a standalone program or `--test`. It
 changes only the generated entrypoint's hook choice: imports and `titan.uv`
@@ -547,9 +560,11 @@ command lines and keep generated `.c` files.
 
 Native standard-library behavior lives in 25 module-owned roots under
 `spec/stdlib/titan/`. `TITAN_STDLIB_TEST_ROOTS` names every root explicitly;
-`make titan-stdlib-test-build` invokes the active
-`titanc --test --no-uv-bootstrap` once from `.titan-tests/`, with an absolute
-source tree, so every root remains source-authoritative. Source-first lookup
+`make titan-stdlib-test-build` builds the explicit test/support object DAG in
+`spec/support/stdlib_test_modules.mk` with `titanc -c --test --incremental`,
+then invokes `titanc --test --incremental --no-uv-bootstrap` from
+`.titan-tests/` to combine all 25 roots into the executable. Every command uses
+the same absolute source tree and shared test-support object. Source-first lookup
 does not expose locals through ordinary imports; the generated runner uses
 `import "titan.test.titan"` for its private protocol. The runner is
 Task-independent; each async case explicitly owns `async.run`/`async.loop`
@@ -590,7 +605,7 @@ without Git metadata and preserves author-written native C fixtures. Reserved
 files, executable, and dSYM, while the root `test_runner_*` namespace belongs to
 interrupted compiler fixtures. Do not replace these ownership patterns with an
 indiscriminate `spec/**/*.c` deletion or a per-test artifact list. The build
-target cleans source-adjacent outputs after compilation, and `make clean` always
+target retains source-adjacent outputs for incremental reuse; `make clean`
 removes them plus `.titan-tests`.
 
 New or modified specs that generate compiler fixtures in the repository root
@@ -725,7 +740,8 @@ are `titan/<module>.titan`, while `titan.uv`, `titan.http`, `titan.peg`, `titan.
 contributors; `titan.peg`, `titan.string`, and `titan.json` instead collect their complete
 public APIs in the canonical main and require every contributor top-level
 declaration to be module-local.
-Clean validation invokes all twenty-one roots in one compiler process, stages
+Clean validation builds twenty-one module object targets and invokes all roots
+in one incremental final-link process, stages
 `<root>/lib/titan/0.6/{titan.so,titan.a}`, and installs twenty-one generated shims
 below `<root>/share/lua/5.5/titan/`. The archive advertises exactly twenty-one
 logical metadata keys; its metadata-free payload begins with `ltitanlib.o` and

@@ -37,9 +37,10 @@ object files ──► one common-prefix provider.so/provider.a + generated Lua 
              └─► driver.compile_program → executable (when a main() exists)
 ```
 
-`titanc` orchestrates the pipeline: it type-checks every requested module
-and its imports first, reports *all* type errors and exits before any
-code generation, then compiles and links
+`titanc` orchestrates the pipeline: by default it checks selected source
+modules before any code generation, reports all errors, then compiles and
+links. `--incremental` can reuse source-object declarations and code, while
+`-c` stops at object/header generation
 ([driver and toolchain](driver.md)).
 
 Two facts shape everything downstream of the checker:
@@ -108,6 +109,7 @@ Two facts shape everything downstream of the checker:
 | [Trusted Lua C API FFI boundary](ffi-lua-api-followup.md) | The general public-FFI exclusion, the audited standard-library exception, its current operation allowlist and stack-effect ledger, and the remaining design work before arbitrary Titan code can use the Lua C API. |
 | [Native test runner](test-runner.md) | Source-first resolver mode without implicit local visibility, checked-AST discovery, the generated `titan.test.runner` and its explicit `titan.test.titan` edge, private protocol, recursive execution, trace helpers, object-local flags, and publication. |
 | [Driver and toolchain](driver.md) | `driver.lua`, `titanc`, generated-source normalization and opt-in `clang-format`, the runtime support library (`titan-runtime/`), `util.lua`, and every default path and flag. |
+| [Object-backed source modules](incremental-compilation.md) | Trusted object source metadata, AST-free source replay, compile-only CLI integration, header materialization, and Make-owned invalidation. |
 | [Folder modules](folder-modules.md) | Tagged flat/folder source resolution, independent parsing into one dense AST, shared checking/codegen identity, deterministic ordering, artifacts, and the `titan.uv` source ensemble. |
 | [Multi-module libraries](multi-module-libraries.md) | Prefix-container discovery, strict DSO ABI/types membership claims, transient `Type.Module.file`, one-object-per-module linking, generated Lua shims, the lazy/global support helper, and paired standard-library publication. |
 | [Static compiled modules](static-compiled-modules.md) | Canonical object-section metadata, bounded ar/ELF/Mach-O/fat parsing, static-provider resolution and native provenance, deterministic archive flattening, three-way protocol validation, and paired publication. |

@@ -1,0 +1,222 @@
+# Reviewed native-test compilation units and direct source imports.
+# Update when adding/removing a contributor or changing a source import.
+TITAN_TEST_MODULES := async.test_support \
+	async.tests \
+	coroutine.test_support \
+	coroutine.tests \
+	fs.test_support \
+	fs.tests \
+	gc.tests \
+	http.test_support \
+	http.tests \
+	io.test_support \
+	io.tests \
+	iteration.tests \
+	json.tests \
+	lua.test_support \
+	lua.tests \
+	math.tests \
+	net.test_support \
+	net.tests \
+	os.process_test_support \
+	os.process_tests \
+	os.test_support \
+	os.tests \
+	peg.test_support \
+	peg.tests \
+	reflect.tests \
+	sqlite3.tests \
+	ssl.test_support \
+	ssl.tests \
+	string.core_test \
+	string.format_pack_test \
+	string.regex_test \
+	string.test_support \
+	support.async \
+	support.command \
+	support.common \
+	support.runtime \
+	test.tests \
+	timer.tests \
+	url.tests \
+	uv.runtime_tests \
+	uv.task_test_support \
+	uv.task_tests
+
+TITAN_TEST_SOURCES_async.test_support := spec/stdlib/titan/async/test_support.titan
+TITAN_TEST_IMPORTS_async.test_support :=
+
+TITAN_TEST_SOURCES_async.tests := spec/stdlib/titan/async/tests/tests.titan \
+	spec/stdlib/titan/async/tests/all_join_test.titan \
+	spec/stdlib/titan/async/tests/any_race_test.titan \
+	spec/stdlib/titan/async/tests/channel_test.titan \
+	spec/stdlib/titan/async/tests/foreign_work_test.titan \
+	spec/stdlib/titan/async/tests/task_test.titan
+TITAN_TEST_IMPORTS_async.tests := async.test_support support.async support.runtime
+TITAN_TEST_FOREIGN_async.tests := 1
+
+TITAN_TEST_SOURCES_coroutine.test_support := spec/stdlib/titan/coroutine/test_support.titan
+TITAN_TEST_IMPORTS_coroutine.test_support :=
+
+TITAN_TEST_SOURCES_coroutine.tests := spec/stdlib/titan/coroutine/tests/tests.titan \
+	spec/stdlib/titan/coroutine/tests/basic_test.titan \
+	spec/stdlib/titan/coroutine/tests/gc_test.titan \
+	spec/stdlib/titan/coroutine/tests/lifecycle_test.titan \
+	spec/stdlib/titan/coroutine/tests/lua_boundary_test.titan \
+	spec/stdlib/titan/coroutine/tests/nested_test.titan
+TITAN_TEST_IMPORTS_coroutine.tests := coroutine.test_support support.command support.common
+
+TITAN_TEST_SOURCES_fs.test_support := spec/stdlib/titan/fs/test_support.titan
+TITAN_TEST_IMPORTS_fs.test_support :=
+
+TITAN_TEST_SOURCES_fs.tests := spec/stdlib/titan/fs/tests.titan
+TITAN_TEST_IMPORTS_fs.tests := fs.test_support support.async support.runtime
+
+TITAN_TEST_SOURCES_gc.tests := spec/stdlib/titan/gc/tests.titan
+TITAN_TEST_IMPORTS_gc.tests := support.common
+
+TITAN_TEST_SOURCES_http.test_support := spec/stdlib/titan/http/test_support.titan
+TITAN_TEST_IMPORTS_http.test_support := support.runtime
+
+TITAN_TEST_SOURCES_http.tests := spec/stdlib/titan/http/tests/tests.titan \
+	spec/stdlib/titan/http/tests/client_behavior.titan \
+	spec/stdlib/titan/http/tests/eof_behavior.titan \
+	spec/stdlib/titan/http/tests/sanitizer_process_test.titan \
+	spec/stdlib/titan/http/tests/server_behavior.titan \
+	spec/stdlib/titan/http/tests/test_cases.titan \
+	spec/stdlib/titan/http/tests/timeout_tls_behavior.titan
+TITAN_TEST_IMPORTS_http.tests := http.test_support support.async support.command support.runtime
+
+TITAN_TEST_SOURCES_io.test_support := spec/stdlib/titan/io/test_support.titan
+TITAN_TEST_IMPORTS_io.test_support :=
+
+TITAN_TEST_SOURCES_io.tests := spec/stdlib/titan/io/tests/tests.titan \
+	spec/stdlib/titan/io/tests/core_test.titan \
+	spec/stdlib/titan/io/tests/process_test.titan
+TITAN_TEST_IMPORTS_io.tests := io.test_support support.runtime
+
+TITAN_TEST_SOURCES_iteration.tests := spec/stdlib/titan/iteration/tests.titan
+TITAN_TEST_IMPORTS_iteration.tests := support.common
+
+TITAN_TEST_SOURCES_json.tests := spec/stdlib/titan/json/tests/tests.titan \
+	spec/stdlib/titan/json/tests/core_test.titan \
+	spec/stdlib/titan/json/tests/mapping_test.titan \
+	spec/stdlib/titan/json/tests/parser_test.titan
+TITAN_TEST_IMPORTS_json.tests :=
+
+TITAN_TEST_SOURCES_lua.test_support := spec/stdlib/titan/lua/test_support.titan
+TITAN_TEST_IMPORTS_lua.test_support := support.runtime
+
+TITAN_TEST_SOURCES_lua.tests := spec/stdlib/titan/lua/tests/tests.titan \
+	spec/stdlib/titan/lua/tests/core_test.titan \
+	spec/stdlib/titan/lua/tests/dofile_test.titan \
+	spec/stdlib/titan/lua/tests/require_test.titan \
+	spec/stdlib/titan/lua/tests/source_require_test.titan
+TITAN_TEST_IMPORTS_lua.tests := lua.test_support support.async support.common support.runtime
+
+TITAN_TEST_SOURCES_math.tests := spec/stdlib/titan/math/tests.titan
+TITAN_TEST_IMPORTS_math.tests :=
+
+TITAN_TEST_SOURCES_net.test_support := spec/stdlib/titan/net/test_support.titan
+TITAN_TEST_IMPORTS_net.test_support := support.runtime
+
+TITAN_TEST_SOURCES_net.tests := spec/stdlib/titan/net/tests.titan
+TITAN_TEST_IMPORTS_net.tests := net.test_support support.async support.runtime
+
+TITAN_TEST_SOURCES_os.process_test_support := spec/stdlib/titan/os/process_test_support.titan
+TITAN_TEST_IMPORTS_os.process_test_support := support.async
+
+TITAN_TEST_SOURCES_os.process_tests := spec/stdlib/titan/os/process_tests/process_tests.titan \
+	spec/stdlib/titan/os/process_tests/exit_test.titan \
+	spec/stdlib/titan/os/process_tests/host_process_test.titan \
+	spec/stdlib/titan/os/process_tests/parent_stdio_test.titan \
+	spec/stdlib/titan/os/process_tests/signal_test.titan \
+	spec/stdlib/titan/os/process_tests/stream_test.titan
+TITAN_TEST_IMPORTS_os.process_tests := os.process_test_support support.async support.command support.common support.runtime
+
+TITAN_TEST_SOURCES_os.test_support := spec/stdlib/titan/os/test_support.titan
+TITAN_TEST_IMPORTS_os.test_support :=
+
+TITAN_TEST_SOURCES_os.tests := spec/stdlib/titan/os/tests/tests.titan \
+	spec/stdlib/titan/os/tests/helpers_test.titan \
+	spec/stdlib/titan/os/tests/time_test.titan
+TITAN_TEST_IMPORTS_os.tests := os.test_support support.command
+
+TITAN_TEST_SOURCES_peg.test_support := spec/stdlib/titan/peg/test_support.titan
+TITAN_TEST_IMPORTS_peg.test_support :=
+
+TITAN_TEST_SOURCES_peg.tests := spec/stdlib/titan/peg/tests/tests.titan \
+	spec/stdlib/titan/peg/tests/core_test.titan \
+	spec/stdlib/titan/peg/tests/gc_test.titan \
+	spec/stdlib/titan/peg/tests/relabel_test.titan
+TITAN_TEST_IMPORTS_peg.tests := peg.test_support
+
+TITAN_TEST_SOURCES_reflect.tests := spec/stdlib/titan/reflect/tests.titan
+TITAN_TEST_IMPORTS_reflect.tests :=
+
+TITAN_TEST_SOURCES_sqlite3.tests := spec/stdlib/titan/sqlite3/tests/tests.titan \
+	spec/stdlib/titan/sqlite3/tests/binding_test.titan \
+	spec/stdlib/titan/sqlite3/tests/cancellation_test.titan \
+	spec/stdlib/titan/sqlite3/tests/connection_test.titan \
+	spec/stdlib/titan/sqlite3/tests/mapping_test.titan \
+	spec/stdlib/titan/sqlite3/tests/query_test.titan \
+	spec/stdlib/titan/sqlite3/tests/transaction_test.titan \
+	spec/stdlib/titan/sqlite3/tests/worker_test.titan
+TITAN_TEST_IMPORTS_sqlite3.tests := support.async support.command support.runtime
+
+TITAN_TEST_SOURCES_ssl.test_support := spec/stdlib/titan/ssl/test_support.titan
+TITAN_TEST_IMPORTS_ssl.test_support := support.runtime
+
+TITAN_TEST_SOURCES_ssl.tests := spec/stdlib/titan/ssl/tests.titan
+TITAN_TEST_IMPORTS_ssl.tests := net.test_support ssl.test_support support.async support.runtime
+
+TITAN_TEST_SOURCES_string.core_test := spec/stdlib/titan/string/core_test.titan
+TITAN_TEST_IMPORTS_string.core_test := string.test_support
+
+TITAN_TEST_SOURCES_string.format_pack_test := spec/stdlib/titan/string/format_pack_test.titan
+TITAN_TEST_IMPORTS_string.format_pack_test := string.test_support
+
+TITAN_TEST_SOURCES_string.regex_test := spec/stdlib/titan/string/regex_test.titan
+TITAN_TEST_IMPORTS_string.regex_test := string.test_support
+
+TITAN_TEST_SOURCES_string.test_support := spec/stdlib/titan/string/test_support.titan
+TITAN_TEST_IMPORTS_string.test_support :=
+
+TITAN_TEST_SOURCES_support.async := spec/stdlib/titan/support/async.titan
+TITAN_TEST_IMPORTS_support.async := support.runtime
+
+TITAN_TEST_SOURCES_support.command := spec/stdlib/titan/support/command.titan
+TITAN_TEST_IMPORTS_support.command := support.common
+
+TITAN_TEST_SOURCES_support.common := spec/stdlib/titan/support/common.titan
+TITAN_TEST_IMPORTS_support.common :=
+
+TITAN_TEST_SOURCES_support.runtime := spec/stdlib/titan/support/runtime.titan
+TITAN_TEST_IMPORTS_support.runtime :=
+
+TITAN_TEST_SOURCES_test.tests := spec/stdlib/titan/test/tests.titan
+TITAN_TEST_IMPORTS_test.tests := support.command support.common support.runtime
+
+TITAN_TEST_SOURCES_timer.tests := spec/stdlib/titan/timer/tests.titan
+TITAN_TEST_IMPORTS_timer.tests := support.async support.runtime
+
+TITAN_TEST_SOURCES_url.tests := spec/stdlib/titan/url/tests.titan
+TITAN_TEST_IMPORTS_url.tests :=
+
+TITAN_TEST_SOURCES_uv.runtime_tests := spec/stdlib/titan/uv/runtime_tests.titan
+TITAN_TEST_IMPORTS_uv.runtime_tests := support.command support.common support.runtime
+
+TITAN_TEST_SOURCES_uv.task_test_support := spec/stdlib/titan/uv/task_test_support.titan
+TITAN_TEST_IMPORTS_uv.task_test_support := support.runtime
+
+TITAN_TEST_SOURCES_uv.task_tests := spec/stdlib/titan/uv/task_tests/task_tests.titan \
+	spec/stdlib/titan/uv/task_tests/cancellation_test.titan \
+	spec/stdlib/titan/uv/task_tests/continuations_test.titan
+TITAN_TEST_IMPORTS_uv.task_tests := support.async support.runtime uv.task_test_support
+
+# Project-private C declarations and generated native fixture headers.
+TITAN_TEST_C_INPUTS_fs.test_support := spec/stdlib/titan/fs/fixture_support.h
+TITAN_TEST_C_INPUTS_io.test_support := spec/stdlib/titan/io/print_capture.h
+TITAN_TEST_C_INPUTS_reflect.tests := spec/stdlib/titan/reflect/reflection_recursive.h
+TITAN_TEST_C_INPUTS_async.tests = $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h
+TITAN_TEST_C_INPUTS_uv.runtime_tests = $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h

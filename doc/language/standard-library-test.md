@@ -42,7 +42,8 @@ opener in a standalone. Use names such as `url_test`, `math_spec`, or
 ## Discovery and compilation
 
 `titanc --test M...` typechecks each requested source root and its source-backed
-import closure. It discovers every declaration that is all of the following:
+import closure. With `--incremental`, current objects can supply the same
+discovered declarations. A test is every declaration that is all of the following:
 
 * a public, non-`local` top-level function whose name starts with `test_`;
 * not an ignored duplicate declaration;
@@ -65,7 +66,7 @@ A test that intentionally needs local declarations writes
 `import "app.calc.titan"`; that explicit edge requires source and has no compiled
 fallback under the rules in
 [Visibility through explicit source imports](source-import-visibility.md). Ordinary
-compilation remains binary first, and `--static` still only swaps `.a` and
+compilation remains binary first by default, and `--static` still only swaps `.a` and
 `.so` preference during the compiled fallback of ordinary imports.
 
 The compiler generates an ordinary source module with the reserved identity
@@ -78,6 +79,16 @@ is emitted. Adjacent generated artifacts use the executable stem:
 `__test_support.c/.o`, `__test_runner.c/.o`, and
 `__test_entrypoint.c/.o`; ordinary test and dependency translation units keep
 their normal source-adjacent paths.
+
+For separate test builds, `-c --test --incremental` emits source objects and
+test compilation flags without synthesizing a runner or executable. All recipes
+use the same build directory and share `titan/test__test_support.o`; build that
+support prerequisite with `-c --test --incremental titan.test` before parallel
+owners. The final `--test --incremental` command discovers fresh and cached
+cases, generates the current runner, and links one executable. It uses the
+shared support output rather than the default first-root-specific support
+stem. See [Separate native test executables](incremental-compilation.md#separate-native-test-executables)
+for the complete sequence and Make-owned invalidation contract.
 
 Only translation units that own a discovered test receive
 `-fno-optimize-sibling-calls`, preserving useful native frames for

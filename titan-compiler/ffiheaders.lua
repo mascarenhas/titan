@@ -41,6 +41,14 @@ function ffiheaders.relative(from, to)
     return table.concat(result, "/")
 end
 
+function ffiheaders.foreign_contents(recipe, ffi_header, source_header)
+    local includes = { "#include " .. quote_header(ffi_header) }
+    for _, modname in ipairs(recipe.source_headers) do
+        includes[#includes + 1] = "#include " .. quote_header(source_header(modname))
+    end
+    return recipe.prefix .. "\n" .. table.concat(includes, "\n") .. "\n" .. recipe.body
+end
+
 local function render_includes(modname, includes, typedefs)
     assert(staticmetadata.valid_module_name(modname))
     -- Case and punctuation are significant in a logical module identity.

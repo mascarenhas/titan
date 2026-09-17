@@ -24,14 +24,15 @@ local function attempt(fn, ...)
     return value
 end
 
-local function valid_entry(entry, options)
+local function valid_entry(entry, options, declarations_only)
     if type(entry) ~= "table" or entry.kind ~= "source"
         or type(entry.type) ~= "table" or entry.type._tag ~= "Type.Module"
         or entry.type._source ~= true or not staticmetadata.valid_module_name(entry.type.name)
         or type(entry.filename) ~= "string" or entry.filename == ""
         or type(entry.source_files) ~= "table" or entry.source_files[1] ~= entry.filename
-        or type(entry.deps) ~= "table" or type(entry.source_manifest) ~= "string"
-        or entry.source_manifest == "" then fail("entry is not a complete checked source module") end
+        or type(entry.deps) ~= "table" then fail("entry is not a complete checked source module") end
+    if not declarations_only and (type(entry.source_manifest) ~= "string"
+        or entry.source_manifest == "") then fail("entry is not a complete checked source module") end
     if options and options.module_name and options.module_name ~= entry.type.name then
         fail("entry belongs to another module")
     end
@@ -39,9 +40,9 @@ end
 
 -- Iterative projection preserves recursive/shared declarations without using
 -- the host Lua stack. A strong memo remains alive across cooperative GC.
-local function project(entry, options, strict)
+local function project(entry, options, strict, declarations_only)
     options = options or {}
-    valid_entry(entry, options)
+    valid_entry(entry, options, declarations_only)
     local work = graphcodec.work(options)
     work(0, true)
     local memo, roles, queue, headers, types_seen = {}, {}, {}, {}, {}
@@ -105,12 +106,16 @@ local function project(entry, options, strict)
         return result
     end
     local result = {
-        kind = "source", _analysis_manifest = true,
+        kind = "source",
         filename = copy(entry.filename, "string"), source_files = copy(entry.source_files, "names"),
         deps = copy(entry.deps, "dependencies"), source_imports = {},
-        source_manifest = copy(entry.source_manifest, "string"), type = copy(entry.type, "type"),
+        type = copy(entry.type, "type"),
         c_header_dependencies = copy(entry.c_header_dependencies or {}, "inputs"), declared_registry = registry,
     }
+    if not declarations_only then
+        result._analysis_manifest = true
+        result.source_manifest = copy(entry.source_manifest, "string")
+    end
     if strict then
         local fields = { kind = true, _analysis_manifest = true, filename = true, source_files = true,
             deps = true, source_imports = true, source_manifest = true, type = true,
@@ -285,6 +290,13 @@ end
 
 function projectcache.compact(entry, options)
     return attempt(project, entry, options, false)
+end
+
+-- Native object metadata shares this declaration projection, but not the
+-- analysis-only capability or its equality-only source interface manifest.
+-- The object loader supplies the accompanying machine code and native facts.
+function projectcache.project_declarations(entry, options)
+    return attempt(project, entry, options, false, true)
 end
 
 function projectcache.encode(entry, options)
