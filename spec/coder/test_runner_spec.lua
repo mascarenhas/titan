@@ -617,7 +617,9 @@ describe("native Titan test runner", function()
         local ok, output, why, code = compile_installed(STATIC, "--static")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        local run_ok, run_output = run({ "./" .. STATIC })
+        local run_ok, run_output = run({
+            "env", "LUA_CPATH_5_5=" .. package.cpath, "./" .. STATIC,
+        })
         assert.truthy(run_ok, run_output)
         assert.truthy(run_output:find(
             "[       OK ] test_runner_static.test_static_fallback",

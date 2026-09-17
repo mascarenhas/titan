@@ -358,7 +358,9 @@ describe("standalone-prefix source installation", function()
         local public_config = read_file(PREFIX .. "/include/luaconf.h")
         assert.equal(source_config, public_config)
         assert.truthy(public_config:find(
-            '#define LUA_ROOT "' .. PREFIX .. '/"', 1, true), public_config)
+            '#define LUA_ROOT "!/"', 1, true), public_config)
+        assert.falsy(source_config:find(PREFIX, 1, true), source_config)
+        assert.falsy(source_loadlib:find(PREFIX, 1, true), source_loadlib)
         assert.truthy(public_config:find(
             '#define LUA_TITAN_CDIR%s+LUA_ROOT "lib/titan/0.6/"'),
             public_config)
@@ -557,6 +559,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             return false
         end
         for _, expected in ipairs({
+            "vendor/lua/lua-5.5.1-relocatable.patch",
             "vendor/lpeglabel/lplcap.c",
             "vendor/lpeglabel/lplcap.h",
             "vendor/lpeglabel/lplcode.c",
@@ -1151,7 +1154,10 @@ end
         assert.falsy(generated:find("/titan/url.so", 1, true), generated)
         assert.falsy(generated:find("/titan/http.so", 1, true), generated)
 
+        -- This executable is outside the installation, so explicitly select
+        -- the provider belonging to the compiler that built it.
         ok, output, why, code = run(clean_environment({
+            "TITAN_PATH_0_6=" .. TITAN_LIBDIR,
             workspace .. "/installed",
         }), workspace)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
@@ -1261,8 +1267,9 @@ end
         local consumer_c = read_file(workspace .. "/consumer.c")
         assert.truthy(consumer_c:find(
             'loadlib(L, "direct_uv.so")', 1, true), consumer_c)
-        ok, output, why, code = run(clean_environment({ "./consumer" }),
-            workspace)
+        ok, output, why, code = run(clean_environment({
+            "TITAN_PATH_0_6=.;" .. TITAN_LIBDIR, "./consumer",
+        }), workspace)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
 
@@ -1292,4 +1299,345 @@ assert(type(uv.Error.new) == "function")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
     end)
+end)
+
+describe("installed Lua SDK Make inputs", function()
+    local workspace
+
+    after_each(function()
+        if workspace then remove_tree(workspace); workspace = nil end
+    end)
+
+    it("selects matching installed inputs while preserving source overrides",
+    function()
+        workspace = temporary_directory("lua-sdk-selection")
+        local repository = assert(lfs.currentdir())
+        local inspection = workspace .. "/inspect.mk"
+        write_file(inspection, [[
+.PHONY: inspect-lua-sdk
+inspect-lua-sdk:
+	@printf '%s\n' '$(TITAN_RUNTIME_LUA_SOURCE_PATH)' '$(TITAN_RUNTIME_LUA_LIB)' '$(LUA_SDK_PREREQ)'
+]])
+        local function inputs(prefix, extra)
+            local argv = {
+                "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKEOVERRIDES",
+                "make", "--no-print-directory", "-f", repository .. "/Makefile",
+                "-f", inspection, "PREFIX=" .. prefix, "inspect-lua-sdk",
+            }
+            for _, word in ipairs(extra or {}) do argv[#argv + 1] = word end
+            local ok, output = run(argv, workspace)
+            assert.truthy(ok, output)
+            return output
+        end
+
+        assert.equal(PREFIX .. "/src/lua-5.5.1\n" ..
+            PREFIX .. "/lib/liblua.a\n\n", inputs(PREFIX))
+        local selected = workspace .. "/custom-lua-src"
+        assert.equal(selected .. "\n" .. selected .. "/liblua.a\n\n",
+            inputs(PREFIX, { "TITAN_RUNTIME_LUA_SOURCE_PATH=" .. selected }))
+        local archive = workspace .. "/custom-liblua.a"
+        assert.equal(selected .. "\n" .. archive .. "\n\n",
+            inputs(PREFIX, {
+                "TITAN_RUNTIME_LUA_SOURCE_PATH=" .. selected,
+                "TITAN_RUNTIME_LUA_LIB=" .. archive,
+            }))
+
+        local unprepared = workspace .. "/unprepared-prefix"
+        local fallback = "lua-5.5.1/src\nlua-5.5.1/src/liblua.a\n" ..
+            unprepared .. "/etc/titan/lua-5.5.1.installed\n"
+        assert.equal(fallback, inputs(unprepared))
+        make_directory(unprepared .. "/src/lua-5.5.1")
+        for _, header in ipairs({ "lua.h", "lobject.h" }) do
+            copy_tree(PREFIX .. "/src/lua-5.5.1/" .. header,
+                unprepared .. "/src/lua-5.5.1/" .. header)
+        end
+        assert.equal(unprepared .. "/src/lua-5.5.1\n" ..
+            unprepared .. "/lib/liblua.a\n\n", inputs(unprepared))
+        assert_absent(workspace .. "/lua-5.5.1")
+    end)
+
+    it("rejects installed headers without their matching Lua archive",
+    function()
+        workspace = temporary_directory("incomplete-lua-sdk")
+        local repository = assert(lfs.currentdir())
+        local incomplete = workspace .. "/prefix"
+        copy_tree(PREFIX .. "/src/lua-5.5.1",
+            incomplete .. "/src/lua-5.5.1")
+        for _, source in ipairs({ "titan.c", "titan.h" }) do
+            copy_tree("titan-runtime/" .. source,
+                workspace .. "/titan-runtime/" .. source)
+        end
+        local ok, output = run({
+            "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKEOVERRIDES",
+            "LC_ALL=C", "make", "--no-print-directory",
+            "-f", repository .. "/Makefile", "PREFIX=" .. incomplete,
+            "LUA_URL=file:///titan-test-must-not-download-lua", "runtime",
+        }, workspace)
+        assert.falsy(ok, output)
+        assert.truthy(output:find("No rule to make target", 1, true), output)
+        assert.truthy(output:find(incomplete .. "/lib/liblua.a", 1, true), output)
+        assert_absent(workspace .. "/lua-5.5.1")
+        assert_absent(workspace .. "/lua-5.5.1.tar.gz")
+    end)
+
+    it("builds and stages native targets without a checkout Lua tree",
+    function()
+        workspace = temporary_directory("installed-lua-sdk-build")
+        local repository = assert(lfs.currentdir())
+        for _, source in ipairs({
+            "titan.c", "titan.h", "minicoro.c", "minicoro.h",
+            "ltitanlib.c", "titan/ffi.h",
+        }) do
+            copy_tree("titan-runtime/" .. source,
+                workspace .. "/titan-runtime/" .. source)
+        end
+        copy_tree("vendor/lpeglabel", workspace .. "/vendor/lpeglabel")
+        local stage = workspace .. "/sdk"
+        local libbacktrace = PREFIX .. "/lib/libbacktrace.a"
+        local llhttp_header = PREFIX .. "/include/llhttp.h"
+        local sqlite_header = PREFIX .. "/include/sqlite3.h"
+        -- Reuse only the unrelated prepared native dependencies. Lua's own
+        -- targets remain fully active, so an accidental provisioning edge
+        -- fails against the deliberately unavailable URL below.
+        local ok, output = run({
+            "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKEOVERRIDES",
+            "CCACHE_DISABLE=1", "make", "--no-print-directory",
+            "-f", repository .. "/Makefile", "PREFIX=" .. PREFIX,
+            "ROCKS_TREE=" .. stage, "LIBUV_MODE=system", "OPENSSL_MODE=system",
+            "LIBBT_DIR=" .. repository .. "/libbacktrace",
+            "LIBBT_LIB=" .. libbacktrace,
+            "LLHTTP_HEADER=" .. llhttp_header, "SQLITE3_HEADER=" .. sqlite_header,
+            "--old-file=" .. libbacktrace,
+            "--old-file=" .. llhttp_header, "--old-file=" .. sqlite_header,
+            "LUA_URL=file:///titan-test-must-not-download-lua",
+            "CFLAGS=-std=c99 -O0 -fPIC", "ROCK_CFLAGS=-O0 -fPIC",
+            "runtime", "lpeglabel", "install-titan-sdk",
+        }, workspace)
+        assert.truthy(ok, output)
+        assert_absent(workspace .. "/lua-5.5.1")
+        assert_absent(workspace .. "/lua-5.5.1.tar.gz")
+        for _, artifact in ipairs({
+            "titan-runtime/libtitan.a", "titan-runtime/bootstrap/titan.so",
+            "lpeglabel-build/libtitan-lpeglabel.a",
+            "sdk/lib/titan/0.6/libtitan.a", "sdk/lib/titan/0.6/titan.so",
+            "sdk/include/titan/ffi.h",
+        }) do
+            assert_file(workspace .. "/" .. artifact)
+        end
+        local config = read_file(workspace ..
+            "/titan-runtime/.titan-runtime-build-config")
+        assert.truthy(config:find("TITAN_RUNTIME_LUA_SOURCE_PATH=" ..
+            PREFIX .. "/src/lua-5.5.1", 1, true), config)
+        assert.truthy(config:find("TITAN_RUNTIME_LUA_LIB=" ..
+            PREFIX .. "/lib/liblua.a", 1, true), config)
+        for _, source in ipairs({ "luaconf.h", "lobject.h", "loadlib.c" }) do
+            assert.equal(read_file(PREFIX .. "/src/lua-5.5.1/" .. source),
+                read_file(stage .. "/src/lua-5.5.1/" .. source), source)
+        end
+        assert.equal(read_file(PREFIX .. "/lib/liblua.a"),
+            read_file(stage .. "/lib/liblua.a"))
+        ok, output = run({ LUA, "-E", "-e", string.format([[
+local open = assert(package.loadlib(%q, "luaopen_titan"))
+assert(type(open()._loadlibglobal) == "function")
+]], stage .. "/lib/titan/0.6/titan.so") })
+        assert.truthy(ok, output)
+    end)
+end)
+
+describe("relocatable Lua build configuration", function()
+    local workspace
+
+    after_each(function()
+        if workspace then remove_tree(workspace); workspace = nil end
+    end)
+
+    it("keeps patched sources prefix independent and an unchanged build warm",
+    function()
+        workspace = temporary_directory("lua-configuration")
+        local repository = assert(lfs.currentdir())
+        local first_prefix = workspace .. "/first-prefix"
+        local second_prefix = workspace .. "/second-prefix"
+        copy_tree("lua-5.5.1.tar.gz", workspace .. "/lua-5.5.1.tar.gz")
+
+        local function configure(prefix)
+            local ok, output = run({
+                "env", "CCACHE_DISABLE=1", "make", "--no-print-directory",
+                "-f", repository .. "/Makefile", "PREFIX=" .. prefix,
+                "LUA_PATCH_FILE=" .. repository ..
+                    "/vendor/lua/lua-5.5.1-relocatable.patch",
+                "LUA_PLATFORM=posix", "READLINE_MODE=auto",
+                "lua-5.5.1/src/.titan-build-config",
+            }, workspace)
+            assert.truthy(ok, output)
+        end
+
+        configure(first_prefix)
+        local source_dir = workspace .. "/lua-5.5.1/src/"
+        local source_paths = { "luaconf.h", "loadlib.c" }
+        local sources = {}
+        for _, name in ipairs(source_paths) do
+            sources[name] = read_file(source_dir .. name)
+            assert.falsy(sources[name]:find(first_prefix, 1, true), name)
+        end
+        assert.truthy(sources["luaconf.h"]:find(
+            '#define LUA_ROOT "!/"', 1, true))
+        local marker = source_dir .. "lapi.o"
+        write_file(marker, "keep existing Lua objects on a warm build\n")
+        local old_mtime = 946684800
+        for _, name in ipairs({ "luaconf.h", "loadlib.c", ".titan-build-config" }) do
+            assert.truthy(lfs.touch(source_dir .. name, old_mtime, old_mtime))
+        end
+
+        configure(first_prefix)
+        assert_file(marker)
+        for _, name in ipairs({ "luaconf.h", "loadlib.c", ".titan-build-config" }) do
+            assert.equal(old_mtime, lfs.attributes(source_dir .. name,
+                "modification"), name)
+        end
+
+        configure(second_prefix)
+        assert_absent(marker)
+        assert.truthy(read_file(source_dir .. ".titan-build-config"):find(
+            "PREFIX=" .. second_prefix, 1, true))
+        for _, name in ipairs(source_paths) do
+            assert.equal(sources[name], read_file(source_dir .. name), name)
+        end
+    end)
+end)
+
+describe("relocatable installed Lua", function()
+    local workspace
+    local original_prefix
+    local relocated_prefix
+
+    before_each(function()
+        workspace = temporary_directory("lua-relocation")
+        -- macOS temporary directories can be reached through /var symlinks.
+        -- The loader deliberately reports the canonical executable location.
+        local ok, output = run({ "pwd", "-P" }, workspace)
+        assert.truthy(ok, output)
+        workspace = assert(output:match("^(.-)\n$"))
+        original_prefix = workspace .. "/original prefix"
+        relocated_prefix = workspace .. "/moved prefix with spaces"
+        for _, suffix in ipairs({
+            "/bin", "/share/lua/5.5", "/lib/lua/5.5", "/lib/titan/0.6",
+            "/custom/lua", "/custom/native",
+        }) do
+            make_directory(original_prefix .. suffix)
+        end
+        ok, output = run({ "cp", "-p", LUA, original_prefix .. "/bin/lua" })
+        assert.truthy(ok, output)
+        for _, suffix in ipairs({ "/share/lua/5.5", "/custom/lua" }) do
+            write_file(original_prefix .. suffix .. "/relocation_lua.lua",
+                'return "relocated Lua module"\n')
+        end
+        local source = workspace .. "/module.c"
+        write_file(source, [[
+#include <lua.h>
+int luaopen_relocation_native(lua_State *L) {
+  lua_pushliteral(L, "relocated native module");
+  return 1;
+}
+int luaopen_relocation_titan(lua_State *L) {
+  lua_pushliteral(L, "relocated Titan library path");
+  return 1;
+}
+]])
+        local native_module = original_prefix ..
+            "/lib/lua/5.5/relocation_native.so"
+        local argv = compiler_argv("-fPIC", "-I" .. PREFIX .. "/include")
+        local host_ok, host_output = run({ "uname", "-s" })
+        assert.truthy(host_ok, host_output)
+        local flags = host_output:match("^%s*Darwin%s*$") and
+            { "-bundle", "-undefined", "dynamic_lookup" } or { "-shared" }
+        for _, flag in ipairs(flags) do argv[#argv + 1] = flag end
+        for _, word in ipairs({ source, "-o", native_module }) do
+            argv[#argv + 1] = word
+        end
+        ok, output = run(argv)
+        assert.truthy(ok, output)
+        copy_tree(native_module, original_prefix ..
+            "/lib/titan/0.6/relocation_titan.so")
+        copy_tree(native_module, original_prefix ..
+            "/custom/native/relocation_native.so")
+    end)
+
+    after_each(function()
+        if workspace then remove_tree(workspace); workspace = nil end
+    end)
+
+    local function check_default_paths(prefix, executable)
+        local probe = string.format([[
+local prefix = %q
+assert(package.path == table.concat({
+  prefix .. "/share/lua/5.5/?.lua",
+  prefix .. "/share/lua/5.5/?/init.lua",
+  prefix .. "/lib/lua/5.5/?.lua",
+  prefix .. "/lib/lua/5.5/?/init.lua",
+  "./?.lua", "./?/init.lua",
+}, ";"), package.path)
+assert(package.cpath == table.concat({
+  prefix .. "/lib/titan/0.6/?.so",
+  prefix .. "/lib/lua/5.5/?.so",
+  prefix .. "/lib/lua/5.5/loadall.so", "./?.so",
+}, ";"), package.cpath)
+assert(package.searchpath("relocation_native", package.cpath) ==
+       prefix .. "/lib/lua/5.5/relocation_native.so")
+assert(package.searchpath("relocation_titan", package.cpath) ==
+       prefix .. "/lib/titan/0.6/relocation_titan.so")
+assert(require "relocation_lua" == "relocated Lua module")
+assert(require "relocation_native" == "relocated native module")
+assert(require "relocation_titan" == "relocated Titan library path")
+]], prefix)
+        local ok, output = run(clean_environment({
+            executable or prefix .. "/bin/lua", "-E", "-e", probe,
+        }), workspace)
+        assert.truthy(ok, output)
+    end
+
+    it("loads prefix-local Lua and C modules after moving the executable",
+    function()
+        check_default_paths(original_prefix)
+        assert.truthy(os.rename(original_prefix, relocated_prefix))
+        assert_absent(original_prefix)
+        check_default_paths(relocated_prefix)
+
+        local alias = workspace .. "/lua alias"
+        local ok, output = run({ "ln", "-s",
+            relocated_prefix .. "/bin/lua", alias })
+        assert.truthy(ok, output)
+        check_default_paths(relocated_prefix, alias)
+    end)
+
+    for _, suffix in ipairs({ "", "_5_5" }) do
+        it("expands ! in LUA_PATH" .. suffix .. " and LUA_CPATH" .. suffix,
+        function()
+            assert.truthy(os.rename(original_prefix, relocated_prefix))
+            local probe = string.format([[
+local prefix = %q
+assert(package.path:sub(1, #(prefix .. "/custom/lua/?.lua;")) ==
+       prefix .. "/custom/lua/?.lua;", package.path)
+assert(package.cpath:sub(1, #(prefix .. "/custom/native/?.so;")) ==
+       prefix .. "/custom/native/?.so;", package.cpath)
+assert(not package.path:find("!", 1, true), package.path)
+assert(not package.cpath:find("!", 1, true), package.cpath)
+assert(package.path:find(prefix .. "/share/lua/5.5/?.lua", 1, true))
+assert(package.cpath:find(prefix .. "/lib/titan/0.6/?.so", 1, true))
+assert(package.path:sub(-#"./unchanged/?.lua") == "./unchanged/?.lua")
+assert(package.cpath:sub(-#"./unchanged/?.so") == "./unchanged/?.so")
+assert(package.searchpath("relocation_lua", package.path) ==
+       prefix .. "/custom/lua/relocation_lua.lua")
+assert(package.searchpath("relocation_native", package.cpath) ==
+       prefix .. "/custom/native/relocation_native.so")
+assert(require "relocation_lua" == "relocated Lua module")
+assert(require "relocation_native" == "relocated native module")
+]], relocated_prefix)
+            local ok, output = run(clean_environment({
+                "LUA_PATH" .. suffix .. "=!/custom/lua/?.lua;;./unchanged/?.lua",
+                "LUA_CPATH" .. suffix .. "=!/custom/native/?.so;;./unchanged/?.so",
+                relocated_prefix .. "/bin/lua", "-e", probe,
+            }), workspace)
+            assert.truthy(ok, output)
+        end)
+    end
 end)

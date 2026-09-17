@@ -1,15 +1,15 @@
 # Titan compiler — developer tooling.
 #
 # The compiler generates C that includes Lua 5.5's *internal* headers and links
-# against its static library, so the test suite needs a Lua source tree built
-# next to this checkout. This Makefile downloads and builds that tree, runs the
-# suite through `luarocks test`, and cleans up generated artifacts.
+# against its matching static library. Native targets reuse the installed Lua
+# SDK when available; `make lua` prepares it from a local source build. This
+# Makefile also runs the suite through `luarocks test` and cleans artifacts.
 #
 # Run `make help` to list the available targets.
 
-# Titan owns the Lua installation it runs on.  Keep PREFIX absolute because it
-# is compiled into Lua's default module paths and copied into the installed
-# luaconf.h used by later Lua libraries and Titan packages.
+# Titan owns the Lua installation it runs on. Keep PREFIX absolute for native
+# dependency configuration and installation; Lua's default module paths derive
+# their root at runtime from the executable in <prefix>/bin.
 PREFIX ?= /usr/local
 override PREFIX := $(abspath $(PREFIX))
 
@@ -22,19 +22,27 @@ LUA_DIR          := lua-$(LUA_VERSION)
 LUA_TARBALL      := $(LUA_DIR).tar.gz
 LUA_URL          := https://drive.google.com/uc?export=download&id=15oUbOJpvI7JGPK9CEYD38p06ahPywPpQ
 # Version the extraction stamp when Titan's policy for the downloaded source
-# tree changes. v2 deliberately restores upstream loadlib.c: global provider
-# visibility now comes from generated logical-module shims and Titan's native
-# lazy/global helper, not a Lua patch.
-LUA_EXTRACTED    := $(LUA_DIR)/.titan-extracted-v2
+# tree changes. v3 adds executable-relative POSIX package paths. Global provider
+# visibility still belongs to generated shims and Titan's lazy/global helper.
+LUA_PATCH_FILE   := vendor/lua/lua-5.5.1-relocatable.patch
+LUA_EXTRACTED    := $(LUA_DIR)/.titan-extracted-v3
 LUA_BUILD_CONFIG := $(LUA_DIR)/src/.titan-build-config
 LUA_LIB          := $(LUA_DIR)/src/liblua.a
-# A source-checkout compiler can target another built Lua source tree through
-# `titanc --lua`. Its runtime archive must use the same headers and library.
-TITAN_RUNTIME_LUA_SOURCE_PATH ?= $(LUA_DIR)/src
-TITAN_RUNTIME_LUA_LIB = $(TITAN_RUNTIME_LUA_SOURCE_PATH)/liblua.a
 LUA_BIN          := $(PREFIX)/bin/lua
 LUA_SOURCE_INSTALL_DIR := $(PREFIX)/src/$(LUA_DIR)
 LUA_INSTALL_STAMP := $(PREFIX)/etc/titan/lua-$(LUA_VERSION).installed
+# LuaRocks already runs against a prepared PREFIX. Its native build must not
+# download or reconstruct Lua merely because this checkout has no local tree.
+# An installed header set selects its matching archive even if that archive is
+# missing, so an incomplete SDK fails instead of mixing it with checkout Lua.
+LUA_INSTALLED_SDK := $(and $(wildcard $(LUA_SOURCE_INSTALL_DIR)/lua.h),$(wildcard $(LUA_SOURCE_INSTALL_DIR)/lobject.h))
+LUA_SDK_SOURCE_PATH := $(if $(LUA_INSTALLED_SDK),$(LUA_SOURCE_INSTALL_DIR),$(LUA_DIR)/src)
+LUA_SDK_PREREQ := $(if $(LUA_INSTALLED_SDK),,$(LUA_INSTALL_STAMP))
+# `titanc --lua` can explicitly select another built source tree. Only the
+# installed PREFIX layout keeps liblua.a outside that source directory.
+TITAN_RUNTIME_LUA_SOURCE_PATH ?= $(LUA_SDK_SOURCE_PATH)
+TITAN_RUNTIME_LUA_LIB = $(if $(filter $(abspath $(LUA_SOURCE_INSTALL_DIR)),$(abspath $(TITAN_RUNTIME_LUA_SOURCE_PATH))),$(PREFIX)/lib/liblua.a,$(TITAN_RUNTIME_LUA_SOURCE_PATH)/liblua.a)
+TITAN_RUNTIME_LUA_HEADERS = $(wildcard $(TITAN_RUNTIME_LUA_SOURCE_PATH)/*.h)
 
 # Lua 5.5.1's interactive Linux and macOS targets use GNU Readline. Prefer a
 # usable host installation, but do not require a development package: an
@@ -348,8 +356,7 @@ LPEGLABEL_BUILD_CONFIG := $(LPEGLABEL_BUILD_DIR)/.titan-lpeglabel-build-config
 LPEGLABEL_ARCHIVE_CONFIG := $(LPEGLABEL_BUILD_DIR)/.titan-lpeglabel-archive-config
 LPEGLABEL_CPPFLAGS := -I$(abspath $(LPEGLABEL_VENDOR_DIR))
 LPEGLABEL_CFLAGS := -std=c99 -fPIC -fvisibility=hidden
-LPEGLABEL_LUA_HEADERS = $(ROCK_LUA_INCDIR)/lua.h \
-	$(ROCK_LUA_INCDIR)/luaconf.h $(ROCK_LUA_INCDIR)/lauxlib.h
+LPEGLABEL_LUA_HEADERS = $(ROCK_LUA_HEADERS)
 
 UV_TITAN_SOURCES := \
 	titan/uv/uv.titan \
@@ -458,6 +465,7 @@ STDLIB_EMBEDDED_FORMAT_INPUTS := titan-compiler/staticmetadata.lua \
 TITAN_BOOTSTRAP_SO := titan-runtime/bootstrap/titan.so
 STDLIB_BOOTSTRAP_PREREQ := $(TITAN_BOOTSTRAP_SO)
 ROCK_LUA_INCDIR ?= $(PREFIX)/include
+ROCK_LUA_HEADERS = $(addprefix $(ROCK_LUA_INCDIR)/,lua.h luaconf.h lauxlib.h)
 ROCK_CFLAGS     ?= -O2 -fPIC
 ROCK_LD         ?= $(CC)
 ifeq ($(HOST_OS),Darwin)
@@ -539,7 +547,10 @@ RECURSIVE_WRAPPER_GUARD = flags=$${MAKEFLAGS%% *}; case "$$flags" in -*) ;; *q*)
 
 FORCE:
 
-all: lua libbacktrace libuv stdlib ## Build everything needed to run the test suite (default)
+# Finish Lua publication before native consumers select their SDK. A recursive
+# invocation also sees the installed headers after a first-time Lua build.
+all: lua libbacktrace libuv ## Build everything needed to run the test suite (default)
+	$(MAKE) stdlib
 
 help: ## Show this help
 	@echo "Titan developer tasks:"
@@ -962,17 +973,19 @@ $(LUA_TARBALL):
 	  echo "ERROR: need 'curl' or 'wget' to download Lua" >&2; exit 1; \
 	fi
 
-$(LUA_EXTRACTED): $(LUA_TARBALL)
+$(LUA_EXTRACTED): $(LUA_TARBALL) $(LUA_PATCH_FILE)
 	@echo "==> Replacing generated Lua source tree from $(LUA_TARBALL)"
 	rm -rf "$(LUA_DIR)"
 	tar zxf "$(LUA_TARBALL)"
+	git apply --directory="$(LUA_DIR)" "$(LUA_PATCH_FILE)"
 	@touch "$@"
 
 # Lua's own Makefile does not track source/header dependencies.  This content
 # stamp configures luaconf.h with Titan's installation paths and cleans Lua
 # objects whenever that configuration or any effective native-build input
 # changes. An unchanged invocation preserves the stamp mtime and leaves the
-# already-built interpreter warm. loadlib.c remains the pristine upstream file.
+# already-built interpreter warm. The patched sources are prefix-independent;
+# PREFIX remains a build input for native dependencies and installation.
 $(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) $(READLINE_SELECTION_CONFIG) FORCE
 	@tmp="$@.tmp"; header="$(LUA_DIR)/src/luaconf.h"; \
 	tmp_header="$$header.titan.tmp"; \
@@ -990,11 +1003,10 @@ $(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) $(READLINE_SELECTION_CONFIG) FORCE
 		$(call make_shell_quote,TITAN_LIBRARY_VERSION=$(TITAN_LIBRARY_VERSION)); } \
 		> "$$tmp"; \
 	cat "$(READLINE_SELECTION_CONFIG)" >> "$$tmp"; \
-	awk -v root=$(call make_shell_quote,$(PREFIX)) \
-	    -v titan_library=$(call make_shell_quote,$(TITAN_LIBRARY_VERSION)) \
+	awk -v titan_library=$(call make_shell_quote,$(TITAN_LIBRARY_VERSION)) \
 	  '$$1 == "#define" && $$2 == "LUA_TITAN_CDIR" { next } \
 	   { if ($$1 == "#define" && index($$2, "LUA_ROOT") == 1) { \
-	       printf("#define LUA_ROOT %c%s/%c\n", 34, root, 34); next; \
+	       print "#define LUA_ROOT \"!/\""; next; \
 	     } \
 	     if ($$1 == "#define" && $$2 == "LUA_CDIR" && \
 	         index($$0, "LUA_ROOT") != 0) { \
@@ -1801,7 +1813,7 @@ lpeglabel: $(LPEGLABEL_ARCHIVE) ## Build/validate the private LPegLabel archive
 # input changes, so warm builds remain true no-ops while same-mtime source
 # rewrites still invalidate every private object.
 $(LPEGLABEL_BUILD_CONFIG): FORCE $(LPEGLABEL_SOURCES) $(LPEGLABEL_HEADERS) \
-		$(LUA_INSTALL_STAMP)
+		$(wildcard $(LPEGLABEL_LUA_HEADERS)) $(LUA_SDK_PREREQ)
 	@mkdir -p "$(@D)"
 	@tmp="$@.tmp"; \
 	{ printf '%s\n' \
@@ -1932,6 +1944,7 @@ $(RUNTIME_BUILD_CONFIG): FORCE
 		$(call make_shell_quote,TITAN_EXTRA_CFLAGS=$(TITAN_EXTRA_CFLAGS)) \
 		$(call make_shell_quote,LUA_DIR=$(LUA_DIR)) \
 		$(call make_shell_quote,TITAN_RUNTIME_LUA_SOURCE_PATH=$(TITAN_RUNTIME_LUA_SOURCE_PATH)) \
+		$(call make_shell_quote,TITAN_RUNTIME_LUA_LIB=$(TITAN_RUNTIME_LUA_LIB)) \
 		$(call make_shell_quote,LUA_PLATFORM=$(LUA_PLATFORM)) \
 		$(call make_shell_quote,LUA_MYCFLAGS=$(LUA_MYCFLAGS)) \
 		$(call make_shell_quote,LUA_MYLDFLAGS=$(LUA_MYLDFLAGS)) \
@@ -1968,14 +1981,14 @@ $(LTITANLIB_BUILD_CONFIG): FORCE
 	fi
 
 $(RUNTIME_O): titan-runtime/titan.c titan-runtime/titan.h \
-		$(RUNTIME_BUILD_CONFIG) | $(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB)
+		$(TITAN_RUNTIME_LUA_HEADERS) $(RUNTIME_BUILD_CONFIG) | $(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB)
 	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(CFLAGS) $(TITAN_EXTRA_CFLAGS) \
 		-c titan-runtime/titan.c -I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
 		-I $(LIBBT_DIR) -o $@
 
 $(MINICORO_O): titan-runtime/minicoro.c \
 		titan-runtime/minicoro.h titan-runtime/titan/ffi.h \
-		$(RUNTIME_BUILD_CONFIG) | $(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB)
+		$(TITAN_RUNTIME_LUA_HEADERS) $(RUNTIME_BUILD_CONFIG) | $(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB)
 	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(CFLAGS) $(TITAN_EXTRA_CFLAGS) \
 		-c titan-runtime/minicoro.c -I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
 		-I $(LIBBT_DIR) -o $@
@@ -1998,7 +2011,8 @@ $(TITAN_RUNTIME_LIB): $(TITAN_RUNTIME_OBJECTS) $(RUNTIME_ARCHIVE_CONFIG)
 	$(AR) rcs "$@" $(TITAN_RUNTIME_OBJECTS)
 	$(RANLIB) "$@"
 
-$(LTITANLIB_O): titan-runtime/ltitanlib.c $(LTITANLIB_BUILD_CONFIG) $(LUA_INSTALL_STAMP)
+$(LTITANLIB_O): titan-runtime/ltitanlib.c $(LTITANLIB_BUILD_CONFIG) \
+		$(wildcard $(ROCK_LUA_HEADERS)) $(LUA_SDK_PREREQ)
 	$(CC) $(ROCK_CFLAGS) $(TITAN_EXTRA_CFLAGS) \
 		-I"$(ROCK_LUA_INCDIR)" -c "$<" -o "$@"
 
@@ -2064,7 +2078,9 @@ titan: lpeglabel libbacktrace libuv openssl llhttp sqlite3 $(TITAN_RUNTIME_LIB) 
 		LIBUV_MODE=$(call make_shell_quote,$(LIBUV_MODE)); \
 	fi
 
-install-titan-sdk: $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) $(LUA_LIB) \
+# PREFIX owns installed Lua. Stage that SDK into a separate ROCKS_TREE, while
+# leaving Lua-owned files in place when both installation roots are the same.
+install-titan-sdk: $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) $(TITAN_RUNTIME_LUA_LIB) \
 		$(LIBBT_LIB) $(LIBUV_LIB) $(OPENSSL_LIBS) $(LLHTTP_HEADER) \
 		$(SQLITE3_HEADER) $(TITAN_SDK_ROOT_HEADERS) \
 		$(TITAN_SDK_NAMESPACED_HEADERS) stage-titan-bootstrap
@@ -2080,9 +2096,13 @@ install-titan-sdk: $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) $(LUA_LIB) \
 	mkdir -p "$$rocks_tree/src/$(LUA_DIR)" \
 		"$$rocks_tree/include/titan" "$$rocks_tree/lib" \
 		"$$version_dir"; \
-	install -m 0644 $(LUA_DIR)/src/*.c $(LUA_DIR)/src/*.h \
+	lua_source="$(abspath $(TITAN_RUNTIME_LUA_SOURCE_PATH))"; \
+	if test "$$lua_source" != "$(LUA_SOURCE_INSTALL_DIR)" || \
+	   test "$$rocks_tree" != "$$(CDPATH= cd "$(PREFIX)" && pwd -P)"; then \
+	  install -m 0644 "$$lua_source"/*.c "$$lua_source"/*.h \
 		"$$rocks_tree/src/$(LUA_DIR)/"; \
-	install -m 0644 "$(LUA_LIB)" "$$rocks_tree/lib/liblua.a"; \
+	  install -m 0644 "$(TITAN_RUNTIME_LUA_LIB)" "$$rocks_tree/lib/liblua.a"; \
+	fi; \
 	rm -f "$$rocks_tree/lib/libtitan.a"; \
 	install -m 0644 "$(TITAN_RUNTIME_LIB)" "$$version_dir/libtitan.a"; \
 	install -m 0644 "$(LIBBT_LIB)" "$$rocks_tree/lib/libbacktrace.a"; \
@@ -2135,10 +2155,9 @@ else
   STDLIB_NATIVE_PREREQS := $(TITAN_RUNTIME_OBJECTS) \
 	$(STDLIB_EXTRA_OBJECTS)
   STDLIB_RUNTIME_ARCHIVE_PREREQ := $(TITAN_RUNTIME_LIB)
-  # A standalone PREFIX is prepared with `make lua` before stdlib. Depending
-  # on its prefix-local stamp keeps native source builds ordered without
-  # rerunning Lua's installation for every module (or during Make dry runs).
-  STDLIB_TOOL_PREREQS := $(LUA_INSTALL_STAMP) $(LIBBT_LIB)
+  # Only an unprepared PREFIX needs the Lua installation step. A prepared
+  # SDK supplies real source headers and its matching archive directly.
+  STDLIB_TOOL_PREREQS := $(LUA_SDK_PREREQ) $(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB)
   STDLIB_UV_CPPFLAGS := $(LIBUV_CPPFLAGS)
   STDLIB_UV_CFLAGS := $(LIBUV_CFLAGS)
   # Only platform/system final libraries belong here. Bundled libuv is in
@@ -2149,10 +2168,10 @@ endif
 
 # Compiler/SDK changes invalidate every module; native header changes enter at
 # their owning modules and propagate through the explicit source import graph.
-# Track the SDK's source inputs, not freshly copied installed-header mtimes.
+# Track the selected SDK's source headers, including installed-prefix updates.
 STDLIB_COMPILER_PREREQS = titanc $(TITAN_COMPILER_LUA) Makefile \
 	$(TITAN_SDK_ROOT_HEADERS) $(TITAN_SDK_NAMESPACED_HEADERS) \
-	$(wildcard $(LUA_DIR)/src/*.h)
+	$(TITAN_RUNTIME_LUA_HEADERS)
 ifeq ($(LIBUV_MODE),bundled)
   STDLIB_UV_HEADER_DIRS = $(LIBUV_INCLUDE_DIR)
 else
@@ -2634,11 +2653,15 @@ $(TITAN_TEST_EXECUTABLE): $(TITAN_TEST_MODULE_OBJECTS) $(TITAN_TEST_SUPPORT_OUTP
 
 titan-stdlib-test-build: $(TITAN_TEST_EXECUTABLE) ## Build every native Titan stdlib test into one incremental executable
 
+# The aggregate and its children run outside <prefix>/bin. Give them the
+# selected installation's Lua paths instead of their executable-relative defaults.
 titan-stdlib-test-run: ## Run the built native suite, optionally with TITAN_FILTER
 	@test -x $(call make_shell_quote,$(TITAN_TEST_EXECUTABLE)) || { \
 	  echo "ERROR: run 'make titan-stdlib-test-build' first" >&2; exit 1; \
 	}
-	@TITAN_FILTER=$(call make_shell_quote_value,TITAN_FILTER) \
+	@LUA_PATH_5_5="$$( $(TEST_LUA) -E -e 'io.write(package.path)' )" \
+	LUA_CPATH_5_5="$$( $(TEST_LUA) -E -e 'io.write(package.cpath)' )" \
+	TITAN_FILTER=$(call make_shell_quote_value,TITAN_FILTER) \
 	bash -o pipefail -c ' \
 	  if [[ -n $${TITAN_FILTER:-} ]]; then \
 	    set -- "$$@" "--filter=$$TITAN_FILTER"; \

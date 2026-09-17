@@ -977,9 +977,11 @@ bundled-mode extension DSOs leave their `uv_*` calls unresolved:
   `package.cpath` for the first `/lib/lua/5.5/?.so` entry, initializes the
   Titan module-path default from that root, and ensures
   `<root>/lib/titan/0.6/?.so` is present in `package.cpath`. The
-  prefix-configured Titan-owned Lua already places that template before its
-  `lib/lua` entries. It then registers only the main module's `luaopen_`
-  function in `package.preload`; this registration initializes nothing.
+  executable-relative Titan-owned Lua already places that template before its
+  `lib/lua` entries; `<root>/bin/program` uses `<root>` unless Lua path
+  environment overrides select another tree. It then registers only the main
+  module's `luaopen_` function in `package.preload`; this registration
+  initializes nothing.
 * **`pmain`** publishes the original `argc` and `argv` under
   `TITAN_MAIN_ARGC_KEY` and `TITAN_MAIN_ARGV_KEY`, then calls
   `require("<modname>")` and retrieves and retains its `main` callable. A

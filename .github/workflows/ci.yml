@@ -767,11 +767,13 @@ jobs:
             test -n "$value"
           done
           inputs="$RUNNER_TEMP/titan-sanitizer-native-cache-inputs"
+          lua_patch_sha256="$(sha256sum vendor/lua/lua-5.5.1-relocatable.patch | cut -d' ' -f1)"
           {
             printf '%s\n' \
               "schema=$SANITIZER_NATIVE_CACHE_SCHEMA" \
               "titan_abi=$TITAN_ABI_VERSION" \
               "lua=$SANITIZER_LUA_VERSION" \
+              "lua_patch=$lua_patch_sha256" \
               "libbacktrace=$libbacktrace_rev" \
               "libuv=$SANITIZER_LIBUV_VERSION:$SANITIZER_LIBUV_SHA256" \
               "llhttp=$SANITIZER_LLHTTP_VERSION:$SANITIZER_LLHTTP_SHA256" \

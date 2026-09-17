@@ -66,7 +66,14 @@ change them only when their own compatibility rules require it.
 - **Lua 5.5.** Both the compiler's own Lua code and generated C target Lua
   5.5 (rockspec: `lua ~> 5.5`). Use an absolute project-local prefix such as
   `PREFIX=$HOME/.local/titan/titan-dev`. `make lua` configures Lua 5.5.1's
-  `LUA_ROOT` to that prefix while leaving upstream `loadlib.c` unchanged. The
+  `LUA_ROOT` to `"!/"` and patches POSIX `loadlib.c` search-path expansion to
+  resolve `!` from the actual executable's directory parent (`<root>/bin/lua`
+  uses `<root>`). Linux uses `/proc/self/exe`; macOS canonicalizes
+  `_NSGetExecutablePath` with `realpath`. The patched Lua source bytes do not
+  depend on `PREFIX`; configuration stamps still track prefix and native-build
+  inputs for rebuilding and installation. LuaRocks configuration and command
+  wrappers can retain absolute paths, so this is Lua module-path relocation,
+  not a complete binary-distribution contract. The
   generated standard-module shims resolve physical `titan.so` through
   `package.cpath`, load bare native support with `require "titan"`, then use
   `titan._loadlibglobal` to map/promote the provider with
@@ -259,6 +266,13 @@ change them only when their own compatibility rules require it.
   (`lobject.h`, `lgc.h`, `lvm.h`, ...) from that installed source tree and
   links the matching archive. That `luaconf.h` is also the public configuration
   used when this LuaRocks builds other Lua libraries and Titan packages.
+  Native Make targets prefer this installed source/header tree when its
+  `lua.h` and `lobject.h` exist, including when `luarocks make` builds the
+  runtime and stages the SDK. They require its matching archive; a missing
+  archive is an error. Without the installed headers, the checkout Lua build
+  is the fallback. An explicit runtime Lua
+  source selection from checkout `titanc --lua` still owns its matching
+  headers and archive.
   `make lua` uses `MYCFLAGS=-fPIC` and selects `linux-readline`/`macosx`
   from `uname`; override with `make lua LUA_PLATFORM=...`, and use `LUA_CC`
   for Lua's compiler. It compile-links a host Readline probe first. When the

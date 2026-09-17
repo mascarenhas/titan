@@ -426,8 +426,10 @@ end
         assert.same({}, collect_files(workspace, ".so"))
         assert.same({}, collect_files(workspace, ".lua"))
 
-        ok, output, why, code = run({ workspace .. "/application" },
-            workspace)
+        ok, output, why, code = run({
+            "env", "TITAN_PATH_0_6=.;" .. PREFIX .. "/lib/titan/0.6",
+            workspace .. "/application",
+        }, workspace)
         assert.falsy(ok)
         assert.equal("", output)
         assert.equal("exit", why)

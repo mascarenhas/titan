@@ -391,6 +391,8 @@ describe("incremental and separate compilation (CLI)", function()
     end)
 
     it("reuses direct and indirect dynamic owners across separate test builds", function()
+        -- These test programs live outside the selected installation's bin.
+        local provider_path = "TITAN_PATH_0_6=.;" .. prefix .. "/lib/titan/0.6"
         local wrapper = NAMESPACE .. ".wrapper"
         local wrapper_stem = source(wrapper, [[
             local sqlite3 = import "sqlite3"
@@ -422,7 +424,7 @@ describe("incremental and separate compilation (CLI)", function()
         local ok, result = xpcall(function()
             -- A fresh source build already supports the indirect method call.
             compiled("--test", APP)
-            local ran, output = run({ "./" .. APP })
+            local ran, output = run({ "env", provider_path, "./" .. APP })
             assert.is_true(ran, output)
             assert.matches("[  PASSED  ] 1 test.", output, 1, true)
 
@@ -432,7 +434,7 @@ describe("incremental and separate compilation (CLI)", function()
             output = compiled("--test", "--incremental", "-v", APP)
             assert.matches("Titan object hit " .. APP .. ":", output, 1, true)
             assert.matches("Titan object hit " .. wrapper .. ":", output, 1, true)
-            ran, output = run({ "./" .. APP })
+            ran, output = run({ "env", provider_path, "./" .. APP })
             assert.is_true(ran, output)
             assert.matches("[  PASSED  ] 1 test.", output, 1, true)
 
@@ -448,7 +450,7 @@ describe("incremental and separate compilation (CLI)", function()
                     assert.matches("Titan object hit " .. name .. ":", output, 1, true)
                 end
                 for filename, bytes in pairs(saved) do assert.equal(bytes, read(filename)) end
-                ran, output = run({ "./" .. roots[1] })
+                ran, output = run({ "env", provider_path, "./" .. roots[1] })
                 assert.is_true(ran, output)
                 assert.matches("[  PASSED  ] 2 tests.", output, 1, true)
                 assert.matches(APP .. ".test_indirect", output, 1, true)

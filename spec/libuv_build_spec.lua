@@ -2349,7 +2349,7 @@ int main(void) {
         function()
             local makefile = read_file("Makefile")
             for _, contract in ipairs({
-                "LUA_EXTRACTED    := $(LUA_DIR)/.titan-extracted-v2",
+                "LUA_EXTRACTED    := $(LUA_DIR)/.titan-extracted-v3",
                 'rm -rf "$(LUA_DIR)"',
                 "STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua",
                 'package.cpath="./titan-runtime/bootstrap/?.so;" .. package.cpath',
@@ -2371,16 +2371,17 @@ int main(void) {
             local makefile = file:read("*a")
             file:close()
             for _, contract in ipairs({
-                "TITAN_RUNTIME_LUA_SOURCE_PATH ?= $(LUA_DIR)/src",
-                "TITAN_RUNTIME_LUA_LIB = " ..
-                "$(TITAN_RUNTIME_LUA_SOURCE_PATH)/liblua.a",
+                "TITAN_RUNTIME_LUA_SOURCE_PATH ?= $(LUA_SDK_SOURCE_PATH)",
+                "TITAN_RUNTIME_LUA_LIB=" ..
+                "$(TITAN_RUNTIME_LUA_LIB)",
                 "TITAN_RUNTIME_LUA_SOURCE_PATH=" ..
                 "$(TITAN_RUNTIME_LUA_SOURCE_PATH)",
                 "LUA_AR=$(LUA_AR)",
                 "LUA_RANLIB=$(LUA_RANLIB)",
-                "$(RUNTIME_BUILD_CONFIG) | $(TITAN_RUNTIME_LUA_LIB) " ..
-                "$(LIBBT_LIB)",
-                "$(LTITANLIB_BUILD_CONFIG) $(LUA_INSTALL_STAMP)",
+                "$(TITAN_RUNTIME_LUA_HEADERS) $(RUNTIME_BUILD_CONFIG) | " ..
+                "$(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB)",
+                "$(wildcard $(LPEGLABEL_LUA_HEADERS)) $(LUA_SDK_PREREQ)",
+                "$(wildcard $(ROCK_LUA_HEADERS)) $(LUA_SDK_PREREQ)",
                 "LIBUV_PROVIDER_LDFLAGS=$(LIBUV_PROVIDER_LDFLAGS)",
                 "MEMBERS=$(notdir $(TITAN_RUNTIME_OBJECTS))",
                 "STDLIB_NATIVE_PREREQS := $(TITAN_RUNTIME_OBJECTS)",
@@ -4967,6 +4968,7 @@ done
                 'SANITIZER_OPENSSL_SHA256: "a8c0d28a529ca480f9f36cf5792e2cd2' ..
                 '1984552a3c8e4aa11a24aa31aeac98e8"',
                 "id: sanitizer-native-cache-key",
+                "sha256sum vendor/lua/lua-5.5.1-relocatable.patch",
                 "git ls-remote",
                 "libbacktrace.git HEAD",
                 'cc_target="$(cc -dumpmachine)"',
@@ -5021,6 +5023,7 @@ done
                 "sanitizer%-native%-cache%-key%.outputs%.digest }}"))
             for _, fingerprint in ipairs({
                 "titan_abi=$TITAN_ABI_VERSION",
+                "lua_patch=$lua_patch_sha256",
                 "libuv_profile=$LIBUV_BUILD_PROFILE",
                 "sqlite3=$SANITIZER_SQLITE3_VERSION:$SANITIZER_SQLITE3_SHA256",
                 "sqlite3_cflags=$SQLITE3_BUILD_CFLAGS",
