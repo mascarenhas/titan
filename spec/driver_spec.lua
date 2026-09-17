@@ -6668,6 +6668,70 @@ typedef double titan_driver_symlink_value;
             message, 1, true)
     end)
 
+    it("validates cached dynamic owner bindings per importing object", function()
+        local owner = types.Module("binding_owner", {})
+        owner.file = "binding_owner.so"
+        driver.imported.binding_owner = {
+            kind = "dynamic", type = owner, filename = binary .. "/binding_owner.so",
+        }
+        driver.imported.direct_user = {
+            kind = "source", type = types.Module("direct_user", {}),
+            object_metadata = {
+                imports = {{ name = "binding_owner", source_required = false }},
+                bindings = { binding_owner = "handle" },
+                providers = { binding_owner = "binding_owner.so" },
+            },
+        }
+        driver.imported.indirect_user = {
+            kind = "source", type = types.Module("indirect_user", {}),
+            object_metadata = {
+                imports = {}, bindings = { binding_owner = "global" }, providers = {},
+            },
+        }
+        local context = driver.new_resolver_context()
+        local finalized, errors = driver.finalize_resolver_context(context)
+        assert.truthy(finalized, errors and table.concat(errors, "\n"))
+        assert.equal("handle", context.native_bindings.binding_owner)
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
+    it("rejects unresolved cached global owners", function()
+        driver.imported.indirect_user = {
+            kind = "source", type = types.Module("indirect_user", {}),
+            object_metadata = {
+                imports = {}, bindings = { missing_owner = "global" }, providers = {},
+            },
+        }
+        local context = driver.new_resolver_context()
+        local finalized, errors = driver.finalize_resolver_context(context)
+        assert.falsy(finalized)
+        assert.matches("requires global binding for 'missing_owner'",
+            table.concat(errors, "\n"), 1, true)
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
+    it("rejects changed providers for cached imported handles", function()
+        local owner = types.Module("binding_owner", {})
+        owner.file = "replacement/binding_owner.so"
+        driver.imported.binding_owner = {
+            kind = "dynamic", type = owner, filename = binary .. "/replacement.so",
+        }
+        driver.imported.direct_user = {
+            kind = "source", type = types.Module("direct_user", {}),
+            object_metadata = {
+                imports = {{ name = "binding_owner", source_required = false }},
+                bindings = { binding_owner = "handle" },
+                providers = { binding_owner = "original/binding_owner.so" },
+            },
+        }
+        local context = driver.new_resolver_context()
+        local finalized, errors = driver.finalize_resolver_context(context)
+        assert.falsy(finalized)
+        assert.matches("loads a different provider for 'binding_owner'",
+            table.concat(errors, "\n"), 1, true)
+        assert.is_true(driver.close_resolver_context(context))
+    end)
+
     it("selects one archive key without importing carried siblings", function()
         local archive = binary .. "/bundle.a"
         local left = types.Module("bundle.left", {})

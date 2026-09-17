@@ -28,6 +28,17 @@ Source-required edges retain their direct-source capability; ordinary edges
 remain public-only. The generated physical-provider identity check continues
 to apply to direct source consumers.
 
+Native binding validation is per reused object. The final resolver determines
+whether an owner is supplied directly or dynamically; the object's recorded
+imports determine whether dynamic access uses its own provider handle or a
+global symbol lookup. This matches `coder.generate`: an indirect record-method
+consumer can store `global` for an owner that another module imports through a
+handle. An invocation-wide dynamic-owner classification alone cannot validate
+both access paths. Validation retains exact handle-provider checks and existing
+source/static/dynamic identity constraints, and does not accept an unresolved
+owner as a global binding. It uses restored imports and resolver data without
+reparsing source or repeating provider discovery.
+
 Test records also retain discovered function names. `test_runner.discover`
 combines checked ASTs and these names, preserving ordinary filtering, sorting,
 and source-closure discovery. `-c --test` discovers cases for test C flags but
