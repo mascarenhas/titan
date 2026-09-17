@@ -5834,12 +5834,15 @@ local function prepare_compile(
     local args, flags_err = driver.generated_compile_prefix()
     if not args then return nil, flags_err end
     append_argv(args, options and options.extra_compile_flags)
-    local lto = false
+    local lto, explicit_seed = false, false
     for _, argument in ipairs(args) do
         if argument == "-fno-lto" then lto = false
         elseif argument == "-flto" or argument:match("^%-flto=") then lto = true end
+        if argument == "-frandom-seed" or argument:match("^%-frandom%-seed=") then
+            explicit_seed = true
+        end
     end
-    if lto then
+    if lto and not explicit_seed then
         -- GCC otherwise gives identical LTO input random section identities.
         -- A distinct stable seed per logical module preserves deterministic
         -- archive bytes across recompilation and private output staging.

@@ -280,6 +280,19 @@ describe("Titan driver generic build flags", function()
         assert.is_true(checked >= 3, output)
     end)
 
+    it("preserves an explicitly selected compiler random seed", function()
+        local ok, output = titanc({
+            MAKE = "true",
+            CC = "cc -DTITAN_DRIVER_CC_HONORED=1",
+            TITAN_EXTRA_CPPFLAGS = "-iquote '" .. INCLUDE .. "' " ..
+                "-DTITAN_DRIVER_CPP_BRANCH=37",
+            TITAN_EXTRA_CFLAGS = "-frandom-seed=explicit-seed",
+        }, "-v", "--tree", APPLICATION, MODULE)
+        assert.truthy(ok, output)
+        assert.truthy(output:find("'-frandom-seed=explicit-seed'", 1, true), output)
+        assert.falsy(output:find("'-frandom-seed=" .. MODULE .. "'", 1, true), output)
+    end)
+
     it("builds the source runtime against the Lua tree selected by --lua",
        function()
         local lua_source = lfs.currentdir() .. "/lua-5.5.1/src"
