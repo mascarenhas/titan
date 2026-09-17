@@ -981,6 +981,9 @@ printf '%s\n' "$module" >> ../build.log
             local function build()
                 local succeeded, message = run_argv(argv)
                 assert.truthy(succeeded, message)
+                assert.equal("file", lfs.attributes(
+                    root .. "/.titan-tests/test/tests", "mode"),
+                    "successful native test build omitted its executable")
                 local result = {}
                 for name in read_file(root .. "/build.log"):gmatch("[^\n]+") do
                     assert.falsy(result[name], "compiled twice: " .. name)
@@ -1012,6 +1015,41 @@ printf '%s\n' "$module" >> ../build.log
             assert.same({}, build())
             argv[#argv + 1] = "TITAN_FILTER=arbitrary-runtime-filter"
             assert.same({}, build())
+
+            -- Model a filesystem whose timestamp precision cannot separate
+            -- this flag change from the previous build. Make has already
+            -- cached the executable's mtime when the config recipe deletes
+            -- it, so equal replacement-object mtimes must still trigger link.
+            local clock = root .. "/coarse-clock"
+            ok, output = run_argv({ "touch", "-r",
+                root .. "/.titan-tests/test/tests", clock })
+            assert.truthy(ok, output)
+            local coarse_outputs = {
+                root .. "/.titan-tests/build.config",
+                root .. "/.titan-tests/test/tests",
+            }
+            for _, suffix in ipairs({ "o", "c", "ffi.h" }) do
+                coarse_outputs[#coarse_outputs + 1] = root ..
+                    "/.titan-tests/titan/test__test_support." .. suffix
+                for _, path in ipairs(sources) do
+                    coarse_outputs[#coarse_outputs + 1] = root .. "/" ..
+                        path:gsub("titan$", suffix)
+                end
+            end
+            local quoted_outputs = {}
+            for _, path in ipairs(coarse_outputs) do
+                quoted_outputs[#quoted_outputs + 1] = quote(path)
+            end
+            local coarse_shell = root .. "/coarse-shell"
+            write_file(coarse_shell, string.format([[#!/bin/sh
+/bin/sh "$@" || exit $?
+for output in %s; do
+    if test -f "$output"; then touch -r %s "$output" || exit $?; fi
+done
+]], table.concat(quoted_outputs, " "), quote(clock)))
+            ok, output = run_argv({ "chmod", "+x", coarse_shell })
+            assert.truthy(ok, output)
+            argv[#argv + 1] = "SHELL=" .. coarse_shell
             argv[#argv + 1] = "TITAN_EXTRA_CFLAGS=-DCHANGED_TEST_FLAGS=1"
             assert.same(all, build())
             assert.same({}, build())
@@ -2349,7 +2387,7 @@ int main(void) {
         function()
             local makefile = read_file("Makefile")
             for _, contract in ipairs({
-                "LUA_EXTRACTED    := $(LUA_DIR)/.titan-extracted-v2",
+                "LUA_EXTRACTED    := $(LUA_DIR)/.titan-extracted-v3",
                 'rm -rf "$(LUA_DIR)"',
                 "STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua",
                 'package.cpath="./titan-runtime/bootstrap/?.so;" .. package.cpath',
@@ -2371,16 +2409,17 @@ int main(void) {
             local makefile = file:read("*a")
             file:close()
             for _, contract in ipairs({
-                "TITAN_RUNTIME_LUA_SOURCE_PATH ?= $(LUA_DIR)/src",
-                "TITAN_RUNTIME_LUA_LIB = " ..
-                "$(TITAN_RUNTIME_LUA_SOURCE_PATH)/liblua.a",
+                "TITAN_RUNTIME_LUA_SOURCE_PATH ?= $(LUA_SDK_SOURCE_PATH)",
+                "TITAN_RUNTIME_LUA_LIB=" ..
+                "$(TITAN_RUNTIME_LUA_LIB)",
                 "TITAN_RUNTIME_LUA_SOURCE_PATH=" ..
                 "$(TITAN_RUNTIME_LUA_SOURCE_PATH)",
                 "LUA_AR=$(LUA_AR)",
                 "LUA_RANLIB=$(LUA_RANLIB)",
-                "$(RUNTIME_BUILD_CONFIG) | $(TITAN_RUNTIME_LUA_LIB) " ..
-                "$(LIBBT_LIB)",
-                "$(LTITANLIB_BUILD_CONFIG) $(LUA_INSTALL_STAMP)",
+                "$(TITAN_RUNTIME_LUA_HEADERS) $(RUNTIME_BUILD_CONFIG) | " ..
+                "$(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB)",
+                "$(wildcard $(LPEGLABEL_LUA_HEADERS)) $(LUA_SDK_PREREQ)",
+                "$(wildcard $(ROCK_LUA_HEADERS)) $(LUA_SDK_PREREQ)",
                 "LIBUV_PROVIDER_LDFLAGS=$(LIBUV_PROVIDER_LDFLAGS)",
                 "MEMBERS=$(notdir $(TITAN_RUNTIME_OBJECTS))",
                 "STDLIB_NATIVE_PREREQS := $(TITAN_RUNTIME_OBJECTS)",
@@ -4967,6 +5006,7 @@ done
                 'SANITIZER_OPENSSL_SHA256: "a8c0d28a529ca480f9f36cf5792e2cd2' ..
                 '1984552a3c8e4aa11a24aa31aeac98e8"',
                 "id: sanitizer-native-cache-key",
+                "sha256sum vendor/lua/lua-5.5.1-relocatable.patch",
                 "git ls-remote",
                 "libbacktrace.git HEAD",
                 'cc_target="$(cc -dumpmachine)"',
@@ -5021,6 +5061,7 @@ done
                 "sanitizer%-native%-cache%-key%.outputs%.digest }}"))
             for _, fingerprint in ipairs({
                 "titan_abi=$TITAN_ABI_VERSION",
+                "lua_patch=$lua_patch_sha256",
                 "libuv_profile=$LIBUV_BUILD_PROFILE",
                 "sqlite3=$SANITIZER_SQLITE3_VERSION:$SANITIZER_SQLITE3_SHA256",
                 "sqlite3_cflags=$SQLITE3_BUILD_CFLAGS",

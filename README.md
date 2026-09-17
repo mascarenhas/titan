@@ -13,7 +13,7 @@ project its own local absolute prefix, then use that prefix's Lua, LuaRocks,
 and Titan compiler to build and run the project. Two destination names have
 distinct ownership even in the current single-directory layout:
 
-* `PREFIX` owns the prefix-configured Lua installation and the LuaRocks
+* `PREFIX` owns the Lua installation and the LuaRocks
   program and configuration.
 * `ROCKS_TREE` owns the installed Titan rock, compiler SDK, and standard
   library.
@@ -42,15 +42,22 @@ make luarocks
 
 `make lua` fetches the
 [Lua 5.5.1 sources](https://www.lua.org/ftp/lua-5.5.1.tar.gz) and configures
-`lua-5.5.1/src/luaconf.h` so `LUA_ROOT` is this `PREFIX`. Lua's `loadlib.c`
-remains unmodified; generated logical-module loaders use Titan's native
-lazy/global helper to map or promote their physical provider. The build then
+`lua-5.5.1/src/luaconf.h` with `LUA_ROOT "!/"`. A small `loadlib.c` patch
+expands `!` in Lua's module search paths to the parent of the actual
+executable's directory. An interpreter at `<root>/bin/lua` therefore finds
+its modules under `<root>`, including after that tree is moved or the
+interpreter is invoked through a symlink. Linux reads `/proc/self/exe`;
+macOS uses `_NSGetExecutablePath` and resolves the executable with `realpath`.
+The patched Lua sources are identical across installation prefixes. This
+changes search-path expansion only: generated logical-module loaders still
+use Titan's native lazy/global helper to map or promote their physical
+provider. The build then
 compiles Lua with `MYCFLAGS=-fPIC` and
 installs it under the prefix. It also installs the Lua `.c` and `.h` sources
 under `$PREFIX/src/lua-5.5.1/`. Consequently the
 installed `liblua.a`, the internal headers Titan-generated C uses, and the
 public headers used when LuaRocks builds other Lua libraries all describe the
-same prefix and the same Lua build. The Makefile selects `linux-readline` on
+same Lua build. The Makefile selects `linux-readline` on
 Linux and `macosx` on Darwin; override it with
 `make lua LUA_PLATFORM=...` when necessary, and use `LUA_CC` to select Lua's
 C compiler. For those interactive targets, `make lua` first compile-links a
@@ -87,7 +94,13 @@ Make's effective `CC`, `AR`, and `RANLIB` (using `CC` for linking), so a later
 direct `$PREFIX/bin/luarocks make` reuses the native tool identities that
 prepared the prefix instead of invalidating and rebuilding dependencies.
 Finally, that command builds and installs the Titan compiler, runtime archives
-and headers, and the standard library into `ROCKS_TREE`. Keep `$PREFIX/bin`
+and headers, and the standard library into `ROCKS_TREE`. Titan's native Make
+targets prefer the installed `$PREFIX/src/lua-5.5.1` headers when present,
+including for SDK staging, and require the matching `$PREFIX/lib/liblua.a`.
+If those headers are absent, they fall back to the checkout Lua build; a
+missing archive in a selected installation is an error. This lets a rock
+build use its prefix's Lua configuration without rebuilding the checkout Lua
+tree. Keep `$PREFIX/bin`
 first on `PATH` while developing so `lua`, `luarocks`, and `titanc` all come
 from this installation.
 
@@ -95,6 +108,11 @@ Lua and LuaRocks record versioned, prefix-local completion stamps under
 `$PREFIX/etc/titan/`. Repeating `make luarocks` against a prepared prefix is a
 no-op, while selecting a fresh prefix performs a fresh installation; the Lua
 stamp is invalidated when its matching source build changes.
+
+Relocation here covers Lua's module search paths. LuaRocks' configuration and
+installed command wrappers can still contain absolute paths; moving a tree
+does not by itself make every installed tool relocatable. The supported
+installation workflow continues to configure each destination explicitly.
 
 Use a fresh prefix when migrating a directory that previously used
 `luarocks init` or a user-tree LuaRocks configuration. Third-party command
@@ -112,7 +130,7 @@ The installed files used to compile Titan code include:
 
 | Owner and path | Purpose |
 | --- | --- |
-| `$PREFIX/src/lua-5.5.1/`, `$PREFIX/include/{lua,lauxlib,lualib,luaconf}.h`, `$PREFIX/lib/liblua.a` | The prefix-configured Lua sources, public configuration/headers, and static library owned by the Lua installation |
+| `$PREFIX/src/lua-5.5.1/`, `$PREFIX/include/{lua,lauxlib,lualib,luaconf}.h`, `$PREFIX/lib/liblua.a` | The matching Lua sources, public configuration/headers, and static library, with module paths resolved from the running executable |
 | `$ROCKS_TREE/src/lua-5.5.1/`, `$ROCKS_TREE/lib/liblua.a` | Matching Lua source and archive copies staged as part of the Titan compiler SDK |
 | `$ROCKS_TREE/lib/titan/0.6/libtitan.a` | Exactly `titan.o` and `minicoro.o`: generated-code loader/error support plus minicoro implementation/tag support; source foreign functions own the standard-library callbacks |
 | `$ROCKS_TREE/lib/libbacktrace.a` | The separate vendored native unwinder/symbolizer archive |
@@ -242,7 +260,7 @@ support table through bare `require "titan"`, then uses its separate
 invoke `luaopen_titan_uv`. Thus the first qualified `require` above establishes
 the provider on stock Lua 5.5 on Linux and macOS. The bare support load uses
 Lua's ordinary eager/local C searcher; the generated loader performs the
-explicit promotion without a patched `loadlib.c` or a self-loading provider.
+explicit promotion independently of the owned Lua's search-path patch.
 
 Because this explicit Lua preload happens before the extension is mapped, it
 also supports its eager libuv relocations and native constructors. It can make
@@ -293,13 +311,15 @@ paths; it is not a portable wrapper around every platform's native trust
 database. See [TLS standard library](doc/language/standard-library-ssl.md) for
 explicit CA-file selection and the complete verification contract.
 
-The Titan-owned Lua's configured default `package.cpath` contains
+For the Titan-owned interpreter at `$PREFIX/bin/lua`, the default
+`package.cpath` contains
 `$PREFIX/lib/titan/0.6/?.so` before `$PREFIX/lib/lua/5.5/?.so`. The first
 template lets the generated `titan.*` loaders find the canonical provider; the
 second remains the root-discovery anchor. The default `package.path` finds all
-twenty-one loaders under `$PREFIX/share/lua/5.5/titan/`. In the currently supported
-layout
-`ROCKS_TREE == PREFIX`, so `titanc` can use the first entry ending in
+twenty-one loaders under `$PREFIX/share/lua/5.5/titan/`. Here `PREFIX` is
+resolved from the running interpreter, so these paths follow a moved tree.
+In the currently supported layout `ROCKS_TREE == PREFIX`, so `titanc` can use
+the first entry ending in
 `/lib/lua/5.5/?.so` to recover its Titan SDK/rocks root.
 During the source rock's post-install build, the internal `TITAN_ROCKS_ROOT`
 override identifies `ROCKS_TREE` directly. The recovered Titan root supplies
@@ -310,11 +330,13 @@ modules consequently live as independent entries inside both `titan.so` and
 discovery rule implements the supported equal-root layout; it does not redefine the
 separately owned `PREFIX` and `ROCKS_TREE` as one concept.
 
-At startup a compiled executable inherits Lua's default `package.cpath` and
-ensures `$ROCKS_TREE/lib/titan/0.6/?.so` is present. Both it and the installed
-Lua therefore resolve `titan.<name>` through a generated loader to the same
-canonical file at `$ROCKS_TREE/lib/titan/0.6/titan.so`; there are no child,
-Lua-facing, or parent-level compatibility copies.
+At startup a compiled executable uses the same executable-relative Lua
+paths: a program installed at `<root>/bin/program` discovers providers and
+loaders under `<root>`. A program elsewhere can select its providers through
+the path overrides below. Titan recovers the runtime root from
+`package.cpath` and ensures `<root>/lib/titan/0.6/?.so` is present. The
+canonical provider remains `<root>/lib/titan/0.6/titan.so`; there are no
+child, Lua-facing, or parent-level compatibility copies.
 
 An unmodified Lua 5.5 can reproduce those search paths with versioned
 environment variables. Include the ordinary Lua C-module template because it

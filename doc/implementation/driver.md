@@ -1777,11 +1777,52 @@ Lua's C searcher loaded the same standard `titan.so` eager/local performs the
 required promotion. Errors retain the originally requested pathname and use
 the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 
+## Lua installation and executable-relative search paths
+
+`make lua` configures the pinned `luaconf.h` with `LUA_ROOT "!/"`, retaining
+the Titan provider template before the ordinary Lua C-module template. In
+`loadlib.c`'s `LUA_USE_DLOPEN` branch, Titan replaces the no-op `setprogdir`
+macro with a function that expands every `LUA_EXEC_DIR` (`!`) occurrence in
+the string on top of the Lua stack, then removes the original string. This
+applies to both default module paths and environment overrides containing
+the marker, with ordinary Lua environment precedence and `;;` expansion.
+
+Linux obtains the actual executable through `/proc/self/exe`; macOS obtains
+it with `_NSGetExecutablePath` and canonicalizes it with `realpath` before
+stripping directory components. The parent of the executable's directory is
+the module-path root: `<root>/bin/lua` uses `<root>`. Symlink launch paths and
+the working directory do not select another installation. The patch leaves
+Lua's native loader flags and Titan's separate lazy/local and lazy/global
+helpers unchanged.
+
+The patched Lua source bytes are independent of `PREFIX`. Make still records
+the destination prefix, platform, native tools, Readline selection, and build
+flags in its configuration stamp; changing those inputs cleans the matching
+Lua objects and installs the resulting archive, public headers, and internal
+sources together. Warm builds preserve unchanged stamps. LuaRocks retains its
+own destination-specific configuration and wrappers, so executable-relative
+Lua paths are not a complete relocation scheme for all installed tools.
+
+For native runtime builds and SDK staging, Make prefers the installed
+`$PREFIX/src/lua-5.5.1` source/header tree when its `lua.h` and `lobject.h`
+exist, and requires the matching `$PREFIX/lib/liblua.a`. A missing archive
+in this selected installation is an error; only absent installed headers
+select the checkout Lua build. Native targets do not reinstall a selected
+installed Lua. This lets `luarocks make` consume its own
+prefix's Lua configuration even when the checkout build belongs to another
+prefix. SDK staging preserves these Lua artifacts when `ROCKS_TREE` is
+`PREFIX`, and copies the selected pair for a separate destination.
+Explicit runtime source selection remains authoritative: the checkout
+compiler passes its `driver.LUA_SOURCE_PATH` to Make, including a source tree
+selected with `titanc --lua`, and uses that tree's matching archive. Installed
+compiler invocations still reject `--lua`. LuaRocks' `ROCK_LUA_INCDIR` remains
+the explicit public-header input for its native helper builds.
+
 ## Reference: environment variables, paths, and flags
 
 | Name | Where read | Default / value | Meaning |
 | --- | --- | --- | --- |
-| `PREFIX` | Makefile / rockspec build input | `/usr/local` for direct Make; an absolute per-project path in the supported workflow | Owns the prefix-configured Lua installation plus the LuaRocks executable and configuration. |
+| `PREFIX` | Makefile / rockspec build input | `/usr/local` for direct Make; an absolute per-project path in the supported workflow | Owns the Lua installation plus the LuaRocks executable and configuration; Lua module paths resolve from the running executable rather than embedding this build destination. |
 | `ROCKS_TREE` | Makefile / rockspec build input | empty for a direct build; LuaRocks' `$(SCRIPTS_DIR)/..` for a source install | Owns the installed Titan rock, SDK, and stdlib. The supported workflow currently sets it equal to `PREFIX`, but they are separate ownership concepts. |
 | `TITAN_PATH_0_6` | `driver.lua` (compile time), `titan.c` `pushpath` (run time) | unset | Versioned module search path; wins over `TITAN_PATH`. |
 | `TITAN_PATH` | same | unset | Module search path; `;;` expands to the ordinary default at compile time and run time. |
@@ -1825,7 +1866,7 @@ the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 | installed link set | `driver.installed_link_inputs` / `append_runtime_libraries` | `<root>/lib/titan/0.6/libtitan.a` + separate `<root>/lib/libbacktrace.a` + `<root>/lib/liblua.a` + platform libraries | Used by provider DSOs and programs; Linux adds `-ldl`, and all platforms add `-lm`. These common final inputs are not copied into package archives. The standard build separately supplies bundled libuv as `-X` payload to both `titan.so` and `titan.a`; system mode keeps explicit pkg-config link flags at final link. |
 | checkout link set | `driver.source_link_inputs` / `append_runtime_libraries` | local `libtitan.a` + separate local `libbacktrace.a` + local `liblua.a` + `-ldl -lm` | Preserves the writable source-development path while using the same archive contract; it never links `titan.o` directly. |
 | `TITAN_ROOT_DEFAULT` / `TITAN_LUA_CPATH_SUFFIX` | `titan.h`/`titan.c` | `/usr/local` / `/lib/lua/5.5/?.so` | Legacy run-time root fallback and exact template suffix used for root discovery. |
-| `titan_init_paths` | generated standalone entrypoint / `titan.c` | root parsed from inherited `package.cpath` | Caches the root and Titan module path and ensures `<root>/lib/titan/0.6/?.so` is in `package.cpath`; prefix-configured Titan-owned Lua has it first by default. |
+| `titan_init_paths` | generated standalone entrypoint / `titan.c` | root parsed from inherited `package.cpath` | Caches the root and Titan module path and ensures `<root>/lib/titan/0.6/?.so` is in `package.cpath`; Titan-owned Lua has it first by default, with `<root>` inferred from the running executable. |
 | registry keys | `titan.h` | `TITAN_ROOT_KEY`, `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`, `TITAN_MAIN_BOOTSTRAP_KEY`, `TITAN_MAIN_ARGC_KEY`, `TITAN_MAIN_ARGV_KEY`, `TITAN_BT_STATE_KEY`, `TITAN_BACKTRACE_KEY`, `TITAN_NAMES_KEY`, `TITAN_TRACE_PINNED`, `TITAN_TRACE_APPEND_KEY` (UUID strings) | Per-state caches and hooks: Titan SDK/rocks-tree root, module path, dlopen handles, optional standalone bootstrap, original process arguments and libuv's possibly replaced `argv`, registry-owned libbacktrace state, last raw backtrace, native-frame display names, re-raise traceback pin, and coroutine traceback append handoff. |
 | generated ABI symbol | `coder.lua` | `<mangled>_abi` returning `TITAN_ABI_VERSION` | Checked before DSO type rehydration and before run-time dynamic-import `dlsym`; the same value is embedded in static metadata and compared during paired validation. Markerless compiled modules are incompatible. |
 

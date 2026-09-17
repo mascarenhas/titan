@@ -8,6 +8,7 @@ local READLINE_PATCH =
     REPO_ROOT .. "/vendor/readline/readline-8.3-p1-p3.patch"
 local READLINE_LICENSE = REPO_ROOT .. "/LICENSES/readline-LICENSE"
 local READLINE_UPSTREAM = REPO_ROOT .. "/vendor/readline/UPSTREAM.md"
+local LUA_PATCH = REPO_ROOT .. "/vendor/lua/lua-5.5.1-relocatable.patch"
 local OLD_MTIME = 946684800
 
 local HOST_CC = os.getenv("CC") or "cc"
@@ -157,7 +158,7 @@ describe("GNU Readline selection", function()
         -- bounded fake extraction so these provider probes remain offline.
         make_directory(workspace .. "/lua-5.5.1")
         write_file(workspace .. "/lua-5.5.1.tar.gz", "test archive\n")
-        write_file(workspace .. "/lua-5.5.1/.titan-extracted-v2",
+        write_file(workspace .. "/lua-5.5.1/.titan-extracted-v3",
             "test extraction\n")
     end)
 
@@ -170,6 +171,7 @@ describe("GNU Readline selection", function()
             "env", "CCACHE_DISABLE=1",
             "make", "--no-print-directory", "-f", MAKEFILE,
             "PREFIX=" .. prefix,
+            "LUA_PATCH_FILE=" .. LUA_PATCH,
             "LUA_PLATFORM=linux-readline",
             "READLINE_PKG_CONFIG=false",
             "LUA_CC=" .. HOST_CC,

@@ -614,6 +614,15 @@ developer installation currently makes those paths equal, which is why the
 driver can discover the Titan root from Lua's `package.cpath`; the names do not
 have inherently identical ownership.
 
+Titan's own Lua build sets `LUA_ROOT` to `"!/"` and expands `!` in
+`package.path` and `package.cpath` from the running executable: an interpreter
+at `<root>/bin/lua` uses `<root>`. Moving that tree preserves those default
+module paths, and invoking Lua through a symlink still uses the actual
+executable's location. Environment path overrides retain their ordinary Lua
+precedence. LuaRocks configuration and installed command wrappers may still
+contain absolute paths, so this module-path behavior alone does not make an
+entire installed toolchain relocatable.
+
 The standard-library names `coroutine`, `uv`, `async`, `timer`, `io`, `fs`,
 `net`, `ssl`, `url`, `http`, `os`, `peg`, `string`, `test`, `lua`, `math`, `gc`,
 `iteration`, `reflect`, `sqlite3`, and `json` are parser sugar for the qualified module names
@@ -766,7 +775,12 @@ After `luaL_openlibs`, the executable parses the
 inherited `package.cpath` for its `/lib/lua/5.5/?.so` entry, adds
 `<root>/lib/titan/0.6/?.so` if it is absent, and initializes the Titan module
 path from that same root. Deploy the standard provider and loaders as described
-under [where modules are found](#where-modules-are-found). `args[1]` onward
+under [where modules are found](#where-modules-are-found). The linked Lua
+runtime resolves default paths from the executable itself, so a program in
+`<root>/bin` discovers providers under `<root>`. For a program outside that
+layout, configure the path overrides shown under
+[Running with a stock Lua](#running-with-a-stock-lua).
+`args[1]` onward
 contain only the user-supplied arguments; index 0 is absent and the executable
 name is not stored. Therefore `#args` is the argument count. The integer returned by
 `main` becomes the process exit status; an uncaught run-time error
@@ -804,9 +818,10 @@ with `<module>: multiple main functions found (already declared in
 
 ## Running with a stock Lua
 
-Compiled Titan modules and executables run against an unmodified Lua loader —
-no `loadlib.c` patch and no custom build flags beyond compiling the Lua
-sources with `-fPIC`. Each DSO and executable links the matched `liblua.a`;
+Compiled Titan modules support the stock Lua loader; provider loading does
+not require patched `dlopen` flags. Titan's own Lua build separately patches
+`loadlib.c` to resolve module paths from the running executable, and compiles
+the Lua sources with `-fPIC`. Each DSO and executable links the matched `liblua.a`;
 a produced static provider deliberately omits that common final input, so its
 consumer supplies the matching Lua archive once. Several logical modules in
 one final native image share that Lua instance.

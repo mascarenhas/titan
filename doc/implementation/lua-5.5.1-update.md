@@ -248,7 +248,7 @@ special case was added.
 | `src/lgc.c` | Stack-aware nil store and pending-finalizer guard. **Inherited.** |
 | `src/llex.c` | Tests numeric `LUA_COMPAT_GLOBAL`. **No dependency.** |
 | `src/llimits.h` | Numeric-operation defaults consume `L`. Floating-for advancement was **adapted**. |
-| `src/loadlib.c` | Source-module loads use explicit binary/text mode. **Inherited**; Titan leaves upstream `loadlib.c` unmodified. |
+| `src/loadlib.c` | Source-module loads use explicit binary/text mode. **Inherited**; Titan's separate POSIX `setprogdir` patch changes executable-relative search paths only. |
 | `src/lobject.h` | Adds `setnilvalue2s`. Generated stack writes were **adapted**. |
 | `src/lopcodes.c` | Corrects top-use bookkeeping for `OP_VARARGPREP`. **No dependency** because Titan does not emit or inspect Lua bytecode. |
 | `src/lopcodes.h` | Makes `luaP_isOT` a test macro and revises opcode-mode descriptions. **No Titan references.** |
