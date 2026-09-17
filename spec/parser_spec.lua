@@ -27,7 +27,20 @@ local function restrict(t1, t2)
     end
 end
 
+local function candidate_expectations(node)
+    if type(node) ~= "table" then return end
+    if node.vars then
+        for i, var in ipairs(node.vars) do
+            if var._tag ~= "Ast.ExpVar" then
+                node.vars[i] = { _tag = "Ast.ExpVar", var = var }
+            end
+        end
+    end
+    for _, child in pairs(node) do candidate_expectations(child) end
+end
+
 local function assert_is_subset(expected_ast, ast)
+    candidate_expectations(expected_ast)
     assert.are.same(expected_ast, restrict(expected_ast, ast))
 end
 
@@ -331,10 +344,10 @@ end
         local program = assert(parser.parse("metadata.titan", [[
 local dep = import "pkg.dep"
 local type Alias = dep.Item
-record Box<T>
-    const item: dep.Item<T>
+record Box<|T|>
+    const item: dep.Item<|T|>
 end
-function Box:take<U>(input: dep.Item<U>): dep.Item<U>
+function Box:take<|U|>(input: dep.Item<|U|>): dep.Item<|U|>
     local selected = input.item
     local bound = input:convert
     input:convert()
@@ -350,22 +363,22 @@ end
 
         local record = program[3]
         assert_location(record._name_loc, 3, 8)
-        assert_location(record.typeparams[1]._name_loc, 3, 12)
+        assert_location(record.typeparams[1]._name_loc, 3, 13)
         assert_location(record.fields[1]._name_loc, 4, 11)
         assert_location(record.fields[1].type._module_loc, 4, 17)
         assert_location(record.fields[1].type._name_loc, 4, 21)
-        assert_location(record.fields[1].type.typeargs[1]._name_loc, 4, 26)
+        assert_location(record.fields[1].type.typeargs[1]._name_loc, 4, 27)
 
         -- The parser inserts Box.new immediately after the record.
         local method = program[5]
         assert_location(method._owner_loc, 6, 10)
         assert_location(method._name_loc, 6, 14)
-        assert_location(method.typeparams[1]._name_loc, 6, 19)
-        assert_location(method.params[1]._name_loc, 6, 22)
-        assert_location(method.params[1].type._module_loc, 6, 29)
-        assert_location(method.params[1].type._name_loc, 6, 33)
-        assert_location(method.rettypes[1]._module_loc, 6, 43)
-        assert_location(method.rettypes[1]._name_loc, 6, 47)
+        assert_location(method.typeparams[1]._name_loc, 6, 20)
+        assert_location(method.params[1]._name_loc, 6, 24)
+        assert_location(method.params[1].type._module_loc, 6, 31)
+        assert_location(method.params[1].type._name_loc, 6, 35)
+        assert_location(method.rettypes[1]._module_loc, 6, 47)
+        assert_location(method.rettypes[1]._name_loc, 6, 51)
         assert_location(method.block.stats[1].exps[1].var._name_loc, 7, 28)
         assert_location(method.block.stats[2].exps[1]._name_loc, 8, 25)
         assert_location(method.block.stats[3].callexp.args._name_loc, 9, 11)
@@ -379,8 +392,8 @@ interface View
     function show()
 end
 union Choice
-    local Some: integer
-    None
+    local Some(integer)
+    None()
 end
 ]]))
         assert_location(owners[1]._name_loc, 1, 11)
@@ -415,7 +428,7 @@ function fold()
     do
     end
     case item
-    when Some then
+    when Some() then
     else
     end
     local callback = function()
@@ -448,42 +461,25 @@ end
         assert.is_nil(initializer._structure_loc)
     end)
 
-    it("can parse toplevel var declarations", function()
-        assert_program_ast([[ local x=17 ]], {
-            { _tag = "Ast.TopLevelVar",
-                islocal = true,
-                decl = { name = "x", type = false, option = false } }
-        })
+    it('can parse toplevel var declarations', function()
 
-        assert_program_ast([[ y = 18 ]], {
-            { _tag = "Ast.TopLevelVar",
-                islocal = false,
-                decl = { name = "y", type = false, option = false } }
-        })
-
-        assert_program_ast([[ local x?=17 ]], {
-            { _tag = "Ast.TopLevelVar",
-                islocal = true,
-                decl = { name = "x", type = false, option = true } }
-        })
-
-        assert_program_ast([[ y? = 18 ]], {
-            { _tag = "Ast.TopLevelVar",
-                islocal = false,
-                decl = { name = "y", type = false, option = true } }
-        })
-
-        assert_program_ast([[ local x?: integer =17 ]], {
-            { _tag = "Ast.TopLevelVar",
-                islocal = true,
-                decl = { name = "x", type = {_tag = "Ast.TypeOption", basetype = {_tag = "Ast.TypeInteger"}}, option = false } }
-        })
-
-        assert_program_ast([[ y?: integer = 18 ]], {
-            { _tag = "Ast.TopLevelVar",
-                islocal = false,
-                decl = { name = "y", type = {_tag = "Ast.TypeOption", basetype = {_tag = "Ast.TypeInteger"}}, option = false } }
-        })
+        local program = assert_parses_successfuly([[
+            local x = 17
+            y = 18
+            local maybe: integer? = 17
+            const later: string?
+            local const hidden: value
+        ]])
+        assert_is_subset({
+            {islocal=true, decl={name="x",type=false,option=false}},
+            {islocal=false, decl={name="y",type=false}},
+            {decl={name="maybe",type={_tag="Ast.TypeOption"}}},
+            {isconst=true,value=false,decl={name="later"}},
+            {islocal=true,isconst=true,value=false,decl={name="hidden"}},
+        }, program)
+        for _,source in ipairs({"x", "local x", "const x", "local x? = 1"}) do
+            assert.falsy(parser.parse("invalid.titan",source))
+        end
     end)
 
     it("parses initialized and initializer-less const module variables",
@@ -543,7 +539,7 @@ end
                 decls = { { name = "x", type = { _tag = "Ast.TypeInteger" }, option = false } } }
         })
 
-        assert_statements_ast([[ local x?: integer=17 ]], {
+        assert_statements_ast([[ local x: integer?=17 ]], {
             { _tag = "Ast.StatDecl",
                 decls = { { name = "x", type = { _tag = "Ast.TypeOption", basetype = {_tag = "Ast.TypeInteger"} }, option = false } } }
         })
@@ -590,108 +586,38 @@ end
         assert_statements_syntax_error("local const x =", "ExpLocal")
     end)
 
-    it("parses constructor-initialized fixed and borrowed C array locals",
-    function()
-        assert_statements_ast([[
-            local storage: ffi.Item[3] = ffi.Item.new_array(3)
-            local borrowed: ffi.Item[] = ffi.Item.new_array(count)
-            local zero: ffi.Item[0] = ffi.Item.new_array(0)
-            local negative: ffi.Item[-2] = ffi.Item.new_array(2)
-            local first: ffi.Item[1], second: ffi.Other[] = a, b
-            local ints: int[4] = int.new_array(4)
-            local words: unsigned long[2] = unsigned long.new_array(2)
-        ]], {
-            { _tag = "Ast.StatDecl", decls = {
-                { _tag = "Ast.Decl", name = "storage", type = {
-                    _tag = "Ast.TypeCArray",
-                    base = {
-                        _tag = "Ast.TypeQualName",
-                        module = "ffi",
-                        name = "Item",
-                    },
-                    length = { _tag = "Ast.ExpInteger", value = 3 },
-                }, option = false },
-            }, exps = { { _tag = "Ast.ExpCall" } } },
-            { _tag = "Ast.StatDecl", decls = {
-                { name = "borrowed", type = {
-                    _tag = "Ast.TypeCArray",
-                    base = { _tag = "Ast.TypeQualName", name = "Item" },
-                    length = false,
-                } },
-            }, exps = { { _tag = "Ast.ExpCall" } } },
-            { _tag = "Ast.StatDecl", decls = {
-                { name = "zero", type = {
-                    _tag = "Ast.TypeCArray",
-                    length = { _tag = "Ast.ExpInteger", value = 0 },
-                } },
-            } },
-            { _tag = "Ast.StatDecl", decls = {
-                { name = "negative", type = {
-                    _tag = "Ast.TypeCArray",
-                    length = { _tag = "Ast.ExpInteger", value = -2 },
-                } },
-            } },
-            { _tag = "Ast.StatDecl", decls = {
-                { name = "first", type = { _tag = "Ast.TypeCArray" } },
-                { name = "second", type = {
-                    _tag = "Ast.TypeCArray", length = false,
-                } },
-            }, exps = {
-                { _tag = "Ast.ExpVar" }, { _tag = "Ast.ExpVar" },
-            } },
-            { _tag = "Ast.StatDecl", decls = {
-                { name = "ints", type = {
-                    _tag = "Ast.TypeCArray",
-                    base = { _tag = "Ast.TypeName", name = "int" },
-                    length = { _tag = "Ast.ExpInteger", value = 4 },
-                } },
-            }, exps = { { _tag = "Ast.ExpCall" } } },
-            { _tag = "Ast.StatDecl", decls = {
-                { name = "words", type = {
-                    _tag = "Ast.TypeCArray",
-                    base = {
-                        _tag = "Ast.TypeName",
-                        name = "unsigned long",
-                    },
-                    length = { _tag = "Ast.ExpInteger", value = 2 },
-                } },
-            }, exps = { { _tag = "Ast.ExpCall" } } },
-        })
+    it('leaves fixed-array inference to the checker and parses borrowed and owned arrays', function()
 
-        -- Zero and negative integer tokens reach the checker so it can issue
-        -- the semantic positive-extent diagnostic. Keep the sign position on
-        -- the literal node for that diagnostic.
-        local source = "function f() local storage: ffi.Item[-8] = source end"
-        local program = assert(parser.parse("automatic.titan", source))
-        local arraytype = program[1].block.stats[1].decls[1].type
-        assert.same({
-            filename = "automatic.titan",
-            line = 1,
-            col = 29,
-        }, arraytype.loc)
-        assert.same(arraytype.loc, arraytype.base.loc)
-        assert.same({
-            filename = "automatic.titan",
-            line = 1,
-            col = 38,
-        }, arraytype.length.loc)
+        local program = assert_parses_successfuly([[
+            function f()
+                local storage = foreign Item.new_array(3)
+                local borrowed: foreign Item[] = foreign Item.new_array(count)
+                local owner: owned Item[] = foreign Item.new_array(3)
+            end
+        ]])
+        local stats=program[1].block.stats
+        assert.is_false(stats[1].decls[1].type)
+        assert.equal("Ast.ExpForeignType",stats[1].exps[1].exp.var.exp._tag)
+        assert.equal("Ast.TypeCArray",stats[2].decls[1].type._tag)
+        assert.is_false(stats[2].decls[1].type.length)
+        assert.equal("Ast.TypeOwned",stats[3].decls[1].type._tag)
     end)
 
     it("retains ordinary initialized qualified local declarations", function()
         assert_statements_ast([[
-            local object: ffi.Object = source
-            local first: ffi.Object, second: ffi.Other = a, b
+            local object: foreign Object = source
+            local first: foreign Object, second: foreign Other = a, b
         ]], {
             { _tag = "Ast.StatDecl", decls = {
                 { name = "object", type = {
-                    _tag = "Ast.TypeQualName",
-                    module = "ffi",
+                    _tag = "Ast.TypeForeignName",
+
                     name = "Object",
                 } },
             }, exps = { { _tag = "Ast.ExpVar" } } },
             { _tag = "Ast.StatDecl", decls = {
-                { name = "first", type = { _tag = "Ast.TypeQualName" } },
-                { name = "second", type = { _tag = "Ast.TypeQualName" } },
+                { name = "first", type = { _tag = "Ast.TypeForeignName" } },
+                { name = "second", type = { _tag = "Ast.TypeForeignName" } },
             }, exps = {
                 { _tag = "Ast.ExpVar" },
                 { _tag = "Ast.ExpVar" },
@@ -699,54 +625,24 @@ end
         })
     end)
 
-    it("rejects malformed constructor-local C array extents precisely",
-    function()
-        for _, extent in ipairs({ "count", "3.0", "-2.5", "1 + 2" }) do
+    it('rejects every source-written fixed C array extent', function()
+
+        for _,extent in ipairs({"3","count","3.0","-2","1 + 2"}) do
             assert_statements_syntax_error(
-                "local storage: ffi.Item[" .. extent .. "] = source",
-                "RBracketCArray")
+                "local storage: foreign Item["..extent.."] = source", "RBracketCArray")
         end
-        assert_statements_syntax_error(
-            "local storage: ffi.Item[3 = source", "RBracketCArray")
     end)
 
-    it("keeps C array targets out of general type positions", function()
-        local programs = {
-            "function f(x: ffi.Item[3]) end",
-            "function f(): ffi.Item[3] end",
-            "type Items = ffi.Item[3]",
-            "record R item: ffi.Item[3] end",
-            "function f() local x = y as ffi.Item[3] end",
-            "function f() local items: ffi.Item?[3] = source end",
-            "function f() local items: Item[3] = source end",
-            "function f() local items: integer[3] = source end",
-        }
-        for _, program in ipairs(programs) do
-            assert_program_syntax_error(program, "CArrayOnlyAutomatic")
-        end
+    it('allows only empty brackets in foreign array type syntax', function()
 
-        assert_statements_ast([[
-            local object: ffi.Item
-            local fixed: ffi.Item[3]
-            local borrowed: ffi.Item[]
-        ]], {
-            { _tag = "Ast.StatDecl", exps = {}, decls = {
-                { name = "object", type = { _tag = "Ast.TypeQualName" } },
-            } },
-            { _tag = "Ast.StatDecl", exps = {}, decls = {
-                { name = "fixed", type = { _tag = "Ast.TypeCArray" } },
-            } },
-            { _tag = "Ast.StatDecl", exps = {}, decls = {
-                { name = "borrowed", type = { _tag = "Ast.TypeCArray" } },
-            } },
-        })
-
-        for _, declaration in ipairs({
-            "local optional: ffi.Item[3]? = source",
-            "local nested: ffi.Item[3][4] = source",
-        }) do
-            assert_statements_syntax_error(declaration, "EndFunc")
-        end
+        for _,source in ipairs({
+            "function f(x: foreign Item[3]) end",
+            "function f(): foreign Item[3] end",
+            "foreign type Items = Item[3]",
+            "record R item: foreign Item[3] end",
+        }) do assert_program_syntax_error(source,"RBracketCArray") end
+        assert_type_ast("foreign Item[]",{_tag="Ast.TypeCArray",length=false,
+            base={_tag="Ast.TypeForeignName",name="Item"}})
     end)
 
     it("can parse toplevel function declarations", function()
@@ -762,7 +658,7 @@ end
         })
 
         assert_program_ast([[
-            local function fB(x:int): nil
+            local function fB(x:foreign int): nil
             end
         ]], {
             { _tag = "Ast.TopLevelFunc",
@@ -775,7 +671,7 @@ end
         })
 
         assert_program_ast([[
-            local function fC(x:int, y:int): nil
+            local function fC(x:foreign int, y:foreign int): nil
             end
         ]], {
             { _tag = "Ast.TopLevelFunc",
@@ -789,66 +685,23 @@ end
         })
     end)
 
-    it("parses foreign declarations and foreign function-pointer types",
-    function()
-        assert_program_ast([[
-            foreign function notify(): ()
-                return
-            end
+    it('parses foreign declarations and foreign function-pointer types', function()
 
-            foreign function apply(
-                item: *c.Item,
-                callback: foreign (c.int) -> c.int
-            ): c.int
+        local program = assert_parses_successfuly([[
+            foreign function notify() return end
+            foreign function apply(item: *Item, callback: function(int): int): int
                 return callback(0)
             end
-
-            local type Nested =
-                foreign (foreign (c.int) -> c.int) -> ()
-            local type RejectedShapes =
-                foreign (c.int, ...: c.int) -> (c.int, ...: c.int)
-        ]], {
-            { _tag = "Ast.TopLevelForeignFunc",
-                name = "notify",
-                params = {},
-                rettypes = {},
-                flexrettype = false,
-                block = { _tag = "Ast.StatBlock", stats = {
-                    { _tag = "Ast.StatReturn", exps = {} },
-                } } },
-            { _tag = "Ast.TopLevelForeignFunc",
-                name = "apply",
-                params = {
-                    { _tag = "Ast.Decl", name = "item", type = {
-                        _tag = "Ast.TypeCPointer",
-                        subtype = { _tag = "Ast.TypeQualName",
-                            module = "c", name = "Item" },
-                    } },
-                    { _tag = "Ast.Decl", name = "callback", type = {
-                        _tag = "Ast.TypeForeignFunction",
-                        argtypes = { { _tag = "Ast.TypeQualName",
-                            module = "c", name = "int" } },
-                        rettypes = { { _tag = "Ast.TypeQualName",
-                            module = "c", name = "int" } },
-                        varargtype = false,
-                        flexrettype = false,
-                    } },
-                },
-                rettypes = { { _tag = "Ast.TypeQualName",
-                    module = "c", name = "int" } } },
-            { _tag = "Ast.TopLevelTypeAlias", name = "Nested", type = {
-                _tag = "Ast.TypeForeignFunction",
-                argtypes = { { _tag = "Ast.TypeForeignFunction" } },
-                rettypes = {},
-            } },
-            { _tag = "Ast.TopLevelTypeAlias", name = "RejectedShapes",
-                type = {
-                    _tag = "Ast.TypeForeignFunction",
-                    varargtype = { _tag = "Ast.TypeQualName" },
-                    rettypes = { { _tag = "Ast.TypeQualName" } },
-                    flexrettype = { _tag = "Ast.TypeQualName" },
-                } },
-        })
+            foreign type Nested = function(function(int): int): void
+            foreign type Variadic = function(int, ...): int
+        ]])
+        assert.equal("void", program[1].rettypes[1].name)
+        assert.equal("Ast.TypeCPointer",program[2].params[1].type._tag)
+        assert.equal("Ast.TypeForeignFunction",program[2].params[2].type._tag)
+        assert.equal("Ast.TopLevelForeignTypeAlias",program[3]._tag)
+        assert.equal("Ast.TypeForeignFunction",program[3].type.argtypes[1]._tag)
+        assert.is_true(program[4].type.varargtype)
+        assert_program_syntax_error("local foreign type X = int","TopLevelDecl")
     end)
 
     it("can parse toplevel method declarations", function()
@@ -864,7 +717,7 @@ end
         })
 
         assert_program_ast([[
-            function Record:fB(x:int): nil
+            function Record:fB(x:foreign int): nil
             end
         ]], {
             { _tag = "Ast.TopLevelMethod",
@@ -877,7 +730,7 @@ end
         })
 
         assert_program_ast([[
-            function Record:fC(x:int, y:int): nil
+            function Record:fC(x:foreign int, y:foreign int): nil
             end
         ]], {
             { _tag = "Ast.TopLevelMethod",
@@ -916,7 +769,7 @@ end
         })
 
         assert_program_ast([[
-            function Record.fB(x:int): nil
+            function Record.fB(x:foreign int): nil
             end
         ]], {
             { _tag = "Ast.TopLevelStatic",
@@ -1121,113 +974,51 @@ end
         assert_type_ast("int", { _tag = "Ast.TypeName", name = "int" } )
     end)
 
-    it("parses the exact contextual C99 primitive surface", function()
-        for _, spelling in ipairs({
-            "void",
-            "bool",
-            "char",
-            "signed char",
-            "unsigned char",
-            "short",
-            "unsigned short",
-            "int",
-            "unsigned int",
-            "long",
-            "unsigned long",
-            "long long",
-            "unsigned long long",
-            "foreign float",
-            "double",
-            "long double",
-        }) do
-            assert_type_ast(spelling, {
-                _tag = "Ast.TypeName",
-                name = spelling,
-                typeargs = {},
-            })
-        end
+    it('parses the exact contextual C99 primitive surface', function()
 
-        for _, spelling in ipairs({
-            "signed short",
-            "signed int",
-            "signed long",
-            "signed long long",
-        }) do
-            assert_type_syntax_error(spelling, "AssignVar")
+        for _,name in ipairs({"void","bool","char","signed char","unsigned char",
+            "short","unsigned short","int","unsigned int","long","unsigned long",
+            "long long","unsigned long long","float","double","long double"}) do
+            assert_type_ast("foreign "..name,{_tag="Ast.TypeForeignName",name=name})
+        end
+        for _,name in ipairs({"signed short","signed int","signed long"}) do
+            assert.falsy(parser.parse("bad.titan","local x: foreign "..name.." = nil"))
         end
     end)
 
-    it("parses contextual primitive allocation and layout namespaces",
-    function()
-        assert_expression_ast("foreign float.new_array(2)", {
-            _tag = "Ast.ExpCall",
-            exp = {
-                _tag = "Ast.ExpVar",
-                var = {
-                    _tag = "Ast.VarDot",
-                    name = "new_array",
-                    exp = {
-                        _tag = "Ast.ExpVar",
-                        var = {
-                            _tag = "Ast.VarName",
-                            name = "foreign float",
-                            _surface_c_namespace = true,
-                        },
-                    },
-                },
-            },
-        })
-        assert_expression_ast("unsigned long.sizeof", {
-            _tag = "Ast.ExpVar",
-            var = {
-                _tag = "Ast.VarDot",
-                name = "sizeof",
-                exp = {
-                    _tag = "Ast.ExpVar",
-                    var = {
-                        _tag = "Ast.VarName",
-                        name = "unsigned long",
-                        _surface_c_namespace = true,
-                    },
-                },
-            },
-        })
+    it('parses contextual primitive allocation and layout namespaces', function()
 
-        -- A single contextual word is still an ordinary name node. Value
-        -- symbol precedence is decided later by the checker.
-        assert_expression_ast("char.new_array(2)", {
-            _tag = "Ast.ExpCall",
-            exp = {
-                _tag = "Ast.ExpVar",
-                var = {
-                    _tag = "Ast.VarDot",
-                    exp = {
-                        _tag = "Ast.ExpVar",
-                        var = { _tag = "Ast.VarName", name = "char" },
-                    },
-                },
-            },
-        })
+        for _,expression in ipairs({"foreign float.new_array(2)",
+            "foreign unsigned long.sizeof", "foreign (*int).alignof", "foreign Packet.new(3)"}) do
+            local exp = assert_expression_ast(expression,{})
+            local selected = exp._tag=="Ast.ExpCall" and exp.exp or exp
+            assert.equal("Ast.ExpForeignType", selected.var.exp._tag)
+        end
+        assert_expression_ast("char.new_array(2)",{_tag="Ast.ExpCall",
+            exp={var={exp={_tag="Ast.ExpVar",var={name="char"}}}}})
+        assert_expression_syntax_error("foreign int", "ForeignTypeMember")
     end)
 
     it("composes contextual primitives with pointers and owners", function()
-        assert_type_ast("const *unsigned long long", {
+        assert_type_ast("foreign const *unsigned long long", {
             _tag = "Ast.TypeCPointer",
             const = true,
             subtype = {
-                _tag = "Ast.TypeName",
+                _tag = "Ast.TypeForeignName",
                 name = "unsigned long long",
             },
         })
-        assert_type_ast("owned const *foreign float[]", {
-            _tag = "Ast.TypeCOwned",
-            count = true,
+        assert_type_ast("owned (const *float)[]", {
+            _tag = "Ast.TypeOwned",
             subtype = {
+                _tag = "Ast.TypeCArray",
+                base = {
                 _tag = "Ast.TypeCPointer",
                 const = true,
                 subtype = {
-                    _tag = "Ast.TypeName",
-                    name = "foreign float",
+                    _tag = "Ast.TypeForeignName",
+                    name = "float",
+                },
                 },
             },
         })
@@ -1237,168 +1028,83 @@ end
         assert_type_ast("foo.bar", { _tag = "Ast.TypeQualName", module = "foo", name = "bar" } )
     end)
 
-    it("marks Titan-keyword spellings only in contextual C name positions",
-    function()
-        assert_type_ast("c.type", {
-            _tag = "Ast.TypeQualName",
-            module = "c",
-            name = "type",
-            _contextual_c_name = true,
-        })
-        assert_type_ast("c.when", {
-            _tag = "Ast.TypeQualName",
-            module = "c",
-            name = "when",
-            _contextual_c_name = true,
-        })
-        assert_type_ast("c.interface", {
-            _tag = "Ast.TypeQualName",
-            module = "c",
-            name = "interface",
-            _contextual_c_name = true,
-        })
-        assert_expression_ast("c.when", {
-            _tag = "Ast.ExpVar",
-            var = {
-                _tag = "Ast.VarDot",
-                name = "when",
-                _contextual_c_name = true,
-            },
-        })
-        assert_expression_ast("c.repeat", {
-            _tag = "Ast.ExpVar",
-            var = {
-                _tag = "Ast.VarDot",
-                name = "repeat",
-                _contextual_c_name = true,
-            },
-        })
-        assert_expression_ast("c.interface", {
-            _tag = "Ast.ExpVar",
-            var = {
-                _tag = "Ast.VarDot",
-                name = "interface",
-                _contextual_c_name = true,
-            },
-        })
+    it('accepts AnyName only at the selected grammar boundaries', function()
 
-        local ast = assert_parses_successfuly("local x: c.member = c.member")
-        assert.is_nil(ast[1].decl.type._contextual_c_name)
-        assert.is_nil(ast[1].value.var._contextual_c_name)
-
-        for _, source in ipairs({
-            "local when = 1",
-            "function when(): nil end",
-            "function R:when(): nil end",
-            "function R.when(): nil end",
-            "record R when: integer end",
-            "union U when end",
-            "function interface(): nil end",
-            "record R interface: integer end",
-        }) do
-            local rejected = parser.parse("(parser_spec)", source)
-            assert.falsy(rejected)
+        for _,name in ipairs({"when","end","function","type","interface"}) do
+            assert_type_ast("module."..name,{_tag="Ast.TypeQualName",name=name})
+            assert_expression_ast("module."..name,{var={_tag="Ast.VarDot",name=name}})
         end
+        assert_parses_successfuly([[
+            function when() end
+            function R:when() end
+            function R.end() end
+            record R when: integer end
+            union U when() end
+            local: integer = 1
+            local local: integer = 2
+            local record: integer = 3
+        ]])
+        assert_program_syntax_error("function f(when: integer) end","RParPList")
     end)
 
-    it("can parse scalar and counted owned C types", function()
-        assert_type_ast("owned *ffi.Item", {
-            _tag = "Ast.TypeCOwned",
-            subtype = {
-                _tag = "Ast.TypeQualName",
-                module = "ffi",
-                name = "Item",
-            },
-            count = false,
-        })
-        assert_type_ast("owned ffi.Item[]", {
-            _tag = "Ast.TypeCOwned",
-            subtype = {
-                _tag = "Ast.TypeQualName",
-                module = "ffi",
-                name = "Item",
-            },
-            count = true,
-        })
-        assert_type_ast("owned **ffi.Item", {
-            _tag = "Ast.TypeCOwned",
-            subtype = {
-                _tag = "Ast.TypeCPointer",
-                subtype = {
-                    _tag = "Ast.TypeQualName",
-                    module = "ffi",
-                    name = "Item",
-                },
-                const = false,
-            },
-            count = false,
-        })
-        assert_type_ast("owned *ffi.Item[]", {
-            _tag = "Ast.TypeCOwned",
-            subtype = {
-                _tag = "Ast.TypeCPointer",
-                subtype = {
-                    _tag = "Ast.TypeQualName",
-                    module = "ffi",
-                    name = "Item",
-                },
-                const = false,
-            },
-            count = true,
-        })
+    it('can parse scalar and counted owned C types', function()
+
+        assert_type_ast("owned *Item",{_tag="Ast.TypeOwned",subtype={
+            _tag="Ast.TypeCPointer",subtype={_tag="Ast.TypeForeignName",name="Item"}}})
+        assert_type_ast("owned Item[]",{_tag="Ast.TypeOwned",subtype={
+            _tag="Ast.TypeCArray",base={_tag="Ast.TypeForeignName",name="Item"}}})
+        assert_type_ast("owned (*Item)[]",{_tag="Ast.TypeOwned",subtype={
+            _tag="Ast.TypeCArray",base={_tag="Ast.TypeCPointer"}}})
+        assert_type_ast("owned Handle",{_tag="Ast.TypeOwned",subtype={
+            _tag="Ast.TypeForeignName",name="Handle"}})
     end)
 
     it("applies the option suffix to the complete owned C type", function()
-        assert_type_ast("owned *ffi.Item?", {
+        assert_type_ast("(owned *Item)?", {
             _tag = "Ast.TypeOption",
             basetype = {
-                _tag = "Ast.TypeCOwned",
+                _tag = "Ast.TypeOwned",
                 subtype = {
-                    _tag = "Ast.TypeQualName",
-                    module = "ffi",
+                    _tag = "Ast.TypeCPointer",
+                    subtype = {
+                    _tag = "Ast.TypeForeignName",
                     name = "Item",
+                    },
                 },
-                count = false,
             },
         })
-        assert_type_ast("owned ffi.Item[]?", {
+        assert_type_ast("(owned Item[])?", {
             _tag = "Ast.TypeOption",
             basetype = {
-                _tag = "Ast.TypeCOwned",
+                _tag = "Ast.TypeOwned",
                 subtype = {
-                    _tag = "Ast.TypeQualName",
-                    module = "ffi",
+                    _tag = "Ast.TypeCArray",
+                    base = {
+                    _tag = "Ast.TypeForeignName",
                     name = "Item",
+                    },
                 },
-                count = true,
             },
         })
     end)
 
-    it("reports malformed owned C type shapes at the owned production",
-    function()
-        assert_type_syntax_error("owned ffi.Item", "COwnedShape")
-        assert_type_syntax_error("owned *", "OwnedPayload")
-        assert_type_syntax_error("owned ffi.Item[", "RBracketCOwned")
-        assert_type_syntax_error("owned ffi.Item[4]", "RBracketCOwned")
+    it('reports malformed owned C type shapes at the owned production', function()
+
+        -- Names are resolved before pointer/array eligibility is checked.
+        assert_type_ast("owned Item",{_tag="Ast.TypeOwned"})
+        assert_type_syntax_error("owned *", "TypeDecl")
+        assert_type_syntax_error("owned Item[", "RBracketCArray")
+        assert_type_syntax_error("owned Item[4]", "RBracketCArray")
+        assert_type_syntax_error("owned (*int", "RParenTypelist")
     end)
 
-    it("retains owned type source locations", function()
-        local source =
-            "local x: owned ffi.Item[]? = nil"
-        local program = assert(parser.parse("owners.titan", source))
-        local option = program[1].decl.type
-        local owner = option.basetype
-        assert.same({
-            filename = "owners.titan",
-            line = 1,
-            col = 10,
-        }, owner.loc)
-        assert.same({
-            filename = "owners.titan",
-            line = 1,
-            col = 16,
-        }, owner.subtype.loc)
+    it('retains owned type source locations', function()
+
+        local program=assert(parser.parse("owners.titan","local x: owned Item[]? = nil"))
+        local owner=program[1].decl.type.basetype
+        assert.same({filename="owners.titan",line=1,col=10},owner.loc)
+        assert.same({filename="owners.titan",line=1,col=16},owner.subtype.loc)
+        assert.same(owner.subtype.loc,owner.subtype.base._name_loc)
     end)
 
     it("can parse array types", function()
@@ -1445,59 +1151,15 @@ end
         })
     end)
 
-    it("keeps const Array, Option, and C pointer qualifiers independent",
-    function()
-        assert_type_ast("const {integer}?", {
-            _tag = "Ast.TypeOption",
-            basetype = {
-                _tag = "Ast.TypeArray",
-                isconst = true,
-                subtype = { _tag = "Ast.TypeInteger" },
-            },
-        })
-        assert_type_ast("const {integer?}", {
-            _tag = "Ast.TypeArray",
-            isconst = true,
-            subtype = {
-                _tag = "Ast.TypeOption",
-                basetype = { _tag = "Ast.TypeInteger" },
-            },
-        })
+    it('keeps const Array, Option, and C pointer qualifiers independent', function()
 
-        -- This is the pre-existing mutable Array of const C pointers.
-        assert_type_ast("{const *ffi.Item}", {
-            _tag = "Ast.TypeArray",
-            isconst = false,
-            subtype = {
-                _tag = "Ast.TypeCPointer",
-                const = true,
-                subtype = { _tag = "Ast.TypeQualName", name = "Item" },
-            },
-        })
-        assert_type_ast("const {*ffi.Item}", {
-            _tag = "Ast.TypeArray",
-            isconst = true,
-            subtype = {
-                _tag = "Ast.TypeCPointer",
-                const = false,
-                subtype = { _tag = "Ast.TypeQualName", name = "Item" },
-            },
-        })
-        assert_type_ast("const {const *ffi.Item}", {
-            _tag = "Ast.TypeArray",
-            isconst = true,
-            subtype = {
-                _tag = "Ast.TypeCPointer",
-                const = true,
-                subtype = { _tag = "Ast.TypeQualName", name = "Item" },
-            },
-        })
-
-        assert_type_ast("const {{integer: string}}", {
-            _tag = "Ast.TypeArray",
-            isconst = true,
-            subtype = { _tag = "Ast.TypeMap" },
-        })
+        assert_type_ast("const {integer}?", {_tag="Ast.TypeOption",basetype={
+            _tag="Ast.TypeArray",isconst=true,subtype={_tag="Ast.TypeInteger"}}})
+        assert_type_ast("const? {foreign const *int}",{_tag="Ast.TypeArray",isconst="maybe",
+            subtype={_tag="Ast.TypeCPointer",const=true}})
+        assert_type_ast("foreign const int[]",{_tag="Ast.TypeCArray",const=true})
+        assert_type_ast("(foreign const *int)?",{_tag="Ast.TypeOption",
+            basetype={_tag="Ast.TypeCPointer",const=true}})
     end)
 
     it("can parse const? (maybe-const) Array types", function()
@@ -1534,7 +1196,7 @@ end
     end)
 
     it("rejects the obsolete const Array placement and const Maps", function()
-        assert_type_syntax_error("{const integer}", "TypeType")
+        assert_type_syntax_error("{const integer}", "RCurlyType")
         assert_type_syntax_error("const {integer: string}", "ConstMap")
         assert_type_syntax_error("const? {integer: string}", "ConstMap")
         assert_type_syntax_error("const {}", "TypeConstArray")
@@ -1616,7 +1278,7 @@ end
                 })
             end
 
-            local source = "local type Wrapped = (((mod.Item)))"
+            local source = "local type Wrapped = mod.Item"
             local typ = assert(parser.parse("grouped.titan", source))[1].type
             assert.same({filename = "grouped.titan", line = 1,
                 col = source:find("mod", 1, true)}, typ.loc)
@@ -1638,13 +1300,13 @@ end
                 basetype = { _tag = "Ast.TypeArray", isconst = "maybe",
                     subtype = { _tag = "Ast.TypeName", name = "T" } },
             })
-            assert_type_ast("(mod.Box<({(T)})?>)", {
+            assert_type_ast("mod.Box<|{T}?|>", {
                 _tag = "Ast.TypeQualName", module = "mod", name = "Box",
                 typeargs = { { _tag = "Ast.TypeOption",
                     basetype = { _tag = "Ast.TypeArray",
                         subtype = { _tag = "Ast.TypeName", name = "T" } } } },
             })
-            assert_expression_ast("make<(T)?>()", {
+            assert_expression_ast("make<|T?|>()", {
                 _tag = "Ast.ExpCall", typeargs = { {
                     _tag = "Ast.TypeOption",
                     basetype = { _tag = "Ast.TypeName", name = "T" },
@@ -1659,7 +1321,7 @@ end
         end)
 
         it("distinguishes optional functions from optional parameters and results", function()
-            assert_type_ast("(T)? -> (U)?", {
+            assert_type_ast("function (T?): (U?)", {
                 _tag = "Ast.TypeFunction",
                 argtypes = { { _tag = "Ast.TypeOption",
                     basetype = { _tag = "Ast.TypeName", name = "T" } } },
@@ -1667,14 +1329,14 @@ end
                     basetype = { _tag = "Ast.TypeName", name = "U" } } },
                 varargtype = false, flexrettype = false,
             })
-            assert_type_ast("((T) -> (U))?", {
+            assert_type_ast("(function (T): (U))?", {
                 _tag = "Ast.TypeOption",
                 basetype = { _tag = "Ast.TypeFunction",
                     argtypes = { { _tag = "Ast.TypeName", name = "T" } },
                     rettypes = { { _tag = "Ast.TypeName", name = "U" } },
                     varargtype = false, flexrettype = false },
             })
-            assert_type_ast("((T -> U)) -> (V)?", {
+            assert_type_ast("function (function (T): (U)): (V?)", {
                 _tag = "Ast.TypeFunction",
                 argtypes = { { _tag = "Ast.TypeFunction",
                     argtypes = { { _tag = "Ast.TypeName", name = "T" } },
@@ -1685,7 +1347,7 @@ end
         end)
 
         it("keeps grouped type-argument and callable lists dense", function()
-            local call = assert_expression_ast("make<((T) -> (U)?), (V)?>()", {
+            local call = assert_expression_ast("make<|function (T): (U?), V?|>()", {
                 _tag = "Ast.ExpCall",
                 typeargs = { { _tag = "Ast.TypeFunction" },
                     { _tag = "Ast.TypeOption" } },
@@ -1701,9 +1363,9 @@ end
 
         it("groups individual return types without turning result lists into types", function()
             assert_program_ast([[
-                function one(): ((T))? end
-                function callback(): ((T) -> U)? end
-                function many(): ((T), (U)?, ...: ({V})) end
+                function one(): T? end
+                function callback(): (function (T): (U))? end
+                function many(): (T, U?, ...: ({V})) end
             ]], {
                 { _tag = "Ast.TopLevelFunc", name = "one",
                     rettypes = { { _tag = "Ast.TypeOption",
@@ -1724,51 +1386,38 @@ end
             })
         end)
 
-        it("groups foreign function types and pointer or owned payloads", function()
-            assert_type_ast("(foreign ((int)) -> (int))", {
-                _tag = "Ast.TypeForeignFunction",
-                argtypes = { { _tag = "Ast.TypeName", name = "int" } },
-                rettypes = { { _tag = "Ast.TypeName", name = "int" } },
-                varargtype = false, flexrettype = false,
-            })
-            assert_type_ast("const *((c.Item))", {
-                _tag = "Ast.TypeCPointer", const = true,
-                subtype = { _tag = "Ast.TypeQualName", module = "c", name = "Item" },
-            })
-            assert_type_ast("owned *((int))", {
-                _tag = "Ast.TypeCOwned", count = false,
-                subtype = { _tag = "Ast.TypeName", name = "int" },
-            })
-            assert_type_ast("owned ((int))[]", {
-                _tag = "Ast.TypeCOwned", count = true,
-                subtype = { _tag = "Ast.TypeName", name = "int" },
-            })
-            assert_type_ast("*(int) -> int", {
-                _tag = "Ast.TypeFunction",
-                argtypes = { { _tag = "Ast.TypeCPointer",
-                    subtype = { _tag = "Ast.TypeName", name = "int" } } },
-                rettypes = { { _tag = "Ast.TypeName", name = "int" } },
-            })
-        end)
+        it('groups foreign function types and pointer or owned payloads', function()
 
-        it("reports malformed groups and bare type lists as syntax errors", function()
-            for _, spelling in ipairs({"()", "(T, U)", "((T, U))", "(...: T)"}) do
-                assert_type_syntax_error(spelling, "TypeFunctionNoRet")
-            end
-            for _, spelling in ipairs({"T -> ()?", "T -> (T, U)?", "T -> (...: T)?"}) do
-                assert_type_syntax_error(spelling, "OptionTypeList")
-            end
-            assert_type_syntax_error("(T", "RParenTypelist")
-            assert_type_syntax_error("(T,)", "TypelistType")
-            assert_type_syntax_error("((T)) ->", "TypeReturnTypes")
-            assert_type_syntax_error("(T)??", "AssignVar")
-        end)
+        assert_type_ast("foreign function(int): int",{_tag="Ast.TypeForeignFunction",
+            argtypes={{_tag="Ast.TypeForeignName",name="int"}},
+            rettypes={{_tag="Ast.TypeForeignName",name="int"}}})
+        assert_type_ast("foreign const *(function(int): int)",{_tag="Ast.TypeCPointer",
+            const=true,subtype={_tag="Ast.TypeForeignFunction"}})
+        assert_type_ast("owned *(*Item)",{_tag="Ast.TypeOwned",subtype={
+            _tag="Ast.TypeCPointer",subtype={_tag="Ast.TypeCPointer"}}})
+        assert_type_ast("function(foreign *int): foreign int",{_tag="Ast.TypeFunction",
+            argtypes={{_tag="Ast.TypeCPointer"}},rettypes={{_tag="Ast.TypeForeignName"}}})
+    end)
+
+        it('reports malformed groups and bare type lists as syntax errors', function()
+
+        assert_type_syntax_error("()", "LParenType")
+        assert_type_syntax_error("(T,U)", "RParenTypelist")
+        assert_type_syntax_error("((T,U))", "RParenTypelist")
+        assert_type_syntax_error("(...:T)", "LParenType")
+        for _,spelling in ipairs({"function(): ()?", "function(): (T,U)?",
+            "function(): (...:T)?"}) do
+            assert_type_syntax_error(spelling,"OptionTypeList")
+        end
+        assert_type_syntax_error("(T", "RParenTypelist")
+        assert_type_syntax_error("(T)??", "fail")
+    end)
     end)
 
     describe("can parse generic type applications", function()
         it("retains direct and qualified applications with nested closers",
         function()
-            assert_type_ast("Pair<integer, string>", {
+            assert_type_ast("Pair<|integer, string|>", {
                 _tag = "Ast.TypeName",
                 name = "Pair",
                 typeargs = {
@@ -1776,7 +1425,7 @@ end
                     { _tag = "Ast.TypeString" },
                 },
             })
-            assert_type_ast("mod.Outer<mod.Inner<T>>", {
+            assert_type_ast("mod.Outer<|mod.Inner<|T|>|>", {
                 _tag = "Ast.TypeQualName",
                 module = "mod",
                 name = "Outer",
@@ -1794,7 +1443,7 @@ end
         end)
 
         it("binds applications more tightly than the option suffix", function()
-            assert_type_ast("Pair<T, {mod.Item}>?", {
+            assert_type_ast("Pair<|T, {mod.Item}|>?", {
                 _tag = "Ast.TypeOption",
                 basetype = {
                     _tag = "Ast.TypeName",
@@ -1827,21 +1476,21 @@ end
 
     describe("can parse function types", function()
         it("with parameter lists of length = 0", function()
-            assert_type_ast("() -> ()",
+            assert_type_ast("function (): ()",
                 { _tag = "Ast.TypeFunction",
                     argtypes = { },
                     rettypes = { } } )
         end)
 
         it("with parameter lists of length = 1", function()
-            assert_type_ast("(a) -> (b)",
+            assert_type_ast("function (a): (b)",
                 { _tag = "Ast.TypeFunction",
                     argtypes = { { _tag = "Ast.TypeName", name = "a" } },
                     rettypes = { { _tag = "Ast.TypeName", name = "b" } } } )
         end)
 
         it("with parameter lists of length >= 2 ", function()
-            assert_type_ast("(a,b) -> (c,d,e)",
+            assert_type_ast("function (a, b): (c, d, e)",
                 { _tag = "Ast.TypeFunction",
                     argtypes = {
                         { _tag = "Ast.TypeName", name = "a" },
@@ -1855,15 +1504,15 @@ end
                  })
         end)
 
-        it("without the optional parenthesis", function()
-            assert_type_ast("a -> b",
+        it("with an unparenthesized single return type", function()
+            assert_type_ast("function(a): b",
                 { _tag = "Ast.TypeFunction",
                     argtypes = { { _tag = "Ast.TypeName", name = "a" } },
                     rettypes = { { _tag = "Ast.TypeName", name = "b" } } } )
         end)
 
 
-        it("and -> is right associative", function()
+        it("nests function result types explicitly", function()
             local ast1 = {
                 _tag = "Ast.TypeFunction",
                 argtypes = {
@@ -1882,17 +1531,17 @@ end
                 rettypes = {
                     { _tag = "Ast.TypeName", name = "c" } } }
 
-            assert_type_ast("a -> b -> c",   ast1)
-            assert_type_ast("a -> (b -> c)", ast1)
-            assert_type_ast("(a -> b) -> c", ast2)
+            assert_type_ast("function(a): function(b): c",   ast1)
+            assert_type_ast("function(a): (function(b): c)", ast1)
+            assert_type_ast("function (function (a): (b)): (c)", ast2)
 
             local function_result = assert_parses_successfuly(
-                "local function f(): a -> b -> c end")
+                "local function f(): function (a): (function (b): (c)) end")
             assert_is_subset(ast1, function_result[1].rettypes[1])
         end)
 
         it("and '->' has higher precedence than ','", function()
-            assert_type_ast("(a, b -> c, d) -> e",
+            assert_type_ast("function (a, function (b): (c), d): (e)",
                 { _tag = "Ast.TypeFunction",
                     argtypes = {
                         { _tag = "Ast.TypeName", name = "a" },
@@ -2002,9 +1651,9 @@ end
         it("parses one or more when arms, bindings, and else", function()
             assert_statements_ast([[
                 case msg
-                when quit then
+                when quit() then
                     stop()
-                when move: delta then
+                when move(delta) then
                     apply(delta)
                 else
                     ignore()
@@ -2043,17 +1692,17 @@ end
         it("keeps each arm and else as an independent full block", function()
             assert_statements_ast([[
                 case msg
-                when first then
+                when first() then
                     defer cleanup_body()
                     body()
                 catch
                     defer cleanup_catch()
                     recover()
-                when second then
+                when second() then
                     if ready then
                         nested()
                     end
-                when third then
+                when third() then
                     later()
                 else
                     defer cleanup_else_body()
@@ -2143,9 +1792,9 @@ end
                     do
                         defer cleanup()
                         case outer
-                        when item then
+                        when item() then
                             case inner
-                            when done then
+                            when done() then
                                 break
                             end
                         end
@@ -2193,7 +1842,7 @@ end
             assert_statements_ast([[
                 defer do
                     case pending
-                    when item then
+                    when item() then
                         release()
                     end
                 end
@@ -2253,7 +1902,7 @@ end
         ]], "DeclLocal")
         assert_statements_syntax_error([[
             local x, = 10, 20
-        ]], "DeclLocal")
+        ]], "DeclParList")
         assert_statements_syntax_error([[
             local x =
         ]], "ExpLocal")
@@ -2528,29 +2177,12 @@ end
         })
     end)
 
-    it("allows Titan keywords only as named argument labels", function()
-        assert_expression_ast([[ f{ repeat = 1 } ]], {
-            _tag = "Ast.ExpCall",
-            args = { _tag = "Ast.ArgsNamedFunc", fields = {
-                { name = "repeat", exp = { value = 1 } },
-            } },
-        })
-        assert_expression_ast([[ f{ when = 2 } ]], {
-            _tag = "Ast.ExpCall",
-            args = { _tag = "Ast.ArgsNamedFunc", fields = {
-                { name = "when", exp = { value = 2 } },
-            } },
-        })
-        assert_expression_ast([[ f{ interface = 3 } ]], {
-            _tag = "Ast.ExpCall",
-            args = { _tag = "Ast.ArgsNamedFunc", fields = {
-                { name = "interface", exp = { value = 3 } },
-            } },
-        })
+    it('accepts reserved-word labels and declarations but keeps local Name binders', function()
 
-        assert_program_syntax_error([[
-            function repeat(): nil end
-        ]], "NameFunc")
+        assert_expression_ast("f{end=1, function=2}",{_tag="Ast.ExpCall",args={
+            _tag="Ast.ArgsNamedFunc",fields={{name="end"},{name="function"}}}})
+        assert_parses_successfuly("function end() end record R end: integer end")
+        assert_program_syntax_error("function f() local end = 1 end","DeclLocal")
     end)
 
     it("keeps parenthesized and bare-string method calls positional", function()
@@ -2590,7 +2222,7 @@ end
             })
             assert.are.same({}, inferred.typeargs)
 
-            assert_expression_ast("f < Outer<Inner<T>> > (x)", {
+            assert_expression_ast("f <| Outer<|Inner<|T|>|> |> (x)", {
                 _tag = "Ast.ExpCall",
                 exp = { var = { name = "f" } },
                 typeargs = {
@@ -2616,7 +2248,7 @@ end
         end)
 
         it("supports explicit named, method, and constructor calls", function()
-            assert_expression_ast("make<integer>{item = x}", {
+            assert_expression_ast("make<|integer|>{item = x}", {
                 _tag = "Ast.ExpCall",
                 typeargs = { { _tag = "Ast.TypeInteger" } },
                 args = {
@@ -2624,17 +2256,17 @@ end
                     fields = { { name = "item", exp = { var = { name = "x" } } } },
                 },
             })
-            assert_expression_ast("object:map<string>(x)", {
+            assert_expression_ast("object:map<|string|>(x)", {
                 _tag = "Ast.ExpCall",
                 typeargs = { { _tag = "Ast.TypeString" } },
                 args = { _tag = "Ast.ArgsMethod", method = "map" },
             })
-            assert_expression_ast("object:map<string>{item = x}", {
+            assert_expression_ast("object:map<|string|>{item = x}", {
                 _tag = "Ast.ExpCall",
                 typeargs = { { _tag = "Ast.TypeString" } },
                 args = { _tag = "Ast.ArgsNamedMethod", method = "map" },
             })
-            assert_expression_ast("Pair<integer, string>.new(1, 'one')", {
+            assert_expression_ast("Pair<|integer, string|>.new(1, 'one')", {
                 _tag = "Ast.ExpCall",
                 exp = { var = {
                     _tag = "Ast.VarDot",
@@ -2649,7 +2281,7 @@ end
                 typeargs = {},
                 args = { _tag = "Ast.ArgsFunc" },
             })
-            assert_expression_ast("library.Pair<T>.from<U>{item = x}", {
+            assert_expression_ast("library.Pair<|T|>.from<|U|>{item = x}", {
                 _tag = "Ast.ExpCall",
                 exp = { var = {
                     _tag = "Ast.VarDot",
@@ -2669,7 +2301,7 @@ end
 
         it("keeps bare strings positional after the factored generic prefix",
         function()
-            assert_expression_ast("make<string> 'item'", {
+            assert_expression_ast("make<|string|> 'item'", {
                 _tag = "Ast.ExpCall",
                 typeargs = { { _tag = "Ast.TypeString" } },
                 args = {
@@ -2677,7 +2309,7 @@ end
                     args = { { _tag = "Ast.ExpString", value = "item" } },
                 },
             })
-            assert_expression_ast("object:map<string> 'item'", {
+            assert_expression_ast("object:map<|string|> 'item'", {
                 _tag = "Ast.ExpCall",
                 typeargs = { { _tag = "Ast.TypeString" } },
                 args = {
@@ -2690,7 +2322,7 @@ end
 
         it("keeps adjacent generic closes on aggregate-owner selections",
         function()
-            assert_expression_ast("Box<Outer<Inner<T>>>.make()", {
+            assert_expression_ast("Box<|Outer<|Inner<|T|>|>|>.make()", {
                 _tag = "Ast.ExpCall",
                 exp = { var = {
                     _tag = "Ast.VarDot",
@@ -2723,11 +2355,11 @@ end
                 local long_padding = [=[$ANGLES]=]
 
                 local function probe()
-                    local call = f<(integer) -> Outer<Inner<T>>>(x)
-                    local member = Box<Outer<Inner<T>>>.make()
-                    local method = object:map<Outer<Inner<T>>>(x)
+                    local call = f<|function (integer): (Outer<|Inner<|T|>|>)|>(x)
+                    local member = Box<|Outer<|Inner<|T|>|>|>.make()
+                    local method = object:map<|Outer<|Inner<|T|>|>|>(x)
                     local comparison = a < b > c
-                    local commented_call = f<T> -- call after comment
+                    local commented_call = f<|T|> -- call after comment
                         (x)
                 end
             ]==], { ANGLES = angles })
@@ -2746,7 +2378,7 @@ end
             assert.are.equal("T", stats[5].exps[1].typeargs[1].name)
         end)
 
-        it("keeps unclosed long strings authoritative during the prescan",
+        it("preserves lexical failures at a committed expression start",
         function()
             local source = "local function probe()\n" ..
                 " local text = [=[" .. string.rep("<", 40) .. "\nend\n"
@@ -2774,7 +2406,7 @@ end
                 op = ">",
                 lhs = { _tag = "Ast.ExpBinop", op = "<" },
             })
-            assert_expression_ast("a < b > (c)", {
+            assert_expression_ast("a <| b |> (c)", {
                 _tag = "Ast.ExpCall",
                 exp = { var = { name = "a" } },
                 typeargs = { { _tag = "Ast.TypeName", name = "b" } },
@@ -2858,16 +2490,11 @@ end
               lhs = { _tag = "Ast.ExpMethodRef", name = "m" } })
     end)
 
-    it("only allows call expressions as statements", function()
-        -- Currently the error messages mention something else
+    it('preserves non-call prefix statements for semantic rejection', function()
 
-        assert_statements_syntax_error([[
-            (f)
-        ]], "ExpStat")
-
-        assert_statements_syntax_error([[
-            1 + 1
-        ]], "ExpStat")
+        local p=assert_parses_successfuly("function f() x; 1; (f()); x.m end")
+        for _,stat in ipairs(p[1].block.stats) do assert.equal("Ast.StatCall",stat._tag) end
+        assert.equal("Ast.ExpAdjust",p[1].block.stats[3].callexp._tag)
     end)
 
     it("can parse import", function ()
@@ -3017,8 +2644,8 @@ end
 
         assert_program_ast([[
             record Owners
-                handle?: owned *ffi.Handle
-                local bytes?: owned ffi.Byte[]
+                handle: (owned *Handle)?
+                local bytes: (owned Byte[])?
             end
         ]], {
             { _tag = "Ast.TopLevelRecord",
@@ -3027,15 +2654,15 @@ end
                 { name = "handle", type = {
                     _tag = "Ast.TypeOption",
                     basetype = {
-                        _tag = "Ast.TypeCOwned",
-                        count = false,
+                        _tag = "Ast.TypeOwned",
+                        subtype = { _tag = "Ast.TypeCPointer" },
                     },
                 } },
                 { name = "bytes", islocal = true, type = {
                     _tag = "Ast.TypeOption",
                     basetype = {
-                        _tag = "Ast.TypeCOwned",
-                        count = true,
+                        _tag = "Ast.TypeOwned",
+                        subtype = { _tag = "Ast.TypeCArray" },
                     },
                 } } } },
         })
@@ -3044,8 +2671,8 @@ end
             record Snapshot
                 const id: integer
                 local const hidden: string
-                const next?: Snapshot
-                local const payload?: value
+                const next: Snapshot?
+                local const payload: value?
             end
         ]], {
             { _tag = "Ast.TopLevelRecord",
@@ -3067,9 +2694,9 @@ end
     function()
         local source = [[
             union Message
-                quit;
-                move: Message
-                local nil_payload: nil;
+                quit();
+                move(Message)
+                local nil_payload(nil);
             end
         ]]
         assert_program_ast(source, {
@@ -3184,8 +2811,8 @@ end
     it("makes every constructor of a local union local", function()
         local ast = assert_parses_successfuly([[
             local union Hidden
-                empty
-                payload: integer
+                empty()
+                payload(integer)
             end
         ]])
         assert.are.equal(3, #ast)
@@ -3207,7 +2834,7 @@ end
 
         local top_case = parser.parse("(parser_spec)", [[
             case item_value
-            when item then
+            when item() then
             end
         ]])
         assert.falsy(top_case)
@@ -3417,153 +3044,38 @@ end
             parsed[1].methods[method_count].name)
     end)
 
-    it("rejects invalid interface declaration and member forms", function()
-        local cases = {
-            {
-                [[interface Empty
-end]],
-                "InterfaceMember",
-            },
-            {
-                [[local interface Local
-function f()
-end]],
-                "LocalInterface",
-            },
-            {
-                [[interface I
-local function f()
-end]],
-                "LocalInterfaceMethod",
-            },
-            {
-                [[interface I
-function I:f()
-end]],
-                "LParInterfaceMethod",
-            },
-            {
-                [[interface I
-function f(): integer
-return 1
-end
-end]],
-                "MemberInterface",
-            },
-            {
-                [[interface I
-local value: integer
-end]],
-                "LocalInterfaceField",
-            },
-            {
-                [[interface I
-item integer
-end]],
-                "ColonInterfaceField",
-            },
-            {
-                [[interface I
-item:
-end]],
-                "TypeInterfaceField",
-            },
-            {
-                [[interface I
-function I.make()
-end]],
-                "LParInterfaceMethod",
-            },
-            {
-                [[interface I
-function I.new()
-end]],
-                "LParInterfaceMethod",
-            },
-            {
-                [[function outer(): nil
-interface Nested
-function f()
-end
-end]],
-                "NestedInterface",
-            },
-            {
-                [[interface
-function f()
-end]],
-                "NameInterface",
-            },
-            {
-                [[interface I
-function ()
-end]],
-                "NameInterfaceMethod",
-            },
-            {
-                [[interface I
-function f: nil
-end]],
-                "LParInterfaceMethod",
-            },
-            {
-                [[interface I
-function f(value: integer: nil
-end]],
-                "RParInterfaceMethod",
-            },
-            {
-                [[interface I
-function f():
-end]],
-                "TypeInterfaceMethod",
-            },
-            {
-                [[interface I
-function f()]],
-                "EndInterface",
-            },
-        }
+    it('rejects invalid interface declaration and member forms', function()
 
-        for _, case in ipairs(cases) do
-            assert_program_syntax_error(case[1], case[2])
-        end
-
-        -- With no body, the first `end` necessarily closes the interface.
-        -- A second one therefore proves that a per-method `end` is not
-        -- silently accepted as part of the interface declaration.
-        local parsed = parser.parse("(parser_spec)", [[
-            interface I
-                function f()
-                end
-            end
-        ]])
-        assert.falsy(parsed)
+        assert_program_syntax_error("local interface I end","LocalInterface")
+        assert_program_syntax_error("interface I function f() end end","fail")
+        assert_program_syntax_error("interface I local x: integer end","EndInterface")
+        assert_parses_successfuly("interface Empty end")
+        assert_parses_successfuly("interface I function: integer end: string end")
     end)
 
     describe("can parse generic declarations", function()
         it("retains owner and callable binders in their source scopes",
         function()
             local program = assert_parses_successfuly([[
-                record Pair<T, U: api.Show<T>>
+                record Pair<|T, U: api.Show<|T|>|>
                     first: T
                     second: U
                 end
 
-                union Result<T, E>
-                    ok: T
-                    error: E
+                union Result<|T, E|>
+                    ok(T)
+                    error(E)
                 end
 
-                interface Stack<E>
-                    function push<R: Stack<E>>(item: E): R
+                interface Stack<|E|>
+                    function push<|R: Stack<|E|>|>(item: E): R
                 end
 
-                function id<T>(x: T): T return x end
-                function Pair:map<V>(f: (T) -> V): Pair<V, U>
+                function id<|T|>(x: T): T return x end
+                function Pair:map<|V|>(f: function (T): (V)): Pair<|V, U|>
                     return nil
                 end
-                function Pair.make<V>(item: V): Pair<V, V>
+                function Pair.make<|V|>(item: V): Pair<|V, V|>
                     return nil
                 end
             ]])
@@ -3679,7 +3191,7 @@ function f()]],
         it("records empty binder lists on existing declarations", function()
             local program = assert_parses_successfuly([[
                 record Plain item: integer end
-                union Maybe none end
+                union Maybe none() end
                 interface Ping function ping() end
                 function plain(): nil end
                 function Plain:method(): nil end
@@ -3799,175 +3311,95 @@ function f()]],
                             name = "a" } } } } } } } })
     end)
 
-    it("can parse cast and type-test expressions", function()
-        assert_expression_ast([[ foo as integer ]],
-            { _tag = "Ast.ExpCast", exp = { _tag = "Ast.ExpVar" }, target = { _tag = "Ast.TypeInteger" } })
-        assert_expression_ast([[ a.b[1].c as integer ]],
-            { _tag = "Ast.ExpCast", exp = { _tag = "Ast.ExpVar" }, target = { _tag = "Ast.TypeInteger" } })
-        assert_expression_ast([[ foo as { integer } ]],
-            { _tag = "Ast.ExpCast", exp = { _tag = "Ast.ExpVar" }, target = { _tag = "Ast.TypeArray" } })
-        assert_expression_ast([[ 2 + foo as integer ]],
-            { rhs = { _tag = "Ast.ExpCast", exp = { _tag = "Ast.ExpVar" }, target = { _tag = "Ast.TypeInteger" } }})
-        assert_expression_ast([[ #... as value ]],
-            { _tag = "Ast.ExpCast",
-                exp = { _tag = "Ast.ExpDotsLen" },
-                target = { _tag = "Ast.TypeValue" } })
+    it('can parse cast and type-test expressions', function()
 
-        -- A local two-component variant-looking target remains syntactically a
-        -- qualified type so the checker can issue the semantic diagnostic.
-        assert_expression_ast([[ x as Message.move ]], {
-            _tag = "Ast.ExpCast",
-            target = {
-                _tag = "Ast.TypeQualName",
-                module = "Message",
-                name = "move",
-            },
-        })
-        assert_expression_ast([[ x is Message.move ]], {
-            _tag = "Ast.ExpIs",
-            target = {
-                _tag = "Ast.TypeQualName",
-                module = "Message",
-                name = "move",
-            },
-        })
-
-        -- Type syntax has only one qualifier. Imported variants require three
-        -- components and therefore never become a type target.
-        for _, op in ipairs({ "as", "is" }) do
-            local program = expression_test_program(
-                "x " .. op .. " m.Message.move")
-            local ast = parser.parse("(parser_spec)", program)
-            assert.falsy(ast)
+        assert_expression_ast("2 + foo as integer",{op="+",rhs={_tag="Ast.ExpCast"}})
+        assert_expression_ast("-foo is integer",{_tag="Ast.ExpIs",exp={op="-"}})
+        assert_expression_ast("foo ^ 2 is integer",{_tag="Ast.ExpIs",exp={op="^"}})
+        assert_expression_ast("foo ^ 2 as integer",{_tag="Ast.ExpCast",exp={op="^"}})
+        assert_expression_ast("(foo as value) is integer",{_tag="Ast.ExpIs",
+            exp={_tag="Ast.ExpCast"}})
+        assert_expression_ast("foo is function(integer): integer",{_tag="Ast.ExpIs",
+            target={_tag="Ast.TypeFunction"}})
+        assert_expression_ast("#... as value",{_tag="Ast.ExpCast",
+            exp={_tag="Ast.ExpDotsLen"}})
+        for _,exp in ipairs({"x as T as U","x is T is U","x as T is U"}) do
+            assert_expression_syntax_error(exp,"EndFunc")
         end
-
-        assert_expression_ast([[ foo is integer ]],
-            { _tag = "Ast.ExpIs", exp = { _tag = "Ast.ExpVar" },
-                target = { _tag = "Ast.TypeInteger" } })
-        assert_expression_ast([[ foo is (integer) -> integer ]],
-            { _tag = "Ast.ExpIs", target = {
-                _tag = "Ast.TypeFunction",
-                argtypes = { { _tag = "Ast.TypeInteger" } },
-                rettypes = { { _tag = "Ast.TypeInteger" } } } })
-        assert_expression_ast([[ 2 + foo is integer ]],
-            { _tag = "Ast.ExpBinop",
-                rhs = { _tag = "Ast.ExpIs",
-                    exp = { _tag = "Ast.ExpVar" },
-                    target = { _tag = "Ast.TypeInteger" } } })
-        assert_expression_ast([[ -foo is integer ]],
-            { _tag = "Ast.ExpIs",
-                exp = { _tag = "Ast.ExpUnop", op = "-",
-                    exp = { _tag = "Ast.ExpVar" } },
-                target = { _tag = "Ast.TypeInteger" } })
-        assert_expression_ast([[ foo ^ 2 is integer ]],
-            { _tag = "Ast.ExpBinop", op = "^",
-                rhs = { _tag = "Ast.ExpIs",
-                    exp = { _tag = "Ast.ExpInteger", value = 2 },
-                    target = { _tag = "Ast.TypeInteger" } } })
-        assert_expression_ast([[ (foo ^ 2) is integer ]],
-            { _tag = "Ast.ExpIs",
-                exp = { _tag = "Ast.ExpBinop", op = "^" },
-                target = { _tag = "Ast.TypeInteger" } })
-        assert_expression_ast([[ foo ^ 2 as integer ]],
-            { _tag = "Ast.ExpBinop", op = "^",
-                rhs = { _tag = "Ast.ExpCast",
-                    exp = { _tag = "Ast.ExpInteger", value = 2 },
-                    target = { _tag = "Ast.TypeInteger" } } })
-        assert_expression_ast([[ (foo as value) is integer ]],
-            { _tag = "Ast.ExpIs",
-                exp = { _tag = "Ast.ExpCast",
-                    target = { _tag = "Ast.TypeValue" } },
-                target = { _tag = "Ast.TypeInteger" } })
-        assert_expression_syntax_error([[ foo is ]], "IsMissingType")
-        assert_expression_syntax_error(
-            [[ foo is integer ^ 2 ]], "EndFunc")
     end)
 
-    it("does not allow parentheses in the LHS of an assignment", function()
-        assert_statements_syntax_error([[ local (x) = 42 ]], "DeclLocal")
-        assert_statements_syntax_error([[ (x) = 42 ]], "AssignNotLValue")
+    it('retains every assignment candidate and parenthesis boundary for the checker', function()
+
+        local p=assert_parses_successfuly("function f() (x), f(), 1 = a,b,c end")
+        local stat=p[1].block.stats[1]
+        assert.is_true(stat._parsed_candidates)
+        assert.is_true(stat.vars[1]._parenthesized)
+        assert.equal("Ast.ExpCall",stat.vars[2]._tag)
+        assert.equal("Ast.ExpInteger",stat.vars[3]._tag)
     end)
 
-    it("does not allow identifiers that are type names", function()
-        assert_program_syntax_error([[
-            function integer()
-            end
-        ]], "NameFunc")
+    it('accepts primitive type words as ordinary names', function()
 
-        assert_program_syntax_error([[
-            function f()
-                local integer: integer = 10
-            end
-        ]], "DeclLocal")
-
-        assert_program_syntax_error([[
-            function type()
-            end
-        ]], "NameFunc")
+        assert_parses_successfuly([[
+            function integer(boolean: integer): integer return boolean end
+            local float = 1
+            record value string: string end
+            function f() local boolean = true end
+        ]])
     end)
 
-    it("doesn't allow using a primitive type as a record", function()
-        assert_expression_syntax_error("integer.new(10)", "ExpAssign")
+    it('leaves contextual primitive term-name resolution to the checker', function()
+
+        assert_expression_ast("integer.new(1)",{_tag="Ast.ExpCall",
+            exp={var={_tag="Ast.VarDot",exp={var={name="integer"}}}}})
     end)
 
-    it("reports source locations for union and case labels", function()
-        local _, union_err = parser.parse("new-errors.titan", [[
-union U
-end]])
-        assert.are.equal("VariantUnion", union_err.label)
-        assert.are.same({
-            filename = "new-errors.titan",
-            line = 2,
-            col = 1,
-        }, union_err.loc)
+    it('reports source locations for union and case labels', function()
 
-        local _, case_err = parser.parse("new-errors.titan", [[
-function f(): nil
-case msg
-when item: then
-end
-end]])
-        assert.are.equal("NameCaseBinding", case_err.label)
-        assert.are.same({
-            filename = "new-errors.titan",
-            line = 3,
-            col = 12,
-        }, case_err.loc)
+        local p=assert(parser.parse("labels.titan",[[union Choice some(integer) end
+function f(x: Choice) case x when some(v) then return end end]]))
+        assert.same({filename="labels.titan",line=1,col=14},p[1].variants[1]._name_loc)
+        local arm=p[3].block.stats[1].arms[1]
+        assert.same({filename="labels.titan",line=2,col=35},arm._name_loc)
+        assert.same({filename="labels.titan",line=2,col=40},arm.binding._name_loc)
     end)
 
     describe("reports focused generic syntax errors", function()
         it("labels malformed declaration binders and type applications",
         function()
-            assert_program_syntax_error("record Empty<> end", "NameTypeParam")
+            assert_program_syntax_error("record Empty<|> end", "NameTypeParam")
             assert_program_syntax_error(
-                "record Trailing<T,> item: T end", "NameTypeParam")
+                "record Trailing<|T,|> item: T end", "NameTypeParam")
             assert_program_syntax_error(
-                "record Missing<T:> item: T end", "TypeParamConstraint")
+                "record Missing<|T:|> item: T end", "TypeParamConstraint")
             assert_program_syntax_error(
-                "record Unclosed<T item: T end", "RAngleTypeParams")
+                "record Unclosed<|T item: T end", "RAngleTypeParams")
 
-            assert_type_syntax_error("Pair<>", "TypeArgument")
-            assert_type_syntax_error("Pair<T,>", "TypeArgument")
-            assert_type_syntax_error("Pair<T", "RAngleTypeArgs")
+            assert_type_syntax_error("Pair<|>", "TypeArgument")
+            assert_type_syntax_error("Pair<|T,|>", "TypeArgument")
+            assert_type_syntax_error("Pair<|T", "RAngleTypeArgs")
         end)
 
         it("rejects binders on foreign functions, lambdas, and aliases",
         function()
             assert_program_syntax_error([[
-                foreign function callback<T>(item: T): T return item end
+                foreign function callback<|T|>(item: T): T return item end
             ]], "GenericForeignFunc")
             assert_program_syntax_error([[
                 function outer(): nil
-                    local callback = function<T>(item: T): T return item end
+                    local callback = function<|T|>(item: T): T return item end
                 end
             ]], "GenericLambda")
             assert_program_syntax_error(
-                "type Identity<T> = T", "GenericTypeAlias")
+                "type Identity<|T|> = T", "GenericTypeAlias")
         end)
 
-        it("does not commit an incomplete ambiguous call suffix", function()
-            assert_expression_syntax_error("f<T,>(x)", "ExpExpList")
-        end)
+        it('commits an explicit generic suffix without probing comparisons', function()
+
+        assert_expression_syntax_error("f<|T,|>(x)","TypeArgument")
+        assert_expression_syntax_error("f<|T(x)","RAngleTypeArgs")
+        assert_expression_ast("a < b > c",{op=">",lhs={op="<"}})
+    end)
 
         it("registers every lexer and parser failure label", function()
             local labels = {}
@@ -3997,365 +3429,32 @@ end]])
         end)
     end)
 
-    it("uses specific error labels for some errors", function()
-
-        assert_program_syntax_error([[
-            function () : int
-            end
-        ]], "NameFunc")
-
-        assert_program_syntax_error([[
-            function Record:() : int
-            end
-        ]], "NameMethod")
-
-        assert_program_syntax_error([[
-            function foo : int
-            end
-        ]], "LParPList")
-
-        assert_program_syntax_error([[
-            function foo ( : int
-            end
-        ]], "RParPList")
-
-        assert_program_syntax_error([[
-            function foo () :
-                local x = 3
-            end
-        ]], "TypeFunc")
-
-        assert_program_syntax_error([[
-            function foo () : int
-              local x = 3
-              return x
-        ]], "EndFunc")
-
-        assert_program_syntax_error([[
-            function foo(x, y) : int
-            end
-        ]], "ParamSemicolon")
-
-        assert_program_syntax_error([[
-            x 3
-        ]], "AssignVar")
-
-        assert_program_syntax_error([[
-            x =
-        ]], "ExpVarDec")
-
-        assert_program_syntax_error([[
-            type = integer
-        ]], "NameTypeAlias")
-
-        assert_program_syntax_error([[
-            type Count integer
-        ]], "AssignTypeAlias")
-
-        assert_program_syntax_error([[
-            type Count =
-        ]], "TypeTypeAlias")
-
-        assert_program_syntax_error([[
-            record
-        ]], "NameRecord")
-
-        assert_program_syntax_error([[
-            record A
-                x : int
-        ]], "EndRecord")
-
-        assert_program_syntax_error([[
-            union
-        ]], "NameUnion")
-
-        assert_program_syntax_error([[
-            union Empty
-            end
-        ]], "VariantUnion")
-
-        assert_program_syntax_error([[
-            union U
-                local : integer
-            end
-        ]], "NameUnionVariant")
-
-        assert_program_syntax_error([[
-            union U
-                payload:
-            end
-        ]], "TypeUnionVariant")
-
-        assert_program_syntax_error([[
-            union U
-                item
-        ]], "EndUnion")
-
-        assert_program_syntax_error([[
-            local = import "bola"
-        ]], "NameImport")
-
-        assert_program_syntax_error([[
-            local bola = import ()
-        ]], "StringLParImport")
-
-        assert_program_syntax_error([[
-            local bola = import ('bola'
-        ]], "RParImport")
-
-        assert_program_syntax_error([[
-            local bola = import
-        ]], "StringImport")
-
-        assert_program_syntax_error([[
-            function foo (a:int, ) : int
-            end
-        ]], "DeclParList")
-
-        assert_program_syntax_error([[
-            function foo (a: ) : int
-            end
-        ]], "TypeDecl")
-
-
-        assert_type_syntax_error([[ {} ]], "TypeType")
-
-        assert_type_syntax_error([[ {int ]], "RCurlyType")
-
-        assert_type_syntax_error([[ (a,,,) -> b ]], "TypelistType")
-
-        assert_type_syntax_error([[ (a, b -> b  ]], "RParenTypelist")
-
-        assert_type_syntax_error([[ (a, b) -> = nil ]], "TypeReturnTypes")
-
-        assert_type_syntax_error([[ foo. ]], "QualName")
-
-        assert_program_syntax_error([[
-            record A
-                x  int
-            end
-        ]], "ColonRecordField")
-
-        assert_program_syntax_error([[
-            record A
-                x : function
-            end
-        ]], "TypeRecordField")
-
-        assert_program_syntax_error([[
-            function f ( x : int) : string
-                do
-                return "42"
-        ]], "EndBlock")
-
-        assert_statements_syntax_error([[
-            while do
-                x = x - 1
-            end
-        ]], "ExpWhile")
-
-        assert_statements_syntax_error([[
-            case
-        ]], "ExpCase")
-
-        assert_statements_syntax_error([[
-            case msg
-            end
-        ]], "WhenCase")
-
-        assert_statements_syntax_error([[
-            case msg
-            when then
-            end
-        ]], "NameCaseVariant")
-
-        assert_statements_syntax_error([[
-            case msg
-            when payload:
-            then
-            end
-        ]], "NameCaseBinding")
-
-        assert_statements_syntax_error([[
-            case msg
-            when payload
-            end
-        ]], "ThenCase")
-
-        assert_program_syntax_error([[
-            function f(): nil
-                case msg
-                when payload then
-        ]], "EndCase")
-
-        assert_statements_syntax_error([[
-            while x > 3
-                x = x - 1
-            end
-        ]], "DoWhile")
-
-        assert_statements_syntax_error([[
-            while x > 3 do
-                x = x - 1
-                return 42
-            return 41
-        ]], "EndWhile")
-
-        assert_statements_syntax_error([[
-            repeat
-                x = x - 1
-            end
-        ]], "UntilRepeat")
-
-        assert_statements_syntax_error([[
-            repeat
-                x = x - 1
-            until
-        ]], "ExpRepeat")
-
-        assert_statements_syntax_error([[
-            if then
-                x = x - 1
-            end
-        ]], "ExpIf")
-
-        assert_statements_syntax_error([[
-            if x > 10
-                x = x - 1
-            end
-        ]], "ThenIf")
-
-        assert_statements_syntax_error([[
-            if x > 10 then
-                x = x - 1
-                return 42
-            return 41
-        ]], "EndIf")
-
-        assert_statements_syntax_error([[
-            for = 1, 10 do
-            end
-        ]], "DeclFor")
-
-        assert_statements_syntax_error([[
-            for x  1, 10 do
-            end
-        ]], "AssignFor")
-
-        assert_statements_syntax_error([[
-            for x = , 10 do
-            end
-        ]], "Exp1For")
-
-        assert_statements_syntax_error([[
-            for x = 1 10 do
-            end
-        ]], "CommaFor")
-
-        assert_statements_syntax_error([[
-            for x = 1, do
-            end
-        ]], "Exp2For")
-
-        assert_statements_syntax_error([[
-            for x = 1, 10, do
-            end
-        ]], "Exp3For")
-
-        assert_statements_syntax_error([[
-            for x = 1, 10, 1
-            end
-        ]], "DoFor")
-
-        assert_statements_syntax_error([[
-            for x = 1, 10, 1 do
-                return 42
-            return 41
-        ]], "EndFor")
-
-        assert_statements_syntax_error([[
-            for x, y = 1, 2 do
-            end
-        ]], "InFor")
-
-        assert_statements_syntax_error([[
-            for x in do
-            end
-        ]], "ExpForIn")
-
-        assert_statements_syntax_error([[
-            for x, in iter do
-            end
-        ]], "DeclParList")
-
-        assert_statements_syntax_error([[
-            for x in iter
-            end
-        ]], "DoForIn")
-
-        assert_statements_syntax_error([[
-            for x in iter do
-                return 42
-            return 41
-        ]], "EndForIn")
-
-        assert_statements_syntax_error([[
-            local = 3
-        ]], "DeclLocal")
-
-        assert_statements_syntax_error([[
-            local x  3
-        ]], "ExpStat")
-
-        assert_statements_syntax_error([[
-            local x =
-        ]], "ExpLocal")
-
-        assert_statements_syntax_error([[
-            x
-        ]], "AssignAssign")
-
-        assert_statements_syntax_error([[
-            x =
-        ]], "ExpAssign")
-
-        assert_statements_syntax_error([[
-            if x > 1 then
-                x = x - 1
-            elseif then
-            end
-        ]], "ExpElseIf")
-
-        assert_statements_syntax_error([[
-            if x > 1 then
-                x = x - 1
-            elseif x > 0
-            end
-        ]], "ThenElseIf")
-
-        assert_expression_syntax_error([[ 1 + ]], "OpExp")
-
-        assert_expression_syntax_error([[ obj:() ]], "NameColonExpSuf")
-
-        assert_expression_syntax_error([[ y[] ]], "ExpExpSuf")
-
-        assert_expression_syntax_error([[ y[1 ]], "RBracketExpSuf")
-
-        assert_expression_syntax_error([[ y.() ]], "NameDotExpSuf")
-
-        assert_expression_syntax_error([[ () ]], "ExpSimpleExp")
-
-        assert_expression_syntax_error([[ (42 ]], "RParSimpleExp")
-
-        assert_expression_syntax_error([[ f(42 ]], "RParFuncArgs")
-
-        assert_expression_syntax_error([[ f(42,) ]], "ExpExpList")
-
-        assert_expression_syntax_error([[ y({42) ]], "RCurlyInitList")
-
-        assert_expression_syntax_error([[ y({42,,}) ]], "ExpFieldList")
-
-        assert_expression_syntax_error([[ foo as ]], "CastMissingType")
+    it('uses specific error labels for some errors', function()
+
+        local cases={
+            {"function () end","NameFunc"},
+            {"function R:() end","NameMethod"},
+            {"function f(x) end","ParamSemicolon"},
+            {"function f(: integer) end","RParPList"},
+            {"function f(): , end","TypeFunc"},
+            {"function f() return 1","EndFunc"},
+            {"x =","ExpVarDec"},
+            {"type Alias integer","AssignTypeAlias"},
+            {"type Alias =","TypeTypeAlias"},
+            {"record","NameRecord"},
+            {"record R x: integer","EndRecord"},
+            {"union U A(integer","RParenVariant"},
+            {"foreign function f(x) end","ParamSemicolon"},
+            {"foreign type Callback = function(int) int","ForeignReturnColon"},
+            {"local x: {integer","RCurlyType"},
+            {"local x: {integer:}","TypeType"},
+            {"function f() local = 1 end","DeclLocal"},
+            {"function f() f(1, ) end","ExpExpList"},
+            {"function f() if true return end end","ThenIf"},
+            {"function f() while true return end end","DoWhile"},
+            {"function f() for x=1 do end end","CommaFor"},
+        }
+        for _,case in ipairs(cases) do assert_program_syntax_error(case[1],case[2]) end
     end)
 
     describe("can parse variadic parameters", function()
@@ -4576,7 +3675,7 @@ end]])
         it("rejects an untyped vararg in a function-type annotation", function()
             -- A function-TYPE annotation still requires `...: type` (no inference).
             assert_program_syntax_error([[
-                function f(g: (...) -> integer): nil
+                function f(g: function(...): integer): nil
                 end
             ]], "VarargColon")
         end)
@@ -4584,7 +3683,7 @@ end]])
         -- Function-type vararg elements can be bare or explicitly grouped.
         it("parses a bare function-type vararg element `...: () -> integer`", function()
             assert_program_ast([[
-                function foo(...: () -> integer): nil
+                function foo(...: function (): (integer)): nil
                 end
             ]], {
                 { _tag = "Ast.TopLevelFunc",
@@ -4600,7 +3699,7 @@ end]])
 
         it("parses a parenthesized function-type vararg element", function()
             assert_program_ast([[
-                function foo(...: (() -> integer)): nil
+                function foo(...: function (): (integer)): nil
                 end
             ]], {
                 { _tag = "Ast.TopLevelFunc", name = "foo",
@@ -4615,7 +3714,7 @@ end]])
 
     describe("can parse variadic function-type annotations", function()
         it("with a fixed prefix and a vararg element type", function()
-            assert_type_ast("(integer, ...: string) -> integer",
+            assert_type_ast("function (integer, ...: string): (integer)",
                 { _tag = "Ast.TypeFunction",
                     argtypes = { { _tag = "Ast.TypeInteger" } },
                     rettypes = { { _tag = "Ast.TypeInteger" } },
@@ -4623,7 +3722,7 @@ end]])
         end)
 
         it("with a sole vararg element type", function()
-            assert_type_ast("(...: integer) -> integer",
+            assert_type_ast("function (...: integer): (integer)",
                 { _tag = "Ast.TypeFunction",
                     argtypes = { },
                     rettypes = { { _tag = "Ast.TypeInteger" } },
@@ -4631,7 +3730,7 @@ end]])
         end)
 
         it("a non-variadic function type carries varargtype = false", function()
-            assert_type_ast("(integer, string) -> integer",
+            assert_type_ast("function (integer, string): (integer)",
                 { _tag = "Ast.TypeFunction",
                     argtypes = {
                         { _tag = "Ast.TypeInteger" },
@@ -4692,17 +3791,17 @@ end]])
 
         it("on function types, including simultaneous input and output tails", function()
             assert_type_ast(
-                "(integer, ...: string) -> (boolean, ...: value)",
+                "function (integer, ...: string): (boolean, ...: value)",
                 { _tag = "Ast.TypeFunction",
                     argtypes = { { _tag = "Ast.TypeInteger" } },
                     varargtype = { _tag = "Ast.TypeString" },
                     rettypes = { { _tag = "Ast.TypeBoolean" } },
                     flexrettype = { _tag = "Ast.TypeValue" } })
-            assert_type_ast("() -> (...: integer)",
+            assert_type_ast("function (): (...: integer)",
                 { _tag = "Ast.TypeFunction", argtypes = {}, rettypes = {},
                     varargtype = false,
                     flexrettype = { _tag = "Ast.TypeInteger" } })
-            assert_type_ast("() -> (...: () -> integer)",
+            assert_type_ast("function (): (...: function (): (integer))",
                 { _tag = "Ast.TypeFunction", rettypes = {},
                     flexrettype = { _tag = "Ast.TypeFunction",
                         argtypes = {},
@@ -4765,7 +3864,7 @@ end]])
                 function bad(): ...: integer
                 end
             ]], "FlexRetParens")
-            assert_type_syntax_error("() -> ...: integer", "FlexRetParens")
+            assert_type_syntax_error("function(): ...: integer", "FlexRetParens")
         end)
     end)
 
@@ -4844,18 +3943,13 @@ end]])
             }, stats)
         end)
 
-        it("rejects bare input varargs outside an expression-list tail",
-        function()
-            for _, case in ipairs({
-                { body = "return 1 + ...", label = "OpExp" },
-                { body = "f(..., 1)", label = "RParFuncArgs" },
-                { body = "x = {..., 1}", label = "RCurlyInitList" },
-                { body = "x = {..., ...}", label = "RCurlyInitList" },
-            }) do
-                assert_program_syntax_error(
-                    vararg_program(case.body), case.label)
-            end
-        end)
+        it('defers non-tail bare vararg rejection to the checker', function()
+
+        local stats=vararg_stats("return 1 + ..., ..., 1")
+        assert.equal("Ast.ExpBinop",stats[1].exps[1]._tag)
+        assert.equal("Ast.ExpDots",stats[1].exps[2]._tag)
+        assert.equal("Ast.ExpInteger",stats[1].exps[3]._tag)
+    end)
 
         it("parses unary-leading collection subjects in explists", function()
             local stats = vararg_stats([[
@@ -4915,29 +4009,15 @@ end]])
             }, stats)
         end)
 
-        it("requires bare dots to close before scalar continuation", function()
-            for _, body in ipairs({
-                "x = (... - 1)",
-                "x = (... as integer)",
-                "x = (...items)",
-            }) do
-                assert_program_syntax_error(
-                    vararg_program(body), "ExpSimpleExp")
-            end
+        it('adjusts parenthesized spreads and varargs to one value', function()
 
-            local stats = vararg_stats([[
-                x = ((...) - 1)
-                y = ((...) as integer)
-            ]])
-            assert_is_subset({
-                { _tag = "Ast.StatAssign",
-                  exps = { { _tag = "Ast.ExpBinop",
-                      lhs = { _tag = "Ast.ExpAdjust" } } } },
-                { _tag = "Ast.StatAssign",
-                  exps = { { _tag = "Ast.ExpCast",
-                      exp = { _tag = "Ast.ExpAdjust" } } } },
-            }, stats)
-        end)
+        local stats=vararg_stats("x=(...items) y=(...) z=(... - 1)")
+        assert.equal("Ast.ExpAdjust",stats[1].exps[1]._tag)
+        assert.equal("Ast.ExpSpread",stats[1].exps[1].exp._tag)
+        assert.equal("Ast.ExpAdjust",stats[2].exps[1]._tag)
+        assert.equal("Ast.ExpDots",stats[2].exps[1].exp._tag)
+        assert.equal("Ast.ExpSpread",stats[3].exps[1].exp._tag)
+    end)
 
         it("allows a parenthesized unary-leading spread subject", function()
             local stats = vararg_stats("f(...(-items))")
@@ -5013,35 +4093,17 @@ end]])
             }, stats)
         end)
 
-        it("parses all three vararg slice forms as spreads", function()
-            local expected_bounds = {
-                { false, { _tag = "Ast.ExpVar" } },
-                { { _tag = "Ast.ExpVar" }, false },
-                { { _tag = "Ast.ExpVar" },
-                  { _tag = "Ast.ExpVar" } },
-            }
-            local spellings = {
-                "f(...[, last])",
-                "f(...[first,])",
-                "f(...[first, last])",
-            }
+        it('retains all vararg ranges for checker-owned tail elaboration', function()
 
-            for i, spelling in ipairs(spellings) do
-                local stats = vararg_stats(spelling)
-                assert_is_subset({
-                    { _tag = "Ast.StatCall",
-                        callexp = { args = { args = {
-                            { _tag = "Ast.ExpSpread",
-                              exp = {
-                                  _tag = "Ast.ExpSubset",
-                                  exp = { _tag = "Ast.ExpDots" },
-                                  first = expected_bounds[i][1],
-                                  last = expected_bounds[i][2],
-                              } },
-                        } } } },
-                }, stats)
-            end
-        end)
+        local stats=vararg_stats("f(...[1,2], ...[,2], ...[1,])")
+        local args=stats[1].callexp.args.args
+        for _,exp in ipairs(args) do
+            assert.equal("Ast.ExpSubset",exp._tag)
+            assert.equal("Ast.ExpDots",exp.exp._tag)
+        end
+        assert.is_false(args[2].first)
+        assert.is_false(args[3].last)
+    end)
 
         it("parses a bracketed vararg slice explicitly in scalar grammar",
         function()
@@ -5049,10 +4111,10 @@ end]])
             assert_is_subset({
                 { _tag = "Ast.StatAssign",
                   exps = {
-                      { _tag = "Ast.ExpSubset",
+                      { _tag = "Ast.ExpAdjust", exp = { _tag = "Ast.ExpSubset",
                         exp = { _tag = "Ast.ExpDots" },
                         first = { _tag = "Ast.ExpVar" },
-                        last = { _tag = "Ast.ExpVar" } },
+                        last = { _tag = "Ast.ExpVar" } } },
                   } },
             }, stats)
 
@@ -5060,17 +4122,22 @@ end]])
             assert_is_subset({
                 { _tag = "Ast.StatAssign",
                   exps = { { _tag = "Ast.ExpInitList", fields = {
-                      { exp = { _tag = "Ast.ExpSubset" } },
+                      { exp = { _tag = "Ast.ExpAdjust", exp = { _tag = "Ast.ExpSubset" } } },
                       { exp = { _tag = "Ast.ExpInteger", value = 3 } },
                   } } } },
             }, stats)
         end)
 
-        it("keeps bare input varargs distinct from collection spreads",
-        function()
-            assert_program_syntax_error(
-                vararg_program("f(......)"), "RParFuncArgs")
-        end)
+        it('keeps bare input varargs distinct from collection spreads', function()
+
+        local stats=vararg_stats("f(..., ...items, ...[1], ...[1,2])")
+        local args=stats[1].callexp.args.args
+        assert.equal("Ast.ExpDots",args[1]._tag)
+        assert.equal("Ast.ExpSpread",args[2]._tag)
+        assert.equal("Ast.ExpDotsIndex",args[3]._tag)
+        assert.equal("Ast.ExpSubset",args[4]._tag)
+        assert.equal("Ast.ExpDots",args[4].exp._tag)
+    end)
 
         it("leaves non-tail explicit spreads for checker diagnostics",
         function()
@@ -5340,107 +4407,42 @@ end]])
         end)
 
         it("applies the limit to type parameter lists", function()
-            local accepted = "record Many<" ..
-                repeated("T%d", 100, ", ") .. "> end"
+            local accepted = "record Many<|" ..
+                repeated("T%d", 100, ", ") .. "|> end"
             assert_parses_successfuly(accepted)
 
-            local rejected = "record TooMany<" ..
-                repeated("T%d", 101, ", ") .. "> end"
+            local rejected = "record TooMany<|" ..
+                repeated("T%d", 101, ", ") .. "|> end"
             assert_program_syntax_error(rejected, "ListTooLong")
         end)
 
         it("applies the limit to type argument lists", function()
             local accepted_args = repeated("T%d", 100, ", ")
-            local accepted = "Holder<" .. accepted_args .. ">"
+            local accepted = "Holder<|" .. accepted_args .. "|>"
             assert_type_ast(accepted, { _tag = "Ast.TypeName" })
-            assert_expression_ast("make<" .. accepted_args .. ">()", {
+            assert_expression_ast("make<|" .. accepted_args .. "|>()", {
                 _tag = "Ast.ExpCall",
             })
 
             local rejected_args = repeated("T%d", 101, ", ")
-            local rejected = "Holder<" .. rejected_args .. ">"
+            local rejected = "Holder<|" .. rejected_args .. "|>"
             assert_type_syntax_error(rejected, "ListTooLong")
             assert_expression_syntax_error(
-                "make<" .. rejected_args .. ">()", "ListTooLong")
+                "make<|" .. rejected_args .. "|>()", "ListTooLong")
         end)
     end)
 
     describe("preserves factored grammar ASTs and diagnostics", function()
-        it("keeps casts and type tests at their original precedence", function()
-            assert_expression_ast("f(g(x as value)) is Result", {
-                _tag = "Ast.ExpIs",
-                exp = {
-                    _tag = "Ast.ExpCall",
-                    args = { args = {
-                        {
-                            _tag = "Ast.ExpCall",
-                            args = { args = {
-                                {
-                                    _tag = "Ast.ExpCast",
-                                    exp = { _tag = "Ast.ExpVar" },
-                                    target = { _tag = "Ast.TypeValue" },
-                                },
-                            } },
-                        },
-                    } },
-                },
-                target = {
-                    _tag = "Ast.TypeName",
-                    name = "Result",
-                },
-            })
+        it('keeps the specified non-associative cast and type-test precedence', function()
 
-            assert_expression_ast("x as First as Second", {
-                _tag = "Ast.ExpCast",
-                target = { _tag = "Ast.TypeName", name = "First" },
-                exp = {
-                    _tag = "Ast.ExpCast",
-                    target = { _tag = "Ast.TypeName", name = "Second" },
-                    exp = { _tag = "Ast.ExpVar" },
-                },
-            })
-
-            assert_expression_ast(
-                "x as First as Second is Third is Fourth", {
-                    _tag = "Ast.ExpIs",
-                    target = { _tag = "Ast.TypeName", name = "Fourth" },
-                    exp = {
-                        _tag = "Ast.ExpIs",
-                        target = { _tag = "Ast.TypeName", name = "Third" },
-                        exp = {
-                            _tag = "Ast.ExpCast",
-                            target = {
-                                _tag = "Ast.TypeName",
-                                name = "First",
-                            },
-                            exp = {
-                                _tag = "Ast.ExpCast",
-                                target = {
-                                    _tag = "Ast.TypeName",
-                                    name = "Second",
-                                },
-                            },
-                        },
-                    },
-                })
-
-            assert_expression_ast("x is First as Second is Third", {
-                _tag = "Ast.ExpIs",
-                target = { _tag = "Ast.TypeName", name = "Third" },
-                exp = {
-                    _tag = "Ast.ExpCast",
-                    target = { _tag = "Ast.TypeName", name = "Second" },
-                    exp = {
-                        _tag = "Ast.ExpIs",
-                        target = {
-                            _tag = "Ast.TypeName",
-                            name = "First",
-                        },
-                        exp = { _tag = "Ast.ExpVar" },
-                    },
-                },
-            })
-        end)
+        assert_expression_ast("a + b as T",{op="+",rhs={_tag="Ast.ExpCast"}})
+        assert_expression_ast("a * b is T",{op="*",rhs={_tag="Ast.ExpIs"}})
+        assert_expression_ast("a ^ b as T",{_tag="Ast.ExpCast",exp={op="^"}})
+        assert_expression_ast("not a is T",{_tag="Ast.ExpIs",exp={op="not"}})
+        assert_expression_ast("(a as T) as U",{_tag="Ast.ExpCast",
+            exp={_tag="Ast.ExpCast"}})
+        assert_expression_syntax_error("a as T as U","EndFunc")
+    end)
 
         it("keeps parenthesized call adjustment and suffix ASTs", function()
             local adjusted = assert_expression_ast("(((f())))", {
@@ -5464,47 +4466,14 @@ end]])
             })
         end)
 
-        it("right-folds power with right-hand prefixes and suffixes", function()
-            local power = assert_expression_ast(
-                "a ^ -b ^ -c as integer as value is value", {
-                    _tag = "Ast.ExpBinop",
-                    op = "^",
-                    lhs = { var = { name = "a" } },
-                    rhs = { _tag = "Ast.ExpUnop", op = "-" },
-                })
-            local nested = power.rhs.exp
-            assert.are.equal("Ast.ExpBinop", nested._tag)
-            assert.are.equal("^", nested.op)
-            assert.are.equal("b", nested.lhs.var.name)
+        it('right-folds power with right-hand prefixes and suffixes', function()
 
-            local test = nested.rhs
-            assert.are.equal("Ast.ExpIs", test._tag)
-            assert.are.equal("Ast.TypeValue", test.target._tag)
-            assert.are.equal("Ast.ExpCast", test.exp._tag)
-            assert.are.equal("Ast.TypeInteger", test.exp.target._tag)
-            assert.are.equal("Ast.ExpCast", test.exp.exp._tag)
-            assert.are.equal("Ast.TypeValue", test.exp.exp.target._tag)
-            assert.are.equal("Ast.ExpUnop", test.exp.exp.exp._tag)
-            assert.are.equal("-", test.exp.exp.exp.op)
-            assert.are.equal("c", test.exp.exp.exp.exp.var.name)
-
-            local mixed = assert_expression_ast(
-                "a ^ b ^ c ^ d is T as U is V as W", {
-                    _tag = "Ast.ExpBinop",
-                    op = "^",
-                    rhs = { _tag = "Ast.ExpBinop", op = "^" },
-                })
-            local terminal = mixed.rhs.rhs.rhs
-            assert.are.equal("Ast.ExpCast", terminal._tag)
-            assert.are.equal("W", terminal.target.name)
-            assert.are.equal("Ast.ExpIs", terminal.exp._tag)
-            assert.are.equal("V", terminal.exp.target.name)
-            assert.are.equal("Ast.ExpCast", terminal.exp.exp._tag)
-            assert.are.equal("U", terminal.exp.exp.target.name)
-            assert.are.equal("Ast.ExpIs", terminal.exp.exp.exp._tag)
-            assert.are.equal("T", terminal.exp.exp.exp.target.name)
-            assert.are.equal("d", terminal.exp.exp.exp.exp.var.name)
-        end)
+        assert_expression_ast("a ^ -b ^ ~c",{op="^",rhs={op="-",exp={
+            op="^",rhs={op="~"}}}})
+        assert_expression_ast("a ^ -b() ^ c[1]",{op="^",rhs={op="-",exp={
+            op="^",lhs={_tag="Ast.ExpCall"},rhs={_tag="Ast.ExpVar"}}}})
+        assert_expression_ast("a ^ b as T",{_tag="Ast.ExpCast",exp={op="^"}})
+    end)
 
         it("right-folds and flattens parenthesized concatenation", function()
             local concat = assert_expression_ast("a .. (b .. c)", {
@@ -5520,36 +4489,13 @@ end]])
             assert.is_true(rawequal(concat.loc, concat.exps[2].loc))
         end)
 
-        it("keeps nested nominal types and right-associative arrows", function()
-            assert_type_ast("a -> b -> c", {
-                _tag = "Ast.TypeFunction",
-                argtypes = { { _tag = "Ast.TypeName", name = "a" } },
-                rettypes = { {
-                    _tag = "Ast.TypeFunction",
-                    argtypes = { { _tag = "Ast.TypeName", name = "b" } },
-                    rettypes = {
-                        { _tag = "Ast.TypeName", name = "c" },
-                    },
-                } },
-            })
+        it('keeps nested nominal applications and function results', function()
 
-            local arrow = assert_parses_successfuly(type_test_program(
-                "Node<Node<Node<T>>> -> Result -> Final"))[1].decl.type
-            assert.are.equal("Ast.TypeFunction", arrow._tag)
-            assert.are.equal("Ast.TypeFunction", arrow.rettypes[1]._tag)
-            assert.are.equal("Result", arrow.rettypes[1].argtypes[1].name)
-            assert.are.equal("Final", arrow.rettypes[1].rettypes[1].name)
-
-            local nominal = arrow.argtypes[1]
-            for _ = 1, 3 do
-                assert.are.equal("Ast.TypeName", nominal._tag)
-                assert.are.equal("Node", nominal.name)
-                assert.are.equal(1, #nominal.typeargs)
-                nominal = nominal.typeargs[1]
-            end
-            assert.are.equal("Ast.TypeName", nominal._tag)
-            assert.are.equal("T", nominal.name)
-        end)
+        assert_type_ast("Box<|function(T): Box<|U|>|>",{_tag="Ast.TypeName",name="Box",
+            typeargs={{_tag="Ast.TypeFunction",rettypes={{name="Box"}}}}})
+        assert_type_ast("function(T): function(U): V",{_tag="Ast.TypeFunction",
+            rettypes={{_tag="Ast.TypeFunction",rettypes={{name="V"}}}}})
+    end)
 
         it("distinguishes nested Array and Map tails after one key type", function()
             assert_type_ast("{{T}: {U: {V}}}", {
@@ -5569,45 +4515,25 @@ end]])
             })
         end)
 
-        it("reconstructs the owned Array pointer at the star location", function()
-            local source = "local x: owned **ffi.Item[] = nil"
-            local owner = assert(parser.parse(
-                "owned-factoring.titan", source))[1].decl.type
-            assert.are.equal("Ast.TypeCOwned", owner._tag)
-            assert.is_true(owner.count)
-            assert.are.equal("Ast.TypeCPointer", owner.subtype._tag)
-            assert.are.equal("Ast.TypeCPointer", owner.subtype.subtype._tag)
-            assert.are.equal("ffi", owner.subtype.subtype.subtype.module)
-            assert.are.equal("Item", owner.subtype.subtype.subtype.name)
-            assert.are.same({
-                filename = "owned-factoring.titan",
-                line = 1,
-                col = 16,
-            }, owner.subtype.loc)
-            assert.are.same({
-                filename = "owned-factoring.titan",
-                line = 1,
-                col = 17,
-            }, owner.subtype.subtype.loc)
-        end)
+        it('retains grouped owned-array pointer source locations', function()
 
-        it("reports malformed nested owners at the local failure", function()
-            local cases = {
-                { "local x: owned owned = nil", "COwnedShape", 22 },
-                { "local x: owned owned * = nil", "OwnedPayload", 24 },
-            }
-            for _, case in ipairs(cases) do
-                local program, err = parser.parse(
-                    "nested-owned-error.titan", case[1])
-                assert.falsy(program)
-                assert.are.equal(case[2], err.label)
-                assert.are.same({
-                    filename = "nested-owned-error.titan",
-                    line = 1,
-                    col = case[3],
-                }, err.loc)
-            end
-        end)
+        local source="local x: owned (*Item)[] = nil"
+        local p=assert(parser.parse("owned-loc.titan",source))
+        local owner=p[1].decl.type
+        assert.equal("Ast.TypeOwned",owner._tag)
+        assert.equal("Ast.TypeCArray",owner.subtype._tag)
+        assert.equal("Ast.TypeCPointer",owner.subtype.base._tag)
+        assert.equal(source:find("*",1,true),owner.subtype.base.loc.col)
+        assert.equal("Item",owner.subtype.base.subtype.name)
+    end)
+
+        it('parses owned alias operands and diagnoses malformed raw syntax', function()
+
+        assert_type_syntax_error("owned *(*", "TypeDecl")
+        assert_type_syntax_error("owned (int[4])", "RBracketCArray")
+        assert_type_ast("owned Handle",{_tag="Ast.TypeOwned",
+            subtype={_tag="Ast.TypeForeignName",name="Handle"}})
+    end)
 
         it("classifies assignment and call statements from one prefix", function()
             assert_statements_ast([[
@@ -5639,30 +4565,18 @@ end]])
             })
         end)
 
-        it("retains labels at each factored decision point", function()
-            assert_expression_syntax_error(
-                "f(g(x)) as", "CastMissingType")
-            assert_expression_syntax_error(
-                "f(g(x)) as First as", "CastMissingType")
-            assert_expression_syntax_error(
-                "f(g(x)) is", "IsMissingType")
-            assert_expression_syntax_error(
-                "f(g(x)) is First is", "IsMissingType")
-            assert_expression_syntax_error("(((x))", "RParSimpleExp")
-            assert_type_syntax_error("Node<T> ->", "TypeReturnTypes")
-            assert_type_syntax_error("{T:}", "TypeType")
-            assert_type_syntax_error("{T", "RCurlyType")
-            assert_type_syntax_error("owned **", "OwnedPayload")
-            assert_type_syntax_error("owned const *", "COwnedShape")
-            assert_expression_syntax_error("x ..", "OpExp")
-            assert_statements_syntax_error("x", "AssignAssign")
-            assert_statements_syntax_error("(x) = y", "AssignNotLValue")
-            assert_statements_syntax_error(
-                "f() + y = z", "AssignNotLValue")
-            assert_statements_syntax_error(
-                "f() .. y = z", "AssignNotLValue")
-            assert_statements_syntax_error("1 + 2", "ExpStat")
-        end)
+        it('retains labels at each factored decision point', function()
+
+        assert_expression_syntax_error("a +", "OpExp")
+        assert_expression_syntax_error("a. )", "NameDotExpSuf")
+        assert_expression_syntax_error("a: )", "NameColonExpSuf")
+        assert_expression_syntax_error("a[", "ExpExpSuf")
+        assert_expression_syntax_error("a[1,", "RBracketExpSuf")
+        assert_expression_syntax_error("a<|T,|>()", "TypeArgument")
+        assert_type_syntax_error("Pair<|T", "RAngleTypeArgs")
+        assert_type_syntax_error("{T:}", "TypeType")
+        assert_type_syntax_error("{T", "RCurlyType")
+    end)
 
         it("keeps the malformed call-tail statement boundary", function()
             local program, err = parser.parse(
@@ -5686,7 +4600,7 @@ end]])
             assert.are.same({
                 filename = "suffix-tail-error.titan",
                 line = 1,
-                col = 14,
+                col = 16,
             }, err.loc)
         end)
     end)
@@ -5736,7 +4650,7 @@ end]])
         function()
             local type_string = "T"
             for _ = 1, 8 do
-                type_string = "Node<" .. type_string .. ">"
+                type_string = "Node<|" .. type_string .. "|>"
             end
             parse_under_instruction_budget(
                 type_test_program(type_string), budget)
@@ -5751,14 +4665,12 @@ end]])
                 expression_test_program(table.concat(parts)), budget)
         end)
 
-        it("disambiguates nested parenthesized return types once", function()
-            local type_string = "integer"
-            for _ = 1, 32 do
-                type_string = "integer -> (" .. type_string .. ") -> integer"
-            end
-            parse_under_instruction_budget(
-                type_test_program(type_string), 30000)
-        end)
+        it('disambiguates nested parenthesized return types once', function()
+
+        local typ="integer"
+        for _=1,24 do typ="function(integer): ("..typ..")" end
+        parse_under_instruction_budget(type_test_program(typ),100000)
+    end)
 
         it("bounds nested grouped optional types and their malformed counterparts", function()
             local typ = "T"
@@ -5770,17 +4682,17 @@ end]])
                 type_test_program("(" .. typ), budget, "RParenTypelist")
             parse_under_instruction_budget(
                 type_test_program("(" .. typ .. ", U)"), budget,
-                "TypeFunctionNoRet")
+                "RParenTypelist")
         end)
 
-        it("keeps long arrows flat when their operands are grouped and optional", function()
-            local parts = {}
-            for _ = 1, 200 do parts[#parts + 1] = "((T))?" end
-            local typ = table.concat(parts, " -> ")
-            parse_under_instruction_budget(type_test_program(typ), 200000)
-            parse_under_instruction_budget(
-                type_test_program(typ .. " ->"), 200000, "TypeReturnTypes")
-        end)
+        it('folds wide function-type lists without a capture-result explosion', function()
+
+        local arguments={}
+        for _=1,100 do arguments[#arguments+1]="((T))?" end
+        local typ="function("..table.concat(arguments,",").."): ()"
+        parse_under_instruction_budget(type_test_program(typ),200000)
+        parse_under_instruction_budget(type_test_program(typ.."?"),200000,"OptionTypeList")
+    end)
 
         it("parses nested Arrays without retrying them as Maps", function()
             local type_string = "T"
@@ -5791,28 +4703,27 @@ end]])
                 type_test_program(type_string), budget)
         end)
 
-        it("parses nested owned payloads without lookahead reparsing",
-        function()
-            local type_string = "ffi.Item"
-            for _ = 1, 8 do
-                type_string = "owned *" .. type_string
-            end
-            parse_under_instruction_budget(
-                type_test_program(type_string), budget)
-        end)
+        it('parses nested grouped foreign pointers without lookahead reparsing', function()
 
-        it("parses long power chains without recursive stack growth", function()
-            local parts = { "x" }
-            for i = 1, 200 do
-                parts[#parts + 1] = " ^ "
-                if i % 2 == 0 then
-                    parts[#parts + 1] = "-"
-                end
-                parts[#parts + 1] = "x"
-            end
-            parse_under_instruction_budget(
-                expression_test_program(table.concat(parts)), budget)
-        end)
+        local typ="Item"
+        for _=1,12 do typ="*("..typ..")" end
+        parse_under_instruction_budget(type_test_program("owned "..typ),budget)
+    end)
+
+        it('parses long power chains without recursive stack growth', function()
+
+        local function measure(count)
+            local parts={"x"}
+            for i=1,count do parts[#parts+1]=i%2==0 and " ^ -x" or " ^ x" end
+            local _,instructions=parse_under_instruction_budget(
+                expression_test_program(table.concat(parts)),400000)
+            return instructions
+        end
+        local small=measure(100)
+        local large=measure(200)
+        assert.is_true(large < small * 2.5)
+        assert.is_true(large > small)
+    end)
 
         it("parses long concat chains without recursive stack growth", function()
             local parts = { "x" }
@@ -5894,23 +4805,14 @@ end]])
                 recovered[1].block.stats[1].exps[1].loc.filename)
         end)
 
-        it("installs parser state after generic candidate collection",
-        function()
-            local original_find = string.find
-            string.find = function()
-                error("forced generic candidate failure", 0)
-            end
-            local ok, err = pcall(parser.parse, "broken-scan.titan", source)
-            string.find = original_find
+        it('parses comparisons without a generic candidate prescan', function()
 
-            assert.is_false(ok)
-            assert.truthy(tostring(err):find(
-                "forced generic candidate failure", 1, true))
-
-            local recovered = assert(parser.parse("recovered-scan.titan", source))
-            assert.are.equal("recovered-scan.titan",
-                recovered[1].block.stats[1].exps[1].loc.filename)
-        end)
+        -- There is no source prescan or generic-call candidate table anymore.
+        local grammar_source=assert(io.open("titan-compiler/parser.lua")):read("a")
+        assert.is_nil(grammar_source:find("GENERIC_CALL_CANDIDATES",1,true))
+        assert.is_nil(grammar_source:find("genericcalltypeargprobe",1,true))
+        assert(parser.parse("comparisons.titan",expression_test_program("a < b < c")))
+    end)
 
         it("keeps non-ASCII source columns byte based", function()
             local utf8_source =
@@ -6154,26 +5056,176 @@ local function answer(): integer return ffi.VALUE end]]))
         assert.are.equal("BoundForeignImport", err.label)
     end)
 
-    it("reserves ffi in every binding namespace", function()
-        for _, source in ipairs({
+    it('allows ffi to be shadowed in ordinary binding namespaces', function()
+
+        for _,source in ipairs({
             "local ffi = 1", 'local ffi = import "math"',
-            "function ffi(): () end", "type ffi = integer",
-            "record ffi n: integer end", "union ffi A end",
-            "interface ffi n: integer end", "function f(ffi: integer): () end",
-            "function f<T>(): () local ffi = 1 end",
-            "function f<ffi>(): () end",
-            "function f(): () for ffi = 1, 2 do end end",
-            "local f = function(ffi: integer): () end",
-        }) do
-            local tree, err = parser.parse("ffi.titan", source)
-            assert.falsy(tree, source)
-            assert.are.equal("ReservedFFI", err.label, source)
-        end
+            "function ffi() end", "type ffi = integer",
+            "record ffi n: integer end", "union ffi A() end",
+            "interface ffi n: integer end", "function f(ffi: integer) end",
+            "function f<|ffi|>() end", "function f() local ffi = 1 end",
+        }) do assert_parses_successfuly(source) end
     end)
 
     it("keeps ffi valid as a member spelling and namespace use", function()
         assert(parser.parse("ffi.titan", [[record R ffi: integer end
 function R.ffi(): integer return ffi.VALUE end
 local function use(obj: R): integer return obj.ffi end]]))
+    end)
+end)
+
+describe("simplified grammar boundaries", function()
+    it("greedily associates function return colons before map separators", function()
+        assert_type_ast("{function(): T}", {
+            _tag = "Ast.TypeArray", subtype = {
+                _tag = "Ast.TypeFunction", rettypes = {{name = "T"}},
+            },
+        })
+        assert_type_ast("{(function()): T}", {
+            _tag = "Ast.TypeMap", keystype = {
+                _tag = "Ast.TypeFunction", rettypes = {},
+            }, valuestype = {name = "T"},
+        })
+    end)
+
+    it("separates keyword-named variables from modifiers and initializers", function()
+        local tree = assert_parses_successfuly([[
+            local: integer = 1
+            const: integer = 2
+            local const: integer = 3
+            local const local: integer = 4
+            do: integer = 5
+            do end
+        ]])
+        assert.equal(6, #tree)
+        assert.equal("local", tree[1].decl.name)
+        assert.is_false(tree[1].islocal)
+        assert.equal("const", tree[3].decl.name)
+        assert.is_true(tree[3].islocal)
+        assert.is_false(tree[3].isconst)
+        assert.is_true(tree[4].isconst)
+        assert.is_true(tree[6]._module_initializer)
+    end)
+
+    it("keeps generic owner, member, method, and bare-reference applications", function()
+        local owner = assert_expression_ast("Box<|T|>.new(1)", {})
+        assert.equal("T", owner.exp.var.exp._nominal_typeargs[1].name)
+        assert.equal(0, #owner.typeargs)
+        local call = assert_expression_ast("module.f<|T|>(1)", {})
+        assert.equal("T", call.typeargs[1].name)
+        assert.is_nil(call.exp._nominal_typeargs)
+        local method = assert_expression_ast("x:m<|T|>", {})
+        assert.equal("Ast.ExpMethodRef", method._tag)
+        assert.equal("T", method._nominal_typeargs[1].name)
+        assert_expression_ast('f<|T|>"text"', {_tag="Ast.ExpCall", typeargs={{name="T"}}})
+    end)
+
+    it("keeps vararg count distinct from greedy complete-expression spreads", function()
+        assert_expression_ast("#... - 1", {op="-", lhs={_tag="Ast.ExpDotsLen"}})
+        assert_expression_ast("#... ^ 2", {op="^", lhs={_tag="Ast.ExpDotsLen"}})
+        assert_expression_ast("#...[1]", {op="#", exp={_tag="Ast.ExpDotsIndex"}})
+        assert_expression_ast("...items + tail", {_tag="Ast.ExpSpread", exp={op="+"}})
+        assert_expression_ast("... - 1", {_tag="Ast.ExpSpread", exp={op="-"}})
+        assert_expression_ast("(...[1,2])", {_tag="Ast.ExpAdjust", exp={_tag="Ast.ExpSubset"}})
+    end)
+
+    it("does not allow removed field-name or fixed-array annotations", function()
+        assert.falsy(parser.parse("old.titan", "record R field?: integer end"))
+        for _, pair in ipairs({{"3", "count"}, {"3", "2"}, {"0", "0"}}) do
+            assert_statements_syntax_error(
+                "local a: foreign Item[" .. pair[1] .. "] = foreign Item.new_array(" .. pair[2] .. ")",
+                "RBracketCArray")
+        end
+        assert_type_syntax_error("owned *(owned *Item)", "RParenTypelist")
+    end)
+
+    it("commits malformed explicit generics and validates trailing source", function()
+        assert_expression_syntax_error("f<|T,|>()", "TypeArgument")
+        assert_expression_syntax_error("f<|T", "RAngleTypeArgs")
+        assert_program_syntax_error("function f() end @", "fail")
+        assert_program_syntax_error("do end x = 1", "fail")
+    end)
+
+    it("folds a wide constructor with linear capture evaluation", function()
+        local function measure(count)
+            local fields = {}
+            for i=1,count do fields[i] = "x" end
+            local _, instructions = parse_under_instruction_budget(
+                expression_test_program("{" .. table.concat(fields, ",") .. "}"), 2000000)
+            return instructions
+        end
+        local small, large = measure(300), measure(600)
+        assert.is_true(large < small * 2.5)
+        assert.is_true(large > small)
+    end)
+
+    it("lowers a flat sequence of defers without copying or recursing over tails", function()
+        local function measure(count)
+            local source = "function f() " .. string.rep("defer release(); ", count) .. "end"
+            local tree, instructions = parse_under_instruction_budget(source, 2000000)
+            local stats, seen = tree[1].block.stats, 0
+            while #stats > 0 do
+                assert.equal(1, #stats)
+                assert.equal("Ast.StatTry", stats[1]._tag)
+                seen = seen + 1
+                stats = stats[1].block.stats
+            end
+            assert.equal(count, seen)
+            return instructions
+        end
+        local small, large = measure(200), measure(400)
+        assert.is_true(large < small * 2.5)
+        assert.is_true(large > small)
+    end)
+
+    it("keeps type-list capacity separate from written parameter and expression limits", function()
+        local names = {}
+        for i = 1, 251 do names[i] = "integer" end
+        local list = table.concat(names, ",")
+        local tree = assert_parses_successfuly("function f(): (" .. list .. ") end")
+        assert.equal(251, #tree[1].rettypes)
+        assert_type_ast("function(" .. list .. ")", {_tag="Ast.TypeFunction"})
+    end)
+
+    it("keeps foreign signatures in the raw single-result category", function()
+        assert_program_syntax_error(
+            "foreign function bad(): (int,int) return 1,2 end", "RParenTypelist")
+        assert_program_syntax_error(
+            "foreign function bad(): (...: int) end", "LParenType")
+        assert_program_syntax_error(
+            "foreign function bad(input: owned *Item): void end", "RParPList")
+    end)
+
+    it("keeps wide union synthesis in a constant number of capture results", function()
+        local variants = {}
+        for i = 1, 20000 do variants[i] = "variant" .. i .. "()" end
+        local tree = assert_parses_successfuly("union Wide " .. table.concat(variants, " ") .. " end")
+        assert.equal(20000, #tree[1].variants)
+        assert.equal(20001, #tree)
+        assert.equal("variant20000", tree[#tree].name)
+    end)
+
+    it("does not retain dynamic lexer captures across wide flat constructors", function()
+        local count = 40000
+        local tree = assert_parses_successfuly("local values = {" ..
+            string.rep("item,1,", count // 2 - 1) .. "item,1}")
+        assert.equal(count, #tree[1].value.fields)
+        assert.equal("Ast.ExpVar", tree[1].value.fields[1].exp._tag)
+        assert.equal("Ast.ExpInteger", tree[1].value.fields[count].exp._tag)
+    end)
+
+    it("cleans per-parse state after ordinary-capture validation failures", function()
+        local parameters = {}
+        for i = 1, 101 do parameters[i] = "x" .. i .. ": integer" end
+        local tree, err = parser.parse("wide.titan",
+            "function f(" .. table.concat(parameters, ",") .. ") end")
+        assert.is_false(tree)
+        assert.equal("ListTooLong", err.label)
+        assert.equal("wide.titan", err.loc.filename)
+        tree, err = parser.parse("shape.titan", "local f: function(): (T,U)? = nil")
+        assert.is_false(tree)
+        assert.equal("OptionTypeList", err.label)
+        tree = assert(parser.parse("recovered.titan", "local x = 1"))
+        assert.equal("recovered.titan", tree[1].loc.filename)
     end)
 end)

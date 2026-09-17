@@ -152,7 +152,7 @@ end
 
 function through_interface(n: integer): integer
     local reader: Reader = Box.new(n)
-    local read: () -> integer = reader:read
+    local read: function (): integer = reader:read
     return read()
 end
 
@@ -221,7 +221,7 @@ function Box:read(): integer
 end
 
 local function contributor_explode(): integer
-    local fail: () -> integer = function(): integer
+    local fail: function (): integer = function(): integer
         raise "folder boom"
         return 0
     end
@@ -323,7 +323,7 @@ print("OK")
         local trace_file = module_folder .. "/trace.titan"
         local main_call = line_of(main_source, "return contributor_explode()")
         local lambda_definition = line_of(trace_source,
-            "local fail: () -> integer = function(): integer")
+            "local fail: function (): integer = function(): integer")
         local lambda_raise = line_of(trace_source, 'raise "folder boom"')
         local lambda_call = line_of(trace_source, "return fail()")
         local script = string.format([==[

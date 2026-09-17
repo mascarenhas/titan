@@ -126,15 +126,15 @@ Records model fixed nominal data. Unions model a closed set of tagged cases:
 
 ```titan
 union Lookup
-  found: string
-  missing
+  found(string)
+  missing()
 end
 
 function describe(result: Lookup): string
   case result
-  when found: text then
+  when found(text) then
     return "found " .. text
-  when missing then
+  when missing() then
     return "missing"
   else
     return "unknown"
@@ -488,7 +488,7 @@ end
 
 function configure_cache(cache: {value: value})
   gc.weak(cache)
-  gc.finalizable<{value: value}>(cache, finish_owner)
+  gc.finalizable<|{value: value}|>(cache, finish_owner)
 
   gc.pause()             -- maps to collectgarbage("stop")
   if not gc.paused() then raise "collector did not pause" end
@@ -502,7 +502,7 @@ end
 `pause_percent` is the incremental collector's tuning accessor; `pause()` has
 side effects, while `paused()` only reports whether the collector is stopped.
 Weak and ephemeron configuration preserves an existing Map metatable and
-changes only its raw `__mode` field. Generic `finalizable<T>` likewise
+changes only its raw `__mode` field. Generic `finalizable<|T|>` likewise
 preserves that exact metatable while replacing raw `__gc`; its callback
 receives the finalized value at the same exact `T` selected by the caller.
 Cleanup should clear owned state before releasing it so the callback remains

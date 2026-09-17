@@ -77,7 +77,7 @@ foreign import "string.h"
 ]=]
 
 local RUNNER_BODY = [=[
-local type TestFunction = (test.Context) -> ()
+local type TestFunction = function (test.Context): ()
 
 local record TestCase
   local full_name: string
@@ -98,17 +98,17 @@ end
 local function copy_interval(subject: string, first: integer,
                              count: integer): string
   if count == 0 then return "" end
-  local storage = char.new_array(count)
-  local output = storage as *char
-  local source = subject as const *char
-  ffi.memcpy(output, source + first - 1, count as ffi.size_t)
+  local storage = foreign char.new_array(count)
+  local output = storage as foreign *char
+  local source = subject as foreign const *char
+  ffi.memcpy(output, source + first - 1, count as foreign size_t)
   return storage as string
 end
 
 local function has_prefix(subject: string, prefix: string): boolean
   if #subject < #prefix then return false end
-  local left = subject as const *unsigned char
-  local right = prefix as const *unsigned char
+  local left = subject as foreign const *unsigned char
+  local right = prefix as foreign const *unsigned char
   for index = 0, #prefix - 1 do
     if left[index] ~= right[index] then return false end
   end
@@ -116,9 +116,9 @@ local function has_prefix(subject: string, prefix: string): boolean
 end
 
 local function write(output: string)
-  local bytes = output as const *unsigned char
+  local bytes = output as foreign const *unsigned char
   for index = 0, #output - 1 do
-    ffi.putchar(bytes[index] as int)
+    ffi.putchar(bytes[index] as foreign int)
   end
 end
 
@@ -151,7 +151,7 @@ end
 
 local function print_trace(trace: string)
   writeln("stack traceback:")
-  local bytes = trace as const *unsigned char
+  local bytes = trace as foreign const *unsigned char
   local position = 1
   while position <= #trace do
     local ending = position

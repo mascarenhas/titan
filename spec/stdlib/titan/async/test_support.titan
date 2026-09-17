@@ -16,20 +16,20 @@ local function cancelled_with(status: async.TaskStatus,
   if not was_cancelled then return false end
   local exact = reason as async.CancellationReason
   case exact
-  when simple: message then return message == expected
+  when simple(message) then return message == expected
   else return false
   end
 end
 
 local function successful(result: value): async.Task
-  return async.run<value, value>(function (): value
+  return async.run<|value, value|>(function (): value
     return result
   end)
 end
 
 local function sleeping(milliseconds: integer,
                         result: value): async.Task
-  return async.run<value, value>(function (): value
+  return async.run<|value, value|>(function (): value
     timer.sleep(milliseconds)
     return result
   end)
@@ -42,7 +42,7 @@ local function cancelled(reason: string): async.Task
 end
 
 local function failing(reason: value): async.Task
-  return async.run<value, value>(function (): value
+  return async.run<|value, value|>(function (): value
     timer.yield()
     raise reason
     return nil
@@ -60,8 +60,8 @@ local function cancelled_payload(status: async.TaskStatus): value
   test.assert(was_cancelled, "expected cancelled Task status")
   local cancellation = reason as async.CancellationReason
   case cancellation
-  when simple: text then return text
-  when complex: payload then return payload
+  when simple(text) then return text
+  when complex(payload) then return payload
   else raise "invalid cancellation reason"
   end
 end
@@ -74,7 +74,7 @@ end
 -- This duplicates no production policy: it exists solely to observe whether
 -- async ownership has released the Map, without importing titan.gc.
 local function mark_finalizable(candidate: {string: value},
-                                callback: (value) -> ())
+                                callback: function (value): ())
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   test.assert(ffi.lua_checkstack(L, 3) ~= 0,

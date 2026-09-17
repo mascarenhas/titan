@@ -22,11 +22,11 @@ local record RelabelParsedRule
 end
 
 local type RelabelReplacementCallback =
-  (value, ...: value) -> (...: value)
+  function (value, ...: value): (...: value)
 local type RelabelMatchTimeCallback =
-  (string, integer, value, ...: value) -> (...: value)
+  function (string, integer, value, ...: value): (...: value)
 local type RelabelFoldCallback =
-  (value, ...: value) -> value
+  function (value, ...: value): (value)
 
 local RELABEL_SUFFIX_AT_LEAST = 1
 local RELABEL_SUFFIX_AT_MOST = 2
@@ -44,7 +44,7 @@ local _relabel_match_cache: {string: Pattern} = {}
 local function _relabel_byte(source: string,
                              position: integer): integer
   local bytes =
-    source as const *unsigned char
+    source as foreign const *unsigned char
   return bytes[position - 1] as integer
 end
 
@@ -52,12 +52,12 @@ local function _relabel_slice(source: string, first: integer,
                              after: integer): string
   if after <= first then return "" end
   local length = after - first
-  local result = char.new_array(length)
-  local source_bytes = source as const *char
-  local result_bytes = result as *char
+  local result = foreign char.new_array(length)
+  local source_bytes = source as foreign const *char
+  local result_bytes = result as foreign *char
   ffi.memcpy(
     result_bytes, source_bytes + first - 1,
-    length as ffi.size_t)
+    length as foreign size_t)
   return result as string
 end
 
@@ -80,11 +80,11 @@ end
 
 local function _relabel_spaces(count: integer): string
   if count <= 0 then return "" end
-  local buffer = char.new_array(count)
-  local bytes = buffer as *char
+  local buffer = foreign char.new_array(count)
+  local bytes = buffer as foreign *char
   local index = 0
   while index < count do
-    bytes[index] = 32 as char
+    bytes[index] = 32 as foreign char
     index = index + 1
   end
   return buffer as string

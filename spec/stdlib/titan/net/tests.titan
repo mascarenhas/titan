@@ -12,7 +12,7 @@ function test_net_exchanges_binary_streams_through_tcp(
   runtime_test.run(function ()
     local server, port = support.listen_available(26000)
     support.cleanup_server(context, server)
-    local peer = async.run<value, value>(function (): value
+    local peer = async.run<|value, value|>(function (): value
       local connection = server:accept()
       defer connection:close()
       test.assert(connection:read_until("\0END", true) == "alpha",
@@ -93,7 +93,7 @@ function test_net_validates_endpoints_and_wakes_pending_accept(
     local server, _ = support.listen_available(27000)
     support.cleanup_server(context, server)
     local accept_failed = false
-    local waiter = async.run<value, value>(function (): value
+    local waiter = async.run<|value, value|>(function (): value
       do
         server:accept()
       catch

@@ -60,7 +60,7 @@ describe("closure adjustment wrappers (checker)", function()
                 end
 
                 function probe()
-                    local adjusted: (integer, value) -> value = actual
+                    local adjusted: function (integer, value): value = actual
                 end
             ]])
         end)
@@ -137,8 +137,8 @@ describe("closure adjustment wrappers (checker)", function()
             end
 
             function probe()
-                local fixed: (integer, value) -> string = fixed_actual
-                local open: (integer, value) -> (...: string) = open_actual
+                local fixed: function (integer, value): string = fixed_actual
+                local open: function (integer, value): (...: string) = open_actual
             end
         ]])
         assert.is_true(ok, err)
@@ -175,36 +175,36 @@ describe("closure adjustment wrappers (checker)", function()
             end
 
             record Holder
-                callback: (value) -> value;
+                callback: function (value): value;
             end
 
-            module_callback: (value) -> value =
+            module_callback: function (value): value =
                 function(v) return v end
-            module_adjusted_lambda: (value) -> value =
+            module_adjusted_lambda: function (value): value =
                 function(v: integer) return v end
 
-            local function take(callback: (value) -> value)
+            local function take(callback: function (value): value)
             end
 
-            function returned(): (value) -> value
+            function returned(): function (value): value
                 return source
             end
 
             function sinks()
-                local contextual: (value) -> value =
+                local contextual: function (value): value =
                     function(v) return v end
-                local source_lambda: (integer) -> integer =
+                local source_lambda: function (integer): integer =
                     function(v) return v end
-                local adjusted_lambda: (value) -> value = source_lambda
-                local declared: (value) -> value = source
+                local adjusted_lambda: function (value): value = source_lambda
+                local declared: function (value): value = source
                 module_callback = source
                 declared = source
                 take(source)
                 take { callback = source }
                 local holder = Holder.new(source)
                 holder.callback = source
-                local array: {(value) -> value} = {source}
-                local map: {string: (value) -> value} = {["x"] = source}
+                local array: {function (value): value} = {source}
+                local map: {string: function (value): value} = {["x"] = source}
             end
         ]])
         assert.is_true(ok, err)
@@ -265,10 +265,10 @@ describe("closure adjustment wrappers (checker)", function()
             end
 
             function probe(v: value)
-                local exact: (integer) -> integer = actual
-                local written = actual as (integer, value) -> value
-                local predicate = actual is (integer, value) -> value
-                local dynamic: (integer) -> integer = v
+                local exact: function (integer): integer = actual
+                local written = actual as function (integer, value): value
+                local predicate = actual is function (integer, value): value
+                local dynamic: function (integer): integer = v
             end
         ]])
         assert.is_true(ok, err)
@@ -306,38 +306,38 @@ describe("closure adjustment wrappers (checker)", function()
                 return x
             end
 
-            function produce(): (...: (integer) -> integer)
+            function produce(): (...: function (integer): integer)
                 return actual
             end
 
-            function collect(): {(integer, value) -> value}
+            function collect(): {function (integer, value): value}
                 return {produce()}
             end
 
             function open_return():
-                (...: (integer, value) -> value)
+                (...: function (integer, value): value)
                 return produce()
             end
 
             local function consume(
-                ...: (integer, value) -> value
+                ...: function (integer, value): value
             )
             end
 
-            function forward(...: (integer) -> integer)
+            function forward(...: function (integer): integer)
                 consume(...)
             end
 
             local function accepts_wide(
-                callback: (integer, integer) -> ()
+                callback: function (integer, integer): ()
             )
             end
 
             function nested(
-                callback: (integer) -> ()
+                callback: function (integer): ()
             )
                 local adjusted:
-                    ((integer) -> ()) -> () = accepts_wide
+                    function (function (integer): ()): () = accepts_wide
             end
         ]])
         assert.is_true(ok, err)

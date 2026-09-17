@@ -255,7 +255,7 @@ helper.
 
 ### Nested Array rule
 
-A Titan write to `Array<Array<T>>` stores the inner backing Table directly and
+A Titan write to `Array<|Array<|T|>|>` stores the inner backing Table directly and
 barriers outer backing → inner backing. Lua `__newindex` passes the incoming
 proxy through the outer Array's writer; the writer validates/unboxes it and
 returns the internal backing representation before the shared callback
@@ -268,7 +268,7 @@ paths are:
 - a structurally validated raw backing fast path; or
 - a canonical proxy that is validated and unboxed.
 
-An `Array<value>` read is different: an Array proxy inside the dynamic value
+An `Array<|value|>` read is different: an Array proxy inside the dynamic value
 must remain boxed. Ordinary Map Tables—including one with an unrelated key-0
 entry—pass through the nonthrowing probe unchanged.
 

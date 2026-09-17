@@ -239,9 +239,8 @@ constant(success_sentinel) * pattern * position_capture()
 
 The cached native callable has the precise internal type:
 
-```titan
-(value, string, integer, ...: value) ->
-  (value, value, ...: value)
+```text
+function (value, string, integer, ...: value): (value, value, ...: value)
 ```
 
 It is a Lua C closure, so Titan's generic callable path invokes it directly
@@ -356,7 +355,7 @@ Consequently `%{01}` reports `"01"`, while `%{fail}` takes the same ordinary
 failure path as a directly constructed `throw("fail")`.
 
 The public `gsub` API is deliberately narrower. Its replacement has exact type
-`(string) -> string`; `%0` first reduces any candidate captures to the whole
+`function (string): (string)`; `%0` first reduces any candidate captures to the whole
 matched substring, and an exact native-protocol adapter calls the replacement.
 Source candidates reuse the ordinary weak compiled-pattern cache, while each
 call constructs the small replacement wrapper needed to retain its callback.

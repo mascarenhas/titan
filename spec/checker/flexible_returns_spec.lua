@@ -536,7 +536,7 @@ describe("flexible return expression-list demand (typechecker)", function()
 
         local fixed51 = repeated("integer", 51)
         local values51 = repeated("1", 51)
-        local callable = "() -> (" .. fixed51 .. ", ...: integer)"
+        local callable = "function (): (" .. fixed51 .. ", ...: integer)"
         local finite251 = repeated("integer", 251)
 
         -- The same request is legal for a statically named Titan function: its
@@ -576,7 +576,7 @@ describe("flexible return expression-list demand (typechecker)", function()
 
         local fixed51 = shape(51)
         local ok, err = run_checker([[
-            function relay(f: () -> (]] .. fixed51
+            function relay(f: function (): (]] .. fixed51
                 .. [[, ...: integer)): (]] .. fixed51 .. [[, ...: integer)
                 return f()
             end

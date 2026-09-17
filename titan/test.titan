@@ -2,12 +2,12 @@ foreign import "lua.h"
 foreign import "lauxlib.h"
 foreign import "titan/ffi.h"
 
-local type Cleanup = () -> ()
-local type TestFunction = (Context) -> ()
-local type TestLogger = (string, string) -> ()
+local type Cleanup = function (): ()
+local type TestFunction = function (Context): ()
+local type TestLogger = function (string, string): ()
 local type TraceScanner =
-  (string, string?) -> (string?, string?, integer?)
-local type PatternMatcher = (string, string) -> boolean
+  function (string, string?): (string?, string?, integer?)
+local type PatternMatcher = function (string, string): (boolean)
 
 local record RegisteredTest
   name: string
@@ -178,10 +178,10 @@ local function runner_matches(name: string, pattern: string): boolean
 end
 
 local function raw_lua_function(
-    table_index: int, name: string): boolean
+    table_index: foreign int, name: string): boolean
   ffi.lua_pushstring(L, name)
   local kind = ffi.lua_rawget(L, table_index)
-  ffi.lua_settop(L, (ffi.lua_gettop(L) - 1) as int)
+  ffi.lua_settop(L, (ffi.lua_gettop(L) - 1) as foreign int)
   return kind == ffi.LUA_TFUNCTION
 end
 
@@ -193,7 +193,7 @@ local function lua_helpers_available(): boolean
   end
 
   ffi.lua_rawgeti(L, ffi.LUA_REGISTRYINDEX,
-                  ffi.LUA_RIDX_GLOBALS as ffi.lua_Integer)
+                  ffi.LUA_RIDX_GLOBALS as foreign lua_Integer)
   if ffi.lua_type(L, -1) ~= ffi.LUA_TTABLE then return false end
   local globals_index = ffi.lua_gettop(L)
 

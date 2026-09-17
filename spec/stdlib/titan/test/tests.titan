@@ -80,7 +80,7 @@ function test_outside_runner_uses_location_sentinel(_context: test.Context)
   ]==], "outside-runner location probe")
 end
 
-local type RuntimeBody = () -> ()
+local type RuntimeBody = function (): ()
 
 local function caught_runtime(body: RuntimeBody): (value, string)
   local failure: value = nil

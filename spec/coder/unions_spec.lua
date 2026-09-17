@@ -41,7 +41,7 @@ describe("unions (end-to-end)", function()
         function()
             local ok, err, ast, modtype = h.run_checker([[
             union Message
-                some: integer
+                some(integer)
             end
         ]])
             assert.truthy(ok, err)
@@ -66,9 +66,9 @@ describe("unions (end-to-end)", function()
         h.with_extra_cflags({ "-DTITAN_COMPILER_TESTS" }, function()
             local csrc = h.compile_and_read_c([[
                 union Packet
-                    empty
-                    numbers: {integer}
-                    local hidden: {integer}?
+                    empty()
+                    numbers({integer})
+                    local hidden({integer}?)
                 end
 
                 function private_packet(): Packet
@@ -105,13 +105,13 @@ describe("unions (end-to-end)", function()
         function()
             h.run_coder([[
             union Message
-                quit
-                write: string
-                count: integer
+                quit()
+                write(string)
+                count(integer)
             end
 
             union Other
-                item
+                item()
             end
 
             surplus_effects: integer = 0
@@ -123,18 +123,18 @@ describe("unions (end-to-end)", function()
 
             function describe(message: Message): string
                 case message
-                when write: text then
+                when write(text) then
                     return "write:" .. text
-                when count: n then
+                when count(n) then
                     return "count:" .. n
-                when quit then
+                when quit() then
                     return "quit"
                 end
             end
 
             function unmatched(message: Message): integer
                 case message
-                when count: n then
+                when count(n) then
                     return n
                 end
                 return -1
@@ -181,7 +181,7 @@ describe("unions (end-to-end)", function()
                 end
 
                 union Message
-                    move: Delta
+                    move(Delta)
                 end
             ]],
                 message_consumer = [[
@@ -190,7 +190,7 @@ describe("unions (end-to-end)", function()
 
                 function total(): float
                     case moved
-                    when move: delta then
+                    when move(delta) then
                         return delta.x + delta.y
                     end
                 end
@@ -206,8 +206,8 @@ describe("unions (end-to-end)", function()
     it("forces an optional scrutinee once before any arm handlers", function()
         h.run_coder([[
             union Maybe
-                none
-                some: integer
+                none()
+                some(integer)
             end
 
             scrutinies: integer = 0
@@ -226,14 +226,14 @@ describe("unions (end-to-end)", function()
 
             function inspect(present: boolean): integer
                 case optional(present)
-                when some: n then
+                when some(n) then
                     defer finally_runs = finally_runs + 1
                     arm_runs = arm_runs + 1
                     return n
                 catch
                     catch_runs = catch_runs + 1
                     return -2
-                when none then
+                when none() then
                     return 0
                 else
                     else_runs = else_runs + 1
@@ -262,8 +262,8 @@ describe("unions (end-to-end)", function()
     it("keeps case arms as full blocks with catch, finally, and defer", function()
         h.run_coder([[
             union Message
-                write: string
-                quit
+                write(string)
+                quit()
             end
 
             cleanup_effects: integer = 0
@@ -275,7 +275,7 @@ describe("unions (end-to-end)", function()
             function protected(message: Message): integer
                 local out = 0
                 case message
-                when write: text then
+                when write(text) then
                     defer out = out + #text + 100
                     do
                         out = #text
@@ -283,7 +283,7 @@ describe("unions (end-to-end)", function()
                     catch
                         out = out + #text + 10
                     end
-                when quit then
+                when quit() then
                     defer out = out + 1000
                     out = 1
                 else
@@ -295,10 +295,10 @@ describe("unions (end-to-end)", function()
             function deferred(message: Message): integer
                 local out = 0
                 case message
-                when write: text then
+                when write(text) then
                     defer out = out + 100
                     out = #text
-                when quit then
+                when quit() then
                     out = 1
                 end
                 return out
@@ -306,7 +306,7 @@ describe("unions (end-to-end)", function()
 
             function cleanup_fallthrough(message: Message): integer
                 case message
-                when write: text then
+                when write(text) then
                     defer cleanup_effects = cleanup_effects + 10
                     defer cleanup_effects = cleanup_effects + 1
                     cleanup_effects = cleanup_effects + #text
@@ -325,7 +325,7 @@ describe("unions (end-to-end)", function()
 
             function cleanup_return(message: Message): integer
                 case message
-                when write: text then
+                when write(text) then
                     defer cleanup_effects = cleanup_effects + 10
                     defer cleanup_effects = cleanup_effects + 1
                     return #text
@@ -338,7 +338,7 @@ describe("unions (end-to-end)", function()
 
             function cleanup_raise(message: Message)
                 case message
-                when write then
+                when write() then
                     defer cleanup_effects = cleanup_effects + 10
                     defer cleanup_effects = cleanup_effects + 1
                     raise "raised arm"
@@ -352,7 +352,7 @@ describe("unions (end-to-end)", function()
 
             function scrutinee_handler_isolation()
                 case exploding_scrutinee()
-                when write then
+                when write() then
                 catch
                     cleanup_effects = cleanup_effects + 100
                 else
@@ -396,8 +396,8 @@ describe("unions (end-to-end)", function()
         function()
             h.run_coder([[
             union Branch
-                selected: integer
-                other: integer
+                selected(integer)
+                other(integer)
             end
 
             differential_trace: integer = 0
@@ -409,7 +409,7 @@ describe("unions (end-to-end)", function()
             function case_fallthrough(branch: Branch): integer
                 differential_trace = 0
                 case branch
-                when selected: n then
+                when selected(n) then
                     defer differential_trace = differential_trace + 10
                     defer differential_trace = differential_trace + 1
                     differential_trace = differential_trace + n
@@ -438,7 +438,7 @@ describe("unions (end-to-end)", function()
             function case_return(branch: Branch): integer
                 differential_trace = 0
                 case branch
-                when selected: n then
+                when selected(n) then
                     defer differential_trace = differential_trace + 10
                     defer differential_trace = differential_trace + 1
                     return n
@@ -465,7 +465,7 @@ describe("unions (end-to-end)", function()
             function case_raise(branch: Branch): integer
                 differential_trace = 0
                 case branch
-                when selected: n then
+                when selected(n) then
                     defer differential_trace = differential_trace + 1000
                     do
                         differential_trace = differential_trace + n
@@ -496,7 +496,7 @@ describe("unions (end-to-end)", function()
                 differential_trace = 0
                 while true do
                     case branch
-                    when selected: n then
+                    when selected(n) then
                         defer differential_trace = differential_trace + 10
                         defer differential_trace = differential_trace + 1
                         differential_trace = differential_trace + n
@@ -552,8 +552,8 @@ describe("unions (end-to-end)", function()
     it("lets an arm break its enclosing loop and nests cases safely", function()
         h.run_coder([[
             union Message
-                quit
-                count: integer
+                quit()
+                count(integer)
             end
 
             function iterations(message: Message): integer
@@ -561,9 +561,9 @@ describe("unions (end-to-end)", function()
                 while true do
                     n = n + 1
                     case message
-                    when quit then
+                    when quit() then
                         break
-                    when count: limit then
+                    when count(limit) then
                         if n >= limit then
                             break
                         end
@@ -574,11 +574,11 @@ describe("unions (end-to-end)", function()
 
             function nested(outer: Message, inner: Message): integer
                 case outer
-                when quit then
+                when quit() then
                     return 0
-                when count: a then
+                when count(a) then
                     case inner
-                    when count: b then
+                    when count(b) then
                         return a * 10 + b
                     else
                         return a
@@ -592,7 +592,7 @@ describe("unions (end-to-end)", function()
                 local n = 0
                 while true do
                     case message
-                    when quit then
+                    when quit() then
                         defer n = n + 10
                         defer n = n + 100
                         n = 1
@@ -606,7 +606,7 @@ describe("unions (end-to-end)", function()
 
             function loop_inside_arm(message: Message): integer
                 case message
-                when count: limit then
+                when count(limit) then
                     local n = 0
                     while true do
                         n = n + 1
@@ -620,9 +620,9 @@ describe("unions (end-to-end)", function()
 
             function terminating_case(message: Message): integer
                 case message
-                when quit then
+                when quit() then
                     return 1
-                when count: n then
+                when count(n) then
                     return n
                 end
                 return variable_in_unchecked_dead_tail
@@ -669,7 +669,7 @@ describe("unions (end-to-end)", function()
                     end
                 end
                 case message
-                when quit then
+                when quit() then
                     out = out + 10
                 else
                     out = out + 20
@@ -708,16 +708,16 @@ describe("unions (end-to-end)", function()
     it("stores Array payloads in their internal representation", function()
         local csrc = h.compile_and_read_c([[
             union Numbers
-                none
-                nothing: nil
-                many: {integer}
+                none()
+                nothing(nil)
+                many({integer})
             end
 
             function total(numbers: Numbers): integer
                 case numbers
-                when many: values then
+                when many(values) then
                     return values[1] + values[2]
-                when none then
+                when none() then
                     return 0
                 else
                     return -1
@@ -734,7 +734,7 @@ describe("unions (end-to-end)", function()
 
             function is_typed_nil(numbers: Numbers): boolean
                 case numbers
-                when nothing: payload then
+                when nothing(payload) then
                     return payload == nil
                 else
                     return false
@@ -743,12 +743,12 @@ describe("unions (end-to-end)", function()
 
             function mutate_and_rebind(numbers: Numbers): integer
                 case numbers
-                when many: values then
+                when many(values) then
                     values[1] = 40
                     values = {1, 2}
                 end
                 case numbers
-                when many: values then
+                when many(values) then
                     return values[1] + values[2]
                 else
                     return -1
@@ -780,44 +780,44 @@ describe("unions (end-to-end)", function()
             local csrc = h.compile_and_read_c([[
             foreign import "spec/fixtures/c_tvalue_soundness.h"
 
-            local type Owner = owned ffi.titan_spec_tvalue_int[]
+            local type Owner = owned titan_spec_tvalue_int[]
 
             local record Box
                 number: integer
             end
 
             local union Payload
-                primitive: integer
-                text: string
-                array: {Box}
-                maybe_array: {Box}?
-                record_item: Box
-                callback: (integer) -> integer
-                pointer: *ffi.titan_spec_tvalue_int
-                owner: Owner
-                raw: ffi.TValue
+                primitive(integer)
+                text(string)
+                array({Box})
+                maybe_array({Box}?)
+                record_item(Box)
+                callback(function (integer): integer)
+                pointer(foreign *titan_spec_tvalue_int)
+                owner(Owner)
+                raw(foreign TValue)
             end
 
             local function payload_value(payload: Payload): integer
                 case payload
-                when primitive: item then
+                when primitive(item) then
                     return item
-                when text: item then
+                when text(item) then
                     return #item
-                when array: values then
+                when array(values) then
                     return values[1].number
-                when maybe_array: maybe then
+                when maybe_array(maybe) then
                     local values: {Box} = maybe
                     return values[1].number
-                when record_item: item then
+                when record_item(item) then
                     return item.number
-                when callback: callback then
+                when callback(callback) then
                     return callback(1)
-                when pointer: pointer then
+                when pointer(pointer) then
                     return pointer[0] as integer
-                when owner: owner then
+                when owner(owner) then
                     return owner[0] as integer
-                when raw: raw then
+                when raw(raw) then
                     local boxed: value = raw
                     local item: string = boxed as string
                     return #item
@@ -828,15 +828,15 @@ describe("unions (end-to-end)", function()
 
             function exercise(): integer
                 local pointer_owner: Owner =
-                    ffi.titan_spec_tvalue_int.new_array(1)
-                pointer_owner[0] = 8 as ffi.titan_spec_tvalue_int
-                local pointer: *ffi.titan_spec_tvalue_int = pointer_owner
+                    foreign titan_spec_tvalue_int.new_array(1)
+                pointer_owner[0] = 8 as foreign titan_spec_tvalue_int
+                local pointer: foreign *titan_spec_tvalue_int = pointer_owner
 
                 local owner: Owner =
-                    ffi.titan_spec_tvalue_int.new_array(1)
-                owner[0] = 7 as ffi.titan_spec_tvalue_int
+                    foreign titan_spec_tvalue_int.new_array(1)
+                owner[0] = 7 as foreign titan_spec_tvalue_int
 
-                local raw: ffi.TValue = "raw"
+                local raw: foreign TValue = "raw"
                 local delta = 5
                 return payload_value(Payload.primitive(1))
                     + payload_value(Payload.text("ok"))
@@ -883,25 +883,25 @@ describe("unions (end-to-end)", function()
             end
 
             local union Inner
-                text: string
+                text(string)
             end
 
             local union Payload
-                primitive: integer
-                text: string
-                array: {Box}
-                maybe_array: {Box}?
-                map: {string: Box}
-                record_item: Box
-                nested: Inner
-                callback: (integer) -> integer
-                boxed: value
-                maybe_text: string?
-                pointer: *int
-                owner: Owner
-                recursive: Payload?
-                raw: ffi.TValue
-                udata: *ffi.Udata
+                primitive(integer)
+                text(string)
+                array({Box})
+                maybe_array({Box}?)
+                map({string: Box})
+                record_item(Box)
+                nested(Inner)
+                callback(function (integer): integer)
+                boxed(value)
+                maybe_text(string?)
+                pointer(foreign *int)
+                owner(Owner)
+                recursive(Payload?)
+                raw(foreign TValue)
+                udata(foreign *Udata)
             end
 
             local function select_gc(generational: boolean)
@@ -918,13 +918,13 @@ describe("unions (end-to-end)", function()
                     -- In generational mode these are minor collections. Do
                     -- not let this proof collapse to "switch mode, full GC".
                     ffi.lua_gc(
-                        L, ffi.LUA_GCSTEP, 0 as ffi.lua_Integer)
+                        L, ffi.LUA_GCSTEP, 0 as foreign lua_Integer)
                     ffi.lua_gc(
-                        L, ffi.LUA_GCSTEP, 0 as ffi.lua_Integer)
+                        L, ffi.LUA_GCSTEP, 0 as foreign lua_Integer)
                     ffi.lua_gc(
-                        L, ffi.LUA_GCSTEP, 0 as ffi.lua_Integer)
+                        L, ffi.LUA_GCSTEP, 0 as foreign lua_Integer)
                     ffi.lua_gc(
-                        L, ffi.LUA_GCSTEP, 0 as ffi.lua_Integer)
+                        L, ffi.LUA_GCSTEP, 0 as foreign lua_Integer)
                 else
                     ffi.lua_gc(L, ffi.LUA_GCCOLLECT)
                 end
@@ -987,14 +987,14 @@ describe("unions (end-to-end)", function()
             end
 
             local function make_pointer(owner: Owner): Payload
-                local pointer: *int = owner
+                local pointer: foreign *int = owner
                 return Payload.pointer(pointer)
             end
 
             local function make_owner(): Payload
                 local owner: Owner =
-                    int.new_array(1)
-                owner[0] = 12 as int
+                    foreign int.new_array(1)
+                owner[0] = 12 as foreign int
                 return Payload.owner(owner)
             end
 
@@ -1004,13 +1004,13 @@ describe("unions (end-to-end)", function()
             end
 
             local function make_raw(): Payload
-                local raw: ffi.TValue = "raw"
+                local raw: foreign TValue = "raw"
                 return Payload.raw(raw)
             end
 
             local function make_udata(): Payload
                 local boxed: value = Box.new(15)
-                local pointer: *ffi.Udata = boxed as *ffi.Udata
+                local pointer: foreign *Udata = boxed as foreign *Udata
                 return Payload.udata(pointer)
             end
 
@@ -1020,11 +1020,11 @@ describe("unions (end-to-end)", function()
             local function install_fresh_array_elements(
                     direct: Payload, optional: Payload)
                 case direct
-                when array: values then
+                when array(values) then
                     values[1] = Box.new(40)
                 end
                 case optional
-                when maybe_array: maybe then
+                when maybe_array(maybe) then
                     local values: {Box} = maybe
                     values[1] = Box.new(31)
                 end
@@ -1032,50 +1032,50 @@ describe("unions (end-to-end)", function()
 
             local function payload_value(payload: Payload): integer
                 case payload
-                when primitive: item then
+                when primitive(item) then
                     return item
-                when text: item then
+                when text(item) then
                     return #item
-                when array: values then
+                when array(values) then
                     return values[1].number + values[2].number
-                when maybe_array: maybe then
+                when maybe_array(maybe) then
                     if maybe then
                         local values: {Box} = maybe
                         return values[1].number
                     end
                     return 0
-                when map: values then
+                when map(values) then
                     return values["left"].number
                         + values["right"].number
-                when record_item: item then
+                when record_item(item) then
                     return item.number
-                when nested: inner then
+                when nested(inner) then
                     case inner
-                    when text: item then
+                    when text(item) then
                         return #item
                     else
                         return -100
                     end
-                when callback: callback then
+                when callback(callback) then
                     return callback(2)
-                when boxed: boxed then
+                when boxed(boxed) then
                     local item: Box = boxed as Box
                     return item.number
-                when maybe_text: maybe then
+                when maybe_text(maybe) then
                     local item: string = maybe
                     return #item
-                when pointer: pointer then
+                when pointer(pointer) then
                     return pointer[0] as integer
-                when owner: owner then
+                when owner(owner) then
                     return owner[0] as integer
-                when recursive: child then
+                when recursive(child) then
                     local item: Payload = child
                     return payload_value(item)
-                when raw: raw then
+                when raw(raw) then
                     local boxed: value = raw
                     local item: string = boxed as string
                     return #item
-                when udata: pointer then
+                when udata(pointer) then
                     local boxed: value = pointer
                     local item: Box = boxed as Box
                     return item.number
@@ -1099,8 +1099,8 @@ describe("unions (end-to-end)", function()
                 local boxed = make_boxed()
                 local maybe_text = make_maybe_text()
                 local pointer_owner: Owner =
-                    int.new_array(1)
-                pointer_owner[0] = 11 as int
+                    foreign int.new_array(1)
+                pointer_owner[0] = 11 as foreign int
                 local pointer = make_pointer(pointer_owner)
                 local owner = make_owner()
                 local recursive = make_recursive()
@@ -1142,7 +1142,7 @@ describe("unions (end-to-end)", function()
                 collect_after_store(generational)
                 local result = false
                 case payload
-                when maybe_array: maybe then
+                when maybe_array(maybe) then
                     result = not maybe
                 end
                 ffi.lua_gc(L, ffi.LUA_GCINC)
@@ -1176,14 +1176,14 @@ describe("unions (end-to-end)", function()
     it("keeps payloads and captured binders alive across collections", function()
         h.run_coder([[
             union Message
-                text: string
-                callback: (integer) -> integer
-                empty
+                text(string)
+                callback(function (integer): integer)
+                empty()
             end
 
-            function capture(message: Message): () -> string
+            function capture(message: Message): function (): string
                 case message
-                when text: text_value then
+                when text(text_value) then
                     return function(): string
                         return text_value
                     end
@@ -1202,7 +1202,7 @@ describe("unions (end-to-end)", function()
 
             function invoke(message: Message, input: integer): integer
                 case message
-                when callback: callback then
+                when callback(callback) then
                     return callback(input)
                 else
                     return -1
@@ -1231,19 +1231,19 @@ describe("unions (end-to-end)", function()
     it("isolates sibling-arm binder boxes and setjmp spills", function()
         h.run_coder([[
             union Choice
-                left: integer
-                right: integer
+                left(integer)
+                right(integer)
             end
 
-            function arm_closure(choice: Choice): () -> integer
+            function arm_closure(choice: Choice): function (): integer
                 case choice
-                when left: n then
+                when left(n) then
                     n = n + 10
                     return function(): integer
                         n = n + 1
                         return n
                     end
-                when right: n then
+                when right(n) then
                     local observed = 0
                     do
                         n = n + 20
@@ -1266,7 +1266,7 @@ describe("unions (end-to-end)", function()
                 local observed = 0
                 do
                     case Choice.left(input)
-                    when left: n then
+                    when left(n) then
                         observed = n
                     else
                         observed = -1
@@ -1298,14 +1298,14 @@ describe("unions (end-to-end)", function()
             h.with_extra_cflags({ '-DTITAN_COMPILER_TESTS' }, function()
                 h.run_coder([[
             union Message
-                quit
-                write: string
-                local hidden: integer
+                quit()
+                write(string)
+                local hidden(integer)
             end
 
             function Message:length(): integer
                 case self
-                when write: text then
+                when write(text) then
                     return #text
                 else
                     return 0
@@ -1351,19 +1351,19 @@ describe("unions (end-to-end)", function()
                 end
 
                 union Message
-                    count: integer
-                    quit
+                    count(integer)
+                    quit()
                 end
             ]],
                 union_consumer = [[
                 local provider = import "union_provider"
 
                 function run(): integer
-                    local make: (integer) -> provider.Message =
+                    local make: function (integer): provider.Message =
                         provider.Message.count
                     local message = make(42)
                     case message
-                    when count: n then
+                    when count(n) then
                         return n
                     else
                         return -1
@@ -1378,7 +1378,7 @@ describe("unions (end-to-end)", function()
                     local message = provider.Message.count(
                         provider.increment(provider.seed))
                     case message
-                    when count: n then
+                    when count(n) then
                         return n
                     else
                         return -1
@@ -1386,7 +1386,7 @@ describe("unions (end-to-end)", function()
                 end
 
                 function record_static(): integer
-                    local make: (integer, integer) -> provider.Pair =
+                    local make: function (integer, integer): provider.Pair =
                         provider.Pair.new
                     local pair = make(provider.seed, 2)
                     return pair.first + pair.second
@@ -1420,16 +1420,16 @@ describe("unions (end-to-end)", function()
                     end
 
                     union Message
-                        local hidden: integer
-                        count: integer
-                        quit
+                        local hidden(integer)
+                        count(integer)
+                        quit()
                     end
 
                     function Message:measure(): integer
                         case self
-                        when count: n then
+                        when count(n) then
                             return n
-                        when quit then
+                        when quit() then
                             return 0
                         else
                             return -1
@@ -1451,11 +1451,11 @@ describe("unions (end-to-end)", function()
                     local provider = import "union_so_provider"
 
                     function run(): integer
-                        local make: (integer) -> provider.Message =
+                        local make: function (integer): provider.Message =
                             provider.Message.count
                         local message = make(42)
                         case message
-                        when count: n then
+                        when count(n) then
                             return n
                         else
                             return -1
@@ -1471,7 +1471,7 @@ describe("unions (end-to-end)", function()
                         local message = provider.Message.count(
                             provider.increment(provider.seed))
                         case message
-                        when count: n then
+                        when count(n) then
                             return n
                         else
                             return -1
@@ -1479,29 +1479,29 @@ describe("unions (end-to-end)", function()
                     end
 
                     function record_static(): integer
-                        local make: (integer, integer) -> provider.Pair =
+                        local make: function (integer, integer): provider.Pair =
                             provider.Pair.new
                         local pair = make(provider.seed, 2)
                         return pair.first + pair.second
                     end
 
                     function static_value(): integer
-                        local make: (integer) -> provider.Message =
+                        local make: function (integer): provider.Message =
                             provider.Message.bump
                         return make(41):measure()
                     end
 
                     function bound_value(): integer
                         local message = provider.Message.count(42)
-                        local read: () -> integer = message:measure
+                        local read: function (): integer = message:measure
                         return read()
                     end
 
                     function hidden_else(): integer
                         case provider.hidden_message()
-                        when count: n then
+                        when count(n) then
                             return n
-                        when quit then
+                        when quit() then
                             return 0
                         else
                             return 99

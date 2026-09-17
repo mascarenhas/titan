@@ -108,7 +108,7 @@ describe("C FFI code generation", function()
                 end
 
                 function has_module(): integer
-                    return ffi.ffi_has_module(M)
+                    return ffi.ffi_has_module(M as foreign *Udata)
                 end
             ]], [[
                 assert(test.has_state() == 1)
@@ -130,7 +130,7 @@ describe("C FFI code generation", function()
                 h.run_coder([[
                     foreign import "]] .. header .. [["
                     function run(input: integer): integer
-                        local item: ffi.ffi_warn_enum = input as ffi.ffi_warn_enum
+                        local item: foreign ffi_warn_enum = input as foreign ffi_warn_enum
                         return item as integer
                     end
                     function fit(): integer
@@ -260,17 +260,17 @@ describe("C FFI code generation", function()
                 h.run_coder([[
                     foreign import "]] .. header .. [["
                     function short(x: integer): integer
-                        local item: ffi.ffi_short_enum =
-                            x as ffi.ffi_short_enum
+                        local item: foreign ffi_short_enum =
+                            x as foreign ffi_short_enum
                         return ffi.ffi_short_take(item) as integer
                     end
                     function short_pointer(x: integer): integer
                         local callback = ffi.ffi_short_pointer()
-                        return callback(x as ffi.ffi_short_enum) as integer
+                        return callback(x as foreign ffi_short_enum) as integer
                     end
                     function ushort(x: integer): integer
-                        local item: ffi.ffi_ushort_enum =
-                            x as ffi.ffi_ushort_enum
+                        local item: foreign ffi_ushort_enum =
+                            x as foreign ffi_ushort_enum
                         return ffi.ffi_ushort_take(item) as integer
                     end
                 ]], [[
@@ -324,7 +324,7 @@ describe("C FFI code generation", function()
 
                 function identity(x: float): float
                     local converted =
-                        x as ffi.ffi_public_number
+                        x as foreign ffi_public_number
                     return converted as float
                 end
             ]], [[
@@ -341,18 +341,18 @@ describe("C FFI code generation", function()
                 foreign import "]] .. header .. [["
 
                 function module_value(): value
-                    return M
+                    return M as foreign *Udata
                 end
 
                 function same_module(item: value): boolean
-                    local module = item as *ffi.Udata
-                    return module == M
+                    local module = item as foreign *Udata
+                    return module == (M as foreign *Udata)
                 end
 
                 function null_roundtrip(): boolean
-                    local module: *ffi.Udata = nil
+                    local module: foreign *Udata = nil
                     local item: value = module
-                    return item == nil and (item as *ffi.Udata) == nil
+                    return item == nil and (item as foreign *Udata) == nil
                 end
             ]], [[
                 assert(rawequal(test.module_value(), test))
@@ -383,7 +383,7 @@ describe("C FFI code generation", function()
             h.run_coder([[
                 foreign import "]] .. header .. [["
 
-                local state = ffi.ffi_state.new()
+                local state = foreign ffi_state.new()
 
                 function state_value(): value
                     return state
@@ -457,7 +457,7 @@ describe("C FFI code generation", function()
                     return x
                 end
 
-                local function coro_entry(func: (value) -> value, co: *ffi.ffi_coro)
+                local function coro_entry(func: function (value): (value), co: foreign *ffi_coro)
                 end
 
                 function nil_rounds(): value
@@ -495,25 +495,25 @@ describe("C FFI code generation", function()
                 end
 
                 function raw_local_kind(): integer
-                    local raw: ffi.TValue = 42
+                    local raw: foreign TValue = 42
                     return ffi.ffi_value_kind(raw)
                 end
 
                 function raw_pointer_kind(): integer
-                    local raw: ffi.TValue = "through pointer"
-                    local p: const *ffi.TValue = raw
+                    local raw: foreign TValue = "through pointer"
+                    local p: foreign const *TValue = raw
                     return (ffi.ffi_const_value_kind(p) as integer)
                         + (ffi.ffi_const_value_kind(raw) as integer)
-                        + (ffi.ffi_const_value_kind("direct" as ffi.TValue) as integer)
+                        + (ffi.ffi_const_value_kind("direct" as foreign TValue) as integer)
                 end
 
                 function raw_back(): value
-                    local raw: ffi.TValue = "back"
+                    local raw: foreign TValue = "back"
                     return raw
                 end
 
                 function raw_gc_survives(): value
-                    local raw: ffi.TValue = ffi.ffi_make_gc_payload(L)
+                    local raw: foreign TValue = ffi.ffi_make_gc_payload(L)
                     ffi.ffi_collect(L)
                     return raw
                 end
@@ -546,7 +546,7 @@ describe("C FFI code generation", function()
                 foreign import "]] .. header .. [["
 
                 function sum(): integer
-                    local owner = ffi.ffi_int.new_array(3)
+                    local owner = foreign ffi_int.new_array(3)
                     ffi.ffi_values[2] = 12
                     owner[1] = 5
                     return (ffi.ffi_values[2] as integer)
@@ -617,15 +617,15 @@ describe("C FFI code generation", function()
                 foreign import "]] .. header .. [["
 
                 seen: integer = 0
-                local owner_array = ffi.ffi_int.new_array(2)
-                local nested_owner = ffi.ffi_owner.new()
+                local owner_array = foreign ffi_int.new_array(2)
+                local nested_owner = foreign ffi_owner.new()
 
                 local function static_index(): integer
                     seen = seen * 10 + 1
                     return 0
                 end
 
-                local function point(good: boolean): *ffi.ffi_point
+                local function point(good: boolean): foreign *ffi_point
                     seen = seen * 10 + 2
                     if good then return ffi.ffi_point_ptr end
                     return ffi.ffi_null_point
@@ -656,7 +656,7 @@ describe("C FFI code generation", function()
                     return v
                 end
 
-                local function intermediate_null_base(): *ffi.ffi_link
+                local function intermediate_null_base(): foreign *ffi_link
                     seen = seen * 10 + 1
                     return ffi.ffi_null_link_ptr
                 end
@@ -667,7 +667,7 @@ describe("C FFI code generation", function()
                 end
 
                 local function swap_nested_owner(f: value): integer
-                    nested_owner = ffi.ffi_owner.new()
+                    nested_owner = foreign ffi_owner.new()
                     nested_owner.inner.x = 900
                     nested_owner.values[0] = 901
                     local result: integer = f()
@@ -741,7 +741,7 @@ describe("C FFI code generation", function()
                 end
 
                 function reset_nested_owner(): nil
-                    nested_owner = ffi.ffi_owner.new()
+                    nested_owner = foreign ffi_owner.new()
                     nested_owner.inner.x = 30
                     nested_owner.values[0] = 40
                     return nil
@@ -776,15 +776,15 @@ describe("C FFI code generation", function()
                 end
 
                 function read_nested_owner(item: value): integer
-                    local owner: owned *ffi.ffi_owner =
-                        ffi.ffi_owner.new()
+                    local owner: owned *ffi_owner =
+                        foreign ffi_owner.new()
                     owner = item
                     return owner.inner.x as integer
                 end
 
                 function read_nested_array(item: value): integer
-                    local owner: owned *ffi.ffi_owner =
-                        ffi.ffi_owner.new()
+                    local owner: owned *ffi_owner =
+                        foreign ffi_owner.new()
                     owner = item
                     return owner.values[0] as integer
                 end
@@ -927,7 +927,7 @@ describe("C FFI code generation", function()
                 end
 
                 function zero(): integer
-                    local p = ffi.ffi_point.new()
+                    local p = foreign ffi_point.new()
                     p.x = 19
                     p.y = 23
                     return (p.x as integer) + (p.y as integer)
@@ -1102,13 +1102,13 @@ describe("C FFI code generation", function()
                 foreign import "]] .. header .. [["
 
                 function use_cast_macros(): integer
-                    local typedef_callback: ffi.ffi_macro_callback =
+                    local typedef_callback: foreign ffi_macro_callback =
                         ffi.FFI_TYPEDEF_CALLBACK
-                    local direct_callback: ffi.ffi_macro_callback =
+                    local direct_callback: foreign ffi_macro_callback =
                         ffi.FFI_DIRECT_CALLBACK
-                    local count: ffi.ffi_macro_long = ffi.FFI_CAST_INT
-                    local fraction: ffi.ffi_macro_double = ffi.FFI_CAST_DOUBLE
-                    local pointer: ffi.ffi_macro_int_ptr = ffi.FFI_CAST_POINTER
+                    local count: foreign ffi_macro_long = ffi.FFI_CAST_INT
+                    local fraction: foreign ffi_macro_double = ffi.FFI_CAST_DOUBLE
+                    local pointer: foreign ffi_macro_int_ptr = ffi.FFI_CAST_POINTER
 
                     if typedef_callback ~= direct_callback
                        and count == ffi.FFI_CAST_INT
@@ -1185,7 +1185,7 @@ describe("C FFI code generation", function()
             h.run_coder([[
                 foreign import "]] .. header .. [["
 
-                local function next_node(): ffi.ffi_node_ref
+                local function next_node(): foreign ffi_node_ref
                     return ffi.ffi_head_ptr.next
                 end
 
@@ -1211,22 +1211,22 @@ describe("C FFI code generation", function()
             h.run_coder([[
                 foreign import "]] .. header .. [["
 
-                local function read_pointer(p: const *ffi.ffi_int): integer
+                local function read_pointer(p: foreign const *ffi_int): integer
                     return ffi.ffi_read_const_int(p) as integer
                 end
 
                 function sum(v: value): integer
-                    local x: ffi.ffi_int = 41 as ffi.ffi_int
-                    return (ffi.ffi_int.sizeof as integer)
-                        + (ffi.ffi_int.alignof as integer)
+                    local x: foreign ffi_int = 41 as foreign ffi_int
+                    return (foreign ffi_int.sizeof as integer)
+                        + (foreign ffi_int.alignof as integer)
                         + (ffi.ffi_read_const_int(x) as integer)
                         + read_pointer(x)
                         + (ffi.ffi_has_const_ptr(x) as integer)
-                        + (ffi.ffi_has_const_tvalue(v as ffi.TValue) as integer)
+                        + (ffi.ffi_has_const_tvalue(v as foreign TValue) as integer)
                 end
 
                 function rvalue_const_pointer(): integer
-                    return ffi.ffi_read_const_int(41 as ffi.ffi_int) as integer
+                    return ffi.ffi_read_const_int(41 as foreign ffi_int) as integer
                 end
 
                 function call_result_const_pointer(): integer
@@ -1256,19 +1256,19 @@ describe("C FFI code generation", function()
                 foreign import "]] .. header .. [["
 
                 function write_int(): integer
-                    local x: ffi.ffi_int = 0 as ffi.ffi_int
+                    local x: foreign ffi_int = 0 as foreign ffi_int
                     ffi.ffi_write_int(x)
                     return x as integer
                 end
 
                 function write_void(): integer
-                    local x: ffi.ffi_int = 0 as ffi.ffi_int
+                    local x: foreign ffi_int = 0 as foreign ffi_int
                     ffi.ffi_write_void(x)
                     return x as integer
                 end
 
                 function write_value(): value
-                    local raw: ffi.TValue = nil
+                    local raw: foreign TValue = nil
                     ffi.ffi_write_value(raw)
                     return raw
                 end
@@ -1324,7 +1324,7 @@ describe("C FFI code generation", function()
                 foreign import "]] .. header .. [["
 
                 function survives_gc_check_after_write(): integer
-                    local raw: ffi.TValue = nil
+                    local raw: foreign TValue = nil
                     ffi.ffi_reset_outparam_finalized()
                     ffi.ffi_write_gc_value(L, raw)
                     ffi.ffi_collect(L)
@@ -1350,7 +1350,7 @@ describe("C FFI code generation", function()
                 foreign import "]] .. header .. [["
 
                 function sum(): integer
-                    local p = ffi.ffi_point.new()
+                    local p = foreign ffi_point.new()
                     p.x = 17
                     p.y = 25
                     return (p.x as integer) + (p.y as integer)
@@ -1386,10 +1386,10 @@ describe("C FFI code generation", function()
                 end
 
                 function formatted_owned_len(): integer
-                    local msg = ffi.ffi_char.new_array(3)
-                    msg[0] = 79 as ffi.ffi_char
-                    msg[1] = 75 as ffi.ffi_char
-                    msg[2] = 0 as ffi.ffi_char
+                    local msg = foreign ffi_char.new_array(3)
+                    msg[0] = 79 as foreign ffi_char
+                    msg[1] = 75 as foreign ffi_char
+                    msg[2] = 0 as foreign ffi_char
                     return ffi.ffi_vararg_string_length(0, msg)
                 end
             ]], [[
@@ -1444,7 +1444,7 @@ describe("C FFI code generation", function()
                 foreign import "]] .. header .. [["
 
                 function sum(): integer
-                    local cb: ffi.ffi_callback = ffi.ffi_add1
+                    local cb: foreign ffi_callback = ffi.ffi_add1
                     local chosen = ffi.ffi_choose()
                     return (ffi.ffi_add1(1) as integer)
                         + (cb(4) as integer)
@@ -1499,13 +1499,13 @@ describe("C FFI code generation", function()
                 end
 
                 function direct_anchor(): value
-                    local item: ffi.TValue = nil
+                    local item: foreign TValue = nil
                     ffi.ffi_touch_value(item)
                     return item
                 end
 
                 function pointer_anchor(): value
-                    local item: ffi.TValue = nil
+                    local item: foreign TValue = nil
                     ffi.ffi_value_pointer(item)
                     return item
                 end
@@ -1620,7 +1620,7 @@ describe("C FFI code generation", function()
                 foreign import "]] .. header .. [["
 
                 function qualified_callbacks(): integer
-                    local direct: ffi.ffi_qualified_callback =
+                    local direct: foreign ffi_qualified_callback =
                         ffi.ffi_qualified_answer
                     local chosen = ffi.ffi_choose_qualified()
                     return (direct() as integer)
@@ -1692,12 +1692,12 @@ describe("C FFI code generation", function()
                 foreign import "]] .. header .. [["
 
                 record Handle
-                    local pointer: *ffi.ffi_counter
+                    local pointer: foreign *ffi_counter
                 end
 
                 function read(): integer
-                    local counter: ffi.ffi_counter = 42 as ffi.ffi_counter
-                    local pointer: *ffi.ffi_counter = counter
+                    local counter: foreign ffi_counter = 42 as foreign ffi_counter
+                    local pointer: foreign *ffi_counter = counter
                     local handle = Handle.new(pointer)
                     return ffi.ffi_counter_read(handle.pointer) as integer
                 end
@@ -1719,7 +1719,7 @@ describe("C FFI code generation", function()
                 end
 
                 function bad(): integer
-                    local p: owned *ffi.ffi_point = ffi.ffi_point.new()
+                    local p: owned *ffi_point = foreign ffi_point.new()
                     local v: value = R.new(7)
                     p = v
                     return p.x as integer

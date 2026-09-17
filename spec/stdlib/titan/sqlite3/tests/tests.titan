@@ -8,9 +8,9 @@ local timer = import "timer"
 local fs = import "fs"
 local math = import "math"
 local reflect = import "reflect"
-local str = import "string"
+local string = import "string"
 
-local function expect_sqlite_error(action: () -> ()): sqlite3.Error
+local function expect_sqlite_error(action: function (): ()): sqlite3.Error
   local caught: sqlite3.Error? = nil
   do
     action()
@@ -27,14 +27,14 @@ local function expect_sqlite_error(action: () -> ()): sqlite3.Error
   return caught
 end
 
-local function expect_wrapper_error(action: () -> ()): sqlite3.Error
+local function expect_wrapper_error(action: function (): ()): sqlite3.Error
   local failure = expect_sqlite_error(action)
   test.assert(failure.code == nil and failure.extended_code == nil,
               "wrapper error invented native SQLite result codes")
   return failure
 end
 
-local function expect_native_error(action: () -> (),
+local function expect_native_error(action: function (): (),
                                    code: integer): sqlite3.Error
   local failure = expect_sqlite_error(action)
   test.assert(failure.code == code and failure.extended_code ~= nil,
@@ -74,7 +74,7 @@ end
 local function assert_integer_cell(row: sqlite3.Row, index: integer,
                                    expected: integer)
   case reflect.inspect(row:get(index))
-  when is_integer: actual then
+  when is_integer(actual) then
     test.assert(actual == expected, "SQL INTEGER cell had the wrong value")
   else
     raise "SQL INTEGER cell lost its integer representation"
@@ -84,7 +84,7 @@ end
 local function assert_float_cell(row: sqlite3.Row, index: integer,
                                  expected: float)
   case reflect.inspect(row:get(index))
-  when is_float: actual then
+  when is_float(actual) then
     test.assert(actual == expected, "SQL REAL cell had the wrong value")
   else
     raise "SQL REAL cell lost its float representation"

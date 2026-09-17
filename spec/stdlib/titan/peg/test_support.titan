@@ -5,8 +5,8 @@ foreign import "locale.h"
 local function bytes_contain(subject: string, needle: string): boolean
   if #needle == 0 then return true end
   if #needle > #subject then return false end
-  local haystack = subject as const *unsigned char
-  local wanted = needle as const *unsigned char
+  local haystack = subject as foreign const *unsigned char
+  local wanted = needle as foreign const *unsigned char
   local first = 0
   while first <= #subject - #needle do
     local equal = true
@@ -24,7 +24,7 @@ local function bytes_contain(subject: string, needle: string): boolean
   return false
 end
 
-local function caught_string(callback: () -> ()): string?
+local function caught_string(callback: function (): ()): string?
   do
     callback()
   catch
@@ -34,7 +34,7 @@ local function caught_string(callback: () -> ()): string?
   return nil
 end
 
-local function assert_raises(fragment: string, callback: () -> ())
+local function assert_raises(fragment: string, callback: function (): ())
   local message? = caught_string(callback)
   test.assert(message ~= nil,
               "expected a string error containing '" .. fragment .. "'")

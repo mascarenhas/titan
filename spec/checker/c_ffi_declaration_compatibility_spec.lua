@@ -435,7 +435,7 @@ describe("C declarations in one module-wide ffi environment", function()
             #define ffi_number ffi_replacement
         ]] }, [[
             function identity(x: float): float
-                local converted = x as ffi.ffi_number
+                local converted = x as foreign ffi_number
                 return converted as float
             end
         ]])

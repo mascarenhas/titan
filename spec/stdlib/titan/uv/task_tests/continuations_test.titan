@@ -16,7 +16,7 @@ function test_task_operation_routing_status_and_cancellation(
     local waiting_observed = false
     local cancellation_kept_waiting_status = false
 
-    local chain_task = async.run<value, value>(function (): value
+    local chain_task = async.run<|value, value|>(function (): value
       chain = "timer"
       timer.sleep(0)
       chain = chain .. ">write"
@@ -30,7 +30,7 @@ function test_task_operation_routing_status_and_cancellation(
     end)
     task_support.cleanup_task(chain_task, "chain Task cleanup")
 
-    local cancelled_task = async.run<value, value>(function (): value
+    local cancelled_task = async.run<|value, value|>(function (): value
       cancelled_body_started = true
       timer.sleep(60000)
       cancelled_body_finished = true
@@ -38,11 +38,11 @@ function test_task_operation_routing_status_and_cancellation(
     end)
     task_support.cleanup_task(cancelled_task, "cancellation target cleanup")
 
-    local failed_task = async.run<value, value>(failed_origin)
+    local failed_task = async.run<|value, value|>(failed_origin)
     task_support.cleanup_task(failed_task, "failed Task cleanup")
 
     local self_cancelled_task: async.Task? = nil
-    self_cancelled_task = async.run<value, value>(function (): value
+    self_cancelled_task = async.run<|value, value|>(function (): value
       (self_cancelled_task as async.Task):cancel(
         async.CancellationReason.simple("self cancellation"))
       -- Pending cancellation is injected here without submitting the long timer.
@@ -53,7 +53,7 @@ function test_task_operation_routing_status_and_cancellation(
     task_support.cleanup_task(self_cancelled_task as async.Task,
                  "self-cancelled Task cleanup")
 
-    local canceller = async.run<value, value>(function (): value
+    local canceller = async.run<|value, value|>(function (): value
       while cancelled_task:status():as_string() == "ready" do
         timer.yield()
       end
@@ -126,7 +126,7 @@ function test_nested_user_coroutine_routes_single_uv_tag(
     context: test.Context)
   runtime_test.run(function ()
     local nested_result = "running"
-    local task = async.run<value, value>(function (): value
+    local task = async.run<|value, value|>(function (): value
       local child = coroutine.create(function (_: value): value
         timer.sleep(0)
         return "nested-timer-ok"
@@ -150,7 +150,7 @@ function test_explicit_resume_runs_after_resumer_returns(
     local trace = ""
     local resume_token =
       async.ResumeToken.new("explicit resume ordering test")
-    local target = async.run<value, value>(function (): value
+    local target = async.run<|value, value|>(function (): value
       trace = trace .. "suspend>"
       async.suspend(resume_token)
       trace = trace .. "target-woke"
@@ -182,7 +182,7 @@ function test_explicit_resume_waits_for_zero_timer_close(
     local server, port = support.listen_available(32000)
     defer server:close()
     local accepted: net.Connection? = nil
-    local accepter = async.run<value, value>(function (): value
+    local accepter = async.run<|value, value|>(function (): value
       accepted = server:accept()
       return nil
     end)
@@ -198,7 +198,7 @@ function test_explicit_resume_waits_for_zero_timer_close(
 
     local resume_token =
       async.ResumeToken.new("zero-timer close ordering test")
-    local target = async.run<value, value>(function (): value
+    local target = async.run<|value, value|>(function (): value
       async.suspend(resume_token)
       trace = trace .. "target"
       return nil
@@ -236,7 +236,7 @@ end
 function test_last_live_task_failure_starts_runtime_cleanup(
     context: test.Context)
   context:log("BEGIN expected uncaught async Task diagnostics")
-  local failing = async.run<value, value>(function (): value
+  local failing = async.run<|value, value|>(function (): value
     raise "last-task-boom"
   end)
   async.loop()

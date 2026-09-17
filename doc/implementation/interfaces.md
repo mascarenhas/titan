@@ -154,7 +154,7 @@ Options use the explicitly supported outer `option_wrap`, `option_force`, or
 case. Its Array, Map, Option, and Function recursion therefore cannot turn
 Interface satisfaction into a compound relation. Distinct nominal Interfaces
 remain unrelated. This separation is what prevents an accepted `R -> I`
-coercion from implying `{R} -> {I}` or `() -> R` to `() -> I`.
+coercion from implying `{R} -> {I}` or `function (): (R)` to `function (): (I)`.
 
 ## Frozen conversion and adapter plans
 

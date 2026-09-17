@@ -163,7 +163,7 @@ describe("flexible return code generation", function()
         local decls = {}
         for i = 1, 200 do decls[i] = "v" .. i .. ": integer?" end
         local source = [[
-            function generic200(f: () -> (...: integer)): boolean
+            function generic200(f: function (): (...: integer)): boolean
                 local ]] .. table.concat(decls, ", ") .. [[ = f()
                 return not v1 and not v200
             end
@@ -197,13 +197,13 @@ describe("flexible return code generation", function()
                 return ]] .. table.concat(nils51, ", ") .. [[
             end
 
-            function finite250(f: () -> (]] .. fixed50
+            function finite250(f: function (): (]] .. fixed50
                 .. [[, ...: integer?)): boolean
                 local ]] .. decls250 .. [[ = f()
                 return not v1 and not v250
             end
 
-            function open251(f: () -> (]] .. fixed51
+            function open251(f: function (): (]] .. fixed51
                 .. [[, ...: integer?)): (]] .. fixed51 .. [[, ...: integer?)
                 return f()
             end
@@ -279,7 +279,7 @@ describe("flexible return code generation", function()
                 return checksum(9, values())
             end
 
-            function generic_args(f: (...: integer) -> integer): integer
+            function generic_args(f: function (...: integer): integer): integer
                 return f(9, values())
             end
 
@@ -287,7 +287,7 @@ describe("flexible return code generation", function()
                 return { 9, values() }
             end
 
-            function generic_array(f: () -> (...: integer)): {integer}
+            function generic_array(f: function (): (...: integer)): {integer}
                 return { 9, f() }
             end
         ]], [[
@@ -324,19 +324,19 @@ describe("flexible return code generation", function()
             end
 
             function top_value(): integer
-                local f: () -> (...: integer) = pair
+                local f: function (): (...: integer) = pair
                 local a: integer?, b: integer? = f()
                 return (a as integer) * 10 + (b as integer)
             end
 
             function discard_value(): integer
-                local f: () -> (...: integer) = pair
+                local f: function (): (...: integer) = pair
                 f()
                 return 12
             end
 
             function lambda_value(): integer
-                local f: () -> (...: integer) = function(): (...: integer)
+                local f: function (): (...: integer) = function(): (...: integer)
                     return 5, 6
                 end
                 local a: integer?, b: integer? = f()
@@ -351,7 +351,7 @@ describe("flexible return code generation", function()
 
             function bound_value(): integer
                 local box = Box.new(9)
-                local f: () -> (...: integer) = box:values
+                local f: function (): (...: integer) = box:values
                 local a: integer?, b: integer? = f()
                 return (a as integer) * 10 + (b as integer)
             end
@@ -368,59 +368,59 @@ describe("flexible return code generation", function()
         run_coder([[
             record Runner end
 
-            function top(p: () -> integer): (...: integer)
+            function top(p: function (): integer): (...: integer)
                 return p()
             end
 
-            function Runner.static_probe(p: () -> integer): (...: integer)
+            function Runner.static_probe(p: function (): integer): (...: integer)
                 return p()
             end
 
-            function Runner:method_probe(p: () -> integer): (...: integer)
+            function Runner:method_probe(p: function (): integer): (...: integer)
                 return p()
             end
 
-            function call_value(g: (() -> integer) -> (...: integer),
-                                p: () -> integer): integer
+            function call_value(g: function (function (): integer): (...: integer),
+                                p: function (): integer): integer
                 local n: integer? = g(p)
                 return n as integer
             end
 
-            function direct_top(p: () -> integer): integer
+            function direct_top(p: function (): integer): integer
                 local n: integer? = top(p)
                 return n as integer
             end
 
-            function direct_static(p: () -> integer): integer
+            function direct_static(p: function (): integer): integer
                 local n: integer? = Runner.static_probe(p)
                 return n as integer
             end
 
-            function direct_method(p: () -> integer): integer
+            function direct_method(p: function (): integer): integer
                 local r = Runner.new()
                 local n: integer? = r:method_probe(p)
                 return n as integer
             end
 
-            function exact_top_value(p: () -> integer): integer
+            function exact_top_value(p: function (): integer): integer
                 return call_value(top, p)
             end
 
-            function exact_bound_value(p: () -> integer): integer
+            function exact_bound_value(p: function (): integer): integer
                 local r = Runner.new()
                 return call_value(r:method_probe, p)
             end
 
-            function exact_lambda_value(p: () -> integer): integer
-                local f: (() -> integer) -> (...: integer) =
-                    function(q: () -> integer): (...: integer)
+            function exact_lambda_value(p: function (): integer): integer
+                local f: function (function (): integer): (...: integer) =
+                    function(q: function (): integer): (...: integer)
                         return q()
                     end
                 return call_value(f, p)
             end
 
-            function slow(g: (() -> integer) -> (...: integer),
-                          p: () -> integer): integer
+            function slow(g: function (function (): integer): (...: integer),
+                          p: function (): integer): integer
                 return call_value(g, p)
             end
         ]], h.DEPTH_PROBE .. [[
@@ -439,7 +439,7 @@ describe("flexible return code generation", function()
 
     it("uses finite Lua-stack demand for compatible generic callables", function()
         run_coder([[
-            function invoke(f: () -> (...: integer)): integer
+            function invoke(f: function (): (...: integer)): integer
                 local a: integer?, b: integer? = f()
                 if not a then return -1 end
                 if not b then return a as integer end
@@ -454,7 +454,7 @@ describe("flexible return code generation", function()
 
     it("preserves raw generic counts, explicit nils, and callable kinds", function()
         run_coder([[
-            function forward(f: () -> (...: value)): (...: value)
+            function forward(f: function (): (...: value)): (...: value)
                 return f()
             end
         ]], [[
@@ -488,7 +488,7 @@ describe("flexible return code generation", function()
 
     it("keeps the caller frame open for 200 generic MULTRET values", function()
         local csrc = generate([[
-            function forward(f: () -> (...: string)): (...: string)
+            function forward(f: function (): (...: string)): (...: string)
                 return f()
             end
         ]])
@@ -496,7 +496,7 @@ describe("flexible return code generation", function()
             csrc)
 
         run_coder([[
-            function forward(f: () -> (...: string)): (...: string)
+            function forward(f: function (): (...: string)): (...: string)
                 return f()
             end
         ]], [[
@@ -515,7 +515,7 @@ describe("flexible return code generation", function()
 
     it("unwinds a failing open light-C call before the next call", function()
         run_coder([[
-            function forward(f: () -> (...: value)): (...: value)
+            function forward(f: function (): (...: value)): (...: value)
                 do
                     return f()
                 catch
@@ -531,7 +531,7 @@ describe("flexible return code generation", function()
 
     it("recovers after open result conversion and cap failures", function()
         run_coder([[
-            function recover(f: () -> (...: integer)): (...: integer)
+            function recover(f: function (): (...: integer)): (...: integer)
                 do
                     return f()
                 catch
@@ -566,15 +566,15 @@ describe("flexible return code generation", function()
                 return 4, "bad"
             end
 
-            function floats(f: (...: float) -> integer): integer
+            function floats(f: function (...: float): integer): integer
                 return f(ints())
             end
 
-            function narrowed(f: (...: integer) -> integer): integer
+            function narrowed(f: function (...: integer): integer): integer
                 return f(values())
             end
 
-            function capped(f: (...: integer) -> integer,
+            function capped(f: function (...: integer): integer,
                             ...: integer): integer
                 return f(0, ...)
             end
@@ -611,7 +611,7 @@ describe("flexible return code generation", function()
                 return mixed(full)
             end
 
-            function generic(f: () -> (value, ...: value)): (value, ...: value)
+            function generic(f: function (): (value, ...: value)): (value, ...: value)
                 return f()
             end
         ]], [[
@@ -657,7 +657,7 @@ describe("flexible return code generation", function()
                 end
 
                 function generic(
-                    f: () -> (...: value)
+                    f: function (): (...: value)
                 ): (...: value)
                     return f()
                 end
@@ -669,7 +669,7 @@ describe("flexible return code generation", function()
                 end
 
                 function c_forward(
-                    f: () -> (...: value)
+                    f: function (): (...: value)
                 ): (...: value)
                     return f()
                 end
@@ -683,7 +683,7 @@ describe("flexible return code generation", function()
                     present: boolean
                 ): (...: integer)
                     local boxed: value = maybe_nil
-                    local f: (boolean) -> (...: integer) = boxed
+                    local f: function (boolean): (...: integer) = boxed
                     return f(present)
                 end
             ]], [[
@@ -792,7 +792,7 @@ describe("flexible return code generation", function()
 
             function nonexact(): (...: value)
                 local boxed: value = huge
-                local f: () -> (...: value) = boxed
+                local f: function (): (...: value) = boxed
                 return f()
             end
 
@@ -808,11 +808,11 @@ describe("flexible return code generation", function()
 
             function typed_maybe_nil(present: boolean): (...: integer)
                 local boxed: value = maybe_nil
-                local f: (boolean) -> (...: integer) = boxed
+                local f: function (boolean): (...: integer) = boxed
                 return f(present)
             end
 
-            function c_forward(f: () -> (...: value)): (...: value)
+            function c_forward(f: function (): (...: value)): (...: value)
                 return f()
             end
         ]], [[
@@ -886,7 +886,7 @@ describe("flexible return code generation", function()
                 return count_after_head(...)
             end
 
-            function generic(f: (integer?, ...: integer) -> integer,
+            function generic(f: function (integer?, ...: integer): integer,
                              ...: integer): integer
                 return f(...)
             end
@@ -929,7 +929,7 @@ describe("flexible return code generation", function()
                 return { rep("p", 7), strings() }
             end
 
-            function generic(f: () -> (...: integer)): {float}
+            function generic(f: function (): (...: integer)): {float}
                 return { 0.25, f() }
             end
         ]], [[
@@ -991,7 +991,7 @@ describe("flexible return code generation", function()
                 end
 
                 function via_value(): integer
-                    local f: () -> (...: integer) = provider.pair
+                    local f: function (): (...: integer) = provider.pair
                     local a: integer?, b: integer? = f()
                     return (a as integer) * 10 + (b as integer)
                 end
@@ -1041,7 +1041,7 @@ describe("flexible return code generation", function()
             end
 
             function mapped_value(): integer
-                local f: (integer, integer?) -> integer = take
+                local f: function (integer, integer?): integer = take
                 return f(1, nil_effect())
             end
 

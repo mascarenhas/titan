@@ -45,15 +45,15 @@ end
 local function regex_projected_size(node: RegexNode):
                                     (integer, integer)
   case node
-  when empty then
+  when empty() then
     return 1, 0
-  when literal then
+  when literal() then
     return 3, 0
-  when any then
+  when any() then
     return 5, 0
-  when class then
+  when class() then
     return 5, 0
-  when sequence: sequence then
+  when sequence(sequence) then
     local size = 1
     local index = 1
     while index <= #sequence.children do
@@ -68,7 +68,7 @@ local function regex_projected_size(node: RegexNode):
       index = index + 1
     end
     return size, 0
-  when choice: choice then
+  when choice(choice) then
     local size = 1
     local index = 1
     while index <= #choice.children do
@@ -83,7 +83,7 @@ local function regex_projected_size(node: RegexNode):
       index = index + 1
     end
     return size, 0
-  when group: group then
+  when group(group) then
     local child_size, overflow =
       regex_projected_size(group.child)
     if overflow ~= 0 then return child_size, overflow end
@@ -92,7 +92,7 @@ local function regex_projected_size(node: RegexNode):
       return size, group.position
     end
     return size, 0
-  when repetition: repetition then
+  when repetition(repetition) then
     local child_size, overflow =
       regex_projected_size(repetition.child)
     if overflow ~= 0 then return child_size, overflow end
@@ -117,11 +117,11 @@ local function regex_projected_size(node: RegexNode):
       return size, repetition.position
     end
     return size, 0
-  when backreference then
+  when backreference() then
     return 8, 0
-  when word_start then
+  when word_start() then
     return 8, 0
-  when word_end then
+  when word_end() then
     return 8, 0
   end
 end
@@ -159,10 +159,10 @@ local function regex_backreference_capture(
   local length = group_after - group_first
   if length < 0 or length > #subject - position + 1 then return false end
   if length > 0 then
-    local bytes = subject as const *char
+    local bytes = subject as foreign const *char
     if ffi.memcmp(
         bytes + position - 1, bytes + group_first - 1,
-        length as ffi.size_t) ~= 0 then
+        length as foreign size_t) ~= 0 then
       return false
     end
   end
@@ -189,16 +189,16 @@ local function regex_compile_node(node: RegexNode,
                                   continuation: peg.Pattern,
                                   state: RegexCompileState?): peg.Pattern
   case node
-  when empty then
+  when empty() then
     return continuation
-  when literal: literal then
+  when literal(literal) then
     return peg.sequence(peg.literal(literal.text), continuation)
-  when any then
+  when any() then
     return peg.sequence(
       peg.difference(peg.any(), peg.literal("\n")), continuation)
-  when class: class then
+  when class(class) then
     return peg.sequence(peg.set(class.text), continuation)
-  when sequence: sequence then
+  when sequence(sequence) then
     local result = continuation
     local index = #sequence.children
     while index >= 1 do
@@ -207,7 +207,7 @@ local function regex_compile_node(node: RegexNode,
       index = index - 1
     end
     return result
-  when choice: choice then
+  when choice(choice) then
     local result = regex_compile_node(
       choice.children[1], continuation, state)
     local index = 2
@@ -219,7 +219,7 @@ local function regex_compile_node(node: RegexNode,
       index = index + 1
     end
     return result
-  when group: group then
+  when group(group) then
     -- Keep group markers as siblings rather than wrapping the whole child in
     -- one named capture. LPeg scopes captures nested inside a named group;
     -- sibling markers leave nested numbered groups visible to the final Cb
@@ -234,7 +234,7 @@ local function regex_compile_node(node: RegexNode,
     local body = regex_compile_node(
       group.child, peg.sequence(finish, continuation), state)
     return peg.sequence(start, body)
-  when repetition: repetition then
+  when repetition(repetition) then
     local atom = repetition.child
     local result = continuation
     if repetition.maximum < 0 then
@@ -274,16 +274,16 @@ local function regex_compile_node(node: RegexNode,
       index = index + 1
     end
     return result
-  when backreference: backreference then
+  when backreference(backreference) then
     local captured = peg.back_capture(
       regex_group_key(backreference.number))
     return peg.sequence(
       peg.match_time(captured, regex_backreference_capture),
       continuation)
-  when word_start then
+  when word_start() then
     return peg.sequence(
       peg.runtime(regex_word_start_capture), continuation)
-  when word_end then
+  when word_end() then
     return peg.sequence(
       peg.runtime(regex_word_end_capture), continuation)
   end

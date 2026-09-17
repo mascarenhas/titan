@@ -5,7 +5,7 @@ local system = import "os"
 local timer = import "timer"
 local task_support = import "support.async.titan"
 
-local type CheckedAction = () -> ()
+local type CheckedAction = function (): ()
 
 local function wait_until_waiting(task: async.Task, subject: string)
   while task:status():as_string() == "ready" or

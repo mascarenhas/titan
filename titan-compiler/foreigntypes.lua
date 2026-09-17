@@ -566,6 +566,28 @@ local function tag_provenance(ftype)
         or (ftype._canonical_tag and ftype._canonical_tag._tag_provenance)
 end
 
+-- Complete tags use the actual definition's header, regardless of an earlier
+-- forward declaration in another header. Opaque tags use their declaration.
+local function tag_ffi_scope(ftype)
+    local metadata = ftype._file_scope_tag_metadata
+        or (ftype._canonical_tag and ftype._canonical_tag._file_scope_tag_metadata)
+    local first = metadata and metadata.declarations and metadata.declarations[1]
+    for _, declaration in ipairs(metadata and metadata.declarations or {}) do
+        if declaration.definition then first = declaration; break end
+    end
+    local provenance = first or ftype._tag_provenance
+        or (ftype._canonical_tag and ftype._canonical_tag._tag_provenance)
+    return provenance and provenance.ffi_scope
+end
+
+local function retain_tag_ffi_scope(owner, ftype)
+    if not (owner._tag == "Type.CStruct" and types.is_c_lua_state(owner)) then
+        owner._ffi_scope = owner._ffi_scope or tag_ffi_scope(ftype)
+    end
+    return owner
+end
+
+
 -- Bind only parser-annotated tags. Legacy/manual declarations without scope
 -- metadata retain the old raw-key behavior below.
 local function bind_tag_record(st, ftype)
@@ -699,9 +721,9 @@ local function primitive_from_tokens(profile, tokens)
 end
 
 -- Titan exposes exactly the portable C99 arithmetic spellings below. The map
--- deliberately differs at the two collision points: `bool` names C `_Bool`,
--- while C `float` is written `foreign float` so Titan's own `float` remains
--- unambiguous. C typedefs never enter this table, even when their targets do.
+-- spells C `_Bool` as `bool`. These names are resolved only in foreign type
+-- context; Titan's scalar `float` lives in a separate syntactic namespace.
+-- C typedefs never enter this table, even when their targets do.
 local surface_primitive_spellings = {
     void = "void",
     bool = "_Bool",
@@ -716,7 +738,7 @@ local surface_primitive_spellings = {
     ["unsigned long"] = "unsigned long",
     ["long long"] = "long long",
     ["unsigned long long"] = "unsigned long long",
-    ["foreign float"] = "float",
+    float = "float",
     double = "double",
     ["long double"] = "long double",
     lua_State = "lua_State",
@@ -845,9 +867,10 @@ end
 local function new_struct_or_union(ftype)
     local fields = {}
     local tagname = c_name(ftype.name)
-    return (ftype.type == "struct")
+    local owner = (ftype.type == "struct")
         and types.CStruct(nil, tagname, nil, fields, false, false)
         or types.CUnion(nil, tagname, nil, fields, false)
+    return retain_tag_ffi_scope(owner, ftype)
 end
 
 local function convert_struct_or_union(st, ftype)
@@ -872,6 +895,7 @@ local function convert_struct_or_union(st, ftype)
         -- part of general Type.CStruct/CUnion equality. It is needed only for
         -- the narrowly scoped repeated-extraction relation above.
         owner._c_tag_scope = record.scope
+        retain_tag_ffi_scope(owner, ftype)
         if ftype.fields and not owner.complete then
             return populate_struct_or_union(st, owner, ftype)
         end
@@ -895,6 +919,7 @@ local function convert_struct_or_union(st, ftype)
     end
     local existing = st:find_foreign_type(key)
     if existing then
+        retain_tag_ffi_scope(existing, ftype)
         if ftype.fields and not existing.complete then
             return populate_struct_or_union(st, existing, ftype)
         end
@@ -1121,6 +1146,7 @@ local function convert_typedef(st, ftype)
     if not target then return nil, err end
     local converted = types.CTypedef(
         ftype.name, target, quals or {})
+    converted._ffi_scope = ftype._ffi_scope
     local resolved_target = types.resolve_c_typedef(target)
     if resolved_target and resolved_target._tag == "Type.CInteger"
        and resolved_target._c_enum_identity
@@ -1198,6 +1224,7 @@ local function declaration_array_view(typ, memo)
     view = view or typ
     if cloned then
         view._c_origin_header = typ._c_origin_header
+        view._ffi_scope = typ._ffi_scope
     end
     memo[typ] = { type = view, cloned = cloned and true or false }
     return view, cloned and true or false
@@ -1215,7 +1242,12 @@ local function convert_declaration(st, ftype, member_name)
             return nil, "unsupported target integer macro expression: " ..
                 tostring(evaluation_error)
         end
-        return evaluated.type
+        return evaluated.type, nil, {
+            qualifiers = {},
+            provenance = ftype._declaration_provenance,
+            origin_header = st._c_origin_header,
+            integer_constant = evaluated.value,
+        }
     end
     local converted, err, declaration_qualifiers
     if ftype.type == "function" then

@@ -32,7 +32,7 @@ hexadecimal floats. A literal is an `integer` if its value is an integer
 in Lua's sense, and a `float` otherwise — a decimal point or an exponent
 makes it a float:
 
-```lua
+```titan
 function numbers(): float
     local a: integer = 0x1abcdef    -- hexadecimal integer
     local b: float = 3.0
@@ -76,7 +76,7 @@ any matching count of `=` signs to allow `]]` inside. No escape
 processing happens inside a long string, and one line break immediately
 after the opening bracket is skipped.
 
-```lua
+```titan
 function escapes(): string
     local s1: string = "col1\tcol2\n"
     local s2: string = "\65\66\67" .. "\x41"   -- "ABCA"
@@ -171,7 +171,7 @@ logical (zero-fill), as in Lua. Exponentiation `^` reproduces Lua's
 `luai_numpow`, including that `x ^ 2.0` is computed as `x * x` (not
 `pow(x, 2)`), so its result matches Lua's to the last bit.
 
-```lua
+```titan
 function lua_not_c(): boolean
     if -10 // 3 ~= -4 then return false end  -- C's '/' would give -3
     if 10 % -3 ~= -2 then return false end   -- C's '%' would give 1
@@ -245,7 +245,7 @@ Anything else is the compile-time error
 `trying to compare values of incomparable types: T1 and T2`. Truthiness is a
 compact presence test when every present value of the option is truthy:
 
-```lua
+```titan
 function found(t: {integer}, i: integer): boolean
     if t[i] then return true else return false end
 end
@@ -264,7 +264,7 @@ the integer to float — matching Lua) or two strings. Everything else — boole
 (`left/right hand side of relational expression is a ... instead of a
 number`, or `trying to use relational expression with ...`).
 
-```lua
+```titan
 function in_range(x: integer, lo: float, hi: float): boolean
     return lo <= x and x <= hi    -- x compared to each float bound by exact mathematical value (no promotion)
 end
@@ -326,7 +326,7 @@ The Lua ternary idiom `cond and a or b` works as expected when `a`
 cannot be falsy, including with a `boolean`-typed condition — a
 comparison, say:
 
-```lua
+```titan
 function pick(use_first: boolean, a: integer, b: integer): integer
     return use_first and a or b
 end
@@ -342,7 +342,7 @@ Long all-boolean `and`/`or` chains and `and`/`or` used for their value —
 numbers are converted with exactly Lua's `tostring` formatting — in
 particular, integral floats keep their `.0`:
 
-```lua
+```titan
 function describe(name: string, n: integer, x: float): string
     return name .. ": " .. n .. " of " .. x
 end
@@ -375,7 +375,7 @@ value to satisfy the static result type. See [arrays and maps](arrays-maps.md).
 Other Map key types and other values are compile-time errors even if their
 run-time metatable has `__len`.
 
-```lua
+```titan
 function total_len(words: {string}): integer
     local n: integer = 0
     for i = 1, #words do
@@ -523,7 +523,7 @@ operand during evaluation and later argument setup, but retaining the pointer
 does not retain the Array, Map, record, union, Interface, or function. See
 [the FFI lifetime rules](ffi.md#casts-and-coercions).
 
-```lua
+```titan
 function unbox(v: value): integer
     return v as integer        -- run-time checked
 end
@@ -548,11 +548,11 @@ end
 Other casts are the compile-time error `cannot cast 'T1' to 'T2'`.
 In particular, a scalar conversion does not lift through a compound type:
 
-```lua
-function rejected(xs: {integer}, f: () -> integer)
+```titan
+function rejected(xs: {integer}, f: function (): (integer))
     local a = xs as {float}       -- cannot cast '{integer}' to '{float}'
-    local b = f as () -> float    -- cannot cast '() -> integer' to '() -> float'
-    local c = f as () -> integer? -- Option wrapping does not lift through Function
+    local b = f as function (): (float)    -- cannot cast 'function (): integer' to 'function (): float'
+    local c = f as function (): (integer?) -- Option wrapping does not lift through Function
 end
 ```
 
@@ -584,7 +584,7 @@ position expects — and, failing that, by the shape of the first field:
   context that names the record type (without one it is the compile-time
   error `no context to provide type for record constructor`).
 
-```lua
+```titan
 record Point
     x: float
     y: float
@@ -632,15 +632,15 @@ implicit: a function flows into a `value` for free, and a `value` flows
 back into a function type with the callability check deferred to the
 actual call.
 
-```lua
+```titan
 function inc(n: integer): integer return n + 1 end
 
-function apply(f: (integer) -> integer, x: integer): integer
+function apply(f: function (integer): (integer), x: integer): integer
     return f(x)               -- call a function value
 end
 
 function use(): integer
-    local g: (integer) -> integer = inc   -- a function name is a value
+    local g: function (integer): (integer) = inc   -- a function name is a value
     return apply(g, 41)                    -- pass it along: 42
 end
 ```
@@ -678,7 +678,7 @@ time instead; see
 
 A bare string retains Lua-style one-argument call sugar:
 
-```lua
+```titan
 function greet(name: string): string return "hello " .. name end
 function sugar(): string return greet "world" end
 ```
@@ -697,7 +697,7 @@ complete visible run instead. A final
 open adjustment, using its selected subject range as the producer.
 Wrapping the call in parentheses always requests exactly one value, as in Lua:
 
-```lua
+```titan
 function divmod(a: integer, b: integer): (integer, integer)
     return a // b, a % b
 end
@@ -721,20 +721,20 @@ requested by the surrounding context, then performs the ordinary run-time
 callability and boundary checks. Named braces remain unavailable because a
 `value` carries no formal parameter names:
 
-```lua
+```titan
 function apply_dynamic(f: value, x: integer): integer
-    return f(x)       -- context treats f as (integer) -> integer
+    return f(x)       -- context treats f as function (integer): integer
 end
 ```
 
 The same parentheses-adjust rule rescues a **zero-return** call. An
-unannotated function returns nothing (its type is `(...) -> ()`; see
+unannotated function returns nothing (its result list is empty; see
 [the type system](types.md#function-types)), and using such a call where
 a value is expected is a compile-time error — *except* when wrapped in
 parentheses, which adjust the empty result up to a single `nil`:
 
-```lua
-function log(s: string) end       -- returns nothing: (string) -> ()
+```titan
+function log(s: string) end       -- returns nothing: function (string): ()
 
 function use_log(): value
     -- local x = log("hi")        -- error: call returns no value

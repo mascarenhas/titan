@@ -36,7 +36,7 @@ describe("type-test expressions (code generator)", function()
             record Second
                 n: integer
             end
-            type IntFunction = (integer) -> integer
+            type IntFunction = function (integer): integer
 
             calls: integer = 0
             certain: boolean = 1 is integer
@@ -59,7 +59,7 @@ describe("type-test expressions (code generator)", function()
                 return v is boolean
             end
             function is_function(v: value): boolean
-                return v is (integer) -> integer
+                return v is function (integer): integer
             end
             function is_nil(v: value): boolean
                 return v is nil
@@ -202,26 +202,26 @@ describe("type-test expressions (code generator)", function()
                 foreign import "]] .. header .. [["
 
                 function is_c_integer(v: value): boolean
-                    return v is ffi.test_integer
+                    return v is foreign test_integer
                 end
                 function is_c_float(v: value): boolean
-                    return v is ffi.test_float
+                    return v is foreign test_float
                 end
                 function is_c_pointer(v: value): boolean
-                    return v is ffi.test_pointer
+                    return v is foreign test_pointer
                 end
                 function as_c_pointer(v: value): boolean
-                    local pointer = v as ffi.test_pointer
+                    local pointer = v as foreign test_pointer
                     return pointer ~= nil
                 end
                 function is_c_userdata(v: value): boolean
-                    return v is *ffi.Udata
+                    return v is foreign *Udata
                 end
                 function is_c_tvalue(v: value): boolean
-                    return v is ffi.TValue
+                    return v is foreign TValue
                 end
                 function has_string(present: integer): boolean
-                    return ffi.test_maybe_string(present as ffi.test_integer)
+                    return ffi.test_maybe_string(present as foreign test_integer)
                         is string
                 end
             ]], [[
@@ -285,11 +285,11 @@ describe("type-test expressions (code generator)", function()
                 foreign import "]] .. header .. [["
 
                 function is_pair(): boolean
-                    return ffi.test_pair_value() is ffi.test_pair
+                    return ffi.test_pair_value() is foreign test_pair
                 end
 
                 function is_number(): boolean
-                    return ffi.test_number_value() is ffi.test_number
+                    return ffi.test_number_value() is foreign test_number
                 end
             ]], [[
                 assert(test.is_pair())

@@ -17,7 +17,7 @@ and dependency linking are in the
 All generated-C excerpts are real output of `coder.generate` for this
 module:
 
-```lua
+```titan
 -- interop.titan
 record Point
     x: float
@@ -745,7 +745,7 @@ inventory:
 | `TITAN_TRACE_PINNED` (`"5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"`) | the one-shot flag that preserves an existing traceback for bare re-raise |
 | `TITAN_LAZY_LIBS_KEY` (private to `ltitanlib.c`) | compiler `_loadlib`'s per-state lazy/local handle cache |
 | `TITAN_LAZY_GLOBAL_LIBS_KEY` (private to `ltitanlib.c`) | generated-shim `_loadlibglobal`'s per-state canonical-path lazy/global handle cache |
-| `"Titan function type <serialized type> tag"` | a shared light-userdata identity tag for each first-class function type |
+| `"Titan function type <runtime identity> tag"` | a shared light-userdata identity tag for each first-class function type, using `types.runtime_identity` with named C scopes |
 
 The UUID-string constants are defined in `titan-runtime/titan.h` and `titan-runtime/titan/ffi.h`.
 

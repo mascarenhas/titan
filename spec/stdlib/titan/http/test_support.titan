@@ -4,7 +4,7 @@ local async = import "async"
 local fs = import "fs"
 local http = import "http"
 local net = import "net"
-local str = import "string"
+local string = import "string"
 
 local CERTIFICATE = "spec/fixtures/ssl/server.pem"
 local PRIVATE_KEY = "spec/fixtures/ssl/server-key.pem"
@@ -12,7 +12,7 @@ local TRUST_ROOT = "spec/fixtures/ssl/ca.pem"
 local outcome = "not-run"
 
 local function contains(subject: string, needle: string): boolean
-  local first: integer? = str.find(subject, needle)
+  local first: integer? = string.find(subject, needle)
   if first then return true end
   return false
 end
@@ -37,7 +37,7 @@ end
 
 local function read_exact(connection: net.Connection,
                           length: integer): string
-  local builder = str.writer()
+  local builder = string.writer()
   local received = 0
   while received < length do
     local chunk? = connection:read()
@@ -53,7 +53,7 @@ local function read_exact(connection: net.Connection,
 end
 
 local function read_response(response: http.ClientResponse): string
-  local builder = str.writer()
+  local builder = string.writer()
   for chunk in response:read do builder:write(chunk) end
   return builder:drain()
 end

@@ -33,54 +33,54 @@ local FIXED_SOURCE = [[
         return x + 1
     end
 
-    function source(): (integer) -> integer
+    function source(): function (integer): integer
         return actual
     end
 
-    function exact(): (integer) -> integer
-        local same: (integer) -> integer = actual
+    function exact(): function (integer): integer
+        local same: function (integer): integer = actual
         return same
     end
 
-    function view(): (value) -> value
-        local adjusted: (value) -> value = actual
+    function view(): function (value): value
+        local adjusted: function (value): value = actual
         return adjusted
     end
 
     function direct(): integer
-        local adjusted: (integer, value) -> value = actual
+        local adjusted: function (integer, value): value = actual
         return adjusted(41, "ignored") as integer
     end
 
     function chained(): integer
-        local first: (integer, value) -> value = actual
-        local second: (integer, value, value) -> value = first
+        local first: function (integer, value): value = actual
+        local second: function (integer, value, value): value = first
         return second(41, "a", "b") as integer
     end
 
     function erased(): integer
-        local first: (integer, value) -> value = actual
+        local first: function (integer, value): value = actual
         local dynamic: value = first
-        local second: (integer, value, value) -> value = dynamic
+        local second: function (integer, value, value): value = dynamic
         return second(41, "a", "b") as integer
     end
 
     local constructions = 0
 
-    local function make_source(): (integer) -> integer
+    local function make_source(): function (integer): integer
         constructions = constructions + 1
         return actual
     end
 
     function evaluated_once(): integer
         constructions = 0
-        local adjusted: (integer, value) -> value = make_source()
+        local adjusted: function (integer, value): value = make_source()
         adjusted(1, "ignored")
         return constructions
     end
 
     function typed_rejects_float(): boolean
-        local adjusted: (value) -> value = actual
+        local adjusted: function (value): value = actual
         local dynamic: value = 41.0
         local succeeded = true
         do
@@ -91,21 +91,21 @@ local FIXED_SOURCE = [[
         return succeeded
     end
 
-    local function invoke_probe(probe: () -> integer): integer
+    local function invoke_probe(probe: function (): integer): integer
         return probe()
     end
 
-    function wrapper_depth(probe: () -> integer): integer
-        local adjusted: (() -> integer, value) -> value = invoke_probe
+    function wrapper_depth(probe: function (): integer): integer
+        local adjusted: function (function (): integer, value): value = invoke_probe
         return adjusted(probe, nil) as integer
     end
 
     function fallback_depth(
         carrier: value,
-        probe: () -> integer
+        probe: function (): integer
     ): integer
-        local alleged: (() -> integer) -> integer = carrier
-        local adjusted: (() -> integer, value) -> value = alleged
+        local alleged: function (function (): integer): integer = carrier
+        local adjusted: function (function (): integer, value): value = alleged
         return adjusted(probe, nil) as integer
     end
 ]]
@@ -197,8 +197,8 @@ describe("closure adjustment wrappers (end-to-end)", function()
                 return "ok"
             end
 
-            function view(): (integer, value) -> string
-                local adjusted: (integer, value) -> string = actual
+            function view(): function (integer, value): string
+                local adjusted: function (integer, value): string = actual
                 return adjusted
             end
         ]])
@@ -239,9 +239,9 @@ describe("closure adjustment wrappers (end-to-end)", function()
                 return "a", "b"
             end
 
-            function view(): (integer, value) -> (...: string)
+            function view(): function (integer, value): (...: string)
                 local adjusted:
-                    (integer, value) -> (...: string) = actual
+                    function (integer, value): (...: string) = actual
                 return adjusted
             end
         ]])
@@ -276,8 +276,8 @@ describe("closure adjustment wrappers (end-to-end)", function()
     it("publishes each open callable result on exactly one adapter branch",
     function()
         local source = [[
-            local type Source = (integer) -> integer
-            local type Target = (integer, value) -> value
+            local type Source = function (integer): integer
+            local type Target = function (integer, value): value
 
             local function first(...: Target): Target
                 return ...[1]
@@ -288,7 +288,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
             end
 
             function forwarded_value(...: Source): Target
-                local consumer: (...: Target) -> Target = first
+                local consumer: function (...: Target): Target = first
                 return consumer(...)
             end
         ]]
@@ -374,16 +374,16 @@ describe("closure adjustment wrappers (end-to-end)", function()
     function()
         local tree = checked([[
             local function source(
-                callback: (integer) -> integer
-            ): (integer) -> integer
+                callback: function (integer): integer
+            ): function (integer): integer
                 return callback
             end
 
             function view(
-                callback: (value) -> value
-            ): (value) -> value
+                callback: function (value): value
+            ): function (value): value
                 local adjusted:
-                    ((value) -> value) -> (value) -> value = source
+                    function (function (value): value): (function (value): value) = source
                 return adjusted(callback)
             end
         ]])
@@ -406,7 +406,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
         h.run_coder([[
             local seen = 0
 
-            local function invoke(callback: () -> value): value
+            local function invoke(callback: function (): value): value
                 return callback()
             end
 
@@ -463,15 +463,15 @@ describe("closure adjustment wrappers (end-to-end)", function()
 
             function input_matrix(): integer
                 local score = 0
-                local ignore: (integer, string) -> () = ignore_actual
+                local ignore: function (integer, string): () = ignore_actual
                 ignore(1, "ignored")
                 score = score + seen
 
-                local fill: (integer) -> () = fill_actual
+                local fill: function (integer): () = fill_actual
                 fill(2)
                 score = score + seen
 
-                local tailfill: (integer, ...: value) -> () = fill_actual
+                local tailfill: function (integer, ...: value): () = fill_actual
                 tailfill(3)
                 score = score + seen
                 tailfill(4, 5)
@@ -479,19 +479,19 @@ describe("closure adjustment wrappers (end-to-end)", function()
                 tailfill(6, 7, "ignored")
                 score = score + seen
 
-                local gather: (integer, integer) -> () = variadic_actual
+                local gather: function (integer, integer): () = variadic_actual
                 gather(8, 9)
                 score = score + seen
 
-                local passthrough: (...: value) -> () = tail_actual
+                local passthrough: function (...: value): () = tail_actual
                 passthrough(10, 11)
                 score = score + seen
 
-                local empty: (integer) -> () = variadic_actual
+                local empty: function (integer): () = variadic_actual
                 empty(12)
                 score = score + seen
 
-                local discard: (integer, ...: string) -> () = ignore_actual
+                local discard: function (integer, ...: string): () = ignore_actual
                 discard(13, "a", "b")
                 score = score + seen
                 return score
@@ -515,40 +515,40 @@ describe("closure adjustment wrappers (end-to-end)", function()
             function result_matrix(): integer
                 local score = 0
 
-                local nilfirst: () -> value = zero
+                local nilfirst: function (): value = zero
                 if nilfirst() == nil then score = score + 1 end
 
-                local nilout: () -> (integer, value) = one
+                local nilout: function (): (integer, value) = one
                 local a: integer, b: value = nilout()
                 if a == 14 and b == nil then score = score + 2 end
 
-                local finite: () -> (integer?, integer) = flexible
+                local finite: function (): (integer?, integer) = flexible
                 local c: integer?, d: integer = finite()
                 if (c as integer) == 17 and d == 18 then
                     score = score + 4
                 end
 
-                local toflex: () -> (integer, ...: value) = fixed
+                local toflex: function (): (integer, ...: value) = fixed
                 local e: integer, f: value? = toflex()
                 if e == 15 and (f as integer) == 16 then
                     score = score + 8
                 end
 
-                local passthrough: () -> (...: value) = flexible
+                local passthrough: function (): (...: value) = flexible
                 local g: value?, h_: value? = passthrough()
                 if (g as integer) == 17 and (h_ as integer) == 18 then
                     score = score + 16
                 end
 
-                local hidefixed: () -> () = one
+                local hidefixed: function (): () = one
                 hidefixed()
                 score = score + 32
 
-                local hideflex: () -> () = flexible
+                local hideflex: function (): () = flexible
                 hideflex()
                 score = score + 64
 
-                local endflex: () -> (...: value) = zero
+                local endflex: function (): (...: value) = zero
                 local absent: value? = endflex()
                 if absent == nil then score = score + 128 end
                 return score
@@ -589,11 +589,11 @@ describe("closure adjustment wrappers (end-to-end)", function()
             end
 
             function nil_representations(): boolean
-                local as_nil: () -> nil = zero
-                local as_value: () -> value = zero
-                local as_option: () -> integer? = zero
+                local as_nil: function (): (nil) = zero
+                local as_value: function (): (value) = zero
+                local as_option: function (): (integer?) = zero
                 local as_cpointer:
-                    () -> ffi.closure_adjustment_pointer = zero
+                    function (): (foreign closure_adjustment_pointer) = zero
                 return as_nil() == nil
                     and as_value() == nil
                     and as_option() == nil
@@ -644,7 +644,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
                     -- `defer` is lowered to this block's finally clause.
                     defer note("F")
                     do
-                        local adjusted: (value) -> integer =
+                        local adjusted: function (value): integer =
                             checked_source
                         local result = adjusted(argument(valid))
                         if result == 7 then note("R") end
@@ -660,7 +660,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
                 do
                     defer note("F")
                     do
-                        local adjusted: (value) -> integer = bad_result
+                        local adjusted: function (value): integer = bad_result
                         adjusted(argument(true))
                     catch
                         note("C")
@@ -678,12 +678,12 @@ describe("closure adjustment wrappers (end-to-end)", function()
     it("wraps nested callable components and runtime-open runs", function()
         h.run_coder([[
             local function invoke_wide(
-                callback: (integer, integer) -> ()
+                callback: function (integer, integer): ()
             )
                 callback(5, 999)
             end
 
-            local function make_narrow(): (integer) -> integer
+            local function make_narrow(): function (integer): integer
                 return function(x: integer): integer
                     return x + 1
                 end
@@ -693,11 +693,11 @@ describe("closure adjustment wrappers (end-to-end)", function()
                 return x + 1
             end
 
-            local function produce(): (...: (integer) -> integer)
+            local function produce(): (...: function (integer): integer)
                 return actual, actual
             end
 
-            local function use(...: (integer, value) -> value): integer
+            local function use(...: function (integer, value): value): integer
                 local first = ...[1]
                 local second = ...[2]
                 return (first(10, "a") as integer)
@@ -705,13 +705,13 @@ describe("closure adjustment wrappers (end-to-end)", function()
             end
 
             local function forward(
-                ...: (integer) -> integer
+                ...: function (integer): integer
             ): integer
                 return use(...)
             end
 
             function nested_arguments(): integer
-                local adjusted: ((integer) -> ()) -> () = invoke_wide
+                local adjusted: function (function (integer): ()): () = invoke_wide
                 local total = 0
                 adjusted(function(x: integer)
                     total = total + x
@@ -721,13 +721,13 @@ describe("closure adjustment wrappers (end-to-end)", function()
 
             function nested_results(): integer
                 local adjusted:
-                    () -> (integer, value) -> value = make_narrow
+                    function (): (function (integer, value): value) = make_narrow
                 local callback = adjusted()
                 return callback(6, "ignored") as integer
             end
 
             function open_constructor(): integer
-                local callbacks: {(integer, value) -> value} = {produce()}
+                local callbacks: {function (integer, value): value} = {produce()}
                 return (callbacks[1](10, "a") as integer)
                     + (callbacks[2](20, "b") as integer)
             end
@@ -751,18 +751,18 @@ describe("closure adjustment wrappers (end-to-end)", function()
         end
         local call_list = table.concat(calls, ", ")
         local source = string.format([[
-            local function make(n: integer): (integer) -> integer
+            local function make(n: integer): function (integer): integer
                 return function(x: integer): integer
                     return n + x
                 end
             end
 
-            local function produce(): (...: (integer) -> integer)
+            local function produce(): (...: function (integer): integer)
                 return %s
             end
 
             local function use(
-                ...: (integer, value) -> value
+                ...: function (integer, value): value
             ): integer
                 local total = 0
                 local index = 1
@@ -776,7 +776,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
             end
 
             local function forward(
-                ...: (integer) -> integer
+                ...: function (integer): integer
             ): integer
                 return use(...)
             end
@@ -815,29 +815,29 @@ describe("closure adjustment wrappers (end-to-end)", function()
                 return x
             end
 
-            local function seed(): (...: (integer) -> integer)
+            local function seed(): (...: function (integer): integer)
                 return %s
             end
 
             local function grow99(
-                ...: (integer) -> integer
-            ): (...: (integer) -> integer)
+                ...: function (integer): integer
+            ): (...: function (integer): integer)
                 return %s, ...
             end
 
             local function grow1(
-                ...: (integer) -> integer
-            ): (...: (integer) -> integer)
+                ...: function (integer): integer
+            ): (...: function (integer): integer)
                 return actual, ...
             end
 
-            local function produce200(): (...: (integer) -> integer)
+            local function produce200(): (...: function (integer): integer)
                 return grow1(grow99(seed()))
             end
 
-            function open_target(): {(integer, value) -> value}
+            function open_target(): {function (integer, value): value}
                 local adjusted:
-                    () -> (...: (integer, value) -> value) = produce200
+                    function (): (...: function (integer, value): value) = produce200
                 return {adjusted()}
             end
         ]], table.concat(seed, ", "), table.concat(growth, ", "))
@@ -864,28 +864,28 @@ describe("closure adjustment wrappers (end-to-end)", function()
                 return x
             end
 
-            local function seed(): (...: (integer) -> integer)
+            local function seed(): (...: function (integer): integer)
                 return %s
             end
 
             local function grow99(
-                ...: (integer) -> integer
-            ): (...: (integer) -> integer)
+                ...: function (integer): integer
+            ): (...: function (integer): integer)
                 return %s, ...
             end
 
             local function grow1(
-                ...: (integer) -> integer
-            ): (...: (integer) -> integer)
+                ...: function (integer): integer
+            ): (...: function (integer): integer)
                 return actual, ...
             end
 
-            local function produce200(): (...: (integer) -> integer)
+            local function produce200(): (...: function (integer): integer)
                 return grow1(grow99(seed()))
             end
 
             local function use(
-                ...: (integer, value) -> value
+                ...: function (integer, value): value
             ): integer
                 local total = 0
                 local index = 1
@@ -899,13 +899,13 @@ describe("closure adjustment wrappers (end-to-end)", function()
             end
 
             local function forward(
-                ...: (integer) -> integer
+                ...: function (integer): integer
             ): integer
                 return use(...)
             end
 
             local function add_one_then_forward(
-                ...: (integer) -> integer
+                ...: function (integer): integer
             ): integer
                 return use(actual, ...)
             end
@@ -945,28 +945,28 @@ describe("closure adjustment wrappers (end-to-end)", function()
                 function add(amount: integer): integer
             end
 
-            function captured(start: integer): (integer, value) -> value
+            function captured(start: integer): function (integer, value): value
                 local count = start
                 local source = function(amount: integer): integer
                     count = count + amount
                     return count
                 end
-                local adjusted: (integer, value) -> value = source
+                local adjusted: function (integer, value): value = source
                 return adjusted
             end
 
-            function bound(start: integer): (integer, value) -> value
-                local source: (integer) -> integer = Counter.new(start):add
-                local adjusted: (integer, value) -> value = source
+            function bound(start: integer): function (integer, value): value
+                local source: function (integer): integer = Counter.new(start):add
+                local adjusted: function (integer, value): value = source
                 return adjusted
             end
 
             function interface_bound(
                 start: integer
-            ): (integer, value) -> value
+            ): function (integer, value): value
                 local counter: Adder = Counter.new(start)
-                local source: (integer) -> integer = counter:add
-                local adjusted: (integer, value) -> value = source
+                local source: function (integer): integer = counter:add
+                local adjusted: function (integer, value): value = source
                 return adjusted
             end
         ]], [[
@@ -1002,20 +1002,20 @@ describe("closure adjustment wrappers (end-to-end)", function()
                 return value_ .. "!"
             end
 
-            function adapt_dynamic(v: value): (value) -> value
-                local source_: (integer) -> integer = v
-                local adjusted: (value) -> value = source_
+            function adapt_dynamic(v: value): function (value): (value)
+                local source_: function (integer): (integer) = v
+                local adjusted: function (value): (value) = source_
                 return adjusted
             end
 
-            function mistagged_source(): (string) -> string
+            function mistagged_source(): function (string): (string)
                 return text
             end
 
-            function mistagged_view(): (value) -> value
+            function mistagged_view(): function (value): (value)
                 local dynamic: value = text
-                local alleged: (integer) -> integer = dynamic
-                local adjusted: (value) -> value = alleged
+                local alleged: function (integer): (integer) = dynamic
+                local adjusted: function (value): (value) = alleged
                 return adjusted
             end
 
@@ -1029,7 +1029,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
                 return adjusted("kept")
             end
 
-            local function saturated(): () -> integer
+            local function saturated(): function (): (integer)
                 %s
                 return function(): integer
                     local total: integer = 0
@@ -1040,7 +1040,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
 
             function max_upvalue_fallback(): boolean
                 local source_ = saturated()
-                local adjusted: (value) -> value = source_
+                local adjusted: function (value): (value) = source_
                 return source_ == adjusted
                     and (adjusted(nil) as integer) == 31375
             end
@@ -1082,7 +1082,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
             end
 
             function run(): integer
-                local adjusted: () -> integer = actual
+                local adjusted: function (): integer = actual
                 return adjusted()
             end
         ]], [[
@@ -1105,7 +1105,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
             end
 
             function probe()
-                local adjusted: (integer, value) -> value = actual
+                local adjusted: function (integer, value): value = actual
             end
         ]]
 

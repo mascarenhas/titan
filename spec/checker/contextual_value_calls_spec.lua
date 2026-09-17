@@ -187,31 +187,31 @@ describe("contextual calls through value (typechecker)", function()
     it("defers contextual value-call shapes until ambient inference closes",
     function()
         local ok, err, tree = run_checker([[
-            function agree<T>(left: T, right: T): T
+            function agree<|T|>(left: T, right: T): T
                 return left
             end
 
-            function make_fixed<T>(): (T, T) -> T
+            function make_fixed<|T|>(): function (T, T): T
                 return function(left: T, right: T): T return left end
             end
 
-            function make_open<T>(): (...: T) -> T
+            function make_open<|T|>(): function (...: T): T
                 return function(...: T): T return ...[1] end
             end
 
-            record Box<T>
+            record Box<|T|>
                 item: T
             end
 
-            function take_array<T>(items: {T}, witness: T): T
+            function take_array<|T|>(items: {T}, witness: T): T
                 return witness
             end
 
-            function take_map<T>(items: {string: T}, witness: T): T
+            function take_map<|T|>(items: {string: T}, witness: T): T
                 return witness
             end
 
-            function take_box<T>(box: Box<T>, witness: T): T
+            function take_box<|T|>(box: Box<|T|>, witness: T): T
                 return witness
             end
 
@@ -331,11 +331,11 @@ describe("contextual calls through value (typechecker)", function()
     it("carries dependent scalar and open-run demands through derived uses",
     function()
         local ok, err, tree = run_checker([[
-            function agree<T>(left: T, right: T): T return left end
-            function take<T>(items: {T}, witness: T): T return witness end
-            function pick<T>(left: T?, right: T): T return right end
-            function make_map<T>(): {T: T} return {} end
-            function spread<T>(): (...: T)
+            function agree<|T|>(left: T, right: T): T return left end
+            function take<|T|>(items: {T}, witness: T): T return witness end
+            function pick<|T|>(left: T?, right: T): T return right end
+            function make_map<|T|>(): {T: T} return {} end
+            function spread<|T|>(): (...: T)
                 return (42 as value) as T
             end
 
@@ -394,7 +394,7 @@ describe("contextual calls through value (typechecker)", function()
 
     it("checks a dependent contextual value call exactly once", function()
         local errs = h.check_errs([[
-            function agree<T>(left: T, right: T): T return left end
+            function agree<|T|>(left: T, right: T): T return left end
 
             function use(callback: value): integer
                 return agree(callback(missing), 42)
@@ -584,7 +584,7 @@ describe("contextual calls through value (typechecker)", function()
             end
 
             function use(): {integer}
-                local narrow: () -> integer = wide
+                local narrow: function (): integer = wide
                 local xs: {integer} = { narrow() }
                 return xs
             end
@@ -634,14 +634,14 @@ describe("contextual calls through value (typechecker)", function()
                 foreign import "]] .. header .. [["
 
                 function use(f: value): nil
-                    local xs: {ffi.phase_c_iptr} = { f() }
+                    local xs: {foreign phase_c_iptr} = { f() }
                     return nil
                 end
             ]])
             assert.same(2, #errs)
             assert.match("a flexible return cannot have a foreign pointer type",
                 errs[1])
-            assert.match("cannot construct an array with element type %*int",
+            assert.match("cannot construct an array with element type foreign %*int",
                 errs[2])
             assert.match("genuine Lua writes have no sound dynamic coercion",
                 errs[2])

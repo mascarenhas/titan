@@ -68,7 +68,7 @@ function test_parser_labeled_structural_errors(context: test.Context)
   parser_add_error(context, "comment_after_comma", "[1, /* x */ 2]",
                    "expected_value", 5)
   parser_add_error(context, "non_json_whitespace", "\vnull", "expected_value", 1)
-  parser_add_error(context, "byte_order_mark", strings.char(239, 187, 191) .. "null",
+  parser_add_error(context, "byte_order_mark", string.char(239, 187, 191) .. "null",
                    "expected_value", 1)
 end
 
@@ -105,17 +105,17 @@ end
 
 function test_parser_string_escape_and_unicode_values(_context: test.Context)
   test.assert(json.decode([=["\"\\\/\b\f\n\r\t\u0000"]=]) == "\"\\/\b\f\n\r\t\0")
-  test.assert(json.decode([=["\uD834\uDD1E"]=]) == strings.char(240, 157, 132, 158))
-  test.assert(json.decode([=["\udbff\udfff"]=]) == strings.char(244, 143, 191, 191))
-  test.assert(json.decode([=["\uD800\uDC00"]=]) == strings.char(240, 144, 128, 128))
+  test.assert(json.decode([=["\uD834\uDD1E"]=]) == string.char(240, 157, 132, 158))
+  test.assert(json.decode([=["\udbff\udfff"]=]) == string.char(244, 143, 191, 191))
+  test.assert(json.decode([=["\uD800\uDC00"]=]) == string.char(240, 144, 128, 128))
   local limits = [=["\u0000\u007f\u0080\u07ff\u0800\uD7ff\uE000\uffff"]=]
   test.assert(json.decode(limits) ==
-    strings.char(0, 127, 194, 128, 223, 191, 224, 160, 128,
+    string.char(0, 127, 194, 128, 223, 191, 224, 160, 128,
                  237, 159, 191, 238, 128, 128, 239, 191, 191))
-  local raw = "é🙂" .. strings.char(127)
+  local raw = "é🙂" .. string.char(127)
   test.assert(json.decode('"' .. raw .. '"') == raw)
   local different: {string: value} = json.decode([=[{"é":1,"e\u0301":2}]=])
-  test.assert(different["é"] == 1 and different["e" .. strings.char(204, 129)] == 2,
+  test.assert(different["é"] == 1 and different["e" .. string.char(204, 129)] == 2,
               "JSON normalized distinct Unicode spellings")
 end
 
@@ -140,13 +140,13 @@ function test_parser_labeled_string_errors(context: test.Context)
                    "invalid_surrogate", 2)
   for octet = 0, 31 do
     parser_add_error(context, "unescaped_control_" .. octet,
-                     '"a' .. strings.char(octet) .. 'b"', "unescaped_control", 3)
+                     '"a' .. string.char(octet) .. 'b"', "unescaped_control", 3)
   end
   local malformed: {string} = {
-    strings.char(128), strings.char(192, 128), strings.char(224, 128, 128),
-    strings.char(194), strings.char(226, 130), strings.char(240, 159, 153),
-    strings.char(244, 144, 128, 128), strings.char(245, 128, 128, 128),
-    strings.char(255), strings.char(237, 160, 128), strings.char(226, 40, 161),
+    string.char(128), string.char(192, 128), string.char(224, 128, 128),
+    string.char(194), string.char(226, 130), string.char(240, 159, 153),
+    string.char(244, 144, 128, 128), string.char(245, 128, 128, 128),
+    string.char(255), string.char(237, 160, 128), string.char(226, 40, 161),
   }
   for index = 1, #malformed do
     parser_add_error(context, "invalid_utf8_" .. index,
@@ -181,10 +181,10 @@ function test_parser_byte_line_and_column_locations(context: test.Context)
 end
 
 function test_parser_long_string_spans(_context: test.Context)
-  local plain = strings.rep("abé", 16384)
+  local plain = string.rep("abé", 16384)
   test.assert(json.decode('"' .. plain .. '"') == plain)
-  local escaped = '"' .. strings.rep([=[\u0041\n]=], 16384) .. '"'
-  test.assert(json.decode(escaped) == strings.rep("A\n", 16384))
+  local escaped = '"' .. string.rep([=[\u0041\n]=], 16384) .. '"'
+  test.assert(json.decode(escaped) == string.rep("A\n", 16384))
   local failure = expect_json_error(function()
     json.decode('"' .. plain)
   end)
@@ -242,7 +242,7 @@ end
 function test_parser_configured_nesting_boundary(_context: test.Context)
   peg.set_max_stack(400)
   local depth = 128
-  local objects = strings.rep('{"x":', depth) .. "true" .. strings.rep("}", depth)
+  local objects = string.rep('{"x":', depth) .. "true" .. string.rep("}", depth)
   local current: value = json.decode(objects, nil, json.DecodeOption.max_depth(depth))
   test.assert(json.encode(current, json.EncodeOption.max_depth(depth)) == objects)
   local failure = expect_json_error(function()
@@ -254,7 +254,7 @@ function test_parser_configured_nesting_boundary(_context: test.Context)
     current = object["x"]
   end
   test.assert(current == true)
-  local arrays = strings.rep("[", depth) .. "true" .. strings.rep("]", depth)
+  local arrays = string.rep("[", depth) .. "true" .. string.rep("]", depth)
   current = json.decode(arrays, nil, json.DecodeOption.max_depth(depth))
   test.assert(json.encode(current, json.EncodeOption.max_depth(depth)) == arrays)
   failure = expect_json_error(function()
@@ -318,14 +318,14 @@ end
 
 function test_parser_peg_limit_is_independent_of_depth_option(_context: test.Context)
   peg.set_max_stack(400)
-  local source = strings.rep("[", 256) .. "true" .. strings.rep("]", 256)
+  local source = string.rep("[", 256) .. "true" .. string.rep("]", 256)
   local failed = false
   do
     json.decode(source, nil, json.DecodeOption.max_depth(math.maxinteger))
   catch
     failed = true
     test.assert(not (error is json.Error), "JSON relabeled a PEG resource failure")
-    test.assert(strings.find(strings.tostring(error), "backtrack stack overflow", 1, true) ~= nil)
+    test.assert(string.find(string.tostring(error), "backtrack stack overflow", 1, true) ~= nil)
   end
   test.assert(failed, "expected the configured PEG stack to be exhausted")
 end
@@ -333,13 +333,13 @@ end
 function test_parser_wide_fold_collections(context: test.Context)
   context:run("array_over_native_result_limit", function(_child: test.Context)
     local width = 32768
-    local source = "[" .. strings.rep("true,", width - 1) .. "true]"
+    local source = "[" .. string.rep("true,", width - 1) .. "true]"
     local array: {boolean} = json.decode(source)
     test.assert(#array == width and array[1] == true and array[width] == true)
   end)
   context:run("object_over_native_result_limit", function(_child: test.Context)
     local width = 32768
-    local source = strings.writer()
+    local source = string.writer()
     defer source:close()
     source:write("{")
     for index = 1, width do
@@ -353,7 +353,7 @@ function test_parser_wide_fold_collections(context: test.Context)
   end)
   context:run("wide_nested_siblings", function(_child: test.Context)
     local width = 32768
-    local source = "[" .. strings.rep('{"n":[]},', width - 1) .. '{"n":[]}]'
+    local source = "[" .. string.rep('{"n":[]},', width - 1) .. '{"n":[]}]'
     local array: {value} = json.decode(source)
     test.assert(#array == width)
     local first: {string: value} = array[1]

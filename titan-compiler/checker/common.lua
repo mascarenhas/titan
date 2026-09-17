@@ -289,6 +289,13 @@ resolve_type_alias = function(node, st, errors)
         -- spelling-only context.
         target = typefromnode(node.type, st, errors, true)
     end
+    if types.is_direct_c(target)
+       and types.resolve_c_typedef(target)._tag ~= "Type.COwned" then
+        checker.typeerror(errors, node.type.loc or node.loc,
+            "type alias '%s' cannot name a direct foreign type; use 'foreign type'",
+            node.name)
+        target = types.Invalid()
+    end
 
     -- A recursive visit marks this declaration resolved/invalid. Preserve that
     -- result instead of wrapping it back in the structural RHS on unwind.
@@ -298,6 +305,66 @@ resolve_type_alias = function(node, st, errors)
     node._type = target
     node._alias_state = "resolved"
     return target
+end
+
+-- Foreign aliases are real C typedef declarations. Keep their dependency order
+-- separately from the semantic module AST, and reject Titan-owned storage even
+-- when hidden behind another alias or inside a callable/aggregate graph.
+local function foreign_alias_has_owned(typ, seen)
+    if type(typ) ~= "table" then return false end
+    if typ._tag == "Type.COwned" then return true end
+    seen = seen or {}
+    if seen[typ] then return false end
+    seen[typ] = true
+    local tag = typ._tag
+    if tag == "Type.CTypedef" then
+        return foreign_alias_has_owned(typ.target, seen)
+    elseif tag == "Type.CPointer" then
+        return foreign_alias_has_owned(typ.pointee, seen)
+    elseif tag == "Type.CArray" then
+        return foreign_alias_has_owned(typ.elem, seen)
+    elseif tag == "Type.CFunction" then
+        for _, param in ipairs(typ.params) do
+            if foreign_alias_has_owned(param, seen) then return true end
+        end
+        return foreign_alias_has_owned(typ.ret, seen)
+    elseif tag == "Type.CStruct" or tag == "Type.CUnion" then
+        for _, field in ipairs(typ.fields or {}) do
+            if foreign_alias_has_owned(field.type, seen) then return true end
+        end
+    end
+    return false
+end
+
+function resolve_foreign_type_alias(node, st, errors)
+    if node._alias_state == "resolved" then return node._type end
+    if node._alias_state == "resolving" then
+        checker.typeerror(errors, node.type.loc or node.loc,
+            "cyclic foreign type alias involving '%s'", node.name)
+        node._type, node._alias_state = types.Invalid(), "resolved"
+        return node._type
+    end
+    node._alias_state = "resolving"
+    local target = typefromnode(node.type, st, errors, true)
+    if node._alias_state == "resolved" then return node._type end
+    if target._tag ~= "Type.Invalid" then
+        if not types.is_direct_c(target) or foreign_alias_has_owned(target) then
+            checker.typeerror(errors, node.type.loc or node.loc,
+                "foreign type alias '%s' requires a raw C type without owned storage",
+                node.name)
+            target = types.Invalid()
+        end
+    end
+    if target._tag == "Type.Invalid" then
+        node._type = target
+    else
+        node._type = types.CTypedef(node.name, target, {})
+        node._c_typedef = "typedef " ..
+            cdeclarator.render_declaration(target, node.name) .. ";"
+        st.foreign_alias_order[#st.foreign_alias_order + 1] = node
+    end
+    node._alias_state = "resolved"
+    return node._type
 end
 
 -- Checks if two types are the same, and logs an error message otherwise

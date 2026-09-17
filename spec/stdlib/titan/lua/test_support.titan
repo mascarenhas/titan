@@ -5,8 +5,8 @@ local fs = import "fs"
 foreign import "lua.h"
 foreign import "titan/ffi.h"
 
-local type CheckedAction = () -> ()
-local type PackageSearcher = (string) -> (value, value)
+local type CheckedAction = function (): ()
+local type PackageSearcher = function (string): (value, value)
 
 local record PackageSearchState
   local package_table: {string: value}
@@ -18,8 +18,8 @@ end
 local function find_literal(subject: string, needle: string): integer?
   if #needle == 0 then return 1 end
   if #needle > #subject then return nil end
-  local bytes = subject as const *unsigned char
-  local wanted = needle as const *unsigned char
+  local bytes = subject as foreign const *unsigned char
+  local wanted = needle as foreign const *unsigned char
   local first = 0
   while first <= #subject - #needle do
     local equal = true

@@ -23,19 +23,19 @@ describe("surface C99 type code generation", function()
     it("allocates and accesses primitive owned arrays directly", function()
         h.run_coder([[
             function exercise(): integer
-                local ints: owned int[] = int.new_array(2)
+                local ints: owned int[] = foreign int.new_array(2)
                 ints[0] = 37
                 ints[1] = 5
-                local chars: owned char[] = char.new_array(3)
-                local floats: owned foreign float[] =
+                local chars: owned char[] = foreign char.new_array(3)
+                local floats: owned float[] =
                     foreign float.new_array(1)
                 return ints[0] as integer + ints[1] as integer
                     + #chars + #floats
             end
 
             function layout(): integer
-                return bool.sizeof + signed char.alignof
-                    + unsigned long.sizeof + long double.alignof
+                return foreign bool.sizeof + foreign signed char.alignof
+                    + foreign unsigned long.sizeof + foreign long double.alignof
             end
         ]], [[
             assert(test.exercise() == 46)
@@ -46,27 +46,26 @@ describe("surface C99 type code generation", function()
     it("shares portable callable and owner identity across modules", function()
         local ok, err = h.generate_modules({
             surface_provider = [[
-                type Callback = foreign (int) -> int
 
                 foreign function plus_one(item: int): int
-                    return item + (1 as int)
+                    return item + (1 as foreign int)
                 end
 
                 callback_invocations: integer = 0
-                stored_callback: Callback = nil
+                stored_callback: foreign function (int): int = nil
 
                 record CallbackBox
-                    callback: Callback
+                    callback: foreign function (int): int
                 end
 
-                function callback(): Callback
+                function callback(): foreign function (int): int
                     callback_invocations = callback_invocations + 1
                     return plus_one
                 end
 
                 function invoke_boxed(raw: value): integer
-                    local restored = raw as Callback
-                    return restored(41 as int) as integer
+                    local restored = raw as foreign function (int): int
+                    return restored(41 as foreign int) as integer
                 end
 
                 function boxed_callback(): CallbackBox
@@ -74,13 +73,13 @@ describe("surface C99 type code generation", function()
                 end
 
                 function expose(): value
-                    local identity: (int) -> int =
-                        function(item: int): int return item end
+                    local identity: function (foreign int): (foreign int) =
+                        function(item: foreign int): foreign int return item end
                     return identity
                 end
 
                 function make(): owned int[]
-                    local items: owned int[] = int.new_array(2)
+                    local items: owned int[] = foreign int.new_array(2)
                     items[0] = 41
                     return items
                 end
@@ -93,21 +92,21 @@ describe("surface C99 type code generation", function()
                 local provider = import "surface_provider"
 
                 function call_foreign(): integer
-                    local callback: provider.Callback = provider.callback()
-                    local item: int = 41
+                    local callback: foreign function (int): int = provider.callback()
+                    local item: foreign int = 41
                     return callback(item) as integer
                 end
 
                 function call_stored(): integer
                     local box = provider.boxed_callback()
-                    return box.callback(40 as int) as integer
-                        + provider.stored_callback(0 as int) as integer
+                    return box.callback(40 as foreign int) as integer
+                        + provider.stored_callback(0 as foreign int) as integer
                 end
 
                 function invoke(): integer
                     local raw: value = provider.expose()
-                    local identity: (int) -> int = raw
-                    local item: int = 41
+                    local identity: function (foreign int): (foreign int) = raw
+                    local item: foreign int = 41
                     return identity(item) as integer
                 end
 
@@ -143,17 +142,16 @@ describe("surface C99 type code generation", function()
     it("exports *lua_State across module boundaries", function()
         local ok, err = h.generate_modules({
             surface_provider = [[
-                type Callback = foreign (*lua_State) -> int
 
                 record Holder
-                    state: *lua_State
+                    state: foreign *lua_State
                 end
 
-                function make_holder(s: *lua_State): Holder
+                function make_holder(s: foreign *lua_State): Holder
                     return { state = s }
                 end
 
-                function extract(h: Holder): *lua_State
+                function extract(h: Holder): foreign *lua_State
                     return h.state
                 end
             ]],
@@ -162,8 +160,8 @@ describe("surface C99 type code generation", function()
 
                 function roundtrip(): boolean
                     local h = provider.make_holder(L)
-                    local s: *lua_State = provider.extract(h)
-                    return (s as *void) == (L as *void)
+                    local s: foreign *lua_State = provider.extract(h)
+                    return (s as foreign *void) == (L as foreign *void)
                 end
             ]],
         }, "surface_consumer", nil, { interface = "compiled" })

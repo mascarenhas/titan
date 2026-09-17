@@ -37,10 +37,10 @@ local function call_api(): integer
 end
 ```
 
-Call `ffi.func(...)`, read `ffi.variable`, and name C types such as
-`ffi.size_t`. The namespace cannot be stored, passed, or returned. Its root name
-is reserved: an ordinary import, local, parameter, or other declaration cannot
-bind or shadow `ffi`. Unrelated member names such as `record.ffi` remain valid.
+Call `ffi.func(...)` and read `ffi.variable`. Write `foreign size_t` in a type
+position. The namespace cannot be stored, passed, returned, or assigned, but
+an ordinary import, local, parameter, or declaration may shadow its `ffi`
+binding. Foreign type lookup remains independent of that term binding.
 The old bound foreign-import syntax is no longer accepted.
 
 Titan preprocesses and parses one ordered C header environment for each logical
@@ -57,8 +57,8 @@ inheritance follows transitive C includes, while access to private Titan
 declarations still requires a direct explicit source import. Ordinary imports
 and compiled providers do not grant this source-only visibility.
 
-The compiler prepares `A.ffi.h` from those includes before checking Titan
-signatures. A module defining foreign functions also gets `A.titan.h` for their
+The compiler prepares `A.ffi.h` from those includes and any `foreign type`
+typedef declarations before checking Titan signatures. A module defining foreign functions also gets `A.titan.h` for their
 checked declarations and eligible inline bodies. Generated `A.c` includes its own `.ffi.h` before
 any `.titan.h`, so the consumer's complete C environment is established first.
 See [foreign functions](foreign-functions.md) for those source-private entry
@@ -103,7 +103,7 @@ GC-bearing, like Titan `value`.
 
 ## Imported Members
 
-The module's `ffi` namespace contains three categories of members:
+The imported C environment contains value members and a separate type namespace:
 
 * C functions become callable members. This includes ordinary prototypes and
   header-defined function bodies, whether `static`, `extern inline`, or bare
@@ -135,16 +135,16 @@ The module's `ffi` namespace contains three categories of members:
   enum or ordinary C integer. Calling a C function pointer performs the same
   lazy checks on its enum parameters and results, while merely carrying a
   pointer to a spellable wide enum does not require a numeric carrier. A
-  transparent Titan type alias does not itself count as a value use; the final
+  foreign type alias does not itself count as a value use; the final
   aliased declaration, pointer, cast, or call determines which check applies.
   Anonymous object declarators from one C enum declaration retain that one
   nominal owner. `__int128` carriers are not supported. See
   [C constants and macro-projected fields](c-ffi-expressions.md#c-constants-and-macro-projected-fields).
 * C typedef names become the source-nameable type namespace. Named file-scope
-  tag-only `struct S` / `union U` declarations also publish `ffi.S` using their
+  tag-only `struct S` / `union U` declarations also publish `foreign S` using their
   exact tag spelling; a real same-name typedef takes precedence. These names
-  may be used in local annotations, casts, and the `.new()` /
-  `.new_array(count)` allocation pseudo-functions. See
+  may be used in annotations and casts, and in `foreign T.new()` /
+  `foreign T.new_array(count)` allocation expressions. See
   [named C tags](c-ffi-expressions.md#named-struct-and-union-tags).
 
 The value namespace and the type namespace are separate: an `extern int x;`
@@ -155,27 +155,22 @@ member is read as `ffi.x`, but `ffi.x` is not a type annotation.
 Built-in and imported C types stay C types. They are not aliases for Titan
 `integer` or `float`, though many casts and calls can convert between the two.
 
-The portable C primitives are contextual type spellings:
+The portable C primitives belong to the foreign type category:
 
-```titan
-void                 bool
-char                 signed char          unsigned char
-short                unsigned short
-int                  unsigned int
-long                 unsigned long
-long long            unsigned long long
-foreign float        double               long double
+```text
+void          bool          char            signed char       unsigned char
+short         unsigned short               int               unsigned int
+long          unsigned long                long long         unsigned long long
+float         double        long double
 ```
 
-`bool` denotes C99 `_Bool`, not Titan `boolean`; `foreign float` denotes C
-`float`, not Titan `float`. Their sizes, integer ranks, and signedness come from
-the configured C compiler's target profile. The newly contextual C words remain
-ordinary identifiers outside a type context; `foreign` and `float` retain their
-existing language roles. An in-scope type parameter or transparent type alias
-with a single-word spelling wins ordinary type lookup, and an in-scope value
-wins expression lookup such as `int.sizeof`. A record, union, or Interface
-cannot establish a new nominal Titan type named with any contextual C
-component word, including `signed` or `unsigned`.
+Prefix a foreign type with `foreign` where Titan and foreign types are both
+admitted, for example `foreign int`, `foreign float`, and `foreign *size_t`.
+Inside a foreign signature or foreign type constructor, use the unqualified C
+spelling. `bool` denotes C99 `_Bool`. Sizes, integer ranks, and signedness come
+from the configured compiler's target profile. These words remain identifiers
+outside foreign type context, so a Titan record named `int` can coexist with
+C `int`. Ordinary values do not participate in foreign type lookup.
 
 Supported C type families:
 
@@ -190,22 +185,22 @@ Supported C type families:
 | `struct S`, `union U` | C aggregate type with fields when the header exposes them; named file-scope tags are source-nameable through the foreign module |
 | `typedef T name` | C typedef that resolves through its target |
 | exact by-value `TValue` | distinct C `TValue`, with FFI coercions to/from Titan `value` |
-| `owned *ffi.T` | one GC-owned C `T` object |
-| `owned ffi.T[]` | a dynamically counted GC-owned array of C `T` |
+| `owned *T` | one GC-owned C `T` object |
+| `owned T[]` | a dynamically counted GC-owned array of C `T` |
 
 Built-in C types need no `foreign import` and can be used directly:
 
 ```titan
-local function add1(x: int): int
+local function add1(x: foreign int): foreign int
     local y: integer = (x as integer) + 1
-    return y as int
+    return y as foreign int
 end
 ```
 
 These primitive descriptors are self-contained, so a public compiled-module
 interface may contain them and recursively built pointer, const-pointer,
 foreign-function-pointer, and `owned` types. For example, another compiled
-Titan module can consume `foreign (*void) -> ()`, `*void`, or
+Titan module can consume `foreign function(*void): void`, `foreign *void`, or
 `owned int[]` without importing a producer's C header. Such native signatures
 remain unavailable to dynamic Lua coercion when they contain a raw or function
 pointer.
@@ -251,21 +246,21 @@ and may itself cross through `value`.
 Pointer types can also be written directly from a C type:
 
 ```lua
-local function fill(out: *int)
+local function fill(out: foreign *int)
     out[0] = 42
 end
 
-local function read(p: const *int): integer
+local function read(p: foreign const *int): integer
     return p[0] as integer
 end
 ```
 
-`*T` means `T *`; `const *T` means `const T *`. The pointee must be a C type,
-so `*integer` and pointers to non-FFI Titan types are compile-time
+`foreign *T` means `T *`; `foreign const *T` means `const T *`. The pointee must be a C type,
+so `foreign *integer` and pointers to non-FFI Titan types are compile-time
 errors.
 
-A C type namespace exposes `sizeof` and `alignof` pseudo-members when no
-ordinary value has the same expression name. They compile to C
+`foreign T.sizeof` and `foreign T.alignof` explicitly select layout operations
+on a foreign type. They compile to C
 `sizeof(T)` and `_Alignof(T)` and return a Titan `integer`. The intermediate
 result retains the target profile's exact `size_t` type; conversion to
 `lua_Integer` is range-checked, so an unusually wider `size_t` raises instead
@@ -273,17 +268,55 @@ of narrowing:
 
 ```titan
 function int_layout(): integer
-    return int.sizeof + int.alignof
+    return foreign int.sizeof + foreign int.alignof
 end
 ```
 
 Inside a restricted `foreign function`, both pseudo-members instead retain
 their C `size_t` type; no Titan numeric conversion occurs.
 
-When a legal ordinary identifier collides with the type spelling, as with
-`struct stat` and `stat()`, expression lookup keeps the ordinary value usable
-and these type pseudo-members are unavailable. See
+A legal C value and type may share a spelling: `ffi.stat(...)` calls the
+function, while `foreign stat.new()` selects the type. Neither hides the other. See
 [C FFI declarations and expressions](c-ffi-expressions.md#named-struct-and-union-tags).
+
+### Foreign aliases and owned Titan types
+
+`foreign type Name = foreigntype` creates a module-local raw C typedef. There
+is no `local` modifier and no exported Titan type-member entry. Aliases may
+refer forward to other foreign aliases; cycles are rejected. The compiler emits
+the typedefs in dependency order after the module's C includes. Their C names
+must be legal in the actual C environment, including the Lua/Titan SDK; they
+cannot collide with ordinary C functions, variables, or incompatible typedefs.
+
+```titan
+foreign type IntPointer = *int
+foreign type Callback = function(IntPointer): void
+local type Owner = owned IntPointer
+```
+
+Explicit `import "other.titan"` includes the other module's `.ffi.h` and makes
+its typedefs available by unqualified foreign name. This inheritance follows
+transitive C includes and header guards. Ordinary `import "other"` does not
+import these names.
+
+Foreign runtime identity follows the declaring header and C declaration, not
+the importing Titan module. Modules using the same declaration can exchange
+owners through `value`, including through source imports and forced headers.
+Distinct anonymous declarations retain distinct identities. As with ordinary
+C linking, modules exchanging C values must use compatible C declarations and
+build settings; Titan does not fingerprint preprocessing conditions or verify
+C ABI compatibility for these runtime identities.
+
+`owned foreigntype` is a Titan constructor. Its operand must resolve to a C
+pointer or array, including through a foreign alias. The pointed-to/element
+type is the owned payload, and an array operand produces a counted owner.
+The checker rejects an outer `const`, including one inherited through an alias:
+`owned const *int` and `owned const int[]` are invalid. Titan has no construct
+that allocates and initializes const owned storage together.
+Thus ordinary `type Owner = owned *int` aliases are valid. Foreign alias RHS
+values and foreign function signatures cannot contain `owned`; foreign function
+bodies also reject owned local declarations. Ordinary Titan aliases cannot
+alias a raw foreign type merely by parenthesizing it.
 
 ## The Built-In Lua State
 
@@ -308,6 +341,11 @@ are rejected so the built-in remains unambiguous. The pointer is not a Titan
 value you should store for later use; pass it only to C APIs that use it during
 the call.
 
+`M` is the other readonly ordinary-function builtin. It selects current-module
+members, including local or keyword-named members, as `M.member`, and an
+explicit `M as foreign *Udata` exposes the borrowed module userdata pointer.
+Foreign function bodies receive neither builtin implicitly.
+
 ## Casts And Coercions
 
 Regular `as <type>` casts handle FFI conversions; there is no special
@@ -330,10 +368,10 @@ Allowed conversions include:
 * a C function pointer to or from C `void *` with a written portability cast;
 * a Titan Array, Map, record, union, Interface, or function value to C
   `void *` with a written identity cast;
-* non-pointer by-value C object expressions to compatible `const *T` pointers,
+* non-pointer by-value C object expressions to compatible `foreign const *T` pointers,
   materialized as the address of the C expression for the duration of the
   foreign call;
-* mutable local or formal C values to compatible mutable `*T` or `void *`
+* mutable local or formal C values to compatible mutable `foreign *T` or `void *`
   pointer parameters, for C out-parameters;
 * mutable local or formal C object-pointer values to an exact pointer
   out-parameter (`T *` storage passed to `T **`), preserving all qualifiers
@@ -425,18 +463,18 @@ The explicit GC-identity cast exposes the native object address:
 * a function exposes the GC object carried by its boxed function value.
 
 The function case has a dynamic precondition because function-typed values
-defer callability checks until call time. `f is *void` is false when the boxed value is not
-collectable, and `f as *void` raises in that case. The operand
+defer callability checks until call time. `f is foreign *void` is false when the boxed value is not
+collectable, and `f as foreign *void` raises in that case. The operand
 is evaluated exactly once.
 
 This identity rule is explicit only: it does not make any of these Titan types
 implicitly assignable to C `void *`, and it does not unwrap an option.
 Arbitrary `value` also gains no GC-identity conversion. A written
-`value as *ffi.T` may accept only the ordinary lightuserdata/nil representation,
+`value as foreign *T` may accept only the ordinary lightuserdata/nil representation,
 but that operation is an unsafe programmer assertion: every lightuserdata
-looks alike and Titan cannot prove that the address points to `ffi.T`. The
+looks alike and Titan cannot prove that the address points to `foreign T`. The
 corresponding `is` can test only this outer representation, not the pointee.
-Implicit `value -> *ffi.T`, typed Array/Map reads of raw pointers, gradual
+Implicit `value -> foreign *T`, typed Array/Map reads of raw pointers, gradual
 container/function views whose eventual leaf is a raw pointer, and raw-pointer
 results from non-Titan Lua callables are rejected. Titan strings retain their
 established pointer conversion to
@@ -465,7 +503,7 @@ formal parameters that have C types, because C may write through the pointer:
 foreign import "outparam.h" -- void write_int(int *p);
 
 function read_written(): integer
-    local x: int = 0 as int
+    local x: foreign int = 0 as foreign int
     ffi.write_int(x)
     return x as integer
 end
@@ -536,7 +574,7 @@ not remove it from contextual C lookup.
 
 Parenthesized direct calls to nonvariadic C functions, calls through
 nonvariadic C function pointers, and type-namespace C allocation pseudo-calls
-such as `T.new_array(...)` retain strict finite C arity. A trailing Titan call
+such as `foreign T.new_array(...)` retain strict finite C arity. A trailing Titan call
 or a spread of an Array, integer-keyed Map, or the current function's input
 varargs may supply the finite projections needed to fill exactly the remaining
 C formals, but explicitly written surplus arguments remain an arity error. The
@@ -570,7 +608,7 @@ foreign import "callbacks.h"
 -- extern int apply(callback cb, int x);
 
 function via_callback(): integer
-    local cb: ffi.callback = ffi.add1
+    local cb: foreign callback = ffi.add1
     return ffi.apply(cb, 41) as integer
 end
 ```
@@ -588,7 +626,7 @@ rather than a direct declaration member:
 ```lua
 foreign import "callbacks.h"
 
-function call_it(cb: ffi.callback): integer
+function call_it(cb: foreign callback): integer
     return cb(41) as integer
 end
 ```
@@ -670,20 +708,21 @@ static length for a C array and the allocation count for an owned array:
 
 ```lua
 function count(): integer
-    local xs = int.new_array(8)
+    local xs = foreign int.new_array(8)
     return #xs
 end
 ```
 
 An uncounted `T[]` local is a borrowed pointer view, so it has no length and
 uses unchecked pointer indexing. A flexible-array member reached through an
-owned or automatic parent created by `T.new(count)` retains count provenance:
+owned or automatic parent created by `foreign T.new(count)` retains count provenance:
 its indexing is checked and `#parent.field` returns that count. Converting the
 parent to raw `T *` erases it.
 
 Functions request automatic fixed arrays explicitly with a direct initialized
-allocation such as `local values: ffi.element_type[N] =
-ffi.element_type.new_array(N)`. The selection, decay, copy, and lifetime rules
+allocation such as `local values = foreign element_type.new_array(4)`.
+A positive literal or eligible integer object-like macro selects fixed storage;
+there is no written `T[N]` annotation. The selection, decay, copy, and lifetime rules
 are in [Target-directed C allocation](c-ffi-expressions.md#target-directed-c-allocation).
 
 ## Structs, Unions, And Fields
@@ -695,7 +734,7 @@ its named fields:
 foreign import "point.h"
 
 function sum(): integer
-    local p = ffi.ffi_point.new()
+    local p = foreign ffi_point.new()
     p.x = 10
     p.y = 20
     return (p.x as integer) + (p.y as integer)
@@ -708,9 +747,9 @@ owned C objects. For pointer and owned bases, `p.x` uses C's `->` semantics.
 Bitfields are parsed and typed, but they remain C bitfields: assignment follows
 the C compiler's rules. Anonymous fields are not exposed as Titan members.
 
-Named file-scope tag-only aggregates are available as `ffi.Tag` without a C
+Named file-scope tag-only aggregates are available as `foreign Tag` without a C
 typedef. Such an aggregate local requires an initializer because the type does
-not admit nil; use `ffi.Tag.new()` at a direct local sink to request zeroed
+not admit nil; use `foreign Tag.new()` at a direct local sink to request zeroed
 automatic storage. An explicitly typed mutable C pointer local may omit its
 initializer and starts as `NULL`. See
 [C FFI declarations and expressions](c-ffi-expressions.md).
@@ -744,13 +783,13 @@ ultimately denote persistent, addressable storage. Imported C objects, C
 locals or parameters, pointer-referenced storage, and fields or elements
 reached from those objects are persistent. A C pointer or owned C object
 identifies persistent storage regardless of how that pointer/userdata value was
-produced, so a pointer-returning function or `T.new()` call can be a receiver.
+produced, so a pointer-returning function or `foreign T.new()` call can be a receiver.
 A call, cast, or other temporary that produces a struct, union, or array *by
 value* is not persistent: Titan cannot retain a pointer to that temporary while
 the right-hand side runs.
 
 ```lua
-local p: ffi.ffi_point = ffi.make_point()
+local p: foreign ffi_point = ffi.make_point()
 p.x = 1                  -- valid: p is persistent local storage
 ffi.make_point().x = 2     -- rejected: the returned struct is temporary
 ```
@@ -771,7 +810,7 @@ ffi.make_outer().pointer_field.x = 3  -- valid: x belongs to the pointee
 
 Titan may materialize the returned aggregate just long enough to extract and
 freeze `pointer_field`; it does not try to mutate the temporary `outer`.
-Passing a materialized by-value object to a compatible `const *T` parameter
+Passing a materialized by-value object to a compatible `foreign const *T` parameter
 for the duration of one C call likewise remains valid. The restriction is
 specifically on mutation of a by-value aggregate through an assignment
 receiver.
@@ -784,9 +823,9 @@ pseudo-functions:
 ```lua
 function make(): integer
     local one: owned *int =
-        int.new()
+        foreign int.new()
     local many: owned int[] =
-        int.new_array(16)
+        foreign int.new_array(16)
     return #many
 end
 ```
@@ -794,44 +833,44 @@ end
 `owned *T` means one GC-owned object whose C payload type is `T`.
 `owned T[]` means a dynamically counted GC-owned array whose element type is
 `T`. The first `*` in the scalar spelling marks ownership; it is not a pointer
-layer in the payload. Consequently, `owned **T` owns one `T *` object, while
-`owned *T[]` owns an array of `T *` elements.
+layer in the payload. Consequently, `owned *(*T)` owns one `T *` object, while
+`owned (*T)[]` owns an array of `T *` elements.
 
 The payload must be a complete, allocatable C object type. Titan
 rejects `void`, direct C function types, incomplete structs and unions, C array
 typedefs, Titan types, and nested owned storage. Fixed extents such as
 `owned T[4]` are not part of the owner syntax; use `owned T[]` and supply the
 count when allocating. A flexible-array-member struct is a scalar owner and is
-allocated with its dedicated `T.new(fam_count)` form.
+allocated with its dedicated `foreign T.new(fam_count)` form.
 
-Outside a direct function-local declaration sink, `T.new()` produces one
-zeroed `owned *T` and `T.new_array(count)` produces a zeroed `owned T[]`.
+Outside a direct function-local declaration sink, `foreign T.new()` produces
+one zeroed `owned *T` and `foreign T.new_array(count)` produces a zeroed
+`owned T[]`.
 At a direct local sink the target/literal may instead select automatic or
 borrowed storage; see
 [Target-directed C allocation](c-ffi-expressions.md#target-directed-c-allocation).
-These are type-namespace allocation pseudo-functions, not first-class callable
+These are syntax-bound foreign allocation expressions, not first-class callable
 values. Owned results are full userdata whose lifetime belongs to Titan's Lua
 GC, and no finalizer is installed.
 
 A trailing option marker wraps the complete owner:
 
-```lua
+```titan
 local type Handle = owned *int
-
 local record State
-    local handle?: Handle
+    local handle: Handle?
 end
 ```
 
-Here `Handle?` and the field shorthand `handle?: Handle` mean that the owner
-may be absent. The C payload itself is never an option, and an optional owner
+Here `Handle?` means that the owner may be absent. Record fields always write
+optionality on the type, as `handle: Handle?`. The C payload itself is never an option, and an optional owner
 must be explicitly unwrapped before it adjusts to a C pointer.
 
 These pseudo-constructor calls are also valid module-variable initializers when
 their arguments are constant:
 
 ```titan
-local counter = int.new()
+local counter = foreign int.new()
 local samples = foreign float.new_array(16)
 ```
 
@@ -850,7 +889,7 @@ foreign import "stdio.h"
 
 function formatted_len(s: string): integer
     local buf: owned char[] =
-        char.new_array(32)
+        foreign char.new_array(32)
     return ffi.snprintf(buf, 32, "%s", s)
 end
 ```
@@ -859,11 +898,11 @@ Counted owned character arrays have one additional explicit conversion:
 
 ```lua
 local bytes: owned char[] =
-    char.new_array(4)
-bytes[0] = 65 as char
-bytes[1] = 0 as char
-bytes[2] = 66 as char
-bytes[3] = 0 as char
+    foreign char.new_array(4)
+bytes[0] = 65 as foreign char
+bytes[1] = 0 as foreign char
+bytes[2] = 66 as foreign char
+bytes[3] = 0 as foreign char
 local binary = bytes as string       -- four bytes: "A\0B\0"
 ```
 
@@ -871,8 +910,8 @@ The conversion is binary-safe: it copies exactly the owned array's byte
 length, including embedded and trailing NUL bytes. It is available for arrays
 of `char`, `signed char`, and `unsigned char`, including typedef chains and
 legal qualifiers. A scalar character owner and a non-character array do not
-have this cast. Casting the same owner to `*char` first retains the older C
-pointer conversion: `(bytes as *char) as string` scans to the
+have this cast. Casting the same owner to `foreign *char` first retains the older C
+pointer conversion: `(bytes as foreign *char) as string` scans to the
 first NUL.
 
 Indexing a counted owner is 0-based and bounds-checked, and `#owner` returns
@@ -992,7 +1031,7 @@ process-global state.
   combined C environment, including changes made by earlier or later headers.
 * Owned allocation does not support `void`, incomplete aggregate types, or C
   array typedef payloads. A flexible-array-member structure uses only
-  `T.new(count)`; `T.new_array` remains unavailable for it.
+  `foreign T.new(count)`; `T.new_array` remains unavailable for it.
 * C adopted pointers/lifetimes are parked for a later design; v1 has borrowed C
   pointers and Titan-owned userdata only.
 * All headers in one module share the C ordinary-identifier and tag namespaces.

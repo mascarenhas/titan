@@ -175,7 +175,7 @@ describe("flexible returns through finally", function()
             end
 
             function lambda_body(): (...: integer)
-                local f: () -> (...: integer) = function(): (...: integer)
+                local f: function (): (...: integer) = function(): (...: integer)
                     defer note()
                     return
                 end
@@ -183,7 +183,7 @@ describe("flexible returns through finally", function()
             end
 
             function lambda_catch(): (...: integer)
-                local f: () -> (...: integer) = function(): (...: integer)
+                local f: function (): (...: integer) = function(): (...: integer)
                     do
                         defer note()
                         raise "x"
@@ -195,7 +195,7 @@ describe("flexible returns through finally", function()
             end
 
             function lambda_fallthrough(): (...: integer)
-                local f: () -> (...: integer) = function(): (...: integer)
+                local f: function (): (...: integer) = function(): (...: integer)
                 end
                 return f()
             end
@@ -215,7 +215,7 @@ describe("flexible returns through finally", function()
             function named_fallthrough(): (nil, ...: integer)
             end
 
-            function make_anonymous(): () -> (nil, ...: integer)
+            function make_anonymous(): function (): (nil, ...: integer)
                 return function(): (nil, ...: integer)
                 end
             end
@@ -237,12 +237,12 @@ describe("flexible returns through finally", function()
                 return prefix .. "1", prefix .. "2", prefix .. "3"
             end
 
-            function body(force: () -> ()): (integer, ...: string)
+            function body(force: function (): ()): (integer, ...: string)
                 defer force()
                 return 9, values("b")
             end
 
-            function caught(force: () -> ()): (integer, ...: string)
+            function caught(force: function (): ()): (integer, ...: string)
                 do
                     defer force()
                     raise "body"
@@ -251,7 +251,7 @@ describe("flexible returns through finally", function()
                 end
             end
 
-            function nested(force: () -> ()): (integer, ...: string)
+            function nested(force: function (): ()): (integer, ...: string)
                 defer force()
                 defer force()
                 return 5, values("n")
@@ -283,8 +283,8 @@ describe("flexible returns through finally", function()
 
     it("roots generic open results before an allocating finally", function()
         run_coder([[
-            function survive(f: () -> (...: value),
-                             force: () -> ()): (...: value)
+            function survive(f: function (): (...: value),
+                             force: function (): ()): (...: value)
                 defer force()
                 return f()
             end
@@ -332,12 +332,12 @@ describe("flexible returns through finally", function()
     it("publishes Lua callable fallbacks before finally clears the open source run",
     function()
         run_coder([[
-            local type Narrow = (integer) -> integer
-            local type Wide = (integer, value) -> value
+            local type Narrow = function (integer): integer
+            local type Wide = function (integer, value): value
 
             function survive_callables(
-                produce: () -> (...: Narrow),
-                force: () -> ()
+                produce: function (): (...: Narrow),
+                force: function (): ()
             ): (...: Wide)
                 defer force()
                 return produce()
@@ -396,7 +396,7 @@ describe("flexible returns through finally", function()
                 return made
             end
 
-            function from_body(force: () -> ()): (...: value)
+            function from_body(force: function (): ()): (...: value)
                 defer do
                     force()
                     raise "finally-body"
@@ -404,7 +404,7 @@ describe("flexible returns through finally", function()
                 return pending("body")
             end
 
-            function from_catch(force: () -> ()): (...: value)
+            function from_catch(force: function (): ()): (...: value)
                 defer do
                     force()
                     raise "finally-catch"
@@ -478,7 +478,7 @@ describe("flexible returns through finally", function()
             end
 
             function invalid_surplus(
-                f: () -> (integer, ...: integer)
+                f: function (): (integer, ...: integer)
             ): (...: integer)
                 defer note()
                 return f()
@@ -561,7 +561,7 @@ describe("flexible returns through finally", function()
                 return R.new("record-left"), R.new("record-right")
             end
 
-            function make_functions(): (...: (integer) -> integer)
+            function make_functions(): (...: function (integer): integer)
                 local left: integer = 30
                 local right: integer = 40
                 return function(n: integer): integer return left + n end,
@@ -574,32 +574,32 @@ describe("flexible returns through finally", function()
                 return r, a
             end
 
-            function strings(force: () -> ()): (...: string)
+            function strings(force: function (): ()): (...: string)
                 defer force()
                 return make_strings()
             end
 
-            function arrays(force: () -> ()): (...: {string})
+            function arrays(force: function (): ()): (...: {string})
                 defer force()
                 return make_arrays()
             end
 
-            function maps(force: () -> ()): (...: {string:integer})
+            function maps(force: function (): ()): (...: {string:integer})
                 defer force()
                 return make_maps()
             end
 
-            function records(force: () -> ()): (...: R)
+            function records(force: function (): ()): (...: R)
                 defer force()
                 return make_records()
             end
 
-            function functions(force: () -> ()): (...: (integer) -> integer)
+            function functions(force: function (): ()): (...: function (integer): integer)
                 defer force()
                 return make_functions()
             end
 
-            function values(force: () -> ()): (...: value)
+            function values(force: function (): ()): (...: value)
                 defer force()
                 return make_values()
             end

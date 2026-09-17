@@ -9,7 +9,7 @@ can read Titan on first sight — but every variable has a static type, and
 the compiler uses those types to generate code that works on Lua values
 at C speed, with none of the dynamic dispatch of the Lua VM.
 
-```lua
+```titan
 -- sum.titan
 function sum_list(xs: {integer}): integer
     local sum: integer = 0
@@ -120,7 +120,7 @@ remains rejected.
 * **Functions are first-class values.** A function name — a top-level
   function, a `local` function, an imported module's function, or a record
   static like `Rec.new` — used as a value yields a stable function value,
-  and function types like `(integer) -> integer` are accepted in every
+  and function types like `function (integer): (integer)` are accepted in every
   type position. Function values can be stored in locals, parameters,
   record fields, arrays and maps, passed, returned, and called. Exact
   Titan-to-Titan calls take a zero-overhead native path. A statically known

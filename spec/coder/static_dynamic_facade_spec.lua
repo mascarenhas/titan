@@ -200,7 +200,7 @@ end
 local facade = import "dynamic.facade"
 
 function main(args: {string}): integer
-    local make: (integer) -> facade.Box = facade.Box.make
+    local make: function (integer): facade.Box = facade.Box.make
     local box = make(40)
     if box:add(2) == 42 and facade.make(39).n == 39 then
         return 0

@@ -801,8 +801,8 @@ describe("Array compiled-interface validation", function()
                 return items
             end
 
-            function optional(items: (const? { boolean })?):
-                    (const? { boolean })?
+            function optional(items: const? {boolean}?):
+                    const? {boolean}?
                 return items
             end
         ]])
@@ -1914,7 +1914,7 @@ describe("module checking header bundles", function()
         local sha256 = require "titan-compiler.sha256"
         local original_hex, environment_hashes = sha256.hex, 0
         sha256.hex = function(contents)
-            if contents:find("titan-module-ffi-v1", 1, true) == 1 then
+            if contents:find("titan-module-ffi-v2", 1, true) == 1 then
                 environment_hashes = environment_hashes + 1
             end
             return original_hex(contents)
@@ -2678,7 +2678,7 @@ describe("compiler module loader", function()
                 local integral: integer = callback(L)
                 local floating: float = provider.measure()
                 local boxed: value = provider.answer()
-                return integral + int.sizeof + int.alignof
+                return integral + foreign int.sizeof + foreign int.alignof
             end
         ]])
         local context = driver.new_resolver_context({
@@ -2717,7 +2717,7 @@ describe("compiler module loader", function()
         -- semantics; scalar metadata and pure primitive layout do not.
         local arithmetic_consumer = "embedded_c_arithmetic"
         write_file(source .. "/" .. arithmetic_consumer .. ".titan", [[
-            function add(left: int, right: int): int
+            function add(left: foreign int, right: foreign int): foreign int
                 return left + right
             end
         ]])
@@ -5731,7 +5731,7 @@ end
             write_file(relative_root .. "/a/provider.titan", [[
                 foreign import "provider.h"
                 foreign function identity(
-                        input: ffi.provider_int): ffi.provider_int
+                        input: provider_int): provider_int
                     return input
                 end
             ]])

@@ -1,6 +1,6 @@
 foreign import "locale.h"
 
-local function core_error(action: () -> (), code: string): json.Error
+local function core_error(action: function (): (), code: string): json.Error
   local failure = expect_json_error(action)
   test.assert(failure.code == code, "expected " .. code .. ", got " .. failure.code)
   return failure
@@ -8,7 +8,7 @@ end
 
 local function core_integer(source: string, expected: integer)
   case reflect.inspect(json.decode(source, reflect.Type.is_integer()))
-  when is_integer: actual then test.assert(actual == expected, source)
+  when is_integer(actual) then test.assert(actual == expected, source)
   else raise "integer descriptor did not produce an integer"
   end
 end
@@ -71,7 +71,7 @@ function test_core_float_range_tags_and_round_trips(_context: test.Context)
     local sample = samples[index] as float
     local encoded = json.encode(sample)
     case reflect.inspect(json.decode(encoded))
-    when is_float: actual then
+    when is_float(actual) then
       test.assert(actual == sample, "float round trip changed " .. encoded)
       if sample == 0.0 then test.assert(1.0 / actual == 1.0 / sample) end
     else raise "float round trip lost its numeric tag"
@@ -79,11 +79,11 @@ function test_core_float_range_tags_and_round_trips(_context: test.Context)
   end
   test.assert(json.encode(-0.0) == "-0.0")
   case reflect.inspect(json.decode("1e0"))
-  when is_float: number then test.assert(number == 1.0)
+  when is_float(number) then test.assert(number == 1.0)
   else raise "exponent notation did not produce a float"
   end
   case reflect.inspect(json.decode("-0"))
-  when is_integer: number then test.assert(number == 0)
+  when is_integer(number) then test.assert(number == 0)
   else raise "integer negative zero did not normalize"
   end
   local wide: float = json.decode("9223372036854775808", reflect.Type.is_float())
@@ -164,7 +164,7 @@ function test_core_options_and_limits(_context: test.Context)
 end
 
 function test_core_default_depth_limit(_context: test.Context)
-  local source = strings.rep("[", 32) .. "true" .. strings.rep("]", 32)
+  local source = string.rep("[", 32) .. "true" .. string.rep("]", 32)
   local decoded: value = json.decode(source)
   test.assert(json.encode(decoded) == source)
   local failure = core_error(function() json.decode("[" .. source .. "]") end,
@@ -196,10 +196,10 @@ function test_core_cycles_sharing_and_unsupported_values(_context: test.Context)
   core_error(function() json.encode(invalid_keys) end, "invalid_map_key")
   core_error(function() json.encode(function() end) end, "unsupported_type")
   local length = 4
-  local owner = char.new_array(length)
+  local owner = foreign char.new_array(length)
   core_error(function() json.encode(owner) end, "unsupported_type")
-  local malformed: {string} = {strings.char(128), strings.char(192, 175),
-    strings.char(237, 160, 128), strings.char(244, 144, 128, 128), strings.char(226, 130)}
+  local malformed: {string} = {string.char(128), string.char(192, 175),
+    string.char(237, 160, 128), string.char(244, 144, 128, 128), string.char(226, 130)}
   for index = 1, #malformed do
     local text = malformed[index] as string
     core_error(function() json.encode(text) end, "invalid_utf8")
@@ -218,7 +218,7 @@ function test_core_raw_sentinel_and_map_iteration(_context: test.Context)
       return setmetatable({a = 1}, mt), setmetatable({a = 1}, mt)
     end
   ]], "json-raw-values", nil)
-  local factory = loader() as () -> (value, value)
+  local factory = loader() as function (): (value, value)
   local first, second = factory()
   test.assert(json.encode(first, json.EncodeOption.null_value(first)) == "null")
   test.assert(json.encode(first, json.EncodeOption.null_value(second)) == [[{"a":1}]])

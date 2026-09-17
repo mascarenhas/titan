@@ -241,6 +241,7 @@ describe("Titan type checker", function()
 
     it("provides built-in locals L and M and rejects shadowing or assigning them", function()
         assert_type_check([[
+            foreign import "titan/ffi.h"
             record R
             end
 
@@ -249,16 +250,16 @@ describe("Titan type checker", function()
             end
 
             function fn_m(): boolean
-                return M
+                return M as foreign *Udata
             end
 
             function R:method(): boolean
-                return M
+                return M as foreign *Udata
             end
 
             function lambda(): boolean
                 local f = function(): boolean
-                    return M
+                    return M as foreign *Udata
                 end
                 return f()
             end
@@ -286,7 +287,7 @@ describe("Titan type checker", function()
                 L = nil
             end
         ]])
-        assert_type_error("cannot assign to built%-in local 'M'", [[
+        assert_type_error("trying to assign to a module", [[
             function fn()
                 M = nil
             end
@@ -569,7 +570,7 @@ describe("Titan type checker", function()
 
     it("accepts a written function-type annotation", function ()
         local ok, err = run_checker([[
-            function f(g: (integer) -> integer): integer return 0 end
+            function f(g: function (integer): integer): integer return 0 end
         ]])
         assert.truthy(ok, err)
     end)
@@ -648,9 +649,9 @@ describe("Titan type checker", function()
         assert.match("expected integer but found boolean%?", err)
     end)
 
-    it("honors the ? inference marker on module and multi-return declarations", function ()
+    it("keeps explicit module options and local multi-return inference markers", function ()
         local ok, err = run_checker([[
-            y? = 18
+            y: integer? = 18
             function setnil() y = nil end
             function two(): (integer, integer) return 1, 2 end
             function md(): integer?
@@ -1465,8 +1466,8 @@ describe("Titan type checker", function()
             local ok, err = run_checker([[
                 foreign import "]] .. header .. [["
                 local function compare(
-                    left: *ffi.ffi_file,
-                    right: *ffi.ffi_file
+                    left: foreign *ffi_file,
+                    right: foreign *ffi_file
                 ): boolean
                     return left == right
                         and left ~= right
@@ -2014,8 +2015,8 @@ describe("Titan type checker", function()
             local ok, err = run_checker([[
                 foreign import "]] .. header .. [["
                 local function use(
-                    left: *ffi.ffi_left,
-                    right: *ffi.ffi_right
+                    left: foreign *ffi_left,
+                    right: foreign *ffi_right
                 )
                     ffi.ffi_consume(left)
                     ffi.ffi_consume(right)
@@ -2038,7 +2039,7 @@ describe("Titan type checker", function()
                 end
             ]])
             assert.falsy(ok)
-            assert.match("expected %*char but found %*void", err)
+            assert.match("expected foreign %*char but found foreign %*void", err)
         end)
     end)
 
@@ -2070,7 +2071,7 @@ describe("Titan type checker", function()
                 end
             ]])
             assert.equal(1, #errors, table.concat(errors, "\n"))
-            assert.match("expected string but found int", errors[1])
+            assert.match("expected string but found foreign int", errors[1])
         end)
     end)
 
@@ -2099,7 +2100,7 @@ describe("Titan type checker", function()
         ok, err = run_checker(code)
         os.remove(header)
         assert.falsy(ok)
-        assert.match("expected string but found int", err)
+        assert.match("expected string but found foreign int", err)
     end)
 
     it("skips foreign members with unsupported C types instead of crashing", function ()
@@ -2233,7 +2234,7 @@ describe("Titan type checker", function()
             function foo(): integer
                 return 0
             end
-            function get(): () -> integer
+            function get(): function (): integer
                 return foo
             end
         ]]
@@ -2262,7 +2263,7 @@ describe("Titan type checker", function()
             ]],
             bar = [[
                 local foo = import "foo"
-                function bar(): () -> integer
+                function bar(): function (): integer
                     return foo.foo
                 end
             ]]

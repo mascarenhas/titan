@@ -1,5 +1,5 @@
 local uv = import "uv.titan"
-local str = import "string"
+local string = import "string"
 
 -- Stream payloads are binary strings, so delimiter handling uses the string
 -- library's length-aware literal search and slicing operations.
@@ -70,7 +70,7 @@ function Connection:read_until(delimiter: string,
   end
   if #delimiter == 0 then raise "read delimiter must not be empty" end
 
-  local builder = str.writer()
+  local builder = string.writer()
   local tail = ""
   while true do
     local chunk? = read(self)
@@ -83,16 +83,16 @@ function Connection:read_until(delimiter: string,
     local bytes = chunk as string
     local boundary = bytes
     if #tail > 0 then boundary = tail .. bytes end
-    local match: integer? = str.find(boundary, delimiter)
+    local match: integer? = string.find(boundary, delimiter)
     if match then
       local match_first = match as integer
       local match_end = match_first + #delimiter - 1
       local result_end = match_end
       if chop then result_end = match_first - 1 end
       if result_end > 0 then
-        builder:write(str.sub(boundary, 1, result_end))
+        builder:write(string.sub(boundary, 1, result_end))
       end
-      self.excess = str.sub(boundary, match_end + 1)
+      self.excess = string.sub(boundary, match_end + 1)
       return builder:drain()
     end
     local keep = #delimiter - 1
@@ -102,10 +102,10 @@ function Connection:read_until(delimiter: string,
       if committed == #boundary then
         builder:write(boundary)
       else
-        builder:write(str.sub(boundary, 1, committed))
+        builder:write(string.sub(boundary, 1, committed))
       end
     end
-    tail = str.sub(boundary, committed + 1)
+    tail = string.sub(boundary, committed + 1)
   end
   return nil
 end

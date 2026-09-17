@@ -22,8 +22,9 @@ and current callback ABI boundary are in
 no `localname`. The import pass resolves ordinary Titan imports and collects
 unbound foreign directives. `check_foreign_environment` installs one implicit
 `Checker.ForeignNamespace` named `ffi`, backed by a `Type.CModule` with separate
-value and type members. The checker rejects attempts to bind or shadow the
-root name; a field/member named `ffi` remains ordinary.
+value and type members. The readonly builtin term may be shadowed normally.
+Foreign type lookup uses `st.ffi_namespace` directly; a hidden later module
+binding falls back to the builtin during an earlier initializer.
 
 Before aliases, signatures, initializers, or bodies are checked, the driver
 prepares one `.ffi.h` for the complete logical module. Direct explicit source
@@ -35,8 +36,10 @@ real C guards, conditional macros, and `#undef` determine their effect.
 `cdriver.resolve_includes` determines quote/angle intent without parsing each
 header. Authored relative headers keep their resolved absolute quoted origin;
 SDK/system includes retain their angle spelling. `cdriver.process_module`
-then preprocesses and parses the generated header once through the configured
-C99 toolchain context. The stages are:
+then preprocesses and parses the generated header through the configured C99
+toolchain context. Modules without foreign aliases need one pass; modules with
+aliases first establish the imported C types, then resolve and append their
+typedefs before converting the final declaration-complete header. The stages are:
 
 1. Configure predefined macros, system include search, user CPP flags, and the
    active Lua/Titan SDK, then preprocess the whole ordered include chain.
@@ -46,7 +49,7 @@ C99 toolchain context. The stages are:
    order for entries obtained from an unordered macro map. Preserve supported
    scalar/accessor expressions and classify every active object macro as a
    pure dotted field projection or a terminal unsupported field token.
-4. Convert that single TypeList once through `foreigntypes.convert` into
+4. Convert the final TypeList through `foreigntypes.convert` into
    `ffi.members` and `ffi.type_members`. Tag-only named file-scope structs and
    unions retain their canonical tag owners; real typedefs take precedence.
 
@@ -92,6 +95,45 @@ retryable. See [semantic-result caching](c-ffi-expressions.md#analysis-local-and
 Unsupported C declarations are skipped per member. A later reference reports
 the missing member in `ffi`; preprocessing/parsing failures still fail the
 module C environment itself.
+
+### Authored foreign typedefs and immutable headers
+
+`Ast.TopLevelForeignTypeAlias` is always source-local. `symtab.foreign_aliases`
+is distinct from `type_aliases`; the resolver tracks resolving/resolved state,
+rejects cycles, and accumulates dependency-ordered C declarations without
+reordering the module AST. Every RHS is raw C and excludes owned storage.
+`cdeclarator.render_declaration` preserves real tag/typedef spellings.
+
+An include-only C pass supplies the imported names needed for alias resolution.
+The checker then emits the typedefs, clears that preliminary conversion's
+C maps/tag owners/memos, and converts the final header. This prevents stale
+include provenance from entering cached final graphs. Native baseline validation
+uses a new include generation; the final namespace must also contain the exact
+requested typedef name, since C compilers may merely warn about declarations
+such as `typedef long int;` that introduce no name.
+
+`ffiheaders` descriptors retain `typedef_declarations` alongside direct includes
+and dependency descriptors. Their v2 digest covers the final contents and
+dependency digests. Restoration validates the declaration plan and materializes
+actual header files; it never reconstructs typedefs from public Titan metadata.
+Project manifest version 4 includes this schema. Foreign conversion cache
+version 6 retains exact integer macro constants used in allocation selection
+and C declaration origins; older snapshots miss rather than silently losing them.
+
+The C driver maps parsed declaration positions through the preprocessor's
+existing output origins. Runtime identity is nominal: the declaring header and
+C declaration determine identity independently of the consuming Titan module.
+Generated FFI headers use their stable logical source identity; temporary
+checking paths never become runtime keys. Anonymous aggregates retain distinct
+declaration sites. Typedef and tag origins survive conversion and cache restore,
+including named payloads reached after an owned pointer or array alias is
+unwrapped. Direct imports, source imports, and forced headers follow this same
+rule; intrinsic `lua_State` retains its built-in identity.
+
+This bookkeeping adds no preprocessing pass, macro-environment fingerprint,
+layout digest, or native compatibility probe. Compatible C build configuration
+is a program precondition, as in ordinary C linking. The origin metadata is not
+a certificate of matching C layouts under different compiler options or macros.
 
 ## Header Support Files
 
@@ -258,15 +300,20 @@ Structural C provenance remains relevant to interface validation; it must not
 send an ordinary Titan Array, Map, option, or callable down a direct-C path
 merely because one component contains `COwned`.
 
-The source parser represents both written owner shapes as
-`Ast.TypeCOwned(loc, subtype, count)`. `count = false` is the scalar
-`owned *T` form; `count = true` is the dynamically counted `owned T[]` form.
-The parser keeps the payload optionless and applies a trailing `?` outside this
-node, so optionality is the ordinary `Type.Option(COwned(...))` shape.
-The record-field shorthand `name?: T` constructs that same outer option.
-`typefromnode` resolves the payload in the current foreign namespace, applies
-the same allocation-eligibility check used by `.new()`/`.new_array()`, and
-constructs the existing `Type.COwned` representation.
+The parser represents the Titan constructor `owned foreigntype` as
+`Ast.TypeOwned(loc, subtype)`. The checker resolves the foreign operand,
+including typedefs, requires `CPointer` or `CArray`, then selects its
+pointee/element and countedness. Before removing that outer constructor, it
+rejects outer qualifiers, including those inherited through typedefs. In
+particular, `owned const *T` and `owned const T[]` are invalid because there is
+no construct that allocates and initializes const owned storage together.
+It shares allocation eligibility with the
+foreign allocation expressions and produces the existing `Type.COwned` runtime
+representation. A trailing `?` wraps that owner in ordinary `Type.Option`.
+Record fields write `name: Owner?`; optional field-name sugar is absent.
+`COwned` remains a direct native representation for lowering, but belongs to
+the Titan category for source aliases. Raw foreign typedefs and source foreign
+signatures/body locals do not admit owned types.
 
 Exact value-type equality compares primitive spelling, qualifiers, array
 length, aggregate identity/shape, and the other representation fields.
@@ -290,9 +337,9 @@ explicitly requested operations. No caller obtains permission from a broad boole
 * C array / counted `COwned` -> compatible pointer;
 * scalar `COwned` -> its payload object pointer;
 * any non-function C pointer -> `void *`;
-* non-pointer by-value C object expressions -> compatible `const *T` pointers
+* non-pointer by-value C object expressions -> compatible `foreign const *T` pointers
   by address;
-* mutable non-pointer local/formal C variables -> compatible mutable `*T` or
+* mutable non-pointer local/formal C variables -> compatible mutable `foreign *T` or
   `void *` out-parameters by address;
 * Titan `string` -> C `char *` or `void *`;
 * C `TValue` -> Titan `value`, and Titan `value` -> C `TValue`;
@@ -444,33 +491,22 @@ only `Type.Function` denotes that boxed, traced representation.
 
 The checker has FFI-specific handling in a few narrow places:
 
-* `Ast.TypeQualName` accepts `ffi.T` when `c` is a `CModule` and source-nameable
-  `T` is in its `type_members`. This lifts the prototype restriction that C
-  types could only be inferred. A non-module-variable declaration may use a
-  later `foreign import`; while checking a module variable,
-  `symtab.find_symbol` masks a later C-module alias by `initializer_order`.
-  The parser uses contextual `lexer.CNAME` for this selector and for C member
-  access, so a header spelling that is a Titan keyword (`when`, `repeat`,
-  `type`, and so on) remains source-nameable. Ordinary Titan names still use
-  keyword-rejecting `NAME`; C prototype labels continue to use
-  `NAMEDLABEL`. The parser stamps accepted `Ast.VarDot` and
-  `Ast.TypeQualName` nodes with `_contextual_c_name`; the checker admits that
-  marker only when the qualifier resolves to a `Type.CModule`, and the coder
-  emits the stored C spelling unchanged.
-* `Ast.TypeName` recognizes an exact contextual primitive spelling through
-  `foreigntypes.is_surface_primitive_name` and resolves it from the active C
-  profile after type-parameter and transparent type-alias lookup, but before
-  the ordinary nominal fallback.
-* `Ast.TypeCPointer` accepts `*T` and `const *T` when `T` resolves to a direct C
-  pointee, producing `CPointer` values and rejecting non-C pointees and
-  `COwned` wrappers.
-* `Ast.TypeCOwned` accepts both qualified and contextual payloads in the source
-  `owned *T` and `owned T[]` forms. It shares `c_allocation_error` with the allocation
-  pseudo-constructors, rejecting non-C and nested owners, `void`, direct C
-  functions, incomplete aggregates, and C array typedefs before any generated
-  `sizeof` can be formed. A complete FAM struct is an eligible scalar owner;
-  construction is the separate `.new(count)` path, while counted outer
-  `.new_array` remains unavailable.
+* `Ast.TypeForeignName` selects unqualified raw C names. Foreign aliases have
+  their own module-wide declaration map and resolve independently of ordinary
+  Titan aliases, type parameters, nominal names, and the term binding `ffi`.
+  Primitive spellings resolve through the configured target profile. Header
+  typedefs and eligible tag-only names come from the complete C environment,
+  including explicit source dependency headers.
+* `Ast.TypeCPointer` requires a raw C pointee and preserves pointer qualifiers.
+  Nested constructor syntax is explicitly grouped. `Ast.TypeCArray` carries an
+  unsized foreign array spelling, with qualifiers retained; fixed C array
+  types arise from imported declarations and allocation inference.
+* `Ast.TypeOwned` is the Titan owner constructor described above. Its resolved
+  pointer/array operand selects an eligible payload. `void`, direct functions,
+  incomplete aggregates, C array-typedef payloads, and nested owners remain
+  invalid; FAM structs use the separate `foreign T.new(count)` allocation path.
+
+
 * `Ast.TypeOption` requires its base to satisfy
   `types.has_tvalue_representation`. This admits `COwned` and other boxable C
   scalars and object/function pointers while rejecting by-value C
@@ -480,13 +516,11 @@ The checker has FFI-specific handling in a few narrow places:
   the same kind of user-value slot. It treats Arrays, Maps, and Titan function
   values as already boxed and recurses only through `Option`; it does not
   recursively reject their component/signature types.
-* `Ast.VarDot` on a `CModule` consults ordinary `members` first. If no value
-  has that name, a `type_members` entry yields a `Type.CTypeNamespace`
-  pseudo-declaration so `.new`, `.new_array`, `.sizeof`, and `.alignof` can be
-  resolved. When both namespaces contain the spelling, the ordinary value
-  remains usable and the checker records the collision so a later
-  type-pseudo-member access gets a specific diagnostic instead of silently
-  selecting the type.
+* `Ast.VarDot` on a `CModule` selects only ordinary C value members.
+  `Ast.ExpForeignType` is the dedicated type receiver for `foreign T.new()`,
+  `.new_array(n)`, `.sizeof`, and `.alignof`; same-named values do not interfere.
+
+
 * `Ast.VarDot` on a C struct/union, pointer-to-aggregate, or owned aggregate
   resolves a `Type.CField`. A pure dotted field macro is expanded logically
   through physical aggregate fields first, because C preprocessing precedes
@@ -519,7 +553,7 @@ The checker has FFI-specific handling in a few narrow places:
   as a `Type.Function` value. Completeness comes from the final module C
   environment, including headers written after an earlier module variable.
 * Top-level initializer validation recognizes `Checker.CPseudoNew` as a sound
-  constructor. `T.new()` and `T.new_array(count)` are accepted when their
+  constructor. `foreign T.new()` and `foreign T.new_array(count)` are accepted when their
   actual argument list is constant; a count that reads module state is
   rejected just like a non-constant record-constructor argument. The
   `Ast.ExpAdjust` introduced by parenthesizing a call is transparent to this
@@ -622,7 +656,8 @@ type and a scalar-cast marker, not the parsed operand. Parser bodies, ordinary
 source-location maps, raw macro environments, CPP spelling/spacing sidecars,
 and registrar bookkeeping do not survive this boundary.
 
-The `c-header-v3` byte payload uses this same read-only extracted graph. A live
+The `c-header-v5` byte payload uses this same read-only extracted graph, including
+declaration origins for typedefs and tags. A live
 hit shares it, while a disk restore reconstructs the closed schema once after
 codec/checksum and envelope validation. Real dependencies/search observations
 still validate the input closure. Forced `-include`/`-imacros` preprocessing
@@ -652,12 +687,13 @@ headers' preferred spelling for calls and allocation. Declarators are built
 recursively for locals and temporaries, because `int (*cb)(int)` cannot be
 produced by concatenating a type spelling and a name. `COwned` renders as
 `Udata *`; its payload is reached through `getudatamem`. The Titan diagnostic
-renderer preserves its logical shape as `owned *T` or `owned T[]`. For a
-portable owner, the hidden metatable registry key instead uses the canonical
-serialized descriptor: diagnostic rendering is intentionally not an identity
-because nested pointer qualifiers can have the same readable spelling. The
-protected display name remains readable. Header-dependent owners retain their
-module scope.
+renderer preserves its logical shape as `owned *T` or `owned T[]`.
+`types.tostring` prints legal unqualified source spellings, while
+`types.runtime_identity` uses the same formatting rules with each header type's
+declaration-origin `_ffi_scope` retained. The owner metatable cache and
+registry both use that scoped identity string; the serialized descriptor is
+separate runtime type metadata. Portable primitive graphs remain shared, and
+header-dependent owners share keys when they refer to the same C declaration.
 
 The general `ctype` function routes C values through `cdeclarator`, applying C
 parameter adjustment where appropriate. `COwned` remains a Lua full-userdata
@@ -746,7 +782,7 @@ type it happens to render.
   vararg arguments;
 * `nil` becomes `NULL`;
 * `value` to C `TValue` passes the raw `TValue` by value;
-* non-pointer by-value C or `value` expressions passed to compatible `const *T`
+* non-pointer by-value C or `value` expressions passed to compatible `foreign const *T`
   parameters are materialized as `&(expr)`;
 * local/formal non-pointer C variables passed to compatible mutable pointer
   parameters are materialized as `&(local)`, enabling C out-parameters;
@@ -916,7 +952,7 @@ or a pointer-array element. The pointer is then frozen in its own temporary;
 the final mutation targets its pointee, not the aggregate temporary. Thus
 `make_outer().inner.x = rhs()` is rejected, while
 `make_outer().pointer_field.x = rhs()` is valid. Ordinary reads and one-call
-`const *T` address coercions may likewise materialize by-value aggregate
+`foreign const *T` address coercions may likewise materialize by-value aggregate
 temporaries because their addresses do not have to survive a separately
 evaluated right-hand side.
 
@@ -924,8 +960,8 @@ evaluated right-hand side.
 
 Source-written `owned *T` and `owned T[]` lower to
 `COwned(T, false)` and `COwned(T, true)`. The pseudo-functions remain
-checker-only declarations (`Checker.CPseudoNew`) generated when a type namespace
-is accessed; their narrow call descriptors are not `Type.Function` values. At
+checker-only declarations (`Checker.CPseudoNew`) selected by a dedicated
+`Ast.ExpForeignType` receiver; their narrow call descriptors are not `Type.Function` values. At
 a direct initialized local sink the checker may instead record automatic or
 borrowed backing, as detailed in
 [Foreign-function implementation](foreign-functions.md#target-directed-allocation-plans).
@@ -969,19 +1005,20 @@ The registry cannot expose a half-initialized identity, and an incompatible or
 corrupted entry is rejected. This is a metatable publication rule, not a transaction
 boundary for the complete module initializer.
 
-Making C-bearing Titan function types source-nameable exposes a separate
-registry-identity issue. `types.contains_c_ffi_type` still separates C ABI
-callables from ordinary Titan function types even when both render similarly.
-A callable built entirely from contextual primitives has one canonical
-serialized structural registry identity shared by compiled modules, so an
-imported public signature retains its exact native fast path. The readable
-`types.tostring` form is display-only and cannot collapse differently placed
-pointer qualifiers into one identity. A callable containing an imported
-typedef or another nonexportable descriptor includes the defining Titan module
-scope because the same diagnostic spelling in another module may denote
-unrelated C identity. The separate C-bearing marker in the local cache
-continues to prevent a C callable from reusing a Titan callable entry before
-either registry key is emitted.
+C-bearing callable registry keys follow the same `types.runtime_identity`
+policy as owned metatables. A function whose components contain only portable
+primitive graphs has a structural key shared across modules. A function that
+contains a named header type retains that type's `_ffi_scope`, because the
+same C spelling may name unrelated declarations. These are nominal keys, not
+an attestation of C layout compatibility under different build settings.
+Source-facing `types.tostring` remains unqualified and is not used for these
+runtime keys.
+
+Conversion establishes declaration origins before foreign name lookup or owned
+alias unwrapping. When `owned P` removes P's outer pointer/array layer, the
+selected payload retains its origin through pointer, array, and function-type
+wrappers. Imports and cache restoration preserve those origins; plain
+primitives and the intrinsic `lua_State` remain unscoped.
 
 This is deliberately different from adopted/borrowed C pointers. Borrowed
 pointers are raw C pointer values and are not GC-managed; adopted pointers are

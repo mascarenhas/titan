@@ -1,8 +1,8 @@
 -- The libuv worker thread may inspect only this raw C carrier. Slot zero is
 -- reserved for the loop-thread callback; the worker reads only the function
 -- and argument in slots one and two.
-local type WorkPointer = *void
-local type WorkFunction = foreign (*void) -> ()
+foreign type WorkPointer = *void
+foreign type WorkFunction = function (*void): void
 
 local record WorkCall
   local carrier: owned WorkPointer[]
@@ -12,30 +12,30 @@ end
 -- after-work callback. The raw carrier separately gives the worker a C-only
 -- view that contains no TValue fields.
 local record WorkOwner
-  local request: owned *ffi.uv_work_t
+  local request: owned *uv_work_t
   local carrier: owned WorkPointer[]
-  local callback: (WorkOwner, integer) -> ()
+  local callback: function (WorkOwner, integer): ()
 end
 
-foreign function uv_work_cb(req: *ffi.uv_work_t)
+foreign function uv_work_cb(req: *uv_work_t)
   local carrier = ffi.uv_req_get_data(
-      req as *ffi.uv_req_t) as *WorkPointer
-  local f = carrier[1] as WorkFunction
+      req as foreign *uv_req_t) as foreign *WorkPointer
+  local f = carrier[1] as foreign WorkFunction
   local arg = carrier[2]
   f(arg)
 end
 
-foreign function uv_after_work_cb(req: *ffi.uv_work_t, status: int)
+foreign function uv_after_work_cb(req: *uv_work_t, status: int)
   local carrier = ffi.uv_req_get_data(
-      req as *ffi.uv_req_t) as *WorkPointer
-  local owner = carrier[0] as *ffi.Udata
+      req as foreign *uv_req_t) as foreign *WorkPointer
+  local owner = carrier[0] as foreign *Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[2].uv)
-  local L = ffi.uv_loop_get_data(req.loop) as *ffi.lua_State
+  local L = ffi.uv_loop_get_data(req.loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
-      callback.upvalue[2]) as UvIntegerCallbackEntry
+      callback.upvalue[2]) as foreign UvIntegerCallbackEntry
   local top = ffi.lua_gettop(L)
-  entry(L, module, callback, owner, status as ffi.lua_Integer)
+  entry(L, module, callback, owner, status as foreign lua_Integer)
   ffi.lua_settop(L, top)
 end
 
@@ -52,16 +52,16 @@ end
 
 local function WorkCall:dispatch(task: Task): Immediate?
   accepting_work(task.runtime, "async.run_foreign")
-  local native: owned *ffi.uv_work_t = ffi.uv_work_t.new()
+  local native: owned *uv_work_t = foreign uv_work_t.new()
   local callback = function (_owner: WorkOwner, status: integer)
     complete_work(task, status)
   end
   local owner = WorkOwner.new(native, self.carrier, callback)
-  local request: *ffi.uv_work_t = native
+  local request: foreign *uv_work_t = native
 
-  self.carrier[0] = owner as WorkPointer
+  self.carrier[0] = owner as foreign WorkPointer
   ffi.uv_req_set_data(
-      request as *ffi.uv_req_t, self.carrier as WorkPointer)
+      request as foreign *uv_req_t, self.carrier as foreign WorkPointer)
   task.pending = owner
 
   local status = ffi.uv_queue_work(
@@ -71,18 +71,18 @@ local function WorkCall:dispatch(task: Task): Immediate?
   return immediate_error(status, "async.run_foreign")
 end
 
-local function WorkCall.from_callback(f: WorkFunction,
-                                      arg: WorkPointer): WorkCall
+local function WorkCall.from_callback(f: foreign WorkFunction,
+                                      arg: foreign WorkPointer): WorkCall
   if not f then raise "async.run_foreign callback must not be NULL" end
 
-  local carrier: owned WorkPointer[] = WorkPointer.new_array(3)
+  local carrier: owned WorkPointer[] = foreign WorkPointer.new_array(3)
   carrier[0] = nil
-  carrier[1] = f as WorkPointer
+  carrier[1] = f as foreign WorkPointer
   carrier[2] = arg
   return WorkCall.new(carrier)
 end
 
-local function run_foreign(f: WorkFunction, arg: WorkPointer)
+local function run_foreign(f: foreign WorkFunction, arg: foreign WorkPointer)
   await(Call.run_foreign(WorkCall.from_callback(f, arg)))
 end
 
@@ -90,6 +90,6 @@ end
 -- finalize, reset, or dispose an unpublished result. Like the existing close
 -- Calls, both submission and ordinary completion survive pending cancellation.
 -- It is deliberately absent from the public async surface.
-local function run_foreign_cleanup(f: WorkFunction, arg: WorkPointer)
+local function run_foreign_cleanup(f: foreign WorkFunction, arg: foreign WorkPointer)
   await(Call.run_foreign_cleanup(WorkCall.from_callback(f, arg)))
 end

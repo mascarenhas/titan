@@ -149,8 +149,10 @@ for strings while native functions read their bytes.
 
 ## Reflection conversion
 
-Encoding dispatches through `reflect.inspect`. Record and Interface fields use
-one-based public descriptor ordinals. Storage indices are not getter ordinals.
+Encoding dispatches through `reflect.inspect`. Container wrappers expose their
+original storage through `.value`; record and Interface schemas are selected
+through `.type.fields`. Field access uses one-based public descriptor ordinals.
+Storage indices are not getter ordinals.
 Interface encoding reads the captured public view, not `.wrapped`. Union
 encoding searches public variants for the actual runtime `.tag`; descriptor
 positions cannot be inferred from sparse runtime tags. Private active arms
@@ -173,7 +175,8 @@ and mutable fields once. There is no partially initialized record, raw storage
 write, or allocate-then-`RecordValue:set` stage.
 
 Union decoding validates exact envelope membership and tag kind/name, checks
-whether payload presence matches the arm, recursively decodes it, then invokes
+whether payload presence matches the arm's optional `VariantType.type`,
+recursively decodes it, then invokes
 the reflected variant callable. Payloadless and nullable-payload arms remain
 distinct. Extra envelope fields are never covered by the record-only
 `ignore_unknown_fields` option.

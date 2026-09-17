@@ -98,9 +98,9 @@ describe("Titan types", function()
             types.tostring(types.Array(types.Integer(), true)))
 
         local c_integer = types.CInteger("int", true, 3, 32)
-        assert.same("{ const *int }", types.tostring(types.Array(
+        assert.same("{ foreign const *int }", types.tostring(types.Array(
             types.CPointer(c_integer, {"const"}), false)))
-        assert.same("const { *int }", types.tostring(types.Array(
+        assert.same("const { foreign *int }", types.tostring(types.Array(
             types.CPointer(c_integer, {}), true)))
     end)
 
@@ -136,7 +136,7 @@ describe("Titan types", function()
         local f = types.Function({types.Integer()},
                                  {types.Integer(), types.String()}, false, false,
                                  false)
-        assert.same("(integer) -> (integer, string)", types.tostring(f))
+        assert.same("function (integer): (integer, string)", types.tostring(f))
     end)
 
     it("pretty-prints flexible returns canonically without changing fixed-only forms", function()
@@ -145,11 +145,11 @@ describe("Titan types", function()
             {types.Integer()}, {types.Boolean()}, false, types.String(),
             types.Value())
 
-        assert.same("() -> (...: integer)", types.tostring(flexonly))
+        assert.same("function (): (...: integer)", types.tostring(flexonly))
         assert.same(
-            "(integer, ...: string) -> (boolean, ...: value)",
+            "function (integer, ...: string): (boolean, ...: value)",
             types.tostring(mixed))
-        assert.same("(integer) -> boolean", types.tostring(types.Function(
+        assert.same("function (integer): boolean", types.tostring(types.Function(
             {types.Integer()}, {types.Boolean()}, false, false, false)))
     end)
 
@@ -158,8 +158,8 @@ describe("Titan types", function()
         local fixed = types.Function({}, {elem}, false, false, false)
         local flexible = types.Function({}, {}, false, false, elem)
 
-        assert.same("() -> (() -> integer)", types.tostring(fixed))
-        assert.same("() -> (...: () -> integer)", types.tostring(flexible))
+        assert.same("function (): (function (): integer)", types.tostring(fixed))
+        assert.same("function (): (...: function (): integer)", types.tostring(flexible))
         assert.not_equal(types.tostring(fixed), types.tostring(flexible))
     end)
 
@@ -1837,9 +1837,9 @@ describe("Titan types", function()
         assert.falsy(types.equals(f3, f1))
     end)
 
-    it("pretty-prints a zero-return () function as `-> ()`", function()
-        assert.same("() -> ()", types.tostring(types.Function({}, {}, false, false, false)))
-        assert.same("(integer) -> ()",
+    it("pretty-prints zero results as function (): ()", function()
+        assert.same("function (): ()", types.tostring(types.Function({}, {}, false, false, false)))
+        assert.same("function (integer): ()",
             types.tostring(types.Function({types.Integer()}, {}, false, false, false)))
     end)
 
@@ -1847,17 +1847,17 @@ describe("Titan types", function()
         local void = types.Function({types.Integer()}, {}, false, false, false)
         local nilret = types.Function({types.Integer()}, {types.Nil()}, false, false, false)
         assert.falsy(types.equals(void, nilret))
-        assert.same("(integer) -> nil", types.tostring(nilret))
+        assert.same("function (integer): nil", types.tostring(nilret))
     end)
 
     it("pretty-prints higher-order and function-returning-function types", function()
         local int = types.Integer()
         local intfn = types.Function({int}, {int}, false, false, false)
         -- (integer -> integer, integer) -> integer
-        assert.same("((integer) -> integer, integer) -> integer",
+        assert.same("function (function (integer): integer, integer): integer",
             types.tostring(types.Function({intfn, int}, {int}, false, false, false)))
         -- (integer) -> ((integer) -> integer)
-        assert.same("(integer) -> ((integer) -> integer)",
+        assert.same("function (integer): (function (integer): integer)",
             types.tostring(types.Function({int}, {intfn}, false, false, false)))
     end)
 
@@ -2170,24 +2170,24 @@ describe("Titan types", function()
         it("constructs and pretty-prints the planned C vocabulary", function()
             local int = cint()
             assert.same("Type.CInteger", int._tag)
-            assert.same("int", types.tostring(int))
-            assert.same("void", types.tostring(types.CVoid()))
-            assert.same("bool", types.tostring(
+            assert.same("foreign int", types.tostring(int))
+            assert.same("foreign void", types.tostring(types.CVoid()))
+            assert.same("foreign bool", types.tostring(
                 types.CInteger("_Bool", false, 0, 8)))
             assert.same("foreign float",
                 types.tostring(types.CFloat("float")))
-            assert.same("double", types.tostring(types.CFloat("double")))
-            assert.same("const *int", types.tostring(types.CPointer(int, {"const"})))
-            assert.same("int[4]", types.tostring(types.CArray(int, 4)))
-            assert.same("const int[4]",
+            assert.same("foreign double", types.tostring(types.CFloat("double")))
+            assert.same("foreign const *int", types.tostring(types.CPointer(int, {"const"})))
+            assert.same("foreign int[4]", types.tostring(types.CArray(int, 4)))
+            assert.same("foreign const int[4]",
                 types.tostring(types.CArray(int, 4, {"const"})))
-            assert.same("foreign  (int, ...) -> double", types.tostring(
+            assert.same("foreign function (int, ...): double", types.tostring(
                 types.CFunction({int}, types.CFloat("double"), true, "cdecl")))
-            assert.same("struct point", types.tostring(
+            assert.same("foreign point", types.tostring(
                 types.CStruct("struct point", "point", false, {}, true, false)))
-            assert.same("union value", types.tostring(
+            assert.same("foreign value", types.tostring(
                 types.CUnion("union value", "value", false, {}, true)))
-            assert.same("x: int", types.tostring(
+            assert.same("x: foreign int", types.tostring(
                 types.CField(false, "x", int, false, false)))
             assert.same("foreign size_t", types.tostring(types.CTypedef("size_t", int)))
             assert.same("owned *int",
@@ -2336,7 +2336,7 @@ describe("Titan types", function()
             local const_return = types.CFunction(
                 {second_int}, second_int, false, "cdecl")
             const_return._return_declaration_qualifiers = {"const"}
-            assert.equal("foreign  (foreign ffi_second_int) -> foreign ffi_second_int",
+            assert.equal("foreign function (ffi_second_int): ffi_second_int",
                 types.tostring(const_return))
             assert.is_false(types.c_function_types_equal(
                 first, const_return))
@@ -2399,7 +2399,7 @@ describe("Titan types", function()
             assert.is_false(types.consistent(first, first_value))
             assert.is_false(types.callable_adjustment(first, first_value))
             assert.is_false(types.callable_adjustment(first_value, first))
-            assert.equal("foreign  () -> void", types.tostring(const_void))
+            assert.equal("foreign function (): void", types.tostring(const_void))
 
             local unknown_array =
                 types.CArray(first_int, nil)
@@ -2900,10 +2900,10 @@ describe("Titan types", function()
                 types.generic_scope_key(scope(
                     false, "owner", "record", "sample.Pair")))
             assert.equal("T", types.tostring(tparam))
-            assert.equal("U: sample.Show<value>", types.tostring(uparam))
-            assert.equal("<U: sample.Show<value>>(U) -> U",
+            assert.equal("U: sample.Show<|value|>", types.tostring(uparam))
+            assert.equal("<|U: sample.Show<|value|>|>function (U): U",
                 types.tostring(scheme))
-            assert.equal("sample.Pair<integer, string>", types.tostring(
+            assert.equal("sample.Pair<|integer, string|>", types.tostring(
                 types.Nominal("sample.Pair",
                     {types.Integer(), types.String()})))
             assert.same({}, types.Nominal("sample.Legacy").args)
@@ -3088,7 +3088,7 @@ describe("Titan types", function()
                 method, owner_scope, {types.Integer()})
             assert.is_true(types.same_generic_scope(
                 method_scope, owner_view.scope))
-            assert.equal("sample.Mapper<integer>", types.tostring(
+            assert.equal("sample.Mapper<|integer|>", types.tostring(
                 owner_view.typeparams[1].constraint))
 
             local local_closed = types.substitute(
@@ -3103,7 +3103,7 @@ describe("Titan types", function()
             assert.equal("{ integer }", types.tostring(closed.params[1]))
             assert.equal("{ string : integer }",
                 types.tostring(closed.params[2]))
-            assert.equal("sample.Pair<integer, string>",
+            assert.equal("sample.Pair<|integer, string|>",
                 types.tostring(closed.rettypes[1]))
             assert.equal("string", types.tostring(closed.varargtype))
             assert.equal("integer", types.tostring(closed.flexrettype))
@@ -3125,7 +3125,7 @@ describe("Titan types", function()
                 {types.TypeParameter("T", false)},
                 types.Function({t, t}, {t}, false, false, false))
             local closed = types.apply_scheme(scheme, {types.Integer()})
-            assert.equal("(integer, integer) -> integer",
+            assert.equal("function (integer, integer): integer",
                 types.tostring(closed))
 
             local owner_scope = scope(
@@ -3138,10 +3138,10 @@ describe("Titan types", function()
                 })
             local applied = types.apply_generic_alias(alias,
                 {types.Integer(), types.String()})
-            assert.equal("sample.Pair<integer, string>",
+            assert.equal("sample.Pair<|integer, string|>",
                 types.tostring(applied))
             assert.equal(
-                "sample.Either<A, B> = sample.Pair<A, B>",
+                "sample.Either<|A, B|> = sample.Pair<|A, B|>",
                 types.tostring(alias))
             assert.has_error(function()
                 types.apply_generic_alias(alias, {types.Integer()})
@@ -3195,7 +3195,7 @@ describe("Titan types", function()
                 types.Nominal("sample.I", {constrained}))
 
             local carrier = types.erase_constraint(dependent)
-            assert.equal("sample.I<sample.J>", types.tostring(carrier))
+            assert.equal("sample.I<|sample.J|>", types.tostring(carrier))
             assert.equal("sample.I", types.tostring(types.erase(dependent)))
         end)
 
@@ -3357,7 +3357,7 @@ describe("Titan types", function()
             end, "type argument 1 is not a type")
             assert.has_error(function()
                 types.substitute(rigid, generic_scope, {pointer})
-            end, "type argument 1 ('*int') has no sound transient round trip")
+            end, "type argument 1 ('foreign *int') has no sound transient round trip")
             assert.is_true(types.equals(pointer,
                 types.substitute_inference(
                     rigid, generic_scope, {pointer})))
@@ -3374,7 +3374,7 @@ describe("Titan types", function()
             valid, argument_error =
                 types.validate_type_arguments(typeparams, {pointer})
             assert.is_nil(valid)
-            assert.equal("type argument 1 ('*int') has no sound " ..
+            assert.equal("type argument 1 ('foreign *int') has no sound " ..
                 "transient round trip", argument_error)
         end)
 
@@ -3415,7 +3415,7 @@ describe("Titan types", function()
             end, "a flexible return cannot have a foreign pointer type")
             assert.has_error(function()
                 types.canonical_function({}, {}, false, types.CVoid())
-            end, "a flexible return cannot use type void because it has " ..
+            end, "a flexible return cannot use type foreign void because it has " ..
                 "no supported variadic-value representation")
 
             assert.has_error(function()

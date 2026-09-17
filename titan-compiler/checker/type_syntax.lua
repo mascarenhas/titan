@@ -48,6 +48,33 @@ function resolve_surface_c_type(name, st, errors, loc)
     return typ
 end
 
+-- Preserve converter-supplied C declaration origins for owner/callable keys.
+-- Module scope is only a fallback for synthetic descriptors without an origin.
+-- Follow structural wrappers only: a named typedef or aggregate is the identity
+-- boundary, not its fields or definition.
+local function scope_foreign_type_surface(typ, st, seen)
+    if type(typ) ~= "table" then return end
+    seen = seen or {}
+    if seen[typ] then return end
+    seen[typ] = true
+    local tag = typ._tag
+    if tag == "Type.CTypedef" or tag == "Type.CStruct"
+       or tag == "Type.CUnion" then
+        if not (tag == "Type.CStruct" and types.is_c_lua_state(typ)) then
+            typ._ffi_scope = typ._ffi_scope or (st.modname .. ".ffi")
+        end
+    elseif tag == "Type.CPointer" then
+        scope_foreign_type_surface(typ.pointee, st, seen)
+    elseif tag == "Type.CArray" then
+        scope_foreign_type_surface(typ.elem, st, seen)
+    elseif tag == "Type.CFunction" then
+        for _, param in ipairs(typ.params) do
+            scope_foreign_type_surface(param, st, seen)
+        end
+        scope_foreign_type_surface(typ.ret, st, seen)
+    end
+end
+
 -- Converts an AST type declaration into a typechecker type
 --   node: AST node
 --   errors: list of compile-time errors
@@ -112,16 +139,6 @@ typefromnode = util.make_visitor({
         end
 
 
-        if foreigntypes.is_surface_primitive_name(node.name) then
-            if #(node.typeargs or {}) > 0 then
-                return invalid(errors, node.loc,
-                    "C99 type '%s' cannot be applied to type arguments",
-                    node.name)
-            end
-            node._surface_c_type = true
-            return resolve_surface_c_type(node.name, st, errors, node.loc)
-        end
-
         local owner = generic_resolve_local_owner(node.name, st)
         if owner and (owner._tag == "Type.Record"
                 or owner._tag == "Type.Union"
@@ -141,6 +158,39 @@ typefromnode = util.make_visitor({
                                         defer_c_enum_carrier)
         local mod = st:find_symbol(node.module)
         if mod then node._module_decl = mod end
+        if mod and mod._current_module then
+            -- The implicit M denotes this module, not a lexical value or
+            -- generic type binder with the selected member's spelling.
+            local alias = st:find_type_alias(node.name)
+            if alias then
+                node._decl = alias
+                local typ = resolve_type_alias(alias, st, errors)
+                if typ._tag == "Type.GenericAlias" then
+                    return generic_apply_generic_alias(typ, node.typeargs,
+                        st, errors, node.loc, "type alias 'M." .. node.name .. "'")
+                elseif #(node.typeargs or {}) > 0 then
+                    return invalid(errors, node.loc,
+                        "type alias 'M.%s' is not a generic type constructor", node.name)
+                end
+                if checker._ensure_c_enum_supported(st, typ, node.loc, errors,
+                        nil, defer_c_enum_carrier and true or false) then
+                    return typ
+                end
+                return types.Invalid()
+            end
+            local declaration = st.interface_declarations
+                and st.interface_declarations[node.name] or st.blocks[1][node.name]
+            if declaration and (declaration._tag == "Ast.TopLevelRecord"
+                    or declaration._tag == "Ast.TopLevelUnion"
+                    or declaration._tag == "Ast.TopLevelInterface") then
+                node._decl = declaration
+                return generic_apply_named_owner(declaration._type,
+                    node.typeargs, st, errors, node.loc,
+                    "type 'M." .. node.name .. "'")
+            end
+            return invalid(errors, node.loc,
+                "type '%s' not found inside the current module", node.name)
+        end
         if node._contextual_c_name and mod and mod._type
            and mod._type._tag ~= "Type.CModule" then
             return invalid(errors, node.loc,
@@ -223,26 +273,6 @@ typefromnode = util.make_visitor({
                 member.islocal)
             return generic_apply_named_owner(member.type, node.typeargs,
                 st, errors, node.loc, "type '" .. fqtn .. "'")
-        elseif mod and mod._type and mod._type._tag == "Type.CModule" then
-            local typ = mod._type.type_members
-                and mod._type.type_members[node.name]
-            if typ then
-                if #(node.typeargs or {}) > 0 then
-                    return invalid(errors, node.loc,
-                        "C type '%s' cannot be applied to type arguments",
-                        node.name)
-                end
-                if checker._ensure_c_enum_supported(
-                        st, typ, node.loc, errors, nil,
-                        defer_c_enum_carrier and true or false) then
-                    typ._ffi_scope = typ._ffi_scope or (st.modname .. "." .. mod._type.name)
-                    return typ
-                end
-                return types.Invalid()
-            end
-            return invalid(errors, node.loc,
-                "C type '%s' not found inside foreign module '%s'",
-                node.name, mod._type.name)
         elseif mod and mod._type and mod._type._tag == "Type.Union" then
             local member = mod._type.variants[node.name]
                 or mod._type.functions[node.name]
@@ -256,6 +286,32 @@ typefromnode = util.make_visitor({
         end
         return invalid(errors, node.loc,
             "module '%s' referenced by type not found", node.module)
+    end,
+
+    ["Ast.TypeForeignName"] = function(node, st, errors,
+                                           defer_c_enum_carrier)
+        local alias = st:find_foreign_alias(node.name)
+        local typ
+        if alias then
+            node._decl = alias
+            typ = resolve_foreign_type_alias(alias, st, errors)
+        elseif foreigntypes.is_surface_primitive_name(node.name) then
+            node._surface_c_type = true
+            typ = resolve_surface_c_type(node.name, st, errors, node.loc)
+        else
+            local namespace = st.ffi_namespace and st.ffi_namespace._type
+            typ = namespace and namespace.type_members[node.name]
+        end
+        if not typ then
+            return invalid(errors, node.loc,
+                "foreign type '%s' is not declared", node.name)
+        end
+        if not node._surface_c_type then scope_foreign_type_surface(typ, st) end
+        if checker._ensure_c_enum_supported(st, typ, node.loc, errors, nil,
+                defer_c_enum_carrier and true or false) then
+            return typ
+        end
+        return types.Invalid()
     end,
 
     ["Ast.TypeCPointer"] = function(node, st, errors)
@@ -283,21 +339,36 @@ typefromnode = util.make_visitor({
                 types.tostring(elem))
         end
         local len = node.length and node.length.value
-        return types.CArray(elem, len)
+        return types.CArray(elem, len, node.const and { "const" } or {})
     end,
 
-    ["Ast.TypeCOwned"] = function(node, st, errors)
-        -- Owned storage renders/allocates the exact payload but does not box an
-        -- enum value until a later payload access.
-        local payload = typefromnode(node.subtype, st, errors, true)
-        if payload._tag == "Type.Invalid" then
-            return payload
+    ["Ast.TypeOwned"] = function(node, st, errors)
+        -- `owned` is a Titan constructor over a foreign pointer/array shape.
+        -- Resolve aliases before selecting the payload and countedness.
+        local foreign = typefromnode(node.subtype, st, errors, true)
+        local shape = types.resolve_c_typedef(foreign)
+        if shape._tag == "Type.Invalid" then return shape end
+        if shape._tag ~= "Type.CPointer" and shape._tag ~= "Type.CArray" then
+            return invalid(errors, node.loc,
+                "owned type requires a foreign pointer or array, not '%s'",
+                types.tostring(foreign))
         end
+        if #(shape.quals or {}) > 0
+           or #types.c_type_qualifiers(foreign) > 0 then
+            return invalid(errors, node.loc,
+                "owned type cannot have outer foreign pointer or array qualifiers")
+        end
+        local counted = shape._tag == "Type.CArray"
+        local payload = counted and shape.elem or shape.pointee
+        -- `owned Alias` removes the alias's outer pointer/array constructor.
+        -- Keep the selected payload's scope just as a directly written
+        -- `owned *ImportedType` does, including nested structural wrappers.
+        scope_foreign_type_surface(payload, st)
         local alloc_err = c_allocation_error(payload, st)
         if alloc_err then
             return invalid(errors, node.loc, alloc_err)
         end
-        return types.COwned(payload, node.count and true or false)
+        return types.COwned(payload, counted)
     end,
 
     ["Ast.TypeArray"] = function(node, st, errors,

@@ -14,7 +14,15 @@ local _ENV = core
 --   annotates the node with its type in a "_type" field
 checkvar = util.make_visitor({
     ["Ast.VarName"] = function(node, st, errors, _)
-        local decl = st:find_symbol(node.name)
+        local decl
+        if node._current_module_member then
+            decl = st.blocks[1][node.name]
+            if decl and (decl._builtin or st:hidden_from_initializer(decl)) then
+                decl = nil
+            end
+        else
+            decl = st:find_symbol(node.name)
+        end
         if not decl then
             local alias = st:find_type_alias(node.name)
             local resolved_alias = alias
@@ -29,15 +37,6 @@ checkvar = util.make_visitor({
                 node._alias_decl = alias
                 node._decl = alias
                 node._type = namespace
-            elseif resolved_alias and types.is_direct_c(resolved_alias) then
-                node._ctype_namespace = true
-                node._alias_decl = alias
-                node._type = resolved_alias
-            elseif not alias
-               and foreigntypes.is_surface_primitive_name(node.name) then
-                node._ctype_namespace = true
-                node._type = resolve_surface_c_type(
-                    node.name, st, errors, node.loc)
             elseif interface then
                 node._type = invalid(errors, node.loc,
                     "interface '%s' is a type and has no runtime value",
@@ -104,6 +103,18 @@ checkvar = util.make_visitor({
     end,
 
     ["Ast.VarDot"] = function(node, st, errors, context)
+        local receiver = node.exp
+        if receiver._tag == "Ast.ExpVar"
+           and receiver.var._tag == "Ast.VarName" then
+            local binding = st:find_symbol(receiver.var.name)
+            if binding and binding._current_module then
+                node._tag = "Ast.VarName"
+                node._module_loc = receiver.loc
+                node._current_module_member = true
+                node.exp = nil
+                return checkvar(node, st, errors, context)
+            end
+        end
         return generic_with_inference_operation(node, st,
         function(operation)
         local written_exp = node.exp
@@ -113,7 +124,9 @@ checkvar = util.make_visitor({
             if node.exp.var._decl then node.exp.var._decl._used = true end
             node.exp._type = node.exp.var._type
         else
-            checkexp(node.exp, st, errors)
+            checkexp(node.exp, st, errors,
+                node.exp._tag == "Ast.ExpForeignType"
+                    and c_type_namespace_context or nil)
         end
         if node.exp._nominal_typeargs ~= nil then
             generic_apply_namespace_typeargs(node.exp, st, errors)
@@ -166,19 +179,6 @@ checkvar = util.make_visitor({
                     node._generic_namespace_arguments = false
                     node._generic_namespace_fixed = false
                 end
-                if ltype._tag == "Type.CModule" and mod.type_members
-                   and mod.type_members[node.name] then
-                    node._c_type_collision = mod.type_members[node.name]
-                end
-            elseif ltype._tag == "Type.CModule" and mod.type_members
-                   and mod.type_members[node.name] then
-                node._decl = {
-                    _tag = "Type.CTypeNamespace",
-                    name = node.name,
-                    type = mod.type_members[node.name],
-                }
-                node._type = node._decl.type
-                node._ctype_namespace = true
             elseif type_member then
                 local namespace = alias_namespace_type(type_member, st)
                 if namespace then
@@ -193,17 +193,6 @@ checkvar = util.make_visitor({
                         islocal = type_member_islocal,
                     }
                     node._type = namespace
-                elseif types.is_direct_c(type_member) then
-                    node._alias_type = type_member
-                    node._decl = {
-                        _tag = "Checker.TypeMember",
-                        modname = mod.name,
-                        name = node.name,
-                        type = type_member,
-                        islocal = type_member_islocal,
-                    }
-                    node._type = type_member
-                    node._ctype_namespace = true
                 elseif type_member._tag == "Type.Interface" then
                     node._type = invalid(errors, node.loc,
                         "interface '%s' is a type and has no runtime value",
@@ -323,28 +312,6 @@ checkvar = util.make_visitor({
                     "field '%s' not found in record '%s'",
                     node.name, ltype.fqtn)
                 end
-            end
-        elseif node.exp._tag == "Ast.ExpVar"
-               and node.exp.var
-               and node.exp.var._c_type_collision
-               and is_c_pseudo_member_name(node.name) then
-            -- The ordinary C identifier wins a value lookup, but a following
-            -- pseudo-member spelling is otherwise liable to fall through to
-            -- generic C field lookup (and produce the misleading "field not
-            -- found" diagnostic). Preserve real aggregate fields named
-            -- `new`/`sizeof`/...; only diagnose the hidden type namespace when
-            -- the ordinary value has no such field.
-            local field_error
-            node._decl, field_error =
-                c_field_decl(ltype, node.name, st)
-            if node._decl then
-                node._type = node._decl.type
-            else
-                node._type = invalid(errors, node.loc,
-                    "C type pseudo-member '%s.%s' is unavailable because "
-                    .. "foreign module '%s' also has an ordinary member named '%s'",
-                    node.exp.var.name, node.name,
-                    node.exp.var.exp._type.name, node.exp.var.name)
             end
         elseif types.is_direct_c(ltype) or is_c_type_namespace(node.exp) then
             if is_c_type_namespace(node.exp) then
@@ -637,7 +604,9 @@ checkvar = util.make_visitor({
 
 -- Returns best guess of expression name
 function expname(node)
-    if node._tag == "Ast.ExpVar" then
+    if node._tag == "Ast.ExpForeignType" and node._type then
+        return types.tostring(node._type)
+    elseif node._tag == "Ast.ExpVar" then
         if node.var._tag == "Ast.VarName" then
             return node.var.name
         elseif node.var._tag == "Ast.VarDot" then

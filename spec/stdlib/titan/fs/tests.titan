@@ -14,7 +14,7 @@ local function contains_entry(entries: {string}, wanted: string): boolean
   return false
 end
 
-local function expect_failure(action: () -> (), message: string)
+local function expect_failure(action: function (): (), message: string)
   local failed = false
   do
     action()
@@ -32,19 +32,19 @@ local function watcher_event_matches(event: fs.WatcherEvent,
   local actual = ""
   local matches = false
   case event
-  when created: found then
+  when created(found) then
     actual = found
     matches = (kind == "created" or alternative_kind == "created") and
               found == path
-  when deleted: found then
+  when deleted(found) then
     actual = found
     matches = (kind == "deleted" or alternative_kind == "deleted") and
               found == path
-  when modified: found then
+  when modified(found) then
     actual = found
     matches = (kind == "modified" or alternative_kind == "modified") and
               found == path
-  when error: failure then raise failure
+  when error(failure) then raise failure
   end
   test.assert(forbidden == nil or actual ~= forbidden,
               "watcher reported an out-of-scope path")
@@ -314,8 +314,8 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
                 dangling_info.kind == "symlink",
                 "lstat did not preserve a dangling symlink")
 
-    local expect_metadata_error: (() -> (), string) -> () =
-      function (action: () -> (), operation: string)
+    local expect_metadata_error: function (function (): (), string): () =
+      function (action: function (): (), operation: string)
         local failed = false
         do
           action()
@@ -377,13 +377,13 @@ function test_fs_independent_continuations(context: test.Context)
 
     local first_realpath: string? = nil
     local second_realpath: string? = nil
-    local first = async.run<value, value>(function (): value
+    local first = async.run<|value, value|>(function (): value
       fs.write_file(first_path, "first")
       first_realpath = fs.realpath(first_path)
       return nil
     end)
     task_support.cleanup_task(first, "first filesystem Task cleanup")
-    local second = async.run<value, value>(function (): value
+    local second = async.run<|value, value|>(function (): value
       fs.write_file(second_path, "second")
       second_realpath = fs.realpath(second_path)
       return nil
@@ -405,7 +405,7 @@ function test_fs_independent_continuations(context: test.Context)
 
     local cancellation_started = false
     local cancelled_realpath: string? = nil
-    local cancelled = async.run<value, value>(function (): value
+    local cancelled = async.run<|value, value|>(function (): value
       local held = fs.open(first_path, "r")
       defer held:close()
       cancellation_started = true
@@ -462,7 +462,7 @@ function test_fs_condition_waiter_tokens_and_callback_progress(
     local watcher_phase = 0
     local watcher_events: {fs.WatcherEvent}? = nil
     local gate_token = async.ResumeToken.new("filesystem test gate")
-    local watcher_task = async.run<value, value>(function (): value
+    local watcher_task = async.run<|value, value|>(function (): value
       watcher_phase = 1
       async.suspend(gate_token)
       watcher_phase = 2
@@ -688,7 +688,7 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
 
     local entered = false
     local first_result: {fs.WatcherEvent}? = nil
-    local first = async.run<value, value>(function (): value
+    local first = async.run<|value, value|>(function (): value
       entered = true
       first_result = watcher:poll()
       return nil
@@ -724,7 +724,7 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
 
     local stop_poll_entered = false
     local stopped_result: {fs.WatcherEvent}? = nil
-    local stopped = async.run<value, value>(function (): value
+    local stopped = async.run<|value, value|>(function (): value
       stop_poll_entered = true
       stopped_result = watcher:poll()
       return nil
@@ -745,7 +745,7 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
     watcher:watch(path)
     local clear_poll_entered = false
     local cleared_result: {fs.WatcherEvent}? = nil
-    local cleared = async.run<value, value>(function (): value
+    local cleared = async.run<|value, value|>(function (): value
       clear_poll_entered = true
       cleared_result = watcher:poll()
       return nil
@@ -776,7 +776,7 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
     watcher:watch(path)
     watcher:watch(clear_path)
     local clear_entered = false
-    local concurrent_clear = async.run<value, value>(function (): value
+    local concurrent_clear = async.run<|value, value|>(function (): value
       clear_entered = true
       watcher:clear()
       return nil

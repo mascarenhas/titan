@@ -1,5 +1,5 @@
 local uv = import "uv.titan"
-local str = import "string"
+local string = import "string"
 foreign import "uv.h"
 foreign import "lua.h"
 foreign import "titan/ffi.h"
@@ -7,7 +7,7 @@ foreign import "titan/ffi.h"
 local READ_CHUNK_BYTES = 64 * 1024
 
 record File
-  local handle: uv.uv_file
+  local handle: foreign uv_file
   local excess: string
 end
 
@@ -21,25 +21,20 @@ record Stat
   modified_nanoseconds: integer
 end
 
-local type FsNoargCallbackEntry =
-  foreign (*ffi.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata) -> ()
-local type FsEventCallbackEntry =
-  foreign (*ffi.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
-           const *char, ffi.lua_Integer,
-           ffi.lua_Integer) -> ()
+foreign type FsNoargCallbackEntry = function (*lua_State, *Udata, *CClosure, *Udata): void
+foreign type FsEventCallbackEntry = function (*lua_State, *Udata, *CClosure, *Udata, const *char, lua_Integer, lua_Integer): void
 
 local record RealpathRequest
-  local handle: owned *ffi.uv_fs_t
-  local callback: (RealpathRequest) -> ()
+  local handle: owned *uv_fs_t
+  local callback: function (RealpathRequest): ()
   local waiter: uv.Task?
   local failed: boolean
   local payload: value
 end
 
 local record WatchRegistration
-  local handle: owned *ffi.uv_fs_event_t
-  local callback: (WatchRegistration, const *char,
-                   integer, integer) -> ()
+  local handle: owned *uv_fs_event_t
+  local callback: function (WatchRegistration, foreign const *char, integer, integer): ()
   local runtime: uv.Runtime
   local path: string
   local directory: boolean
@@ -57,34 +52,34 @@ end
 
 local realpath_roots: {RealpathRequest: boolean} = {}
 
-foreign function fs_realpath_cb(request: *ffi.uv_fs_t)
+foreign function fs_realpath_cb(request: *uv_fs_t)
   local owner = ffi.uv_req_get_data(
-      request as *ffi.uv_req_t) as *ffi.Udata
+      request as foreign *uv_req_t) as foreign *Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
-  local L = ffi.uv_loop_get_data(request.loop) as *ffi.lua_State
+  local L = ffi.uv_loop_get_data(request.loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
-      callback.upvalue[2]) as FsNoargCallbackEntry
+      callback.upvalue[2]) as foreign FsNoargCallbackEntry
   local top = ffi.lua_gettop(L)
   entry(L, module, callback, owner)
   ffi.lua_settop(L, top)
 end
 
-foreign function fs_watcher_event_cb(handle: *ffi.uv_fs_event_t,
+foreign function fs_watcher_event_cb(handle: *uv_fs_event_t,
                                       filename: const *char,
                                       events: int,
                                       status: int)
-  local native_handle = handle as *ffi.uv_handle_t
-  local owner = ffi.uv_handle_get_data(native_handle) as *ffi.Udata
+  local native_handle = handle as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(native_handle) as foreign *Udata
   local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
   local loop = ffi.uv_handle_get_loop(native_handle)
-  local L = ffi.uv_loop_get_data(loop) as *ffi.lua_State
+  local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
-      callback.upvalue[2]) as FsEventCallbackEntry
+      callback.upvalue[2]) as foreign FsEventCallbackEntry
   local top = ffi.lua_gettop(L)
   entry(L, module, callback, owner, filename,
-        events as ffi.lua_Integer, status as ffi.lua_Integer)
+        events as foreign lua_Integer, status as foreign lua_Integer)
   ffi.lua_settop(L, top)
 end
 
@@ -105,8 +100,8 @@ function File:read(max_bytes: integer?): string?
   if #self.excess > 0 then
     local length = requested
     if length > #self.excess then length = #self.excess end
-    local result = str.sub(self.excess, 1, length)
-    self.excess = str.sub(self.excess, length + 1)
+    local result = string.sub(self.excess, 1, length)
+    self.excess = string.sub(self.excess, length + 1)
     return result
   end
   return uv.fs_read(self.handle, requested)
@@ -122,21 +117,21 @@ function File:read_until(delimiter: string,
     raise "read delimiter must not be empty"
   end
 
-  local builder = str.writer()
+  local builder = string.writer()
   local tail = ""
   for chunk in self:read do
     local boundary = chunk
     if #tail > 0 then boundary = tail .. chunk end
-    local match: integer? = str.find(boundary, delimiter)
+    local match: integer? = string.find(boundary, delimiter)
     if match then
       local match_first = match
       local match_end = match_first + #delimiter - 1
       local result_end = match_end
       if chop then result_end = match_first - 1 end
       if result_end > 0 then
-        builder:write(str.sub(boundary, 1, result_end))
+        builder:write(string.sub(boundary, 1, result_end))
       end
-      self.excess = str.sub(boundary, match_end + 1)
+      self.excess = string.sub(boundary, match_end + 1)
       return builder:drain()
     end
     local keep = #delimiter - 1
@@ -146,10 +141,10 @@ function File:read_until(delimiter: string,
       if committed == #boundary then
         builder:write(boundary)
       else
-        builder:write(str.sub(boundary, 1, committed))
+        builder:write(string.sub(boundary, 1, committed))
       end
     end
-    tail = str.sub(boundary, committed + 1)
+    tail = string.sub(boundary, committed + 1)
   end
   if #tail > 0 then builder:write(tail) end
   local result = builder:drain()
@@ -177,7 +172,7 @@ function File:close()
   if (self.handle as integer) < 0 then return end
   local descriptor = self.handle
   local operation = uv.FsCloseCall.new(descriptor, false)
-  self.handle = -1 as uv.uv_file
+  self.handle = -1 as foreign uv_file
   do
     uv.fs_close(operation)
   catch
@@ -194,7 +189,7 @@ function read_file(path: string): string
   local file = open(path, "r")
   defer file:close()
 
-  local builder = str.writer()
+  local builder = string.writer()
   for bytes in file:read do
     builder:write(bytes)
   end
@@ -302,7 +297,7 @@ local function RealpathRequest:finish()
       payload = uv.make_error(result, "fs.realpath")
     else
       local resolved = ffi.uv_fs_get_ptr(
-          self.handle) as const *char
+          self.handle) as foreign const *char
       payload = resolved as string
     end
   catch
@@ -322,7 +317,7 @@ function realpath(path: string): string
   uv.accepting_work(runtime, "resolve a filesystem path")
   local checked = uv.checked_text(path, "fs.realpath")
   local resume_token = uv.ResumeToken.new("fs.realpath")
-  local native: owned *ffi.uv_fs_t = ffi.uv_fs_t.new()
+  local native: owned *uv_fs_t = foreign uv_fs_t.new()
   local callback = function (request: RealpathRequest)
     request:finish()
   end
@@ -333,8 +328,8 @@ function realpath(path: string): string
   end
   defer cancel_action()
   request:root()
-  ffi.uv_req_set_data((native as *ffi.uv_fs_t) as *ffi.uv_req_t,
-                        request as *void)
+  ffi.uv_req_set_data((native as foreign *uv_fs_t) as foreign *uv_req_t,
+                        request as foreign *void)
   local status = ffi.uv_fs_realpath(
       runtime.loop, native, checked, fs_realpath_cb)
   if status < 0 then
@@ -364,10 +359,10 @@ record Watcher
 end
 
 union WatcherEvent
-  created: string
-  deleted: string
-  modified: string
-  error: uv.OperationError
+  created(string)
+  deleted(string)
+  modified(string)
+  error(uv.OperationError)
 end
 
 local function Watcher:wake()
@@ -433,7 +428,7 @@ end
 
 local function WatchRegistration:close(wait: boolean)
   local handle =
-    (self.handle as *ffi.uv_fs_event_t) as *ffi.uv_handle_t
+    (self.handle as foreign *uv_fs_event_t) as foreign *uv_handle_t
   if wait then
     uv.wait_handle_close(self.runtime, handle, self,
                          self.runtime_root_index)
@@ -446,7 +441,7 @@ end
 
 local function Watcher:receive_event(
     registration: WatchRegistration,
-    filename: const *char,
+    filename: foreign const *char,
     events: integer, status: integer)
   local copied: string? = nil
   if filename then copied = filename as string end
@@ -458,9 +453,9 @@ end
 local function Watcher:new_registration(
     path: string, directory: boolean): WatchRegistration
   local runtime = self.runtime
-  local native: owned *ffi.uv_fs_event_t = ffi.uv_fs_event_t.new()
+  local native: owned *uv_fs_event_t = foreign uv_fs_event_t.new()
   local callback = function (registration: WatchRegistration,
-                             filename: const *char,
+                             filename: foreign const *char,
                              events: integer, status: integer)
     do
       self:receive_event(registration, filename, events, status)
@@ -484,9 +479,9 @@ local function Watcher:new_registration(
     registration.runtime_root_index = 0
     raise uv.make_error(init_status, "fs.watcher.init")
   end
-  local handle = (native as *ffi.uv_fs_event_t) as *ffi.uv_handle_t
+  local handle = (native as foreign *uv_fs_event_t) as foreign *uv_handle_t
   ffi.uv_handle_set_data(
-      handle, registration as *void)
+      handle, registration as foreign *void)
   local start_status = ffi.uv_fs_event_start(
       native, fs_watcher_event_cb, path, 0)
   if start_status < 0 then

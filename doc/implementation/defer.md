@@ -8,12 +8,15 @@ with a `finally` block.
 ## Lexer And Grammar
 
 `defer` is a reserved word in `lexer.lua`, exported as `DEFER`, so it
-cannot be used as a name.
+is excluded from ordinary `Name` bindings. Contexts explicitly using
+`AnyName`, such as member selectors, still accept keyword spellings.
 
 The parser production is:
 
 ```peg
-deferstat <- (P DEFER !DEFER statement) -> deferstat
+deferstat <- (P DEFER (!DEFER / %{DeferDefer})
+                 (!SEMICOLON / %{DeferStatement})
+                 statement^DeferStatement) -> deferstat
 ```
 
 The implementation also labels two user-facing failures:
@@ -69,7 +72,7 @@ work()
 
 becomes roughly:
 
-```lua
+```text
 do
     do
         work()

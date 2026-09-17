@@ -87,8 +87,8 @@ describe("generic for loops (typechecker)", function()
     it("accepts computed record fields in iterator and close slots", function()
         local ok, err = run_checker([[
             record H
-                iter: (value, value) -> integer?
-                close: (value) -> nil
+                iter: function (value, value): integer?
+                close: function (value): nil
             end
             function hs(): {H} return {} end
 
@@ -104,11 +104,11 @@ describe("generic for loops (typechecker)", function()
     it("checks computed iterator and close eligibility exactly once", function()
         local prelude = [[
             record H
-                iter: (value, value) -> integer?
-                close: (value) -> nil
+                iter: function (value, value): integer?
+                close: function (value): nil
             end
             function hs(): {H} return {} end
-            function funcs(): {(value, value) -> integer?} return {} end
+            function funcs(): {function (value, value): integer?} return {} end
             function step(state: value, control: value): integer?
                 return nil
             end
@@ -334,7 +334,7 @@ describe("generic for loops (typechecker)", function()
                 foreign import "]] .. header .. [["
 
                 function run(): nil
-                    for p: ffi.ffi_int_ptr in ffi.ffi_next, nil, nil, ffi.ffi_close do
+                    for p: foreign ffi_int_ptr in ffi.ffi_next, nil, nil, ffi.ffi_close do
                     end
                     return nil
                 end
@@ -376,7 +376,7 @@ describe("generic for loops (typechecker)", function()
                 return nil
             end
 
-            function run(...: (nil) -> nil): nil
+            function run(...: function (nil): nil): nil
                 for x: integer in step, nil, 0, ... do
                 end
                 return nil

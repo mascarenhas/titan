@@ -12,10 +12,10 @@ they happen to have.
 ## Declaring a record
 
 A record declaration may only appear at the top level of a module. Each
-field is `[local] [const] name [?]: type`; fields are separated by newlines or
+field is `[local] [const] name: type`; fields are separated by newlines or
 semicolons (a trailing semicolon is fine):
 
-```lua
+```titan
 record Point
     const id: integer
     x: float
@@ -24,8 +24,8 @@ end
 ```
 
 A const field is filled during record construction and cannot be replaced
-later. The `?` shorthand remains record-only and composes with const, as in
-`local const cache?: Cache`. Constness is shallow: a const field containing a
+later. Put optionality on the field type, as in
+`local const cache: Cache?`; `cache?: Cache` is not field syntax. Constness is shallow: a const field containing a
 mutable container or record retains that object's ordinary mutability. See
 [Const values](const-values.md#const-record-fields).
 
@@ -56,7 +56,7 @@ fields, because compiled module interfaces only serialize the public surface.
 A record's field types may mention the record being declared, so
 recursive records work:
 
-```lua
+```titan
 record List
     v: integer
     next: List?
@@ -92,7 +92,7 @@ function may appear before its record, and a module variable may use either
 `Rec.new(...)` or a context-typed constructor expression before the written
 record declaration:
 
-```lua
+```titan
 origin: Point = Point.new(0.0, 0.0)
 
 function Point:is_origin(): boolean
@@ -122,7 +122,7 @@ stores an untraced C object inline.
 Two record types are distinct types if they come from distinct
 declarations — even when their fields are identical:
 
-```lua
+```titan
 record Celsius
     degrees: float
 end
@@ -193,7 +193,7 @@ values through its parameters.
 A record can also be built with a constructor expression listing fields by
 name:
 
-```lua
+```titan
 local p: Point = { x = 2.0, y = 3.0 }
 ```
 
@@ -238,7 +238,7 @@ The field list is checked at compile time:
 This makes partial and empty constructors useful when all omitted slots are
 nil-compatible:
 
-```lua
+```titan
 record Config
     label: string?
     enabled: boolean
@@ -261,7 +261,7 @@ function from the defining module instead.
 A module variable can hold a record, and both constructor forms are
 accepted as its (constant) initializer:
 
-```lua
+```titan
 p: Point = { x = 1.0, y = 2.0 }
 origin: Point = Point.new(0.0, 0.0)
 ```
@@ -286,7 +286,7 @@ must come from an earlier import. See
 
 Fields are read and written with `.`, exactly like Lua table fields:
 
-```lua
+```titan
 function flip(p: Point)
     local t: float = p.x
     p.x = p.y
@@ -314,7 +314,7 @@ called through the field.
 Record fields can themselves have record types, and nesting works as
 expected:
 
-```lua
+```titan
 record Inner
     v: integer
 end
@@ -336,7 +336,7 @@ end
 
 A field may be prefixed with `local`:
 
-```lua
+```titan
 record Box
     local hidden: integer
     shown: integer
@@ -353,7 +353,7 @@ public fields; attempting to read or write a hidden field reports the same
 Methods are declared at the top level with Lua's colon syntax, naming the
 record they belong to, and called with the colon as well:
 
-```lua
+```titan
 record Point
     x: float
     y: float
@@ -373,7 +373,7 @@ end
 Prefixing a method declaration with `local` makes the method callable only in
 the defining module:
 
-```lua
+```titan
 local function Box:secret(): integer
     return self.hidden
 end
@@ -417,10 +417,10 @@ removed, with the receiver `p` bound in. The receiver is evaluated once,
 when the reference is taken, and the result is an ordinary function value —
 store it, pass it, return it, call it, or hand it to Lua:
 
-```lua
+```titan
 function demo(): integer
     local p = Point.new(1.0, 2.0)
-    local m: (float, float) -> () = p:move   -- bound to p
+    local m: function (float, float): () = p:move   -- bound to p
     m(1.0, 1.0)                              -- runs Point:move on p
     return 1
 end
@@ -461,7 +461,7 @@ record are not equal.
 
 A record function is declared at top level with a dot-qualified record name:
 
-```lua
+```titan
 function Point.origin(): Point
     return Point.new(0.0, 0.0)
 end
@@ -475,15 +475,15 @@ Record functions are called as `RecName.func(...)`. They have no implicit
 operates on a receiver. A record function may be declared `local`, in which
 case it is visible only inside the defining module:
 
-```lua
+```titan
 local function Point.checked(x: float, y: float): Point
     return Point.new(x, y)
 end
 ```
 
 For a generic record, explicit owner arguments attach to the record namespace:
-`Box<integer>.new(1)`. A record function with its own parameters keeps those
-after the member name, as in `Box<integer>.convert<string>(text)`. If both owner
+`Box<|integer|>.new(1)`. A record function with its own parameters keeps those
+after the member name, as in `Box<|integer|>.convert<|string|>(text)`. If both owner
 and callable-local scopes are open, write both complete lists or neither; see
 [Generics](generics.md#explicit-type-arguments).
 
@@ -524,7 +524,7 @@ An exported record declared in one module is usable from any module that
 [imports](modules.md) it: the qualified name works in type position, and public
 fields, public methods, and public record functions work normally:
 
-```lua
+```titan
 -- geometry.titan
 record Point
     x: float
@@ -536,7 +536,7 @@ function Point:norm2(): float
 end
 ```
 
-```lua
+```titan
 -- client.titan
 local geo = import "geometry"
 
@@ -570,7 +570,7 @@ remain different types (`geometry.Point` is not `test.Point`).
 To Lua, a Titan record is a **userdata** (not a table) with access to its public
 fields and public methods:
 
-```lua
+```titan
 -- Titan (module test)
 record Point
     x: float

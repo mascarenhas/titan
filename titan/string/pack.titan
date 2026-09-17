@@ -4,7 +4,7 @@
 -- Copyright (C) 1994-2026 Lua.org, PUC-Rio. MIT terms are reproduced in
 -- LICENSES/lua-LICENSE.
 
-local type VoidPointer = *void
+foreign type VoidPointer = *void
 
 local PACK_INT = 1
 local PACK_UINT = 2
@@ -33,24 +33,24 @@ local record PackOption
 end
 
 local function host_is_little_endian(): boolean
-  local probe: unsigned int =
-    1 as unsigned int
-  local storage = CChar.new_array(
-    unsigned int.sizeof as integer)
-  local bytes = storage as *char
+  local probe: foreign unsigned int =
+    1 as foreign unsigned int
+  local storage = foreign char.new_array(
+    foreign unsigned int.sizeof as integer)
+  local bytes = storage as foreign *char
   ffi.memcpy(
-    bytes, probe, #storage as ffi.size_t)
-  local octets = bytes as *unsigned char
-  return octets[0] == (1 as unsigned char)
+    bytes, probe, #storage as foreign size_t)
+  local octets = bytes as foreign *unsigned char
+  return octets[0] == (1 as foreign unsigned char)
 end
 
 local function native_maximum_alignment(): integer
-  local alignment = long double.alignof as integer
-  if VoidPointer.alignof > alignment then
-    alignment = VoidPointer.alignof as integer
+  local alignment = foreign long double.alignof as integer
+  if foreign VoidPointer.alignof > alignment then
+    alignment = foreign VoidPointer.alignof as integer
   end
-  if long long.alignof > alignment then
-    alignment = long long.alignof as integer
+  if foreign long long.alignof > alignment then
+    alignment = foreign long long.alignof as integer
   end
   return alignment
 end
@@ -110,54 +110,54 @@ local function read_pack_option(state: PackState): PackOption
     return PackOption.new(PACK_UINT, 1, 0)
   elseif option == 104 then
     return PackOption.new(
-      PACK_INT, short.sizeof as integer, 0)
+      PACK_INT, foreign short.sizeof as integer, 0)
   elseif option == 72 then
     return PackOption.new(
-      PACK_UINT, short.sizeof as integer, 0)
+      PACK_UINT, foreign short.sizeof as integer, 0)
   elseif option == 108 then
     return PackOption.new(
-      PACK_INT, long.sizeof as integer, 0)
+      PACK_INT, foreign long.sizeof as integer, 0)
   elseif option == 76 then
     return PackOption.new(
-      PACK_UINT, long.sizeof as integer, 0)
+      PACK_UINT, foreign long.sizeof as integer, 0)
   elseif option == 106 then
     return PackOption.new(
-      PACK_INT, ffi.lua_Integer.sizeof as integer, 0)
+      PACK_INT, foreign lua_Integer.sizeof as integer, 0)
   elseif option == 74 then
     return PackOption.new(
-      PACK_UINT, ffi.lua_Integer.sizeof as integer, 0)
+      PACK_UINT, foreign lua_Integer.sizeof as integer, 0)
   elseif option == 84 then
     return PackOption.new(
-      PACK_UINT, ffi.size_t.sizeof as integer, 0)
+      PACK_UINT, foreign size_t.sizeof as integer, 0)
   elseif option == 102 then
     return PackOption.new(
       PACK_FLOAT, foreign float.sizeof as integer, 0)
   elseif option == 110 then
     return PackOption.new(
-      PACK_NUMBER, ffi.lua_Number.sizeof as integer, 0)
+      PACK_NUMBER, foreign lua_Number.sizeof as integer, 0)
   elseif option == 100 then
     return PackOption.new(
-      PACK_DOUBLE, double.sizeof as integer, 0)
+      PACK_DOUBLE, foreign double.sizeof as integer, 0)
   elseif option == 105 then
     return PackOption.new(
       PACK_INT,
       checked_pack_integer_size(
         read_pack_number(
-          state, int.sizeof as integer)),
+          state, foreign int.sizeof as integer)),
       0)
   elseif option == 73 then
     return PackOption.new(
       PACK_UINT,
       checked_pack_integer_size(
         read_pack_number(
-          state, int.sizeof as integer)),
+          state, foreign int.sizeof as integer)),
       0)
   elseif option == 115 then
     return PackOption.new(
       PACK_STRING,
       checked_pack_integer_size(
         read_pack_number(
-          state, ffi.size_t.sizeof as integer)),
+          state, foreign size_t.sizeof as integer)),
       0)
   elseif option == 99 then
     local size = read_pack_number(state, -1)
@@ -236,53 +236,53 @@ local function checked_pack_growth(total_size: integer,
   end
 end
 
-local function pack_integer_bytes(number: ffi.lua_Integer,
+local function pack_integer_bytes(number: foreign lua_Integer,
                                   size: integer,
                                   little_endian: boolean,
                                   negative: boolean): string
-  local storage = CChar.new_array(size)
-  local remaining = number as ffi.lua_Unsigned
+  local storage = foreign char.new_array(size)
+  local remaining = number as foreign lua_Unsigned
   local index = 0
   while index < size do
     local destination = size - index - 1
     if little_endian then destination = index end
-    local octet: unsigned char =
-      0 as unsigned char
-    if index >= ffi.lua_Integer.sizeof and negative then
-      octet = 255 as unsigned char
+    local octet: foreign unsigned char =
+      0 as foreign unsigned char
+    if index >= foreign lua_Integer.sizeof and negative then
+      octet = 255 as foreign unsigned char
     else
       octet =
-        (remaining & (255 as ffi.lua_Unsigned))
-          as unsigned char
+        (remaining & (255 as foreign lua_Unsigned))
+          as foreign unsigned char
       remaining =
-        remaining >> (8 as int)
+        remaining >> (8 as foreign int)
     end
-    storage[destination] = octet as char
+    storage[destination] = octet as foreign char
     index = index + 1
   end
   return storage as string
 end
 
-local function check_signed_pack_range(number: ffi.lua_Integer,
+local function check_signed_pack_range(number: foreign lua_Integer,
                                        size: integer)
-  if size < ffi.lua_Integer.sizeof then
+  if size < foreign lua_Integer.sizeof then
     local shift = size * 8 - 1
     local limit = 1 << shift
-    if number < (-limit as ffi.lua_Integer) or
-        number >= (limit as ffi.lua_Integer) then
+    if number < (-limit as foreign lua_Integer) or
+        number >= (limit as foreign lua_Integer) then
       raise "integer overflow"
     end
   end
 end
 
-local function check_unsigned_pack_range(number: ffi.lua_Integer,
+local function check_unsigned_pack_range(number: foreign lua_Integer,
                                          size: integer)
-  if size < ffi.lua_Integer.sizeof then
+  if size < foreign lua_Integer.sizeof then
     local shift = size * 8
     local limit =
-      (1 as ffi.lua_Unsigned) <<
-      (shift as int)
-    if (number as ffi.lua_Unsigned) >= limit then
+      (1 as foreign lua_Unsigned) <<
+      (shift as foreign int)
+    if (number as foreign lua_Unsigned) >= limit then
       raise "unsigned overflow"
     end
   end
@@ -295,42 +295,42 @@ local function ordered_native_bytes(bytes: string,
   return reverse(bytes)
 end
 
-local function pack_float_bytes(number: ffi.lua_Number,
+local function pack_float_bytes(number: foreign lua_Number,
                                 little_endian: boolean,
                                 native_little_endian: boolean): string
   local converted = number as foreign float
-  local storage = CChar.new_array(
+  local storage = foreign char.new_array(
     foreign float.sizeof as integer)
-  local output = storage as *char
+  local output = storage as foreign *char
   ffi.memcpy(
-    output, converted, #storage as ffi.size_t)
+    output, converted, #storage as foreign size_t)
   return ordered_native_bytes(
     storage as string,
     little_endian, native_little_endian)
 end
 
-local function pack_number_bytes(number: ffi.lua_Number,
+local function pack_number_bytes(number: foreign lua_Number,
                                  little_endian: boolean,
                                  native_little_endian: boolean): string
-  local storage = CChar.new_array(
-    ffi.lua_Number.sizeof as integer)
-  local output = storage as *char
+  local storage = foreign char.new_array(
+    foreign lua_Number.sizeof as integer)
+  local output = storage as foreign *char
   ffi.memcpy(
-    output, number, #storage as ffi.size_t)
+    output, number, #storage as foreign size_t)
   return ordered_native_bytes(
     storage as string,
     little_endian, native_little_endian)
 end
 
-local function pack_double_bytes(number: ffi.lua_Number,
+local function pack_double_bytes(number: foreign lua_Number,
                                  little_endian: boolean,
                                  native_little_endian: boolean): string
-  local converted = number as double
-  local storage = CChar.new_array(
-    double.sizeof as integer)
-  local output = storage as *char
+  local converted = number as foreign double
+  local storage = foreign char.new_array(
+    foreign double.sizeof as integer)
+  local output = storage as foreign *char
   ffi.memcpy(
-    output, converted, #storage as ffi.size_t)
+    output, converted, #storage as foreign size_t)
   return ordered_native_bytes(
     storage as string,
     little_endian, native_little_endian)
@@ -345,32 +345,32 @@ end
 local function unpack_integer_bytes(data: string, position: integer,
                                     size: integer,
                                     little_endian: boolean,
-                                    signed: boolean): ffi.lua_Integer
-  local bytes = data as const *unsigned char
+                                    signed: boolean): foreign lua_Integer
+  local bytes = data as foreign const *unsigned char
   local limit = size
-  if limit > ffi.lua_Integer.sizeof then
-    limit = ffi.lua_Integer.sizeof as integer
+  if limit > foreign lua_Integer.sizeof then
+    limit = foreign lua_Integer.sizeof as integer
   end
-  local result: ffi.lua_Unsigned = 0 as ffi.lua_Unsigned
+  local result: foreign lua_Unsigned = 0 as foreign lua_Unsigned
   local index = limit - 1
   while index >= 0 do
     result =
-      result << (8 as int)
+      result << (8 as foreign int)
     local source_index = size - index - 1
     if little_endian then source_index = index end
     result = result |
-      (bytes[position + source_index] as ffi.lua_Unsigned)
+      (bytes[position + source_index] as foreign lua_Unsigned)
     index = index - 1
   end
 
-  if size < ffi.lua_Integer.sizeof and signed then
+  if size < foreign lua_Integer.sizeof and signed then
     local mask =
-      (1 as ffi.lua_Unsigned) <<
-      ((size * 8 - 1) as int)
+      (1 as foreign lua_Unsigned) <<
+      ((size * 8 - 1) as foreign int)
     result = (result ~ mask) - mask
-  elseif size > ffi.lua_Integer.sizeof then
+  elseif size > foreign lua_Integer.sizeof then
     local extension = 0
-    if signed and (result as ffi.lua_Integer) < 0 then
+    if signed and (result as foreign lua_Integer) < 0 then
       extension = 255
     end
     index = limit
@@ -384,7 +384,7 @@ local function unpack_integer_bytes(data: string, position: integer,
       index = index + 1
     end
   end
-  return result as ffi.lua_Integer
+  return result as foreign lua_Integer
 end
 
 local function native_ordered_slice(data: string, position: integer,
@@ -399,46 +399,46 @@ end
 local function unpack_float_bytes(data: string, position: integer,
                                   little_endian: boolean,
                                   native_little_endian: boolean):
-                                  ffi.lua_Number
+                                  foreign lua_Number
   local bytes = native_ordered_slice(
     data, position, foreign float.sizeof as integer,
     little_endian, native_little_endian)
-  local source = bytes as const *char
+  local source = bytes as foreign const *char
   local converted: foreign float =
     0.0 as foreign float
   ffi.memcpy(
     converted, source,
-    foreign float.sizeof as ffi.size_t)
-  return converted as ffi.lua_Number
+    foreign float.sizeof as foreign size_t)
+  return converted as foreign lua_Number
 end
 
 local function unpack_number_bytes(data: string, position: integer,
                                    little_endian: boolean,
                                    native_little_endian: boolean):
-                                   ffi.lua_Number
+                                   foreign lua_Number
   local bytes = native_ordered_slice(
-    data, position, ffi.lua_Number.sizeof as integer,
+    data, position, foreign lua_Number.sizeof as integer,
     little_endian, native_little_endian)
-  local source = bytes as const *char
-  local converted: ffi.lua_Number = 0.0 as ffi.lua_Number
+  local source = bytes as foreign const *char
+  local converted: foreign lua_Number = 0.0 as foreign lua_Number
   ffi.memcpy(
     converted, source,
-    ffi.lua_Number.sizeof as ffi.size_t)
+    foreign lua_Number.sizeof as foreign size_t)
   return converted
 end
 
 local function unpack_double_bytes(data: string, position: integer,
                                    little_endian: boolean,
                                    native_little_endian: boolean):
-                                   ffi.lua_Number
+                                   foreign lua_Number
   local bytes = native_ordered_slice(
-    data, position, double.sizeof as integer,
+    data, position, foreign double.sizeof as integer,
     little_endian, native_little_endian)
-  local source = bytes as const *char
-  local converted: double =
-    0.0 as double
+  local source = bytes as foreign const *char
+  local converted: foreign double =
+    0.0 as foreign double
   ffi.memcpy(
     converted, source,
-    double.sizeof as ffi.size_t)
-  return converted as ffi.lua_Number
+    foreign double.sizeof as foreign size_t)
+  return converted as foreign lua_Number
 end

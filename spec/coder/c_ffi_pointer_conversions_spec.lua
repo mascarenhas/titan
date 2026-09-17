@@ -45,13 +45,13 @@ describe("unsafe C object-pointer conversion code generation", function()
                 foreign import "]] .. header .. [["
 
                 local function reinterpret(
-                    pointer: *ffi.ffi_source
-                ): *ffi.ffi_target
+                    pointer: foreign *ffi_source
+                ): foreign *ffi_target
                     return pointer
                 end
 
                 function local_address(): integer
-                    local object: ffi.ffi_source = ffi.ffi_make_source()
+                    local object: foreign ffi_source = ffi.ffi_make_source()
                     return ffi.ffi_read_target(object) as integer
                 end
             ]])
@@ -94,8 +94,8 @@ describe("unsafe C object-pointer conversion code generation", function()
                 foreign import "]] .. header .. [["
 
                 function arrays(): integer
-                    local local_sources: ffi.ffi_source[2] =
-                        ffi.ffi_source.new_array(2)
+                    local local_sources =
+                        foreign ffi_source.new_array(2)
                     return ffi.ffi_read_target(ffi.ffi_sources) as integer
                         + ffi.ffi_read_target(local_sources) as integer
                         + ffi.ffi_read_const(ffi.ffi_const_values) as integer
@@ -151,25 +151,25 @@ describe("unsafe C object-pointer conversion code generation", function()
                 foreign import "]] .. header .. [["
 
                 local function reinterpret(
-                    pointer: *ffi.ffi_source
-                ): *ffi.ffi_target
-                    return pointer as *ffi.ffi_target
+                    pointer: foreign *ffi_source
+                ): foreign *ffi_target
+                    return pointer as foreign *ffi_target
                 end
 
                 function explicit(): integer
-                    local object: ffi.ffi_source =
+                    local object: foreign ffi_source =
                         ffi.ffi_make_source(53)
-                    local pointer: *ffi.ffi_source = object
+                    local pointer: foreign *ffi_source = object
                     return ffi.ffi_read_target(
                         reinterpret(pointer)) as integer
                 end
 
                 function vararg(): integer
-                    local object: ffi.ffi_source =
+                    local object: foreign ffi_source =
                         ffi.ffi_make_source(59)
-                    local pointer: *ffi.ffi_source = object
+                    local pointer: foreign *ffi_source = object
                     return ffi.ffi_read_vararg(
-                        1, pointer as *ffi.ffi_target) as integer
+                        1, pointer as foreign *ffi_target) as integer
                 end
             ]]
             local csrc = h.compile_and_read_c(source)
@@ -317,10 +317,10 @@ describe("unsafe C object-pointer conversion code generation", function()
                 foreign import "]] .. header .. [["
 
                 function survives_unsafe_gc_write(): integer
-                    local raw: ffi.TValue = nil
+                    local raw: foreign TValue = nil
                     ffi.ffi_reset_unsafe_outparam_finalized()
                     ffi.ffi_write_unsafe_gc_value(
-                        L, raw as *ffi.TValue)
+                        L, raw as foreign *TValue)
                     ffi.ffi_collect_unsafe_outparam(L)
                     if (ffi.ffi_was_unsafe_outparam_finalized()
                             as integer) ~= 0 then
@@ -385,26 +385,26 @@ describe("unsafe C object-pointer conversion code generation", function()
                 foreign import "]] .. header .. [["
 
                 local function handle(
-                    tcp: *ffi.ffi_tcp
-                ): *ffi.ffi_handle
+                    tcp: foreign *ffi_tcp
+                ): foreign *ffi_handle
                     return tcp
                 end
 
                 local function stream(
-                    pipe: *ffi.ffi_pipe
-                ): *ffi.ffi_stream
+                    pipe: foreign *ffi_pipe
+                ): foreign *ffi_stream
                     return pipe
                 end
 
                 local function request(
-                    fs: *ffi.ffi_fs
-                ): *ffi.ffi_request
+                    fs: foreign *ffi_fs
+                ): foreign *ffi_request
                     return fs
                 end
 
                 local function direct(): integer
-                    local tcp = ffi.ffi_tcp.new()
-                    local fs = ffi.ffi_fs.new()
+                    local tcp = foreign ffi_tcp.new()
+                    local fs = foreign ffi_fs.new()
                     ffi.ffi_close(tcp, nil)
                     return ffi.ffi_cancel(fs) as integer
                 end

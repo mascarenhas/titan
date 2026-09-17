@@ -9,7 +9,7 @@ from context (the [lambda inference](#untyped-lambda-vararg) path). Inside the d
 function the parameter is reached through three forms — `#...` (count),
 `...[e]` (1-based element), and a trailing **spread** (`f(a, ...)`,
 `return a, ...`, `{a, ...}`, `{...}`) — and the same `...: t` syntax annotates a
-first-class variadic **function type** (`(integer, ...: string) -> integer`).
+first-class variadic **function type** (`function (integer, ...: string): (integer)`).
 
 The feature is deliberately *lightweight*: there is no slice type. The `...`
 expression/parameter is **not first-class** — it cannot be captured by a
@@ -38,7 +38,7 @@ token ([Lexer and parser](lexer-parser.md#one-grammar-no-token-stream)).
 
 `ast.lua` adds three constructors to the `Exp` group:
 
-```lua
+```text
 ExpDots         = {"loc"},          -- bare `...`
 ExpDotsIndex    = {"loc", "exp"},   -- `...[e]`  (checker sets _nilfill, _type)
 ExpDotsLen      = {"loc"}           -- explicit `#...`
@@ -58,88 +58,39 @@ to `Ast.TypeFunction`
 absent. The independent final field describes a flexible *output* tail; see
 [flexible-return internals](flexible-returns.md).
 
-### Colon, last-only, trailing — the productions
+### Parameter and function-type lists
 
-A variadic parameter follows the `name: type` style with no name, so the rule
-consumes `DOTS COLON` then a required element type. Two variants:
+Named Titan declarations require `...: T` for an input tail. Lambdas may omit
+that annotation and infer the tail element from an expected function type.
+The fixed-parameter loop stops at a following `...`, so an input tail remains
+last-only. Parameter lists use fold captures and retain the 100-item written-
+parameter guard; this is separate from runtime vararg capacity.
 
-```
-varargparam       <- (P  DOTS COLON^VarargColon type^TypeDecl) -> varargdecl
-lambdavarargparam <- (P  DOTS (COLON type^TypeDecl)?)          -> varargdecl
-```
+Function types begin with `function`. Their `typelist` and `resulttypes`
+productions independently collect fixed types and an optional final `...: T`,
+then `split_types` separates the fixed list from its tail. The resulting
+`Ast.TypeFunction.varargtype` and `.flexrettype` remain independent. Type/result
+lists do not inherit the declaration-parameter count guard: the checker and
+calling convention apply the appropriate result limits at their consumers.
 
-`paramlist` uses `varargparam` (the `: t` is mandatory); `lambdaparamlist` uses
-`lambdavarargparam`, where the `(COLON type)?` is **optional** — an absent type
-yields an untyped vararg `Decl` whose element type the checker infers from
-context. There is no ambiguity with the lambda return type: `function(...): T`
-parses as an untyped vararg whose `)` precedes the return `:`, while
-`function(...: T)` parses as a typed vararg (the `:` precedes the `)`). The
-`VarargColon` syntax error fires when a top-level/method/function-type vararg
-omits the colon (`...integer` and `function f(...)`).
+### Vararg atoms, spreads, and semantic placement
 
-Both are admitted only in trailing position. Both `paramlist` and
-`lambdaparamlist` run the fixed-parameter loop with a `!DOTS` guard so the loop
-stops before a `, ...`, letting the optional trailing `(COMMA varargparam)?`
-(or a sole `varargparam`) consume that comma itself — which is what makes the
-vararg structurally **last-only** (a `..., x` cannot parse). The whole list is
-wrapped in a `=> checklist` predicate that throws `%{ListTooLong}` past
-`LIST_LIMIT = 100` (a *parse-time* guardrail near `THIS_FILENAME`, distinct from
-the runtime `TITAN_VARARG_MAX` cap).
+Bare `...` is now a `baseexp` atom. A following bracket suffix distinguishes
+scalar `...[index]` from the comma-bearing range forms. With another expression
+start after `...`, bounded token dispatch parses one collection-spread subject.
+The dedicated `#...` count form remains separate from `#...[index]`.
 
-The **function-type annotation** uses a parallel pair, `varargtypeann` /
-`varargtypeopt`, inside `typelist` (the arrow productions); `varargtypeann`
-requires the colon (`DOTS COLON^VarargColon type`) and defaults to `false`
-when absent; `typelist`'s fixed-type loop carries the same `!DOTS` guard. The
-bare input `typelist` does not double as a result-tail grammar. Return lists use
-their own `...: t` carrier, so input and output tails cannot be confused.
-`defs.typefunc` combines the argument carrier and result carrier so the two
-element types land in `Ast.TypeFunction.varargtype` and `.flexrettype`
-respectively.
+The parser preserves markers in every written expression-list position;
+shared checker adjustment rejects unparenthesized varargs or spreads before
+the final expanding position. This applies equally to calls, assignments,
+returns, iterator tuples, and positional constructors. There is no separate
+parser fixed-position predicate rejecting bare dots.
 
-### Tail markers and explicit variadic expressions
-
-A bare `...` marker is admitted only as the last item of an explist (call
-args, `return`, assignment/decl RHS) or positional container constructor.
-Explicit collection spreads and DOTS subsets parse in fixed positions as well,
-so the checker—not a speculative parser branch—owns their last-only semantic
-diagnostic. Each raw item is captured once and classified from the delimiter:
-
-```
-rawexplistitem  <- ((P &DOTS exp) => claim_dots_started_item)
-                 / spreadexp
-                 / ((P DOTS !LBRACKET) -> ExpDots)
-                 / exp
-explistitemrole <- (&COMMA => fixed_explist_item)
-                 / (!COMMA => tail_explist_item)
-```
-
-`defs.dots_field` builds a key-less `Ast.Field` wrapping an `ExpDots`. A fixed
-classifier rejects that bare node; it retains `ExpSpread` and explicit
-`ExpSubset` nodes for checker placement errors. A tail classifier promotes a
-direct `ExpSubset(ExpDots)` to `ExpSpread`. Bare `...` remains deliberately
-absent from `simpleexp`. Its explicit expression forms have dedicated branches:
-
-```
-simpleexp <- ...
-           / (P LEN DOTS !LBRACKET) -> ExpDotsLen
-           / (P DOTS bracketbody) -> dots_bracket_exp
-           / ...
-
-parenexp  <- (((P DOTS) -> ExpDots) &RPAREN)
-           / exp
-```
-
-The exact parenthesized branch becomes `ExpAdjust(ExpDots)`; an indexed form
-inside parentheses falls through to `exp`. A comma-bearing `...[subset]` is an
-explicit syntactic expression, represented as `ExpSubset(ExpDots)`, but only
-direct tail classification promotes it to a spread; other positions reach the
-checker-specific subset error. The unary rule leaves `#` before bare dots for
-the dedicated `ExpDotsLen` branch while retaining ordinary unary length for
-`#...[index]`. In contrast, `... -1` is `spreadexp` with a unary subject and
-reaches the subject type check, while `... ...[1]` is a spread whose subject is
-the explicit `ExpDotsIndex`. A second bare `...` is still not an expression.
-Invalid bare forms use existing enclosing syntax-error labels; `ListTooLong`
-remains the independent written-list cap.
+Parentheses request one adjusted value. This includes bare `(...)`, collection
+`(...items)`, and ranged `(...[first, last])` forms. A plain collection subset
+such as `items[first, last]` still needs a spread owner. `ExpSpread` carriers
+and their shared finite projections keep the existing evaluation-once and
+finite/open behavior described in [spread internals](spread-expressions.md).
 
 ## Checker: `varargtype`, scope, and shared result demand
 
@@ -555,12 +506,11 @@ parameter:
 A variadic function is an ordinary first-class value; `codevaluecall` dispatches
 it exactly like a non-variadic value. The runtime function-type tag is a
 `static const void *` published/recovered through the Lua registry. C-free
-callable shapes use the full `types.tostring(ftype)` key so different modules
-agree. A callable built only from exportable C descriptors instead uses its
-canonical serialized structure and is likewise shared across modules; a
-header-dependent C shape keeps its defining module's private namespace. The
-module-local cache separately marks C-bearing keys so a C typedef whose
-spelling resembles a Titan type cannot alias it. The tag **folds in the vararg
+callable shapes use `types.runtime_identity(ftype)` so different modules agree.
+That key preserves the full callable structure and the declaration origins of
+header-dependent C types. The same C declaration shares identity across modules;
+unrelated declarations with matching spellings remain distinct. The tag
+**folds in the vararg
 element** because the full callable shape
 distinguishes `...: integer` from `...: value`. So:
 

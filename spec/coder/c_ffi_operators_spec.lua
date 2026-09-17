@@ -422,11 +422,11 @@ describe("C FFI operator code generation", function()
                 foreign import "]] .. header .. [["
 
                 function checked_sizeof(): integer
-                    return ffi.ffi_item.sizeof
+                    return foreign ffi_item.sizeof
                 end
 
                 function checked_alignof(): integer
-                    return ffi.ffi_item.alignof
+                    return foreign ffi_item.alignof
                 end
 
                 function checked_difference(): integer

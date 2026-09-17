@@ -278,9 +278,9 @@ record Box
 end
 
 union Result
-    none
-    local hidden: integer
-    box: Box
+    none()
+    local hidden(integer)
+    box(Box)
 end
 
 interface Incrementer
@@ -321,7 +321,7 @@ function increment(value_: integer): integer
     return value_ + 1
 end
 
-function callback(): (integer) -> integer
+function callback(): function (integer): integer
     return increment
 end
 
@@ -355,10 +355,10 @@ record LocalBox
 end
 
 function callable_views()
-    local direct: (integer, value) -> value = api.increment
-    local returned: (integer, value) -> value = api.callback()
-    local broad: (value) -> value = api.identity
-    local narrowed: (LocalBox) -> LocalBox = broad
+    local direct: function (integer, value): value = api.increment
+    local returned: function (integer, value): value = api.callback()
+    local broad: function (value): value = api.identity
+    local narrowed: function (LocalBox): LocalBox = broad
 end
 
 function use_everything(): integer
@@ -367,14 +367,14 @@ function use_everything(): integer
     local encoded = api.combine { right = 2, left = 4 }
     local box: api.Alias = api.Box.make { n = encoded }
     local incrementer: api.Incrementer = box
-    local wrap: (api.Box) -> api.Result = api.Result.box
+    local wrap: function (api.Box): api.Result = api.Result.box
     local result = wrap(box)
     local first: string?, second: string? = api.labels()
     local count = api.sum(1, 2, 3)
     case result
-    when box: selected then
+    when box(selected) then
         return incrementer:add { delta = count }
-    when none then
+    when none() then
         return 0
     else
         return -1

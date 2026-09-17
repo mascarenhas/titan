@@ -89,30 +89,30 @@ describe("generic declarations and explicit calls", function()
     it("reserves owner and callable binders and builds immutable schemes",
     function()
         local ast, modtype = assert_check([[
-            record Pair<T, U>
+            record Pair<|T, U|>
                 first: T
                 second: U
             end
 
-            function id<T>(item: T): T
+            function id<|T|>(item: T): T
                 return item
             end
 
-            function Pair:replace<V>(item: V): Pair<V, U>
-                return Pair<V, U>.new(item, self.second)
+            function Pair:replace<|V|>(item: V): Pair<|V, U|>
+                return Pair<|V, U|>.new(item, self.second)
             end
 
-            function Pair.from<V>(item: V, second: U): Pair<V, U>
-                return Pair<V, U>.new(item, second)
+            function Pair.from<|V|>(item: V, second: U): Pair<|V, U|>
+                return Pair<|V, U|>.new(item, second)
             end
 
-            function exercise(pair: Pair<integer, string>): Pair<boolean, string>
-                local copy: Pair<integer, string> =
-                    Pair<integer, string>.new(pair.first, pair.second)
-                local number: integer = id<integer>(copy.first)
-                local flags: Pair<boolean, string> =
-                    Pair<integer, string>.from<boolean>(true, pair.second)
-                return pair:replace<boolean>(flags.first)
+            function exercise(pair: Pair<|integer, string|>): Pair<|boolean, string|>
+                local copy: Pair<|integer, string|> =
+                    Pair<|integer, string|>.new(pair.first, pair.second)
+                local number: integer = id<|integer|>(copy.first)
+                local flags: Pair<|boolean, string|> =
+                    Pair<|integer, string|>.from<|boolean|>(true, pair.second)
+                return pair:replace<|boolean|>(flags.first)
             end
         ]])
 
@@ -194,35 +194,35 @@ describe("generic declarations and explicit calls", function()
     it("keeps owner applications on nominal namespaces",
     function()
         assert_error("attach them to the nominal namespace", [[
-            record Box<T> item: T end
-            function bad(): Box<integer> return Box.new<integer>(1) end
+            record Box<|T|> item: T end
+            function bad(): Box<|integer|> return Box.new<|integer|>(1) end
         ]])
         assert_error("expected integer but found string", [[
-            record Box<T> item: T end
-            function bad(): Box<integer>
-                return Box<integer>.new("wrong")
+            record Box<|T|> item: T end
+            function bad(): Box<|integer|>
+                return Box<|integer|>.new("wrong")
             end
         ]])
         assert_error("concrete type alias namespace 'IntBox' cannot receive type arguments", [[
-            record Box<T> item: T end
-            type IntBox = Box<integer>
+            record Box<|T|> item: T end
+            type IntBox = Box<|integer|>
             function bad(): IntBox
-                return IntBox<string>.new(1)
+                return IntBox<|string|>.new(1)
             end
         ]])
         assert_error("must provide both the owner and callable type argument lists", [[
-            record Box<T> item: T end
-            function Box.make<U>(item: U): Box<T>
+            record Box<|T|> item: T end
+            function Box.make<|U|>(item: U): Box<|T|>
                 return Box.new(item as T)
             end
-            function bad(): Box<integer>
-                return Box<integer>.make("mixed")
+            function bad(): Box<|integer|>
+                return Box<|integer|>.make("mixed")
             end
         ]])
         assert_error("can only be used in a direct call", [[
-            record Box<T> item: T end
-            function bad(): (integer) -> Box<integer>
-                return Box<integer>.new
+            record Box<|T|> item: T end
+            function bad(): function (integer): (Box<|integer|>)
+                return Box<|integer|>.new
             end
         ]])
     end)
@@ -230,28 +230,28 @@ describe("generic declarations and explicit calls", function()
     it("substitutes generic record fields and union payloads at each use",
     function()
         local ast = assert_check([[
-            record Box<T>
+            record Box<|T|>
                 item: T
             end
 
-            union Maybe<T>
-                present: T
-                absent
+            union Maybe<|T|>
+                present(T)
+                absent()
             end
 
-            function get(box: Box<integer>): integer
+            function get(box: Box<|integer|>): integer
                 return box.item
             end
 
-            function make(): Maybe<integer>
-                return Maybe<integer>.present(1)
+            function make(): Maybe<|integer|>
+                return Maybe<|integer|>.present(1)
             end
 
-            function read(candidate: Maybe<string>): string
+            function read(candidate: Maybe<|string|>): string
                 case candidate
-                when present: text then
+                when present(text) then
                     return text
-                when absent then
+                when absent() then
                     return ""
                 end
             end
@@ -272,38 +272,38 @@ describe("generic declarations and explicit calls", function()
         assert.equal("value", types.tostring(
             case._union.variants.present.payload))
 
-        assert_error("expected test.Box<string> but found test.Box<integer>", [[
-            record Box<T>
+        assert_error("expected test.Box<|string|> but found test.Box<|integer|>", [[
+            record Box<|T|>
                 item: T
             end
-            function mismatch(box: Box<integer>): Box<string>
-                local wrong: Box<string> = box
+            function mismatch(box: Box<|integer|>): Box<|string|>
+                local wrong: Box<|string|> = box
                 return wrong
             end
         ]])
 
         assert_check([[
-            record Box<T>
+            record Box<|T|>
                 item: T
             end
-            function shallow(box: Box<{integer}>): Box<value>
+            function shallow(box: Box<|{integer}|>): Box<|value|>
                 return box
             end
         ]])
-        assert_error("expected test.Box<{ value }> but found test.Box<{ integer }>", [[
-            record Box<T>
+        assert_error("expected test.Box<|{ value }|> but found test.Box<|{ integer }|>", [[
+            record Box<|T|>
                 item: T
             end
-            function deep(box: Box<{integer}>): Box<{value}>
+            function deep(box: Box<|{integer}|>): Box<|{value}|>
                 return box
             end
         ]])
-        assert_error("cannot cast 'test.Box<integer>' to 'test.Box<string>'", [[
-            record Box<T>
+        assert_error("cannot cast 'test.Box<|integer|>' to 'test.Box<|string|>'", [[
+            record Box<|T|>
                 item: T
             end
-            function bad(box: Box<integer>): Box<string>
-                return box as Box<string>
+            function bad(box: Box<|integer|>): Box<|string|>
+                return box as Box<|string|>
             end
         ]])
     end)
@@ -311,7 +311,7 @@ describe("generic declarations and explicit calls", function()
     it("uses applied Interface constraints as rigid method capabilities",
     function()
         local ast = assert_check([[
-            interface Show<A>
+            interface Show<|A|>
                 function render(item: A): string
             end
 
@@ -323,38 +323,38 @@ describe("generic declarations and explicit calls", function()
                 return self.prefix
             end
 
-            function display<S: Show<integer>>(subject: S): string
+            function display<|S: Show<|integer|>|>(subject: S): string
                 return subject:render(1)
             end
 
             function use(show: IntegerShow): string
-                return display<IntegerShow>(show)
+                return display<|IntegerShow|>(show)
             end
         ]])
 
         local display = toplevel(ast, "Ast.TopLevelFunc", "display")
         local declared_display = declared_type(display)
         local binder = declared_display.typeparams[1]
-        assert.equal("test.Show<integer>",
+        assert.equal("test.Show<|integer|>",
             types.tostring(binder.constraint))
         local rigid = declared_display.signature.params[1]
         assert.equal("Type.Parameter", rigid._tag)
-        assert.equal("test.Show<integer>",
+        assert.equal("test.Show<|integer|>",
             types.tostring(rigid.erased_constraint))
         assert_nominal(display._type.params[1], "test.Show", {})
         local call = display.block.stats[1].exps[1]
         assert.equal("string", types.tostring(call._type))
         assert.is_nil(call._rigid_receiver_type)
 
-        assert_error("does not satisfy constraint 'test.Show<integer>'", [[
-            interface Show<A>
+        assert_error("does not satisfy constraint 'test.Show<|integer|>'", [[
+            interface Show<|A|>
                 function render(item: A): string
             end
-            function display<S: Show<integer>>(subject: S): string
+            function display<|S: Show<|integer|>|>(subject: S): string
                 return subject:render(1)
             end
             function bad(): string
-                return display<string>("no")
+                return display<|string|>("no")
             end
         ]])
     end)
@@ -362,26 +362,26 @@ describe("generic declarations and explicit calls", function()
     it("alpha-matches generic Interface methods after owner substitution",
     function()
         assert_check([[
-            interface Mapper<A>
-                function map<B>(item: A, f: (A) -> B): B
+            interface Mapper<|A|>
+                function map<|B|>(item: A, f: function (A): B): B
             end
 
             record IntegerMapper
             end
 
-            function IntegerMapper:map<B>(
-                    item: integer, f: (integer) -> B): B
+            function IntegerMapper:map<|B|>(
+                    item: integer, f: function (integer): B): B
                 return f(item)
             end
 
-            function apply<M: Mapper<integer>>(
+            function apply<|M: Mapper<|integer|>|>(
                     mapper: M): string
-                return mapper:map<string>(1,
+                return mapper:map<|string|>(1,
                     function(x: integer): string return "ok" end)
             end
 
             function use(mapper: IntegerMapper): string
-                return apply<IntegerMapper>(mapper)
+                return apply<|IntegerMapper|>(mapper)
             end
         ]])
     end)
@@ -389,7 +389,7 @@ describe("generic declarations and explicit calls", function()
     it("allows only rigid transport, options, containers, equality, and casts",
     function()
         assert_check([[
-            function transport<T>(item: T, dynamic: value,
+            function transport<|T|>(item: T, dynamic: value,
                     items: {T}, values: {string: T}):
                     ({T}, T?, value, T, T, T, boolean, integer)
                 local made: {T} = { item }
@@ -404,21 +404,21 @@ describe("generic declarations and explicit calls", function()
                     same, projected
             end
 
-            function lookup<K, V>(values: {K: V}, key: K): V
+            function lookup<|K, V|>(values: {K: V}, key: K): V
                 return values[key]
             end
 
-            function relay<T>(head: T, ...: T): (T, ...: T)
+            function relay<|T|>(head: T, ...: T): (T, ...: T)
                 return head, ...
             end
 
             function relay_integers(): (integer, ...: integer)
-                return relay<integer>(1, 2, 3)
+                return relay<|integer|>(1, 2, 3)
             end
         ]])
 
         local err = assert_error("operator '%+' is not available for rigid type parameter 'T'", [[
-            function bad<T>(left: T, right: T): T
+            function bad<|T|>(left: T, right: T): T
                 local sum = left + right
                 return left
             end
@@ -426,13 +426,13 @@ describe("generic declarations and explicit calls", function()
         assert.match("rigid type parameter 'T'", err)
 
         assert_error("rigid type parameter 'T' cannot be used as a condition", [[
-            function bad<T>(item: T)
+            function bad<|T|>(item: T)
                 if item then return end
             end
         ]])
 
         assert_error("expected record in receiver of method call but found 'T'", [[
-            function bad<T>(item: T)
+            function bad<|T|>(item: T)
                 item:missing()
             end
         ]])
@@ -440,7 +440,7 @@ describe("generic declarations and explicit calls", function()
 
     it("pairs exact record and Map finalizer callbacks", function()
         assert_check([[
-            function finalizable<T>(v: T, f: (T) -> ()): () end
+            function finalizable<|T|>(v: T, f: function (T): ()): () end
 
             record Owner
                 marker: integer
@@ -450,15 +450,15 @@ describe("generic declarations and explicit calls", function()
             local function finish_map(map: {string: integer}): () end
 
             function install(owner: Owner, map: {string: integer})
-                finalizable<Owner> { v = owner, f = finish_owner }
-                finalizable<{string: integer}>(map, finish_map)
+                finalizable<|Owner|> { v = owner, f = finish_owner }
+                finalizable<|{string: integer}|>(map, finish_map)
             end
         ]])
 
         assert_error(
-            "expected %(test.Owner%) %-> %(%) but found " ..
-                "%(test.Other%) %-> %(%)", [[
-                function finalizable<T>(v: T, f: (T) -> ()): () end
+            "expected function %(test.Owner%): %(%) but found " ..
+                "function %(test.Other%): %(%)", [[
+                function finalizable<|T|>(v: T, f: function (T): ()): () end
 
                 record Owner
                     marker: integer
@@ -471,7 +471,7 @@ describe("generic declarations and explicit calls", function()
                 local function finish_other(other: Other): () end
 
                 function install(owner: Owner)
-                    finalizable<Owner>(owner, finish_other)
+                    finalizable<|Owner|>(owner, finish_other)
                 end
             ]])
     end)
@@ -479,34 +479,34 @@ describe("generic declarations and explicit calls", function()
     it("rejects duplicate binders, owner shadowing, and incomplete lists",
     function()
         local errors = h.check_errs([[
-            function duplicate<T, T>(item: T): T return item end
+            function duplicate<|T, T|>(item: T): T return item end
 
-            record Box<T>
+            record Box<|T|>
                 item: T
             end
-            function Box:shadow<T>(item: T): T return item end
+            function Box:shadow<|T|>(item: T): T return item end
 
-            interface Loop<T: Loop<T>>
+            interface Loop<|T: Loop<|T|>|>
                 function get(): T
             end
 
             interface Show
                 function render(): string
             end
-            interface Outer<X: Holder<value>>
+            interface Outer<|X: Holder<|value|>|>
                 function get(): X
             end
-            interface Holder<T: Show>
+            interface Holder<|T: Show|>
                 function get(): T
             end
 
-            function id<T>(item: T): T return item end
+            function id<|T|>(item: T): T return item end
             function too_many(): integer
-                return id<integer, string>(1)
+                return id<|integer, string|>(1)
             end
 
             function plain(item: integer): integer return item end
-            function non_generic(): integer return plain<string>(1) end
+            function non_generic(): integer return plain<|string|>(1) end
         ]])
         assert.truthy(#errors >= 6)
         local joined = table.concat(errors, "\n")
@@ -520,9 +520,9 @@ describe("generic declarations and explicit calls", function()
         with_header("typedef long ffi_intptr;\n", function(header)
             assert_error("has no sound transient round trip", [[
             foreign import "]] .. header .. [["
-            local function transient_id<T>(item: T): T return item end
-            local function bad(pointer: *ffi.ffi_intptr): value
-                return transient_id<*ffi.ffi_intptr>(pointer)
+            local function transient_id<|T|>(item: T): T return item end
+            local function bad(pointer: foreign *ffi_intptr): value
+                return transient_id<|foreign *ffi_intptr|>(pointer)
             end
             ]])
         end)
@@ -530,17 +530,17 @@ describe("generic declarations and explicit calls", function()
 
     it("preserves generic owner applicability through bare aliases", function()
         local ast = assert_check([[
-            record Pair<T, U>
+            record Pair<|T, U|>
                 first: T
                 second: U
             end
             type Either = Pair
             local type PrivateEither = Either
-            function make(): Either<string, integer>
-                return Either<string, integer>.new("ok", 1)
+            function make(): Either<|string, integer|>
+                return Either<|string, integer|>.new("ok", 1)
             end
-            function make_private(): PrivateEither<boolean, string>
-                return PrivateEither<boolean, string>.new(true, "yes")
+            function make_private(): PrivateEither<|boolean, string|>
+                return PrivateEither<|boolean, string|>.new(true, "yes")
             end
         ]])
         local alias = toplevel(ast, "Ast.TopLevelTypeAlias", "Either")
@@ -554,7 +554,7 @@ describe("generic declarations and explicit calls", function()
 
     it("uses the all-value application for a bare generic owner", function()
         local ast = assert_check([[
-            record Cell<T>
+            record Cell<|T|>
                 item: T
             end
             function read(cell: Cell): value
@@ -571,19 +571,19 @@ describe("generic declarations and explicit calls", function()
 
     it("serializes canonical generic owner and callable scopes", function()
         local _, modtype = assert_check([[
-            interface Show<A>
-                function map<T>(item: T): T
+            interface Show<|A|>
+                function map<|T|>(item: T): T
             end
-            union Result<T>
-                ok: T
-                none
+            union Result<|T|>
+                ok(T)
+                none()
             end
-            record Box<T>
+            record Box<|T|>
                 item: T
             end
-            function Box.make<U>(item: U): U return item end
-            function Box:get<V>(fallback: V): T return self.item end
-            function identity<T: Show<integer>>(item: T): T return item end
+            function Box.make<|U|>(item: U): U return item end
+            function Box:get<|V|>(fallback: V): T return self.item end
+            function identity<|T: Show<|integer|>|>(item: T): T return item end
             function ordinary(): integer return 1 end
         ]])
         local serialized = types.serialize(modtype)
@@ -600,15 +600,15 @@ describe("generic declarations and explicit calls", function()
             interface J
                 function render(): string
             end
-            interface I<A>
+            interface I<|A|>
                 function use(item: A): string
             end
-            function forward<T: I<U>, U: J>(left: T, right: U): T
+            function forward<|T: I<|U|>, U: J|>(left: T, right: U): T
                 return left
             end
         ]])
         local member = modtype.members.forward.type
-        assert.equal("test.I<test.J>", types.tostring(
+        assert.equal("test.I<|test.J|>", types.tostring(
             member.signature.params[1].erased_constraint))
         local decoded, decode_error = driver.decode_module_interface(
             types.serialize(modtype), "test", "forward-constraint-test")
@@ -618,16 +618,16 @@ describe("generic declarations and explicit calls", function()
     it("round-trips inferred source and compiled module schemes", function()
         local modules = {
             library = [[
-                record Box<T>
+                record Box<|T|>
                     item: T
                 end
-                function id<T>(item: T): T return item end
+                function id<|T|>(item: T): T return item end
             ]],
             consumer = [[
                 local library = import "library"
-                function use(): library.Box<integer>
+                function use(): library.Box<|integer|>
                     local number: integer = library.id(1)
-                    local text_id: (string) -> string = library.id
+                    local text_id: function (string): string = library.id
                     local text: string = text_id("ok")
                     if text == "" then number = 0 end
                     return library.Box.new(number)
@@ -649,24 +649,24 @@ describe("generic declarations and explicit calls", function()
             end
             function Rendered:render(): string return "ok" end
 
-            record Pair<T, U>
+            record Pair<|T, U|>
                 first: T
                 second: U
             end
-            record Box<T: Show>
+            record Box<|T: Show|>
                 item: T
             end
 
             type Either = Pair
             local type Hidden = Either
             type Public = Hidden
-            type IntPair = Pair<integer, integer>
+            type IntPair = Pair<|integer, integer|>
             type Crate = Box
 
             function bare(pair: Either): value return pair.first end
             function make(): IntPair return IntPair.new(1, 2) end
-            function pack(item: Rendered): Crate<Rendered>
-                return Crate<Rendered>.new(item)
+            function pack(item: Rendered): Crate<|Rendered|>
+                return Crate<|Rendered|>.new(item)
             end
         ]])
 
@@ -696,26 +696,26 @@ describe("generic declarations and explicit calls", function()
                 record Rendered
                 end
                 function Rendered:render(): string return "ok" end
-                record Pair<T, U>
+                record Pair<|T, U|>
                     first: T
                     second: U
                 end
-                record Box<T: Show>
+                record Box<|T: Show|>
                     item: T
                 end
                 type Either = Pair
                 type Chain = Either
-                type IntPair = Pair<integer, integer>
+                type IntPair = Pair<|integer, integer|>
                 type Crate = Box
             ]],
             consumer = [[
                 local l = import "library"
                 function use(item: l.Rendered):
-                        (l.Chain<string, integer>, l.IntPair,
-                         l.Crate<l.Rendered>)
-                    return l.Chain<string, integer>.new("ok", 1),
+                        (l.Chain<|string, integer|>, l.IntPair,
+                         l.Crate<|l.Rendered|>)
+                    return l.Chain<|string, integer|>.new("ok", 1),
                         l.IntPair.new(1, 2),
-                        l.Crate<l.Rendered>.new(item)
+                        l.Crate<|l.Rendered|>.new(item)
                 end
             ]],
         }
@@ -725,7 +725,7 @@ describe("generic declarations and explicit calls", function()
 
         modules.consumer = [[
             local l = import "library"
-            function bad(x: l.IntPair<string, integer>) end
+            function bad(x: l.IntPair<|string, integer|>) end
         ]]
         ok, err = run_checker_modules(
             modules, "consumer", { interface = "compiled" })
@@ -734,7 +734,7 @@ describe("generic declarations and explicit calls", function()
 
         modules.consumer = [[
             local l = import "library"
-            function bad(x: l.Crate<string>) end
+            function bad(x: l.Crate<|string|>) end
         ]]
         ok, err = run_checker_modules(
             modules, "consumer", { interface = "compiled" })
@@ -750,17 +750,17 @@ describe("generic declarations and explicit calls", function()
             end
             record R
             end
-            record Box<T: Show>
+            record Box<|T: Show|>
                 item: T
             end
             record Holder
-                early: Box<R>
+                early: Box<|R|>
             end
-            function consume(item: Box<R>): string
+            function consume(item: Box<|R|>): string
                 return item.item:render()
             end
-            function R.wrap(item: Box<R>): Box<R> return item end
-            function R:copy(item: Box<R>): Box<R> return item end
+            function R.wrap(item: Box<|R|>): Box<|R|> return item end
+            function R:copy(item: Box<|R|>): Box<|R|> return item end
             function R:render(): string return "r" end
         ]])
 
@@ -770,10 +770,10 @@ describe("generic declarations and explicit calls", function()
             end
             record Missing
             end
-            record Box<T: Show>
+            record Box<|T: Show|>
                 item: T
             end
-            function consume(item: Box<Missing>) end
+            function consume(item: Box<|Missing|>) end
         ]])
 
         assert_error("public module interface is not recoverable", [[
@@ -783,10 +783,10 @@ describe("generic declarations and explicit calls", function()
             record PrivateOnly
             end
             local function PrivateOnly:render(): string return "hidden" end
-            record Box<T: Show>
+            record Box<|T: Show|>
                 item: T
             end
-            function exported(item: Box<PrivateOnly>) end
+            function exported(item: Box<|PrivateOnly|>) end
         ]])
     end)
 
@@ -796,40 +796,40 @@ describe("generic declarations and explicit calls", function()
             interface J
                 function j(): integer
             end
-            interface I<A>
+            interface I<|A|>
                 function i(item: A): integer
             end
-            record G<A, B: I<A>>
+            record G<|A, B: I<|A|>|>
                 first: A
                 second: B
             end
-            record R<A: J>
+            record R<|A: J|>
                 marker: A
             end
-            function R:m<B: I<A>>(item: B): B return item end
-            function inner<V: J, W: I<V>>(item: W): W return item end
-            function outer<U: J, T: I<U>>(first: U, item: T): (T, T, T)
-                local pair: G<U, T> = G<U, T>.new(first, item)
-                return pair.second, inner<U, T>(item), inner(item)
+            function R:m<|B: I<|A|>|>(item: B): B return item end
+            function inner<|V: J, W: I<|V|>|>(item: W): W return item end
+            function outer<|U: J, T: I<|U|>|>(first: U, item: T): (T, T, T)
+                local pair: G<|U, T|> = G<|U, T|>.new(first, item)
+                return pair.second, inner<|U, T|>(item), inner(item)
             end
-            function nested<X: J, T: I<X>>(receiver: R<X>, item: T): (T, T)
-                return receiver:m<T>(item), receiver:m(item)
+            function nested<|X: J, T: I<|X|>|>(receiver: R<|X|>, item: T): (T, T)
+                return receiver:m<|T|>(item), receiver:m(item)
             end
         ]])
         local decoded, decode_error = driver.decode_module_interface(
             types.serialize(modtype), "test", "dependent-constraint-test")
         assert.truthy(decoded, decode_error)
 
-        assert_error("does not satisfy constraint 'test.I<test.J>'", [[
+        assert_error("does not satisfy constraint 'test.I<|test.J|>'", [[
             interface J
                 function j(): integer
             end
-            interface I<A>
+            interface I<|A|>
                 function i(item: A): integer
             end
-            function inner<W: I<J>>(item: W): W return item end
-            function bad<X: J, T: I<X>>(item: T): T
-                return inner<T>(item)
+            function inner<|W: I<|J|>|>(item: W): W return item end
+            function bad<|X: J, T: I<|X|>|>(item: T): T
+                return inner<|T|>(item)
             end
         ]])
 
@@ -844,59 +844,59 @@ describe("generic declarations and explicit calls", function()
                 marker: integer
             end
             local function PrivateRenderable:render(): string return "ok" end
-            record RenderedBox<T: Renderable>
+            record RenderedBox<|T: Renderable|>
                 item: T
             end
             local function private_use(item: PublicBox) end
-            type PublicBox = RenderedBox<PrivateRenderable>
+            type PublicBox = RenderedBox<|PrivateRenderable|>
         ]])
     end)
 
     it("smart-reconstructs every explicit owner and callable application",
     function()
         assert_error("type of map key cannot be nil", [[
-            record Dictionary<K>
+            record Dictionary<|K|>
                 entries: {K: string}
                 count: integer
             end
             type Nil = nil
-            function bad(item: Dictionary<Nil>) end
+            function bad(item: Dictionary<|Nil|>) end
         ]])
 
         assert_error("type of map key cannot be option type", [[
-            record Dictionary<K>
+            record Dictionary<|K|>
                 entries: {K: string}
                 count: integer
             end
             type Dict = Dictionary
             type MaybeInteger = integer?
-            function bad(item: Dict<MaybeInteger>) end
+            function bad(item: Dict<|MaybeInteger|>) end
         ]])
 
         assert_error("variadic parameter cannot have type nil", [[
-            function consume<T>(...: T) end
-            function bad() consume<nil>() end
+            function consume<|T|>(...: T) end
+            function bad() consume<|nil|>() end
         ]])
 
         assert_error("flexible return cannot have type nil", [[
-            function produce<T>(): (...: T) end
-            function bad() produce<nil>() end
+            function produce<|T|>(): (...: T) end
+            function bad() produce<|nil|>() end
         ]])
     end)
 
     it("binds first structural evidence through every Titan shape",
     function()
         local ast = assert_check([[
-            record Box<T>
+            record Box<|T|>
                 item: T
             end
 
-            function unwrap<T>(box: Box<T>): T
+            function unwrap<|T|>(box: Box<|T|>): T
                 return box.item
             end
 
-            function structural<A, B, C, D>(maybe: A?, items: {B},
-                    values: {string: C}, callback: (D) -> D, item: D):
+            function structural<|A, B, C, D|>(maybe: A?, items: {B},
+                    values: {string: C}, callback: function (D): D, item: D):
                     (A?, B, C, D)
                 return maybe, items[1], values["item"], callback(item)
             end
@@ -935,7 +935,7 @@ describe("generic declarations and explicit calls", function()
             function Mark:marker(): integer return self.number end
             function marker(): Marker return Mark.new(1) end
             function mark(): Mark return Mark.new(2) end
-            function same<T>(left: T, right: T): T return left end
+            function same<|T|>(left: T, right: T): T return left end
             function use(v: value)
                 local value_first = same(v, 42)
                 local integer_first = same(42, v)
@@ -1000,7 +1000,7 @@ describe("generic declarations and explicit calls", function()
             record Box end
             function Box:convert(item: integer): integer return item end
             function float_function(item: float): float return item end
-            function same<T>(left: T, right: T): T return left end
+            function same<|T|>(left: T, right: T): T return left end
             function use(box: Box)
                 local got = same(box:convert, float_function)
             end
@@ -1009,40 +1009,40 @@ describe("generic declarations and explicit calls", function()
         assert.truthy(errs[1]:find(
             "argument 2 of call to 'same'", 1, true), errs[1])
         assert.truthy(errs[1]:find(
-            "expected (integer) -> integer but found (float) -> float",
+            "expected function (integer): integer but found function (float): float",
             1, true), errs[1])
     end)
 
     it("propagates constraint equations after each ordered evidence slot",
     function()
         local ast = assert_check([[
-            interface Carrier<T>
+            interface Carrier<|T|>
                 function get(): T
             end
-            function choose<V, W: Carrier<V>>(owner: W, item: V): V
+            function choose<|V, W: Carrier<|V|>|>(owner: W, item: V): V
                 return item
             end
-            function produce<V, W: Carrier<V>>(): (W, V)
+            function produce<|V, W: Carrier<|V|>|>(): (W, V)
                 return (nil as value) as W, (nil as value) as V
             end
-            function choose_callback<V, W: Carrier<V>>(
-                    callback: (W) -> W, item: V): V
+            function choose_callback<|V, W: Carrier<|V|>|>(
+                    callback: function (W): W, item: V): V
                 return item
             end
-            record MethodBox<T> end
-            function MethodBox:convert<X>(item: T): T return item end
-            function argument_order<U: Carrier<integer>>(owner: U): integer
+            record MethodBox<|T|> end
+            function MethodBox:convert<|X|>(item: T): T return item end
+            function argument_order<|U: Carrier<|integer|>|>(owner: U): integer
                 return choose(owner, 2.5)
             end
-            function result_order<U: Carrier<integer>>(): (U, float)
+            function result_order<|U: Carrier<|integer|>|>(): (U, float)
                 return produce()
             end
-            function lambda_order<U: Carrier<integer>>(): integer
+            function lambda_order<|U: Carrier<|integer|>|>(): integer
                 return choose_callback(
                     function(item: U): U return item end, 2.5)
             end
-            function method_order<U: Carrier<integer>>(
-                    box: MethodBox<U>): integer
+            function method_order<|U: Carrier<|integer|>|>(
+                    box: MethodBox<|U|>): integer
                 return choose_callback(box:convert, 2.5)
             end
         ]])
@@ -1086,19 +1086,19 @@ describe("generic declarations and explicit calls", function()
 
     it("uses fixed, flexible, and open expected-result evidence", function()
         local ast = assert_check([[
-            union Maybe<T>
-                present: T
-                absent
+            union Maybe<|T|>
+                present(T)
+                absent()
             end
 
-            function make<T>(): T
+            function make<|T|>(): T
                 return nil as T
             end
 
-            function emit<T>(): (...: T)
+            function emit<|T|>(): (...: T)
             end
 
-            function use(): (string, Maybe<boolean>, ...: integer)
+            function use(): (string, Maybe<|boolean|>, ...: integer)
                 return make(), Maybe.absent(), emit()
             end
         ]])
@@ -1119,18 +1119,18 @@ describe("generic declarations and explicit calls", function()
     it("closes later argument evidence before checking a contextual lambda",
     function()
         local ast = assert_check([[
-            function fold<T, U>(items: {T}, callback: (T, U) -> U,
+            function fold<|T, U|>(items: {T}, callback: function (T, U): U,
                     initial: U): U
                 return initial
             end
 
-            function apply<T, U>(callback: (T) -> U, item: T): U
+            function apply<|T, U|>(callback: function (T): U, item: T): U
                 return callback(item)
             end
 
-            function id<T>(item: T): T return item end
+            function id<|T|>(item: T): T return item end
 
-            function rigid<T>(): (T) -> T
+            function rigid<|T|>(): function (T): T
                 return id
             end
 
@@ -1159,12 +1159,12 @@ describe("generic declarations and explicit calls", function()
         assert_error(
             "types in generic for variable score do not match, " ..
             "expected string but found integer%?", [[
-                function next<K, V>(map: {K: V}, key: K?): (K?, V?)
+                function next<|K, V|>(map: {K: V}, key: K?): (K?, V?)
                     return nil, nil
                 end
 
-                function pairs<K, V>(map: {K: V}):
-                    (({K: V}, K?) -> (K?, V?), {K: V}, nil, nil)
+                function pairs<|K, V|>(map: {K: V}):
+                    (function ({K: V}, K?): (K?, V?), {K: V}, nil, nil)
                     return next, map, nil, nil
                 end
 
@@ -1178,7 +1178,7 @@ describe("generic declarations and explicit calls", function()
     it("rejects transport between distinct rigid binders", function()
         assert_error(
             "types in return do not match, expected U but found T", [[
-                function bad<T, U>(item: T): U
+                function bad<|T, U|>(item: T): U
                     return item
                 end
             ]])
@@ -1189,7 +1189,7 @@ describe("generic declarations and explicit calls", function()
         assert_error(
             "types in argument 1 of call to 'id' do not match, " ..
                 "expected string but found integer", [[
-                    function id<T>(item: T): T return item end
+                    function id<|T|>(item: T): T return item end
                     function bad(): string
                         return id(42)
                     end
@@ -1201,13 +1201,13 @@ describe("generic declarations and explicit calls", function()
         assert_error(
             "types in argument 1 of call to method 'test%.Box:replace' " ..
                 "do not match, expected integer but found string", [[
-                    record Box<T>
+                    record Box<|T|>
                         item: T
                     end
                     function Box:replace(item: T)
                         self.item = item
                     end
-                    function bad(box: Box<integer>)
+                    function bad(box: Box<|integer|>)
                         box:replace("wrong")
                     end
                 ]])
@@ -1217,7 +1217,7 @@ describe("generic declarations and explicit calls", function()
     function()
         assert_error(
             "types in return do not match, expected string but found integer", [[
-                function duplicate<T>(item: T): (T, T)
+                function duplicate<|T|>(item: T): (T, T)
                     return item, item
                 end
                 function bad(): (integer, string)
@@ -1228,28 +1228,28 @@ describe("generic declarations and explicit calls", function()
 
     it("contextually supplies fixed nil results to generic callbacks", function()
         local ast = assert_check([[
-            record Task<A, B>
+            record Task<|A, B|>
             end
 
-            function run<A, B>(callback: () -> A): Task<A, B>
-                return (nil as value) as Task<A, B>
+            function run<|A, B|>(callback: function (): A): Task<|A, B|>
+                return (nil as value) as Task<|A, B|>
             end
 
-            function missing(): Task<nil, value>
-                return run<nil, value>(function () end)
+            function missing(): Task<|nil, value|>
+                return run<|nil, value|>(function () end)
             end
 
-            function bare(): Task<nil, value>
-                return run<nil, value>(function () return end)
+            function bare(): Task<|nil, value|>
+                return run<|nil, value|>(function () return end)
             end
 
-            function inferred(): Task<nil, value>
+            function inferred(): Task<|nil, value|>
                 return run(function () end)
             end
 
             function annotated()
                 local task = run(function (): nil end)
-                local _: Task<nil, value> = task
+                local _: Task<|nil, value|> = task
             end
 
             function no_results()
@@ -1257,7 +1257,7 @@ describe("generic declarations and explicit calls", function()
 
             function pretyped()
                 local task = run(no_results)
-                local _: Task<value, value> = task
+                local _: Task<|value, value|> = task
             end
         ]])
 
@@ -1276,11 +1276,11 @@ describe("generic declarations and explicit calls", function()
     it("does not infer nil from an unconstrained lambda fallthrough", function()
         assert_error(
             "function can return nil but return type is not nil", [[
-                record Task<A, B>
+                record Task<|A, B|>
                 end
 
-                function run<A, B>(callback: () -> A): Task<A, B>
-                    return (nil as value) as Task<A, B>
+                function run<|A, B|>(callback: function (): A): Task<|A, B|>
+                    return (nil as value) as Task<|A, B|>
                 end
 
                 function bad()
@@ -1292,20 +1292,20 @@ describe("generic declarations and explicit calls", function()
     it("infers constructors, nominal functions, methods, and bound values",
     function()
         local ast = assert_check([[
-            record Pair<T, U>
+            record Pair<|T, U|>
                 first: T
                 second: U
             end
 
-            function Pair.pick<V>(left: T, right: U, item: V): V
+            function Pair.pick<|V|>(left: T, right: U, item: V): V
                 return item
             end
 
-            function Pair:map<V>(callback: (T) -> V): V
+            function Pair:map<|V|>(callback: function (T): V): V
                 return callback(self.first)
             end
 
-            function Pair:replace<V>(item: V): V
+            function Pair:replace<|V|>(item: V): V
                 return item
             end
 
@@ -1315,9 +1315,9 @@ describe("generic declarations and explicit calls", function()
                 local mapped: string =
                     pair:map(function(item) return "ok" end)
                 local constructor:
-                    (integer, string) -> Pair<integer, string> = Pair.new
-                local bound: (string) -> string = pair:replace
-                local static: (integer, string, boolean) -> boolean = Pair.pick
+                    function (integer, string): (Pair<|integer, string|>) = Pair.new
+                local bound: function (string): string = pair:replace
+                local static: function (integer, string, boolean): boolean = Pair.pick
                 local made = constructor(2, "two")
                 if made.first == 0 or bound("") == "never" or
                         static(1, "", false) then
@@ -1334,11 +1334,11 @@ describe("generic declarations and explicit calls", function()
             declared_type(use.block.stats[2].decls[1])))
         assert.equal("string", types.tostring(
             declared_type(use.block.stats[3].decls[1])))
-        assert.equal("(integer, string) -> test.Pair<integer, string>",
+        assert.equal("function (integer, string): test.Pair<|integer, string|>",
             types.tostring(declared_type(use.block.stats[4].decls[1])))
-        assert.equal("(string) -> string", types.tostring(
+        assert.equal("function (string): string", types.tostring(
             declared_type(use.block.stats[5].decls[1])))
-        assert.equal("(integer, string, boolean) -> boolean",
+        assert.equal("function (integer, string, boolean): boolean",
             types.tostring(declared_type(use.block.stats[6].decls[1])))
         assert_nominal(declared_type(use.block.stats[7].decls[1]),
             "test.Pair", {"integer", "string"})
@@ -1351,19 +1351,19 @@ describe("generic declarations and explicit calls", function()
     it("uses an optional result context for nominal constructor inference",
     function()
         local ast = assert_check([[
-            union Reason<B>
-                simple: string
-                complex: B
+            union Reason<|B|>
+                simple(string)
+                complex(B)
             end
-            record Task<T, E>
+            record Task<|T, E|>
             end
-            function Task:cancel(reason: Reason<E>?) end
-            function make_reason<B>(): Reason<B>? return nil end
-            function identity<B>(): B return (nil as value) as B end
-            function use(task: Task<string, integer>)
+            function Task:cancel(reason: Reason<|E|>?) end
+            function make_reason<|B|>(): Reason<|B|>? return nil end
+            function identity<|B|>(): B return (nil as value) as B end
+            function use(task: Task<|string, integer|>)
                 task:cancel(Reason.simple("timed out"))
-                local reason: Reason<integer> = make_reason()
-                local optional: Reason<integer>? = identity()
+                local reason: Reason<|integer|> = make_reason()
+                local optional: Reason<|integer|>? = identity()
             end
         ]])
         local use = toplevel(ast, "Ast.TopLevelFunc", "use")
@@ -1401,17 +1401,17 @@ describe("generic declarations and explicit calls", function()
     it("infers named, variadic, flexible, and runtime-open call evidence",
     function()
         local ast = assert_check([[
-            function named<T>(left: T, right: T): T return left end
+            function named<|T|>(left: T, right: T): T return left end
 
-            function first<T>(...: T): T return ...[1] end
+            function first<|T|>(...: T): T return ...[1] end
 
             function supply(): (integer, ...: integer)
                 return 1, 2, 3
             end
 
-            function consume<T>(...: T): T return ...[1] end
+            function consume<|T|>(...: T): T return ...[1] end
 
-            function many<T>(item: T): (T, ...: T)
+            function many<|T|>(item: T): (T, ...: T)
                 return item, item
             end
 
@@ -1452,14 +1452,14 @@ describe("generic declarations and explicit calls", function()
     it("consumes constructor components in their written order",
     function()
         local ast = assert_check([[
-            record Pair<T>
+            record Pair<|T|>
                 first: T
                 second: T
             end
-            function arrays<T>(items: {T}): {T} return items end
-            function symmetric<T>(items: {T: T}): {T: T} return items end
-            function pairs<T>(item: Pair<T>): Pair<T> return item end
-            function whole<T>(item: T): T return item end
+            function arrays<|T|>(items: {T}): {T} return items end
+            function symmetric<|T|>(items: {T: T}): {T: T} return items end
+            function pairs<|T|>(item: Pair<|T|>): Pair<|T|> return item end
+            function whole<|T|>(item: T): T return item end
             function use()
                 local ai = arrays({1, 2.0})
                 local af = arrays({1.0, 2})
@@ -1488,8 +1488,8 @@ describe("generic declarations and explicit calls", function()
         local use = toplevel(ast, "Ast.TopLevelFunc", "use")
         assert.same({
             "{ integer }", "{ float }", "{ float : float }",
-            "{ integer : integer }", "test.Pair<integer>",
-            "test.Pair<float>", "{ { integer } }", "test.Pair<nil>",
+            "{ integer : integer }", "test.Pair<|integer|>",
+            "test.Pair<|float|>", "{ { integer } }", "test.Pair<|nil|>",
         }, (function()
             local out = {}
             for index, stat in ipairs(use.block.stats) do
@@ -1537,15 +1537,15 @@ describe("generic declarations and explicit calls", function()
     it("uses written named order and delivered multi-result slot order",
     function()
         local ast = assert_check([[
-            function same<T>(left: T, right: T): T return left end
-            function named<T>(left: T, right: T): T return left end
+            function same<|T|>(left: T, right: T): T return left end
+            function named<|T|>(left: T, right: T): T return left end
             function value_integer(v: value): (value, integer)
                 return v, 1
             end
             function integer_value(v: value): (integer, value)
                 return 1, v
             end
-            function pair<T>(): (T, T)
+            function pair<|T|>(): (T, T)
                 return (nil as value) as T, (nil as value) as T
             end
             function results(): (integer, float) return pair() end
@@ -1607,21 +1607,21 @@ describe("generic declarations and explicit calls", function()
 
     it("reclassifies hidden iterator operations inside generic bodies", function()
         local ast = assert_check([[
-            function step<T>(state: {T}, control: integer): (integer?, T?)
+            function step<|T|>(state: {T}, control: integer): (integer?, T?)
                 return nil, nil
             end
-            function copy<T>(items: {T})
+            function copy<|T|>(items: {T})
                 for index, item in step, items, 0 do
                 end
             end
 
-            function next<T>(state: T, control: T): T?
+            function next<|T|>(state: T, control: T): T?
                 return nil
             end
-            function close<T>(state: T?)
+            function close<|T|>(state: T?)
             end
-            function use<T>(state: T)
-                local finish: (T?) -> () = close
+            function use<|T|>(state: T)
+                local finish: function (T?): () = close
                 for item in next, state, state, finish do
                 end
             end
@@ -1650,12 +1650,12 @@ describe("generic declarations and explicit calls", function()
 
     it("uses hidden generic-for input, result, and close evidence", function()
         local ast = assert_check([[
-            function step<T>(state: {T}, control: integer):
+            function step<|T|>(state: {T}, control: integer):
                     (integer?, T?)
                 return nil, nil
             end
 
-            function close<T>(state: T)
+            function close<|T|>(state: T)
             end
 
             function use(items: {string})
@@ -1664,16 +1664,16 @@ describe("generic declarations and explicit calls", function()
                 end
             end
 
-            record Box<T> item: T end
-            function make_box<U>(): Box<U>
-                return Box<U>.new((nil as value) as U)
+            record Box<|T|> item: T end
+            function make_box<|U|>(): Box<|U|>
+                return Box<|U|>.new((nil as value) as U)
             end
-            function step_box<T>(state: Box<T>, control: integer):
-                    (integer?, Box<T>?)
+            function step_box<|T|>(state: Box<|T|>, control: integer):
+                    (integer?, Box<|T|>?)
                 return nil, nil
             end
             function nested()
-                for index: integer, item: Box<integer>? in
+                for index: integer, item: Box<|integer|>? in
                         step_box, make_box(), 0 do
                 end
             end
@@ -1685,7 +1685,7 @@ describe("generic declarations and explicit calls", function()
                 for index: integer, item: string? in step, supply() do
                 end
             end
-            function step_dots<T>(state: T, control: T): T?
+            function step_dots<|T|>(state: T, control: T): T?
                 return nil
             end
             function dots(...: integer)
@@ -1707,7 +1707,7 @@ describe("generic declarations and explicit calls", function()
         types.assert_erased(loop._next_call._type)
 
         local nested = toplevel(ast, "Ast.TopLevelFunc", "nested").block.stats[1]
-        assert.equal("test.Box<integer>?", types.tostring(
+        assert.equal("test.Box<|integer|>?", types.tostring(
             declared_type(nested._result_decls[2])))
         local multi = toplevel(ast, "Ast.TopLevelFunc", "multi").block.stats[1]
         assert.equal("integer", types.tostring(
@@ -1744,7 +1744,7 @@ describe("generic declarations and explicit calls", function()
             record Renderable
             end
             function Renderable:show(): string return "ok" end
-            function render<T: Show>(item: T): string return item:show() end
+            function render<|T: Show|>(item: T): string return item:show() end
             function use(item: Renderable): string return render(item) end
         ]])
 
@@ -1755,32 +1755,32 @@ describe("generic declarations and explicit calls", function()
                 interface Show
                     function show(): string
                 end
-                local function render<T: Show>(item: T): string
+                local function render<|T: Show|>(item: T): string
                     return item:show()
                 end
                 local function bad_constraint(): string
                     return render("no")
                 end
 
-                local function id<T>(item: T): T return item end
-                local function bad_pointer(pointer: *ffi.ffi_intptr)
+                local function id<|T|>(item: T): T return item end
+                local function bad_pointer(pointer: foreign *ffi_intptr)
                     local copy = id(pointer)
                 end
 
-                local function same<T>(left: T, right: T): T return left end
-                local function bad_ordered(pointer: *ffi.ffi_intptr)
+                local function same<|T|>(left: T, right: T): T return left end
+                local function bad_ordered(pointer: foreign *ffi_intptr)
                     local got = same(pointer, 42)
                 end
 
-                local function make<K>(key: K): {K: string}
+                local function make<|K|>(key: K): {K: string}
                     return {[key] = "x"}
                 end
                 local function bad_key() local got = make(nil) end
 
-                local function consume<T>(...: T) end
+                local function consume<|T|>(...: T) end
                 local function bad_variadic() consume(nil) end
 
-                local function produce<T>(item: T): (...: T)
+                local function produce<|T|>(item: T): (...: T)
                     return item
                 end
                 local function bad_flexible()
@@ -1792,7 +1792,7 @@ describe("generic declarations and explicit calls", function()
             assert.match("has no sound transient round trip", errors[2])
             assert.match("has no sound transient round trip", errors[3])
             assert.match(
-                "argument 2.-expected %*.-ffi_intptr but found integer",
+                "argument 2.-expected foreign %*.-ffi_intptr but found integer",
                 errors[4])
             for index = 5, 7 do
                 assert.match("cannot close", errors[index])
@@ -1809,14 +1809,14 @@ describe("generic declarations and explicit calls", function()
     it("keeps inference fresh, ordinary-checks later mismatches, and closes free cells",
     function()
         assert_check([[
-            function id<T>(item: T): T return item end
+            function id<|T|>(item: T): T return item end
             function use(): (integer, string)
                 return id(1), id("one")
             end
         ]])
 
         local mismatch_source = [[
-            function same<T>(left: T, right: T): T return left end
+            function same<|T|>(left: T, right: T): T return left end
             function bad(): integer return same(1, "one") end
         ]]
         local errs = h.check_errs(mismatch_source)
@@ -1840,41 +1840,41 @@ describe("generic declarations and explicit calls", function()
         end
 
         assert_check([[
-            interface Container<T>
+            interface Container<|T|>
                 function get(): T
             end
-            function phantom<T, C: Container<T>>(item: integer): integer
+            function phantom<|T, C: Container<|T|>|>(item: integer): integer
                 return item
             end
             function use(): integer return phantom(1) end
         ]])
 
         assert_check([[
-            interface Container<T>
+            interface Container<|T|>
                 function get(): T
             end
-            record Box<T> item: T end
-            function Box:project<U>(item: U): U return item end
-            function id<T>(item: T): T return item end
-            function constrained<T, C: Container<T>>(item: C): C
+            record Box<|T|> item: T end
+            function Box:project<|U|>(item: U): U return item end
+            function id<|T|>(item: T): T return item end
+            function constrained<|T, C: Container<|T|>|>(item: C): C
                 return item
             end
-            function take<U>(callback: (U) -> U): value return nil end
-            function take_named<U>(callback: (U) -> U): value return nil end
-            function relay<V, W: Container<V>>(item: V): integer return 1 end
-            function relay_outer<U>(item: U): integer return relay(item) end
-            function apply<T, U>(callback: (T) -> U, item: T): U
+            function take<|U|>(callback: function (U): U): value return nil end
+            function take_named<|U|>(callback: function (U): U): value return nil end
+            function relay<|V, W: Container<|V|>|>(item: V): integer return 1 end
+            function relay_outer<|U|>(item: U): integer return relay(item) end
+            function apply<|T, U|>(callback: function (T): U, item: T): U
                 return callback(item)
             end
-            function constrained_outer<U, C: Container<U>>(item: C): C
+            function constrained_outer<|U, C: Container<|U|>|>(item: C): C
                 return take_pair(item, id)
             end
-            function take_pair<V, W: Container<V>>(
-                item: W, callback: (V) -> V
+            function take_pair<|V, W: Container<|V|>|>(
+                item: W, callback: function (V): V
             ): W
                 return item
             end
-            function contextual(box: Box<integer>): integer
+            function contextual(box: Box<|integer|>): integer
                 return apply(box:project, 1)
             end
             function use()
@@ -1899,29 +1899,29 @@ describe("generic declarations and explicit calls", function()
                 function marker(): integer
             end
 
-            function id<T>(item: T): T return item end
-            function constrained<T: I>(item: T): T return item end
-            function take<U: I>(left: (U) -> U, right: (U) -> U): value
+            function id<|T|>(item: T): T return item end
+            function constrained<|T: I|>(item: T): T return item end
+            function take<|U: I|>(left: function (U): U, right: function (U): U): value
                 return nil
             end
 
-            record Box<T>
+            record Box<|T|>
                 item: T
             end
             function Box:integer_identity(item: T): T return item end
-            function pair<U>(left: (U) -> U, right: (U) -> U): value
+            function pair<|U|>(left: function (U): U, right: function (U): U): value
                 return nil
             end
 
-            union Maybe<T>
-                none
-                some: T
+            union Maybe<|T|>
+                none()
+                some(T)
             end
-            function consume<T>(left: T, right: T): value return nil end
-            function make<T>(): T return (nil as value) as T end
-            function pass<T>(item: T): T return item end
+            function consume<|T|>(left: T, right: T): value return nil end
+            function make<|T|>(): T return (nil as value) as T end
+            function pass<|T|>(item: T): T return item end
 
-            function use(box: Box<integer>)
+            function use(box: Box<|integer|>)
                 local positional_left: value = take(id, constrained)
                 local positional_right: value = take(constrained, id)
                 local named_left: value =
@@ -1946,33 +1946,33 @@ describe("generic declarations and explicit calls", function()
     it("finalizes dependent container and record constructors in source order",
     function()
         local checked = assert_check([[
-            record Plain<T>
+            record Plain<|T|>
                 item: T
             end
-            record Pair<T>
+            record Pair<|T|>
                 first: T
                 second: T
             end
-            record Nested<T>
-                inner: Plain<T>
+            record Nested<|T|>
+                inner: Plain<|T|>
                 item: T
             end
 
-            function make<T>(): T return (nil as value) as T end
-            function key<T>(): T return (nil as value) as T end
-            function array_left<T>(items: {T}, item: T): integer return 0 end
-            function array_right<T>(item: T, items: {T}): integer return 0 end
-            function array_only<T>(items: {T}): integer return 0 end
-            function map_left<T>(items: {string: T}, item: T): integer return 0 end
-            function map_right<T>(item: T, items: {string: T}): integer return 0 end
-            function map_only<T>(items: {string: T}): integer return 0 end
-            function plain_left<T>(box: Plain<T>, item: T): integer return 0 end
-            function plain_right<T>(item: T, box: Plain<T>): integer return 0 end
-            function plain_pair<T>(left: Plain<T>, right: Plain<T>): integer
+            function make<|T|>(): T return (nil as value) as T end
+            function key<|T|>(): T return (nil as value) as T end
+            function array_left<|T|>(items: {T}, item: T): integer return 0 end
+            function array_right<|T|>(item: T, items: {T}): integer return 0 end
+            function array_only<|T|>(items: {T}): integer return 0 end
+            function map_left<|T|>(items: {string: T}, item: T): integer return 0 end
+            function map_right<|T|>(item: T, items: {string: T}): integer return 0 end
+            function map_only<|T|>(items: {string: T}): integer return 0 end
+            function plain_left<|T|>(box: Plain<|T|>, item: T): integer return 0 end
+            function plain_right<|T|>(item: T, box: Plain<|T|>): integer return 0 end
+            function plain_pair<|T|>(left: Plain<|T|>, right: Plain<|T|>): integer
                 return 0
             end
-            function pair_only<T>(box: Pair<T>): integer return 0 end
-            function nested_only<T>(box: Nested<T>): integer return 0 end
+            function pair_only<|T|>(box: Pair<|T|>): integer return 0 end
+            function nested_only<|T|>(box: Nested<|T|>): integer return 0 end
 
             function use_array_left(): integer
                 return array_left({make()}, 42)
@@ -2069,9 +2069,9 @@ describe("generic declarations and explicit calls", function()
     it("finalizes ordinary calls through inferred generic function results",
     function()
         assert_check([[
-            function agree<T>(left: T, right: T): T return left end
-            function id<T>(item: T): T return item end
-            function make_identity<T>(): (T) -> T
+            function agree<|T|>(left: T, right: T): T return left end
+            function id<|T|>(item: T): T return item end
+            function make_identity<|T|>(): function (T): T
                 return function(item: T): T return item end
             end
 
@@ -2087,25 +2087,25 @@ describe("generic declarations and explicit calls", function()
     it("finalizes ordinary methods on inferred record and Interface receivers",
     function()
         assert_check([[
-            function agree<T>(left: T, right: T): T return left end
+            function agree<|T|>(left: T, right: T): T return left end
 
-            interface View<T>
+            interface View<|T|>
                 function get(): T
-                function pick<U>(fallback: U): T
+                function pick<|U|>(fallback: U): T
                 function replace(item: T): T
             end
-            record Box<T>
+            record Box<|T|>
                 item: T
             end
             function Box:get(): T return self.item end
-            function Box:pick<U>(fallback: U): T return self.item end
+            function Box:pick<|U|>(fallback: U): T return self.item end
             function Box:replace(item: T): T return item end
 
-            function make_box<T>(): Box<T>
-                return Box<T>.new((nil as value) as T)
+            function make_box<|T|>(): Box<|T|>
+                return Box<|T|>.new((nil as value) as T)
             end
-            function make_view<T>(): View<T>
-                return make_box<T>() as View<T>
+            function make_view<|T|>(): View<|T|>
+                return make_box<|T|>() as View<|T|>
             end
 
             function record_method(): integer
@@ -2129,21 +2129,21 @@ describe("generic declarations and explicit calls", function()
     it("refreshes finalized child projections before closing parent arguments",
     function()
         local ast = assert_check([[
-            function make<T>(): T return (42 as value) as T end
+            function make<|T|>(): T return (42 as value) as T end
 
-            function duo<T>(): (integer, {T})
+            function duo<|T|>(): (integer, {T})
                 return 1, {make()}
             end
 
-            function spread<T>(): (integer, ...: {T})
+            function spread<|T|>(): (integer, ...: {T})
                 return 1, {make()}, {make()}
             end
 
-            function consume_fixed<T>(first: T, second: {T}): integer
+            function consume_fixed<|T|>(first: T, second: {T}): integer
                 return #second
             end
 
-            function consume_open<T>(first: T, ...: {T}): integer
+            function consume_open<|T|>(first: T, ...: {T}): integer
                 local left: {T} = ...[1]
                 local right: {T} = ...[2]
                 return #left + #right
@@ -2172,7 +2172,7 @@ describe("generic declarations and explicit calls", function()
     it("finalizes ambient derived projections before parent arguments",
     function()
         local ast = assert_check([[
-            record Box<T>
+            record Box<|T|>
                 item: T
             end
             function Box:id(): T return self.item end
@@ -2181,18 +2181,18 @@ describe("generic declarations and explicit calls", function()
                 item: integer
             end
 
-            function make<T>(): Box<T>
-                return Box<T>.new((nil as value) as T)
+            function make<|T|>(): Box<|T|>
+                return Box<|T|>.new((nil as value) as T)
             end
-            function make_array<T>(): {T}
+            function make_array<|T|>(): {T}
                 return {((nil as value) as T)}
             end
-            function make_map<K, V>(): {K: V} return {} end
-            function make_item<T>(): T return (nil as value) as T end
-            function agree<T>(left: T, right: T): T return left end
-            function consume<T>(left: T?, right: T): value return nil end
-            function take<T>(left: () -> T, right: T): T return left() end
-            function take_reversed<T>(left: T, right: () -> T): T
+            function make_map<|K, V|>(): {K: V} return {} end
+            function make_item<|T|>(): T return (nil as value) as T end
+            function agree<|T|>(left: T, right: T): T return left end
+            function consume<|T|>(left: T?, right: T): value return nil end
+            function take<|T|>(left: function (): T, right: T): T return left() end
+            function take_reversed<|T|>(left: T, right: function (): T): T
                 return right()
             end
 
@@ -2245,36 +2245,36 @@ describe("generic declarations and explicit calls", function()
     it("closes direct computed calls and option-backed record owners",
     function()
         local ast = assert_check([[
-            record FnBox<T>
-                callback: () -> T
+            record FnBox<|T|>
+                callback: function (): T
             end
-            record Box<T>
+            record Box<|T|>
                 item: T
             end
             function Box:get(): T return self.item end
-            record Holder<T>
-                box: Box<T>
+            record Holder<|T|>
+                box: Box<|T|>
             end
             record Plain
                 item: integer
             end
 
-            function make<T>(): FnBox<T>
-                return FnBox<T>.new(function(): T
+            function make<|T|>(): FnBox<|T|>
+                return FnBox<|T|>.new(function(): T
                     return (42 as value) as T
                 end)
             end
-            function make_callbacks<T>(): {() -> T}
+            function make_callbacks<|T|>(): {function (): T}
                 return {function(): T return (42 as value) as T end}
             end
-            function make_boxes<T>(): {Box<T>}
-                return {Box<T>.new((42 as value) as T)}
+            function make_boxes<|T|>(): {Box<|T|>}
+                return {Box<|T|>.new((42 as value) as T)}
             end
-            function make_holder<T>(): Holder<T>
-                return Holder<T>.new(Box<T>.new((42 as value) as T))
+            function make_holder<|T|>(): Holder<|T|>
+                return Holder<|T|>.new(Box<|T|>.new((42 as value) as T))
             end
             function maybe(): Plain? return Plain.new(42) end
-            function agree<T>(left: T, right: T): T return left end
+            function agree<|T|>(left: T, right: T): T return left end
 
             function direct_field(): integer
                 return agree(make().callback(), 42)
@@ -2338,9 +2338,9 @@ describe("generic declarations and explicit calls", function()
     it("settles nested constructor and generic-value defaults inside-out",
     function()
         local ast = assert_check([[
-            function id<T>(item: T): T return item end
+            function id<|T|>(item: T): T return item end
             record Receiver end
-            function Receiver:method<T>(item: T): T return item end
+            function Receiver:method<|T|>(item: T): T return item end
             function use(receiver: Receiver)
                 local nested_empty = id({{}})
                 local generic_value = id({id})
@@ -2359,18 +2359,18 @@ describe("generic declarations and explicit calls", function()
         end
         assert.same({
             "{ { integer } }",
-            "{ (value) -> value }",
-            "{ (value) -> value }",
-            "{ (value) -> value : integer }",
-            "{ integer : (value) -> value }",
+            "{ function (value): value }",
+            "{ function (value): value }",
+            "{ function (value): value : integer }",
+            "{ integer : function (value): value }",
             "{ { integer } : integer }",
             "{ integer : { integer } }",
-            "{ { (value) -> value : integer } }",
+            "{ { function (value): value : integer } }",
         }, got)
         assert_runtime_ast_erased(use.block)
 
         local errs = h.check_errs([[
-            function id<T>(item: T): T return item end
+            function id<|T|>(item: T): T return item end
             function bad()
                 local got = id({function(item) return item end})
             end
@@ -2380,7 +2380,7 @@ describe("generic declarations and explicit calls", function()
 
         local computed_errors = h.check_errs([[
             record Box end
-            function id<T>(item: T): T return item end
+            function id<|T|>(item: T): T return item end
             function bad(box: Box)
                 local got = id({{[box.missing] = 1}})
             end
@@ -2401,13 +2401,13 @@ describe("generic declarations and explicit calls", function()
             return original(node, ...)
         end
         local result = table.pack(pcall(assert_check, [[
-            function agree<T>(left: T, right: T): T return left end
+            function agree<|T|>(left: T, right: T): T return left end
             function strings(): {string} return {"witness"} end
             record CallbackBox
                 callback: value
                 callbacks: {value}
             end
-            function callbacks(): {{(integer) -> integer}}
+            function callbacks(): {{function (integer): integer}}
                 return {{function(x: integer): integer return x end}}
             end
             function use(callback: value): {string}
@@ -2422,7 +2422,7 @@ describe("generic declarations and explicit calls", function()
                 local inferred = agree({box.callbacks[1]()}, strings())
                 return inferred
             end
-            function nested(): {{(integer) -> integer}}
+            function nested(): {{function (integer): integer}}
                 return agree({{function(x) return x end}}, callbacks())
             end
         ]]))
@@ -2466,22 +2466,22 @@ describe("generic declarations and explicit calls", function()
     it("defers only context-only constructor work and closes it exactly once",
     function()
         local source = [[
-            function agree<T>(left: T, right: T): T return left end
-            function make<U>(): U return (nil as value) as U end
+            function agree<|T|>(left: T, right: T): T return left end
+            function make<|U|>(): U return (nil as value) as U end
             function integers(): {integer: string} return {[1] = "one"} end
             function typed(item: integer): value return item end
-            function identity<T>(item: T): T return item end
-            record CallbackBox callback: (integer) -> integer end
+            function identity<|T|>(item: T): T return item end
+            record CallbackBox callback: function (integer): integer end
             function callback_box(): CallbackBox
                 return CallbackBox.new(
                     function(x: integer): integer return x + 1 end)
             end
-            type Callback = (integer) -> integer
+            type Callback = function (integer): integer
             function callback_map(): {Callback: integer}
                 return {[function(x: integer): integer return x end] = 1}
             end
-            function left<T>(items: {T}, witness: T) end
-            function right<T>(witness: T, items: {T}) end
+            function left<|T|>(items: {T}, witness: T) end
+            function right<|T|>(witness: T, items: {T}) end
             function use()
                 local empty_left = agree({}, integers())
                 local empty_right = agree(integers(), {})
@@ -2517,7 +2517,7 @@ describe("generic declarations and explicit calls", function()
             assert_nominal(declared_type(use.block.stats[index].decls[1]),
                 "test.CallbackBox", {})
         end
-        assert.equal("{ (integer) -> integer : integer }", types.tostring(
+        assert.equal("{ function (integer): integer : integer }", types.tostring(
             declared_type(use.block.stats[6].decls[1])))
         for node, count in pairs(operation_counts) do
             assert.equal(1, count,
@@ -2550,8 +2550,8 @@ describe("generic declarations and explicit calls", function()
 
         local errs = h.check_errs([[
             function typed(item: integer): value return item end
-            function left<T>(items: {T}, witness: T) end
-            function right<T>(witness: T, items: {T}) end
+            function left<|T|>(items: {T}, witness: T) end
+            function right<|T|>(witness: T, items: {T}) end
             function bad()
                 left({function(item): integer
                     local number: integer = "bad"
@@ -2572,8 +2572,8 @@ describe("generic declarations and explicit calls", function()
         local recovery_ok, recovery_error, recovery_ast = run_checker([[
             record Plain item: integer end
             function plain(): Plain return Plain.new(1) end
-            function make<U>(): U return (nil as value) as U end
-            function agree<T>(left: T, right: T): T return left end
+            function make<|U|>(): U return (nil as value) as U end
+            function agree<|T|>(left: T, right: T): T return left end
             function bad() local got = agree({make()}, plain()) end
         ]])
         assert.falsy(recovery_ok)
@@ -2594,7 +2594,7 @@ describe("generic declarations and explicit calls", function()
 
         local invalid_errors = h.check_errs([[
             record Box item: integer end
-            function id<T>(item: T): T return item end
+            function id<|T|>(item: T): T return item end
             function bad(box: Box) local got = id({box.missing}) end
         ]])
         assert.same(1, #invalid_errors)
@@ -2602,7 +2602,7 @@ describe("generic declarations and explicit calls", function()
         assert.falsy(invalid_errors[1]:find("array initializer", 1, true))
 
         local ownerless_errors = h.check_errs([[
-            function id<T>(item: T): T return item end
+            function id<|T|>(item: T): T return item end
             function bad() local got = id({item = 1}) end
         ]])
         assert.same(1, #ownerless_errors)
@@ -2624,8 +2624,8 @@ describe("generic declarations and explicit calls", function()
         }
         for _, case in ipairs(cases) do
             local source = ([=[
-                function make<T>(): {T} return {} end
-                function agree<T>(a: T?, b: T): T return b end
+                function make<|T|>(): {T} return {} end
+                function agree<|T|>(a: T?, b: T): T return b end
                 function use(): integer return %s end
             ]=]):format(case.call)
             local operation_counts = {}
@@ -2671,11 +2671,11 @@ describe("generic declarations and explicit calls", function()
         end
         local result = table.pack(pcall(assert_check, [[
             record Holder
-                callback: (integer) -> integer
+                callback: function (integer): integer
             end
             function holders(): {Holder} return {} end
-            function callbacks(): {(integer) -> integer} return {} end
-            function apply<T>(callback: (T) -> T, item: T): T
+            function callbacks(): {function (integer): integer} return {} end
+            function apply<|T|>(callback: function (T): T, item: T): T
                 return callback(item)
             end
 
@@ -2721,7 +2721,7 @@ describe("generic declarations and explicit calls", function()
 
         local result = table.pack(pcall(assert_check, ([=[
             foreign import "%s"
-            local function keep<T>(callback: ffi.ffi_callback, item: T): T
+            local function keep<|T|>(callback: foreign ffi_callback, item: T): T
                 return item
             end
             function contextual(): integer return keep(ffi.ffi_identity, 42) end
@@ -2741,7 +2741,7 @@ describe("generic declarations and explicit calls", function()
                 item: integer
             end
             function maybe(): Plain? return Plain.new(42) end
-            function agree<T>(left: T, right: T): T return left end
+            function agree<|T|>(left: T, right: T): T return left end
 
             function inferred_left(): integer
                 local got = agree({item = 42}, maybe())
@@ -2802,7 +2802,7 @@ describe("generic declarations and explicit calls", function()
                 if present then return Plain.new(42) end
                 return nil
             end
-            function same<T>(left: T, right: T): T return left end
+            function same<|T|>(left: T, right: T): T return left end
             function use()
                 local opt? = same(maybe(true), Plain.new(42))
                 local base = same(Plain.new(42), maybe(true))
@@ -2835,15 +2835,15 @@ describe("generic declarations and explicit calls", function()
 
     it("infers structured argument components through an outer Option", function()
         local ast = assert_check([[
-            record Box<T> item: T end
-            function map<K,V>(items: {K:V}): integer return 0 end
-            function array<T>(items: {T}): integer return 0 end
-            function box<T>(item: Box<T>): integer return 0 end
-            function callable<T>(f: (T) -> T): integer return 0 end
-            function optional<T>(items: ({T})?): integer return 0 end
-            function variadic<T>(...: {T}): integer return 0 end
-            function use<T>(m: ({string:T})?, a: ({T})?,
-                            b: Box<T>?, f: ((T) -> T)?, raw: {T}, runs: {{T}})
+            record Box<|T|> item: T end
+            function map<|K,V|>(items: {K:V}): integer return 0 end
+            function array<|T|>(items: {T}): integer return 0 end
+            function box<|T|>(item: Box<|T|>): integer return 0 end
+            function callable<|T|>(f: function (T): T): integer return 0 end
+            function optional<|T|>(items: {T}?): integer return 0 end
+            function variadic<|T|>(...: {T}): integer return 0 end
+            function use<|T|>(m: {string: T}?, a: {T}?,
+                            b: Box<|T|>?, f: (function (T): T)?, raw: {T}, runs: {{T}})
                 map(m)
                 map { items = m }
                 array(a)
@@ -2861,24 +2861,24 @@ describe("generic declarations and explicit calls", function()
     it("preserves optional Array constructor context through generic erasure",
     function()
         local ast = assert_check([[
-            function first<T>(items: ({T})?): T?
+            function first<|T|>(items: {T}?): T?
                 if items == nil then return nil end
                 local present: {T} = items
                 return present[1]
             end
-            function ordinary(items: ({integer})?): integer?
+            function ordinary(items: {integer}?): integer?
                 if items == nil then return nil end
                 local present: {integer} = items
                 return present[1]
             end
-            function use(typed: {integer}, optional: ({integer})?)
+            function use(typed: {integer}, optional: {integer}?)
                 local inferred? = first({1})
-                local explicit? = first<integer>({2})
+                local explicit? = first<|integer|>({2})
                 local from_typed? = first(typed)
                 local from_optional? = first(optional)
                 local empty? = first({})
-                local explicit_empty? = first<integer>({})
-                local absent? = first<integer>(nil)
+                local explicit_empty? = first<|integer|>({})
+                local absent? = first<|integer|>(nil)
                 local default_absent? = first(nil)
                 local ordinary_literal? = ordinary({3})
                 local ordinary_empty? = ordinary({})
@@ -2897,13 +2897,13 @@ describe("generic declarations and explicit calls", function()
     it("diagnoses incompatible optional Array elements without lifting conversions",
     function()
         local errs = h.check_errs([[
-            function first<T>(items: ({T})?): integer return 0 end
-            function ordinary(items: ({integer})?): integer return 0 end
-            function bad(strings: {string}, numbers: ({float})?)
-                first<integer>({"wrong"})
+            function first<|T|>(items: {T}?): integer return 0 end
+            function ordinary(items: {integer}?): integer return 0 end
+            function bad(strings: {string}, numbers: {float}?)
+                first<|integer|>({"wrong"})
                 ordinary({"wrong"})
-                first<integer>(strings)
-                first<integer>(numbers)
+                first<|integer|>(strings)
+                first<|integer|>(numbers)
             end
         ]])
         assert.equal(4, #errs)
@@ -2918,8 +2918,8 @@ describe("generic declarations and explicit calls", function()
 
     it("keeps complete optional evidence for a direct generic binder", function()
         local ast = assert_check([[
-            function identity<T>(item: T): T return item end
-            function use(item: ({string:integer})?)
+            function identity<|T|>(item: T): T return item end
+            function use(item: {string: integer}?)
                 local selected? = identity(item)
             end
         ]])
@@ -2931,16 +2931,16 @@ describe("generic declarations and explicit calls", function()
 
     it("keeps nested shapes and later optional argument evidence invariant", function()
         local errs = h.check_errs([[
-            record Box<T> item: T end
-            function nested<T>(item: Box<{string:T}>): integer return 0 end
-            function pair<T>(left: {string:T}, right: {string:T}): integer
+            record Box<|T|> item: T end
+            function nested<|T|>(item: Box<|{string: T}|>): integer return 0 end
+            function pair<|T|>(left: {string:T}, right: {string:T}): integer
                 return 0
             end
-            function bad_nested(item: Box<({string:integer})?>): integer
+            function bad_nested(item: Box<|{string: integer}?|>): integer
                 return nested(item)
             end
-            function bad_later(left: ({string:integer})?,
-                               right: ({string:float})?): integer
+            function bad_later(left: {string: integer}?,
+                               right: {string: float}?): integer
                 return pair(left, right)
             end
         ]])
@@ -2953,16 +2953,16 @@ describe("generic declarations and explicit calls", function()
     it("preserves invariance for independently built generic containers",
     function()
         local errs = h.check_errs([[
-            record Box<T> item: T end
+            record Box<|T|> item: T end
             function ia(): {integer} return {1} end
             function fa(): {float} return {1.0} end
             function im(): {string: integer} return {["x"] = 1} end
             function fm(): {string: float} return {["x"] = 1.0} end
-            function ib(): Box<integer> return Box<integer>.new(1) end
-            function fb(): Box<float> return Box<float>.new(1.0) end
-            function array_pair<T>(left: {T}, right: {T}) end
-            function map_pair<T>(left: {string: T}, right: {string: T}) end
-            function box_pair<T>(left: Box<T>, right: Box<T>) end
+            function ib(): Box<|integer|> return Box<|integer|>.new(1) end
+            function fb(): Box<|float|> return Box<|float|>.new(1.0) end
+            function array_pair<|T|>(left: {T}, right: {T}) end
+            function map_pair<|T|>(left: {string: T}, right: {string: T}) end
+            function box_pair<|T|>(left: Box<|T|>, right: Box<|T|>) end
             function bad()
                 array_pair(ia(), fa()); array_pair(fa(), ia())
                 map_pair(im(), fm()); map_pair(fm(), im())
@@ -2975,8 +2975,8 @@ describe("generic declarations and explicit calls", function()
             { "{ float }", "{ integer }" },
             { "{ string : integer }", "{ string : float }" },
             { "{ string : float }", "{ string : integer }" },
-            { "test.Box<integer>", "test.Box<float>" },
-            { "test.Box<float>", "test.Box<integer>" },
+            { "test.Box<|integer|>", "test.Box<|float|>" },
+            { "test.Box<|float|>", "test.Box<|integer|>" },
         }
         for index, direction in ipairs(directions) do
             assert.truthy(errs[index]:find(
@@ -2994,7 +2994,7 @@ describe("generic declarations and explicit calls", function()
             "    item: integer",
             "end",
             "function maybe(): Plain? return Plain.new(42) end",
-            "function agree<T>(left: T, right: T): T return left end",
+            "function agree<|T|>(left: T, right: T): T return left end",
             "function accept(item: Plain): Plain return item end",
         }, "\n")
         local function source(expression)
@@ -3063,27 +3063,27 @@ describe("generic declarations and explicit calls", function()
     it("drains equated constraint records in lexical registration order",
     function()
         local declarations = [[
-            interface Carrier<T>
+            interface Carrier<|T|>
                 function marker(item: T): T
             end
-            function scalar<V, W: Carrier<V>>(): (W) -> V
+            function scalar<|V, W: Carrier<|V|>|>(): function (W): V
                 return function(owner: W): V
                     return (nil as value) as V
                 end
             end
-            function array<V, W: Carrier<{V}>>(): (W) -> V
+            function array<|V, W: Carrier<|{V}|>|>(): function (W): V
                 return function(owner: W): V
                     return (nil as value) as V
                 end
             end
-            function combine<P, Q>(
-                    first: (P) -> Q, second: (P) -> Q, owner: P): Q
+            function combine<|P, Q|>(
+                    first: function (P): Q, second: function (P): Q, owner: P): Q
                 return first(owner)
             end
         ]]
         local function diagnose(arguments)
             local errs = h.check_errs(declarations .. ([=[
-                function ordered<Z: Carrier<{integer}>>(owner: Z)
+                function ordered<|Z: Carrier<|{integer}|>|>(owner: Z)
                     local got = combine(%s, owner)
                 end
             ]=]):format(arguments))
@@ -3093,9 +3093,9 @@ describe("generic declarations and explicit calls", function()
         -- Both child W cells enter one equivalence class before `owner` binds
         -- it. The first queued constraint selects their shared V cell; reversing
         -- the written children must reverse which later constraint is rejected.
-        assert.match("call to 'array'.-Carrier<{ { integer } }>",
+        assert.match("call to 'array'.-Carrier<|{ { integer } }|>",
             diagnose("scalar(), array()"))
-        assert.match("call to 'scalar'.-Carrier<integer>",
+        assert.match("call to 'scalar'.-Carrier<|integer|>",
             diagnose("array(), scalar()"))
     end)
 
@@ -3111,9 +3111,9 @@ describe("generic declarations and explicit calls", function()
             interface Marker
                 function marker(): integer
             end
-            function identity<U: Marker>(item: U): U return item end
-            function many<T: Marker>(%s): T return x1 end
-            function outer<X: Marker>(x: X): X
+            function identity<|U: Marker|>(item: U): U return item end
+            function many<|T: Marker|>(%s): T return x1 end
+            function outer<|X: Marker|>(x: X): X
                 local inferred = many(%s)
                 return inferred
             end
@@ -3183,20 +3183,20 @@ describe("generic declarations and explicit calls", function()
         end
 
         check([[
-            record Pair<T, U>
+            record Pair<|T, U|>
                 first: T
                 second: U
             end
-            function dup<U>(item: U): Pair<U, U>
-                return Pair<U, U>.new(item, item)
+            function dup<|U|>(item: U): Pair<|U, U|>
+                return Pair<|U, U|>.new(item, item)
             end
-            function take<T>(callback: (T) -> T): value return nil end
+            function take<|T|>(callback: function (T): T): value return nil end
             function bad(): value return take(dup) end
         ]])
 
         check([[
-            function optionize<U>(item: U): U? return item end
-            function take<T>(callback: (T) -> T): value return nil end
+            function optionize<|U|>(item: U): U? return item end
+            function take<|T|>(callback: function (T): T): value return nil end
             function bad(): value return take(optionize) end
         ]])
 
@@ -3204,15 +3204,15 @@ describe("generic declarations and explicit calls", function()
         -- this larger scope under a generous VM-instruction bound so a future
         -- self-expanding substitution fails instead of hanging the checker job.
         check([[
-            record Pair<T, U>
+            record Pair<|T, U|>
                 first: T
                 second: U
             end
-            function dup<A, B, C, D, E, F, G, H, I, J,
-                         K, L, M, N, O, P, Q, R, S, U>(item: U): Pair<U, U>
-                return Pair<U, U>.new(item, item)
+            function dup<|A, B, C, D, E, F, G, H, I, J,
+                         K, L, M, N, O, P, Q, R, S, U|>(item: U): Pair<|U, U|>
+                return Pair<|U, U|>.new(item, item)
             end
-            function take<T>(callback: (T) -> T): value return nil end
+            function take<|T|>(callback: function (T): T): value return nil end
             function bad(): value return take(dup) end
         ]], 20000000)
 
@@ -3228,16 +3228,16 @@ describe("generic declarations and explicit calls", function()
             local imported = {}
             local modules = {
                 provider = [[
-                    record Box<T>
+                    record Box<|T|>
                         item: T
                     end
-                    local function boxed(): Box<string>
-                        return Box<string>.new("ok")
+                    local function boxed(): Box<|string|>
+                        return Box<|string|>.new("ok")
                     end
                 ]],
                 first = [[
                     local provider = import "provider.titan"
-                    function use(): provider.Box<string>
+                    function use(): provider.Box<|string|>
                         return provider.boxed()
                     end
                 ]],

@@ -21,22 +21,22 @@ The aliases retain the underlying public static/constructor namespace. The
 public `async` facade surface below includes methods available through those
 aliases:
 
-```titan
+```text
 type CancellationReason = uv.CancellationReason
 type TaskStatus = uv.TaskStatus
 type Task = uv.Task
 type ResumeToken = uv.ResumeToken
-type SuspendCancelAction = () -> ()
+type SuspendCancelAction = function (): ()
 
-function run<A, B>(func: () -> A): Task<A, B>
-function run_foreign(f: foreign (*void) -> (), arg: *void)
+function run<|A, B|>(func: function (): (A)): Task<|A, B|>
+function run_foreign(f: foreign function (*void): void, arg: foreign *void)
 function loop()
 function yield()
-function running(): Task -- exactly Task<value, value>
+function running(): Task -- exactly Task<|value, value|>
 function suspend(token: ResumeToken,
                  cancel_action: SuspendCancelAction?)
-function channel<T>(size: integer?):
-    ((T) -> (), () -> T, () -> ())
+function channel<|T|>(size: integer?):
+    (function (T): (), function (): (T), function (): ())
 function reader_writer_channel(size: integer?):
     (ChannelReader, ChannelWriter)
 function version(): string
@@ -51,17 +51,17 @@ function ChannelReader:close()
 function ChannelWriter:write(data: string)
 function ChannelWriter:close()
 
-function Task:cancel(reason: CancellationReason<B>?)
-function Task:status(): TaskStatus<A, B>
+function Task:cancel(reason: CancellationReason<|B|>?)
+function Task:status(): TaskStatus<|A, B|>
 function Task:add_terminal_listener(
-    listener: (TaskStatus<A, B>) -> ()): () -> ()
+    listener: function (TaskStatus<|A, B|>): ()): function (): ()
 function Task:resume(token: ResumeToken)
 
 function TaskStatus:as_string(): string
 function TaskStatus:has_finished(): boolean
 function TaskStatus:has_succeeded(): (boolean, A?)
 function TaskStatus:has_failed(): (boolean, Error?)
-function TaskStatus:has_cancelled(): (boolean, CancellationReason<B>?)
+function TaskStatus:has_cancelled(): (boolean, CancellationReason<|B|>?)
 ```
 
 The aliased data owners are declared in the source-private `uv` provider, not
@@ -84,34 +84,34 @@ record OperationError
   operation: string
 end
 
-union CancellationReason<B>
-  simple: string
-  complex: B
+union CancellationReason<|B|>
+  simple(string)
+  complex(B)
 end
 
-union TaskStatus<A, B>
-  ready
-  running
-  waiting
-  succeeded: A
-  failed: Error
-  cancelled: CancellationReason<B>
+union TaskStatus<|A, B|>
+  ready()
+  running()
+  waiting()
+  succeeded(A)
+  failed(Error)
+  cancelled(CancellationReason<|B|>)
 end
 ```
 
-`Task<A, B>` uses `A` for a successful return and `B` for the payload of a
+`Task<|A, B|>` uses `A` for a successful return and `B` for the payload of a
 complex cancellation reason. A bare `Task`, `TaskStatus`, or
 `CancellationReason` is the ordinary all-`value` application. `B` is
-result-only in `run<A, B>`: result context selects it when available, and the
+result-only in `run<|A, B|>`: result context selects it when available, and the
 final carrier rule otherwise closes it to `value`. A caller may state the
-complete pair, for example `async.run<string, value>(func)`; there is no partial
+complete pair, for example `async.run<|string, value|>(func)`; there is no partial
 type-argument list. `running()` deliberately returns the bare all-value Task,
 not an inferred application.
 
-`async.run<A, B>(func)` creates and roots a Task, registers a zero-duration
+`async.run<|A, B|>(func)` creates and roots a Task, registers a zero-duration
 libuv timer, and returns without calling `func`. Its public wrapper adapts the
-exact `() -> A` callback to the Runtime's `() -> value` carrier and returns a
-shallow `Task<A, B>` view of the same userdata. The timer callback submits
+exact `function (): (A)` callback to the Runtime's `function (): (value)` carrier and returns a
+shallow `Task<|A, B|>` view of the same userdata. The timer callback submits
 `uv_close`; its close callback releases the timer owner and only then starts the
 Task on a later event-loop turn. Every one-shot timer uses this close-before-
 resume order. Calling `run` from another Task is valid and still does not run
@@ -240,11 +240,11 @@ promise one exact libuv iteration.
 
 ## Bounded channels
 
-`async.channel<T>(size)` returns sending, receiving, and closing closures over
+`async.channel<|T|>(size)` returns sending, receiving, and closing closures over
 one bounded FIFO channel:
 
 ```titan
-local send, receive, close = async.channel<string>()
+local send, receive, close = async.channel<|string|>()
 send("message")
 local message = receive()       -- string, with no written cast
 close()
@@ -302,7 +302,7 @@ the erased value closure triple; Lua has no type-argument syntax.
 `async` also owns opaque string-specialized reader/writer records over the same
 channel protocol:
 
-```titan
+```text
 record ChannelReader
 record ChannelWriter
 
@@ -318,10 +318,10 @@ function ChannelWriter:close()
 
 Every record field is local, so neither generated constructor is public.
 `reader_writer_channel` is the public factory, and neither endpoint exposes
-the raw channel closures. The factory closes `channel<string>` internally and
-stores exact `(string) -> ()` and `() -> string` callbacks. The records remain
+the raw channel closures. The factory closes `channel<|string|>` internally and
+stores exact `function (string): ()` and `function (): (string)` callbacks. The records remain
 intentionally non-generic string ReaderCloser/WriterCloser adapters; use
-`channel<T>` itself for other typed payloads. The ordinary `string.reader` and
+`channel<|T|>` itself for other typed payloads. The ordinary `string.reader` and
 `string.writer` remain synchronous in-memory values.
 
 The optional size has the same rules as `channel`: omission or nil gives
@@ -351,9 +351,9 @@ An authoritative Task cancellation can instead win the same unwind.
 
 Tasks expose terminal-state observation directly:
 
-```titan
+```text
 function Task:add_terminal_listener(
-    listener: (TaskStatus<A, B>) -> ()): () -> ()
+    listener: function (TaskStatus<|A, B|>): ()): function (): ()
 ```
 
 An unfinished Task creates one fresh registration, appends it in registration
@@ -375,71 +375,71 @@ empty live list, and marks every detached registration no longer live. It
 invokes every snapshot listener in sequence without consulting the live bit and
 ignores any error raised by a listener. Calling a remover during delivery is
 therefore a no-op and cannot shift the snapshot or skip a later callback. A
-listener observes the exact terminal `TaskStatus<A, B>` and cannot replace it.
+listener observes the exact terminal `TaskStatus<|A, B|>` and cannot replace it.
 
 The fixed-arity combinators build on listeners plus explicit suspension. Each
 operand keeps its independent success and cancellation types; the parameter
 order is the interleaved `(A1, B1, A2, B2, ...)` operand order:
 
-```titan
-function any_two<A1, B1, A2, B2>(
-    first: Task<A1, B1>, second: Task<A2, B2>): AnyTwoResult<A1, A2>
-function any_three<A1, B1, A2, B2, A3, B3>(
-    first: Task<A1, B1>, second: Task<A2, B2>,
-    third: Task<A3, B3>): AnyThreeResult<A1, A2, A3>
-function any_four<A1, B1, A2, B2, A3, B3, A4, B4>(...):
-    AnyFourResult<A1, A2, A3, A4>
-function any_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(...):
-    AnyFiveResult<A1, A2, A3, A4, A5>
+```text
+function any_two<|A1, B1, A2, B2|>(
+    first: Task<|A1, B1|>, second: Task<|A2, B2|>): AnyTwoResult<|A1, A2|>
+function any_three<|A1, B1, A2, B2, A3, B3|>(
+    first: Task<|A1, B1|>, second: Task<|A2, B2|>,
+    third: Task<|A3, B3|>): AnyThreeResult<|A1, A2, A3|>
+function any_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(...):
+    AnyFourResult<|A1, A2, A3, A4|>
+function any_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(...):
+    AnyFiveResult<|A1, A2, A3, A4, A5|>
 
-function race_two<A1, B1, A2, B2>(
-    first: Task<A1, B1>, second: Task<A2, B2>):
-    RaceTwoResult<A1, B1, A2, B2>
-function race_three<A1, B1, A2, B2, A3, B3>(...):
-    RaceThreeResult<A1, B1, A2, B2, A3, B3>
-function race_four<A1, B1, A2, B2, A3, B3, A4, B4>(...):
-    RaceFourResult<A1, B1, A2, B2, A3, B3, A4, B4>
-function race_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(...):
-    RaceFiveResult<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>
+function race_two<|A1, B1, A2, B2|>(
+    first: Task<|A1, B1|>, second: Task<|A2, B2|>):
+    RaceTwoResult<|A1, B1, A2, B2|>
+function race_three<|A1, B1, A2, B2, A3, B3|>(...):
+    RaceThreeResult<|A1, B1, A2, B2, A3, B3|>
+function race_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(...):
+    RaceFourResult<|A1, B1, A2, B2, A3, B3, A4, B4|>
+function race_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(...):
+    RaceFiveResult<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>
 
-function all_two<A1, B1, A2, B2>(
-    first: Task<A1, B1>, second: Task<A2, B2>): (A1, A2)
-function all_three<A1, B1, A2, B2, A3, B3>(...): (A1, A2, A3)
-function all_four<A1, B1, A2, B2, A3, B3, A4, B4>(...):
+function all_two<|A1, B1, A2, B2|>(
+    first: Task<|A1, B1|>, second: Task<|A2, B2|>): (A1, A2)
+function all_three<|A1, B1, A2, B2, A3, B3|>(...): (A1, A2, A3)
+function all_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(...):
     (A1, A2, A3, A4)
-function all_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(...):
+function all_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(...):
     (A1, A2, A3, A4, A5)
 
-function join<A, B>(task: Task<A, B>): TaskStatus<A, B>
-function join_two<A1, B1, A2, B2>(...):
-    (TaskStatus<A1, B1>, TaskStatus<A2, B2>)
-function join_three<A1, B1, A2, B2, A3, B3>(...):
-    (TaskStatus<A1, B1>, TaskStatus<A2, B2>, TaskStatus<A3, B3>)
-function join_four<A1, B1, A2, B2, A3, B3, A4, B4>(...):
-    (TaskStatus<A1, B1>, TaskStatus<A2, B2>,
-     TaskStatus<A3, B3>, TaskStatus<A4, B4>)
-function join_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(...):
-    (TaskStatus<A1, B1>, TaskStatus<A2, B2>, TaskStatus<A3, B3>,
-     TaskStatus<A4, B4>, TaskStatus<A5, B5>)
+function join<|A, B|>(task: Task<|A, B|>): TaskStatus<|A, B|>
+function join_two<|A1, B1, A2, B2|>(...):
+    (TaskStatus<|A1, B1|>, TaskStatus<|A2, B2|>)
+function join_three<|A1, B1, A2, B2, A3, B3|>(...):
+    (TaskStatus<|A1, B1|>, TaskStatus<|A2, B2|>, TaskStatus<|A3, B3|>)
+function join_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(...):
+    (TaskStatus<|A1, B1|>, TaskStatus<|A2, B2|>,
+     TaskStatus<|A3, B3|>, TaskStatus<|A4, B4|>)
+function join_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(...):
+    (TaskStatus<|A1, B1|>, TaskStatus<|A2, B2|>, TaskStatus<|A3, B3|>,
+     TaskStatus<|A4, B4|>, TaskStatus<|A5, B5|>)
 ```
 
 Only `join` has a single-Task form. Unary `any`, `race`, and `all` would have
 the same scheduling behavior as `join` and would differ only in how they wrap
 its one terminal status or result, so those APIs are intentionally absent.
 
-`AnyNResult<A1,...,AN>` has positional `first`, `second`, `third`,
+`AnyNResult<|A1,...,AN|>` has positional `first`, `second`, `third`,
 `fourth`, and `fifth` variants carrying the corresponding success type, as
 applicable, plus a payload-free `none` variant. It needs no cancellation type
 parameters because it never exposes a cancellation status. `any_*` returns the
 first observed success, or `none` once every input failed or was cancelled.
 
-`RaceNResult<A1,B1,...,AN,BN>` has the same positional variants, each carrying
-the corresponding `TaskStatus<Ai,Bi>`. `race_*` returns when any input succeeds,
+`RaceNResult<|A1,B1,...,AN,BN|>` has the same positional variants, each carrying
+the corresponding `TaskStatus<|Ai, Bi|>`. `race_*` returns when any input succeeds,
 fails, or is cancelled.
 
 `all_*` returns every exact `Ai` success payload as multiple results. On the
 first observed failed or cancelled input it raises
-`AllNError<A1,B1,...,AN,BN>`; these unions have positional variants carrying
+`AllNError<|A1,B1,...,AN,BN|>`; these unions have positional variants carrying
 that operand's exact terminal status. `join*` instead waits for every input and
 returns all exact final statuses without raising them.
 
@@ -468,7 +468,7 @@ so after the deadline wins its cancellation is joined before that shared state
 is released:
 
 ```titan
-local reading = async.run<string?, value>(function (): string?
+local reading = async.run<|string?, value|>(function (): string?
   return connection:read()
 end)
 local deadline = async.run(function (): nil
@@ -477,13 +477,13 @@ end)
 
 local result = async.any_two(reading, deadline)
 case result
-when first: data then
+when first(data) then
   deadline:cancel(async.CancellationReason.simple("read completed"))
   consume(data)
-when second then
+when second() then
   reading:cancel(async.CancellationReason.simple("read timed out"))
   async.join(reading)
-when none then
+when none() then
   -- Both Tasks failed or were cancelled; inspect their final statuses.
   local read_status, deadline_status = async.join_two(reading, deadline)
   report(read_status, deadline_status)
@@ -571,10 +571,10 @@ name, numeric code, and message before the traceback. Other raised values use
 Lua's ordinary string conversion. Rendering preserves the original error
 value in the failed Task even if conversion itself fails.
 
-`cancel(reason)` is sticky and preserves the first `CancellationReason<B>`
+`cancel(reason)` is sticky and preserves the first `CancellationReason<|B|>`
 directly in the Task. Nil selects
 `CancellationReason.simple("cancelled")`. The expected
-`CancellationReason<B>?` parameter supplies `B` through the ordinary option
+`CancellationReason<|B|>?` parameter supplies `B` through the ordinary option
 wrap; without such context the generic final carrier rule chooses `value`. The
 `simple` arm covers ordinary
 text reasons; `complex` retains a payload of `B` for protocols that need a

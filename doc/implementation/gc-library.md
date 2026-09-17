@@ -38,11 +38,11 @@ at initialization. Neither module duplicates Lua stack or metatable code.
 
 ## Finalizer stack ledger
 
-`finalizable<T>(v: T, f: (T) -> ())` is the matching audited boundary for
+`finalizable<|T|>(v: T, f: function (T): ())` is the matching audited boundary for
 attaching a Lua finalizer to an existing table or full userdata. The declared
 scheme ties the candidate and callback together at the source boundary. Its one
-code-facing body erases unconstrained `T` to `value` and `(T) -> ()` to
-`(value) -> ()`; there is no reified type argument or specialized finalizer
+code-facing body erases unconstrained `T` to `value` and `function (T): ()` to
+`function (value): ()`; there is no reified type argument or specialized finalizer
 body:
 
 | Operation | Stack effect and obligation |
@@ -60,7 +60,7 @@ body:
 Erasure changes neither the four-slot reservation nor any operation in this
 ledger. A concrete `Owner` or `{string: integer}` application uses the generic
 call boundary's ordinary traced callable adjustment to present its exact
-callback as the erased `(value) -> ()` formal. The same existing whole-slot
+callback as the erased `function (value): ()` formal. The same existing whole-slot
 adjustment supplies `ffi.lua_pushtvalue`; `titan.gc` has no generic-specific
 Lua API whitelist or alternate stack path. Conversely, an `integer`
 application boxes its candidate normally, reaches `lua_type`, raises there,

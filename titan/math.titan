@@ -162,14 +162,14 @@ function fmod(numerator: float, denominator: float): float
 end
 
 function frexp(number: float): (float, integer)
-  local exponent: int = 0 as int
+  local exponent: foreign int = 0 as foreign int
   local mantissa = ffi.frexp(number, exponent) as float
   return mantissa, exponent as integer
 end
 
 function ldexp(mantissa: float, exponent: integer): float
   return ffi.ldexp(
-    mantissa, exponent as int) as float
+    mantissa, exponent as foreign int) as float
 end
 
 function log(number: float, base: float?): float
@@ -209,8 +209,8 @@ function min(first: float, ...: float): float
 end
 
 function modf(number: float): (float, float)
-  local integral: double =
-    0.0 as double
+  local integral: foreign double =
+    0.0 as foreign double
   local fractional = ffi.modf(number, integral) as float
   return integral as float, fractional
 end
@@ -232,7 +232,7 @@ function tan(number: float): float
 end
 
 local function byte_at(text: string, index: integer): integer
-  local bytes = text as const *ffi.uint8_t
+  local bytes = text as foreign const *uint8_t
   return bytes[index - 1] as integer
 end
 
@@ -338,10 +338,10 @@ local function parsed_float(text: string,
   if not decimal_point or decimal_point[0] == 46 then
     return ffi.strtod(text, nil) as float
   end
-  local source = text as const *char
-  local storage = char.new_array(#text + 1)
-  local normalized = storage as *char
-  ffi.memcpy(normalized, source, #text as ffi.size_t)
+  local source = text as foreign const *char
+  local storage = foreign char.new_array(#text + 1)
+  local normalized = storage as foreign *char
+  ffi.memcpy(normalized, source, #text as foreign size_t)
   normalized[point_position - 1] = decimal_point[0]
   normalized[#text] = 0
   return ffi.strtod(normalized, nil) as float

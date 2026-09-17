@@ -5,7 +5,7 @@ turns ordinary Titan modules into a standalone test executable. Test files are
 not a distinct source kind: a test is a public top-level function discovered in
 an ordinary flat or [folder module](folder-modules.md).
 
-```lua
+```titan
 -- calc_test.titan
 local test = import "test"       -- shorthand for titan.test
 local calc = import "app.calc"
@@ -92,7 +92,7 @@ itself.
 
 ### Runner state
 
-```lua
+```text
 function testing(): boolean
 function verbose(): boolean
 ```
@@ -105,7 +105,7 @@ initialize before the generated `main` can activate the runner.
 
 ### Assertions and skips
 
-```lua
+```text
 function assert(check: boolean, message: string?)
 function skip(reason: string?)
 ```
@@ -122,14 +122,14 @@ exposing the private marker.
 
 ### Contexts, subtests, and cleanup
 
-```lua
+```text
 record Context
 end
 
 function Context:name(): string
 function Context:log(message: string)
-function Context:run(name: string, subtest: (Context) -> ())
-function Context:cleanup(f: () -> ())
+function Context:run(name: string, subtest: function (Context): ())
+function Context:cleanup(f: function (): ())
 ```
 
 The runner supplies the contexts passed to tests; `Context` has no public
@@ -165,7 +165,7 @@ still exits unsuccessfully because at least one case failed.
 
 ## Location and failure traces
 
-```lua
+```text
 function location(): (string, string, integer)
 ```
 

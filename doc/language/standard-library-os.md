@@ -20,7 +20,7 @@ The module currently supports Linux and macOS.
 
 ## Clocks and time differences
 
-```titan
+```text
 function clock(): float
 function difftime(later: integer, earlier: integer): float
 ```
@@ -33,7 +33,7 @@ and macOS targets.
 
 ## Calendar formatting and decomposition
 
-```titan
+```text
 record Date
   year: integer
   month: integer
@@ -78,7 +78,7 @@ reject an embedded NUL.
 
 ## Constructing timestamps
 
-```titan
+```text
 function time(year: integer?, month: integer?, day: integer?,
               hour: integer?, min: integer?, sec: integer?,
               isdst: boolean?): integer
@@ -105,7 +105,7 @@ or a timestamp the host cannot represent, raises an error.
 
 ## Locale
 
-```titan
+```text
 function setlocale(locale: string?, category: string?): string?
 ```
 
@@ -124,7 +124,7 @@ on one loop thread; embedding hosts must provide the same exclusion.
 
 ## Environment
 
-```titan
+```text
 function getenv(name: string): string?
 function setenv(name: string, contents: string)
 function unsetenv(name: string)
@@ -142,7 +142,7 @@ racing these helpers from another operating-system thread.
 
 ## Directories and host identity
 
-```titan
+```text
 function cwd(): string
 function chdir(path: string)
 function homedir(): string
@@ -173,7 +173,7 @@ into the same automatic retry behavior.
 
 ## Waiting for a signal
 
-```titan
+```text
 function wait_signal(name: string): string
 ```
 
@@ -191,7 +191,7 @@ disposition; embedding code should not install a competing handler for it.
 
 ## Graceful program exit
 
-```titan
+```text
 function exit(code: integer?)
 ```
 
@@ -222,7 +222,7 @@ Runtime has finished.
 
 ## Child processes
 
-```titan
+```text
 record ExitStatus
   code: integer
   signal: string?
@@ -230,7 +230,7 @@ record ExitStatus
 end
 
 record SpawnConfig
-type SpawnOption = (SpawnConfig) -> integer
+type SpawnOption = function (SpawnConfig): (integer)
 
 record Process
   stdin: OutputStream?

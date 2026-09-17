@@ -4,7 +4,7 @@ The `timer` standard module provides Task-friendly delays and recurring
 timers. Titan imports the canonical module with `import "timer"`; Lua uses
 `require "titan.timer"`.
 
-```titan
+```text
 function sleep(milliseconds: integer)
 function yield()
 

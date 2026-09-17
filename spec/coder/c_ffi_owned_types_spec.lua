@@ -3,6 +3,7 @@ local h = require "spec.support.helpers"
 local coder = require "titan-compiler.coder"
 local coder_names = require "titan-compiler.coder.names"
 local types = require "titan-compiler.types"
+local driver = require "titan-compiler.driver"
 
 local function with_header(contents, fn)
     local header = os.tmpname() .. ".h"
@@ -31,6 +32,7 @@ describe("source-written owned C type code generation", function()
             "test",
             "owned_tag_a",
             "owned_tag_b",
+            "owned_tag_middle",
         }) do
             remove_module(name)
         end
@@ -46,13 +48,13 @@ describe("source-written owned C type code generation", function()
             local csrc = h.with_extra_cflags({ '-DTITAN_COMPILER_TESTS' }, function ()
               return h.compile_and_read_c([[
                 foreign import "]] .. header .. [["
-                local type Item = owned *ffi.ffi_item
-                local item: Item = ffi.ffi_item.new()
+                local type Item = owned *ffi_item
+                local item: Item = foreign ffi_item.new()
                 function ready(): boolean
                     return true
                 end
                 function make(): value
-                    local made: Item = ffi.ffi_item.new()
+                    local made: Item = foreign ffi_item.new()
                     return made
                 end
               ]])
@@ -141,33 +143,33 @@ describe("source-written owned C type code generation", function()
             h.run_coder([[
                 foreign import "]] .. header .. [["
 
-                local type Item = owned *ffi.ffi_item
-                local type Items = owned ffi.ffi_item[]
-                local type PointerSlot = owned *ffi.ffi_item_pointer
+                local type Item = owned *ffi_item
+                local type Items = owned ffi_item[]
+                local type PointerSlot = owned *ffi_item_pointer
 
                 record Holder
-                    local item?: Item
+                    local item: Item?
                     local items: Items
                 end
 
                 function exercise(): integer
-                    local one: Item = ffi.ffi_item.new()
-                    local many: Items = ffi.ffi_item.new_array(2)
+                    local one: Item = foreign ffi_item.new()
+                    local many: Items = foreign ffi_item.new_array(2)
                     local slot: PointerSlot =
-                        ffi.ffi_item_pointer.new()
-                    local mutable: *ffi.ffi_item = one
-                    local immutable: const *ffi.ffi_item = many
-                    local erased: *ffi.ffi_void = one
+                        foreign ffi_item_pointer.new()
+                    local mutable: foreign *ffi_item = one
+                    local immutable: foreign const *ffi_item = many
+                    local erased: foreign *ffi_void = one
 
                     ffi.ffi_write(mutable, 37)
                     ffi.ffi_write(
-                        (many as *ffi.ffi_item) + 1, 41)
+                        (many as foreign *ffi_item) + 1, 41)
                     ffi.ffi_store_pointer(slot, one)
 
                     local holder = Holder.new(one, many)
                     return ffi.ffi_read(immutable)
                         + ffi.ffi_read(
-                            (holder.items as *ffi.ffi_item) + 1)
+                            (holder.items as foreign *ffi_item) + 1)
                         + ffi.ffi_read_pointer(slot)
                         + ffi.ffi_present(erased)
                         + #holder.items
@@ -189,15 +191,15 @@ describe("source-written owned C type code generation", function()
             h.run_coder([[
                 foreign import "]] .. header .. [["
 
-                local type Item = owned *ffi.ffi_item
-                local type Items = owned ffi.ffi_item[]
+                local type Item = owned *ffi_item
+                local type Items = owned ffi_item[]
 
                 function exercise(): integer
                     local absent_item: Item? = nil
-                    local present_item: Item? = ffi.ffi_item.new()
+                    local present_item: Item? = foreign ffi_item.new()
                     local absent_items: Items? = nil
                     local present_items: Items? =
-                        ffi.ffi_item.new_array(2)
+                        foreign ffi_item.new_array(2)
                     local result = 0
 
                     if not absent_item then result = result + 1 end
@@ -237,71 +239,71 @@ describe("source-written owned C type code generation", function()
             h.run_coder([[
             foreign import "]] .. header .. [["
 
-            local type Chars = owned ffi.ffi_char[]
+            local type Chars = owned ffi_char[]
             local type SignedChars =
-                owned ffi.ffi_signed_char[]
+                owned ffi_signed_char[]
             local type UnsignedChars =
-                owned ffi.ffi_unsigned_char[]
+                owned ffi_unsigned_char[]
 
             local module_bytes: Chars =
-                ffi.ffi_char.new_array(4)
+                foreign ffi_char.new_array(4)
 
             local record Box
                 local bytes: Chars
             end
 
             local function fill(bytes: Chars)
-                bytes[0] = 65 as ffi.ffi_char
-                bytes[1] = 0 as ffi.ffi_char
-                bytes[2] = 66 as ffi.ffi_char
-                bytes[3] = 0 as ffi.ffi_char
+                bytes[0] = 65 as foreign ffi_char
+                bytes[1] = 0 as foreign ffi_char
+                bytes[2] = 66 as foreign ffi_char
+                bytes[3] = 0 as foreign ffi_char
             end
 
-            local function captured(bytes: Chars): () -> string
+            local function captured(bytes: Chars): function (): string
                 return function(): string
                     return bytes as string
                 end
             end
 
             function zero(): string
-                return ffi.ffi_char.new_array(0) as string
+                return foreign ffi_char.new_array(0) as string
             end
 
             function one(): string
                 local bytes: Chars =
-                    ffi.ffi_char.new_array(1)
-                bytes[0] = 90 as ffi.ffi_char
+                    foreign ffi_char.new_array(1)
+                bytes[0] = 90 as foreign ffi_char
                 return bytes as string
             end
 
             function plain(): string
                 local bytes: Chars =
-                    ffi.ffi_char.new_array(4)
+                    foreign ffi_char.new_array(4)
                 fill(bytes)
                 return bytes as string
             end
 
             function signed_bytes(): string
                 local bytes: SignedChars =
-                    ffi.ffi_signed_char.new_array(2)
-                bytes[0] = (255 as ffi.ffi_int)
-                    as ffi.ffi_signed_char
-                bytes[1] = 0 as ffi.ffi_signed_char
+                    foreign ffi_signed_char.new_array(2)
+                bytes[0] = (255 as foreign ffi_int)
+                    as foreign ffi_signed_char
+                bytes[1] = 0 as foreign ffi_signed_char
                 return bytes as string
             end
 
             function unsigned_bytes(): string
                 local bytes: UnsignedChars =
-                    ffi.ffi_unsigned_char.new_array(3)
-                bytes[0] = 0 as ffi.ffi_unsigned_char
-                bytes[1] = 254 as ffi.ffi_unsigned_char
-                bytes[2] = 0 as ffi.ffi_unsigned_char
+                    foreign ffi_unsigned_char.new_array(3)
+                bytes[0] = 0 as foreign ffi_unsigned_char
+                bytes[1] = 254 as foreign ffi_unsigned_char
+                bytes[2] = 0 as foreign ffi_unsigned_char
                 return bytes as string
             end
 
             function through_field_option_and_closure(): string
                 local bytes: Chars =
-                    ffi.ffi_char.new_array(4)
+                    foreign ffi_char.new_array(4)
                 fill(bytes)
                 local box = Box.new(bytes)
                 local optional: Chars? = box.bytes
@@ -310,15 +312,15 @@ describe("source-written owned C type code generation", function()
 
             function pointer_string(): string
                 local bytes: Chars =
-                    ffi.ffi_char.new_array(4)
+                    foreign ffi_char.new_array(4)
                 fill(bytes)
-                return (bytes as *ffi.ffi_char) as string
+                return (bytes as foreign *ffi_char) as string
             end
 
             local predicate_calls = 0
             local function make_for_predicate(): Chars
                 predicate_calls = predicate_calls + 1
-                return ffi.ffi_char.new_array(1)
+                return foreign ffi_char.new_array(1)
             end
 
             function predicate_once(): boolean
@@ -355,7 +357,7 @@ describe("source-written owned C type code generation", function()
                 foreign import "]] .. header .. [["
 
                 function temporary(size: integer): string
-                    return ffi.ffi_char.new_array(size) as string
+                    return foreign ffi_char.new_array(size) as string
                 end
             ]])
 
@@ -377,7 +379,7 @@ describe("source-written owned C type code generation", function()
             foreign import "lua.h"
 
             local function temporary(size: integer): string
-                return char.new_array(size) as string
+                return foreign char.new_array(size) as string
             end
 
             function stress(generational: boolean): integer
@@ -434,7 +436,7 @@ describe("source-written owned C type code generation", function()
 
                 function exercise(): integer
                     return ffi.ffi_present_record(
-                        make_owner() as ffi.ffi_void_pointer,
+                        make_owner() as foreign ffi_void_pointer,
                         later_argument()) as integer
                 end
             ]])
@@ -499,7 +501,7 @@ describe("source-written owned C type code generation", function()
                 function exercise(): integer
                     made = 0
                     local result = ffi.ffi_remember_record(
-                        make_owner() as ffi.ffi_void_pointer,
+                        make_owner() as foreign ffi_void_pointer,
                         collect_and_reuse())
                     local raw: value =
                         ffi.ffi_saved_record_udata()
@@ -556,18 +558,18 @@ describe("source-written owned C type code generation", function()
                     end
                     local score = 0
                     if ffi.ffi_same_identity(
-                        values as ffi.ffi_void_pointer,
-                        values as ffi.ffi_void_pointer) ~= 0 then
+                        values as foreign ffi_void_pointer,
+                        values as foreign ffi_void_pointer) ~= 0 then
                         score = score + 1
                     end
                     if ffi.ffi_same_identity(
-                        by_name as ffi.ffi_void_pointer,
-                        by_name as ffi.ffi_void_pointer) ~= 0 then
+                        by_name as foreign ffi_void_pointer,
+                        by_name as foreign ffi_void_pointer) ~= 0 then
                         score = score + 2
                     end
                     if ffi.ffi_same_identity(
-                        callback as ffi.ffi_void_pointer,
-                        callback as ffi.ffi_void_pointer) ~= 0 then
+                        callback as foreign ffi_void_pointer,
+                        callback as foreign ffi_void_pointer) ~= 0 then
                         score = score + 4
                     end
                     return score + values[1]
@@ -576,8 +578,8 @@ describe("source-written owned C type code generation", function()
 
                 function roundtrip_c_function_pointer(): integer
                     local pointer =
-                        ffi.ffi_get_callback() as ffi.ffi_void_pointer
-                    local callback = pointer as ffi.ffi_callback_pointer
+                        ffi.ffi_get_callback() as foreign ffi_void_pointer
+                    local callback = pointer as foreign ffi_callback_pointer
                     return callback(41) as integer
                 end
             ]])
@@ -645,7 +647,7 @@ describe("source-written owned C type code generation", function()
                     return { ["answer"] = 19 }
                 end
 
-                local function make_function(): () -> integer
+                local function make_function(): function (): (integer)
                     function_calls = function_calls + 1
                     local answer = 23
                     return function(): integer
@@ -672,18 +674,18 @@ describe("source-written owned C type code generation", function()
                     local callback = make_function()
                     local score = 0
                     if ffi.ffi_same_identity(
-                        values as ffi.ffi_void_pointer,
-                        values as ffi.ffi_void_pointer) ~= 0 then
+                        values as foreign ffi_void_pointer,
+                        values as foreign ffi_void_pointer) ~= 0 then
                         score = score + 1
                     end
                     if ffi.ffi_same_identity(
-                        by_name as ffi.ffi_void_pointer,
-                        by_name as ffi.ffi_void_pointer) ~= 0 then
+                        by_name as foreign ffi_void_pointer,
+                        by_name as foreign ffi_void_pointer) ~= 0 then
                         score = score + 2
                     end
                     if ffi.ffi_same_identity(
-                        callback as ffi.ffi_void_pointer,
-                        callback as ffi.ffi_void_pointer) ~= 0 then
+                        callback as foreign ffi_void_pointer,
+                        callback as foreign ffi_void_pointer) ~= 0 then
                         score = score + 4
                     end
                     return score + values[1]
@@ -696,13 +698,13 @@ describe("source-written owned C type code generation", function()
                     function_calls = 0
                     local score =
                         ffi.ffi_present_after(
-                            make_array() as ffi.ffi_void_pointer,
+                            make_array() as foreign ffi_void_pointer,
                             collect_and_allocate())
                         + ffi.ffi_present_after(
-                            make_map() as ffi.ffi_void_pointer,
+                            make_map() as foreign ffi_void_pointer,
                             collect_and_allocate())
                         + ffi.ffi_present_after(
-                            make_function() as ffi.ffi_void_pointer,
+                            make_function() as foreign ffi_void_pointer,
                             collect_and_allocate())
                     return score
                         + array_calls * 100
@@ -713,33 +715,33 @@ describe("source-written owned C type code generation", function()
                 function predicates(): boolean
                     function_calls = 0
                     local real =
-                        make_function() is ffi.ffi_void_pointer
+                        make_function() is foreign ffi_void_pointer
                     local raw: value = 42
-                    local malformed: () -> () = raw
+                    local malformed: function (): () = raw
                     local fake =
-                        malformed is ffi.ffi_void_pointer
+                        malformed is foreign ffi_void_pointer
                     return real and not fake and function_calls == 1
                 end
 
                 function malformed_function_cast(): integer
                     local raw: value = 42
-                    local malformed: () -> () = raw
+                    local malformed: function (): () = raw
                     local pointer =
-                        malformed as ffi.ffi_void_pointer
+                        malformed as foreign ffi_void_pointer
                     return ffi.ffi_present_after(pointer, 1)
                 end
 
                 function c_function_pointer(): integer
                     local callback = ffi.ffi_get_callback()
                     local pointer =
-                        callback as ffi.ffi_void_pointer
+                        callback as foreign ffi_void_pointer
                     return ffi.ffi_present_after(pointer, 1)
                 end
 
                 function roundtrip_c_function_pointer(): integer
                     local pointer =
-                        ffi.ffi_get_callback() as ffi.ffi_void_pointer
-                    local callback = pointer as ffi.ffi_callback_pointer
+                        ffi.ffi_get_callback() as foreign ffi_void_pointer
+                    local callback = pointer as foreign ffi_callback_pointer
                     return callback(41) as integer
                 end
             ]])
@@ -778,11 +780,11 @@ describe("source-written owned C type code generation", function()
             h.run_coder([[
                 foreign import "]] .. header .. [["
                 local type ConstChars =
-                    owned ffi.ffi_const_char[]
+                    owned ffi_const_char[]
 
                 function qualified_bytes(): string
                     local bytes: ConstChars =
-                        ffi.ffi_const_char.new_array(3)
+                        foreign ffi_const_char.new_array(3)
                     return bytes as string
                 end
             ]], [[
@@ -810,10 +812,10 @@ describe("source-written owned C type code generation", function()
             h.run_coder([[
                 foreign import "]] .. header .. [["
 
-                local type Item = owned *ffi.ffi_item
+                local type Item = owned *ffi_item
                 local type Items = {Item}
                 local type ByName = {string: Item}
-                local type Transform = (Item) -> Item
+                local type Transform = function (Item): (Item)
 
                 local function sum(...: Item): integer
                     local total = 0
@@ -837,8 +839,8 @@ describe("source-written owned C type code generation", function()
                 end
 
                 function exercise(): integer
-                    local first: Item = ffi.ffi_item.new()
-                    local second: Item = ffi.ffi_item.new()
+                    local first: Item = foreign ffi_item.new()
+                    local second: Item = foreign ffi_item.new()
                     ffi.ffi_write(first, 11)
                     ffi.ffi_write(second, 13)
 
@@ -868,6 +870,167 @@ describe("source-written owned C type code generation", function()
         end)
     end)
 
+    it("inherits C scopes through direct and transitive source imports", function()
+        with_header([[
+            struct inherited_item { int number; };
+            typedef struct inherited_item *InheritedPointer;
+            typedef struct inherited_item InheritedArray[];
+        ]], function(header)
+            for _, transitive in ipairs({ false, true }) do
+                local upstream = transitive and "owned_tag_middle" or "owned_tag_a"
+                local modules = {
+                    owned_tag_a = string.format([[
+                        foreign import %q
+                        foreign type Item = inherited_item
+                        function make_alias(): value
+                            local item: owned *Item = foreign Item.new()
+                            item.number = 11
+                            return item
+                        end
+                        function make_raw(): value
+                            local item: owned InheritedPointer = foreign inherited_item.new()
+                            item.number = 13
+                            return item
+                        end
+                        function make_array(): value
+                            local items: owned InheritedArray = foreign inherited_item.new_array(2)
+                            items[0].number = 17
+                            items[1].number = 19
+                            return items
+                        end
+                        local function read(item: owned *Item): integer
+                            return item.number as integer
+                        end
+                        function reader(): value return read end
+                    ]], header),
+                    owned_tag_b = string.format([[
+                        local a = import %q
+                        local record Holder item: owned *Item end
+                        local function accept(item: owned *Item): integer
+                            return item.number as integer
+                        end
+                        function acceptor(): value return accept end
+                        function holder(): value return Holder.new(a.make_alias()) end
+                        function array(): value
+                            local items: {owned *Item} = {}
+                            return items
+                        end
+                        function exercise(): integer
+                            local item: owned *Item = a.make_alias()
+                            local raw: owned InheritedPointer = a.make_raw()
+                            local items: owned InheritedArray = a.make_array()
+                            local read: function(owned *Item): integer = a.reader()
+                            return item.number + raw.number + items[0].number
+                                + items[1].number + read(item)
+                        end
+                    ]], upstream .. ".titan"),
+                }
+                if transitive then
+                    modules.owned_tag_middle = [[
+                        local a = import "owned_tag_a.titan"
+                        function make_alias(): value return a.make_alias() end
+                        function make_raw(): value return a.make_raw() end
+                        function make_array(): value return a.make_array() end
+                        function reader(): value return a.reader() end
+                    ]]
+                end
+                local ok, err = h.generate_modules(modules, "owned_tag_b")
+                assert.truthy(ok, err)
+                local called, message = h.call("owned_tag_b", [[
+                    local a = require "owned_tag_a"
+                    assert(owned_tag_b.exercise() == 71)
+                    assert(owned_tag_b.acceptor()(a.make_alias()) == 11)
+                    local holder = owned_tag_b.holder()
+                    holder.item = a.make_alias()
+                    local items = owned_tag_b.array()
+                    items[1] = a.make_alias()
+                    assert(#items == 1)
+                ]])
+                assert.truthy(called, message)
+            end
+        end)
+    end)
+
+    local function shared_header_owners(forced)
+        with_header([[
+            #ifndef TITAN_SHARED_OWNER_HEADER
+            #define TITAN_SHARED_OWNER_HEADER
+            struct shared_payload { int number; };
+            typedef struct shared_payload *NativePointer;
+            typedef struct shared_payload NativeArray[];
+            #endif
+        ]], function(header)
+            local previous = driver.EXTRA_CPPFLAGS
+            if forced then
+                driver.EXTRA_CPPFLAGS = { table.unpack(previous or {}) }
+                driver.EXTRA_CPPFLAGS[#driver.EXTRA_CPPFLAGS + 1] = "-include"
+                driver.EXTRA_CPPFLAGS[#driver.EXTRA_CPPFLAGS + 1] = header
+                assert(driver.configure_foreign_c())
+            end
+            local ok, failure = xpcall(function()
+                local imports = forced and "" or string.format("foreign import %q\n", header)
+                local function producer(value)
+                    return imports .. string.format([[
+                        foreign type Pointer = NativePointer
+                        foreign type Array = NativeArray
+                        function make(): value
+                            local item: owned Pointer = foreign shared_payload.new()
+                            item.number = %d
+                            return item
+                        end
+                        function make_array(): value
+                            local items: owned Array = foreign shared_payload.new_array(1)
+                            items[0].number = %d
+                            return items
+                        end
+                        local function read(item: owned Pointer): integer
+                            return item.number as integer
+                        end
+                        function reader(): value return read end
+                    ]], value, value)
+                end
+                for _, reversed in ipairs({ false, true }) do
+                    local first = reversed and "owned_tag_b" or "owned_tag_a"
+                    local second = reversed and "owned_tag_a" or "owned_tag_b"
+                    local modules = {
+                        owned_tag_a = producer(41),
+                        owned_tag_b = producer(43),
+                        owned_tag_middle = string.format([[
+                            local first = import %q
+                            local second = import %q
+                            function exercise(): integer
+                                local a: owned Pointer = first.make()
+                                local b: owned Pointer = second.make()
+                                local aa: owned Array = first.make_array()
+                                local bb: owned Array = second.make_array()
+                                local ar: function(owned Pointer): integer = first.reader()
+                                local br: function(owned Pointer): integer = second.reader()
+                                return ar(a) + br(b) + aa[0].number + bb[0].number
+                            end
+                        ]], first .. ".titan", second .. ".titan"),
+                    }
+                    local generated, err = h.generate_modules(modules, "owned_tag_middle")
+                    assert.truthy(generated, err)
+                    local called, message = h.call("owned_tag_middle", [[
+                        assert(owned_tag_middle.exercise() == 168)
+                    ]])
+                    assert.truthy(called, message)
+                end
+            end, debug.traceback)
+            driver.EXTRA_CPPFLAGS = previous
+            assert(driver.configure_foreign_c())
+            assert.truthy(ok, failure)
+        end)
+    end
+
+    it("shares declaration scopes for independent users of one physical header", function()
+        shared_header_owners(false)
+    end)
+
+    it("shares forced-header scopes through two providers and both import orders", function()
+        shared_header_owners(true)
+    end)
+
     it("scopes C-bearing callable tags to their defining module", function()
         with_header([[
             typedef struct ffi_same {
@@ -886,7 +1049,7 @@ describe("source-written owned C type code generation", function()
                     owned_tag_a = [[
                         foreign import "]] ..
                             first_header .. [["
-                        local type Owner = owned *ffi.ffi_same
+                        local type Owner = owned *ffi_same
 
                         local function read(owner: Owner): integer
                             return owner.left as integer
@@ -900,12 +1063,12 @@ describe("source-written owned C type code generation", function()
                         foreign import "]] ..
                             second_header .. [["
                         local a = import "owned_tag_a"
-                        local type Owner = owned *ffi.ffi_same
+                        local type Owner = owned *ffi_same
 
                         function call_wrong(): integer
                             local raw: value = a.expose()
-                            local read: (Owner) -> integer = raw
-                            return read(ffi.ffi_same.new())
+                            local read: function (Owner): integer = raw
+                            return read(foreign ffi_same.new())
                         end
                     ]],
                 }, "owned_tag_b", nil, { interface = "compiled" })

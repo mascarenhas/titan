@@ -145,7 +145,7 @@ local function parent_stdout(): string
 end
 
 local function denied_diagnostic(): string
-  local task = async.run<nil, value>(function (): nil
+  local task = async.run<|nil, value|>(function (): nil
     system.stdout:is_tty()
     return nil
   end)

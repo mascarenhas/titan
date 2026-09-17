@@ -45,7 +45,7 @@ describe("checker semantic metadata", function()
             interface Show
                 function show(): string
             end
-            function identity<T: Show>(item: T): T
+            function identity<|T: Show|>(item: T): T
                 return item
             end
         ]])
@@ -68,32 +68,32 @@ describe("checker semantic metadata", function()
 
     it("binds source declarations and selected member occurrences", function()
         local ast = assert_check([[
-            record Box<T>
+            record Box<|T|>
                 item: T
             end
             union Maybe
-                Some: Box<integer>
-                None
+                Some(Box<|integer|>)
+                None()
             end
             interface View
                 item: integer
                 function read(): integer
             end
-            local type Alias = Box<integer>
+            local type Alias = Box<|integer|>
             function Box:get(): T return self.item end
-            function Box:replace<U>(item: U): T return self.item end
-            function Box.make<U>(item: U): Box<U>
-                return Box<U>.new(item)
+            function Box:replace<|U|>(item: U): T return self.item end
+            function Box.make<|U|>(item: U): Box<|U|>
+                return Box<|U|>.new(item)
             end
-            function inspect<T>(box: Box<T>, alias: Alias,
+            function inspect<|T|>(box: Box<|T|>, alias: Alias,
                                 maybe: Maybe): T
                 local field = box.item
                 local bound = box:get
                 local got = box:get()
                 local replaced = box:replace{item = 1}
-                local made: Box<T> = { item = field }
+                local made: Box<|T|> = { item = field }
                 case maybe
-                when Some: some then
+                when Some(some) then
                 else
                 end
                 return field
@@ -240,7 +240,7 @@ describe("checker semantic metadata", function()
     it("retains source visibility on qualified type aliases", function()
         local ok, err, imported = h.run_checker_modules({
             provider = [[
-                record Box<T>
+                record Box<|T|>
                     item: T
                 end
                 local type Hidden = integer
@@ -253,9 +253,9 @@ describe("checker semantic metadata", function()
                 local type ForwardHiddenBox = provider.HiddenBox
                 type ForwardPublicBox = provider.PublicBox
                 function use(number: provider.Hidden): provider.Public
-                    local hidden: provider.HiddenBox<string> =
-                        provider.HiddenBox<string>.new("hidden")
-                    local public: provider.PublicBox<string> = hidden
+                    local hidden: provider.HiddenBox<|string|> =
+                        provider.HiddenBox<|string|>.new("hidden")
+                    local public: provider.PublicBox<|string|> = hidden
                     if public.item == "" then return 0 end
                     return number
                 end

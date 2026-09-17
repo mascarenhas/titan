@@ -1,5 +1,5 @@
 local test = import "test"
-local strings = import "string"
+local string = import "string"
 local support = import "string.test_support.titan"
 
 local record RegexCase
@@ -14,18 +14,18 @@ end
 
 local function whole(subject: string, expression: string,
                      initial: integer?): string?
-  local found? = strings.match(subject, expression, initial)
+  local found? = string.match(subject, expression, initial)
   if not found then return nil end
   return found:whole()
 end
 
 local function diagnostic(expression: string, label: string): string
   local message = support.expect_error(function()
-    strings.compile_regex(expression)
+    string.compile_regex(expression)
   end, "[" .. label .. "]")
   test.assert(support.contains(message, "(byte "), message)
   test.assert(support.contains(message, "\n"), message)
-  test.assert(strings.sub(message, -1, nil) == "^", message)
+  test.assert(string.sub(message, -1, nil) == "^", message)
   return message
 end
 
@@ -34,7 +34,7 @@ local function check_empty_progress(subject: string,
                                     expected_output: string,
                                     expected_count: integer)
   local actual: {string} = {}
-  local iterator = strings.gmatch(subject, "a*", nil)
+  local iterator = string.gmatch(subject, "a*", nil)
   while true do
     local found? = iterator()
     if not found then break end
@@ -47,7 +47,7 @@ local function check_empty_progress(subject: string,
   end
 
   local replacements: {string} = {}
-  local output, count = strings.gsub(
+  local output, count = string.gsub(
     subject, "a*", function(found: string): string
       replacements[#replacements + 1] = found
       return "X"
@@ -60,7 +60,7 @@ local function check_empty_progress(subject: string,
 end
 
 function test_capture_iteration_and_split(context: test.Context)
-  local words = strings.matches("one two", "\\w+")
+  local words = string.matches("one two", "\\w+")
   local word? = words()
   test.assert(word == "one")
   word = words()
@@ -68,7 +68,7 @@ function test_capture_iteration_and_split(context: test.Context)
   word = words()
   test.assert(word == nil)
 
-  local assignments = strings.matches(
+  local assignments = string.matches(
     "from=world,to=Lua", "(\\w+)=(\\w+)")
   local key?, captured_value? = assignments()
   test.assert(key == "from" and captured_value == "world")
@@ -77,20 +77,20 @@ function test_capture_iteration_and_split(context: test.Context)
   key, captured_value = assignments()
   test.assert(key == nil and captured_value == nil)
 
-  local optional = strings.matches("b a", "(a)|(b)")
+  local optional = string.matches("b a", "(a)|(b)")
   local first?, second? = optional()
   test.assert(first == nil and second == "b")
   first, second = optional()
   test.assert(first == "a" and second == nil)
 
-  local bytes = strings.split("a\0b", nil)
+  local bytes = string.split("a\0b", nil)
   test.assert(bytes() == "a")
   test.assert(bytes() == "\0")
   test.assert(bytes() == "b")
   test.assert(bytes() == nil)
-  test.assert(strings.split("", nil)() == nil)
+  test.assert(string.split("", nil)() == nil)
 
-  local fields = strings.split(",a,,b,", ",")
+  local fields = string.split(",a,,b,", ",")
   test.assert(fields() == "")
   test.assert(fields() == "a")
   test.assert(fields() == "")
@@ -98,14 +98,14 @@ function test_capture_iteration_and_split(context: test.Context)
   test.assert(fields() == "")
   test.assert(fields() == nil)
 
-  local zero = strings.split("ab", "")
+  local zero = string.split("ab", "")
   test.assert(zero() == "")
   test.assert(zero() == "a")
   test.assert(zero() == "b")
   test.assert(zero() == "")
   test.assert(zero() == nil)
 
-  local captured = strings.split("a1b22c", "(\\d+)")
+  local captured = string.split("a1b22c", "(\\d+)")
   test.assert(captured() == "a")
   test.assert(captured() == "b")
   test.assert(captured() == "c")
@@ -113,7 +113,7 @@ function test_capture_iteration_and_split(context: test.Context)
 end
 
 function test_unmatched_and_empty_capture_spans(context: test.Context)
-  local found? = strings.match("", "(a)?()", nil)
+  local found? = string.match("", "(a)?()", nil)
   test.assert(found ~= nil)
   test.assert(found:group_span(1) == nil)
   local empty = found:group_span(2)
@@ -217,22 +217,22 @@ function test_pinned_ta_regex_corpus(context: test.Context)
   test.assert(#cases == 89)
   for index = 1, #cases do
     local current = cases[index]
-    local found? = strings.compile_regex(current.expression):match(
+    local found? = string.compile_regex(current.expression):match(
       current.subject, nil)
     if current.expected == nil then
       test.assert(found == nil,
-                  "regex corpus case " .. strings.tostring(index) ..
+                  "regex corpus case " .. string.tostring(index) ..
                   " unexpectedly matched")
     else
       test.assert(found ~= nil and found:whole() == current.expected,
-                  "regex corpus case " .. strings.tostring(index) ..
+                  "regex corpus case " .. string.tostring(index) ..
                   " differed")
     end
   end
 end
 
 function test_compiled_spans_captures_and_positions(context: test.Context)
-  local regex = strings.compile_regex("(a|(b))+(c)?")
+  local regex = string.compile_regex("(a|(b))+(c)?")
   test.assert(regex:source() == "(a|(b))+(c)?")
   test.assert(regex:group_count() == 3)
   local found? = regex:match("xxabb", 1)
@@ -253,22 +253,22 @@ function test_compiled_spans_captures_and_positions(context: test.Context)
   support.expect_error(function() found:group_span(4) end,
                        "capture group index out of range")
 
-  local source_match? = strings.match("a", "(a)?(b)?", nil)
+  local source_match? = string.match("a", "(a)?(b)?", nil)
   test.assert(source_match ~= nil and source_match:whole() == "a")
   local first?, second? = source_match:values()
   test.assert(first == "a" and second == nil)
-  source_match = strings.match("xxab", "ab", nil)
+  source_match = string.match("xxab", "ab", nil)
   test.assert(source_match ~= nil and source_match:whole() == "ab")
   first = source_match:values()
   test.assert(first == "ab")
 
-  test.assert(strings.match("ba", "^a", 2):whole() == "a")
-  test.assert(strings.match("ba", "^a", 1) == nil)
-  test.assert(strings.match("ba", "^b", 0):whole() == "b")
-  test.assert(strings.match("ba", "^b", -99):whole() == "b")
-  test.assert(strings.match("ba", "^a", -1):whole() == "a")
-  test.assert(strings.match("ba", "a", 4) == nil)
-  test.assert(strings.match("", "^$", 1):whole() == "")
+  test.assert(string.match("ba", "^a", 2):whole() == "a")
+  test.assert(string.match("ba", "^a", 1) == nil)
+  test.assert(string.match("ba", "^b", 0):whole() == "b")
+  test.assert(string.match("ba", "^b", -99):whole() == "b")
+  test.assert(string.match("ba", "^a", -1):whole() == "a")
+  test.assert(string.match("ba", "a", 4) == nil)
+  test.assert(string.match("", "^$", 1):whole() == "")
 end
 
 function test_regex_corrected_defects(context: test.Context)
@@ -276,18 +276,18 @@ function test_regex_corrected_defects(context: test.Context)
   test.assert(whole("aaab", "a+ab", nil) == "aaab")
   test.assert(whole("aab", "(a)\\1b", nil) == "aab")
   test.assert(whole("aa", "((a))\\1", nil) == "aa")
-  test.assert(strings.match("b", "(a)|(b)\\1", nil) == nil)
+  test.assert(string.match("b", "(a)|(b)\\1", nil) == nil)
 
-  local nested? = strings.compile_regex("(ab*)+"):match("xxabbbab!", nil)
+  local nested? = string.compile_regex("(ab*)+"):match("xxabbbab!", nil)
   test.assert(nested ~= nil and nested:whole() == "abbbab")
   test.assert(nested:group(1) == "ab")
-  nested = strings.compile_regex("((a)b)"):match("ab", nil)
+  nested = string.compile_regex("((a)b)"):match("ab", nil)
   test.assert(nested ~= nil and nested:group(1) == "ab")
   test.assert(nested:group(2) == "a")
-  nested = strings.compile_regex("(a+b+)*"):match("aaabbabx", nil)
+  nested = string.compile_regex("(a+b+)*"):match("aaabbabx", nil)
   test.assert(nested ~= nil and nested:whole() == "aaabbab")
   test.assert(nested:group(1) == "ab")
-  nested = strings.compile_regex(
+  nested = string.compile_regex(
     "((?:ab*)+)-\\1"):match("xabbbab-abbbab!", nil)
   test.assert(nested ~= nil and nested:whole() == "abbbab-abbbab")
   test.assert(nested:group(1) == "abbbab")
@@ -296,19 +296,19 @@ function test_regex_corrected_defects(context: test.Context)
     "(a){0}", "(a){2}", "(a){2,}", "(a){2,4}",
   }
   for index = 1, #expressions do
-    test.assert(strings.compile_regex(expressions[index]):group_count() == 1)
+    test.assert(string.compile_regex(expressions[index]):group_count() == 1)
   end
-  test.assert(strings.compile_regex("(a)?\\1"):match("", nil) == nil)
-  test.assert(strings.compile_regex("(a?)\\1"):match("", nil):whole() == "")
+  test.assert(string.compile_regex("(a)?\\1"):match("", nil) == nil)
+  test.assert(string.compile_regex("(a?)\\1"):match("", nil):whole() == "")
   diagnostic("\\1|(a)", "invalid_backreference")
-  test.assert(strings.compile_regex("(a)|\\1"):group_count() == 1)
-  test.assert(strings.compile_regex("(a)|\\1"):match("a", nil):whole() == "a")
+  test.assert(string.compile_regex("(a)|\\1"):group_count() == 1)
+  test.assert(string.compile_regex("(a)|\\1"):match("a", nil):whole() == "a")
 
   test.assert(whole("\0\xff", "[\0\xff]+", nil) == "\0\xff")
   test.assert(whole("\r", ".", nil) == "\r")
-  test.assert(strings.match("\n", ".", nil) == nil)
+  test.assert(string.match("\n", ".", nil) == nil)
   test.assert(whole("\v", "\\s", nil) == "\v")
-  test.assert(strings.match("\f", "\\s", nil) == nil)
+  test.assert(string.match("\f", "\\s", nil) == nil)
   test.assert(whole("\f", "\\S", nil) == "\f")
   test.assert(whole(" foo", "\\<foo", nil) == "foo")
   test.assert(whole("foo!", "foo\\>", nil) == "foo")
@@ -372,7 +372,7 @@ function test_regex_diagnostics(context: test.Context)
   malformed = diagnostic("a**", "bad_quantifier")
   test.assert(support.contains(
     malformed, ": malformed counted quantifier\n"), malformed)
-  test.assert(strings.compile_regex("a{0002}"):match("aa", nil):whole() ==
+  test.assert(string.compile_regex("a{0002}"):match("aa", nil):whole() ==
               "aa")
   diagnostic("a{999999999999999999999999999999999999}",
              "bad_quantifier")
@@ -391,7 +391,7 @@ function test_regex_diagnostics(context: test.Context)
   diagnostic("()*+", "nullable_repetition")
   diagnostic("(a?)*+", "nullable_repetition")
   diagnostic("\\<*{", "nullable_repetition")
-  test.assert(strings.compile_regex("(|a){2}"):match("", nil):whole() == "")
+  test.assert(string.compile_regex("(|a){2}"):match("", nil):whole() == "")
   local anchored = diagnostic("a$b", "misplaced_anchor")
   test.assert(support.contains(anchored, "(byte 3)"), anchored)
   diagnostic("a^b", "misplaced_anchor")
@@ -408,40 +408,40 @@ function test_regex_diagnostics(context: test.Context)
   test.assert(support.contains(
     after_newline, "at L2:C2 (byte 9)"), after_newline)
 
-  local groups200 = strings.rep("()", 200)
-  local regex = strings.compile_regex(groups200)
+  local groups200 = string.rep("()", 200)
+  local regex = string.compile_regex(groups200)
   test.assert(regex:group_count() == 200)
   local found? = regex:match("", nil)
   test.assert(found ~= nil)
   local values: {string?} = {found:values()}
   test.assert(#values == 200)
-  diagnostic(strings.rep("()", 201), "too_many_captures")
-  diagnostic(strings.rep("(?:", 312) .. strings.rep("(", 201),
+  diagnostic(string.rep("()", 201), "too_many_captures")
+  diagnostic(string.rep("(?:", 312) .. string.rep("(", 201),
              "group_nesting_too_deep")
 end
 
 function test_regex_group_depth_and_size_limits(context: test.Context)
   local noncapturing =
-    strings.rep("(?:", 512) .. "a" .. strings.rep(")", 512)
-  local regex = strings.compile_regex(noncapturing)
+    string.rep("(?:", 512) .. "a" .. string.rep(")", 512)
+  local regex = string.compile_regex(noncapturing)
   test.assert(regex:group_count() == 0)
   local found? = regex:match("a", nil)
   test.assert(found ~= nil and found:whole() == "a")
 
-  local siblings = strings.compile_regex(strings.rep("(?:a)", 513))
+  local siblings = string.compile_regex(string.rep("(?:a)", 513))
   test.assert(siblings:group_count() == 0)
-  test.assert(siblings:match(strings.rep("a", 513), nil):whole() ==
-              strings.rep("a", 513))
+  test.assert(siblings:match(string.rep("a", 513), nil):whole() ==
+              string.rep("a", 513))
 
-  local flat = strings.rep("a", 1000)
-  test.assert(strings.compile_regex(flat):match(flat, nil):whole() == flat)
-  local wide_class = "[" .. strings.rep("a", 1000) .. "]"
-  test.assert(strings.compile_regex(wide_class):match("a", nil):whole() ==
+  local flat = string.rep("a", 1000)
+  test.assert(string.compile_regex(flat):match(flat, nil):whole() == flat)
+  local wide_class = "[" .. string.rep("a", 1000) .. "]"
+  test.assert(string.compile_regex(wide_class):match("a", nil):whole() ==
               "a")
 
   local capturing =
-    strings.rep("(", 200) .. "a" .. strings.rep(")", 200)
-  regex = strings.compile_regex(capturing)
+    string.rep("(", 200) .. "a" .. string.rep(")", 200)
+  regex = string.compile_regex(capturing)
   test.assert(regex:group_count() == 200)
   found = regex:match("a", nil)
   test.assert(found ~= nil and found:whole() == "a")
@@ -452,24 +452,24 @@ function test_regex_group_depth_and_size_limits(context: test.Context)
   end
 
   local too_deep =
-    strings.rep("(?:", 513) .. "a" .. strings.rep(")", 513)
+    string.rep("(?:", 513) .. "a" .. string.rep(")", 513)
   local message = support.expect_error(function()
-    strings.compile_regex(too_deep)
+    string.compile_regex(too_deep)
   end, "[group_nesting_too_deep]")
   test.assert(support.contains(message,
     "at L1:C1537 (byte 1537): regular expression has more than " ..
     "512 nested groups"), message)
 
   local too_many =
-    strings.rep("(", 201) .. "a" .. strings.rep(")", 201)
+    string.rep("(", 201) .. "a" .. string.rep(")", 201)
   message = support.expect_error(function()
-    strings.compile_regex(too_many)
+    string.compile_regex(too_many)
   end, "[too_many_captures]")
   test.assert(support.contains(message, "(byte 201)"), message)
 end
 
 function test_typed_iteration_and_empty_match_progress(context: test.Context)
-  local iterator = strings.gmatch("b a", "(a)|(b)", nil)
+  local iterator = string.gmatch("b a", "(a)|(b)", nil)
   local first? = iterator()
   test.assert(first ~= nil and first:whole() == "b")
   test.assert(first:group(1) == nil and first:group(2) == "b")
@@ -486,7 +486,7 @@ end
 
 function test_gsub_callback_and_maximum(context: test.Context)
   local calls: {string} = {}
-  local output, count = strings.gsub(
+  local output, count = string.gsub(
     "b ab", "(a)?b", function(found: string): string
       calls[#calls + 1] = found
       return "[" .. found .. "]"
@@ -494,47 +494,47 @@ function test_gsub_callback_and_maximum(context: test.Context)
   test.assert(output == "[b] [ab]" and count == 2)
   test.assert(#calls == 2 and calls[1] == "b" and calls[2] == "ab")
 
-  output, count = strings.gsub(
+  output, count = string.gsub(
     "aaaa", "a", function(_: string): string return "X" end, 2)
   test.assert(output == "XXaa" and count == 2)
   local zero_calls = 0
-  output, count = strings.gsub(
+  output, count = string.gsub(
     "aaaa", "a", function(found: string): string
       zero_calls = zero_calls + 1
       return found
     end, 0)
   test.assert(output == "aaaa" and count == 0 and zero_calls == 0)
 
-  output, count = strings.gsub(
+  output, count = string.gsub(
     "a-b", "[ab]", function(found: string): string
       if found == "a" then return found end
       return ""
     end, nil)
   test.assert(output == "a-" and count == 2)
-  test.assert(strings.gsub(
+  test.assert(string.gsub(
     "a", "a", function(_: string): string return "%1" end, nil) ==
     "%1")
 
-  local regex = strings.compile_regex("a+")
+  local regex = string.compile_regex("a+")
   output, count = regex:gsub(
     "xaaayaa", function(found: string): string
       return "<" .. found .. ">"
     end, 1)
   test.assert(output == "x<aaa>yaa" and count == 1)
 
-  output, count = strings.gsub("baaacaa", "(a+)", bracket, nil)
+  output, count = string.gsub("baaacaa", "(a+)", bracket, nil)
   test.assert(output == "b[aaa]c[aa]" and count == 2)
-  output, count = strings.compile_regex("(a+)"):gsub(
+  output, count = string.compile_regex("(a+)"):gsub(
     "baaacaa", bracket, nil)
   test.assert(output == "b[aaa]c[aa]" and count == 2)
 
   support.expect_error(function()
-    strings.gsub(
+    string.gsub(
       "a", "a", function(_: string): string
         raise "replacement exploded"
       end, nil)
   end, "replacement exploded")
-  test.assert(strings.gsub(
+  test.assert(string.gsub(
     "a", "a", function(found: string): string
       return "[" .. found .. "]"
     end, nil) == "[a]")
@@ -543,8 +543,8 @@ end
 function test_regex_gc_rooting(context: test.Context)
   local previous_mode = support.set_gc_mode("generational")
   defer support.set_gc_mode(previous_mode)
-  local iterator: () -> strings.RegexMatch? =
-    strings.compile_regex("((a|b)+)-\\1"):gmatch(
+  local iterator: function (): (string.RegexMatch?) =
+    string.compile_regex("((a|b)+)-\\1"):gmatch(
       "ab-ab xx b-b aa-aa", nil)
   for _ = 1, 12 do support.collect_gc() end
   local values: {string} = {}
@@ -559,7 +559,7 @@ function test_regex_gc_rooting(context: test.Context)
               values[2] == "b-b" and values[3] == "aa-aa")
 
   local callback_calls = 0
-  local output, count = strings.gsub(
+  local output, count = string.gsub(
     "ab-ab b-b", "((a|b)+)-\\1",
     function(found: string): string
       callback_calls = callback_calls + 1
@@ -572,7 +572,7 @@ function test_regex_gc_rooting(context: test.Context)
 
   support.set_gc_mode("incremental")
   for _ = 1, 12 do support.collect_gc() end
-  local found? = strings.match("zz-aa-aa", "((a)+)-\\1", nil)
+  local found? = string.match("zz-aa-aa", "((a)+)-\\1", nil)
   test.assert(found ~= nil and found:whole() == "aa-aa")
   test.assert(found:group(1) == "aa")
 end
@@ -582,9 +582,9 @@ function test_weak_cache_and_binary_matches_across_gc(context: test.Context)
   defer support.set_gc_mode(previous_mode)
   for _ = 1, 12 do
     local subject = "\0\xffA\0\xff"
-    local found? = strings.match(subject, "[\0\xff]+", nil)
+    local found? = string.match(subject, "[\0\xff]+", nil)
     test.assert(found ~= nil and found:whole() == "\0\xff")
-    local output, count = strings.gsub(
+    local output, count = string.gsub(
       subject, "[\0\xff]+", function(found_text: string): string
         test.assert(found_text == "\0\xff")
         return "\xff\0"

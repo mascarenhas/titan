@@ -112,8 +112,8 @@ it (see [the checklist below](#the-cost-of-adding-a-node-or-type)).
 
 Every AST node's first constructor field is `loc`, a plain table
 `{filename, line, col}` (1-based) from `location.lua`. The grammar rule
-`P <- {} => get_loc` captures the byte position at the start of every
-node-producing production and converts it with `location.from_pos`,
+`P` captures the byte position at the start of every node-producing production
+and converts it with an ordinary location capture and `location.from_pos`,
 which is why `loc` is always the first argument of every constructor
 call in the parser (see [lexer and parser](lexer-parser.md)). Line
 lookup is lazy: the first query for a source string builds a sorted
@@ -136,14 +136,16 @@ omitted from the field lists for brevity.
 | --- | --- | --- |
 | `TypeNil`, `TypeBoolean`, `TypeInteger`, `TypeFloat`, `TypeString`, `TypeValue` | — | the primitive type keywords |
 | `TypeParam` | `name`, `constraint` | declaration binder syntax; `constraint` is a named Interface type or `false` |
-| `TypeName` | `name`, `typeargs` | a bare or applied name in type position; contextual C primitives are canonicalized into this existing node, including multiword names such as `unsigned long` and `foreign float` |
-| `TypeQualName` | `module`, `name`, `typeargs` | `mod.Name` or `mod.Name<...>` |
-| `TypeCPointer` | `subtype`, `const` | `*c.T` or `const *c.T`; `const` records the written pointee qualifier |
-| `TypeCArray` | `base`, `length` | fixed C array annotation `c.T[N]`; `length` is an integer expression node |
-| `TypeCOwned` | `subtype`, `count` | `owned *c.T` when `count == false`, or `owned c.T[]` when true |
-| `TypeArray` | `subtype`, `isconst` | `{T}` or `const { T }`; `isconst` is an exact parser boolean |
+| `TypeName` | `name`, `typeargs` | a bare or applied Titan type name |
+| `TypeForeignName` | `name` | an unqualified foreign name or contextual C primitive, including multiword names such as `unsigned long` |
+| `TypeQualName` | `module`, `name`, `typeargs` | `mod.Name` or `mod.Name<\|...\|>` in the Titan type namespace |
+| `TypeCPointer` | `subtype`, `const` | `*T` or `const *T` inside foreign syntax; nested pointer constructors require grouping |
+| `TypeCArray` | `base`, `length` | `T[]` inside foreign syntax; parsed `length` is `false`, and `.const` records the array element qualifier; fixed extents are inferred semantic types rather than written annotations |
+| `TypeOwned` | `subtype` | Titan `owned foreigntype`; the checker resolves the complete operand to a foreign pointer or array and selects scalar/counting ownership |
+| `TypeArray` | `subtype`, `isconst` | `{T}`, `const { T }`, or `const? { T }`; `isconst` is `false`, `true`, or `"maybe"` |
 | `TypeMap` | `keystype`, `valuestype` | `{K: V}` |
 | `TypeFunction` | `argtypes`, `rettypes`, `varargtype`, `flexrettype` | dense fixed lists plus independent optional input/output tail element types (`false` when absent) |
+| `TypeForeignFunction` | `argtypes`, `rettypes`, `varargtype`, `flexrettype` | raw foreign signature syntax, resolved to a C function pointer; unsupported source variadics are rejected semantically |
 | `TypeOption` | `basetype` | the `?` suffix, `T?` |
 
 ### Top-level nodes
@@ -155,6 +157,8 @@ omitted from the field lists for brevity.
 | `TopLevelStatic` | `class`, `name`, `params`, `rettypes`, `flexrettype`, `block`, `typeparams` | `function Class.name(...)`, synthesized record `Class.new`, and synthesized union variant constructors; parser decorates `islocal` and marks synthesized forms |
 | `TopLevelVar` | `islocal`, `isconst`, `decl`, `value` | module variable; `value == false` preserves an omitted initializer until checking |
 | `TopLevelTypeAlias` | `islocal`, `name`, `type` | compile-time-only `[local] type Name = T` |
+| `TopLevelForeignTypeAlias` | `name`, `type` | always-local raw C alias; emits a typedef in the module's generated FFI header |
+| `TopLevelForeignFunc` | `name`, `params`, `rettypes`, `flexrettype`, `block` | source foreign function with raw C parameters/results and a restricted body |
 | `TopLevelInterface` | `name`, `members`, `fields`, `methods`, `typeparams` | top-level, non-local, nonempty Interface declaration; `members` preserves mixed source order and the other lists are ordered projections |
 | `TopLevelRecord` | `name`, `fields`, `typeparams` | `fields` is a list of `Decl`; parser decorates `islocal` |
 | `TopLevelUnion` | `name`, `variants`, `typeparams` | `variants` is a source-order list of `UnionVariant`; parser decorates `islocal` |
@@ -171,7 +175,7 @@ local. It sets `new._record_constructor = true`, which lets the checker
 distinguish this adjacent desugaring from an explicit `function Class.new`
 while collecting every record namespace before ordinary record members:
 
-```lua
+```titan
 record Point
     x: float
     y: float
@@ -219,11 +223,13 @@ That is, `x?: T` is eagerly desugared into an option *annotation*,
 while a bare `x?` defers to the checker, which infers the initializer's
 type and optionizes it (`local y? = arr[1]` gives `y : integer?` where
 `local y = arr[1]` gives `y : integer`). Parameters require an annotation and
-admit no `?` mark on the name. Record fields also require an annotation, but
-accept `field?: T`, eagerly lowering it to `TypeOption(T)`; a bare `field?`
-without an annotation is not accepted. A record field `Decl` may carry
-`islocal = true`, set by the parser for `local field: T` or
-`local field?: T`.
+admit no `?` mark on the name. Record fields and module variables require
+`field: T?` rather than `field?: T`; their name-suffix sugar is absent from
+the grammar. A record field `Decl` may carry `islocal = true`, set by the
+parser for `local field: T`. A module variable needs an annotation or an
+initializer, and only an explicitly nil-bearing annotation permits omission
+of its initializer. The checker supplies the nil expression for mutable and
+const module variables alike.
 
 ### Statements
 
@@ -236,9 +242,9 @@ without an annotation is not accepted. A record field `Decl` may carry
 | `StatCase` | `exp`, `arms`, `elseblock` | `arms` is a list of `CaseArm {name, binding, block}`; `binding` and `elseblock` are `false` when absent |
 | `StatFor` | `decl`, `start`, `finish`, `inc`, `block` | `inc` is `false` when the step is omitted; the checker fills in a literal `1`/`1.0` |
 | `StatForIn` | `decls`, `exps`, `block` | generic `for decllist in explist`; the checker pads/elaborates `exps` as the iterator tuple |
-| `StatAssign` | `vars`, `exps` | multiple assignment lists |
+| `StatAssign` | `vars`, `exps` | parser candidates have expression nodes in `vars` and `_parsed_candidates = true`; checking validates and extracts their `Var*` nodes |
 | `StatDecl` | `decls`, `exps` | mutable `local` may have an empty `exps` list for checked nil synthesis; const declarations always have a nonempty initializer list |
-| `StatCall` | `callexp` | a call in statement position |
+| `StatCall` | `callexp` | a parsed prefix-expression statement candidate; checking requires an actual call |
 | `StatReturn` | `exps` | zero or more; `return` can only be the last statement of a block |
 
 ### Variables (lvalues)
@@ -256,12 +262,13 @@ to use it as an expression.
 | `ExpInitList` | `fields` | `{...}` constructors: arrays, maps, records |
 | `ExpCall` | `exp`, `args`, `typeargs` | parser output may carry any of the four `Args*` forms below; successful named calls are normalized before codegen |
 | `ExpVar` | `var` | |
+| `ExpForeignType` | `type` | foreign type operand of `.new`, `.new_array`, `.sizeof`, or `.alignof`; never an ordinary first-class value |
 | `ExpUnop` | `op`, `exp` | `op` ∈ `"not"`, `"#"`, `"-"`, `"~"` |
 | `ExpBinop` | `lhs`, `op`, `rhs` | `op` is the literal operator string (`"+"`, `"=="`, `"and"`, ...) |
 | `ExpConcat` | `exps` | `..` is flattened to one n-ary node at parse time; all-literal operands are constant-folded into an `ExpString` |
 | `ExpCast` | `exp`, `target` | written `as` casts **and** every checker-materialized implicit coercion |
 | `ExpIs` | `exp`, `target` | written `is` type test; the checker resolves `target` and gives the expression type `boolean` |
-| `ExpAdjust` | `exp` | parser-built parenthesized call or exact `(...)`; checker truncates a call or rewrites input dots to optional index 1 |
+| `ExpAdjust` | `exp` | parenthesized call, varargs, spread, or subset; checking requests one result, including nil padding for an empty run |
 | `ExpExtra` | `exp`, `index`, `_type` | synthesized by the checker only: the index-th (> 1) value of a multi-return call |
 | `ExpSubset` | `exp`, `first`, `last` | parser-built comma-bearing bracket suffix; either bound may be `false`, and checking accepts it only as spread range syntax |
 | `ExpSpread` | `exp`, `first`, `last` | unique parser/checker carrier for one collection or ranged-vararg spread; owns subject/bound evaluation |
@@ -269,21 +276,27 @@ to use it as an expression.
 | `ExpFunction` | `params`, `rettypes`, `flexrettype`, `block` | anonymous function; the raw AST keeps an omitted result annotation as `rettypes = false`, distinct from explicit `: ()`; a matching expected Function may supply missing fixed/bare-variadic inputs and the complete result shape |
 | `ExpUnionInit` | `owner`, `variant`, `value` | parser-synthesized variant-constructor result; `value` is `false` for an empty variant |
 
-For `Owner<T>.member(...)`, the parser temporarily decorates the namespace
+For `Owner<|T|>.member(...)`, the parser temporarily decorates the namespace
 `ExpVar` with `_nominal_typeargs` and `_nominal_typeargs_loc`. The checker
 resolves that owner application before selecting the member, and erased-core
 lowering removes both fields before coder entry. `ExpCall.typeargs` remains the
-callable-local list after a function or method name.
+callable-local list after a function or method name. The broader suffix grammar
+also represents explicit arguments on a first-class expression candidate;
+checking retains the existing direct-call-only restriction rather than silently
+ignoring those arguments.
 
 Three elaborated expression forms merit special attention:
 
-* **`ExpAdjust`** is created by `defs.adjust_exp` when a call is parenthesized
-  or by the exact input-vararg form `(...)`. `(f())` adjusts the call to exactly
+* **`ExpAdjust`** is created by `defs.adjust_exp` when a call, vararg marker,
+  spread, or subset is parenthesized. `(f())` adjusts the call to exactly
   one value, mirroring Lua; the checker propagates its scalar type but not its
   multiple-result `_types`. For `(...)`, the checker replaces the child with a
   nil-filling `ExpDotsIndex(1)` whose type is the optional vararg element.
-  Parentheses around other expressions vanish from the AST (`((1))` is just
-  `ExpInteger 1`).
+  A parenthesized spread owns `_adjusted_spread` and one `ExpSpreadIndex`
+  projection, so its subject and bounds execute once. Flow analysis visits that
+  carrier for reads and writes, including catch-visible local mutations.
+  Other parenthesized nodes retain `_parenthesized` for semantic lvalue
+  rejection; they do not need an adjustment node.
 * **`ExpExtra`** is created by the checker wherever a trailing call is
   consumed under a finite demand with more than one visible slot:
   `StatDecl`/`StatAssign` right-hand sides, `StatReturn` lists, call
@@ -366,6 +379,10 @@ cross-pass fields (short-lived state used wholly inside one pass is omitted).
 | `_open_spread` | `ExpSpread` | checker | checker generic lowering, coder | raw-element open-run descriptor: source/target types and first projection not consumed by the finite prefix |
 | `_nilfill` | `ExpSpreadIndex` | checker | coder | finite spread projection is absence-aware; its declared `spread` field retains the shared-carrier origin through target adjustment |
 | `_coder_spread` | `ExpSpread` | coder | coder | prepared subject/range/count/result-run state shared by every generated projection and open sink |
+| `_adjusted_spread` | `ExpAdjust` | checker | flow analysis, coder | the evaluated-once carrier for the scalar projection of a parenthesized spread |
+| `_parsed_candidates` | `StatAssign` | parser, cleared by checker | checker | `vars` still contains prefix expressions awaiting lvalue validation |
+| `_current_module_member` | normalized `VarName` | checker | checker | an `M.member` selection resolved against the module root rather than lexical shadows |
+| `_ffi_scope` | C type descriptors | C declaration conversion | runtime identity rendering, source declaration persistence | retains declaration origin through typedef and pointer/array/function wrappers independently of the importing Titan module; anonymous aggregates retain distinct sites, and ordinary source display remains unqualified |
 | `_allocation_result_root` | coder-synthesized `ExpCast` used by an open adjustment | coder adjustment dispatcher | coder cast lowering | optional sink-selected indexed slot into which the allocating cast publishes its final GC object exactly once |
 | `_discard_results`, `_voidok` | expressions/calls | checker | checker, coder | evaluate under zero-result demand; calls may legally expose no result |
 | `_npassed_args`, `_open_args` | `ExpCall` | checker | coder | statically passed argument count and a final dynamic run feeding an input-vararg tail |
@@ -384,7 +401,6 @@ cross-pass fields (short-lived state used wholly inside one pass is omitted).
 | `_interface_test`, `_interface_downcast` | `ExpIs`/`ExpCast` | checker | coder | respectively a statically proven concrete-to-Interface test and an exact Interface-wrapper-to-concrete payload check |
 | `_interface`, `_interface_method`, `_interface_method_index`, `_interface_bound` | Interface method call/reference | checker | coder | resolved Interface descriptor, method descriptor, declaration-order payload slot, and bound-reference marker |
 | `_interface_field`, `_interface_field_index` | Interface field read | checker | coder | resolved target field descriptor and declaration-order snapshot user-value index |
-| `_contextual_c_name` | `VarDot`, `TypeQualName` | parser, when the selector came from `CNAME` | checker | admits the raw keyword spelling only when the qualifier resolves to a C module/owner; coder emits the stored `name` unchanged |
 | `_toplevel_order` | every AST root node | checker duplicate prepass | checker, symbol table | 1-based position in the unchanged flat/combined AST; drives duplicate winners and the module-variable import/variable visibility frontier |
 | `_ignore` | top-level nodes | checker declaration stages: duplicate declarations, a duplicate record's synthesized constructor, and record functions/methods whose declaration fails (missing record, name clash, redeclaration) | body checker, `makemoduletype`, coder (`generate`, `allocate_upvalues`) | "pretend this node does not exist"; every later traversal must skip it |
 | `_alias_state` | `TopLevelTypeAlias` | checker alias resolver | checker | `resolving`/`resolved` state used for lazy forward resolution and cycle detection; `_type` is the resolved RHS type itself |

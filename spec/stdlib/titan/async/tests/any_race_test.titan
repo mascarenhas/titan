@@ -1,79 +1,79 @@
 local function any_two_tag(result: async.AnyTwoResult): string
   case result
-  when first: payload then return "1:" .. (payload as string)
-  when second: payload then return "2:" .. (payload as string)
-  when none then return "none"
+  when first(payload) then return "1:" .. (payload as string)
+  when second(payload) then return "2:" .. (payload as string)
+  when none() then return "none"
   else raise "invalid AnyTwoResult"
   end
 end
 
 local function any_three_tag(result: async.AnyThreeResult): string
   case result
-  when first: payload then return "1:" .. (payload as string)
-  when second: payload then return "2:" .. (payload as string)
-  when third: payload then return "3:" .. (payload as string)
-  when none then return "none"
+  when first(payload) then return "1:" .. (payload as string)
+  when second(payload) then return "2:" .. (payload as string)
+  when third(payload) then return "3:" .. (payload as string)
+  when none() then return "none"
   else raise "invalid AnyThreeResult"
   end
 end
 
 local function any_four_tag(result: async.AnyFourResult): string
   case result
-  when first: payload then return "1:" .. (payload as string)
-  when second: payload then return "2:" .. (payload as string)
-  when third: payload then return "3:" .. (payload as string)
-  when fourth: payload then return "4:" .. (payload as string)
-  when none then return "none"
+  when first(payload) then return "1:" .. (payload as string)
+  when second(payload) then return "2:" .. (payload as string)
+  when third(payload) then return "3:" .. (payload as string)
+  when fourth(payload) then return "4:" .. (payload as string)
+  when none() then return "none"
   else raise "invalid AnyFourResult"
   end
 end
 
 local function any_five_tag(result: async.AnyFiveResult): string
   case result
-  when first: payload then return "1:" .. (payload as string)
-  when second: payload then return "2:" .. (payload as string)
-  when third: payload then return "3:" .. (payload as string)
-  when fourth: payload then return "4:" .. (payload as string)
-  when fifth: payload then return "5:" .. (payload as string)
-  when none then return "none"
+  when first(payload) then return "1:" .. (payload as string)
+  when second(payload) then return "2:" .. (payload as string)
+  when third(payload) then return "3:" .. (payload as string)
+  when fourth(payload) then return "4:" .. (payload as string)
+  when fifth(payload) then return "5:" .. (payload as string)
+  when none() then return "none"
   else raise "invalid AnyFiveResult"
   end
 end
 
 local function race_two_tag(result: async.RaceTwoResult): string
   case result
-  when first: status then return "1:" .. status:as_string()
-  when second: status then return "2:" .. status:as_string()
+  when first(status) then return "1:" .. status:as_string()
+  when second(status) then return "2:" .. status:as_string()
   else raise "invalid RaceTwoResult"
   end
 end
 
 local function race_three_tag(result: async.RaceThreeResult): string
   case result
-  when first: status then return "1:" .. status:as_string()
-  when second: status then return "2:" .. status:as_string()
-  when third: status then return "3:" .. status:as_string()
+  when first(status) then return "1:" .. status:as_string()
+  when second(status) then return "2:" .. status:as_string()
+  when third(status) then return "3:" .. status:as_string()
   else raise "invalid RaceThreeResult"
   end
 end
 
 local function race_four_tag(result: async.RaceFourResult): string
   case result
-  when first: status then return "1:" .. status:as_string()
-  when second: status then return "2:" .. status:as_string()
-  when third: status then return "3:" .. status:as_string()
-  when fourth: status then return "4:" .. status:as_string()
+  when first(status) then return "1:" .. status:as_string()
+  when second(status) then return "2:" .. status:as_string()
+  when third(status) then return "3:" .. status:as_string()
+  when fourth(status) then return "4:" .. status:as_string()
   else raise "invalid RaceFourResult"
   end
 end
 
 local function race_five_tag(result: async.RaceFiveResult): string
   case result
-  when first: status then return "1:" .. status:as_string()
-  when second: status then return "2:" .. status:as_string()
-  when third: status then return "3:" .. status:as_string()
-  when fourth: status then return "4:" .. status:as_string()
-  when fifth: status then return "5:" .. status:as_string()
+  when first(status) then return "1:" .. status:as_string()
+  when second(status) then return "2:" .. status:as_string()
+  when third(status) then return "3:" .. status:as_string()
+  when fourth(status) then return "4:" .. status:as_string()
+  when fifth(status) then return "5:" .. status:as_string()
   else raise "invalid RaceFiveResult"
   end
 end
@@ -158,13 +158,13 @@ function test_any_combinators_all_arities_and_positions(context: test.Context)
           "any_five none variant")
 
     case async.any_two(nil_succeeded, first_cancelled)
-    when first: payload then
+    when first(payload) then
       test.assert(payload == nil, "any lost a nil success payload")
     else
       raise "nil success did not select any_two first"
     end
     case async.any_two(logged_failure, first_cancelled)
-    when none then
+    when none() then
     else
       raise "failed/cancelled any did not return none"
     end
@@ -326,23 +326,23 @@ end
 
 function test_generic_any_and_race_operand_positions(context: test.Context)
   runtime_test.run(function ()
-    local number = async.run<integer, string>(function (): integer
+    local number = async.run<|integer, string|>(function (): integer
       return 41
     end)
     task_support.cleanup_task(number, "generic any/race number cleanup")
-    local text = async.run<string, integer>(function (): string
+    local text = async.run<|string, integer|>(function (): string
       return "typed"
     end)
     task_support.cleanup_task(text, "generic any/race text cleanup")
-    local flag = async.run<boolean, {string: integer}>(function (): boolean
+    local flag = async.run<|boolean, {string: integer}|>(function (): boolean
       return true
     end)
     task_support.cleanup_task(flag, "generic any/race flag cleanup")
-    local nothing = async.run<nil, boolean>(function ()
+    local nothing = async.run<|nil, boolean|>(function ()
       return
     end)
     task_support.cleanup_task(nothing, "generic any/race nil cleanup")
-    local decimal = async.run<float, string>(function (): float
+    local decimal = async.run<|float, string|>(function (): float
       return 2.5
     end)
     task_support.cleanup_task(decimal, "generic any/race float cleanup")
@@ -350,49 +350,49 @@ function test_generic_any_and_race_operand_positions(context: test.Context)
     async.join_five(number, text, flag, nothing, decimal)
 
     case async.any_two(number, text)
-    when first: payload then
+    when first(payload) then
       test.assert(payload + 1 == 42, "generic any_two lost first result type")
     else raise "generic any_two selected the wrong operand"
     end
     case async.any_three(text, number, flag)
-    when first: payload then
+    when first(payload) then
       test.assert(payload == "typed", "generic any_three lost first result type")
     else raise "generic any_three selected the wrong operand"
     end
     case async.any_four(flag, number, text, nothing)
-    when first: payload then
+    when first(payload) then
       test.assert(payload, "generic any_four lost first result type")
     else raise "generic any_four selected the wrong operand"
     end
     case async.any_five(decimal, number, text, flag, nothing)
-    when first: payload then
+    when first(payload) then
       test.assert(payload == 2.5, "generic any_five lost first result type")
     else raise "generic any_five selected the wrong operand"
     end
 
     case async.race_two(text, number)
-    when first: status then
+    when first(status) then
       local succeeded, payload? = status:has_succeeded()
       test.assert(succeeded and (payload as string) == "typed",
             "generic race_two lost first status type")
     else raise "generic race_two selected the wrong operand"
     end
     case async.race_three(flag, text, number)
-    when first: status then
+    when first(status) then
       local succeeded, payload? = status:has_succeeded()
       test.assert(succeeded and (payload as boolean),
             "generic race_three lost first status type")
     else raise "generic race_three selected the wrong operand"
     end
     case async.race_four(nothing, flag, text, number)
-    when first: status then
+    when first(status) then
       local succeeded, payload? = status:has_succeeded()
       test.assert(succeeded and payload == nil,
             "generic race_four lost first status type")
     else raise "generic race_four selected the wrong operand"
     end
     case async.race_five(decimal, nothing, flag, text, number)
-    when first: status then
+    when first(status) then
       local succeeded, payload? = status:has_succeeded()
       test.assert(succeeded and (payload as float) == 2.5,
             "generic race_five lost first status type")

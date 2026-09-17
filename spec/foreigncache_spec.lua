@@ -135,6 +135,57 @@ describe("module foreign conversion payloads", function()
             types.resolve_c_typedef(aliases.same_anonymous))
     end)
 
+    it("retains inherited named scopes in raw and converted cache payloads", function()
+        header("scope_leaf.h", [[
+            struct inherited_raw { int member; };
+            typedef struct inherited_raw *InheritedPointer;
+            typedef struct inherited_raw InheritedArray[];
+            struct lua_State;
+        ]])
+        header("scope_parent.h", '#include "scope_leaf.h"\n')
+        local provider = [[
+            foreign import "scope_parent.h"
+            foreign type Item = inherited_raw
+        ]]
+        local consumer = [[
+            local source = import "provider.titan"
+            local type ItemOwner = owned *Item
+            local type PointerOwner = owned InheritedPointer
+            local type ArrayOwner = owned InheritedArray
+        ]]
+        local expected_scopes
+        local function assert_scopes(entry)
+            local members = entry.ast._ffi_namespace._type.type_members
+            for _, name in ipairs({ "Item", "inherited_raw", "InheritedPointer", "InheritedArray" }) do
+                assert.matches("^c%-header%-%x+%.", members[name]._ffi_scope)
+                if expected_scopes then assert.equal(expected_scopes[name], members[name]._ffi_scope, name) end
+            end
+            assert.is_nil(types.resolve_c_typedef(members.lua_State)._ffi_scope)
+            assert.equal(members.Item._ffi_scope, entry.ast[2]._type.pointee._ffi_scope)
+            for index = 3, 4 do
+                assert.equal(members.inherited_raw._ffi_scope, entry.ast[index]._type.pointee._ffi_scope)
+            end
+            if not expected_scopes then
+                expected_scopes = {}
+                for _, name in ipairs({ "Item", "inherited_raw", "InheritedPointer", "InheritedArray" }) do
+                    expected_scopes[name] = members[name]._ffi_scope
+                end
+            end
+        end
+        local first = check(consumer, adapter, provider)
+        assert_scopes(first)
+        local restored, warm = check(consumer .. "\n-- warm conversion", adapter, provider)
+        assert_scopes(restored)
+        assert.is_true(warm.conversion.hits > 0)
+        for key in pairs(payloads) do
+            if key:find("ffi-conversion-v6\0", 1, true) == 1 then payloads[key] = nil end
+        end
+        local raw_restored, raw_warm = check(consumer .. "\n-- raw header replay", adapter, provider)
+        assert_scopes(raw_restored)
+        assert.is_true(raw_warm.headers.hits > 0)
+        assert.is_true(raw_warm.conversion.misses > 0)
+    end)
+
     it("keeps negative field lookups out of shared header definitions", function()
         header("fields.h", [[
             typedef struct { int member; struct { int member; } nested; } item;
@@ -143,7 +194,7 @@ describe("module foreign conversion payloads", function()
         local filename = directory .. "/cached.titan"
         local source = [[
             foreign import "fields.h"
-            local function read(input: *ffi.item): integer
+            local function read(input: foreign *item): integer
                 return input.member + input.PROJECT
             end
         ]]
@@ -173,7 +224,7 @@ describe("module foreign conversion payloads", function()
         -- Reading the physical member during the first body check must not
         -- have inserted a false macro memo into that shared header graph.
         for key in pairs(payloads) do
-            if key:find("ffi-conversion-v3\0", 1, true) == 1 then
+            if key:find("ffi-conversion-v6\0", 1, true) == 1 then
                 payloads[key] = nil
             end
         end
@@ -203,7 +254,7 @@ describe("module foreign conversion payloads", function()
         ]])
         local source = [[
             foreign import "extracted.h"
-            foreign function projected(input: *ffi.item): ffi.word return input.PROJECT end
+            foreign function projected(input: *item): word return input.PROJECT end
             function answer(): integer
                 local result = ffi.named { count = 1, label = "value" }
                 return ffi.HIGH + ffi.SMALL
@@ -246,7 +297,7 @@ describe("module foreign conversion payloads", function()
         ]])
         local source = [[
             foreign import "fields.h"
-            foreign function observed(item: *ffi.item): ffi.word return item.removed + item.function_like end
+            foreign function observed(item: *item): word return item.removed + item.function_like end
         ]]
         check(source)
         local count = conversions
@@ -270,7 +321,7 @@ describe("module foreign conversion payloads", function()
         local external = {}
         for name, value in pairs(refs) do external[value] = name end
         for key, payload in pairs(payloads) do
-            if key:find("ffi-conversion-v3\0", 1, true) == 1 then
+            if key:find("ffi-conversion-v6\0", 1, true) == 1 then
                 local snapshot = assert(cpp.decode_graph(payload, { references = refs }))
                 snapshot.converted_enums = {}
                 payloads[key] = assert(cpp.encode_graph(snapshot, { external = external }))
@@ -297,7 +348,7 @@ describe("module foreign conversion payloads", function()
         local source = [[
             foreign import "first.h"
             foreign import "second.h"
-            foreign function identity(input: ffi.count): ffi.count return input end
+            foreign function identity(input: count): count return input end
             function answer(): integer local text = ffi.TEXT return 42 end
         ]]
         check(source)
@@ -307,7 +358,7 @@ describe("module foreign conversion payloads", function()
         assert.equal(1, stats.conversion.hits)
         local first = restored.ast._ffi_namespace._type
         for key, payload in pairs(payloads) do
-            if key:sub(1, #"ffi-conversion-v3\0") == "ffi-conversion-v3\0" then
+            if key:sub(1, #"ffi-conversion-v6\0") == "ffi-conversion-v6\0" then
                 local snapshot = assert(cpp.decode_graph(payload, { references = graph_references(restored) }))
                 assert.equal('"a + b"', snapshot.field_macros.TEXT.replacement)
                 assert.is_nil(snapshot.roots)
@@ -327,7 +378,7 @@ describe("module foreign conversion payloads", function()
         check(source)
         local count = conversions
         for key in pairs(payloads) do
-            if key:sub(1, #"ffi-conversion-v3\0") == "ffi-conversion-v3\0" then payloads[key] = "corrupt" end
+            if key:sub(1, #"ffi-conversion-v6\0") == "ffi-conversion-v6\0" then payloads[key] = "corrupt" end
         end
         local _, corrupt = check(source)
         assert.is_true(conversions > count)
@@ -347,7 +398,7 @@ describe("module foreign conversion payloads", function()
         check(source)
         local count, get = conversions, adapter.get
         adapter.get = function(kind, key)
-            if kind == "ffi-conversion-v3" then
+            if kind == "ffi-conversion-v6" then
                 local malformed = {}
                 setmetatable(malformed, { __index = malformed })
                 return get(kind, key), { malformed }
@@ -366,7 +417,7 @@ describe("module foreign conversion payloads", function()
         check(source)
         local get, cancellation = adapter.get, {}
         adapter.get = function(kind, key)
-            if kind == "ffi-conversion-v3" then
+            if kind == "ffi-conversion-v6" then
                 local malformed = setmetatable({}, { __index = function() error(cancellation, 0) end })
                 return get(kind, key), { malformed }
             end
@@ -410,13 +461,13 @@ describe("module foreign conversion payloads", function()
         assert.equal(1, stats.conversion.hits)
         assert.equal(interface, assert(driver.serialize_source_interface(touched)))
         assert.same(original, payloads)
-        assert.is_true((refreshes["c-header-v3"] or 0) > 0)
-        assert.equal(1, refreshes["ffi-conversion-v3"])
+        assert.is_true((refreshes["c-header-v5"] or 0) > 0)
+        assert.equal(1, refreshes["ffi-conversion-v6"])
         local _, warm = check(source)
         assert.equal(count, conversions)
         assert.equal(0, warm.headers.file_reads)
         assert.equal(0, warm.headers.file_hashes)
-        assert.equal(1, refreshes["ffi-conversion-v3"])
+        assert.equal(1, refreshes["ffi-conversion-v6"])
     end)
 
     it("replays a fresh source-import context after its provider body changes", function()
@@ -424,7 +475,7 @@ describe("module foreign conversion payloads", function()
         header("consumer.h", "typedef int consumer_count;\n")
         local provider = [[
             foreign import "provider.h"
-            foreign function identity(input: ffi.provider_count): ffi.provider_count
+            foreign function identity(input: provider_count): provider_count
                 return input
             end
         ]]
@@ -498,7 +549,7 @@ describe("module foreign conversion payloads", function()
         ]]
         local hashes = 0
         adapter.sha256_binary = function(bytes)
-            if bytes:find("ffi-conversion-v3", 1, true) then hashes = hashes + 1 end
+            if bytes:find("ffi-conversion-v6", 1, true) then hashes = hashes + 1 end
             return require("titan-compiler.sha256").binary(bytes)
         end
         check(source)
@@ -509,7 +560,7 @@ describe("module foreign conversion payloads", function()
         assert.equal(count, conversions)
         local cancelled = {}
         adapter.sha256_binary = function(bytes)
-            if bytes:find("ffi-conversion-v3", 1, true) then error(cancelled, 0) end
+            if bytes:find("ffi-conversion-v6", 1, true) then error(cancelled, 0) end
             return require("titan-compiler.sha256").binary(bytes)
         end
         local ok, err = pcall(check, source)

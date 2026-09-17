@@ -276,7 +276,7 @@ describe("call sequencing regressions", function()
                 return take(current, replace_argument())
             end
 
-            current_fn: (integer) -> integer = function (_n: integer): integer
+            current_fn: function (integer): integer = function (_n: integer): integer
                 return -99
             end
 
@@ -365,7 +365,7 @@ describe("call sequencing regressions", function()
                 return take(current, replace_argument())
             end
 
-            current_fn: (integer) -> integer = function (_n: integer): integer
+            current_fn: function (integer): integer = function (_n: integer): integer
                 return -99
             end
 
@@ -482,7 +482,7 @@ static inline fixture_object *fixture_pointer(fixture_scalar present) {
                 end
 
                 function store(v: value): value
-                    local raw: ffi.TValue = nil
+                    local raw: foreign TValue = nil
                     ffi.fixture_value_store(raw, v)
                     return raw
                 end
@@ -492,16 +492,16 @@ static inline fixture_object *fixture_pointer(fixture_scalar present) {
                 end
 
                 function write_box(): integer
-                    local p: ffi.fixture_int_pointer = ffi.fixture_box_void()
+                    local p: foreign fixture_int_pointer = ffi.fixture_box_void()
                     ffi.fixture_write_int(p, 77)
                     return ffi.fixture_read_int(
-                        ffi.fixture_box_void() as ffi.fixture_int_pointer)
+                        ffi.fixture_box_void() as foreign fixture_int_pointer)
                 end
 
                 function string_first_byte(): integer
                     local text = "Titan"
                     return ffi.fixture_first_byte(
-                        text as ffi.fixture_void_pointer) as integer
+                        text as foreign fixture_void_pointer) as integer
                 end
 
                 function scalar_value(): value
@@ -513,13 +513,13 @@ static inline fixture_object *fixture_pointer(fixture_scalar present) {
                 end
 
                 function global_value(): integer
-                    ffi.fixture_set_global(29 as ffi.fixture_scalar)
+                    ffi.fixture_set_global(29 as foreign fixture_scalar)
                     return ffi.fixture_global as integer
                 end
 
                 function pointer_present(present: integer): boolean
                     local pointer = ffi.fixture_pointer(
-                        present as ffi.fixture_scalar)
+                        present as foreign fixture_scalar)
                     if not pointer then return false end
                     return true
                 end
@@ -3335,7 +3335,7 @@ static struct titan_symlink_origin *titan_symlink_origin_get(void) {
 
             function exercise(): integer
                 local handle = native_handle.make(10)
-                local bound: (integer) -> integer = handle:bump
+                local bound: function (integer): integer = handle:bump
                 return handle:bump(2) + bound(3)
             end
         ]], [[

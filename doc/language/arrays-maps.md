@@ -417,7 +417,7 @@ Array writes are dynamic boundaries, while observing a Map value performs only
 the strict typed guard.
 
 As with Arrays, an unguardable value type makes the indexing expression a
-compile-time error. A `{string: *c.T}` Map may be constructed or written from
+compile-time error. A `{string: foreign *T}` Map may be constructed or written from
 statically typed Titan code, but `m[key]` through that raw-pointer value view is
 rejected because lightuserdata cannot prove the pointee type.
 

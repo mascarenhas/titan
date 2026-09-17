@@ -23,7 +23,7 @@ the same adjustment rules.
 A function declaration names the function, gives every parameter a type,
 optionally declares the return type(s), and ends with `end`:
 
-```lua
+```titan
 function clamp(x: integer, lo: integer, hi: integer): integer
     if x < lo then
         return lo
@@ -43,8 +43,7 @@ The pieces:
   compile-time error (`duplicate parameter 'x' in declaration of
   function 'f'`).
 * **The return annotation is optional, and omitting it means zero return
-  values.** A function declared without `: type` is a `(...) -> ()`
-  function that returns *nothing* — `function log_it(msg: string)` is the
+  values.** A function declared without `: type` returns *nothing* — `function log_it(msg: string)` is the
   same as `function log_it(msg: string): ()`, and `select('#', m.log_it(s))`
   from Lua is `0`. This matches Lua, where `function f() end` returns no
   values. If you want a function that returns a single `nil`, write it
@@ -94,7 +93,7 @@ one and from Lua as a member of the module value returned by `require`.
 Prefixing the declaration with `local` makes the function private to the
 module:
 
-```lua
+```titan
 -- geometry.titan
 local function square(x: float): float    -- private helper
     return x * x
@@ -134,7 +133,7 @@ type can accept the synthesized `nil` (for example `T?`, `value`,
 `integer`, `float`, `string`, array, map, record, union, Interface, or function
 parameter is a type error at the call site:
 
-```lua
+```titan
 function fma(a: float, b: float, c: float): float
     return a * b + c
 end
@@ -163,7 +162,7 @@ admitted argument adjustment and is checked against the corresponding
 parameter type. Surplus expressions do not
 need to match a parameter, but they still run for their effects:
 
-```lua
+```titan
 local effects: integer = 0
 
 local function record_effect(): string
@@ -201,7 +200,7 @@ section and [Flexible returns](flexible-returns.md).
 
 A direct declaration can also be called with a brace-delimited named list:
 
-```lua
+```titan
 function clamp(x: integer, lo: integer, hi: integer): integer
     if x < lo then return lo elseif x > hi then return hi else return x end
 end
@@ -234,7 +233,7 @@ always positional-only.
 
 A function may declare and return several values:
 
-```lua
+```titan
 function divmod(a: integer, b: integer): (integer, integer)
     return a // b, a % b
 end
@@ -256,7 +255,7 @@ assignment requests one value per name. Surplus producer values are ignored;
 if an ordinary fixed-only producer supplies too few, the checker reports
 `left-hand side expects N value(s) but the expression list produces M`:
 
-```lua
+```titan
 function use(): integer
     local q, r = divmod(13, 2)       -- ok: q = 6, r = 1
     local q2 = divmod(13, 2)         -- ok: remainder is ignored
@@ -324,7 +323,7 @@ contributes one value—the first argument, with intrinsic type `T?` so absence
 is represented by nil; see
 [Variadic parameters](variadic-parameters.md#explicit-one-value-adjustment).
 
-```lua
+```titan
 function just_div(a: integer, b: integer): integer
     return (divmod(a, b))    -- ok: adjusted to one value
 end
@@ -346,32 +345,33 @@ call indirectly. The name can be a top-level function, a `local` function,
 an imported module's function (`mod.f`), a record function (`Rec.new` or
 `Rec.make`), or a union constructor/function (`Message.write`):
 
-```lua
+```titan
 function double(x: integer): integer
     return x * 2
 end
 
-function apply(f: (integer) -> integer, x: integer): integer
+function apply(f: function (integer): (integer), x: integer): integer
     return f(x)                            -- call through a function value
 end
 
 function use(): integer
-    local f: (integer) -> integer = double -- store a function in a variable
+    local f: function (integer): (integer) = double -- store a function in a variable
     return apply(f, 21)                    -- pass it as an argument  --> 42
 end
 ```
 
-A **function type** is written `(P1, …, Pn) -> R` for one fixed return,
-`(P…) -> (R1, …, Rm)` for several, `() -> R` for no parameters, and
-`(P…) -> ()` for zero return values. An input tail is written
-`(...: P)`, and a flexible output tail as `(...: R)` or
-`(R1, ...: R)`. `->` is right-associative and the
-single-parameter form may drop its parentheses (`integer -> integer`), so
-higher-order types nest naturally: `(integer -> integer, integer) -> integer`.
-Writing a function type in an annotation is no longer an error.
+A **function type** is written `function (P1, …, Pn): R` for one result,
+`function (P1, …, Pn): (R1, …, Rm)` for several, and `function (): R` for no
+parameters. `function (P1, …, Pn)` or an explicit `: ()` returns zero values.
+Parameter parentheses are mandatory. An input tail uses `...: P`; a flexible
+result tail uses `(...: R)` or `(R1, ...: R)`.
+
+Higher-order types nest with the same syntax:
+`function (function (integer): integer, integer): integer`. Parenthesize the
+complete type before an outer `?` to make the function itself optional.
 
 Function values may be assigned into function-typed locals, parameters and
-record fields, stored in arrays (`{(integer) -> integer}`) and maps,
+record fields, stored in arrays (`{function (integer): (integer)}`) and maps,
 returned, and passed across the Lua boundary in both directions. (Indexing
 an array or map of functions yields an option `T?`; calling it directly,
 `fns[i](x)`, auto-unwraps with a runtime nil-check.)
@@ -468,8 +468,8 @@ allocates no wrapper. The full rules and examples are in
 [Closure adjustment wrappers](closure-adjustment-wrappers.md).
 
 This directional shape operation is not subtyping and does not lift a direct
-component conversion. For example, neither `() -> integer` to `() -> float`
-nor `() -> integer` to `() -> integer?` is accepted. A `value` hole or
+component conversion. For example, neither `function (): (integer)` to `function (): (float)`
+nor `function (): (integer)` to `function (): (integer?)` is accepted. A `value` hole or
 consistent compound component is enforced by the frozen adapter when a wrapper
 is realized and by the strict generic path on fallback.
 
@@ -510,7 +510,7 @@ alias, or import, and a method or nominal function may be written before its
 owner. Recursion needs no forward declarations, and mutual recursion just
 works:
 
-```lua
+```titan
 function is_even(n: integer): boolean
     if n == 0 then return true else return is_odd(n - 1) end
 end
@@ -562,7 +562,7 @@ loads the DSO through the module's logical entry, while another Titan module
 may select either provider form. A module that declares a function with this
 exact signature instead marks the program entry point:
 
-```lua
+```text
 function main(args: {string}): integer
 ```
 
@@ -625,7 +625,7 @@ constructs this canonical Array with the same fixed `{string}` Lua-writer
 policy as an ordinary Titan `{string}` constructor. The integer returned by
 `main` becomes the process exit status:
 
-```lua
+```titan
 -- answer.titan
 function main(args: {string}): integer
     return 42

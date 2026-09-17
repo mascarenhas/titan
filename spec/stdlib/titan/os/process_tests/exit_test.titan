@@ -1,4 +1,4 @@
-local type ExitFixtureCase = (string) -> ()
+local type ExitFixtureCase = function (string): ()
 
 local function compile_exit_fixture(workspace: string)
   local source = fs.read_file("spec/fixtures/stdlib/titan/os_exit_app.titan")

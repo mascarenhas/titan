@@ -105,12 +105,12 @@ never uses NUL termination for an ordinary string. A generated result is a
 counted owned C array:
 
 ```titan
-local owned = char.new_array(length)
-local output = owned as *char
+local storage: owned char[] = foreign char.new_array(length)
+local output = storage as foreign *char
 ```
 
 `new_array` creates the Lua full userdata, records its element count, and
-leaves `owned` as the traced GC root. C calls and pointer arithmetic use the
+leaves `storage` as the traced GC root. C calls and pointer arithmetic use the
 cast pointer while `#owned` recovers the allocation length. The raw pointer is
 valid only while `owned` is live. Casting the complete owned array to `string`
 creates an immutable Lua string with exactly that recorded length, including
@@ -183,7 +183,7 @@ otherwise unnecessary size arithmetic.
 
 The public `tostring` signature is:
 
-```titan
+```text
 function tostring(candidate: value): string
 ```
 
@@ -222,7 +222,7 @@ Lua C API, not a general promise that arbitrary Titan FFI code can manipulate
 The formatter ports the Lua 5.5 conversion grammar and validation tables into
 a `titan.peg` pattern built once by the module initializer. Matching a format
 string produces one local `FormatPlan`: a dense Array of exact
-`FormatPartial` closures of type `(value) -> string`, followed by one literal
+`FormatPartial` closures of type `function (value): (string)`, followed by one literal
 trailer. A `FormatFactory` constructs each partial from the literal prefix,
 the captured conversion form, and its conversion family. Integer factories
 also insert and retain the target-correct C length modifier once while
@@ -438,7 +438,7 @@ to the output. This is Lua 5.5's previous-end rule, not an unconditional
 advance after every empty match.
 
 Replacement has no raw-Lua dispatch or template parser. Both public `gsub`
-forms require an exact `(string) -> string` function. For each accepted match,
+forms require an exact `function (string): (string)` function. For each accepted match,
 the implementation materializes `RegexMatch:whole()`, calls the replacement
 through Titan's ordinary typed callable path with that one string, and appends
 the returned string. Captures never change callback arity, and `%` bytes in

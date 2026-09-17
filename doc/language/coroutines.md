@@ -17,11 +17,11 @@ This does not replace Lua's standard coroutine library:
 
 ## API
 
-```lua
+```text
 record Coro
 end
 
-function create(func: (value) -> value, default_tag: value): Coro
+function create(func: function (value): (value), default_tag: value): Coro
 function Coro:resume(arg: value, tag: value): value
 function Coro:error(err: value, tag: value): value
 function Coro:status(): string
@@ -60,7 +60,7 @@ metamethods.
 `create(func, default_tag)` creates a suspended coroutine. The first
 successful `resume` calls `func(arg)` in that coroutine.
 
-```lua
+```titan
 local coroutine = import "coroutine"
 
 function body(arg: value): value
@@ -89,7 +89,7 @@ becomes `"suspended"` and is resumable. The inner coroutines between that
 resumer and the yielder become `"stacked"` until the resumer is resumed
 and restores the skipped stack.
 
-```lua
+```titan
 local coroutine = import "coroutine"
 
 function nested(): string
@@ -149,7 +149,7 @@ a successful value.
 If the coroutine is suspended at a `coroutine.yield`, that yield raises
 `err` at the yield site. The coroutine may catch it:
 
-```lua
+```titan
 function body(arg: value): value
     do
         coroutine.yield("ready", "tag")

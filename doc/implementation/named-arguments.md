@@ -22,18 +22,15 @@ ArgsNamedFunc  { fields }
 ArgsNamedMethod{ method, fields }
 ```
 
-`funcargs` accepts a parenthesized expression list or a bare string. A separate
-`namedargs` production accepts braces and only `NAMEDLABEL '=' exp` fields,
-with comma or semicolon separators and an optional trailing separator. Because
-`NAMEDLABEL` is reachable only in that production, it can recognize the raw
-identifier spelling of a Titan keyword without weakening `NAME` anywhere else.
-There is no whitespace-sensitive alternative: `f{}` and `f {}` take the same
-suffix path.
+`callsuffix` selects a parenthesized expression list, braces containing
+`namedargs`, or a bare string. A `namedarg` is `ANYNAME '=' exp`; comma or
+semicolon separators and a trailing separator are accepted. `ANYNAME` admits
+keyword labels and is also used for general member selectors and eligible
+declaration names. There is no whitespace-sensitive alternative: `f{}` and
+`f {}` take the same suffix path.
 
-Braces were removed from `funcargs`. Consequently, `f { x = 1 }` always
-produces `ArgsNamedFunc`; a constructor passed positionally is represented by
-the ordinary parenthesized path in `f({ x = 1 })`. The parser's suffix closures
-are `suffix_namedfunccall` and `suffix_namedmethodcall`. Named entries reuse
+Thus `f { x = 1 }` always produces `ArgsNamedFunc`; a constructor passed
+positionally uses the parenthesized path in `f({ x = 1 })`. Named entries reuse
 `Ast.Field {name, exp}` nodes, but the enclosing `ArgsNamed*` tag keeps them
 distinct from an `ExpInitList` record constructor.
 

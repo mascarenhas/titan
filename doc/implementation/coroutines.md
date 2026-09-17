@@ -39,7 +39,7 @@ use backing `Table *`. This internal/boxed distinction is part of ABI 2; see
 `titan/coroutine.titan` imports minicoro's private struct layout plus
 the Lua and private helper headers:
 
-```lua
+```titan
 foreign import "minicoro.h"
 foreign import "lua.h"
 foreign import "lauxlib.h"
@@ -48,10 +48,10 @@ foreign import "titan/ffi.h"
 
 The exported `Coro` record has local fields:
 
-```lua
+```titan
 record Coro
   local udata: value
-  local handle: *mco.mco_coro
+  local handle: foreign *mco_coro
   local default_tag: value
 end
 ```
@@ -119,11 +119,11 @@ source-level C pointer types (`*T`, `const *T`), read `T.sizeof`, and
 coerce C locals/formals to mutable pointer parameters. This is enough for
 `titan/coroutine.titan` to call minicoro's storage and tag APIs directly:
 
-```lua
-local payload: ffi.TValue = nil
-local ok: int = 0 as int
-mco.mco_pop(source, ok, int.sizeof)
-mco.mco_pop(source, payload, ffi.TValue.sizeof)
+```titan
+local payload: foreign TValue = nil
+local ok: foreign int = 0 as foreign int
+ffi.mco_pop(source, ok, foreign int.sizeof)
+ffi.mco_pop(source, payload, foreign TValue.sizeof)
 ```
 
 When a C call mutates a stack-anchored `TValue` local through a mutable
@@ -139,9 +139,9 @@ For resume/yield tags, `titan/coroutine.titan` materializes the
 effective Titan `value` as a local C `TValue` and passes that local to
 minicoro's `void *` tag parameter:
 
-```lua
-local ctag: ffi.TValue = tag
-mco.mco_resume(co, ctag)
+```titan
+local ctag: foreign TValue = tag
+ffi.mco_resume(co, ctag)
 ```
 
 Minicoro treats that pointer opaquely and compares it before returning
@@ -223,20 +223,18 @@ value, and the pending transfer root. Creation stores the userdata pointer in
 `coro_entry_trampoline` foreign function directly to the minicoro descriptor's
 `void (*)(mco_coro *)` field.
 
-The built-in `M` expression is a native `Udata *`. The coder recognizes that
-specific Lua-internal pointer type as GC-bearing: converting a non-NULL
-`Udata *` to `value` emits a full-userdata `TValue`, while NULL becomes nil.
-Creation can therefore store `M` directly in owner slot 2 as the actual module
-root. It does not need to recover an equivalent value from a closure upvalue.
+The builtin `M` denotes the current module. Coroutine creation explicitly
+casts `M as foreign *Udata` before storing the actual module userdata in owner
+slot 2. The trusted Lua-value bridge turns that Udata pointer into the traced
+module root; no closure-upvalue lookup is needed to recover it.
 
 The foreign trampoline recovers the first four values from the owner userdata
 with the typed Lua-internal bridges in `titan/ffi.h`: the child thread, module
 state, Titan entry closure, and callback value. It reads the native entry from
 the closure's fixed native-pointer upvalue, casts it to the exact source alias
 
-```titan
-foreign (*ffi.lua_State, *ffi.Udata, *ffi.CClosure,
-         ffi.TValue, *mco.mco_coro) -> ()
+```text
+foreign function (*lua_State, *Udata, *CClosure, TValue, *mco_coro): void
 ```
 
 and calls it directly with `_fn = nil`. The trampoline is emitted as raw C: it
@@ -281,7 +279,7 @@ coroutine FFI.
 The callback ABI itself no longer requires hand-written C:
 `coro_entry_trampoline` uses the restricted
 [`foreign function`](foreign-functions.md) body and an exact
-`foreign (*mco.mco_coro) -> ()`-compatible signature. The two pieces that remain
+`foreign function (*mco_coro): void`-compatible signature. The two pieces that remain
 in `minicoro.c` are the ones that genuinely require a single implementation
 translation unit or a raw Lua-internal operation:
 
@@ -338,7 +336,7 @@ Minicoro exposes the complete runtime layout so the Titan module can allocate
 one with its ordinary owned-C-object constructor:
 
 ```lua
-local runtime = mco.mco_runtime.new()
+local runtime = foreign mco_runtime.new()
 ```
 
 The module initializer stores that userdata in a GC-traced local module slot.

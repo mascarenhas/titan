@@ -534,8 +534,8 @@ typeQualifier <- { "const"    } _
 
 functionSpecifier <- { "inline" } _
 
-structOrUnionSpecifier <- {| {:type: structOrUnion :} gccExtensionSpecifier* ({:id: IDENTIFIER :})? "{" _ {:fields: {| structDeclaration+ |} :} "}" _ |}
-                        / {| {:type: structOrUnion :} gccExtensionSpecifier* {:id: IDENTIFIER :}                                                     |}
+structOrUnionSpecifier <- {| {:_source_position: {} :} {:type: structOrUnion :} gccExtensionSpecifier* ({:id: IDENTIFIER :})? "{" _ {:fields: {| structDeclaration+ |} :} "}" _ |}
+                        / {| {:_source_position: {} :} {:type: structOrUnion :} gccExtensionSpecifier* {:id: IDENTIFIER :}                                                     |}
 
 structOrUnion <- { "struct" } _
                / { "union"  } _
@@ -545,7 +545,7 @@ structOrUnion <- { "struct" } _
 -- choice reparsed the complete body for every named inline-union member, which
 -- doubled at each nested member. The guard keeps a malformed exact `union {`
 -- prefix from falling back and rebuilding the same recursive body.
-inlineUnionMember <- ({| {:union: {| {:type: { "union" } :} _ "{" _ {:fields: {| structDeclaration+ |} :} "}" _ |} :} {:tail: {| specifierQualifier* |} :} ({:ids: structDeclaratorList :})? |} ";" _) => inline_union_member
+inlineUnionMember <- ({| {:union: {| {:_source_position: {} :} {:type: { "union" } :} _ "{" _ {:fields: {| structDeclaration+ |} :} "}" _ |} :} {:tail: {| specifierQualifier* |} :} ({:ids: structDeclaratorList :})? |} ";" _) => inline_union_member
 
 structDeclaration <- inlineUnionMember
                    / !("union" _ "{") {| {:type: {| specifierQualifier+ |} :} {:ids: structDeclaratorList :} |} ";" _
@@ -558,8 +558,8 @@ structDeclaratorList <- {| structDeclarator ("," _ structDeclarator)* |}
 structDeclarator <- declarator? ":" _ constantExpression
                   / declarator
 
-enumSpecifier <- {| {:type: enum :} gccExtensionSpecifier* ({:id: IDENTIFIER :})? "{" _ {:values: enumeratorList :} ("," _)? "}" _ |}
-               / {| {:type: enum :} gccExtensionSpecifier* {:id: IDENTIFIER :}                                                          |}
+enumSpecifier <- {| {:_source_position: {} :} {:type: enum :} gccExtensionSpecifier* ({:id: IDENTIFIER :})? "{" _ {:values: enumeratorList :} ("," _)? "}" _ |}
+               / {| {:_source_position: {} :} {:type: enum :} gccExtensionSpecifier* {:id: IDENTIFIER :}                                                          |}
 
 enum <- { "enum" } _
 

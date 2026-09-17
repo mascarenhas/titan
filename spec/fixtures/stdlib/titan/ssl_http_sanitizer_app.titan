@@ -52,7 +52,7 @@ local function exercise(certificate: string, private_key: string)
   local exact_server = server as http.Server
   server_value = exact_server
   defer exact_server:close()
-  local serving = async.run<value, value>(function (): value
+  local serving = async.run<|value, value|>(function (): value
     exact_server:serve()
     return nil
   end)
@@ -68,7 +68,7 @@ local function exercise(certificate: string, private_key: string)
   end
 
   local observed = "not-read"
-  local idle_reader = async.run<value, value>(function (): value
+  local idle_reader = async.run<|value, value|>(function (): value
     do
       local chunk? = idle:read()
       if chunk then
@@ -86,7 +86,7 @@ local function exercise(certificate: string, private_key: string)
     return nil
   end)
   local watchdog_fired = false
-  local watchdog = async.run<value, value>(function (): value
+  local watchdog = async.run<|value, value|>(function (): value
     timer.sleep(5000)
     watchdog_fired = true
     idle_reader:cancel(async.CancellationReason.simple(

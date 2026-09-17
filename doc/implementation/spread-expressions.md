@@ -8,57 +8,30 @@ reads directly inside the consuming function.
 
 ## Parser and AST ownership
 
-`titan-compiler/ast.lua` defines three nodes:
+The AST retains `ExpSubset(loc, exp, first, last)`,
+`ExpSpread(loc, exp, first, last)`, and checker-synthesized
+`ExpSpreadIndex(loc, spread, index, type)`. A comma-bearing bracket suffix is
+parsed once, selecting an ordinary index or range at the next delimiter.
+Missing range bounds are represented by `false`.
 
-```lua
-ExpSubset      = {"loc", "exp", "first", "last"}
-ExpSpread      = {"loc", "exp", "first", "last"}
-ExpSpreadIndex = {"loc", "spread", "index", "_type"}
-```
+Bare `...` is now an expression atom. After it, `[` selects input-vararg
+index/range syntax; otherwise a token in the expression FIRST set selects a
+collection-spread subject. This dispatch uses bounded token lookahead and
+parses the selected subject once. The explicit `#...` count form stays distinct
+from length applied to an indexed vararg. Prefix/suffix and expression lists
+use fold captures rather than recursive list captures.
 
-`ExpSubset` is the parser representation of a comma-bearing bracket suffix.
-Either bound can be `false`. One factored `bracketbody` parses the first
-expression once, then describes an index or subset according to whether the
-next token is `]` or `,`; the surrounding suffix path materializes the node.
-This preserves chains such as `a[i][first, last]` and keeps `...[i]` distinct.
-The checker rejects every `ExpSubset` that is not the immediate subject wrapper
-consumed by a spread.
+The parser accepts non-tail markers and preserves them in the AST. Expression-
+list adjustment and constructor checking reject unparenthesized spreads or
+varargs outside the final expanding position. A plain collection subset still
+requires an enclosing spread. Parentheses instead request one result, including
+`(...)`, `(...items)`, and `(...[first, last])`.
 
-`spreadexp` parses `DOTS exp`; its subject may begin with an ordinary unary
-operator, so `... -1` is a spread whose subject is `ExpUnop(-, 1)`. It may
-also begin with the explicit DOTS-index scalar, so `... ...[1]` has an
-`ExpDotsIndex` subject. The second DOTS cannot be bare because bare `ExpDots`
-is not an expression. The three comma-bearing variadic forms first parse as
-explicit `ExpSubset(ExpDots)` expressions. Bare `ExpDots` is constructed only
-by the list/field marker production, by exact `(...)`, or underneath one of
-those subset nodes; it is not a `simpleexp`. Dedicated simple-expression
-branches retain `#...`, scalar `...[index]`, and explicit vararg-subset syntax.
-
-All common bracket bodies are factored through one descriptor production. It
-parses the first bound once and chooses index versus subset only at the comma
-or closing bracket; `expsuffix` and the direct DOTS branch then materialize the
-appropriate AST node. This avoids the former nested `[exp]`/`[exp, ...]`
-prefix reparse.
-
-Expression lists likewise parse each written item once into a named capture,
-then classify it from the following comma. A fixed-position classifier rejects
-only bare `ExpDots`: an explicit `ExpSpread` or `ExpSubset(ExpDots)` remains in
-the AST for the checker to issue the placement error. The tail classifier
-promotes a direct DOTS subset to `ExpSpread`; a continued expression such as
-`...[1] + 2` or `...[1, 2] + 3` remains scalar. Constructor fields use the same
-classification. This is deterministic delimiter-based dispatch, not recursive
-negative lookahead or speculative nested-expression parsing.
-
-Inside parentheses, an exact `DOTS` followed by `RPAREN` selects the adjustment
-branch; indexed and subset forms fall through to the ordinary expression
-branch. Bare markers still fail syntactically before a comma, while explicit
-non-tail spread/subset nodes deliberately reach checking.
-
-The parser initially leaves `ExpSpread.first` and `.last` false. During
-checking, a carrier whose subject is `ExpSubset` consumes that wrapper and
-moves its subject and bounds into the public `ExpSpread` fields. This makes the
-carrier the unique owner of evaluation while every synthesized projection
-points back to it through `ExpSpreadIndex.spread`.
+During checking, a spread whose subject is an `ExpSubset` takes ownership of
+its subject and bounds. Finite projections share that one carrier through
+`ExpSpreadIndex.spread`; the subject and both bounds are evaluated once. These
+syntax changes preserve the existing finite/open demand and code-generation
+plans described below.
 
 ## Checker planning
 

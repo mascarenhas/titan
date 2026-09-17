@@ -8,7 +8,7 @@ local function clear_lua_helper_globals()
     raise "cannot reserve Lua stack for helper-global mutation"
   end
   ffi.lua_rawgeti(L, ffi.LUA_REGISTRYINDEX,
-                  ffi.LUA_RIDX_GLOBALS as ffi.lua_Integer)
+                  ffi.LUA_RIDX_GLOBALS as foreign lua_Integer)
   ffi.lua_pushnil(L)
   ffi.lua_setfield(L, -2, "string")
   ffi.lua_pushnil(L)

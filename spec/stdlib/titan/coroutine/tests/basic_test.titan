@@ -126,7 +126,7 @@ function test_raw_tag_mismatch_does_not_call_lua_eq(_context: test.Context)
         end,
       })
     end
-  ]==]) as (value, {string: value}) -> ()
+  ]==]) as function (value, {string: value}): ()
   install_eq(resume_tag, calls)
   install_eq(yield_tag, calls)
 

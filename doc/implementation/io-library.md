@@ -29,9 +29,9 @@ wrapper keeps the concrete Reader and its defining module rooted. No private
 record or bound closure is needed, and the public return type states the
 ownership literally:
 
-```titan
-((ReaderCloser) -> string?, ReaderCloser, nil,
- (ReaderCloser) -> ())
+```text
+(function (ReaderCloser): (string?), ReaderCloser, nil,
+ function (ReaderCloser): ())
 ```
 
 Initial control is nil. The iterator's nil-capable string result is the generic

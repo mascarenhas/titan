@@ -5,8 +5,8 @@ range of the current function's variadic arguments into the surrounding
 positional expression list. It is written with `...` immediately before the
 subject:
 
-```lua
-function append(dst: (integer, ...: integer) -> (), xs: {integer}): ()
+```titan
+function append(dst: function (integer, ...: integer): (), xs: {integer}): ()
     dst(0, ...xs)
 end
 
@@ -20,14 +20,14 @@ end
 ```
 
 Only the last item of a positional expression list can expand. An earlier
-multiple-return call is an ordinary scalar expression. An explicit spread
-spelling may parse earlier so the checker can report that placement error;
-bare variadic `...` remains syntactically restricted to the tail. The subject
+multiple-return call is an ordinary scalar expression. The parser admits both
+spreads and bare variadic markers earlier in a list, and semantic checking
+reports the invalid placement. The subject
 and bounds are nevertheless evaluated exactly once even when the consumer
 requests no elements.
 
-Bare `...` is a list-tail marker, not a general expression operand, so
-`expression + ...` is a syntax error. At the start of a list item, however,
+Bare `...` does not supply a scalar operand by itself, so
+`expression + ...` is rejected by semantic checking. At the start of a list item, however,
 `...` followed by an expression is the collection-spread form. This includes
 an expression beginning with unary `-` or `~`: `... -1` spreads the subject
 `-1` and is then rejected because an integer is not a container. Write
@@ -70,15 +70,16 @@ comma-bearing range keeps its existing meaning; `...[index]` is still the
 ordinary scalar, raising variadic index operation. Because that indexed form
 is an explicit scalar expression, it may itself be a collection subject:
 `... ...[index]` spreads the Array or integer-keyed Map stored in that vararg
-slot. A second bare `...` is not an expression, so `......` remains invalid.
+slot. Bare varargs themselves are not a collection value; an additional bare
+spread prefix does not turn them into one.
 
 Ordinary suffixes remain part of the subject expression. For example,
 `...groups[i]` first performs the ordinary optional `groups[i]` read,
 auto-unwraps it with a run-time presence check, and then spreads the resulting
 Array or integer-keyed Map. A comma-bearing suffix such as `xs[first, last]`
-is not a standalone slice value. A direct `...[first, last]` at the end of a
-positional list is promoted to a spread; in any scalar or earlier position the
-checker rejects the subset expression rather than assigning it a value.
+is not a standalone slice value. `...[first, last]` expands in the final
+positional slot. An earlier unparenthesized range is a placement error, while
+`(...[first, last])` adjusts that range to one value.
 
 ## Closed ranges
 
@@ -122,7 +123,7 @@ decides the outcome: an optional destination can receive `nil`, while a
 required destination forces a present value and raises if the position is
 absent.
 
-```lua
+```titan
 function first_two(xs: {integer}): (integer, integer?)
     local first: integer, second: integer? = ...xs
     return first, second
@@ -136,24 +137,25 @@ without shortening the run. An explicit variadic range that reaches outside
 the available run always raises when that element is read. An empty range
 contributes no elements.
 
-```lua
+```titan
 function collect(xs: {integer}): {integer}
     return {10, ...xs[2,]}       -- every selected value is appended
 end
 
-function relay(sink: (...: string) -> (), xs: {string}): ()
+function relay(sink: function (...: string): (), xs: {string}): ()
     sink(...xs)                  -- forwards the complete selected run
 end
 ```
 
 Only the final expression can expand. A preceding scalar is evaluated first
 and contributes one value. An explicit spread parsed before another positional
-item is rejected by the checker. A spread cannot be used in a computed Map
-field, record field, named argument, condition, operator, or parenthesized
-scalar position.
+item is rejected by the checker. An unparenthesized spread cannot stand in a
+scalar field, named argument, condition, or operator. Parentheses request one
+value instead: `(...xs)` and `(...xs[first, last])` can be used at ordinary
+scalar sinks with the usual type and missing-value checks.
 
 A direct call to a nonvariadic C function, a call through a nonvariadic C
-function pointer, or a C allocation pseudo-call such as `T.new_array(...)`
+function pointer, or a C allocation pseudo-call such as `foreign T.new_array(...)`
 consumes a spread only through its ordinary finite formal positions: Titan
 evaluates the carrier and passes exactly one converted scalar for each C
 parameter. C variadic arguments are a separate C ABI facility, not a Titan

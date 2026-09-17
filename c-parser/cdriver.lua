@@ -11,8 +11,8 @@ local version = require "titan-compiler.version"
 local definitions = require "titan-compiler.cdefinitioncache"
 local csemantics = require "titan-compiler.csemantics"
 
-cdriver.HEADER_CACHE_VERSION = 3
-local HEADER_CACHE_KIND = "c-header-v3"
+cdriver.HEADER_CACHE_VERSION = 5
+local HEADER_CACHE_KIND = "c-header-v5"
 
 local SEP = package.config:sub(1, 1)
 local default_io = compiler_io.new_sync()
@@ -702,6 +702,59 @@ local function generated_header_inputs(header)
     return files, searches
 end
 
+-- Nominal C identity comes from the declaring header, not the importing Titan
+-- module or a fingerprint of preprocessing conditions. Resolve/hash each
+-- encountered header pathname once; generated paths map to their stable source
+-- identity. Byte positions add a declaration site for anonymous/prototype tags.
+local function declaration_scope_resolver(ctx, generated, generated_files, cwd, strategy)
+    local starts, line_scopes, paths, identities, offset = {}, {}, {}, {}, 1
+    for index, line in ipairs(ctx.output) do
+        starts[index] = offset
+        offset = offset + #line + 1
+        local origin = ctx.output_origins[index]
+        if origin then
+            local path = absolute_lookup_path(origin.file, cwd)
+            local scope = paths[path]
+            if not scope then
+                local descriptor = generated and (generated_files[path]
+                    or generated_files[generated_lookup_path(generated, path)])
+                local identity
+                if descriptor then
+                    identity = "generated-header\0" .. descriptor.identity
+                else
+                    local physical, err = strategy:realpath(path)
+                    if not physical then
+                        return nil, "cannot resolve declaring C header '" .. path .. "': " .. tostring(err)
+                    end
+                    identity = "physical-header\0" .. physical
+                end
+                scope = identities[identity]
+                if not scope then
+                    -- Hash only this short nominal pathname, once per header;
+                    -- no header bytes, macro maps or compiler argv are hashed.
+                    scope = "c-header-" .. sha256.hex(identity)
+                    identities[identity] = scope
+                end
+                paths[path] = scope
+            end
+            line_scopes[index] = scope
+        end
+    end
+    return function(position)
+        if type(position) ~= "number" then return nil end
+        local first, last = 1, #starts
+        while first <= last do
+            local middle = (first + last) // 2
+            if starts[middle] <= position then first = middle + 1
+            else last = middle - 1 end
+        end
+        local origin = ctx.output_origins[last]
+        if origin then
+            return line_scopes[last], origin.line, position - starts[last] + 1
+        end
+    end
+end
+
 local function process_file_inner(filename, options)
     options = normalize_options(options)
     local cache_valid, cache_error = cacheadapter.validate(options.cache_adapter)
@@ -986,15 +1039,14 @@ local function process_file_inner(filename, options)
         return nil, ("failed parsing: %s:%d:%d: %s\n%s"):format(filename, line, col, err, fragment)
     end
 
-    -- The real module-wide header already resolves declaration order and
-    -- tag scope. Per-declaration physical-file identities were used only by
-    -- the retired independent-header compatibility path; keep no such source
-    -- map in the extracted declaration graph.
-
+    local declaration_scope, declaration_scope_error = declaration_scope_resolver(
+        ctx, generated, generated_files, cwd, strategy)
+    if not declaration_scope then return nil, declaration_scope_error end
     local type_conversion_started = cdriver.process_phase_clock(options)
     local ffi_types, err = ctypes.register_types(res, {
         header = generated and generated.identity or filename,
         resolved_header = include.resolved,
+        declaration_scope = declaration_scope,
     })
     cdriver.emit_process_phase(options, filename, include,
         "c_type_conversion", ffi_types and "complete" or "failed",

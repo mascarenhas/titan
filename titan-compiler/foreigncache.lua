@@ -7,7 +7,7 @@ local version = require "titan-compiler.version"
 local definitions = require "titan-compiler.cdefinitioncache"
 local graphcodec = require "titan-compiler.graphcodec"
 
-local foreigncache = { VERSION = 3, KIND = "ffi-conversion-v3" }
+local foreigncache = { VERSION = 6, KIND = "ffi-conversion-v6" }
 local statistics = setmetatable({}, { __mode = "k" })
 
 local function counters(st)
@@ -170,7 +170,7 @@ function foreigncache.restore(st, namespace, key)
     st.c_file_tags = snapshot.file_tags
     st.c_profile = snapshot.profile
     namespace._type = snapshot.namespace_type
-    st:add_symbol("ffi", namespace)
+    if not st:find_symbol("ffi") then st:add_symbol("ffi", namespace) end
     if observations_changed then
         local refreshed = cacheadapter.refresh_inputs(st.cache_adapter, foreigncache.KIND, key, inputs)
         if refreshed == nil and st.cache_adapter.put then

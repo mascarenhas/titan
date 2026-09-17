@@ -750,17 +750,19 @@ and synthesized constructors, collects ordinary callable/initializer
 signatures and explicit methods/nominal functions, and finally checks module
 variables in AST order before bodies. Nominal owners, aliases, callables, and imports used
 outside module-variable declarations are therefore placement-independent. A
-module-variable declaration/initializer sees only earlier imports and earlier
-module variables, while seeing every other declaration kind. Combined source
+module-variable declaration/initializer sees only earlier ordinary Titan
+imports and module variables, while seeing the complete foreign environment
+and every other declaration kind. Combined source
 order remains authoritative for duplicate precedence, serialized member/slot
 order, module-variable initialization, and code generation.
 
 Unions are nominal v1 sum types. `union`, `case`, and `when` are keywords;
-every arm starts with `when`. Variant constructors are positional-only,
+variants use `empty()` or `payload(T)`, and arms use `when empty() then` or
+`when payload(binding) then`. Variant constructors are positional-only,
 first-class fixed Titan functions (`paramnames = false`) and use ordinary
 nil-fill/surplus adjustment. Imported union visibility exactly follows record
 frontiers. Each case arm/else is a full ordinary block with its own
-`catch`/`finally`, and the normal recursive `defer` transformation remains
+`catch`; source `finally` is reserved and unused. Internal `defer` cleanup remains
 clause-bounded. A `Union?` scrutinee is auto-forced before dispatch; cases are
 not required to be exhaustive, and unmatched/no-else is a no-op. For control
 flow, a case is non-fallthrough when every `when` arm is non-fallthrough and
@@ -771,12 +773,13 @@ all variants are covered, a redundant falling-through `else` is unreachable
 and does not defeat the proof.
 Record fields and union payloads share `types.has_tvalue_representation`:
 ordinary boxed Titan values including functions are legal; direct C
-aggregates/arrays/functions/function pointers are not, and only Option recurses.
+aggregates/arrays/direct functions are not. Eligible C function pointers use
+the supported boxed pointer representation, and only Option recurses.
 Titan unions cast only by nominal GC identity to C `void *`, never
 structurally to C unions/structs. `Type.Variant` is owner metadata, not a source
-type and not valid in annotations, aliases, `as`, or `is`. Contextual
-`lexer.CNAME` keeps C selectors/type names spelled with Titan keywords
-source-nameable without weakening ordinary `NAME`.
+type and not valid in annotations, aliases, `as`, or `is`. `lexer.ANYNAME`
+permits keyword spellings in the selected declaration/member/type positions
+without weakening ordinary local and parameter `NAME` bindings.
 
 The canonical main controls generated C/object placement, while logical `M`
 controls native symbols, metadata, and the generated shim. Thus folder
@@ -960,7 +963,72 @@ AST nodes (`ast.lua`) and types (`types.lua`) are plain tables created by `typed
 
 ### Frontend (`lexer.lua`, `parser.lua`, `syntax_errors.lua`)
 
-Lexing and parsing are fused in one LPegLabel/relabel grammar; `lexer.lua` exports raw LPeg patterns referenced as `%TOKEN` terminals (no token stream). Every AST constructor is auto-injected into the grammar's defs table, so grammar actions like `-> TopLevelFunc` call constructors directly. Every error label used in the grammar (`^Label`, `%{Label}`) or lexer (`lpeg.T`) **must** have an entry in `syntax_errors.errors` or error formatting breaks. The parser is not reentrant (module-global `THIS_FILENAME`, asserted nil on entry). `record` declarations are desugared at parse time into a `TopLevelRecord` plus an adjacent synthesized `new` static marked `_record_constructor`. `union` declarations emit `TopLevelUnion` plus one adjacent synthesized static per variant, marked `_union_constructor`/`_union_variant`; explicit nominal functions carry neither marker. `case`/`when` arms consume the ordinary full block production. `[local] type Name = T` produces a transparent `TopLevelTypeAlias`; it is not a standalone value, but a record/union alias preserves the canonical nominal namespace and its visible constructors/statics. `interface Name ... end` produces a nonempty type-only `TopLevelInterface` with ordered bodyless methods. Short standard-library imports are also parser sugar: `coroutine`, `uv`, `async`, `timer`, `io`, `fs`, `net`, `ssl`, `url`, `http`, `os`, `peg`, `string`, `test`, `math`, `lua`, `iteration`, `gc`, `reflect`, `sqlite3`, and `json` become the ordinary qualified module names under `titan.*` before module resolution.
+Lexing and parsing are fused in one LPegLabel/relabel grammar; `lexer.lua`
+exports raw patterns referenced as `%TOKEN` terminals, not a token stream.
+`NAME` excludes reserved words; `ANYNAME` admits the same ASCII identifier
+spelling including keywords at the declaration/member boundaries specified by
+`doc/language/grammar.md`. Primitive Titan type words and `ffi` are not lexer
+reserved words. Remove old `CNAME`-specific assumptions; foreign types and
+ordinary Titan member selectors both use their documented name categories.
+
+Function types use `function (P...): R`; parameter parentheses are mandatory
+and an absent return annotation means zero results. The colon after a function
+type's parameter list belongs greedily to that return annotation: an Array of
+functions is `{function (): T}`, while a Map keyed by zero-result functions
+uses `{(function ()): T}`. Generic lists use the distinct longest-match tokens
+`<|` and `|>`, with committed diagnostics after `<|`. Do not reintroduce arrow
+types, contextual `>` splitting, whole-source generic scans, recursive type
+probes, or full-expression diagnostic lookahead.
+
+Use fresh incremental fold captures for lists and expression chains. Fold
+right-associative concatenation and powers from the right while retaining
+unary power operands such as `2^-3`; `as`/`is` do not chain. Keep written
+parameter/expression/generic list guardrails separate from type/result-list
+and runtime/calling-convention limits. Do not raise LPeg's stack limit to make
+wide lists work. Every positive/negative lookahead must inspect a constant
+number of terminals. Alternatives must not share a prefix containing a
+syntactic nonterminal: factor that prefix once. After a bounded terminal head
+selects an alternative, each syntactic nonterminal in that alternative must
+carry `^ErrorLabel` so failure commits instead of backtracking. Convenience
+helpers expanding to a bounded number of tokens are the exception; keep their
+bounds explicit in the audit. If arbitrary lookahead appears necessary, stop
+and ask the maintainer about the intended grammar.
+
+The parser admits prefix-expression assignment/call candidates and vararg or
+spread markers in any expression-list position. Semantic checking rejects
+non-lvalues, non-call statements, and unparenthesized non-tail expansions,
+normalizing valid receivers into the existing `Var*` nodes. Parentheses request
+one value, including `(...)`, `(...items)`, and `(...[first, last])`.
+
+Every error label used by the grammar or lexer must appear in
+`syntax_errors.errors`. The parser remains non-reentrant; its per-parse source
+locations and other private state are installed and cleared transactionally.
+It consumes one complete program and rejects trailing text. Records still
+produce an adjacent synthesized `new` static marked `_record_constructor`;
+unions use `empty()` / `payload(T)` declarations and produce adjacent statics
+marked `_union_constructor`/`_union_variant`. Case arms use
+`when variant(binding) then` or `when empty() then` with ordinary full blocks.
+Record fields spell optional types as `field: T?`, never `field?: T`.
+
+`[local] type Name = T` produces a transparent `TopLevelTypeAlias` in the Titan
+type namespace. Raw `foreign type Name = foreigntype` is always local, has no
+`local` modifier, produces `TopLevelForeignTypeAlias`, and emits a real C
+typedef in the module's `.ffi.h`. Raw foreign names use `TypeForeignName` and
+are unqualified; mixed type positions explicitly start with `foreign`.
+`owned foreigntype` is a Titan constructor (`TypeOwned`) whose complete raw
+operand must resolve to a pointer or array; ordinary Titan aliases may name
+owned types. Do not spell the ownership constructor `foreign owned ...`,
+and do not put owned storage in a raw foreign alias. Reject an outer `const`
+on the resolved pointer or array operand: there is no construct that allocates
+and initializes const owned storage together. The checker also rejects
+a grouped direct foreign RHS in an
+ordinary Titan alias; parentheses do not change its category.
+
+Interfaces remain type-only, nonempty declarations with ordered fields and
+bodyless methods. Short standard imports (`coroutine`, `uv`, `async`, `timer`,
+`io`, `fs`, `net`, `ssl`, `url`, `http`, `os`, `peg`, `string`, `test`, `math`,
+`lua`, `iteration`, `gc`, `reflect`, `sqlite3`, and `json`) normalize to their
+ordinary qualified `titan.*` module names before resolution.
 
 ### Checker (`checker.lua`, `checker/*.lua`, `types.lua`, `symtab.lua`)
 
@@ -992,12 +1060,26 @@ private edges are not serialized ABI or runtime input and must stay outside the
 coder's erased-boundary traversal.
 
 During each `TopLevelVar`, `symtab.initializer_order` hides the current/later
-module variables and later ordinary Titan import aliases. The reserved `ffi`
-namespace has already been populated from the complete ordered module C
+module variables and later ordinary Titan import aliases. The readonly,
+shadowable builtin `ffi` namespace has already been populated from the complete ordered module C
 environment; its names, macros, and complete aggregates are visible throughout
 the module. Every other declaration kind sees all imports, nominal owners,
 aliases, and callables regardless of relative placement. Body checking and the coder still traverse the unchanged
 AST order, as does `makemoduletype`.
+
+Module variables require an annotation, an initializer, or both; their names
+have no `?` inference suffix. Both mutable and const module variables may omit
+an RHS only with an explicit nil-bearing type, and the checker supplies nil.
+An initializer-less const retains its owning root initializer's assignment
+authority. Block-local `name?` inference and `local const` remain supported.
+
+`L` is the readonly current Lua-state pointer in ordinary bodies and the module
+initializer. `M` is a readonly compile-time marker for the current module:
+`M.member` resolves owner declarations despite lexical shadows, body-local
+`M.Type` annotations resolve owner types despite local/generic shadows, and
+`M as foreign *Udata` exposes the native module pointer where that C type is
+available. The usual visibility and initializer frontier still apply. Foreign
+function bodies receive neither builtin implicitly.
 
 - Every ordinary type-directed target sink asks
   `types.assignment_adjustment(source, target)` once. Expression-dependent C
@@ -1133,9 +1215,9 @@ substitution, recursive; error on missing keys). Key facts:
   source foreign callbacks, and affected public standard-library signatures.
   Its Lua contract is 5.5.1, and its callable names use the injective
   `_\u2133_` module and `_\u2131_` nominal-member separators.
-- Generic owner arguments attach to the nominal namespace (`Pair<T>.new`,
-  `Pair<T>.static<U>`), while callable-local arguments remain after the member;
-  never accept constructor owner arguments as `Pair.new<T>`. When both owner
+- Generic owner arguments attach to the nominal namespace (`Pair<|T|>.new`,
+  `Pair<|T|>.static<|U|>`), while callable-local arguments remain after the member;
+  never accept constructor owner arguments as `Pair.new<|T|>`. When both owner
   and callable scopes are open, explicit lists are all-or-none. After all
   receiver/result/argument/constraint evidence, a free binder closes to its
   declared erased carrier (`value` or its recursively substituted Interface
@@ -1222,7 +1304,7 @@ substitution, recursive; error on missing keys). Key facts:
   invoke it repeatedly; weigh that one-time wrapper against the hot-path
   savings rather than removing adapters mechanically.
   All public standard-library `gsub` operations use the same exact
-  `(found: string) -> string` replacement contract and pass the whole matched
+  `function (string): string` replacement contract and pass the whole matched
   byte string independently of captures. Keep template, capture-index, table,
   and other dynamic replacement forms inside an expression language such as
   relabel syntax; do not overload a public substitution parameter through
@@ -1463,22 +1545,34 @@ substitution, recursive; error on missing keys). Key facts:
 
 ### C FFI (`c-parser/`, `foreigntypes.lua`)
 
-`foreign import "header.h"` is an unbound top-level directive. The reserved
-`ffi` namespace contains the module's final C types and values and cannot be
-shadowed, stored, passed, or exported. The old bound import syntax is rejected.
-Every source module owns `A.ffi.h`, containing explicit `.titan` dependency FFI
-headers in dependency declaration order, then local directives in combined AST
-order. For folder modules that means main first, then bytewise-sorted
-contributors. Ordinary imports contribute no C environment.
+`foreign import "header.h"` is an unbound top-level directive. The builtin
+`ffi` refers to the module's final C value namespace; it is readonly and cannot
+be stored, passed, or exported, but an ordinary declaration may shadow it.
+Foreign type lookup uses its own namespace independently of that lexical value
+binding. Write `foreign T` in a mixed type position and `ffi.function(...)` in
+an expression. Nested pointer syntax groups each additional constructor, as in
+`foreign *(*int)`. Type allocation/layout expressions are explicit:
+`foreign T.new()`, `foreign T.new_array(n)`, `foreign T.sizeof`, and
+`foreign T.alignof`; ordinary values do not hide this type namespace.
 
-`cdriver.process_module` preprocesses and parses the actual combined `A.ffi.h`
-once using `cpp.lua`, `c99.lua`, `ctypes.lua`, and `cdefines.lua`; header guards,
-macro state, redeclarations, and C scopes determine the final TypeList. Author
-quoted headers resolve under the canonical source directory and use normalized
-absolute spelling. Generated checking trees contain the real `.ffi.h` files
-with a deterministic content-derived identity and no forwarding wrappers or
-filesystem identity tricks. Dependency C headers are transitive; direct private
-Titan visibility still requires a written explicit `.titan` edge.
+Every source module owns `A.ffi.h`. Its inherited explicit `.titan` dependency
+headers precede direct foreign directives in combined source order. An initial
+C environment pass establishes imported declarations and macros; raw foreign
+aliases are then resolved and emitted as real typedefs in dependency order,
+and the final augmented environment is validated before signatures and bodies
+use it. Do not reorder the semantic module AST to order typedefs. Ordinary
+Titan imports contribute no C headers or foreign aliases. Explicit source
+imports inherit the unqualified typedefs transitively; ordinary private Titan
+visibility still requires a direct explicit source edge.
+
+The initial/final phases use `cpp.lua`, `c99.lua`, `ctypes.lua`, and
+`cdefines.lua` with the configured native context. Header guards, macro state,
+redeclarations, and C scopes remain authoritative. Do not mangle foreign alias
+names to conceal normal C collisions. Author quoted headers resolve under the
+canonical source directory with normalized absolute spelling. Generated
+checking trees contain real `.ffi.h` files with deterministic identities;
+header plans and their closed persisted schemas retain typedef declarations
+and dependencies, with no forwarding headers or filesystem identity tricks.
 
 A module defining foreign functions also gets `A.titan.h` for their C
 declarations and eligible inline bodies. Generated `A.c` includes `A.ffi.h`
@@ -1530,7 +1624,24 @@ retain deterministic order across compiler processes.
 Declaration extraction and macro classification use the same final combined
 C environment; an earlier header can control later conditional declarations.
 
-`foreigntypes.convert` maps C declarations to the `Type.C*` family (`CVoid`, `CInteger`, `CFloat`, `CPointer`, `CArray`, `CStruct`, `CUnion`, `CFunction`, `CTypedef`, `CModule`, and owned storage wrappers). C imports are namespaces, not first-class values: the checker represents them as `Type.CModule` (renamed from the prototype's foreign-module type), typedef-qualified names such as `ffi.T` may be used in local annotations, and `types.serialize` rejects any exported function/method/variable type that mentions a C FFI type. An eligible named file-scope tag-only `struct T` or `union T` is published as the base-name Titan type `ffi.T`, but remains its canonical `CStruct`/`CUnion` and generates exact tag spelling; do not invent a `CTypedef`, header alias, or ordinary C identifier. A real same-name typedef always wins. C aggregate fields, C array indexing, `#` on static arrays and counted owned buffers, and explicit C vararg calls are implemented; C array indexing is 0-based, bounds-checked for `CArray` and counted `COwned`, and null-checked but otherwise unchecked for raw `CPointer`. Object-pointer conversions, C arithmetic, relational/equality, bitwise, and shift operators, C promotions, and mixed Titan/C operands follow the target profile plus the contextual probe policy; they do not reuse Titan's Lua-semantics operator helpers. Titan's `and`/`or`/`not` remain excluded from C-mode operators.
+`foreigntypes.convert` maps declarations into the `Type.C*` family. The final
+`Type.CModule` has separate C type and value maps: source annotations use
+`foreign T`, while expressions select `ffi.name`. Eligible file-scope tag-only
+structs/unions are available by their unqualified base name but remain their
+canonical `CStruct`/`CUnion` with exact native tag spelling; do not fabricate a
+CTypedef for a tag. A real same-name typedef wins. Source foreign aliases, by
+contrast, deliberately are genuine C typedef declarations.
+
+Public serialized graphs may contain supported portable C primitives,
+pointers, function pointers, and owned graphs over them. Imported/header-
+dependent typedefs, aggregates, arrays, and enum identities remain local; do
+not infer exportability merely from an alias's underlying primitive. C arrays
+are 0-based, bounds-checked for `CArray` and counted `COwned`, and otherwise
+only null-checked for raw pointers. Aggregate fields, `#` on fixed/countable
+arrays, and direct C variadic calls retain their established support. C
+operators, promotions, comparisons, and
+conversions use the target profile and existing contextual probe policy;
+Titan's `and`/`or`/`not` remain outside C-mode operators.
 
 Source modules remain ordinary separate C translation units compiled with the
 same configured compiler and flags. An explicit `.titan` import brings the
@@ -1578,40 +1689,50 @@ through Option. Written C-integer-to-C-integer casts and C usual-arithmetic
 integer conversions retain C semantics; a potentially out-of-range C
 integer-to-floating operator cast remains checked.
 
-Owned C objects are Titan-owned Lua userdata payloads allocated by the generated
-`.new()` and `.new_array(count)` pseudo-functions on C types. Their source
-spellings are `owned *T` for one object and `owned T[]` for a dynamically
-counted array; aliases and a whole-type trailing `?` are allowed locally, but
-any public surface containing an owned C type is rejected just like every
-other C-bearing type. They are zeroed, anchored on the Lua stack during
-initialization, stamped with a per-owned-C-type metatable for `value` cast
-checks, and need no finalizer because the Lua GC owns the payload; dynamic
-array counts are reconstructed from `Udata.len`. An owner implicitly converts
+Owned C objects are Titan-owned userdata payloads allocated through
+`foreign T.new()` and `foreign T.new_array(count)`. `owned` is a Titan type
+constructor: `owned *T`, `owned T[]`, and `owned Alias` use a raw foreign operand
+that resolves to a pointer or array. Ordinary Titan aliases and an outer `?`
+are supported; raw foreign aliases cannot contain owned storage. Public owned
+graphs are permitted only when their full graph is portable. The payload is
+zeroed, rooted during allocation, and stamped with its scoped owned-type tag;
+Lua GC owns the allocation, so there is no automatic resource finalizer.
+Dynamic counts are reconstructed from `Udata.len`. An owner implicitly converts
 to its corresponding raw object pointer where C code borrows it. Casting an
 `owned char[]`, `owned signed char[]`, or `owned unsigned char[]` directly to
 `string` copies exactly the counted payload, including embedded NULs; a raw
 character pointer cast retains NUL-terminated C-string semantics. Do not
 manufacture an intermediate Lua stack value, parallel `value` storage field,
 or duplicate length record for capabilities already carried by an owner.
-Every function-local C object still requires an initializer. `.new()` and
-`.new_array(...)` request zeroed storage; at their direct local declaration sink
-a complete non-pointer struct/union or positive-literal fixed array may select
-automatic storage. Its lifetime is the generated C block, no escape analysis is
+Automatic C aggregates/arrays require an initializer. Mutable locals with an
+explicit nil-bearing pointer type may omit the RHS, including inside foreign
+functions; every const local requires an initializer. At a direct local sink,
+allocation of a complete non-pointer struct/
+union or an eligible positive constant-sized array may select automatic C
+storage. Fixed-array annotations are no longer written in Titan source.
+Inferred arrays preserve their fixed type for eligible literals and proven
+integer object-like macros; an explicit owned target forces owned storage.
+Do not introduce an allocation-size threshold or host-width constant guesses. Its lifetime is the generated C block, no escape analysis is
 attempted, and aggregate values are spilled through volatile byte storage
 around catchable Titan calls so normal-return mutation commits while a caught
 longjmp reloads the last Titan-visible state. Owned allocation rejects `void`,
 incomplete aggregates, direct functions, nested owners, and C array-typedef
 payloads. A complete struct with one flexible-array member instead uses
-`T.new(count)` as a scalar owner (or automatic object for a nonnegative literal);
+`foreign T.new(count)` as a scalar owner (or automatic object for a nonnegative literal);
 arrays of variably extended objects remain unsupported. Automatic fixed storage
 accepts imported array-typedef and nested-array shapes but rejects void,
 incomplete, and GC-bearing objects. Imported/static C functions can
 be converted to compatible C function pointers and called through them;
 adapting a Titan function to a C callback ABI remains a parked follow-up
 alongside `CAdopted` lifetimes and stronger Lua C API coverage. Generated
-run-time type tags for C-bearing callable types are module-scoped because
-foreign C type identity is compilation-unit-local; never coalesce those
-registry keys globally by rendered spelling. `c-parser/typed.lua` (used only
+C-bearing callable and owned tags must preserve their C declaration origin
+through the structural identity machinery. The same header declaration shares
+identity across modules, including forced-header and source-import paths;
+anonymous declaration sites remain distinct. Compatible C build settings are
+a program precondition: do not add preprocessing-condition or layout
+fingerprints, macro-environment scans, or compatibility probes for these keys.
+Portable graphs follow the portable sharing contract; never coalesce unrelated
+declarations by rendered spelling alone. `c-parser/typed.lua` (used only
 by c-parser) is a runtime signature-checking DSL that ships **disabled** —
 `typed.off()` is the last line; flip to `typed.on()` to debug c-parser type
 confusion.
@@ -1702,7 +1823,7 @@ terminal `CancellationReason` payloads. `Task:cancel` stores its first reason
 privately until terminal `cancelled` and invokes the current cancellation
 action without a public `cancelling` state.
 
-`Task<A,B>`, `TaskStatus<A,B>`, and `CancellationReason<B>` are the public
+`Task<|A,B|>`, `TaskStatus<|A,B|>`, and `CancellationReason<|B|>` are the public
 owners, while Runtime roots, waiters, callbacks, and `running()` deliberately
 use the bare all-`value` Task application. Task terminal publication first
 clears any explicit-suspension token and pending wake, then stores the final

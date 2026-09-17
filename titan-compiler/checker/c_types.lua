@@ -567,10 +567,11 @@ function c_resolve(t)
 end
 
 function is_c_type_namespace(exp)
-    return exp._tag == "Ast.ExpVar"
-        and exp.var
-        and exp.var._ctype_namespace
+    return exp._tag == "Ast.ExpForeignType"
 end
+
+c_type_namespace_context = {}
+current_module_cast_context = {}
 
 function c_owned_type(typ, has_count)
     return types.COwned(typ, has_count and true or false)
@@ -776,11 +777,6 @@ function c_pseudo_member(typ, name, st)
             result_source = size_entry.type,
         }
     end
-end
-
-function is_c_pseudo_member_name(name)
-    return name == "new" or name == "new_array"
-        or name == "sizeof" or name == "alignof"
 end
 
 function field_macro_path_spelling(path)
@@ -1160,15 +1156,50 @@ function checker._validate_automatic_fam_extent(plan, st, loc, errors)
     end
 end
 
-function checker._allocation_integer_literal(exp)
+function checker._allocation_integer_literal(exp, st)
     while exp and (exp._tag == "Ast.ExpCast"
                    or exp._tag == "Ast.ExpAdjust") do
+        if exp._tag == "Ast.ExpCast" and not exp._implicit_coercion then
+            local identity = exp._written_cast
+                and exp._written_cast.op == "identity"
+            local integer_target = exp.target and
+                (exp.target._tag == "Type.Integer"
+                 or exp.target._tag == "Ast.TypeInteger")
+            -- A written C cast may truncate the macro's value. Only peel an
+            -- identity or checked Titan-integer conversion; other expressions
+            -- keep the normal dynamically counted allocation path.
+            if not identity and not integer_target then return nil end
+        end
         exp = exp.exp
     end
     if exp and exp._tag == "Ast.ExpInteger"
        and math.type(exp.value) == "integer" then
         return exp.value
     end
+    if not st or not exp or exp._tag ~= "Ast.ExpVar"
+       or exp.var._tag ~= "Ast.VarDot" then return nil end
+    local var = exp.var
+    local receiver = var.exp
+    if receiver._tag ~= "Ast.ExpVar"
+       or receiver.var._tag ~= "Ast.VarName" then return nil end
+    local namespace = st:find_symbol(receiver.var.name)
+    if not namespace or namespace._tag ~= "Checker.ForeignNamespace" then
+        return nil
+    end
+    local member = namespace._type.members[var.name]
+    local decimal = member and member._c_integer_constant
+    if not decimal then return nil end
+    -- Macro evaluation uses the configured C target. Only carry its exact
+    -- decimal result into the host AST when both integer carriers can hold it.
+    local value = tonumber(decimal)
+    if math.type(value) ~= "integer" or tostring(value) ~= decimal then return nil end
+    local carrier = st.c_profile and st.c_profile.integers[st.c_profile.lua_integer]
+    if not carrier then return nil end
+    local minimum, maximum = tonumber(carrier.minimum), tonumber(carrier.maximum)
+    if not minimum or not maximum or value < minimum or value > maximum then
+        return nil
+    end
+    return value
 end
 
 function checker._numeric_literal_is_zero(exp)
@@ -1232,7 +1263,7 @@ function checker._plan_c_allocation(node, pseudo, demand, st, errors)
         and node._arg_adjustment.fixed[1] or node.args.args[1]
 
     if pseudo.array then
-        local count = checker._allocation_integer_literal(count_argument)
+        local count = checker._allocation_integer_literal(count_argument, st)
         plan.array_count_literal = count
         if target and target._tag == "Type.COwned" then
             -- An explicit owner always wins over literal-driven inference.
@@ -1266,7 +1297,7 @@ function checker._plan_c_allocation(node, pseudo, demand, st, errors)
            and (resolved_payload._tag == "Type.CStruct"
                 or resolved_payload._tag == "Type.CUnion") then
         local fam_count = pseudo.fam
-            and checker._allocation_integer_literal(count_argument) or nil
+            and checker._allocation_integer_literal(count_argument, st) or nil
         plan.fam_count_literal = fam_count
         local explicit_owner = target and target._tag == "Type.COwned"
         local pointer_target = target

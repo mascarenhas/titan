@@ -21,7 +21,7 @@ never decides to coerce anything on its own.
 
 ## Entry point and contract
 
-```lua
+```text
 function checker.check(modname, ast, subject, filename, loader, options)
 ```
 
@@ -68,10 +68,11 @@ aliases and C declarations:
   re-declaring a name in the same inner block silently overwrites it, except
   for read-only compiler-synthesized locals such as `L`, which `declare`
   rejects before adding the new symbol.
-* The reserved `ffi` symbol refers to a single `Type.CModule`, with separate
+* The readonly, shadowable builtin `ffi` refers to a single `Type.CModule`, with separate
   ordinary-value and type-member maps built from the complete module C
-  translation unit. C typedef and ordinary C names stay separate from Titan
-  symbols. Canonical file-scope aggregates and prototype-local tags preserve
+  translation unit. Foreign type lookup uses a separate namespace and never depends on a local
+  value binding named `ffi`. C typedef and ordinary C names stay separate from
+  Titan symbols. Canonical file-scope aggregates and prototype-local tags preserve
   the C scopes established by that combined parse.
 * During a `TopLevelVar`, `initializer_order` makes `find_symbol` hide the
   current and later module variables and later ordinary Titan import aliases.
@@ -131,15 +132,15 @@ and detects cycles with a `resolving` state.
    Each synthesized constructor is then attached to its complete nominal
    namespace. Record fields and union payloads share
    `types.has_tvalue_representation`: Titan function values are legal, while
-   direct C aggregates, C arrays, direct C functions, and C function pointers
-   are rejected.
+   direct C aggregates, C arrays, and direct C functions are rejected. Eligible
+   C function pointers use their supported boxed pointer representation.
 5. Ordinary function and module-initializer signatures are collected, followed
    by explicit methods and nominal functions. Because names, imports, aliases,
    nominal owners, and synthesized constructors are already available, these
    declarations are independent of their relative AST order.
 6. Module variables are checked in AST order. For each node the checker sets
    `st.initializer_order` to its `_toplevel_order`; symbol lookup then exposes
-   only earlier Titan/foreign imports and earlier module variables, while all
+   only earlier ordinary Titan imports and earlier module variables, while all
    other declaration kinds remain module-wide. The type annotation and RHS are
    checked under the same frontier, followed by the ordinary constant-expression
    validation.
@@ -148,8 +149,8 @@ Constness is retained as an exact boolean on local declarations, record
 fields, module variables, and Array types. An omitted mutable-local initializer
 is normalized to a checked nil expression list only when every written type
 passes `types.accepts_missing_nil`; const locals always arrive with an RHS.
-An initializer-less const module variable uses that same narrow nil-bearing
-predicate, then may be assigned only by the directly executing root
+Initializer-less mutable and const module variables use that same nil-bearing
+predicate. A const one may then be assigned only by the directly executing root
 initializer of its owning module. Nested blocks retain that authority, but a
 nested callable or an importer does not. See
 [Const-value implementation](const-values.md#checker-rules-for-declarations).
@@ -168,12 +169,14 @@ that is what permits recursive and mutually recursive nominal declarations while
 nominal. Module-variable annotations are instead resolved and validated in the
 module-variable stage, where every record is already registered but the
 import/module-variable frontier is still active. `checkfuncbody` also
-synthesizes a read-only local `L` in every function-like body. Its type is
-`lua_State *` in the C FFI type family. Ordinary top-level callable bodies see
-the complete foreign environment and reuse an imported `lua_State` identity
-regardless of the import's placement. A lambda checked inside a module-variable
-initializer retains that initializer's frontier, so it reuses only an earlier
-`lua_State` declaration and otherwise receives the same opaque fallback type.
+synthesizes the readonly Lua-state binding `L` in ordinary function-like bodies,
+using the complete foreign environment's canonical `lua_State` identity. Foreign
+functions receive no implicit Lua state. The current-module binding `M` is a
+compile-time module marker: member selection resolves owner declarations,
+including source-private ones. Qualified body-local type syntax `M.Type` uses
+that same owner namespace rather than a lexical or generic shadow. An explicit `as foreign *Udata` lowers to
+the native module pointer. These operations retain the ordinary initializer
+frontier and readonly-binding rules.
 
 After declaration and body checking, `makemoduletype` builds the module's
 interface by traversing the original AST order from the
@@ -197,6 +200,21 @@ this test lets transparent aliases satisfy the entrypoint contract.
 Because it examines the one combined list, a valid `main` may be declared in
 the folder main or any contributor and still belongs to the same logical
 module.
+
+## Syntax candidates and semantic validation
+
+The parser now admits prefix-expression candidates for assignments and call
+statements. Before ordinary variable checking, the checker rejects non-lvalues
+and normalizes valid name/member/index receivers to the existing `Var*` nodes.
+A statement candidate must be a call; an arbitrary value expression is not an
+expression statement. These checks no longer require full-expression parser
+lookahead or parse-time semantic predicates.
+
+Bare varargs and collection/ranged spreads may also appear syntactically in
+any expression-list position. Shared list adjustment and constructor checking
+reject an unparenthesized non-tail expansion. Parenthesized markers request
+one value, including a parenthesized input-vararg range. The established
+finite/open plans and evaluation-once carriers remain the codegen boundary.
 
 ## The relations and plans in `types.lua`
 
@@ -829,7 +847,7 @@ nil-accepting result-bearing target through the checker-frozen callable plan.
   a callee whose static type is `value` instead receives a synthesized
   positional function type from its arguments and surrounding result demand,
   then rejoins the same call path;
-  writing a function *type* in an annotation (`g: (integer) -> integer`) is
+  writing a function *type* in an annotation (`g: function (integer): (integer)`) is
   handled by `typefromnode`'s `Ast.TypeFunction` handler and produces a
   `Type.Function`; and assigning a value into a function-typed variable is
   allowed. An `Ast.ExpFunction` (an anonymous function) typechecks to a
@@ -950,7 +968,7 @@ other fixed-result shape must be non-fallthrough. A single non-nil result uses
 `function can fall through but return type requires N fixed values`. The same
 one-fixed-`nil` predicate tells `adjust_explist` to synthesize an ordinary nil
 source for a bare `return`. It never nil-fills a multi-result prefix. Functions
-declared without a return annotation default to **zero results** (`() -> ()`).
+declared without a return annotation default to **zero results** (`function (): ()`).
 
 ## Imports and the loader protocol
 
@@ -1046,12 +1064,12 @@ Two real loaders exist in `driver.lua`:
 
 An unbound `Ast.TopLevelForeignImport` contributes a header directive to the
 module C environment. After loading explicit source dependencies, the checker
-prepares `A.ffi.h` and invokes `cdriver.process_module` once on that actual
-header. `foreigntypes.convert` builds one `Type.CModule` for the reserved `ffi`
-namespace. Direct functions retain `Type.CFunction`; function-pointer values
+prepares the ordered `A.ffi.h` environment, including source foreign typedefs,
+and validates its final declarations through `cdriver.process_module`.
+`foreigntypes.convert` builds one `Type.CModule` for the builtin `ffi` namespace. Direct functions retain `Type.CFunction`; function-pointer values
 retain `Type.CPointer(Type.CFunction)`, and neither is projected to
 `Type.Function`. C type declarations become `type_members`, allowing local
-annotations such as `ffi.size_t` (see [FFI internals](ffi-internals.md)).
+annotations such as `foreign size_t` (see [FFI internals](ffi-internals.md)).
 
 Before conversion, the complete TypeList supplies syntactic typedef-name and
 file-scope tag metadata. A named tag-only struct/union with no same-name real

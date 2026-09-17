@@ -54,23 +54,23 @@ describe("source-defined foreign functions", function()
             local csrc = h.compile_and_read_c([[
                 foreign import "]] .. header .. [["
 
-                foreign function add_one(input: ffi.ffi_int): ffi.ffi_int
+                foreign function add_one(input: ffi_int): ffi_int
                     return input + 1
                 end
 
-                foreign function choose(input: ffi.ffi_int): ffi.ffi_int
+                foreign function choose(input: ffi_int): ffi_int
                     if input then return input else return 7 end
                 end
 
-                foreign function choose_or(input: ffi.ffi_int): ffi.ffi_int
+                foreign function choose_or(input: ffi_int): ffi_int
                     if input then return input end
                     return 8
                 end
 
-                foreign function accumulate(limit: ffi.ffi_int): ffi.ffi_int
+                foreign function accumulate(limit: ffi_int): ffi_int
                     local total = 0
                     if limit then total = ffi.ffi_apply(add_one, total) end
-                    for index = 1 as ffi.ffi_int, limit do
+                    for index = 1 as foreign ffi_int, limit do
                         total = total + index
                     end
                     return total + choose(0) + choose_or(0)
@@ -86,7 +86,7 @@ describe("source-defined foreign functions", function()
                 end
 
                 function exercise(input: integer): integer
-                    return (ffi.ffi_apply(add_one, input as ffi.ffi_int)
+                    return (ffi.ffi_apply(add_one, input as foreign ffi_int)
                         as integer) + hidden(accumulate(3) as integer)
                 end
             ]])
@@ -194,9 +194,9 @@ describe("source-defined foreign functions", function()
             h.run_coder([[
                 foreign import "]] .. header .. [["
 
-                foreign function raw(limit: ffi.ffi_int): ffi.ffi_int
+                foreign function raw(limit: ffi_int): ffi_int
                     local total = 0
-                    local pointer: *ffi.ffi_int = nil
+                    local pointer: foreign *ffi_int = nil
                     if pointer then total = 100 end
                     if limit then total = total + ffi.ffi_next() end
                     while total < limit do total = total + 1 end
@@ -204,7 +204,7 @@ describe("source-defined foreign functions", function()
                     return total
                 end
 
-                foreign function sequence(): ffi.ffi_int
+                foreign function sequence(): ffi_int
                     ffi.ffi_reset_trace()
                     local first, second =
                         ffi.ffi_value(1, 3), ffi.ffi_value(2, 4)
@@ -214,41 +214,41 @@ describe("source-defined foreign functions", function()
                         + ffi.ffi_slot(0) + ffi.ffi_slot(1)
                 end
 
-                foreign function prepared_pointer_target(): ffi.ffi_int
+                foreign function prepared_pointer_target(): ffi_int
                     local holder = ffi.ffi_first_slot()
                     holder.pointer[0] = ffi.ffi_retarget(holder)
                     return ffi.ffi_slot(0) * 10 + ffi.ffi_slot(1)
                 end
 
-                foreign function prepared_index_target(): ffi.ffi_int
+                foreign function prepared_index_target(): ffi_int
                     local holder = ffi.ffi_first_slot()
                     holder.pointer[holder.index] = ffi.ffi_reindex(holder)
                     return ffi.ffi_slot(0) * 10 + ffi.ffi_slot(1)
                 end
 
-                foreign function prepared_indirect_callee(): ffi.ffi_int
+                foreign function prepared_indirect_callee(): ffi_int
                     local holder = ffi.ffi_callback_holder_new()
                     return holder.callback(ffi.ffi_retarget_callback(holder))
                 end
 
                 foreign function roundtrip_pointer(
-                    pointer: ffi.ffi_void_pointer
-                ): ffi.ffi_int
-                    local callback = pointer as ffi.ffi_unary_callback
+                    pointer: ffi_void_pointer
+                ): ffi_int
+                    local callback = pointer as foreign ffi_unary_callback
                     return callback(1)
                 end
 
                 foreign function named(
-                    left: ffi.ffi_int,
-                    right: ffi.ffi_int
-                ): ffi.ffi_int
+                    left: ffi_int,
+                    right: ffi_int
+                ): ffi_int
                     return left * 10 + right
                 end
 
-                foreign function raw_forms(callback: ffi.ffi_callback): ffi.ffi_int
-                    local negative: ffi.ffi_int = -1
+                foreign function raw_forms(callback: ffi_callback): ffi_int
+                    local negative: foreign ffi_int = -1
                     local computed = callback(2, 5)
-                    local selected: ffi.ffi_callback = named
+                    local selected: foreign ffi_callback = named
                     local selected_value = selected(1, 2)
                     local holder = ffi.ffi_holder()
                     holder.pointer[holder.index] = 6
@@ -281,7 +281,7 @@ describe("source-defined foreign functions", function()
 
                 function roundtrip(): integer
                     local pointer =
-                        ffi.ffi_get_callback() as ffi.ffi_void_pointer
+                        ffi.ffi_get_callback() as foreign ffi_void_pointer
                     return roundtrip_pointer(pointer) as integer
                 end
             ]], [[
@@ -302,8 +302,8 @@ describe("source-defined foreign functions", function()
             h.run_coder([[
                 foreign import "]] .. header .. [["
 
-                foreign function float_loops(): ffi.ffi_double
-                    local total: ffi.ffi_double = 0.0
+                foreign function float_loops(): ffi_double
+                    local total: foreign ffi_double = 0.0
                     for up = 0.0, 1.0, 0.25 do
                         total = total + up
                     end
@@ -341,14 +341,14 @@ describe("source-defined foreign functions", function()
                 foreign import "]] .. header .. [["
 
                 foreign function outputs(): int
-                    local item: *ffi.ffi_item = nil
-                    local text: const *char = nil
+                    local item: foreign *ffi_item = nil
+                    local text: foreign const *char = nil
                     ffi.ffi_outputs(item, text)
-                    local erased: *void = item
+                    local erased: foreign *void = item
                     if erased ~= item then return -1 end
-                    if ffi.ffi_layout(ffi.ffi_item.sizeof,
-                                    ffi.ffi_item.alignof) == 0 then return -2 end
-                    return item.value + (text[0] as int)
+                    if ffi.ffi_layout(foreign ffi_item.sizeof,
+                                    foreign ffi_item.alignof) == 0 then return -2 end
+                    return item.value + (text[0] as foreign int)
                 end
 
                 function result(): integer
@@ -356,8 +356,8 @@ describe("source-defined foreign functions", function()
                 end
 
                 function ordinary_result(): integer
-                    local item: *ffi.ffi_item = nil
-                    local text: const *char = nil
+                    local item: foreign *ffi_item = nil
+                    local text: foreign const *char = nil
                     ffi.ffi_outputs(item, text)
                     return item.value + (text[0] as integer)
                 end
@@ -383,7 +383,7 @@ describe("source-defined foreign functions", function()
 
                 foreign function select_arm(selected: int): int
                     ffi.ffi_clear()
-                    local result: int = 0
+                    local result: foreign int = 0
                     if ffi.ffi_condition(1, selected) then
                         result = 10
                     elseif ffi.ffi_condition(2, selected) then
@@ -458,15 +458,15 @@ describe("source-defined foreign functions", function()
         ]], function(header)
             h.run_coder([[
                 foreign import "]] .. header .. [["
-                local type Pointer = *void
+                foreign type Pointer = *void
 
                 foreign function call_pointer(): *Pointer
-                    return ffi.ffi_pointer_source() as *Pointer
+                    return ffi.ffi_pointer_source() as foreign *Pointer
                 end
 
                 foreign function local_pointer(): int
                     local raw = ffi.ffi_pointer_source()
-                    ffi.ffi_pointer_sink(raw as *Pointer)
+                    ffi.ffi_pointer_sink(raw as foreign *Pointer)
                     if raw ~= ffi.ffi_pointer_source() then return -1 end
                     return ffi.ffi_written()
                 end

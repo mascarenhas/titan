@@ -2,7 +2,7 @@ foreign import "lua.h"
 foreign import "stddef.h"
 foreign import "titan/ffi.h"
 
-local function require_gc_result(result: int): integer
+local function require_gc_result(result: foreign int): integer
   if result < 0 then
     raise "garbage collector operation is unavailable"
   end
@@ -40,7 +40,7 @@ function ephemeron(map: {value: value})
   set_weak_mode(map, "k")
 end
 
-function finalizable<T>(v: T, f: (T) -> ()): ()
+function finalizable<|T|>(v: T, f: function (T): ()): ()
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 4) == 0 then
@@ -94,7 +94,7 @@ function step(size: integer?): boolean
     raise "garbage collector step size must be non-negative"
   end
   return require_gc_result(ffi.lua_gc(
-    L, ffi.LUA_GCSTEP, amount as ffi.size_t)) ~= 0
+    L, ffi.LUA_GCSTEP, amount as foreign size_t)) ~= 0
 end
 
 function incremental(): boolean
@@ -115,15 +115,15 @@ function count(): integer
   return kilobytes * 1024 + remaining_bytes
 end
 
-local function parameter(which: int,
+local function parameter(which: foreign int,
                          setting: integer?): integer
-  local configured = -1 as int
+  local configured = -1 as foreign int
   if setting then
     local supplied = setting as integer
     if supplied < 0 or supplied > 100000 then
       raise "garbage collector parameter must be between 0 and 100000"
     end
-    configured = supplied as int
+    configured = supplied as foreign int
   end
   return require_gc_result(ffi.lua_gc(
     L, ffi.LUA_GCPARAM, which, configured))

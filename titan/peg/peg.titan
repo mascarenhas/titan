@@ -18,33 +18,32 @@ local PATTERN_REGISTRY_KEY =
 -- The engine table and all callables are per-state GC roots owned by this
 -- module.  The functions are ordinary private Lua C closures, so calls use
 -- Titan's generic callable path despite their precise static types.
-local type NativeUnary = (value) -> value
-local type NativeBinary = (value, value) -> value
-local type NativeRange = (...: string) -> value
-local type NativeUtfRange = (integer, integer) -> value
-local type NativeConstant = (...: value) -> value
-local type NativePosition = () -> value
+local type NativeUnary = function (value): (value)
+local type NativeBinary = function (value, value): (value)
+local type NativeRange = function (...: string): (value)
+local type NativeUtfRange = function (integer, integer): (value)
+local type NativeConstant = function (...: value): (value)
+local type NativePosition = function (): (value)
 local type NativeMatch =
-  (value, string, integer, ...: value) ->
-    (value, value, ...: value)
-local type NativeLocale = () -> {string: value}
-local type NativeSetMaxStack = (integer) -> ()
+  function (value, string, integer, ...: value): (value, value, ...: value)
+local type NativeLocale = function (): ({string: value})
+local type NativeSetMaxStack = function (integer): ()
 
 local _engine: {string: value} = {}
 local _version_text = ""
 
 local _P: NativeUnary = nil as value
-local _S: (string) -> value = nil as value
+local _S: function (string): (value) = nil as value
 local _R: NativeRange = nil as value
 local _utfR: NativeUtfRange = nil as value
-local _V: (string) -> value = nil as value
+local _V: function (string): (value) = nil as value
 local _B: NativeUnary = nil as value
-local _T: (string) -> value = nil as value
+local _T: function (string): (value) = nil as value
 local _C: NativeUnary = nil as value
 local _Cc: NativeConstant = nil as value
 local _Cmt: NativeBinary = nil as value
 local _Cb: NativeUnary = nil as value
-local _Carg: (integer) -> value = nil as value
+local _Carg: function (integer): (value) = nil as value
 local _Cp: NativePosition = nil as value
 local _Cs: NativeUnary = nil as value
 local _Ct: NativeUnary = nil as value
@@ -59,7 +58,7 @@ local _choice: NativeBinary = nil as value
 local _difference: NativeBinary = nil as value
 local _lookahead: NativeUnary = nil as value
 local _negative: NativeUnary = nil as value
-local _repeat: (value, integer) -> value = nil as value
+local _repeat: function (value, integer): (value) = nil as value
 local _capture_replace: NativeBinary = nil as value
 local _match_success_sentinel: {value: value} = {}
 
@@ -252,10 +251,9 @@ function fail(): Pattern
 end
 
 function runtime(
-    callback: (string, integer, string) ->
-      (...: value)): Pattern
+    callback: function (string, integer, string): (...: value)): Pattern
   local adapter:
-      (string, integer, string) -> (...: value) =
+      function (string, integer, string): (...: value) =
     function(subject: string, position: integer,
              whole: string): (...: value)
       return callback(subject, position, whole)
@@ -407,11 +405,9 @@ end
 
 function match_time(
     pattern: Pattern,
-    callback: (string, integer, value, ...: value) ->
-      (...: value)): Pattern
+    callback: function (string, integer, value, ...: value): (...: value)): Pattern
   local adapter:
-      (string, integer, value, ...: value) ->
-        (...: value) =
+      function (string, integer, value, ...: value): (...: value) =
     function(subject: string, position: integer,
              first: value, ...: value): (...: value)
       return callback(subject, position, first, ...)
@@ -448,9 +444,9 @@ end
 
 function fold_capture(
     pattern: Pattern,
-    callback: (value, ...: value) -> value): Pattern
+    callback: function (value, ...: value): (value)): Pattern
   local adapter:
-      (value, ...: value) -> value =
+      function (value, ...: value): (value) =
     function(accumulator: value, ...: value): value
       return callback(accumulator, ...)
     end
@@ -489,10 +485,9 @@ end
 
 function function_capture(
     pattern: Pattern,
-    callback: (value, ...: value) ->
-      (...: value)): Pattern
+    callback: function (value, ...: value): (...: value)): Pattern
   local adapter:
-      (value, ...: value) -> (...: value) =
+      function (value, ...: value): (...: value) =
     function(first: value, ...: value): (...: value)
       return callback(first, ...)
     end
@@ -591,7 +586,7 @@ function match(subject: string, candidate: value,
 end
 
 function gsub(subject: string, candidate: value,
-              replacement: (string) -> string): string
+              replacement: function (string): (string)): string
   _relabel_ensure_initialized()
   local compiled: Pattern = succeed()
   if candidate is Pattern then
@@ -603,7 +598,7 @@ function gsub(subject: string, candidate: value,
     raise "PEG expression must be a string or Pattern"
   end
 
-  local adapter: (value) -> string =
+  local adapter: function (value): (string) =
     function(found: value): string
       return replacement(found as string)
     end

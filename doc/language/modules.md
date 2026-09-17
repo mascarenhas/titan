@@ -36,7 +36,7 @@ A declaration is one of:
 * a **method** declaration: `function Name:method(...) ... end`, also
   covered in [Records](records.md) and [Unions](unions.md).
 
-```lua
+```titan
 -- Titan: a small but complete module (shapes.titan)
 record Circle                     -- record
     radius: float
@@ -110,7 +110,7 @@ than that sequence, with one deliberate frontier for module variables:
   module variables.** Ordinary import aliases are available regardless of
   placement to other declarations. At each module-variable declaration, its
   type annotation and initializer see only those aliases and module variables
-  that occur earlier in the logical order. The reserved `ffi` namespace already
+  that occur earlier in the logical order. The builtin `ffi` namespace already
   contains the complete ordered module C environment, including declarations
   and macros from foreign directives written later. They still see every record, union,
   Interface, type alias, ordinary function, method, nominal function, and
@@ -158,7 +158,7 @@ After its declarations, a module may have one root `do ... end` block for
 computed initialization that cannot be expressed by constant module-variable
 initializers:
 
-```lua
+```titan
 local ready: boolean = false
 
 local function prepare()
@@ -184,24 +184,43 @@ function frame through nested blocks, but does not flow into a function or
 lambda called or created from it. An explicit source import does not grant an
 importer's initializer authority over the producer's const slots.
 
+## Builtin names and keyword-named members
+
+`ffi` is a readonly builtin namespace binding. A declaration may shadow it;
+assignment cannot replace the builtin itself. In ordinary function and method
+bodies and the module initializer, `L` is the current Lua-state pointer and `M`
+identifies the current module. `M.member` selects an owner declaration even if a
+local shadows its name, and can select local module members. Body-local type
+annotations may use `M.Type` to select an owner type despite a local or generic
+shadow with that spelling. The explicit
+`M as foreign *Udata` cast exposes the module's native address at the trusted
+FFI boundary.
+
+Top-level declarations and member selectors admit keyword spellings where the
+grammar uses `AnyName`. Local bindings and parameters still require `Name`.
+Use `M.end`, for example, to select a module member named `end`. The primitive
+Titan type words `boolean`, `integer`, `float`, `string`, and `value` are not
+lexer-reserved words. Full productions are in [the grammar](grammar.md).
+
 ## Module variables
 
 A module-variable declaration has the form
 
-```lua
+```text
 -- Titan
-[local] <name> [: <type>] = <expression>
-[local] const <name> [: <type>] [= <expression>]
+[local] [const] <name> [: <type>] [= <expression>]
 ```
 
-The type annotation is optional when an initializer is present; without it the
-type is inferred from the initializer. With an annotation, the usual
+A declaration needs a type annotation, an initializer, or both; a bare name is
+not a module declaration. Module names have no `?` inference suffix; use an
+explicit optional type such as `state: State?`. With an initializer and no annotation, the type is
+inferred. A mutable or const variable may omit its initializer only when its
+explicit type admits nil, and then starts as nil/NULL. With an annotation, the usual
 [assignment adjustments](types.md#relations-and-boundaries-no-subtyping)
 apply, so `pi: float = 3` declares a float-typed variable holding `3.0`.
 
-An initialized const module variable is never assignable. A const declaration
-may omit its initializer only with an explicit type that admits the missing nil
-representation; the slot starts as nil/NULL and can be assigned only while code
+An initialized const module variable is never assignable. An initializer-less
+const slot can be assigned only while code
 executes directly in its owning root module initializer. Nested callables and
 other modules' initializers do not inherit that permission. The owner
 initializer may assign it conditionally or repeatedly; it becomes read-only
@@ -266,7 +285,7 @@ ordinary function call and is not constant.
 An `import` declaration makes another Titan module's exported members
 available under a local alias:
 
-```lua
+```text
 -- Titan
 local <localname> = import "<modname>"
 ```
@@ -309,7 +328,7 @@ Module `foo.bar` lives in flat source `foo/bar.titan`, folder source with main
 Through the alias, the importing module can use everything the imported
 module exports:
 
-```lua
+```titan
 -- Titan: geom/point.titan
 record Point
     x: float
@@ -323,7 +342,7 @@ function norm(p: Point): float
 end
 ```
 
-```lua
+```titan
 -- Titan: main.titan
 local geom = import "geom.point"
 
@@ -697,7 +716,7 @@ record/union/Interface identities and the same module variables.
 If exactly one of the modules given to `titanc` defines a function with
 the exact signature
 
-```lua
+```text
 -- Titan
 function main(args: {string}): integer
 ```
@@ -746,7 +765,7 @@ the `args` table is built. This startup contract is also why
 available in compiled Titan programs but not when the standard module is
 loaded by a Lua or other embedding host.
 
-```lua
+```titan
 -- Titan: hello.titan
 function main(args: {string}): integer
     return #args

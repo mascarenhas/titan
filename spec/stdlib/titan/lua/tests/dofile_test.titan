@@ -42,7 +42,7 @@ function test_lua_dofile_preserves_flexible_values_and_recovers_after_errors(
         end
         return count
       end
-    ]==]) as () -> integer
+    ]==]) as function (): (integer)
     local baseline_fds = count_fds()
     for _ = 1, 24 do
       test.assert(lua_support.caught_string(function ()

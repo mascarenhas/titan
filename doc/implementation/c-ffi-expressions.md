@@ -39,7 +39,7 @@ best-effort declaration conversion:
 
 Collecting this metadata first makes alias publication independent of
 declaration order. A real `typedef Item` always reserves the Titan spelling
-`ffi.Item`; a tag-only fallback never shadows it merely because the tag was
+`foreign Item`; a tag-only fallback never shadows it merely because the tag was
 converted first.
 
 For an eligible named `struct` or `union` with no same-name real typedef, the
@@ -53,16 +53,12 @@ Anonymous aggregates and enum tags receive no source alias in this iteration.
 An incomplete file-scope tag does receive an alias for pointer-only use; layout
 sinks consult visibility/completeness separately.
 
-Source-nameable C selectors use the raw contextual `lexer.CNAME`, not
-ordinary Titan `NAME`. It accepts the C identifier shape without rejecting a
-Titan keyword and is referenced only by C member/type grammar positions.
-Consequently headers may expose `when`, `repeat`, `type`, or another
-Titan-only keyword without reserving an escape syntax or making that spelling
-legal in ordinary Titan declarations. Named C prototype arguments retain the
-separate contextual `NAMEDLABEL` path. The parser marks the corresponding
-`Ast.VarDot`/`Ast.TypeQualName` with `_contextual_c_name`; the checker accepts
-that marker only after proving the qualifier is a C namespace/receiver, while
-the coder simply emits the stored spelling unchanged.
+Member selectors, named argument labels, and foreign type names use
+`lexer.ANYNAME`, which accepts keyword spellings such as `when`, `repeat`, and
+`type`. The same token serves the ordinary Titan grammar positions that admit
+keyword names. There is no C-only selector token or `_contextual_c_name`
+marker. The checker resolves the receiver or type namespace normally, and the
+coder emits the accepted C member spelling unchanged.
 
 ### One tag namespace per C scope
 
@@ -91,43 +87,39 @@ layout is required: by-value parameters/results/locals/casts, automatic object
 construction, fixed-array elements, allocation, `sizeof`/`alignof`, and aggregate
 field access. Typedefs and array elements are resolved recursively. Pointers to
 incomplete objects remain valid. Flexible-array-member structs are complete for
-`sizeof`/`alignof` and have the dedicated scalar `T.new(count)` allocation path;
+`sizeof`/`alignof` and have the dedicated scalar `foreign T.new(count)` allocation path;
 they remain ineligible for `T.new_array`.
 
-### Dual type/value lookup
+### Separate type/value lookup
 
-`Type.CModule` has separate `members` and `type_members`. Type syntax
-`ffi.stat` consults the type table. Expression lookup is value-first so a legal C
-function or variable named `stat` is not stolen by `struct stat`.
+`Type.CModule` retains `members` and `type_members` for the imported C graph.
+`Ast.TypeForeignName` selects primitive, imported, or authored foreign typedef
+names independently of lexical term lookup. Ordinary `Ast.TypeName` and
+`Ast.TypeQualName` resolve only the Titan type namespace.
 
-When only a type exists, expression lookup may synthesize a
-`Type.CTypeNamespace` for `.new`, `.new_array`, `.sizeof`, and `.alignof`.
-When both namespaces contain the spelling, those pseudo-members are
-intentionally unavailable and the checker emits a collision-specific
-diagnostic. This avoids parent-sensitive guessing and keeps real fields named
-`new`, `new_array`, or `alignof` ordinary fields. `sizeof` itself is a C
-keyword and cannot name a field.
+`Ast.ExpForeignType(type)` is the receiver for the dedicated
+`foreign T.new()`, `.new_array(n)`, `.sizeof`, and `.alignof` expressions.
+The checker exposes a syntax-bound pseudo declaration only for these
+operations; ordinary `ffi.member` lookup never manufactures a type namespace.
+Thus `ffi.stat(...)` and `foreign stat.new()` coexist without parent-sensitive
+collision resolution. Real aggregate fields named `new` remain fields.
 
-The checker records the target profile's authoritative `size_t` type on each
-`sizeof`/`alignof` pseudo-declaration. Code generation preserves that C result
-and uses the shared checked numeric conversion before producing Titan
-`integer`; it never emits an unchecked `size_t`-to-`lua_Integer` cast.
-Within a restricted foreign body, the pseudo-declaration's exposed type is
-that same native `size_t`, so raw C calls and local declarations need no
-Titan conversion.
+The target profile's authoritative `size_t` type stays on each layout
+pseudo-declaration. Code generation uses the shared checked numeric conversion
+before producing Titan `integer`; restricted foreign bodies retain native
+`size_t` directly.
 
-Contextual primitive type namespaces are self-contained. They and transparent
-Titan aliases whose complete C graph is built from contextual primitives may
-be serialized into compiled module interfaces. Namespaces derived from a
-foreign import remain source-local even when an imported typedef resolves to a
-portable primitive.
+Portable primitive/pointer/callback graphs can occur directly in compiled
+Titan signatures. Authored foreign aliases are actual header typedefs and stay
+source-only, just like imported header typedefs. Titan owned aliases use
+`Ast.TypeOwned` and keep their normal public embedded-type eligibility checks.
 
 ## Exact C declarators
 
 `titan-compiler/cdeclarator.lua` is the single renderer for C declarations,
 type names, and parameter adjustment:
 
-```lua
+```text
 render_type_name(type)
 render_declaration(type, name)
 adjust_parameter_type(type)
@@ -377,7 +369,7 @@ lowering emit the address of the original local, never the address of a copied
 argument temporary.
 Written pointer casts bypass this address selection and retain the existing
 pointer-value conversion. Mutation analysis follows the actual address plan,
-so an explicit `raw as **void` does not mark `raw` as mutated by the callee.
+so an explicit `raw as foreign *(*void)` does not mark `raw` as mutated by the callee.
 
 Before probing, recursive qualifier analysis rejects reachable `const` or
 `volatile` loss. Qualifiers attached through typedefs and array element types
@@ -423,22 +415,29 @@ try-spill analysis below.
 
 ## Target-directed automatic aggregates and fixed arrays
 
-The parser adds `Ast.TypeCArray` only to an initialized local target. A fixed
-`T[N]` or uncounted `T[]` is not a general Titan type form. The old
-initializer-less automatic-local production is gone; `.new()` and
-`.new_array(...)` make zero initialization explicit. The ordinary mutable
-local grammar may omit an RHS only for an explicit nil-bearing type; neither a
-direct C aggregate nor a fixed C array is such a type, and every const local
-still requires an expression list.
+`Ast.TypeCArray` represents unsized foreign arrays. At a direct initialized
+local sink, `foreign T[]` becomes the existing uncounted borrowed pointer view.
+There is no written `T[N]` source form. The ordinary local grammar still requires
+an initializer for aggregates/fixed arrays and every const local.
 
 During `StatDecl` checking, the result-demand callback identifies a direct
-allocation sink. `_plan_c_allocation` records one immutable plan on the call and
-declaration. An inferred/by-value eligible struct or union `.new()` becomes
-`automatic_object`; an explicit owner remains owned, and a raw pointer target
-uses hidden rooted owner backing. A positive literal array count can become
-`automatic_array` or `automatic_array_borrow`; dynamic/zero borrowed views use
-hidden owner backing. A written fixed extent must be positive and match the
-literal count. Whole-array assignment, return, and capture remain rejected.
+allocation sink. `_plan_c_allocation` records the storage plan on the call and
+declaration. Eligible inferred/by-value structures select `automatic_object`;
+explicit owners stay owned and raw pointer targets use hidden owner backing.
+A positive integer literal or eligible object-like integer macro array count
+selects `automatic_array` or `automatic_array_borrow`. Dynamic/zero borrowed
+views use hidden owner backing. There is no automatic-allocation size threshold.
+Whole-array assignment, return, and capture remain rejected.
+
+`foreigntypes.convert` retains a successfully evaluated integer macro's exact
+decimal constant alongside its C type. The namespace member stores
+`_c_integer_constant`, and the converted-foreign-cache schema preserves it.
+Allocation selection admits only directly resolved namespace constants whose
+value fits the required integer extent; macros that denote ordinary C variables
+have no constant metadata. No host arithmetic evaluation or general constant
+folder is introduced.
+
+
 
 The coder consumes only that plan. Automatic declarations emit exact C storage
 with `{0}`; borrowed automatic arrays add a pointer to their separate fixed

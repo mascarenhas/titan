@@ -1,5 +1,5 @@
 local os = import "os"
-local str = import "string"
+local string = import "string"
 
 interface Reader
   function read(): string?
@@ -51,10 +51,10 @@ record InputOutputStream
 end
 
 function print(...: value)
-  local builder = str.writer()
+  local builder = string.writer()
   local index = 1
   while index <= #... do
-    local rendered = str.tostring(...[index])
+    local rendered = string.tostring(...[index])
     local separator = ""
     if index > 1 then separator = "\t" end
     builder:write(separator .. rendered)
@@ -75,8 +75,8 @@ local function next_line(reader: ReaderCloser): string?
 end
 
 function lines(reader: ReaderCloser):
-    ((ReaderCloser) -> string?, ReaderCloser, nil,
-     (ReaderCloser) -> ())
+    (function (ReaderCloser): (string?), ReaderCloser, nil,
+     function (ReaderCloser): ())
   return next_line, reader, nil, close_reader
 end
 

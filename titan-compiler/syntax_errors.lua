@@ -4,6 +4,11 @@ local errors = {
     -- The `fail` label is the default "parsing failed" error number
     fail = "Syntax Error",
 
+    TopLevelDecl = "Expected a complete top-level declaration.",
+    Statement = "Expected a complete statement.",
+    ExpSuffix = "Expected a member, call, or bracket suffix.",
+    ExpReturn = "Expected an expression in the return list.",
+
     --
     -- Lexer errors
     -- (tested in spec/lexer_spec.lua)
@@ -38,15 +43,15 @@ local errors = {
 
    TypeFunc = "Expected a type in function declaration.",
 
-   NameTypeParam = "Expected a type parameter name after '<' or ','.",
+   NameTypeParam = "Expected a type parameter name after '<|' or ','.",
 
    TypeParamConstraint = "Expected an Interface application after ':' in type parameter constraint.",
 
-   RAngleTypeParams = "Expected '>' to close the type parameter list.",
+   RAngleTypeParams = "Expected '|>' to close the type parameter list.",
 
-   TypeArgument = "Expected a type argument after '<' or ','.",
+   TypeArgument = "Expected a type argument after '<|' or ','.",
 
-   RAngleTypeArgs = "Expected '>' to close the type argument list.",
+   RAngleTypeArgs = "Expected '|>' to close the type argument list.",
 
    GenericForeignFunc = "Foreign functions cannot declare type parameters.",
 
@@ -90,7 +95,17 @@ local errors = {
 
    NameUnionVariant = "Expected a variant name after 'local'.",
 
-   TypeUnionVariant = "Expected a payload type after ':'.",
+   TypeUnionVariant = "Expected a union variant payload type.",
+
+   LParenVariant = "Expected '(' after the variant name.",
+
+   RParenVariant = "Expected ')' after the variant payload or binding.",
+
+   ForeignReturnColon = "Expected ':' before the foreign function result type.",
+
+   ForeignTypeMember = "Expected an allocation or layout operation after the foreign type.",
+
+   AssignField = "Expected '=' after the constructor field key.",
 
    EndUnion = "Expected 'end' to close the union.",
 
@@ -155,7 +170,7 @@ local errors = {
 
     COwnedShape = "Expected '*' for one owned C object or '[]' for a counted owned C array after 'owned'.",
 
-    OwnedPayload = "Expected a C object type after the owned storage marker.",
+    OwnedPayload = "Expected a foreign type after 'owned'.",
 
     RBracketCOwned = "Expected ']' to close a counted owned C array type.",
 

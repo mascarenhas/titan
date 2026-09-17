@@ -8,7 +8,7 @@ persistent stream handle.
 The goal is not a one-for-one public wrapper around libuv. Add only the native
 surface needed by a high-level standard module and normally keep FFI types
 inside `titan.uv`. A deliberately portable public native boundary such as
-`async.run_foreign(f: foreign (*void) -> (), arg: *void)` is the narrow
+`async.run_foreign(f: foreign function (*void): void, arg: foreign *void)` is the narrow
 exception; it must use only contextual C primitives and their exportable
 structural closure. Preserve the central equivalence:
 
@@ -235,9 +235,8 @@ The current DNS owner is:
 
 ```titan
 local record uv_getaddrinfo_t
-  local native: owned *ffi.uv_getaddrinfo_t
-  local callback: (uv_getaddrinfo_t, integer,
-                   *void) -> ()
+  local native: owned *uv_getaddrinfo_t
+  local callback: function (uv_getaddrinfo_t, integer, foreign *void): ()
 end
 ```
 
@@ -513,13 +512,13 @@ example. `new_tcp` plus `TcpRole` is the persistent multi-shot example.
 
 An imported libuv handle type cannot appear in an exported module interface;
 its graph depends on `uv.h`, not only contextual portable primitives. Define
-one ordinary Titan wrapper that owns `*ffi.uv_X_t` locally, plus only its
+one ordinary Titan wrapper that owns `foreign *uv_X_t` locally, plus only its
 callbacks, Runtime identity, root index, and inherent persistent state. Public
 facades hold the wrapper as an opaque `uv` record and expose ordinary Titan
 records, unions, Interfaces, strings, numbers, and options.
 
-For a stream subtype, add small local conversions to `*ffi.uv_stream_t` and
-`*ffi.uv_handle_t`. For another handle, add only the handle conversion.
+For a stream subtype, add small local conversions to `foreign *uv_stream_t` and
+`foreign *uv_handle_t`. For another handle, add only the handle conversion.
 Centralizing casts makes generic close and state calls visible without a
 parallel kind tag.
 

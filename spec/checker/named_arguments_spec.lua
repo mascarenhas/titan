@@ -231,7 +231,7 @@ describe("named arguments (typechecker)", function()
             [[
                 function direct(x: integer): integer return x end
                 function run(): integer
-                    local f: (integer) -> integer = direct
+                    local f: function (integer): integer = direct
                     return f { x = 1 }
                 end
             ]],
@@ -251,7 +251,7 @@ describe("named arguments (typechecker)", function()
             [[
                 function direct(x: integer): integer return x end
                 function run(): integer
-                    local fs: {(integer) -> integer} = { direct }
+                    local fs: {function (integer): integer} = { direct }
                     return fs[1] { x = 1 }
                 end
             ]],
@@ -392,12 +392,12 @@ describe("named arguments (typechecker)", function()
             ]], function(header)
                 local ok, err = run_checker(
                     "foreign import \"" .. header .. [["
-                    local function callback(cb: ffi.ffi_callback): integer
+                    local function callback(cb: foreign ffi_callback): integer
                         return cb { value = 1 } as integer
                     end
                     local function constructors()
-                        local one = ffi.ffi_int.new {}
-                        local many = ffi.ffi_int.new_array { count = 2 }
+                        local one = foreign ffi_int.new {}
+                        local many = foreign ffi_int.new_array { count = 2 }
                     end
                 ]])
                 assert.falsy(ok)
@@ -458,7 +458,7 @@ describe("named arguments (typechecker)", function()
                     end
 
                     local record PointerBox
-                        pointer: *ffi.ffi_node
+                        pointer: foreign *ffi_node
                     end
 
                     local function construct(): Outer

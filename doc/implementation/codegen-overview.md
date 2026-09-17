@@ -160,7 +160,7 @@ registry is unchanged.
 
 A trimmed but real example (elisions marked `...`) — this module:
 
-```lua
+```titan
 -- counter.titan
 x = 1
 function inc(n: integer): integer
@@ -513,10 +513,9 @@ if (TITAN_LIKELY(runtime_tag == <function-type tag>)) {
 Those tags are the `static const void *` identities allocated by
 `function_type_tag` and publish-or-recovered through the Lua registry so
 source-linked and `.so`-loaded modules agree on the pointer for the same exact
-type. C-free shapes use `types.tostring(ftype)`; exportable C-bearing shapes
-use their canonical serialized descriptor so nested declarator qualifiers
-cannot collide; header-dependent C shapes add their defining module scope.
-Exact
+type. All shapes use `types.runtime_identity(ftype)`, which retains nested
+declarator qualifiers and adds C declaration origins to header-dependent shapes.
+The same C declaration shares identity across modules. Exact
 pointer equality is sufficient evidence for the private Titan layout under
 the same trusted-debug/C-API invariant as the closure upvalues themselves; the
 hot branch neither queries the Lua registry nor rechecks the module, native
@@ -525,7 +524,7 @@ minimum and reads the tag's raw pointer bits, so no `ttis*` discriminator is
 needed on this trusted private slot.
 
 Matching the tag is stricter than gradual consistency. A Titan
-`(value) -> integer` viewed as `(integer) -> integer` through a dynamic
+`function (value): (integer)` viewed as `function (integer): (integer)` through a dynamic
 `value` round trip has no statically known source Function edge, so its tag does
 not match and it cannot use this branch. By contrast, a direct checker-approved
 non-exact `A -> B` cast may conditionally realize a closure tagged B; that
@@ -708,7 +707,7 @@ inventing side storage.
 
 Each lambda's native, coercive-Lua, and strict-generic entries are **hoisted
 to file scope** and
-emitted alongside the top-level functions, named `<modprefix>lambda_<N>`.
+emitted alongside the top-level functions, named `<modprefix>lambda_<|N|>`.
 Because a lambda nested inside another lambda is discovered only while the
 outer one's body is generated, the emission loop drains the lambda list
 with an index-based `while` that re-reads its length each iteration rather

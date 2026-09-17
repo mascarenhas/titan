@@ -139,10 +139,10 @@ describe("typechecker rehydration of .so-only imports", function()
     it("rehydrates a higher-order / first-class function signature", function ()
         local dep = { name = "hofoo", src = [[
             function inc(x: integer): integer return x + 1 end
-            function apply(f: (integer) -> integer, x: integer): integer
+            function apply(f: function (integer): integer, x: integer): integer
                 return f(x)
             end
-            function adder(): (integer) -> integer
+            function adder(): function (integer): integer
                 return inc  -- a function value of the rehydrated return type
             end
         ]] }
@@ -158,7 +158,7 @@ describe("typechecker rehydration of .so-only imports", function()
         local good2 = so_check({ dep }, "hobar", [[
             local f = import "hofoo"
             function bar(): integer
-                local g: ((integer) -> integer, integer) -> integer = f.apply
+                local g: function (function (integer): integer, integer): integer = f.apply
                 return g(f.adder(), 5)
             end
         ]])
@@ -375,9 +375,9 @@ describe("typechecker rehydration of .so-only imports", function()
                 local point = import "rhunionpoint"
 
                 union Message
-                    quit
-                    local hidden: integer
-                    move: point.Delta
+                    quit()
+                    local hidden(integer)
+                    move(point.Delta)
                 end
 
                 function hidden_message(): Message
@@ -396,9 +396,9 @@ describe("typechecker rehydration of .so-only imports", function()
                 local make = api.Message.move
                 local message = make(api.delta(1.0, 2.0))
                 case message
-                when move: delta then
+                when move(delta) then
                     return delta.x + delta.y
-                when quit then
+                when quit() then
                     return 0.0
                 else
                     return -1.0
@@ -407,9 +407,9 @@ describe("typechecker rehydration of .so-only imports", function()
 
             function hidden_falls_through(): integer
                 case api.hidden_message()
-                when quit then
+                when quit() then
                     return 0
-                when move: delta then
+                when move(delta) then
                     return 1
                 else
                     return 17
@@ -640,7 +640,7 @@ describe("typechecker rehydration of .so-only imports", function()
             function bar(): integer return f.sum(1, 2, 3) end
             function empty(): integer return f.sum() end
             function asvalue(): integer
-                local g: (...: integer) -> integer = f.sum  -- recovered varargtype
+                local g: function (...: integer): integer = f.sum  -- recovered varargtype
                 return g(4, 5)
             end
         ]])

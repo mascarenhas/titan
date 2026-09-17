@@ -1,5 +1,5 @@
 local uv = import "uv.titan"
-local str = import "string"
+local string = import "string"
 foreign import "time.h"
 foreign import "locale.h"
 foreign import "string.h"
@@ -37,7 +37,7 @@ record SpawnConfig
   local handle: uv.uv_spawn_config
 end
 
-type SpawnOption = (SpawnConfig) -> integer
+type SpawnOption = function (SpawnConfig): (integer)
 
 record InputStream
   local handle: uv.uv_stdio_t?
@@ -66,7 +66,7 @@ stdout: OutputStream = OutputStream.new(nil, 1)
 stderr: OutputStream = OutputStream.new(nil, 2)
 
 local function byte_at(text: string, index: integer): integer
-  local bytes = text as const *unsigned char
+  local bytes = text as foreign const *unsigned char
   return bytes[index - 1] as integer
 end
 
@@ -110,18 +110,18 @@ local function validate_date_format(format: string)
         index = index + 1
         if index > #format then
           raise "invalid conversion specifier '%" ..
-                str.sub(format, index - 1) .. "'"
+                string.sub(format, index - 1) .. "'"
         end
         conversion = byte_at(format, index)
         local choices = after_e
         if modifier == 79 then choices = after_o end
         if not contains_conversion(choices, conversion) then
           raise "invalid conversion specifier '%" ..
-                str.sub(format, index - 1, index) .. "'"
+                string.sub(format, index - 1, index) .. "'"
         end
       elseif not contains_conversion(ordinary, conversion) then
         raise "invalid conversion specifier '%" ..
-              str.sub(format, index, index) .. "'"
+              string.sub(format, index, index) .. "'"
       end
     end
     index = index + 1
@@ -129,7 +129,7 @@ local function validate_date_format(format: string)
 end
 
 local function formatted_date(format: string,
-                              calendar: *ffi.tm): string
+                              calendar: foreign *tm): string
   if #format == 0 then return "" end
   validate_date_format(format)
 
@@ -145,16 +145,16 @@ local function formatted_date(format: string,
   if maximum < capacity then maximum = capacity end
 
   while true do
-    local buffer = char.new_array(capacity)
+    local buffer = foreign char.new_array(capacity)
     local written = ffi.strftime(
-      buffer, capacity as ffi.size_t, format, calendar)
+      buffer, capacity as foreign size_t, format, calendar)
     if written ~= 0 then
       local length = written as integer
-      local result = char.new_array(length)
+      local result = foreign char.new_array(length)
       ffi.memcpy(
-        result as *char,
-        buffer as const *char,
-        written as ffi.size_t)
+        result as foreign *char,
+        buffer as foreign const *char,
+        written as foreign size_t)
       return result as string
     end
     if capacity >= maximum then return "" end
@@ -168,7 +168,7 @@ local function formatted_date(format: string,
 end
 
 local function checked_time_field(number: integer, delta: integer,
-                                  name: string): int
+                                  name: string): foreign int
   if number >= 0 then
     if number > 2147483647 + delta then
       raise "time field '" .. name .. "' is out of range"
@@ -176,10 +176,10 @@ local function checked_time_field(number: integer, delta: integer,
   elseif number < -2147483648 + delta then
     raise "time field '" .. name .. "' is out of range"
   end
-  return (number - delta) as int
+  return (number - delta) as foreign int
 end
 
-local function locale_category(name: string): int
+local function locale_category(name: string): foreign int
   if name == "all" then return ffi.LC_ALL end
   if name == "collate" then return ffi.LC_COLLATE end
   if name == "ctype" then return ffi.LC_CTYPE end
@@ -242,7 +242,7 @@ local function read_input_until(stream: InputStream, delimiter: string,
   if captured_input_is_closed(stream) then return nil end
   if #delimiter == 0 then raise "read delimiter must not be empty" end
 
-  local builder = str.writer()
+  local builder = string.writer()
   local tail = ""
   while true do
     local chunk? = read_stream(stream)
@@ -256,16 +256,16 @@ local function read_input_until(stream: InputStream, delimiter: string,
     local bytes = chunk as string
     local boundary = bytes
     if #tail > 0 then boundary = tail .. bytes end
-    local match: integer? = str.find(boundary, delimiter)
+    local match: integer? = string.find(boundary, delimiter)
     if match then
       local match_first = match as integer
       local match_end = match_first + #delimiter - 1
       local result_end = match_end
       if chop then result_end = match_first - 1 end
       if result_end > 0 then
-        builder:write(str.sub(boundary, 1, result_end))
+        builder:write(string.sub(boundary, 1, result_end))
       end
-      stream.excess = str.sub(boundary, match_end + 1)
+      stream.excess = string.sub(boundary, match_end + 1)
       return builder:drain()
     end
     local keep = #delimiter - 1
@@ -275,10 +275,10 @@ local function read_input_until(stream: InputStream, delimiter: string,
       if committed == #boundary then
         builder:write(boundary)
       else
-        builder:write(str.sub(boundary, 1, committed))
+        builder:write(string.sub(boundary, 1, committed))
       end
     end
-    tail = str.sub(boundary, committed + 1)
+    tail = string.sub(boundary, committed + 1)
   end
   return nil
 end
@@ -289,8 +289,8 @@ end
 
 function difftime(later: integer, earlier: integer): float
   return ffi.difftime(
-    later as ffi.time_t,
-    earlier as ffi.time_t) as float
+    later as foreign time_t,
+    earlier as foreign time_t) as float
 end
 
 function date(format: string?, timestamp: integer?): value
@@ -301,12 +301,12 @@ function date(format: string?, timestamp: integer?): value
   local utc = false
   if #actual_format > 0 and byte_at(actual_format, 1) == 33 then
     utc = true
-    actual_format = str.sub(actual_format, 2)
+    actual_format = string.sub(actual_format, 2)
   end
 
-  local instant = uv.os_time() as ffi.time_t
+  local instant = uv.os_time() as foreign time_t
   if timestamp then
-    instant = (timestamp as integer) as ffi.time_t
+    instant = (timestamp as integer) as foreign time_t
   end
   local calendar = ffi.localtime(instant)
   if utc then calendar = ffi.gmtime(instant) end
@@ -378,22 +378,22 @@ function time(year: integer?, month: integer?, day: integer?,
   if min then actual_minute = min as integer end
   if sec then actual_second = sec as integer end
 
-  local calendar = ffi.tm.new()
+  local calendar = foreign tm.new()
   calendar.tm_year = checked_time_field(year as integer, 1900, "year")
   calendar.tm_mon = checked_time_field(month as integer, 1, "month")
   calendar.tm_mday = checked_time_field(day as integer, 0, "day")
   calendar.tm_hour = checked_time_field(actual_hour, 0, "hour")
   calendar.tm_min = checked_time_field(actual_minute, 0, "min")
   calendar.tm_sec = checked_time_field(actual_second, 0, "sec")
-  calendar.tm_isdst = -1 as int
+  calendar.tm_isdst = -1 as foreign int
   if isdst == false then
-    calendar.tm_isdst = 0 as int
+    calendar.tm_isdst = 0 as foreign int
   elseif isdst == true then
-    calendar.tm_isdst = 1 as int
+    calendar.tm_isdst = 1 as foreign int
   end
 
   local instant = ffi.mktime(calendar)
-  if instant == (-1 as ffi.time_t) then
+  if instant == (-1 as foreign time_t) then
     raise "time result cannot be represented in this installation"
   end
   return instant as integer

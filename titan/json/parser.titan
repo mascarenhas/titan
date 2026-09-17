@@ -167,16 +167,16 @@ end
 
 local function json_parse_utf8(codepoint: integer): string
   if codepoint < 0x80 then
-    return strings.char(codepoint)
+    return string.char(codepoint)
   elseif codepoint < 0x800 then
-    return strings.char(0xC0 + (codepoint >> 6),
+    return string.char(0xC0 + (codepoint >> 6),
                         0x80 + (codepoint & 0x3F))
   elseif codepoint < 0x10000 then
-    return strings.char(0xE0 + (codepoint >> 12),
+    return string.char(0xE0 + (codepoint >> 12),
                         0x80 + ((codepoint >> 6) & 0x3F),
                         0x80 + (codepoint & 0x3F))
   end
-  return strings.char(0xF0 + (codepoint >> 18),
+  return string.char(0xF0 + (codepoint >> 18),
                       0x80 + ((codepoint >> 12) & 0x3F),
                       0x80 + ((codepoint >> 6) & 0x3F),
                       0x80 + (codepoint & 0x3F))
@@ -189,7 +189,7 @@ local function json_parse_string(
   local budget: ParseBudget = budget_value
   local source = budget.source
   local closing = after - 1
-  local output = strings.writer()
+  local output = string.writer()
   defer output:close()
   local cursor = first + 1
   local plain_start = cursor
@@ -198,7 +198,7 @@ local function json_parse_string(
       cursor = cursor + 1
     else
       if plain_start < cursor then
-        output:write(strings.sub(source, plain_start, cursor - 1))
+        output:write(string.sub(source, plain_start, cursor - 1))
       end
       local escape_position = cursor
       local escaped = json_parse_byte(source, cursor + 1)
@@ -241,7 +241,7 @@ local function json_parse_string(
     end
   end
   if plain_start < closing then
-    output:write(strings.sub(source, plain_start, closing - 1))
+    output:write(string.sub(source, plain_start, closing - 1))
   end
   return Node.new("string", first, output:drain(), nil, nil)
 end

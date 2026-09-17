@@ -5,7 +5,7 @@ A Titan function normally has a fixed result list: `integer`,
 trailing run whose length is chosen at run time. The fixed prefix is followed
 by zero or more values of one declared type:
 
-```lua
+```titan
 function names(): (...: string)
     return "Ada", "Grace", "Edsger"
 end
@@ -25,7 +25,7 @@ the complete run that actually exists.
 
 The flexible tail is written last inside a parenthesized return list:
 
-```lua
+```titan
 function only_tail(): (...: integer)
 end
 
@@ -37,8 +37,8 @@ function both_directions(n: integer, ...: string): (boolean, ...: value)
     return n > 0
 end
 
-local f: () -> (...: integer) = only_tail
-local g: (integer, ...: string) -> (boolean, ...: value) = both_directions
+local f: function (): (...: integer) = only_tail
+local g: function (integer, ...: string): (boolean, ...: value) = both_directions
 ```
 
 The same syntax is available on every Titan callable declaration: exported
@@ -51,7 +51,7 @@ The parentheses are mandatory whenever the result list has a flexible tail.
 The tail must be last, may appear only once, and must include its type. Thus
 these forms are errors:
 
-```lua
+```text
 function unparenthesized(): ...: integer       -- must be inside (...)
 function not_last(): (...: integer, string)    -- must be last
 function missing_type(): (...)                 -- needs : type
@@ -74,7 +74,7 @@ Most expression positions ask for a known, finite number of values. When such
 a position reaches beyond a flexible function's fixed prefix, each requested
 tail position has type `T?`, because that particular value may be absent.
 
-```lua
+```titan
 function measurements(short: boolean): (...: integer)
     if short then
         return 10
@@ -98,7 +98,7 @@ Assigning a projected `T?` to a non-option `T` uses Titan's ordinary option
 force. It is accepted statically and raises the usual nil-unwrap error if the
 position is absent at run time:
 
-```lua
+```titan
 function require_second(short: boolean): integer
     local first: integer?, second: integer = measurements(short)
     return second       -- raises when short is true
@@ -119,7 +119,7 @@ Surplus results are ignored by a finite consumer. If a fixed-only call has too
 few results, however, the existing arity error remains: only a declared
 flexible tail can represent a possibly absent requested position.
 
-```lua
+```titan
 function pair(): (integer, string)
     return 7, "seven"
 end
@@ -147,7 +147,7 @@ The final producer can also be an Array, integer-Map, or variadic
 [spread expression](spread-expressions.md). In that case the selected range,
 rather than a callable's result tail, supplies the run-time-sized sequence.
 
-```lua
+```titan
 function names(): (...: string)
     return "Ada", "Grace", "Edsger"
 end
@@ -189,7 +189,7 @@ parenthesized expressions are never open sinks.
 
 An open context does not reveal results hidden by a narrower static function
 type. If a callable that can return `(integer, ...: integer)` is stored in a
-slot typed `() -> integer`, calls through that slot expose one integer even in
+slot typed `function (): (integer)`, calls through that slot expose one integer even in
 a positional container or flexible-return context. The callable's static type
 remains the contract visible to its caller.
 
@@ -200,19 +200,19 @@ from the positional arguments and from the results demanded by the
 surrounding context, then performs the ordinary run-time callable and boundary
 type checks.
 
-```lua
+```titan
 function call_one(f: value): integer
-    local n: integer = f()     -- treat f as () -> integer here
+    local n: integer = f()     -- treat f as function (): integer here
     return n
 end
 
 function call_maybe(f: value): integer?
-    local n: integer? = f()    -- treat f as () -> integer? here
+    local n: integer? = f()    -- treat f as function (): integer? here
     return n
 end
 
 function call_all(f: value): {integer}
-    return { f() }             -- treat f as () -> (...: integer) here
+    return { f() }             -- treat f as function (): (...: integer) here
 end
 
 function call_for_effect(f: value): ()
@@ -229,7 +229,7 @@ end
 ```
 
 The generic `for` call temporarily treats `factory` as
-`() -> (value, value, value, value)`, for the iterator, state, initial control,
+`function (): (value, value, value, value)`, for the iterator, state, initial control,
 and optional close slots. Missing results are padded with `nil`; in particular,
 a missing or explicit `nil` close from a `value` factory means that no close
 call is made. The iterator and any non-`nil` close value are then checked
@@ -240,7 +240,7 @@ The synthesized parameter types come from the positional argument expression
 list. A known finite result position contributes its expected type; an
 inferred finite position with no expected type becomes `value`:
 
-```lua
+```titan
 function infer(f: value): value
     local result = f()         -- result is value
     return result
@@ -290,7 +290,7 @@ Positional Titan calls follow Lua's downward adjustment rule. Every explicit
 argument expression is evaluated exactly once, from left to right, but a
 non-variadic Titan function observes only its declared fixed parameters:
 
-```lua
+```titan
 function take_one(n: integer): ()
 end
 
@@ -308,7 +308,7 @@ Finite result consumers likewise ignore surplus values. Explicit surplus
 expressions are still evaluated for their effects, so a fixed-return function
 may write more expressions than its declaration exposes:
 
-```lua
+```titan
 function answer(): integer
     return 42, record_effect() -- record_effect() runs; its result is discarded
 end
@@ -371,19 +371,19 @@ For inputs:
   own callable adjustment. Ordinary numeric, Option, C, or Interface-wrapper
   coercions are rejected rather than lifted through the function type.
 
-```lua
+```titan
 function first(n: integer): integer
     return n
 end
 
-local wider_call: (integer, string) -> integer = first -- accepted
+local wider_call: function (integer, string): (integer) = first -- accepted
 -- wider_call(7, "ignored") calls first(7)
 
 function second(first: value, following: value): value
     return following
 end
 
-local adjusted: (value, ...: value) -> value = second -- accepted
+local adjusted: function (value, ...: value): (value) = second -- accepted
 -- adjusted("a") supplies nil to second's second parameter
 -- adjusted("a", "b", "ignored") returns "b"
 ```
@@ -409,7 +409,7 @@ For results:
   rejected. Neither flexible projection nor `nil_fill_result` is a component
   coercion, so neither makes a fixed `T` result adjustable to fixed `T?`.
 
-```lua
+```titan
 function pair(): (integer, integer)
     return 1, 2
 end
@@ -418,15 +418,15 @@ function numbers(): (...: integer)
     return 1, 2, 3
 end
 
-local one: () -> integer = pair                    -- second result is hidden
-local run: () -> (...: integer) = pair             -- finite pair, then the run ends
-local maybe_one: () -> integer? = numbers          -- safe finite projection
-local required_one: () -> integer = numbers        -- raises if the run is empty
+local one: function (): (integer) = pair                    -- second result is hidden
+local run: function (): (...: integer) = pair             -- finite pair, then the run ends
+local maybe_one: function (): (integer?) = numbers          -- safe finite projection
+local required_one: function (): (integer) = numbers        -- raises if the run is empty
 
 function done(): ()
 end
-local absent: () -> integer? = done                -- fixed nil_fill_result
-local bad: () -> integer = done                    -- rejected
+local absent: function (): (integer?) = done                -- fixed nil_fill_result
+local bad: function (): (integer) = done                    -- rejected
 ```
 
 The familiar contravariant/covariant vocabulary approximates the alignment,
@@ -434,13 +434,13 @@ but Titan does not define a subtyping relation around it. Gradual consistency
 applies only to the directly aligned components, and the complete callable
 adjustment remains directional.
 
-```lua
+```titan
 function n(): integer
     return 1
 end
 
-local bad_float: () -> float = n       -- rejected: no result coercion lifting
-local bad_option: () -> integer? = n   -- rejected: fixed T -> fixed T? does not lift
+local bad_float: function (): (float) = n       -- rejected: no result coercion lifting
+local bad_option: function (): (integer?) = n   -- rejected: fixed T -> fixed T? does not lift
 ```
 
 Callable adjustment is not exact identity. A finite non-exact assignment
@@ -449,7 +449,7 @@ is an exact eligible Titan source value. Calls through that wrapper use its
 checker-frozen native adapter. Lua/noncallable/differently tagged/max-upvalue
 operands stay unchanged and retain the strict branded or ordinary Lua generic
 path. Either form prevents results outside the expected static type from
-escaping: storing `numbers` in `() -> integer` makes calls through that slot
+escaping: storing `numbers` in `function (): (integer)` makes calls through that slot
 finite one-result calls, including inside an open sink. Re-evaluating a realized
 adjustment creates another identity; there is no cache. See
 [Closure adjustment wrappers](closure-adjustment-wrappers.md),

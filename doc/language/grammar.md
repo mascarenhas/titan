@@ -1,75 +1,58 @@
 # The Titan grammar
 
-This chapter is the reference grammar of Titan as implemented by the
-0.6.0 prototype compiler: lexical conventions, the complete syntactic
-grammar, operator precedence, and the restrictions the EBNF alone does
-not show. It replaces the old manual's stale grammar.
-
-The notation is extended BNF, as in the Lua manual: `{A}` means zero or
-more As, `[A]` an optional A, and `|` separates alternatives. Keywords
-and quoted symbols (`'('`) are terminals; **Name**, **NamedLabel**, **CName**,
-**Numeral**, and **LiteralString** are the lexical categories defined below.
-Whitespace and comments may appear between any two tokens. A source file must parse
-as one complete `program`; trailing text is a compile-time (syntax)
-error.
-
-*Implementation note:* this grammar transcribes the scannerless
-LPegLabel grammar of `parser.lua` — see
-[its internals chapter](../implementation/lexer-parser.md).
+This chapter specifies Titan's current source syntax. `{A}` means zero or more
+As, `[A]` means an optional A, and `|` separates alternatives. Keywords and
+quoted punctuation are terminals. Whitespace and comments may separate tokens.
+A file must match one complete `program`; trailing text is a syntax error.
+The parser uses bounded token lookahead and incremental fold captures; see
+[lexer and parser implementation](../implementation/lexer-parser.md).
 
 ## Lexical conventions
 
 ### Identifiers and reserved words
 
-The compiler owns the binding `ffi` for the module C namespace. It remains an
-identifier token, but a Titan declaration cannot shadow it. C members named
-`ffi` are unaffected; this restriction concerns the Titan binding.
+**Name** matches ASCII `[A-Za-z_][A-Za-z0-9_]*` except reserved words.
+**AnyName** has the same spelling and admits reserved words. The latter is used
+for top-level declarations, type names, nominal members, dot/colon selectors,
+and named fields where surrounding punctuation identifies the role.
 
-A **Name** is any ASCII sequence matching `[A-Za-z_][A-Za-z0-9_]*` that
-is not a reserved word. Tokenization is longest-match, so `andy`,
-`return17`, and `_end` are names. The reserved words are:
+The reserved words are:
 
+```text
+and     as     break   case    catch   const   defer   do      else
+elseif  end    false   finally for     foreign function goto  if
+import  in     interface is    local   nil     not     or      owned
+raise   record repeat  return  then    true    type    union   until
+when    while
 ```
-and       as      boolean  break     case    catch   const   defer  do      else
-elseif    end     false    finally   float   for     foreign function
-goto      if      import   in        integer interface is    local   nil
-not       or      owned    raise     record  repeat  return  string  then
-true      type    union    until     value   when    while
-```
 
-`in` is used by the generic `for ... in` statement. `goto` and `finally` are
-reserved but unused by surface grammar; cleanup is written with `defer`, and
-there are no user-written `finally` blocks. `::` is recognized by the lexer but
-used by no grammar rule — there are no labels. (`break` *is* a statement — see
-[statements](statements.md#break-no-goto).) The type keywords `boolean`,
-`float`, `integer`, `nil`, `string`, and `value` are reserved too, so
-they cannot name variables, functions, or fields (`local integer:
-integer = 10` is a syntax error).
+`goto` and `finally` remain reserved without surface productions. The type words
+`boolean`, `integer`, `float`, `string`, and `value` are contextual identifiers,
+as are C primitive words in foreign types. Tokenization uses longest match:
+`integer_count`, `return17`, and `_end` are names. Contextual type primitives
+retain their defined meaning in an unqualified primitive type position.
 
-A **NamedLabel** has the same raw ASCII spelling as a Name but does not exclude
-reserved words. It is used only immediately before `=` in a named call's brace
-list, so `f { repeat = 1 }` is legal without making `repeat` a legal variable,
-declaration, or record-field name.
-
-A **CName** has the same raw spelling and is accepted only in a contextual
-qualified member/type position that the checker resolves through a C
-`foreign import`. This permits C symbols named `when`, `type`, `interface`,
-`repeat`, or another Titan keyword without making those spellings legal
-ordinary Titan identifiers.
+`ffi` is a readonly builtin term binding for C values, and ordinary declarations
+may shadow it. Foreign type lookup has its own unqualified namespace and does
+not depend on that binding. Ordinary function/method bodies and the module
+initializer also bind readonly `L` to the current Lua-state pointer and `M` to
+the current module. `M.member` can select local members and keyword-named
+members; body-local type annotations can use `M.Type` despite local or generic
+shadows; `M` can be cast to the specified foreign Udata pointer. Methods bind
+`self` to their receiver. Foreign function bodies do not receive `L` or `M`.
 
 ### Other tokens
 
-The symbolic tokens are:
-
-```
-+   -   *   /   //  %   ^   #   &   ~   |   <<  >>  ..
-==  ~=  <   >   <=  >=  =
-(   )   [   ]   {   }   ;   :   ,   .   ... ->  ?
+```text
++ - * / // % ^ # & ~ | << >> ..
+== ~= < > <= >= = <| |>
+( ) [ ] { } ; : , . ... ?
 ```
 
-`->` (function types), `?` (option types), and `...` (variadic
-parameters and spreads) are Titan additions. `::` is recognized by the
-lexer but used by no grammar rule — there are no labels.
+`<|` and `|>` delimit generic parameters and arguments. `<` and `>` remain
+comparison operators. Function types start with `function`; the old arrow
+spelling is not accepted. There is no unary pointer-dereference operator;
+write `pointer[0]`.
 
 ### Comments
 
@@ -145,443 +128,230 @@ no \escapes here]]                        -- value: "no \escapes here"
 local s5: string = [==[ contains ]] safely ]==]
 ```
 
-## Modules and top-level declarations
+## Modules and declarations
 
-A flat Titan source, or each independently parsed file of a
-[folder module](folder-modules.md), is a sequence of top-level declarations.
-The canonical source may end with one root `do ... end` module initializer;
-for a folder module only its main source may contain that initializer. Its `block` may use the ordinary optional `catch` trailer.
+Each source file contains declarations and at most one final initializer.
+Folder modules parse each contributor independently; only the main source may
+contain the final initializer. See [folder modules](folder-modules.md).
 
-```
-program  ::= {tldecl} [moduleinit]
-tldecl   ::= tlmethod | tlrecfunc | tlfunc | tlforeignfunc | tlvar
-           | tlconstvar
-           | tlrecord | tlunion | tlinterface | tltype | tlimport
-           | tlforeignimport
-tlmethod ::= [local] function Name ':' Name [typeparams]
+```text
+program ::= {tldecl} [moduleinit]
+tldecl ::= tlmethod | tlstaticfunc | tlfunc | tlforeignfunc | tlvar
+         | tlrecord | tlunion | tlinterface | tltype | tlforeigntype
+         | tlimport | tlforeignimport | ';'
+tlmethod ::= [local] function AnyName ':' AnyName [typeparams]
              '(' [parlist] ')' [':' rettype] block end
-tlrecfunc ::= [local] function Name '.' Name [typeparams]
-             '(' [parlist] ')' [':' rettype] block end
-tlfunc   ::= [local] function Name [typeparams]
-             '(' [parlist] ')' [':' rettype] block end
-tlforeignfunc ::= foreign function Name '(' [parlist] ')' [':' rettype] block end
-tlvar    ::= [local] decl '=' exp
-tlconstvar ::= [local] const decl ['=' exp]
-tlrecord ::= [local] record Name [typeparams] {recordfield} end
-tlunion  ::= [local] union Name [typeparams] unionvariant {unionvariant} end
-tlinterface ::= interface Name [typeparams]
-                interfacemember {interfacemember} end
-interfacemember ::= interfacemethod | interfacefield
-interfacemethod ::= function Name [typeparams]
-                    '(' [parlist] ')' [':' rettype]
-interfacefield ::= Name ':' type [';']
-tltype   ::= [local] type Name '=' type
-recordfield     ::= [local] [const] Name ['?'] ':' type [';']
-unionvariant    ::= [local] Name [':' type] [';']
-tlimport        ::= local Name '=' import importname
+tlstaticfunc ::= [local] function AnyName '.' AnyName [typeparams]
+                 '(' [parlist] ')' [':' rettype] block end
+tlfunc ::= [local] function AnyName [typeparams]
+           '(' [parlist] ')' [':' rettype] block end
+tlforeignfunc ::= foreign function AnyName
+                  '(' [foreignparlist] ')' [':' foreigntype] block end
+tlvar ::= [local] [const] AnyName
+          (':' type ['=' exp] | '=' exp)
+tlrecord ::= [local] record AnyName [typeparams] {recordfield} end
+tlunion ::= [local] union AnyName [typeparams] {unionvariant} end
+tlinterface ::= interface AnyName [typeparams] {interfacemember} end
+tltype ::= [local] type AnyName '=' titantype
+tlforeigntype ::= foreign type AnyName '=' foreigntype
+tlimport ::= local Name '=' import importname
 tlforeignimport ::= foreign import importname
-moduleinit     ::= do block end
-importname      ::= LiteralString | '(' LiteralString ')'
-parlist         ::= param {',' param} [',' varargparam]
-                 |  varargparam
-param           ::= Name ':' type
-varargparam     ::= '...' ':' type
-typeparams      ::= '<' typeparam {',' typeparam} '>'
-typeparam       ::= Name [':' namedtype]
-typeargs        ::= '<' type {',' type} '>'
-namedtype       ::= Name [typeargs] | Name '.' Name [typeargs]
+importname ::= LiteralString | '(' LiteralString ')'
+moduleinit ::= do block end
+recordfield ::= [local] [const] AnyName ':' type [';']
+unionvariant ::= [local] AnyName '(' [type] ')' [';']
+interfacemember ::= interfacemethod | interfacefield
+interfacemethod ::= function AnyName [typeparams]
+                    '(' [parlist] ')' [':' rettype] [';']
+interfacefield ::= AnyName ':' type [';']
+parlist ::= param {',' param} [',' varargparam] | varargparam
+param ::= Name ':' type
+varargparam ::= '...' ':' type
+foreignparlist ::= foreignparam {',' foreignparam} [',' '...'] | '...'
+foreignparam ::= Name ':' foreigntype
+typeparams ::= '<|' typeparam {',' typeparam} '|>'
+typeparam ::= AnyName [':' namedtype]
+typeargs ::= '<|' type {',' type} '|>'
+namedtype ::= AnyName [typeargs] | AnyName '.' AnyName [typeargs]
 ```
 
-```lua
-local m = import "ext.module"        -- both import forms are accepted
-local internals = import "ext.module.titan" -- explicit source marker
-foreign import("stdlib.h")
-record Point
-    x: float
-    y: float
-end
-local origin_x: float = 0.0          -- local module variable
-type Coordinates = {float}           -- exported transparent type alias
-interface Movable
-    function move(dx: float, dy: float)
-end
-release_stage = "development"        -- exported module variable, inferred
-function Point:move(dx: float, dy: float)
-    self.x = self.x + dx
-    self.y = self.y + dy
-end
-function Point.origin(): Point
-    return Point.new(0.0, 0.0)
-end
-do
-    origin_x = Point.origin().x        -- optional final module initializer
-end
+A missing named Titan function return annotation means zero results; a missing foreign
+function return annotation means C `void`. When a lambda omits its return
+annotation, its expected function type supplies the results when available;
+otherwise it has zero results. Results are not inferred from the body.
+A module variable needs an
+annotation or initializer. An omitted initializer supplies nil, which its type
+must admit; const initialization authority in the final initializer is
+unchanged. A keyword followed by `:` or `=` may name a module variable before
+that word is interpreted as a declaration keyword or modifier.
+
+Foreign aliases are always module-local and do not accept `local`. Their RHS
+must contain only raw C types, with no `owned` component. They become real
+C typedefs in the module's generated `.ffi.h`. Explicit source imports inherit
+those typedefs through the ordinary transitive C header environment; ordinary
+Titan imports do not. Source-defined C variadics remain unsupported: the
+foreign list syntax retains `...` so semantic analysis can diagnose it.
+
+Record fields use optional types (`field: T?`), not `field?: T`.
+Union variants use `none()` or `some(T)` and still carry at most one payload.
+
+## Types
+
+```text
+type ::= titantype | foreign foreigntype
+titantype ::= basetitan ['?']
+basetitan ::= nil | boolean | integer | float | string | value
+            | namedtype
+            | const ['?'] '{' type '}'
+            | '{' type '}' | '{' type ':' type '}'
+            | function '(' [typelist] ')' [':' rettype]
+            | owned foreigntype | '(' type ')'
+typelist ::= type {',' type} [',' flextail] | flextail
+flextail ::= '...' ':' type
+rettype ::= '(' [typelist] ')' | type
+foreigntype ::= const '*' baseforeign | '*' baseforeign
+              | const baseforeign '[' ']' | baseforeign ['[' ']']
+baseforeign ::= unsigned long long | unsigned char | unsigned short
+              | unsigned int | unsigned long | signed char
+              | long long | long double | float | long | void | bool
+              | char | short | int | double
+              | function '(' [foreigntypelist] ')' ':' foreigntype
+              | '(' foreigntype ')' | AnyName
+foreigntypelist ::= foreigntype {',' foreigntype} [',' '...'] | '...'
 ```
 
-The terminal `.titan` in a Titan import string is semantic rather than a
-filename grammar production. It is removed from the logical name and requests
-the module's source-only collaboration interface. See
-[Modules](modules.md#importing-other-modules).
+Titan constructors may contain foreign components, such as `{foreign int}` or
+`function(foreign *char): integer`. Foreign constructors never contain Titan
+types. Foreign names have no `ffi.` or module qualification. Nested foreign
+constructors are grouped: `foreign *(*int)` is a pointer to a pointer, and
+`owned (*int)[]` owns an array of pointer elements.
 
-Notes on the top level:
+A foreign function type already denotes a C function pointer. For example,
+`foreign function(int): int` is a callback pointer and
+`foreign *(function(int): int)` points to such a pointer. Foreign signatures
+reject Titan values, owned storage, direct array/function values, and source
+variadics. The `void` result is valid; a `void` parameter is not.
 
-* A missing `[':' rettype]` annotation means the function returns
-  *nothing* — its type is `(...) -> ()`, the zero-return form, distinct
-  from a `: nil` return of one `nil` value (see [Functions](functions.md)).
-* Methods and record functions are written outside the `record ... end` body,
-  which contains only fields; a record may be empty (`record A end` parses).
-  `local` on a record, record field, method, or record function makes that
-  declaration visible only inside the defining module.
-* A `record` also synthesizes a static constructor `Name.new`, taking
-  the fields as positional parameters in declaration order. `Name.new` is
-  local when the record is local or any field is local. See
-  [Records](records.md).
-* A `union` must contain at least one variant and synthesizes one
-  positional-only static constructor per variant. An empty variant takes no
-  parameter; a payload variant takes one. See [Unions](unions.md).
-* An `interface` is a nonempty, public, top-level type declaration. Its body
-  may mix implicitly const `name: type` fields with bodyless `function`
-  signatures. There is no `local` Interface, nested Interface, method body,
-  receiver colon, static, or member-level `end`. See
-  [Interfaces](interfaces.md).
-* A mutable module variable requires a full initializer expression. A const
-  module variable may omit it subject to the nil-bearing type rule; after `=`, the
-  keywords `import` and `foreign import` mark an import instead.
-* The optional `moduleinit` is the sole executable root construct. It runs
-  once per Lua state after all logical-module declarations, including folder
-  contributors, and must remain last.
+An ordinary alias may contain foreign components inside actual Titan
+constructors, but its resolved outer type cannot be directly foreign. Thus
+`type A = {foreign int}` and `type B = (foreign int)?` are permitted, while
+`type C = ((foreign int))` requires a foreign alias instead. Parentheses do not
+change the type category. `owned` is a Titan type constructor: its foreign operand must resolve to a
+pointer or array, including through a foreign alias. `type Owner = owned *Item`
+and `owned Item[]?` are ordinary Titan alias/Option forms. Owned types cannot
+occur in foreign alias RHS types or foreign function signatures or local
+declarations inside foreign function bodies.
+An outer `const` on the resolved foreign operand is rejected: Titan cannot
+allocate and initialize const owned storage in one construct.
 
-## Declarations and types
+A colon immediately after a function type's parameter list is its return
+annotation. `{function(): T}` is an Array of functions returning T;
+`{(function()): T}` is a Map keyed by zero-result functions. At a function's
+return annotation, parentheses delimit the result list. A parenthesized single
+result may have `?` to make that result optional; a multiple-result list cannot
+be optional. Fixed results precede a single flexible tail.
 
-```
-decl       ::= Name ['?'] [':' type]
-decllist   ::= decl {',' decl}
-qualifiedtype ::= Name '.' Name
-type       ::= simpletype
-            |  funargtypes '->' rettype
-            |  simpletype '->' rettype
-simpletype ::= basictype ['?']
-basictype  ::= nil | boolean | integer | float | string | value
-            |  Name '.' Name [typeargs]
-            |  '*' simpletype
-            |  const '*' simpletype
-            |  ownedtype
-            |  Name [typeargs]
-            |  '{' type ':' type '}'
-            |  '{' type '}'
-            |  const '{' type '}'
-            |  '(' type ')'
-ownedtype  ::= owned '*' cownedpayload
-            |  owned cownedpayload '[' ']'
-cownedpayload ::= nil | boolean | integer | float | string | value
-            |  Name '.' Name
-            |  '*' cownedpayload
-            |  const '*' cownedpayload
-            |  Name
-            |  ownedtype
-            |  '(' type ')'
-funargtypes::= '(' [type {',' type} [',' varargtype] | varargtype] ')'
-varargtype ::= '...' ':' type
-resulttypes::= '(' [type {',' type} [',' flexrettype] | flexrettype] ')'
-flexrettype::= '...' ':' type
-rettype    ::= funargtypes '->' rettype
-            |  simpletype '->' rettype
-            |  resulttypes
-            |  simpletype
-```
+There are no source-written sized C arrays. An eligible direct local initialized
+by `foreign T.new_array(positive_constant)` infers fixed automatic C-array
+storage; an explicit `owned T[]` target requests GC-owned storage.
+`foreign T[]` at an initialized local sink is the existing borrowed pointer
+view, with pointer bounds/lifetime rules. See
+[C allocation](c-ffi-expressions.md#target-directed-c-allocation).
 
-The four forms of `decl` mean:
+## Blocks and statements
 
-| Written | Meaning |
-| --- | --- |
-| `x: T` | type is `T` |
-| `x?: T` | type is the option type `T?` |
-| `x?` | type is inferred from the initializer, then made optional |
-| `x` | type is inferred from the initializer |
-
-These forms are accepted wherever a `decl` appears: module variables,
-`local` statements, the control variable of a numeric `for`, and each
-visible variable of a generic `for`
-(`for i: integer = 1, 10 do ... end` and
-`for k: integer, v: string in step do ... end` are valid). Function
-*parameters* (`param`) must be annotated and admit no `?` shorthand —
-write `p: T?`. Record fields admit the annotated shorthand `x?: T`, which is
-equivalent to `x: T?`.
-
-In types, `Name` may be a record, union, Interface, type parameter, or
-transparent alias, and `mod.Name` may name an exported type from an imported
-module. Generic owners and forwarding aliases to a bare generic owner take
-`typeargs`; a concrete alias is already closed. Declaration `typeparams` may constrain a parameter to a named Interface
-application. See [Generics](generics.md).
-
-`{T}` is a mutable Array, `const { T }` a const Array, `{K: V}` a Map,
-`T?` an option type, and `t -> t` a function type. `const` does not qualify a
-Map. A
-function type may end its argument list with
-`...: T` to describe a variadic function value, and a parenthesized result
-list may end with `...: T` to describe a flexible result run. The two tails
-are independent. When a fixed result prefix is present, a comma is required
-before the tail: `(integer, ...: string)` is valid, while
-`(integer ...: string)` is not. `->` is right-associative (`a -> b -> c` is
-`a -> (b -> c)`) and binds tighter than the commas of an enclosing
-parenthesized result list.
-
-Parentheses may also group any one type, with no new type identity:
-`(T)?` is `T?`, `({K: V})?` makes a Map optional, and `((T) -> U)?`
-makes the complete function optional. Grouping is recursive and is allowed
-inside generic arguments and C pointer/owned payloads. Empty, multiple, and
-flexible type lists are not single types: `()`, `(T, U)`, and `(...: T)`
-need their parameter/result-list context and cannot receive an outer `?`.
-See [Parenthesized types](types.md#parenthesized-types).
-
-`owned *mod.T` is the scalar GC-owner spelling and `owned mod.T[]` is
-the dynamically counted owner spelling. The first `*` of the scalar form is
-the ownership marker, so another pointer layer belongs to the payload:
-`owned **mod.T` owns one `mod.T *`, while `owned *mod.T[]` owns an array of
-`mod.T *`. An unparenthesized `cownedpayload` consumes no option suffix, so
-the trailing `?` accepted by `simpletype` wraps the complete owner. A grouped
-payload follows the ordinary type grammar. The parser accepts the shared payload
-shape above; the checker then requires a complete, allocatable C
-object type and rejects Titan, `void`, function, incomplete, fixed-array
-typedef, and nested-owner payloads. A flexible-array-member struct is a scalar
-owner allocated through its special `.new(count)` constructor. A numeral
-between the brackets is not owner syntax.
-
-A bare `resulttypes` form is valid only in
-`rettype` position — a function's return annotation or the right side
-of `->` — which is how multiple and flexible return types are written:
-
-```lua
-function divmod(a: integer, b: integer): (integer, integer)
-    return a // b, a % b
-end
-function stream(): (boolean, ...: string)
-    return true
-end
-local maybe: integer? = nil                  -- option type
-local grid: {{float}} = {}                   -- array of arrays
-local ages: {string: integer} = {}           -- map
-```
-
-The `?` suffix attaches only to `simpletype`, so it cannot be applied directly
-to a function type: `((integer) -> integer)?` is a syntax error. The type
-system does support options of functions; name the function type with an alias
-and suffix the name instead, for example `type F = (integer) -> integer`
-followed by `local f: F? = nil`.
-
-`foreign (P...) -> R` is a C function-pointer type, not an ordinary Titan
-function type; `()` on its right means C `void`. A top-level `foreign function`
-uses the same restricted C signature and body described in
-[Foreign functions](foreign-functions.md).
-
-Function types are valid, checked types in any type position: functions
-are first-class values, so a function type may annotate a variable,
-parameter, return, field, or any other declaration, and a function value
-inhabiting it can be stored, passed, returned, and called. A return list
-of `()` denotes a function that returns nothing, distinct from `nil`
-(one `nil` return). A flexible tail must be last, appear inside the
-parenthesized result list, and include its element type. `->` is
-right-associative and function types nest, so
-a higher-order type like `(integer -> integer, integer) -> integer` is
-written directly. See [the type system](types.md#function-types).
-
-## Statements
-
-```
-block      ::= simpleblock ['catch' simpleblock]
-simpleblock::= {statement} [returnstat]
-statement  ::= ';'
-            |  do block end
-            |  while exp do block end
-            |  repeat block until exp
-            |  if exp then block {elseif exp then block} [else block] end
-            |  case exp casearm {casearm} [else block] end
-            |  for decl '=' exp ',' exp [',' exp] do block end
-            |  for decllist in explist do block end
-            |  [local] const decllist '=' explist
-            |  local decllist ['=' explist]
-            |  varlist '=' explist
-            |  functioncall
-            |  break
-            |  raise [exp]
-            |  defer statement
+```text
+block ::= simpleblock [catch simpleblock]
+simpleblock ::= {statement} [returnstat]
+statement ::= ';' | do block end
+            | while exp do block end
+            | repeat block until exp
+            | if exp then block {elseif exp then block} [else block] end
+            | case exp {casearm} [else block] end
+            | for decl '=' exp ',' exp [',' exp] do block end
+            | for decl {',' decl} in explist do block end
+            | [local] const decllist '=' explist
+            | local decllist ['=' explist]
+            | varlist '=' explist | break | raise [exp]
+            | defer statement | callstmt
 returnstat ::= return [explist] [';']
-casearm    ::= when Name [':' Name] then block
-varlist    ::= var {',' var}
-explist    ::= explistitem {',' explistitem} [',' '...']
-            |  '...'
-explistitem ::= exp | spreadexp
-spreadexp  ::= '...' exp
-            |  '...' subsetsuffix
-var        ::= Name
-            |  prefixexp {suffix} '[' exp ']'
-            |  prefixexp {suffix} '.' Name
+casearm ::= when AnyName '(' [Name] ')' then block
+decl ::= Name ['?'] [':' type]
+decllist ::= decl {',' decl}
+varlist ::= prefixexp {',' prefixexp}
+callstmt ::= prefixexp
+explist ::= exp {',' exp}
 ```
 
-A `case` must contain at least one `when` arm. Every arm and its optional
-`else` consumes a full `block`, so each may have its own `catch`; a `defer` inside that block is transformed normally. The checker
-requires a union scrutinee, rejects duplicate arms and binding an empty
-variant, but does not require exhaustive coverage. See
-[Unions](unions.md#case-statements).
-
-In the first `spreadexp` alternative, `exp` may be any explicit expression,
-including a DOTS-started scalar such as `...[index]`; therefore
-`... ...[index]` spreads the Array or integer-keyed Map stored in that vararg
-slot. A second bare `...` cannot satisfy `exp`, so `......` remains invalid.
-The comma-bearing ranged forms use the second alternative. Bare `...` is
-syntactically final. An explicit `spreadexp` may be parsed as an earlier
-`explistitem`, but the checker requires it to be final; this keeps list parsing
-deterministic while preserving a precise placement diagnostic.
-
-An lvalue (`var`) is a plain name or a suffixed expression whose *last*
-suffix is an index or a field selection — `f()[1] = v`, `m[k][1] = v`,
-and `f().x = v` are assignable, as is reading `f().x`; a bare call is
-not. Multiple assignment and multiple initialized `local` declarations mirror
-Lua. A mutable local may omit the expression list only when every declaration
-has an explicit type that admits missing nil; the checker synthesizes one nil
-per slot. Const locals always require `= explist`. Direct C aggregates and
-fixed arrays do not admit nil and require an initialized allocation expression.
-`return`
-takes zero or more expressions, only as the last statement of a block.
-In a zero-return function (`(...) -> ()`), a bare `return` returns zero
-values. Written return expressions are evaluated but their values are
-discarded, so `return nil` also exposes zero results there. In an explicit
-`: nil` function, a bare `return` is accepted as the one `nil` return. In
-option- or `value`-returning functions, write `return nil` explicitly.
-
-```lua
-function demo(xs: {integer}, p: Point): (integer, integer)
-    local lo: integer, hi = xs[1], xs[1]   -- multiple declaration
-    for i = 2, #xs do                      -- step defaults to 1
-        if xs[i] < lo then lo = xs[i]
-        elseif xs[i] > hi then hi = xs[i]
-        end
-    end
-    p.x, p.y = 0.0, 0.0                    -- multiple assignment
-    while lo < 0 do lo = lo + 10 end
-    repeat hi = hi - 1 until hi <= 100
-    do p:move(1.0, 2.0) end                -- method call as a statement
-    return lo, hi                          -- multiple return values
-end
-```
+Semantic analysis requires assignment targets to be lvalues and expression
+statements to be calls. It also enforces legal `break`, `raise`, `defer`,
+case-arm payloads, const assignments, and nil initialization. A const local
+always needs an expression list. `return` is the final statement of its block.
 
 ## Expressions
 
-The expression grammar is a precedence ladder; each level `eN` binds
-tighter than the one above it.
-
-```
-exp         ::= e1
-e1          ::= e2 {or e2}
-e2          ::= e3 {and e3}
-e3          ::= e4 {('==' | '~=' | '<' | '>' | '<=' | '>=') e4}
-e4          ::= e5 {'|' e5}
-e5          ::= e6 {'~' e6}
-e6          ::= e7 {'&' e7}
-e7          ::= e8 {('<<' | '>>') e8}
-e8          ::= e9 ['..' e8]
-e9          ::= e10 {('+' | '-') e10}
-e10         ::= e11 {('*' | '/' | '//' | '%') e11}
-e11         ::= castexp
-castexp     ::= unopexp [(as | is) type]
-unopexp     ::= {unop} e12
-e12         ::= simpleexp ['^' e11]
-unop        ::= not | '#' | '-' | '~'
-simpleexp   ::= nil | false | true | Numeral | LiteralString
-             |  '#...'
-             |  '...' '[' exp ']'
-             |  '...' subsetsuffix
-             |  constructor | funcexp | suffixedexp | prefixexp
-funcexp     ::= function '(' [lambdaparlist] ')' [':' rettype] block end
+```text
+exp ::= e1
+e1 ::= e2 {or e2}
+e2 ::= e3 {and e3}
+e3 ::= e4 {('==' | '~=' | '<' | '>' | '<=' | '>=') e4}
+e4 ::= e5 {'|' e5}
+e5 ::= e6 {'~' e6}
+e6 ::= e7 {'&' e7}
+e7 ::= e8 {('<<' | '>>') e8}
+e8 ::= e9 {'..' e9}
+e9 ::= e10 {('+' | '-') e10}
+e10 ::= e11 {('*' | '/' | '//' | '%') e11}
+e11 ::= e12 [(as | is) type]
+e12 ::= {unop} e13
+e13 ::= prefixexp {'^' {unop} prefixexp}
+unop ::= not | '#' | '-' | '~'
+prefixexp ::= baseexp {suffixexp}
+baseexp ::= nil | false | true | Numeral | LiteralString
+          | Name [typeargs] | constructor | lambda | '(' exp ')'
+          | '...' [exp] | '#' '...'
+          | foreign foreigntype '.' foreignop
+foreignop ::= new '(' [exp] ')' | new_array '(' exp ')'
+            | sizeof | alignof
+suffixexp ::= '.' AnyName [typeargs] | ':' AnyName [typeargs]
+            | '(' [explist] ')' | '{' [namedarglist] '}'
+            | LiteralString | '[' exp ']' | '[' exp ',' exp ']'
+            | '[' ',' exp ']' | '[' exp ',' ']'
+lambda ::= function '(' [lambdaparlist] ')' [':' rettype] block end
 lambdaparlist ::= lambdaparam {',' lambdaparam} [',' lambdavarargparam]
-                |  lambdavarargparam
+               | lambdavarargparam
 lambdaparam ::= Name [':' type]
 lambdavarargparam ::= '...' [':' type]
-prefixexp   ::= Name | '(' exp ')' | '(' '...' ')'
-suffixedexp ::= prefixexp suffix {suffix}
-suffix      ::= [typeargs] callargs
-             |  ':' Name
-             |  ':' Name [typeargs] callargs
-             |  '[' exp ']'
-             |  subsetsuffix
-             |  [typeargs] '.' Name
-subsetsuffix ::= '[' ',' exp ']'
-              |  '[' exp ',' [exp] ']'
-functioncall ::= prefixexp {suffix} [typeargs] callargs
-              |  prefixexp {suffix} ':' Name [typeargs] callargs
-callargs    ::= funcargs | namedargs
-funcargs    ::= '(' [explist] ')'
-             |  LiteralString
-namedargs   ::= '{' [namedarglist] '}'
 namedarglist ::= namedarg {fieldsep namedarg} [fieldsep]
-namedarg    ::= NamedLabel '=' exp
+namedarg ::= AnyName '=' exp
 constructor ::= '{' [fieldlist] '}'
-fieldlist   ::= fielditem {fieldsep fielditem}
-                [fieldsep '...'] [fieldsep]
-             |  '...' [fieldsep]
-fielditem   ::= field | spreadexp
-field       ::= exp
-             |  Name '=' exp
-             |  '[' exp ']' '=' exp
-fieldsep    ::= ',' | ';'
+fieldlist ::= field {fieldsep field} [fieldsep]
+field ::= AnyName '=' exp | '[' exp ']' '=' exp | exp
+fieldsep ::= ',' | ';'
 ```
 
-A call's `typeargs` after the callable name apply its callable-local binders:
-`f<T>(x)` and `object:map<U>(x)`. Explicit record/union owner arguments instead
-precede the selected dot member: `Pair<T,U>.new(x, y)` and
-`Pair<T,U>.from<V>(x)`. If both scopes are open, write both complete lists or
-neither. An owner-attached list without a direct call is rejected semantically.
-Angle-list recognition is contextual, so ordinary `<`, `>`, `>=`, and `>>` expressions remain available.
+The foreign pseudo-expression selects an operation on its entire foreign type;
+the first dot ends that type. `foreign T.new(count)` is valid specifically for
+a struct with a flexible array member. Other `new` calls take no arguments.
+The pseudo-operation cannot be detached as a callable value.
 
-Parentheses and bare strings are positional call syntax: `f(x)` and
-`f "literal"`, with corresponding method forms. Bare braces are always named
-syntax, including `{}` and regardless of whitespace: `f { x = 1 }`,
-`f{x = 1}`, and `o:m{}`. A constructor passed as one positional argument must be
-parenthesized, as in `f({1, 2})`, `f({x = 1})`, or `f({})`. Named lists accept
-only `NamedLabel = exp`; positional fields, computed keys, `...`, and mixtures
-are syntax errors. A method name used in a `suffix`/`callargs` position is a
-call; a method name with **no** following `callargs` — a bare `o:m` — is
-instead a [bound method reference](closures.md#bound-method-references), a function
-value. Constructors cover positional Arrays, Maps (computed `[k] = v` fields
-or, for an exact integer key type, all-positional fields), and records
-(`name = v`). Positional and keyed forms cannot be mixed; `,` and `;` are
-interchangeable and a trailing separator is allowed. Bare `...` is a
-grammar-level trailer and cannot precede another positional item. An explicit
-`spreadexp` can parse as an earlier list item or constructor field, but the
-checker requires it to be final. Outside a trailer, the dots token is admitted
-only by the explicit `#...`, `...[index]`, `...[subset]`, `(...)`, and
-`...subject` forms. Thus `1 + ...`, `(... + 1)`, and `{..., 1}` are syntax
-errors; close the adjustment first to write `(...) + 1`. In contrast,
-`... -1` is a spread whose subject is the unary expression `-1` and is rejected
-semantically as a non-container subject. A `subsetsuffix` is syntactically an
-expression suffix, but the checker accepts it only as the range suffix consumed
-by a [spread expression](spread-expressions.md); it is not an independently
-valued slice. A `funcexp` is an
-anonymous function: unlike a top-level `tlfunc`, its fixed-parameter and bare
-input-`...` annotations are optional, and an omitted complete result annotation
-may likewise come from a matching expected function type. Explicit `: ()` fixes
-the zero-result shape; without usable context an omitted result annotation also
-defaults to zero. Because a `funcexp` is a `simpleexp` and not a `prefixexp`, it
-cannot be applied directly —
-`(function () … end)(x)` needs the parentheses. See
-[Expressions](expressions.md),
-[Anonymous functions and closures](closures.md),
-[Arrays and maps](arrays-maps.md), and [Records](records.md).
+A colon selector denotes a bound method, optionally followed by a call. Generic
+owner arguments attach before selection (`Box<|integer|>.new(...)`). Literal
+string calls abbreviate one positional argument; brace calls are named calls.
+Bracket commas distinguish indexing from ranges without reparsing the index.
 
-```lua
-function build(v: value): string
-    local xs: {integer}       = {1, 2, 3,}
-    local m: {string: float}  = {["pi"] = 3.14; ["e"] = 2.72}
-    local p: Point            = {x = 1.0, y = 2.0}
-    local q: Point            = Point.new(1.0, 2.0)
-    local n: integer          = v as integer // 2
-    return "n = " .. n .. "!"
-end
-```
+After `...`, `[` selects vararg indexing/ranging; otherwise a token that can
+start an expression commits to the complete collection-spread subject. If no
+such token follows, the expression is bare varargs. `#...` is a dedicated count
+atom when the dots are not followed by `[`: `#... - 1` subtracts from the
+vararg count, while `#...[1]` applies length to the first vararg. Parentheses
+adjust a call, bare varargs, or collection spread to one result. Semantic
+analysis rejects bare varargs and spreads outside permitted tail positions;
+the expression parser does not enforce expression-list position.
 
-## Operator precedence and associativity
+### Precedence and associativity
 
-From lowest to highest precedence:
+From lowest to highest:
 
 | Operators | Associativity |
 | --- | --- |
@@ -589,80 +359,25 @@ From lowest to highest precedence:
 | `and` | left |
 | `<` `>` `<=` `>=` `~=` `==` | left |
 | `\|` | left |
-| `~` (binary, exclusive or) | left |
+| binary `~` | left |
 | `&` | left |
 | `<<` `>>` | left |
-| `..` | **right** |
-| `+` `-` (binary) | left |
+| `..` | right |
+| `+` `-` | left |
 | `*` `/` `//` `%` | left |
-| `as` `is` | postfix on one unary expression; non-associative |
-| `not` `#` `-` `~` (unary) | prefix |
-| `^` | **right** |
+| `as` `is` | non-associative, after a unary expression |
+| unary `not` `#` `-` `~` | prefix |
+| `^` | right |
 
-This is Lua's table with a non-chaining `as`/`is` level between
-multiplication and unary expressions. As in Lua,
-`^` binds tighter than the unary operators on its *left*, while its
-right operand may carry them: `-1 ^ -2 ^ 3 * 4` parses as
-`(-(1 ^ (-(2 ^ 3)))) * 4`. `as` and `is` bind tighter than the
-multiplicative and looser binary operators: `2 + v as integer` is
-`2 + (v as integer)`, and `2 + v is integer` is
-`2 + (v is integer)`. They wrap unary expressions (`-v is integer` is
-`(-v) is integer`). Since `^` recurses through the `e11` level on its right,
-`v ^ 2 as integer` is `v ^ (2 as integer)`; write
-`(v as integer) ^ 2` when the cast is the left operand, and
-`(v ^ 2) is integer` when the whole power is the test operand.
-`v is integer ^ 2` is a syntax error. The comparison
-operators chain *grammatically* —
-`a < b < c` parses as `(a < b) < c` — and are then rejected by the type
-checker (compile-time error: `left hand side of relational expression
-is a boolean instead of a number`).
+Thus `-2^2` is `-(2^2)`, `2^-3` is `2^(-3)`, and `a^b^c` is
+`a^(b^c)`. Chaining casts/type tests requires explicit parentheses. Operator
+chains and lists are accumulated with folds; genuinely nested syntax still
+uses the parser's ordinary nesting limits. Width does not justify speculative
+recursive lookahead or increasing LPeg's stack limit.
 
-## Syntactic restrictions and notes
-
-Some properties are easy to miss in the EBNF, and one frequently
-confused rule is not syntax at all:
-
-1. **Only calls can be statements.** A `functioncall` (including a
-   method call) is the only expression form allowed in statement
-   position; anything else is a compile-time syntax error (`Expected a
-   statement but found an expression that is not a function call.` —
-   though when the expression *starts* with a valid lvalue, as in
-   `x + 1`, the parser commits to an assignment and reports `Expected
-   '=' after variable.` instead).
-2. **`return` only at the end of a block.** As in Lua, `returnstat` is
-   the optional final element of `simpleblock`; a statement after `return`
-   (even another `return`) is a syntax error.
-3. **`catch` is a block trailer.** There is no `try` keyword.
-   A block may have a `catch` trailer; its clause body is a `simpleblock`.
-4. **`defer` cannot directly defer another `defer`.** The grammar
-   production is guarded like `defer !defer statement`, so
-   `defer defer cleanup()` is a syntax error. Use two separate defers for
-   last-in-first-out cleanup, or `defer do ... end` for multiple cleanup
-   statements.
-5. **`as` and `is` do not chain.** `x as integer is float` is a syntax
-   error; their operand is an `unopexp`, so chaining grammatically
-   requires parentheses (`(x as integer) is value`). Which casts/tests are
-   then *accepted* is a typing matter ([Expressions](expressions.md)) —
-   each parenthesized edge is checked independently. For example,
-   `(x as integer) as float` is accepted because the second edge is a written
-   numeric conversion, while `(x as integer) as string` is rejected.
-6. **Lvalues cannot be parenthesized.** `(x) = 1` is a syntax error
-   (`Expected a valid lvalue in the left side of assignment but found
-   a regular expression.`).
-7. **Only nil-bearing mutable locals may omit an initializer.** Every name
-   still needs an explicit nil-bearing type. Const locals always require
-   `= explist`; mutable module variables require `= exp`; only const module
-   variables may omit their initializer under the same nil-bearing rule.
-8. **Parenthesizing a call truncates it.** `(f())` adjusts a
-   multiple-value call to exactly its first value, as in Lua. See
-   [Functions](functions.md).
-9. **Record constructors needing a type from context is a typing rule,
-   not a syntax rule.** The grammar places `constructor` wherever any
-   expression can go; the *type checker* then requires a named-field
-   constructor to appear where the expected record type is known,
-   reporting `no context to provide type for record constructor`
-   otherwise. Array and computed-key Map constructors can instead have their
-   types inferred from their elements. A positional constructor defaults to
-   Array and needs an exact `{integer: V}` context to construct a Map. See
-   [Records](records.md) and
-   [Arrays and maps](arrays-maps.md).
+The implementation dispatches with a constant number of terminal tokens.
+Ordered alternatives do not share a prefix containing a syntactic nonterminal;
+once that terminal dispatch chooses a construct, its syntactic descents commit
+with explicit error labels. Bounded token-only convenience rules are the
+exception. Lexing a complete identifier or literal is separate from syntactic
+lookahead.

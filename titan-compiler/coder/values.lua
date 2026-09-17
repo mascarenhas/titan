@@ -1527,6 +1527,10 @@ function coder._checked_written_cast_plan(
     if cast.op == "identity" then
         assert(types.equals(source, target),
             use .. " identity operation changes its operand type")
+    elseif cast.op == "current_module" then
+        assert(source._tag == "Type.Module" and source._current_module
+               and types.is_c_udata_pointer(target),
+            use .. " has an invalid current-module pointer cast")
     elseif cast.op == "dynamic" then
         assert(source._tag == "Type.Value",
             use .. " dynamic operation has a non-value source")

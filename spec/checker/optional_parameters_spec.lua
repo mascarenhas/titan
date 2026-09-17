@@ -53,7 +53,7 @@ describe("optional function parameters", function()
             end
 
             function run(): integer
-                local f: (integer?, boolean) -> integer = fill
+                local f: function (integer?, boolean): integer = fill
                 return f()
             end
         ]])
@@ -67,7 +67,7 @@ describe("optional function parameters", function()
             end
 
             function run(): integer
-                local noargs: () -> integer = fixed
+                local noargs: function (): integer = fixed
                 return noargs()
             end
         ]])
@@ -82,7 +82,7 @@ describe("optional function parameters", function()
             end
 
             function run(): integer
-                local integers: (...: integer) -> integer = tailed
+                local integers: function (...: integer): integer = tailed
                 return integers(10, 20)
             end
         ]])
@@ -97,7 +97,7 @@ describe("optional function parameters", function()
             end
 
             function run(): integer
-                local noargs: () -> integer = required
+                local noargs: function (): integer = required
                 return noargs()
             end
         ]])
@@ -111,7 +111,7 @@ describe("optional function parameters", function()
             end
 
             function run(): integer
-                local integers: (...: integer) -> integer = strings
+                local integers: function (...: integer): integer = strings
                 return integers(10)
             end
         ]])

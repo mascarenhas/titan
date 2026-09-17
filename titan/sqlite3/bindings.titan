@@ -1,5 +1,5 @@
 local function check_no_nul(subject: string, operation: string)
-  local position? = strings.find(subject, "\0")
+  local position? = string.find(subject, "\0")
   if position ~= nil then
     raise Error.new("embedded NUL is not permitted", nil, nil, operation)
   end
@@ -10,7 +10,7 @@ end
 local function valid_text(subject: string): boolean
   local index = 1
   while index <= #subject do
-    local first: integer = strings.byte(subject, index)
+    local first: integer = string.byte(subject, index)
     if first == 0 then return false end
     if first < 128 then
       index = index + 1
@@ -32,10 +32,10 @@ local function valid_text(subject: string): boolean
         return false
       end
       if length > #subject - index + 1 then return false end
-      local second: integer = strings.byte(subject, index + 1)
+      local second: integer = string.byte(subject, index + 1)
       if second < lower or second > upper then return false end
       for offset = 2, length - 1 do
-        local byte: integer = strings.byte(subject, index + offset)
+        local byte: integer = string.byte(subject, index + offset)
         if byte < 128 or byte > 191 then return false end
       end
       index = index + length
@@ -49,14 +49,14 @@ local function native_allocation_error(operation: string)
                   ffi.SQLITE_NOMEM, ffi.SQLITE_NOMEM, operation)
 end
 
-local function copy_input(packet: *ffi.TitanSqlitePacket,
+local function copy_input(packet: foreign *TitanSqlitePacket,
                           input: string, operation: string)
   packet.input_length = #input
   packet.input = sqlite_copy_bytes(input, packet.input_length)
   if not packet.input then native_allocation_error(operation) end
 end
 
-local function copy_argument_bytes(cell: *ffi.TitanSqliteCell,
+local function copy_argument_bytes(cell: foreign *TitanSqliteCell,
                                    bytes: string, operation: string)
   cell.length = #bytes
   cell.bytes = sqlite_copy_bytes(bytes, cell.length)
@@ -69,26 +69,26 @@ local function unsupported_argument(index: integer, kind: string,
                   nil, nil, operation)
 end
 
-local function bind_argument(cell: *ffi.TitanSqliteCell,
+local function bind_argument(cell: foreign *TitanSqliteCell,
                              candidate: value, index: integer,
                              operation: string)
   case reflect.inspect(candidate)
-  when is_nil then
+  when is_nil() then
     cell.kind = ffi.SQLITE_NULL
-  when is_boolean: flag then
+  when is_boolean(flag) then
     cell.kind = ffi.SQLITE_INTEGER
     if flag then cell.integer_value = 1 else cell.integer_value = 0 end
-  when is_integer: number then
+  when is_integer(number) then
     cell.kind = ffi.SQLITE_INTEGER
     cell.integer_value = number
-  when is_float: number then
+  when is_float(number) then
     if number ~= number or number == math.huge or number == -math.huge then
       raise Error.new("argument " .. index .. " must be finite",
                       nil, nil, operation)
     end
     cell.kind = ffi.SQLITE_FLOAT
     cell.float_value = number
-  when is_string: bytes then
+  when is_string(bytes) then
     if not valid_text(bytes) then
       raise Error.new("argument " .. index ..
                       " must be UTF-8 TEXT without NUL; use Blob for bytes",
@@ -96,31 +96,31 @@ local function bind_argument(cell: *ffi.TitanSqliteCell,
     end
     cell.kind = ffi.SQLITE_TEXT
     copy_argument_bytes(cell, bytes, operation)
-  when is_record: inspected then
-    if inspected.val is Blob then
-      local blob: Blob = inspected.val
+  when is_record(inspected) then
+    if inspected.value is Blob then
+      local blob: Blob = inspected.value
       cell.kind = ffi.SQLITE_BLOB
       copy_argument_bytes(cell, blob.bytes, operation)
     else
       unsupported_argument(index, "record", operation)
     end
-  when is_array then unsupported_argument(index, "Array", operation)
-  when is_const_array then unsupported_argument(index, "const Array", operation)
-  when is_map then unsupported_argument(index, "Map", operation)
-  when is_union then unsupported_argument(index, "union", operation)
-  when is_interface then unsupported_argument(index, "Interface", operation)
-  when is_titan_function then unsupported_argument(index, "Titan function", operation)
-  when is_lua_function then unsupported_argument(index, "Lua function", operation)
-  when is_lua_c_function then unsupported_argument(index, "Lua C function", operation)
-  when is_owned_foreign_pointer then unsupported_argument(index, "owned pointer", operation)
-  when is_owned_foreign_array then unsupported_argument(index, "owned Array", operation)
-  when is_lua_userdata then unsupported_argument(index, "userdata", operation)
-  when is_lua_thread then unsupported_argument(index, "thread", operation)
-  when is_raw_pointer then unsupported_argument(index, "raw pointer", operation)
+  when is_array() then unsupported_argument(index, "Array", operation)
+  when is_const_array() then unsupported_argument(index, "const Array", operation)
+  when is_map() then unsupported_argument(index, "Map", operation)
+  when is_union() then unsupported_argument(index, "union", operation)
+  when is_interface() then unsupported_argument(index, "Interface", operation)
+  when is_titan_function() then unsupported_argument(index, "Titan function", operation)
+  when is_lua_function() then unsupported_argument(index, "Lua function", operation)
+  when is_lua_c_function() then unsupported_argument(index, "Lua C function", operation)
+  when is_owned_foreign_pointer() then unsupported_argument(index, "owned pointer", operation)
+  when is_owned_foreign_array() then unsupported_argument(index, "owned Array", operation)
+  when is_lua_userdata() then unsupported_argument(index, "userdata", operation)
+  when is_lua_thread() then unsupported_argument(index, "thread", operation)
+  when is_raw_pointer() then unsupported_argument(index, "raw pointer", operation)
   end
 end
 
-local function Statement:bind(packet: *ffi.TitanSqlitePacket,
+local function Statement:bind(packet: foreign *TitanSqlitePacket,
                               operation: string, ...: value)
   if #... ~= self.parameter_count then
     raise Error.new("expected " .. self.parameter_count .. " arguments, got " ..
@@ -128,7 +128,7 @@ local function Statement:bind(packet: *ffi.TitanSqlitePacket,
   end
   packet.argument_count = #...
   if #... <= 0 then return end
-  packet.arguments = ffi.calloc(#..., ffi.TitanSqliteCell.sizeof)
+  packet.arguments = ffi.calloc(#..., foreign TitanSqliteCell.sizeof)
   if not packet.arguments then native_allocation_error(operation) end
   -- Preserve the vararg run itself: an Array loses its trailing nil positions.
   for index = 1, #... do
@@ -136,13 +136,13 @@ local function Statement:bind(packet: *ffi.TitanSqlitePacket,
   end
 end
 
-local function copy_result_bytes(cell: *ffi.TitanSqliteCell): string
-  local bytes: owned char[] = char.new_array(cell.length)
+local function copy_result_bytes(cell: foreign *TitanSqliteCell): string
+  local bytes: owned char[] = foreign char.new_array(cell.length)
   if cell.length > 0 then ffi.memcpy(bytes, cell.bytes, cell.length) end
   return bytes as string
 end
 
-local function decode_columns(packet: *ffi.TitanSqlitePacket): const {Column}
+local function decode_columns(packet: foreign *TitanSqlitePacket): const {Column}
   local columns: {Column} = {}
   local count: integer = packet.column_count
   for index = 1, count do
@@ -156,7 +156,7 @@ local function decode_columns(packet: *ffi.TitanSqlitePacket): const {Column}
   return columns as const {Column}
 end
 
-local function decode_row(packet: *ffi.TitanSqlitePacket,
+local function decode_row(packet: foreign *TitanSqlitePacket,
                            columns: const {Column}): Row
   local cells: {value} = {}
   for index = 1, #columns do

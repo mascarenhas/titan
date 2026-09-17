@@ -4301,6 +4301,15 @@ function types.written_cast(source, target, policy)
         })
     end
 
+    if source._tag == "Type.Module" and source._current_module
+       and types.is_c_udata_pointer(target) then
+        return plan("written_cast", {
+            op = "current_module",
+            source = source,
+            target = target,
+        })
+    end
+
     -- Freezing is the sole relation that crosses Array mutability. A shallow
     -- freeze cannot convert element representations, so the element types
     -- must be exact or gradually consistent. The checker later refines
@@ -4613,10 +4622,10 @@ function types.assignment_adjustment(source, target, policy)
     return false
 end
 
-local function tostring_list(items)
+local function tostring_list(items, scoped)
     local out = {}
     for _, item in ipairs(items) do
-        table.insert(out, types.tostring(item))
+        table.insert(out, types.tostring(item, false, scoped))
     end
     return table.concat(out, ", ")
 end
@@ -4639,36 +4648,102 @@ local function serialize_names(names)
     return "{" .. table.concat(out, ",") .. "}"
 end
 
-local function tostring_typeparams(typeparams)
+local function tostring_typeparams(typeparams, scoped)
     if not typeparams or #typeparams == 0 then return "" end
     local rendered = {}
     for _, typeparam in ipairs(typeparams) do
-        rendered[#rendered + 1] = types.tostring(typeparam)
+        rendered[#rendered + 1] = types.tostring(typeparam, false, scoped)
     end
-    return "<" .. table.concat(rendered, ", ") .. ">"
+    return "<|" .. table.concat(rendered, ", ") .. "|>"
 end
 
-function types.tostring(t, wrap)
+local foreign_display_tags = {
+    ["Type.CVoid"] = true, ["Type.CInteger"] = true,
+    ["Type.CFloat"] = true, ["Type.CPointer"] = true,
+    ["Type.CArray"] = true, ["Type.CFunction"] = true,
+    ["Type.CStruct"] = true, ["Type.CUnion"] = true,
+    ["Type.CTypedef"] = true,
+}
+
+local function foreign_type_string(t, grouped, scoped)
+    local tag, result = t._tag
+    if tag == "Type.Invalid" then return "invalid type"
+    elseif tag == "Type.CVoid" then result = "void"
+    elseif tag == "Type.CInteger" then
+        result = t.spelling == "_Bool" and "bool" or t.spelling
+    elseif tag == "Type.CFloat" then result = t.spelling
+    elseif tag == "Type.CTypedef" then result = c_display_name(t.name)
+    elseif tag == "Type.CStruct" or tag == "Type.CUnion" then
+        result = c_display_name(t.tagname or t.cname or t.typedef)
+            or (tag == "Type.CStruct" and "<anonymous struct>" or "<anonymous union>")
+    elseif tag == "Type.CFunction" then
+        local params = {}
+        for _, param in ipairs(t.params) do
+            params[#params + 1] = foreign_type_string(param, false, scoped)
+        end
+        if t.vararg then params[#params + 1] = "..." end
+        result = "function (" .. table.concat(params, ", ") .. "): "
+            .. foreign_type_string(t.ret, false, scoped)
+    elseif tag == "Type.CPointer" then
+        if t.pointee._tag == "Type.CFunction" and #(t.quals or {}) == 0 then
+            result = foreign_type_string(t.pointee, false, scoped)
+        else
+            local qualifiers = #(t.quals or {}) > 0
+                and table.concat(t.quals, " ") .. " " or ""
+            result = qualifiers .. "*" .. foreign_type_string(t.pointee, true, scoped)
+        end
+    elseif tag == "Type.CArray" then
+        local qualifiers = #(t.quals or {}) > 0
+            and table.concat(t.quals, " ") .. " " or ""
+        result = qualifiers .. foreign_type_string(t.elem, true, scoped)
+            .. "[" .. (t.len and tostring(t.len) or "") .. "]"
+    elseif tag == "Type.COwned" then
+        result = t.count
+            and ("owned " .. foreign_type_string(t.pointee, true, scoped) .. "[]")
+            or ("owned *" .. foreign_type_string(t.pointee, true, scoped))
+    else
+        error("not a foreign type: " .. tostring(tag))
+    end
+    if scoped and t._ffi_scope
+       and (tag == "Type.CTypedef" or tag == "Type.CStruct" or tag == "Type.CUnion") then
+        result = t._ffi_scope .. "." .. result
+    end
+    if grouped and (tag == "Type.CPointer" or tag == "Type.CArray"
+                    or tag == "Type.COwned") then
+        return "(" .. result .. ")"
+    end
+    return result
+end
+
+function types.tostring(t, wrap, scoped)
     local tag = t._tag
-    if tag == "Type.GenericScope" then
+    if foreign_display_tags[tag] then
+        local result = "foreign " .. foreign_type_string(t, false, scoped)
+        return wrap and "(" .. result .. ")" or result
+    elseif tag == "Type.COwned" then
+        local result = foreign_type_string(t, false, scoped)
+        return wrap and "(" .. result .. ")" or result
+    elseif tag == "Type.Module" then
+        return "module '" .. t.name .. "'"
+    elseif tag == "Type.GenericScope" then
         return "scope[" .. types.generic_scope_key(t) .. "]"
     elseif tag == "Type.TypeParameter" then
         if t.constraint == false then return t.name end
-        return t.name .. ": " .. types.tostring(t.constraint)
+        return t.name .. ": " .. types.tostring(t.constraint, false, scoped)
     elseif tag == "Type.Parameter" then
         return t.diagnostic_name
     elseif tag == "Type.FunctionScheme" then
-        return tostring_typeparams(t.typeparams) ..
-            types.tostring(t.signature)
+        return tostring_typeparams(t.typeparams, scoped) ..
+            types.tostring(t.signature, false, scoped)
     elseif tag == "Type.GenericAlias" then
-        local binders = tostring_typeparams(t.typeparams)
+        local binders = tostring_typeparams(t.typeparams, scoped)
         local arguments = {}
         for _, typeparam in ipairs(t.typeparams) do
             arguments[#arguments + 1] = typeparam.name
         end
         local target = t.target_owner_fqtn
         if #arguments > 0 then
-            target = target .. "<" .. table.concat(arguments, ", ") .. ">"
+            target = target .. "<|" .. table.concat(arguments, ", ") .. "|>"
         end
         return t.module .. "." .. t.name .. binders .. " = " .. target
     elseif tag == "Type.Integer"     then return "integer"
@@ -4686,73 +4761,72 @@ function types.tostring(t, wrap)
         elseif t.isconst == "maybe" then
             prefix = "const? "
         end
-        return prefix .. "{ " .. types.tostring(t.elem) .. " }"
+        return prefix .. "{ " .. types.tostring(t.elem, false, scoped) .. " }"
     elseif tag == "Type.Map" then
-        return "{ " .. types.tostring(t.keys) .. " : " .. types.tostring(t.values) .. " }"
+        return "{ " .. types.tostring(t.keys, false, scoped) .. " : " .. types.tostring(t.values, false, scoped) .. " }"
     elseif tag == "Type.Function" then
-        local out = {"("}
+        local out = {"function ("}
         local ptypes = {}
         for _, param in ipairs(t.params) do
-            table.insert(ptypes, types.tostring(param))
+            table.insert(ptypes, types.tostring(param, false, scoped))
         end
         if t.varargtype then
-            table.insert(ptypes, "...: " .. types.tostring(t.varargtype))
+            table.insert(ptypes, "...: " .. types.tostring(t.varargtype, false, scoped))
         end
         table.insert(out, table.concat(ptypes, ", "))
         table.insert(out, ")")
         local rtypes = {}
         if #t.rettypes == 1 and not t.flexrettype then
-          table.insert(rtypes, types.tostring(t.rettypes[1], true))
+          table.insert(rtypes, types.tostring(t.rettypes[1], true, scoped))
         else
           for _, rettype in ipairs(t.rettypes) do
-            table.insert(rtypes, types.tostring(rettype))
+            table.insert(rtypes, types.tostring(rettype, false, scoped))
           end
         end
         if t.flexrettype then
-            table.insert(rtypes, "...: " .. types.tostring(t.flexrettype))
+            table.insert(rtypes, "...: " .. types.tostring(t.flexrettype, false, scoped))
             -- A flexible tail is legal only in a parenthesized result list;
             -- retaining those parentheses also keeps the rendering
             -- collision-free when its element type is itself a function.
-            table.insert(out, " -> (")
+            table.insert(out, ": (")
             table.insert(out, table.concat(rtypes, ", "))
             table.insert(out, ")")
         elseif #rtypes == 1 then
-            table.insert(out, " -> ")
+            table.insert(out, ": ")
             table.insert(out, rtypes[1])
         elseif #rtypes > 1 then
-            table.insert(out, " -> (")
+            table.insert(out, ": (")
             table.insert(out, table.concat(rtypes, ", "))
             table.insert(out, ")")
         else
-            -- zero return values: canonicalize as `(P...) -> ()`, distinct
-            -- from a `nil`-returning function `(P...) -> nil`
-            table.insert(out, " -> ()")
+            -- Explicit empty results keep zero returns distinct from nil.
+            table.insert(out, ": ()")
         end
         local res = table.concat(out)
         return wrap and "(" .. res .. ")" or res
     elseif tag == "Type.Method" or tag == "Type.StaticMethod" then
         local out = {t.fqtn,
              tag == "Type.Method" and ":" or ".",
-             t.name, tostring_typeparams(t.typeparams), "("}
+             t.name, tostring_typeparams(t.typeparams, scoped), "("}
         local ptypes = {}
         for _, param in ipairs(t.params) do
-            table.insert(ptypes, types.tostring(param))
+            table.insert(ptypes, types.tostring(param, false, scoped))
         end
         if t.varargtype then
-            table.insert(ptypes, "...: " .. types.tostring(t.varargtype))
+            table.insert(ptypes, "...: " .. types.tostring(t.varargtype, false, scoped))
         end
         table.insert(out, table.concat(ptypes, ", "))
         table.insert(out, ")")
         local rtypes = {}
         if #t.rettypes == 1 and not t.flexrettype then
-          table.insert(rtypes, types.tostring(t.rettypes[1], true))
+          table.insert(rtypes, types.tostring(t.rettypes[1], true, scoped))
         else
           for _, rettype in ipairs(t.rettypes) do
-            table.insert(rtypes, types.tostring(rettype))
+            table.insert(rtypes, types.tostring(rettype, false, scoped))
           end
         end
         if t.flexrettype then
-            table.insert(rtypes, "...: " .. types.tostring(t.flexrettype))
+            table.insert(rtypes, "...: " .. types.tostring(t.flexrettype, false, scoped))
             table.insert(out, ": (")
             table.insert(out, table.concat(rtypes, ", "))
             table.insert(out, ")")
@@ -4767,105 +4841,29 @@ function types.tostring(t, wrap)
         return table.concat(out)
     elseif tag == "Type.Record" or tag == "Type.Union"
        or tag == "Type.Interface" then
-        return t.name .. tostring_typeparams(t.typeparams)
+        return t.name .. tostring_typeparams(t.typeparams, scoped)
     elseif tag == "Type.Variant" then
         return t.fqtn .. "." .. t.name
     elseif tag == "Type.Nominal" then
         local args = t.args or {}
         if #args == 0 then return t.fqtn end
-        return t.fqtn .. "<" .. tostring_list(args) .. ">"
+        return t.fqtn .. "<|" .. tostring_list(args, scoped) .. "|>"
     elseif tag == "Type.Option" then
-        return types.tostring(t.base, true) .. "?"
-    elseif tag == "Type.CVoid" then
-        return "void"
-    elseif tag == "Type.CInteger" then
-        if t.spelling == "_Bool" then return "bool" end
-        return t.spelling
-    elseif tag == "Type.CFloat" then
-        if t.spelling == "float" then return "foreign float" end
-        return t.spelling
-    elseif tag == "Type.CPointer" then
-        local quals = t.quals and #t.quals > 0
-            and table.concat(t.quals, " ")
-        local base = "*" .. types.tostring(t.pointee, true)
-        if quals then
-          if wrap then
-            return "(" .. quals .. " " .. base .. ")"
-          else
-            return quals .. " " .. base
-          end
-        else
-          return base
-        end
-    elseif tag == "Type.CArray" then
-        local len = t.len and tostring(t.len) or ""
-        local quals = t.quals and #t.quals > 0
-            and table.concat(t.quals, " ")
-        local base = types.tostring(t.elem, true) .. "[" .. len .. "]"
-        if quals then
-          if wrap then
-            return "(" .. quals .. " " .. base .. ")"
-          else
-            return quals .. " " .. base
-          end
-        else
-          return base
-        end
-    elseif tag == "Type.CFunction" then
-        local params = {}
-        local rendered_params = tostring_list(t.params)
-        if rendered_params ~= "" then
-            table.insert(params, rendered_params)
-        end
-        if t.vararg then
-            table.insert(params, "...")
-        end
-        local res = "foreign " .. " (" .. table.concat(params, ", ") .. ")" .. " -> " .. types.tostring(t.ret, true)
-        if wrap then
-            return "(" .. res .. ")"
-        else
-            return res
-        end
-    elseif tag == "Type.CStruct" then
-        if types.is_c_lua_state(t) then
-            return "lua_State"
-        end
-        local display_name = c_display_name(t.tagname or t.cname or t.typedef)
-        if t._ffi_scope and display_name then
-          return t._ffi_scope .. "." .. display_name
-        else
-          local wrap_left = wrap and "(" or ""
-          local wrap_right = wrap and ")" or ""
-          return wrap_left .. "struct " .. (display_name or "<anonymous>") .. wrap_right
-        end
-    elseif tag == "Type.CUnion" then
-        local display_name = c_display_name(t.tagname or t.cname or t.typedef)
-        if t._ffi_scope and display_name then
-          return t._ffi_scope .. "." .. display_name
-        else
-          local wrap_left = wrap and "(" or ""
-          local wrap_right = wrap and ")" or ""
-          return wrap_left .. "union " .. (display_name or "<anonymous>") .. wrap_right
-        end
+        return types.tostring(t.base, true, scoped) .. "?"
     elseif tag == "Type.CField" then
-        return t.name .. ": " .. types.tostring(t.type)
-    elseif tag == "Type.CTypedef" then
-        if t._ffi_scope then
-          return t._ffi_scope .. "." .. t.name
-        else
-          -- avoid accidentaly aliasing Titan type
-          return "foreign " .. t.name
-        end
-    elseif tag == "Type.COwned" then
-        if t.count then
-            return "owned " .. types.tostring(t.pointee, true) .. "[]"
-        end
-        return "owned *" .. types.tostring(t.pointee, true)
+        return t.name .. ": " .. types.tostring(t.type, false, scoped)
     elseif tag == "Type.CModule" then
         return "C module " .. t.name
     else
         error("impossible: " .. tostring(tag))
     end
+end
+
+-- Source spelling is unqualified in the foreign namespace, but runtime tags
+-- must retain C declaration origins. This shares matching header declarations
+-- across modules without exposing internal identity keys in source syntax.
+function types.runtime_identity(t)
+    return types.tostring(t, false, true)
 end
 
 -- Build the public view serialized for a source union. Keeping this projection

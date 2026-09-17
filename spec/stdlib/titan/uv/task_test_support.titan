@@ -17,7 +17,7 @@ local function simple_cancellation_reason(task: async.Task): string
     raise "cancelled Task has no cancellation reason"
   end
   case reason as async.CancellationReason
-  when simple: message then return message
+  when simple(message) then return message
   else raise "cancelled Task has a complex cancellation reason"
   end
 end

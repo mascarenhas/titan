@@ -45,14 +45,14 @@ semicolon after each variant:
 
 ```text
 ["local"] "union" Name union-variant+ "end"
-union-variant ::= ["local"] Name [":" type] [";"]
+union-variant ::= ["local"] AnyName "(" [type] ")" [";"]
 ```
 
-A case has one or more arms:
+A case parses its sequence of arms before the optional else block:
 
 ```text
 "case" expression
-    ("when" Name [":" Name] "then" block)+
+    ("when" AnyName "(" [Name] ")" "then" block)*
     ["else" block]
 "end"
 ```
@@ -60,7 +60,9 @@ A case has one or more arms:
 The `block` after `then` and `else` is the same grammar production used by
 other compound statements. It may therefore become either a plain
 `Ast.StatBlock` or the `Ast.StatTry` wrapper produced by a trailing `catch`
-and/or `finally`. No restricted "case body" grammar exists.
+clause. Source `finally` remains reserved and unused; internal cleanup
+lowering may populate the existing finally representation. No restricted
+"case body" grammar exists.
 
 `defs.uniondecl` returns the `Ast.TopLevelUnion` followed immediately by one
 synthesized `Ast.TopLevelStatic` per variant. An empty variant produces a
@@ -89,12 +91,10 @@ An imported `m.Message.move` has three components and is rejected by the
 parser. Both outcomes enforce the same v1 boundary without adding a
 variant-type AST node.
 
-`lexer.CNAME` is the raw-identifier token used only in contextual C member and
-qualified-type positions. It allows imported C symbols whose spelling is a
-Titan keyword, including the new `when`, while `lexer.NAME` continues to
-reject keywords in ordinary Titan declarations and expressions. It
-generalizes the same separation already used by `NAMEDLABEL` for C prototype
-parameter labels.
+`lexer.ANYNAME` admits keyword spellings in member selectors, named argument
+labels, and declaration positions that permit them, including union variants.
+`lexer.NAME` still rejects reserved words in bare expression-name positions.
+These rules apply to Titan and C members without a C-only selector token.
 
 ## Type descriptors
 

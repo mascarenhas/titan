@@ -218,7 +218,7 @@ For details of each source, see the chapters that define the construct:
 Use errors for exceptional failures and violated assumptions. For ordinary
 "not found" or "not available" results, prefer [option types](option-types.md):
 
-```lua
+```titan
 function find(xs: {integer}, v: integer): integer?
     for i = 1, #xs do
         if xs[i] == v then

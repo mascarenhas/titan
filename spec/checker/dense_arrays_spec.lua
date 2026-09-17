@@ -362,7 +362,7 @@ describe("dense Array and positional integer-Map checking", function()
                 end
 
                 local function c_integer_map(
-                    m: {ffi.ffi_int: string}
+                    m: {foreign ffi_int: string}
                 ): integer
                     return #m
                 end
@@ -417,9 +417,9 @@ describe("dense Array and positional integer-Map checking", function()
 
     it("typechecks generic functions accepting const? arrays", function()
         assert_type_check([[
-            function map<A, B>(
+            function map<|A, B|>(
                 xs: const? {A},
-                f: (A, integer) -> B
+                f: function (A, integer): B
             ): {B}
                 local res: {B} = {}
                 for i = #xs, 1, -1 do
@@ -544,7 +544,7 @@ describe("dense Array and positional integer-Map checking", function()
                 return { 1, 2, 3 }
             end
 
-            function use(): () -> {integer}
+            function use(): function (): ({integer})
                 local f = producer
                 return f
             end

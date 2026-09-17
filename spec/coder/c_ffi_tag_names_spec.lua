@@ -45,12 +45,12 @@ describe("named C tag code generation", function()
                 foreign import "]] .. header .. [["
 
                 function item_value(): integer
-                    local item: ffi.Item = ffi.make_item(17)
+                    local item: foreign Item = ffi.make_item(17)
                     return item.count as integer
                 end
 
                 function cell_value(): integer
-                    local cell: ffi.Cell = ffi.make_cell(23)
+                    local cell: foreign Cell = ffi.make_cell(23)
                     return cell.count as integer
                 end
             ]]
@@ -93,7 +93,7 @@ describe("named C tag code generation", function()
                 end
 
                 function field_value(): integer
-                    local result: ffi.stat = ffi.make_stat()
+                    local result: foreign stat = ffi.make_stat()
                     return result.new as integer
                 end
             ]], [[
@@ -117,7 +117,7 @@ describe("named C tag code generation", function()
                 foreign import "]] .. header .. [["
 
                 local function pass(
-                    pointer: *ffi.Opaque): *ffi.Opaque
+                    pointer: foreign *Opaque): foreign *Opaque
                     return ffi.identity(pointer)
                 end
             ]])
@@ -195,28 +195,28 @@ describe("named C tag code generation", function()
                 foreign import "]] .. header .. [["
 
                 foreign function dns_callback(
-                    request: *ffi.ffi_dns_request,
-                    status: ffi.ffi_int,
-                    result: *ffi.ffi_addrinfo): ()
+                    request: *ffi_dns_request,
+                    status: ffi_int,
+                    result: *ffi_addrinfo): void
                 end
 
                 foreign function connect_callback(
-                    request: *ffi.ffi_connect_request,
-                    status: ffi.ffi_int): ()
+                    request: *ffi_connect_request,
+                    status: ffi_int): void
                 end
 
                 local function dns_shape(
-                    loop: *ffi.ffi_loop,
-                    dns: *ffi.ffi_dns_request,
-                    connect: *ffi.ffi_connect_request,
-                    tcp: *ffi.ffi_tcp,
-                    node: const *ffi.ffi_char):
-                    (ffi.ffi_int, ffi.ffi_int)
-                    local service: ffi.ffi_char[6] =
-                        ffi.ffi_char.new_array(6)
-                    local hints = ffi.ffi_addrinfo.new()
-                    local address = ffi.ffi_sockaddr.new()
-                    local storage = ffi.ffi_sockaddr_storage.new()
+                    loop: foreign *ffi_loop,
+                    dns: foreign *ffi_dns_request,
+                    connect: foreign *ffi_connect_request,
+                    tcp: foreign *ffi_tcp,
+                    node: foreign const *ffi_char):
+                    (foreign ffi_int, foreign ffi_int)
+                    local service =
+                        foreign ffi_char.new_array(6)
+                    local hints = foreign ffi_addrinfo.new()
+                    local address = foreign ffi_sockaddr.new()
+                    local storage = foreign ffi_sockaddr_storage.new()
                     hints.family = ffi.FFI_AF_UNSPEC
                     hints.socket_type = ffi.FFI_SOCK_STREAM
                     hints.protocol = ffi.FFI_IPPROTO_TCP
@@ -227,7 +227,7 @@ describe("named C tag code generation", function()
                     local dns_status = ffi.ffi_getaddrinfo(
                         loop, dns, dns_callback, node, service, hints)
                     local generic =
-                        storage as const *ffi.ffi_sockaddr
+                        storage as foreign const *ffi_sockaddr
                     local connect_status = ffi.ffi_tcp_connect(
                         connect, tcp, generic, connect_callback)
                     return dns_status, connect_status

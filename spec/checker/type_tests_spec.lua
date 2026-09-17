@@ -38,7 +38,7 @@ describe("type-test expressions (typechecker)", function()
             "nil",
             "string",
             "Record",
-            "(integer) -> integer",
+            "function (integer): integer",
         }) do
             h.assert_type_check([[
                 record Record end
@@ -105,19 +105,19 @@ describe("type-test expressions (typechecker)", function()
             foreign import "]] .. header .. [["
 
             function c_integer(v: value): boolean
-                return v is ffi.ffi_int
+                return v is foreign ffi_int
             end
             function c_float(v: value): boolean
-                return v is ffi.ffi_double
+                return v is foreign ffi_double
             end
             function c_pointer(v: value): boolean
-                return v is ffi.ffi_void_ptr
+                return v is foreign ffi_void_ptr
             end
             function c_userdata(v: value): boolean
-                return v is *ffi.Udata
+                return v is foreign *Udata
             end
             function c_tvalue(v: value): boolean
-                return v is ffi.TValue
+                return v is foreign TValue
             end
             ]])
         end)
@@ -131,13 +131,13 @@ describe("type-test expressions (typechecker)", function()
             h.assert_type_error("cannot cast 'value' to '.-test_array'", [[
                 foreign import "]] .. header .. [["
                 function array(v: value): boolean
-                    return v is ffi.test_array
+                    return v is foreign test_array
                 end
             ]])
             h.assert_type_error("cannot cast 'value' to '.-test_record'", [[
                 foreign import "]] .. header .. [["
                 function aggregate(v: value): boolean
-                    return v is ffi.test_record
+                    return v is foreign test_record
                 end
             ]])
         end)

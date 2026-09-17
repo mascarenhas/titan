@@ -12,6 +12,7 @@ local schemas = {
         source_type_members = "type_map",
     },
     ["Type.ModuleMember"] = {
+        _c_integer_constant = "string?",
         modname = "string", name = "string", type = "type", paramnames = "names_or_false",
         islocal = "boolean?", _foreign_source = "boolean?",
     },
@@ -111,6 +112,7 @@ local schemas = {
     header = {
         modname = "string", logical_name = "string", identity = "string",
         contents = "string", direct_includes = "names", dependencies = "headers",
+        typedef_declarations = "names",
         search_inputs = "inputs", digest = "string",
     },
     include = {

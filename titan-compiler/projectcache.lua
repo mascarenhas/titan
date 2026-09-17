@@ -7,7 +7,7 @@ local version = require "titan-compiler.version"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local ffiheaders = require "titan-compiler.ffiheaders"
 
-local projectcache = { VERSION = 3 }
+local projectcache = { VERSION = 4 }
 
 local schemas = require "titan-compiler.declarationschemas"
 

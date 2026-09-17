@@ -40,14 +40,14 @@ one C translation unit. A `local` top-level declaration is private to the
 logical module, not to the file that contains it, so another contributor may
 use it:
 
-```lua
+```titan
 -- graphics/scene/scene.titan
 function visible_objects(c: Camera): integer
     return count_visible(c)       -- local helper from geometry.titan
 end
 ```
 
-```lua
+```titan
 -- graphics/scene/geometry.titan
 local function count_visible(c: Camera): integer
     -- ...
@@ -122,7 +122,7 @@ Like any Titan block, that main initializer may have a `catch`
 trailer. That trailer remains part of the one initializer; it does not let a
 contributor define another root initialization block.
 
-```lua
+```titan
 -- graphics/scene/scene.titan
 local initialized: boolean = false
 

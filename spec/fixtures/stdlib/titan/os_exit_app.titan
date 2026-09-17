@@ -34,7 +34,7 @@ local function explicit_exit(marker: string): integer
 end
 
 local function child_exit(marker: string): integer
-  async.run<value, value>(function (): value
+  async.run<|value, value|>(function (): value
     defer append(marker, "child-defer;")
     timer.sleep(5)
     system.exit(29)
@@ -60,7 +60,7 @@ end
 
 local function competing_exit(marker: string): integer
   local child_ready = false
-  async.run<value, value>(function (): value
+  async.run<|value, value|>(function (): value
     defer append(marker, "child-defer;")
     child_ready = true
     do

@@ -82,7 +82,9 @@ function checkfuncbody(node, st, errors, opts)
         ldecl._readonly = true
         st:add_symbol("L", ldecl)
         local mdecl = ast.Decl(node.loc, "M", false, false, false)
-        mdecl._type = module_udata_pointer_type(st)
+        mdecl._type = types.Module(st.modname, {}, {})
+        mdecl._type._current_module = true
+        mdecl._current_module = true
         mdecl._funcdepth = #func_stack
         mdecl._cvar = "_mod"
         mdecl._readonly = true
@@ -145,7 +147,7 @@ function checkfuncbody(node, st, errors, opts)
             param._type = ptypes[i]
             param._funcdepth = #func_stack
             local builtin = st:find_symbol(param.name)
-            if builtin and builtin._readonly then
+            if builtin and builtin._readonly and not builtin._builtin then
                 checker.typeerror(errors, param.loc,
                     "cannot declare parameter '%s' because it shadows a built-in local",
                     param.name)
@@ -579,6 +581,7 @@ function toplevel_name(node)
     elseif tag == "Ast.TopLevelVar" then
         return node.decl.name
     elseif tag == "Ast.TopLevelTypeAlias"
+           or tag == "Ast.TopLevelForeignTypeAlias"
            or tag == "Ast.TopLevelInterface" then
         -- Type aliases occupy a separate namespace and are deliberately absent
         -- from the ordinary top-level duplicate/value-symbol machinery.
@@ -601,12 +604,13 @@ end
 -- One namespace is established from the real ordered module header. Foreign
 -- directives carry include metadata only; they do not bind ordinary symbols.
 function check_foreign_environment(module_ast, st, errors)
-    local namespace = {
+    local namespace = st.ffi_namespace or {
         _tag = "Checker.ForeignNamespace", name = "ffi", _builtin = true,
+        _readonly = true,
         _type = types.CModule("ffi", {}, {}),
     }
     st.ffi_namespace, module_ast._ffi_namespace = namespace, namespace
-    st:add_symbol("ffi", namespace)
+    if not st:find_symbol("ffi") then st:add_symbol("ffi", namespace) end
     local nodes, names, has_source = {}, {}, false
     for _, node in ipairs(module_ast) do
         if not node._ignore and node._tag == "Ast.TopLevelForeignImport" then
@@ -619,7 +623,7 @@ function check_foreign_environment(module_ast, st, errors)
     local loc = nodes[1] and nodes[1].loc or module_ast[1] and module_ast[1].loc
         or { filename = st.filename, line = 1, col = 1 }
     local service, options, err
-    if #nodes > 0 or has_source then
+    if #nodes > 0 or has_source or next(st.foreign_aliases) then
         if foreign_c_config_error then err = foreign_c_config_error
         else
             service, err = ensure_probe_service(st)
@@ -645,7 +649,7 @@ function check_foreign_environment(module_ast, st, errors)
     if st.prepare_ffi_header then
         header, err = st.prepare_ffi_header(module_ast)
     elseif options then
-        st.ffi_header_owner = { io = options.io }
+        st.ffi_header_owner = st.ffi_header_owner or { io = options.io }
         header, err = ffiheaders.prepare(st.ffi_header_owner, st.modname,
             module_ast, st.filename or (st.modname:gsub("[.]", "/") .. ".titan"))
     end
@@ -665,7 +669,8 @@ function check_foreign_environment(module_ast, st, errors)
     if not include then checker.typeerror(errors, loc, "%s", err); return end
     namespace._include = include
     st.last_foreign_import_node = { loc = loc, headername = "ffi" }
-    st.foreign_includes, st.foreign_includes_version = { include }, 1
+    st.foreign_includes = { include }
+    st.foreign_includes_version = (st.foreign_includes_version or 0) + 1
     local conversion_key = st.cache_adapter and foreigncache.key(st, namespace)
     if conversion_key and foreigncache.restore(st, namespace, conversion_key) then
         cdriver.emit_process_phase(options, "ffi", include,
@@ -694,6 +699,7 @@ function check_foreign_environment(module_ast, st, errors)
                     local member = types.ModuleMember("ffi", name, decl, paramnames)
                     member._foreign_namespace = true
                     member._c_origin_header = declaration and declaration.origin_header or include
+                    member._c_integer_constant = declaration and declaration.integer_constant
                     members[name] = member
                 end
                 if is_foreign_ordinary_identifier(name, ftype) then
@@ -768,14 +774,13 @@ toplevel_visitor = util.make_visitor({
     ["Ast.TopLevelVar"] = function(node, st, errors)
         node._module_name = st.modname
         if node.value == false then
-            assert(node.isconst,
-                "only const module variables may omit an initializer")
-            node._initializerless_const = true
+            node._initializerless_const = node.isconst and true or nil
+            local subject = (node.isconst and "const " or "") .. "module variable"
             local value = ast.ExpNil(node.decl.loc)
             if not node.decl.type then
                 checker.typeerror(errors, node.decl.loc,
-                    "const module variable '%s' without an initializer requires an explicit type",
-                    node.decl.name)
+                    "%s '%s' without an initializer requires an explicit type",
+                    subject, node.decl.name)
                 node._type = types.Invalid()
                 value._type = node._type
             else
@@ -788,14 +793,14 @@ toplevel_visitor = util.make_visitor({
                     node.decl.type.loc or node.loc, errors)
                 if not types.accepts_missing_nil(node._type) then
                     checker.typeerror(errors, node.decl.loc,
-                        "const module variable '%s' cannot be initialized with nil because type '%s' does not accept nil",
-                        node.decl.name, types.tostring(node._type))
+                        "%s '%s' cannot be initialized with nil because type '%s' does not accept nil",
+                        subject, node.decl.name, types.tostring(node._type))
                     value._type = types.Invalid()
                 else
                     checkexp(value, st, errors, node._type)
                     value = coerce_and_check(
                         value, node._type,
-                        "nil initialization of const module variable " ..
+                        "nil initialization of " .. subject .. " " ..
                             node.decl.name,
                         errors, node.loc)
                 end
@@ -839,6 +844,10 @@ toplevel_visitor = util.make_visitor({
 
     ["Ast.TopLevelTypeAlias"] = function(node, st, errors)
         resolve_type_alias(node, st, errors)
+    end,
+
+    ["Ast.TopLevelForeignTypeAlias"] = function(node, st, errors)
+        resolve_foreign_type_alias(node, st, errors)
     end,
 
     ["Ast.TopLevelInterface"] = function(node, st, errors)
@@ -981,7 +990,7 @@ toplevel_visitor = util.make_visitor({
         local varargtype = false
         for _, param in ipairs(node.params) do
             if param.name == false then
-                varargtype = param.type
+                varargtype = param.type or { loc = param.loc }
             else
                 argnodes[#argnodes + 1] = param.type
                 paramnames[#paramnames + 1] = param.name
@@ -1264,17 +1273,26 @@ toplevel_visitor = util.make_visitor({
 -- source order. Interfaces and aliases otherwise use first-declaration-wins in
 -- their shared type-only namespace.
 function collect_type_aliases(ast, st, errors)
+    st.foreign_alias_order = {}
+    for _, node in ipairs(ast) do
+        if not node._ignore and node._tag == "Ast.TopLevelForeignTypeAlias" then
+            local previous = st:find_foreign_alias(node.name)
+            if previous then
+                checker.typeerror(errors, node.loc,
+                    "duplicate foreign type alias for %s, previous one at %s",
+                    node.name, location.format(previous.loc))
+                node._ignore = true
+            else
+                st:add_foreign_alias(node.name, node)
+            end
+        end
+    end
     local nominals = {}
     for _, node in ipairs(ast) do
         if not node._ignore
            and (node._tag == "Ast.TopLevelRecord"
                 or node._tag == "Ast.TopLevelUnion") then
-            if foreigntypes.is_surface_primitive_component(node.name) then
-                checker.typeerror(errors, node.loc,
-                    "cannot define Titan nominal type '%s'; the name is a contextual C99 type",
-                    node.name)
-                node._ignore = true
-            elseif not nominals[node.name] then
+            if not nominals[node.name] then
                 nominals[node.name] = node
             end
         end
@@ -1286,14 +1304,6 @@ function collect_type_aliases(ast, st, errors)
         if not node._ignore
            and (node._tag == "Ast.TopLevelTypeAlias"
                 or node._tag == "Ast.TopLevelInterface") then
-            if node._tag == "Ast.TopLevelInterface"
-               and foreigntypes.is_surface_primitive_component(node.name) then
-                checker.typeerror(errors, node.loc,
-                    "cannot define Titan nominal type '%s'; the name is a contextual C99 type",
-                    node.name)
-                node._ignore = true
-                goto continue_type_only
-            end
             local nominal = nominals[node.name]
             local previous = type_only[node.name]
             if nominal then
@@ -1515,6 +1525,36 @@ function checktoplevel(ast, st, errors, loader)
         end
     end
     check_foreign_environment(ast, st, errors)
+    if next(st.foreign_aliases) then
+        local before = #errors
+        for _, node in ipairs(ast) do
+            if not node._ignore and node._tag == "Ast.TopLevelForeignTypeAlias" then
+                resolve_foreign_type_alias(node, st, errors)
+            end
+        end
+        if #errors == before then
+            ast._foreign_typedefs = {}
+            for _, node in ipairs(st.foreign_alias_order) do
+                ast._foreign_typedefs[#ast._foreign_typedefs + 1] = node._c_typedef
+            end
+            st:reset_foreign_environment()
+            check_foreign_environment(ast, st, errors)
+            for _, node in ipairs(st.foreign_alias_order) do
+                local declared = st.ffi_namespace._type.type_members[node.name]
+                if declared and declared._tag == "Type.CTypedef" then
+                    node._type = declared
+                elseif #errors == before then
+                    -- Some C compilers merely warn for `typedef long int;`.
+                    -- Success must establish the exact requested typedef, not
+                    -- just accept a declaration with no declarator name.
+                    checker.typeerror(errors, node.loc,
+                        "foreign type alias '%s' does not declare a valid C typedef name",
+                        node.name)
+                    node._type = types.Invalid()
+                end
+            end
+        end
+    end
     -- Structural constraints cannot be decided until every nominal method
     -- signature has populated its canonical owner descriptor. Keep every
     -- signature-time application deferrable across aliases, owners, top-level

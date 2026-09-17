@@ -27,7 +27,7 @@ local function captured_lambda_source(count)
         terms[#terms + 1] = string.format("capture_%03d", i)
     end
     return string.format([[
-        function make(): (() -> integer)
+        function make(): function (): (integer)
             %s
             return function(): integer
                 return %s
@@ -44,7 +44,7 @@ end
 describe("closures (capture analysis)", function()
     it("flags a captured-and-mutated local (boxed counter)", function()
         local ok, err, ast = run_checker([[
-            function make(): (() -> (integer))
+            function make(): function (): integer
                 local n: integer = 0
                 local inc = function(): integer
                     n = n + 1
@@ -62,7 +62,7 @@ describe("closures (capture analysis)", function()
 
     it("flags a captured-immutable local (not assigned)", function()
         local ok, err, ast = run_checker([[
-            function make(): (() -> (integer))
+            function make(): function (): integer
                 local n: integer = 7
                 local get = function(): integer return n end
                 return get
@@ -121,7 +121,7 @@ describe("closures (capture analysis)", function()
         local ok, err, ast = run_checker([[
             function f(): integer
                 local a: integer = 1
-                local b = function(): (() -> (integer))
+                local b = function(): function (): integer
                     local c = function(): integer
                         return a
                     end
@@ -138,7 +138,7 @@ describe("closures (capture analysis)", function()
 
     it("captures a parameter of the enclosing function", function()
         local ok, err, ast = run_checker([[
-            function adder(x: integer): (() -> (integer))
+            function adder(x: integer): function (): integer
                 local g = function(): integer return x end
                 return g
             end
@@ -153,7 +153,7 @@ describe("closures (capture analysis)", function()
         -- `self` is declared at the method's own func-depth (checkfuncbody).
         local ok, err, ast = run_checker([[
             record C n: integer end
-            function C:m(): (() -> (integer))
+            function C:m(): function (): integer
                 local g = function(): integer return self.n end
                 return g
             end
@@ -169,8 +169,8 @@ describe("closures (capture analysis)", function()
         -- variable stays immutable -> by-value (never boxed) -> fresh per
         -- iteration. (§3/§4.2 invariant.)
         local ok, err, ast = run_checker([[
-            function f(): {() -> integer}
-                local fns: {() -> integer} = {}
+            function f(): {function (): integer}
+                local fns: {function (): integer} = {}
                 for i = 1, 3 do
                     fns[i] = function(): integer return i end
                 end
@@ -201,7 +201,7 @@ describe("closures (parameter inference)", function()
     it("infers a param type from an assignment-target function type", function()
         assert_type_check([[
             function f(): integer
-                local g: (integer) -> (integer) = function(x) return x + 1 end
+                local g: function (integer): integer = function(x) return x + 1 end
                 return g(2)
             end
         ]])
@@ -209,7 +209,7 @@ describe("closures (parameter inference)", function()
 
     it("infers a param type from an argument-position function type", function()
         assert_type_check([[
-            function apply(g: (integer) -> (integer), x: integer): integer
+            function apply(g: function (integer): integer, x: integer): integer
                 return g(x)
             end
             function f(): integer
@@ -220,7 +220,7 @@ describe("closures (parameter inference)", function()
 
     it("infers a param type from a return-position function type", function()
         assert_type_check([[
-            function make(): ((integer) -> (integer))
+            function make(): function (integer): integer
                 return function(x) return x * 2 end
             end
         ]])
@@ -229,7 +229,7 @@ describe("closures (parameter inference)", function()
     it("uses the annotation when a param is annotated", function()
         assert_type_check([[
             function f(): integer
-                local g: (integer) -> (integer) = function(x: integer) return x end
+                local g: function (integer): integer = function(x: integer) return x end
                 return g(1)
             end
         ]])
@@ -250,7 +250,7 @@ describe("closures (return inference)", function()
     it("infers a single return type from an assignment-target function type", function()
         assert_type_check([[
             function f(): integer
-                local g: (integer) -> (integer) = function(x) return x + 1 end
+                local g: function (integer): integer = function(x) return x + 1 end
                 return g(2)
             end
         ]])
@@ -259,7 +259,7 @@ describe("closures (return inference)", function()
     it("infers a multi return type from the context function type", function()
         assert_type_check([[
             function f(): integer
-                local g: (integer) -> (integer, integer) =
+                local g: function (integer): (integer, integer) =
                     function(x) return x, x + 1 end
                 local a: integer, b: integer = g(2)
                 return a + b
@@ -269,7 +269,7 @@ describe("closures (return inference)", function()
 
     it("infers a return type from an argument-position function type", function()
         assert_type_check([[
-            function apply(g: (integer) -> (integer), x: integer): integer
+            function apply(g: function (integer): integer, x: integer): integer
                 return g(x)
             end
             function f(): integer
@@ -280,7 +280,7 @@ describe("closures (return inference)", function()
 
     it("infers a return type from a return-position function type", function()
         assert_type_check([[
-            function make(): ((integer) -> (integer))
+            function make(): function (integer): integer
                 return function(x) return x * 2 end
             end
         ]])
@@ -291,7 +291,7 @@ describe("closures (return inference)", function()
         -- type, not used to synthesize it: an integer return coerces to float.
         assert_type_check([[
             function f(): float
-                local g: (integer) -> (float) = function(x) return x end
+                local g: function (integer): float = function(x) return x end
                 return g(2)
             end
         ]])
@@ -300,7 +300,7 @@ describe("closures (return inference)", function()
     it("rejects a body return that mismatches the context return type", function()
         assert_type_error("types in return do not match", [[
             function f(): integer
-                local g: (integer) -> (string) = function(x) return x end
+                local g: function (integer): string = function(x) return x end
                 return 1
             end
         ]])
@@ -329,7 +329,7 @@ describe("closures (return inference)", function()
     it("lets explicit `: ()` override a result-bearing context", function()
         local ok, err, ast = run_checker([[
             function f()
-                local g: (integer) -> value = function(x): () end
+                local g: function (integer): value = function(x): () end
             end
         ]])
         assert.truthy(ok, err)
@@ -369,7 +369,7 @@ describe("closures (top-level lambda initializer is sound)", function()
         assert_type_check([[
             local f = function(x: integer): integer return x * 2 end
             function apply(x: integer): integer return f(x) end
-            function setf(g: (integer) -> integer) f = g end
+            function setf(g: function (integer): integer) f = g end
         ]])
     end)
 
@@ -415,7 +415,7 @@ describe("closures (still-an-error cases)", function()
         -- a clean 'not declared' error, not a silent miscompile (D2).
         assert_type_error("variable 'f' not declared", [[
             function g(): integer
-                local f: (integer) -> (integer) = function(n: integer): integer
+                local f: function (integer): integer = function(n: integer): integer
                     return f(n)
                 end
                 return 1
@@ -428,7 +428,7 @@ describe("closures (still-an-error cases)", function()
         -- "declaration of function 'nil'".
         assert_type_error("duplicate parameter 'x' in anonymous function", [[
             function g(): integer
-                local f: (integer, integer) -> (integer) =
+                local f: function (integer, integer): integer =
                     function(x: integer, x: integer): integer return x end
                 return 1
             end
@@ -443,7 +443,7 @@ describe("bound method references (obj:m)", function()
             function Adder:add(x: integer): integer
                 return self.base + x
             end
-            function use(): (integer) -> integer
+            function use(): function (integer): integer
                 local a = Adder.new(0)
                 local f = a:add
                 return f
@@ -467,7 +467,7 @@ describe("bound method references (obj:m)", function()
             function Adder:add(x: integer): integer return self.base + x end
             function use(): integer
                 local a = Adder.new(1)
-                local f: (integer) -> integer = a:add
+                local f: function (integer): integer = a:add
                 return f(2)
             end
         ]])
@@ -475,13 +475,13 @@ describe("bound method references (obj:m)", function()
 
     it("rejects a bound method bound to an incompatible function type", function()
         assert_type_error(
-            "do not match, expected %(string%) %-> string but found %(integer%) %-> integer",
+            "do not match, expected function %(string%): string but found function %(integer%): integer",
             [[
                 record Adder base: integer end
                 function Adder:add(x: integer): integer return self.base + x end
                 function use()
                     local a = Adder.new(1)
-                    local f: (string) -> string = a:add
+                    local f: function (string): string = a:add
                 end
             ]])
     end)

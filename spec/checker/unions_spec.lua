@@ -31,16 +31,16 @@ describe("unions (typechecker)", function()
     it("builds stable variant metadata and positional constructors", function()
         local ast, modtype = assert_check([[
             union Message
-                quit
-                local hidden: integer
-                write: string
+                quit()
+                local hidden(integer)
+                write(string)
             end
 
             local quit = Message.quit()
             local write = Message.write("hello")
 
             function make_write(): Message
-                local constructor: (string) -> Message = Message.write
+                local constructor: function (string): Message = Message.write
                 return constructor("hello")
             end
         ]])
@@ -83,18 +83,18 @@ describe("unions (typechecker)", function()
     function()
         local ast = assert_check([[
             union Message
-                quit
-                write: string
+                quit()
+                write(string)
             end
 
             function inspect(message: Message?): integer
                 case message
-                when write: text then
+                when write(text) then
                     local read = function(): string
                         return text
                     end
                     return #read()
-                when quit then
+                when quit() then
                     return 0
                 end
             end
@@ -118,7 +118,7 @@ describe("unions (typechecker)", function()
     function()
         assert_check([[
             union Message
-                write: string
+                write(string)
             end
 
             function use(text: string)
@@ -126,7 +126,7 @@ describe("unions (typechecker)", function()
 
             function inspect(message: Message)
                 case message
-                when write: text then
+                when write(text) then
                     defer use(text)
                     use(text)
                 catch
@@ -140,35 +140,35 @@ describe("unions (typechecker)", function()
     function()
         local ast = assert_check([[
             union Message
-                one
-                local two
+                one()
+                local two()
             end
 
             type MessageAlias = Message
 
             function complete(message: Message): integer
                 case message
-                when one then
+                when one() then
                     return 1
-                when two then
+                when two() then
                     return 2
                 end
             end
 
             function complete_alias(message: MessageAlias): integer
                 case message
-                when one then
+                when one() then
                     return 1
-                when two then
+                when two() then
                     return 2
                 end
             end
 
             function complete_with_dead_else(message: Message): integer
                 case message
-                when one then
+                when one() then
                     return 1
-                when two then
+                when two() then
                     return 2
                 else
                     local unreachable = 0
@@ -177,7 +177,7 @@ describe("unions (typechecker)", function()
 
             function fallback(message: Message): integer
                 case message
-                when one then
+                when one() then
                     return 1
                 else
                     return 2
@@ -201,13 +201,13 @@ describe("unions (typechecker)", function()
 
         assert_error("function can return nil but return type is not nil", [[
             union Message
-                one
-                two
+                one()
+                two()
             end
 
             function incomplete(message: Message): integer
                 case message
-                when one then
+                when one() then
                     return 1
                 end
             end
@@ -215,15 +215,15 @@ describe("unions (typechecker)", function()
 
         assert_error("function can return nil but return type is not nil", [[
             union Message
-                one
-                two
+                one()
+                two()
             end
 
             function incomplete(message: Message): integer
                 case message
-                when one then
+                when one() then
                     return 1
-                when two then
+                when two() then
                 end
             end
         ]])
@@ -232,15 +232,15 @@ describe("unions (typechecker)", function()
     it("does not count duplicate arms toward exhaustive coverage", function()
         local err = assert_error("duplicate case arm for variant 'one'", [[
             union Message
-                one
-                two
+                one()
+                two()
             end
 
             function duplicate_only(message: Message): integer
                 case message
-                when one then
+                when one() then
                     return 1
-                when one then
+                when one() then
                     return 2
                 end
             end
@@ -254,17 +254,17 @@ describe("unions (typechecker)", function()
         local err = assert_error(
             "empty variant 'test%.Message%.quit' has no payload to bind", [[
                 union Message
-                    quit
-                    write: string
+                    quit()
+                    write(string)
                 end
 
                 function inspect(message: Message)
                     case message
-                    when quit: payload then
-                    when missing: missing_payload then
+                    when quit(payload) then
+                    when missing(missing_payload) then
                         local recovered = missing_payload
-                    when write then
-                    when write then
+                    when write() then
+                    when write() then
                     end
                 end
             ]])
@@ -277,7 +277,7 @@ describe("unions (typechecker)", function()
             "union member 'Message%.write' is not a type; use union type "
                 .. "'Message' or a case statement", [[
                 union Message
-                    write: string
+                    write(string)
                 end
 
                 function bad(x: value): Message
@@ -289,7 +289,7 @@ describe("unions (typechecker)", function()
             "union member 'Message%.write' is not a type; use union type "
                 .. "'Message' or a case statement", [[
                 union Message
-                    write: string
+                    write(string)
                 end
 
                 function bad(x: value): boolean
@@ -301,7 +301,7 @@ describe("unions (typechecker)", function()
             "union member 'Message%.inspect' is not a type; use union type "
                 .. "'Message' or a case statement", [[
                 union Message
-                    quit
+                    quit()
                 end
 
                 function Message:inspect()
@@ -318,7 +318,7 @@ describe("unions (typechecker)", function()
         assert_error("case expression must have a union type", [[
             function inspect(x: value)
                 case x
-                when item then
+                when item() then
                 end
             end
         ]])
@@ -331,7 +331,7 @@ describe("unions (typechecker)", function()
 
                 function inspect(box: Box)
                     case box
-                    when item then
+                    when item() then
                     end
                 end
             ]])
@@ -340,7 +340,7 @@ describe("unions (typechecker)", function()
             "union type 'test%.Missing' in case expression does not exist", [[
                 function inspect(item: Missing)
                     case item
-                    when missing then
+                    when missing() then
                     end
                 end
             ]])
@@ -349,7 +349,7 @@ describe("unions (typechecker)", function()
             "union value of type 'test%.Message' has no fields; "
                 .. "use a case statement", [[
             union Message
-                quit
+                quit()
             end
 
             function inspect(message: Message): integer
@@ -361,7 +361,7 @@ describe("unions (typechecker)", function()
             "union type 'test%.Message' cannot be constructed with a record "
                 .. "initializer", [[
                 union Message
-                    quit
+                    quit()
                 end
 
                 function make(): Message
@@ -374,7 +374,7 @@ describe("unions (typechecker)", function()
             "trying to access union type 'test%.Message' as a first%-class "
                 .. "value", [[
                 union Message
-                    quit
+                    quit()
                 end
 
                 local invalid = Message
@@ -386,7 +386,7 @@ describe("unions (typechecker)", function()
         assert_error(
             "named arguments require a direct Titan module function", [[
             union Message
-                write: string
+                write(string)
             end
 
             function make(): Message
@@ -396,7 +396,7 @@ describe("unions (typechecker)", function()
 
         assert_error("top level variable initialization must be constant", [[
             union Message
-                quit
+                quit()
             end
 
             function Message.fake(): Message
@@ -420,8 +420,8 @@ describe("unions (typechecker)", function()
 
         assert_check([[
             union Message
-                quit
-                write: string
+                quit()
+                write(string)
             end
 
             local empty = Message.quit()
@@ -433,8 +433,8 @@ describe("unions (typechecker)", function()
     function()
         assert_check([[
             union Message
-                quit
-                write: string
+                quit()
+                write(string)
             end
 
             function Message.default(): Message
@@ -447,7 +447,7 @@ describe("unions (typechecker)", function()
 
             function use(): integer
                 local message = Message.default()
-                local bound: () -> integer = message:length
+                local bound: function (): integer = message:length
                 return message:length() + bound()
             end
         ]])
@@ -455,7 +455,7 @@ describe("unions (typechecker)", function()
         local err = assert_error(
             "redeclaration of union function 'Message%.write'", [[
                 union Message
-                    write: string
+                    write(string)
                 end
 
                 function Message.write(text: string): Message
@@ -473,7 +473,7 @@ describe("unions (typechecker)", function()
             "cannot declare union function 'Message%.inspect' as method "
                 .. "'Message:inspect' exists in union 'Message'", [[
                 union Message
-                    quit
+                    quit()
                 end
 
                 function Message:inspect()
@@ -502,8 +502,8 @@ describe("unions (typechecker)", function()
         local err = assert_error(
             "redeclaration of variant 'write' in union 'Message'", [[
                 union Message
-                    write
-                    write: string
+                    write()
+                    write(string)
                 end
             ]])
         assert.match("redeclaration of union function 'Message%.write'", err)
@@ -513,8 +513,8 @@ describe("unions (typechecker)", function()
         local ok, err = run_checker_modules({
             provider = [[
                 union Message
-                    quit
-                    write: string
+                    quit()
+                    write(string)
                 end
             ]],
             consumer = [[
@@ -522,9 +522,9 @@ describe("unions (typechecker)", function()
 
                 function inspect(message: provider.Message): integer
                     case message
-                    when quit then
+                    when quit() then
                         return 0
-                    when write: text then
+                    when write(text) then
                         return #text
                     end
                 end
@@ -536,9 +536,9 @@ describe("unions (typechecker)", function()
         ok, err, imported = run_checker_modules({
             provider = [[
                 union Message
-                    quit
-                    local secret: integer
-                    write: string
+                    quit()
+                    local secret(integer)
+                    write(string)
                 end
             ]],
             consumer = [[
@@ -546,9 +546,9 @@ describe("unions (typechecker)", function()
 
                 function inspect(message: provider.Message): integer
                     case message
-                    when quit then
+                    when quit() then
                         return 0
-                    when write: text then
+                    when write(text) then
                         return #text
                     else
                         return -1
@@ -556,7 +556,7 @@ describe("unions (typechecker)", function()
                 end
 
                 function make(): provider.Message
-                    local constructor: (string) -> provider.Message =
+                    local constructor: function (string): provider.Message =
                         provider.Message.write
                     return constructor("hello")
                 end
@@ -575,9 +575,9 @@ describe("unions (typechecker)", function()
         ok, err = run_checker_modules({
             provider = [[
                 union Message
-                    quit
-                    local secret: integer
-                    write: string
+                    quit()
+                    local secret(integer)
+                    write(string)
                 end
             ]],
             consumer = [[
@@ -585,9 +585,9 @@ describe("unions (typechecker)", function()
 
                 function inspect(message: provider.Message): integer
                     case message
-                    when quit then
+                    when quit() then
                         return 0
-                    when write: text then
+                    when write(text) then
                         return #text
                     end
                 end
@@ -600,8 +600,8 @@ describe("unions (typechecker)", function()
         ok, err = run_checker_modules({
             provider = [[
                 union Message
-                    quit
-                    local secret: integer
+                    quit()
+                    local secret(integer)
                 end
             ]],
             consumer = [[
@@ -609,7 +609,7 @@ describe("unions (typechecker)", function()
 
                 function inspect(message: provider.Message)
                     case message
-                    when secret then
+                    when secret() then
                     end
                 end
             ]],
@@ -623,7 +623,7 @@ describe("unions (typechecker)", function()
     function()
         local provider = [[
             union Message
-                quit
+                quit()
             end
         ]]
         local ok, err = run_checker_modules({
@@ -713,8 +713,8 @@ describe("unions (typechecker)", function()
     it("makes a local union's complete namespace private", function()
         local ast, modtype = assert_check([[
             local union Internal
-                hidden
-                payload: integer
+                hidden()
+                payload(integer)
             end
 
             function Internal.make(): Internal
@@ -746,7 +746,7 @@ describe("unions (typechecker)", function()
                 end
 
                 union Public
-                    exposed: Secret
+                    exposed(Secret)
                 end
             ]])
         assert.match("from Titan module 'test'", err)
@@ -757,8 +757,8 @@ describe("unions (typechecker)", function()
             end
 
             union Public
-                visible: integer
-                local hidden: Secret
+                visible(integer)
+                local hidden(Secret)
             end
         ]])
     end)
@@ -767,8 +767,8 @@ describe("unions (typechecker)", function()
     function()
         assert_check([[
             union Message
-                optional: string?
-                empty
+                optional(string?)
+                empty()
             end
 
             local nil_filled = Message.optional()
@@ -779,7 +779,7 @@ describe("unions (typechecker)", function()
             "types in argument 1 of call to function 'Message%.optional' "
                 .. "do not match, expected string%? but found integer", [[
                 union Message
-                    optional: string?
+                    optional(string?)
                 end
 
                 local invalid = Message.optional(1)

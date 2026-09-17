@@ -1,5 +1,5 @@
 local reflect = import "reflect"
-local strings = import "string"
+local string = import "string"
 local math = import "math"
 local peg = import "peg"
 local iteration = import "iteration"
@@ -14,18 +14,18 @@ record Error
 end
 
 union EncodeOption
-  null_value: value
-  max_depth: integer
-  max_bytes: integer
-  max_nodes: integer
+  null_value(value)
+  max_depth(integer)
+  max_bytes(integer)
+  max_nodes(integer)
 end
 
 union DecodeOption
-  null_value: value
-  max_depth: integer
-  max_bytes: integer
-  max_nodes: integer
-  ignore_unknown_fields: boolean
+  null_value(value)
+  max_depth(integer)
+  max_bytes(integer)
+  max_nodes(integer)
+  ignore_unknown_fields(boolean)
 end
 
 local record Settings
@@ -109,10 +109,10 @@ function encode(subject: value, ...: EncodeOption): string
   local settings = default_settings()
   for index = 1, #... do
     case ...[index]
-    when null_value: sentinel then settings.null_value = sentinel
-    when max_depth: limit then settings.max_depth = limit
-    when max_bytes: limit then settings.max_bytes = limit
-    when max_nodes: limit then settings.max_nodes = limit
+    when null_value(sentinel) then settings.null_value = sentinel
+    when max_depth(limit) then settings.max_depth = limit
+    when max_bytes(limit) then settings.max_bytes = limit
+    when max_nodes(limit) then settings.max_nodes = limit
     end
   end
   validate_settings(settings)
@@ -123,11 +123,11 @@ function decode(source: string, target: reflect.Type?, ...: DecodeOption): value
   local settings = default_settings()
   for index = 1, #... do
     case ...[index]
-    when null_value: sentinel then settings.null_value = sentinel
-    when max_depth: limit then settings.max_depth = limit
-    when max_bytes: limit then settings.max_bytes = limit
-    when max_nodes: limit then settings.max_nodes = limit
-    when ignore_unknown_fields: ignore then settings.ignore_unknown_fields = ignore
+    when null_value(sentinel) then settings.null_value = sentinel
+    when max_depth(limit) then settings.max_depth = limit
+    when max_bytes(limit) then settings.max_bytes = limit
+    when max_nodes(limit) then settings.max_nodes = limit
+    when ignore_unknown_fields(ignore) then settings.ignore_unknown_fields = ignore
     end
   end
   validate_settings(settings)

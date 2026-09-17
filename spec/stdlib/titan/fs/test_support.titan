@@ -17,12 +17,12 @@ end
 
 local function new_workspace(context: test.Context): string
   local pattern = "/tmp/titan-fs-test-XXXXXX"
-  local storage = char.new_array(#pattern + 1)
-  ffi.memcpy(storage as *char,
-                 pattern as const *char,
-                 #pattern as ffi.size_t)
+  local storage = foreign char.new_array(#pattern + 1)
+  ffi.memcpy(storage as foreign *char,
+                 pattern as foreign const *char,
+                 #pattern as foreign size_t)
   storage[#pattern] = 0
-  local created = ffi.mkdtemp(storage as *char)
+  local created = ffi.mkdtemp(storage as foreign *char)
   test.assert(created, "could not create native workspace")
   local root = created as string
   cleanup_path(context, root)
@@ -56,16 +56,16 @@ end
 
 local function write_file_synchronously(path: string, contents: string)
   local status = ffi.titan_spec_write_file(
-      path, contents, #contents as ffi.size_t)
+      path, contents, #contents as foreign size_t)
   test.assert(status == 0, "could not write native fixture file")
 end
 
 local function make_boundary_payload(): string
   local prefix_length = 65535
   local length = prefix_length + 6
-  local storage = char.new_array(length)
-  ffi.memset(storage as *char, 120,
-                 prefix_length as ffi.size_t)
+  local storage = foreign char.new_array(length)
+  ffi.memset(storage as foreign *char, 120,
+                 prefix_length as foreign size_t)
   storage[prefix_length] = 0
   storage[prefix_length + 1] = 89
   storage[prefix_length + 2] = 116

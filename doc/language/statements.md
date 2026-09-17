@@ -17,7 +17,7 @@ A *block* is a sequence of statements optionally ended by a single
 `while`, `repeat`, `for`, and each arm of an `if` or `case`. A free-standing block
 can be written with `do ... end`:
 
-```lua
+```titan
 function f(): integer
     local x = 10
     do
@@ -55,7 +55,7 @@ local x, _ = f()   -- keep the first result, ignore the second
 A mutable local variable is declared with `local`, an optional type
 annotation, and an optional initializer expression list:
 
-```lua
+```titan
 local x: integer = 10
 local s = "hello"        -- type inferred: string
 ```
@@ -67,7 +67,7 @@ slot. General assignment conversion is deliberately not consulted, so
 truthiness does not make `local ready: boolean` valid and a declaration with
 no annotation has no type to infer. For example:
 
-```lua
+```titan
 local found: string?
 local dynamic: value
 ```
@@ -95,7 +95,7 @@ Inference never produces an option type: if the initializer is an option
 unwrapped, with a run-time check, and the variable gets the base type. Ask
 for an option explicitly by writing `?` after the name:
 
-```lua
+```titan
 local xs: {integer} = {1, 2, 3}
 local a = xs[1]    -- a: integer  (run-time error if xs[1] is nil)
 local b? = xs[1]   -- b: integer? (nil is fine)
@@ -130,7 +130,7 @@ parenthesized call that leaves a multi-name declaration short
 The declared names only enter scope after the whole statement, so the
 initializers see the *outer* bindings:
 
-```lua
+```titan
 function f(x: integer): integer
     local x = x + 1   -- the x on the right is the parameter
     return x
@@ -220,7 +220,7 @@ fixed prefix; see [Flexible returns](flexible-returns.md).
 `if` has the same shape as in Lua, with any number of `elseif` arms and an
 optional `else`:
 
-```lua
+```titan
 function sign(x: integer): integer
     if x > 0 then
         return 1
@@ -237,7 +237,7 @@ rules: `false` and `nil` are false, everything else is true. In
 particular, an option-typed condition tests whether the value is `nil` —
 the idiomatic way to check an array read:
 
-```lua
+```titan
 function get(xs: {integer}, i: integer): integer
     if xs[i] then
         return xs[i]
@@ -261,9 +261,9 @@ applies to `while` and `repeat`/`until` conditions.
 
 ```titan
 case message
-when write: text then
+when write(text) then
     consume(text)
-when quit then
+when quit() then
     stop()
 else
     ignore()
@@ -283,7 +283,7 @@ binding is visible in that arm's protected body and catch.
 
 ## `while`
 
-```lua
+```titan
 function first_set(t: {integer}): integer
     local i = 1
     while not t[i] do   -- loop while t[i] is nil
@@ -304,7 +304,7 @@ the exact presence test when a present base value may itself be falsy, as with
 
 ## `repeat` / `until`
 
-```lua
+```titan
 function count_down(n: integer): integer
     local steps = 0
     repeat
@@ -325,7 +325,7 @@ the loop above could end with `local done = n <= 0` followed by
 
 Titan has Lua's numeric `for`:
 
-```lua
+```titan
 function sum_list(xs: {integer}): integer
     local sum: integer = 0
     for i = 1, #xs do
@@ -373,7 +373,7 @@ rather than wrapping the counter past the maximum integer.
 
 Titan's generic `for` iterates with an explicit iterator tuple:
 
-```lua
+```titan
 function step(limit: integer, n: integer): integer?
     if n >= limit then
         return nil
@@ -433,7 +433,7 @@ pointer. A plain `nil` return type and non-nil-capable return types such as
 `integer` are rejected. The loop stops only when that first returned value is
 `nil` (or `NULL` for C pointers). False values do **not** stop the loop:
 
-```lua
+```titan
 function flags(_: nil): boolean?
     -- returning false here still runs the loop body
 end
@@ -469,9 +469,9 @@ call. If close itself raises, that new error replaces the pending action.
 This helper returns the whole tuple, including a close function that receives
 the file state:
 
-```lua
+```text
 function numbered_lines(filename: string):
-        ((File, integer) -> (integer?, string?), File, integer, (File) -> ())
+        (function (File, integer): (integer?, string?), File, integer, function (File): ())
     local file: File = File.open(filename)
     local next = function (f: File, line_no: integer): (integer?, string?)
         local line? = f:read_line()
@@ -495,8 +495,8 @@ end
 If the iterator and closer are method closures that already capture the file,
 no state value is needed:
 
-```lua
-function lines(filename: string): (() -> string?, nil, nil, () -> ())
+```text
+function lines(filename: string): (function (): (string?), nil, nil, function (): ())
     local file: File = File.open(filename)
     return file:read_lines, nil, nil, file:close
 end
@@ -516,10 +516,10 @@ xs_push(xs, 10)
 p:move(2.0, 3.0)
 ```
 
-Only calls are valid as expression-statements. Any other expression in
-statement position — `(f)`, `1 + 1` — is a compile-time syntax error:
-`Expected a statement but found an expression that is not a function
-call.`
+Only calls are valid as expression statements. The parser admits prefix
+candidates such as `(f)` or `(1 + 1)`, then semantic checking rejects them
+because they are not calls. Assignment candidates similarly receive semantic
+lvalue validation before code generation.
 
 ## `raise`
 
@@ -611,14 +611,14 @@ requests one value. See [Functions](functions.md) and
 [Flexible returns](flexible-returns.md).
 
 A function declared without a return annotation returns **zero** values
-(its type is `() -> ()`), matching Lua — not one `nil`. Such functions need
+(its type is `function (): ()`), matching Lua — not one `nil`. Such functions need
 no `return` at all, and falling off the end is allowed.
 
 In a zero-return function a completely bare `return` is the clearest spelling,
 but expressions are also permitted: they are evaluated for their effects and
 their values are discarded. The function still exposes zero results:
 
-```lua
+```titan
 local count: integer = 0
 
 function bump(n: integer)    -- no annotation: returns zero values
@@ -664,7 +664,7 @@ numeric `for`, and generic `for` loops remain fallthrough.
 `break` exits the innermost enclosing loop — a `while`, `repeat`,
 numeric `for`, or generic `for` — exactly as in Lua:
 
-```lua
+```titan
 function first_positive(xs: {integer}): integer
     local r = 0
     for i = 1, #xs do

@@ -12,18 +12,18 @@ record Point
 end
 
 union Message
-    quit
-    write: string
-    move: Point
+    quit()
+    write(string)
+    move(Point)
 end
 
 function describe(message: Message): string
     case message
-    when write: text then
+    when write(text) then
         return "write: " .. text
-    when move: point then
+    when move(point) then
         return "move to " .. point.x .. ", " .. point.y
-    when quit then
+    when quit() then
         return "quit"
     else
         return "unknown"
@@ -34,18 +34,18 @@ end
 Every arm begins with the reserved word `when`. There is no fallthrough:
 exactly the matching arm runs. The optional `else` runs when no listed arm
 matches.
-`when` is reserved in ordinary Titan names, but a C header member or qualified
-C type spelled `when` remains source-nameable through the FFI's
-[contextual C-name rule](c-ffi-expressions.md#titan-keywords-as-c-names).
+`when` is reserved as a statement keyword. Declaration/member positions that
+use `AnyName` still admit keyword spellings; local payload binders use ordinary
+non-keyword names. See [the grammar](grammar.md).
 
 ## Declaring unions and variants
 
 The general form is:
 
-```titan
+```text
 [local] union Name
-    [local] empty_variant
-    [local] payload_variant: PayloadType
+    [local] empty_variant()
+    [local] payload_variant(PayloadType)
     ...
 end
 ```
@@ -66,11 +66,11 @@ different types:
 
 ```titan
 union First
-    item: integer
+    item(integer)
 end
 
 union Second
-    item: integer
+    item(integer)
 end
 
 -- First.item(1) is not a Second
@@ -95,15 +95,15 @@ local moved = Message.move(Point.new(10.0, 20.0))
 ```
 
 For a generic union, explicit owner arguments attach to the union namespace:
-`Maybe<integer>.present(1)` and `Maybe<integer>.absent()`. The old spelling
-`Maybe.present<integer>(1)` is not an owner application. An inferred call may
+`Maybe<|integer|>.present(1)` and `Maybe<|integer|>.absent()`. The old spelling
+`Maybe.present<|integer|>(1)` is not an owner application. An inferred call may
 remain `Maybe.present(1)`, and a result-only binder with no evidence closes by
 the [generic final carrier rule](generics.md#instantiating-calls-and-constructors).
 
 Variant constructors are ordinary first-class function values:
 
 ```titan
-local make_message: (string) -> Message = Message.write
+local make_message: function (string): (Message) = Message.write
 local message = make_message("hello")
 ```
 
@@ -137,7 +137,7 @@ record Delta
 end
 
 union Message
-    move: Delta
+    move(Delta)
 end
 ```
 
@@ -161,7 +161,7 @@ end
 
 function Message:length(): integer
     case self
-    when write: text then
+    when write(text) then
         return #text
     else
         return 0
@@ -204,14 +204,14 @@ one in a `case` arm.
 
 ## Case statements
 
-A case statement has one scrutinee, one or more `when` arms, and an optional
+A case statement has one scrutinee, a sequence of `when` arms, and an optional
 `else`:
 
-```titan
+```text
 case expression
-when variant_name[: binding] then
+when variant_name([binding]) then
     block
-when another_variant[: binding] then
+when another_variant([binding]) then
     block
 else
     block
@@ -219,7 +219,7 @@ end
 ```
 
 The scrutinee must have the union's type. A payload arm may introduce one
-binding after `:`; the binding has the variant's payload type. An empty
+binding inside the parentheses; the binding has the variant's payload type. An empty
 variant cannot have a binding. Repeating the same variant in a case statement
 is an error.
 
@@ -235,12 +235,12 @@ nested declarations and control flow and can carry its own `catch` clause:
 
 ```titan
 case message
-when write: text then
+when write(text) then
     defer log(text)
     consume(text)
 catch
     report(text)
-when quit then
+when quit() then
     stop()
 else
     ignore()
@@ -292,7 +292,7 @@ The ordinary option auto-unwrapping rule applies to case scrutinees. A
 ```titan
 function inspect(message: Message?)
     case message
-    when quit then
+    when quit() then
         stop()
     else
         continue()

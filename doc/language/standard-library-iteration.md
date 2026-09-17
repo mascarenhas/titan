@@ -13,8 +13,8 @@ Lua code loads the same installed standard-provider module with
 
 `next` is generic in the Map's key and value types:
 
-```titan
-function next<K, V>(map: {K: V}, key: K?): (K?, V?)
+```text
+function next<|K, V|>(map: {K: V}, key: K?): (K?, V?)
 ```
 
 It has Lua's `next` semantics. A nil key starts the traversal. A successful call
@@ -40,7 +40,7 @@ A call may also give the complete explicit application:
 
 ```titan
 local name?, score? =
-  iteration.next<string, integer>(scores, nil)
+  iteration.next<|string, integer|>(scores, nil)
 ```
 
 A control key that is neither nil nor present in the Map raises Lua's
@@ -49,14 +49,14 @@ primitive, adding new keys during a traversal is not supported.
 
 `pairs` returns the complete iterator tuple required by Titan's generic `for`:
 
-```titan
-function pairs<K, V>(map: {K: V}):
-    (({K: V}, K?) -> (K?, V?), {K: V}, nil, nil)
+```text
+function pairs<|K, V|>(map: {K: V}):
+    (function ({K: V}, K?): (K?, V?), {K: V}, nil, nil)
 ```
 
 The values are `(next, map, nil, nil)`: iterator, state, initial control, and no
 close function. `K` and `V` are inferred from `map` in the usual call, while
-`pairs<string, integer>(scores)` is the corresponding explicit application:
+`pairs<|string, integer|>(scores)` is the corresponding explicit application:
 
 ```titan
 for name, score in iteration.pairs(scores) do
@@ -76,7 +76,7 @@ monomorphic function context can instantiate `next`:
 
 ```titan
 local string_next:
-    ({string: integer}, string?) -> (string?, integer?) = iteration.next
+    function ({string: integer}, string?): (string?, integer?) = iteration.next
 
 local name?, score? = string_next(scores, nil)
 ```
@@ -89,14 +89,14 @@ identity is not promised to equal another instantiation.
 
 `ipairs` is generic in the Array element type:
 
-```titan
-function ipairs<T>(array: {T}):
-    (({T}, integer) -> (integer?, T?), {T}, integer, nil)
+```text
+function ipairs<|T|>(array: {T}):
+    (function ({T}, integer): (integer?, T?), {T}, integer, nil)
 ```
 
 It returns a private step function, the original Array, control value `0`, and
 no close function. `T` is normally inferred from the Array, or it can be given
-explicitly as in `iteration.ipairs<string>(items)`.
+explicitly as in `iteration.ipairs<|string|>(items)`.
 
 Iteration visits every integer from 1 through `#array`. Unlike Lua's `ipairs`,
 an inner nil element does not stop traversal because the nonnil index is the
@@ -128,21 +128,21 @@ rule](generics.md#raw-writes-and-delayed-failure) applies. Lua or a generic
 function can put a raw carrier value into a dependent Map value or Array element.
 The write may return normally, but a later closed iterator result is checked:
 
-```titan
-local function replace<K, V>(map: {K: V}, key: K,
+```text
+local function replace<|K, V|>(map: {K: V}, key: K,
                              replacement: value)
   local item: V = replacement
   map[key] = item
 end
 
 local scores: {string: integer} = {}
-replace<string, integer>(scores, "alice", "not an integer")
+replace<|string, integer|>(scores, "alice", "not an integer")
 
 -- The precise integer? result projection raises "expected integer".
 local name?, score? =
-  iteration.next<string, integer>(scores, nil)
+  iteration.next<|string, integer|>(scores, nil)
 ```
 
-The same rule applies to the `T?` item returned by `ipairs<T>`. A successful
+The same rule applies to the `T?` item returned by `ipairs<|T|>`. A successful
 projection checks one use; it does not sanitize the aliased container, so a
 later precise read checks again.

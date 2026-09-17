@@ -38,7 +38,7 @@ function test_lua_load_chunks_arguments_and_environments(_context: test.Context)
     local source = function(...) return ... end
     return string.dump(source)
   end
-  ]]) as () -> string
+  ]]) as function (): (string)
     local dumped = tlua.load(dump(), "=dumped", { ["ignored"] = true })
     values = { dumped(7, nil, 9) }
     test.assert(#values == 3)
@@ -53,7 +53,7 @@ function test_lua_load_chunks_arguments_and_environments(_context: test.Context)
     local actual_global: value = global_chunk()
     local global_value = common.lua_helper([[
   return function() return _G end
-  ]]) as () -> value
+  ]]) as function (): (value)
     test.assert(actual_global == global_value())
 
     common.assert_raises_contains(function()
@@ -92,7 +92,7 @@ function test_lua_require_preload_cache_and_fallback(_context: test.Context)
     package.preload[name] = nil
     package.loaded[name] = nil
   end
-  ]]) as (string) -> ()
+  ]]) as function (string): ()
 
     local preload_name = "lua.tests.preloaded"
     defer cleanup(preload_name)
@@ -107,7 +107,7 @@ function test_lua_require_preload_cache_and_fallback(_context: test.Context)
     end
     return state
   end
-  ]]) as (string) -> {string: value}
+  ]]) as function (string): ({string: value})
     local preload_state = setup_preload(preload_name)
     local first: value = tlua.require(preload_name)
     test.assert(first is {string: value})
@@ -124,12 +124,12 @@ function test_lua_require_preload_cache_and_fallback(_context: test.Context)
     package.loaded[name] = nil
     package.preload[name] = function() end
   end
-  ]]) as (string) -> ()
+  ]]) as function (string): ()
     setup_fallback(fallback_name)
     test.assert(tlua.require(fallback_name) == true)
     local loaded = common.lua_helper([[
   return function(name) return package.loaded[name] end
-  ]]) as (string) -> value
+  ]]) as function (string): (value)
     test.assert(loaded(fallback_name) == true)
 
     local false_name = "lua.tests.false"
@@ -144,7 +144,7 @@ function test_lua_require_preload_cache_and_fallback(_context: test.Context)
     end
     return state
   end
-  ]]) as (string) -> {string: value}
+  ]]) as function (string): ({string: value})
     local false_state = setup_false(false_name)
     test.assert(tlua.require(false_name) == false)
     test.assert(tlua.require(false_name) == false)

@@ -161,6 +161,8 @@ collect_reads_exp = function(node, out)
         collect_reads_exp(node.exp, out)
         collect_reads_exp(node.first, out)
         collect_reads_exp(node.last, out)
+    elseif tag == "Ast.ExpAdjust" and node._adjusted_spread then
+        collect_reads_exp(node._adjusted_spread, out)
     elseif tag == "Ast.ExpUnop" or tag == "Ast.ExpCast"
             or tag == "Ast.ExpIs"
             or tag == "Ast.ExpAdjust" or tag == "Ast.ExpDotsIndex" then
@@ -213,6 +215,8 @@ function coder._collect_writes_exp(node, out)
         coder._collect_writes_exp(node.exp, out)
         coder._collect_writes_exp(node.first, out)
         coder._collect_writes_exp(node.last, out)
+    elseif tag == "Ast.ExpAdjust" and node._adjusted_spread then
+        coder._collect_writes_exp(node._adjusted_spread, out)
     elseif tag == "Ast.ExpUnop" or tag == "Ast.ExpCast"
             or tag == "Ast.ExpIs"
             or tag == "Ast.ExpAdjust" or tag == "Ast.ExpDotsIndex"

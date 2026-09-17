@@ -1,9 +1,9 @@
 local function assert_cancelled(task: async.Task, expected: string)
   local status = async.join(task)
   case status
-  when cancelled: reason then
+  when cancelled(reason) then
     case reason
-    when simple: message then
+    when simple(message) then
       test.assert(message == expected, "SQLite work changed cancellation reason")
     else
       raise "SQLite work replaced simple cancellation with a complex reason"
@@ -20,7 +20,7 @@ function test_pending_cancellation_does_not_open_a_database(
     fs.unlink(path)
     defer remove_if_present(path)
     local published = false
-    local target = async.run<nil, value>(function (): nil
+    local target = async.run<|nil, value|>(function (): nil
       async.running():cancel(async.CancellationReason.simple(
           "cancel before SQLite open"))
       local connection = sqlite3.connect(path)
@@ -41,7 +41,7 @@ function test_pending_cancellation_does_not_prepare_or_leave_connection_busy(
     local connection = sqlite3.connect(":memory:")
     defer connection:close()
     local published = false
-    local target = async.run<nil, value>(function (): nil
+    local target = async.run<|nil, value|>(function (): nil
       async.running():cancel(async.CancellationReason.simple(
           "cancel before SQLite prepare"))
       local statement = connection:prepare("SELECT 1")
@@ -65,7 +65,7 @@ function test_pending_cancellation_does_not_execute_and_statement_is_reusable(
     execute_sql(connection, "CREATE TABLE item (value INTEGER)")
     local statement = connection:prepare("INSERT INTO item VALUES (?)")
     defer statement:close()
-    local target = async.run<nil, value>(function (): nil
+    local target = async.run<|nil, value|>(function (): nil
       async.running():cancel(async.CancellationReason.simple(
           "cancel before SQLite execute"))
       statement:execute(7)
@@ -84,7 +84,7 @@ function test_cancelled_unwind_completes_cursor_statement_and_connection_closes(
     context: test.Context)
   runtime_test.run(function ()
     local retired = 0
-    local target = async.run<nil, value>(function (): nil
+    local target = async.run<|nil, value|>(function (): nil
       local connection = sqlite3.connect(":memory:")
       defer do
         connection:close()
@@ -117,7 +117,7 @@ function test_pending_cancellation_delivers_each_explicit_cleanup_completion(
     context: test.Context)
   runtime_test.run(function ()
     local completed = 0
-    local target = async.run<nil, value>(function (): nil
+    local target = async.run<|nil, value|>(function (): nil
       local connection = sqlite3.connect(":memory:")
       defer connection:close()
       local statement = connection:prepare("SELECT 1 UNION ALL SELECT 2")

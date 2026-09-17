@@ -540,7 +540,7 @@ local function active(task: async.Task): boolean
   return status == "ready" or status == "running" or status == "waiting"
 end
 
-local function check_parent_stream(query: () -> boolean)
+local function check_parent_stream(query: function (): (boolean))
   local tty = query()
   check(tty or not tty, "static parent stdio query failed")
 end
@@ -550,7 +550,7 @@ record JsonSmokeRecord
 end
 
 union JsonSmokeMessage
-  ready: JsonSmokeRecord
+  ready(JsonSmokeRecord)
 end
 
 local function check_json_provider()
@@ -676,7 +676,7 @@ function main(args: {string}): integer
 
     local server, port = listen_available()
     local peer_result = "not-run"
-    local peer = async.run<value, value>(function (): value
+    local peer = async.run<|value, value|>(function (): value
       local connection = server:accept()
       check(connection:read_until("\n") == "ping\n",
             "static net peer received the wrong payload")

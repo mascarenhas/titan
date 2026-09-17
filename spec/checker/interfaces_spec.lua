@@ -71,7 +71,7 @@ describe("interfaces (typechecker)", function()
 
     it("builds independent ordered field and method slots", function()
         local ok, err, ast = run_checker([[
-            interface Entry<T>
+            interface Entry<|T|>
                 first: T
                 function reset()
                 optional: T?
@@ -264,7 +264,7 @@ describe("interfaces (typechecker)", function()
                         item: integer
                     end
                     union Choice
-                        none
+                        none()
                     end
                     function wrap(choice: Choice): View
                         return choice
@@ -301,7 +301,7 @@ describe("interfaces (typechecker)", function()
 
     it("lowers applied generic Interface field snapshots and reads", function()
         local ok, err, ast = run_checker([[
-            interface Box<T>
+            interface Box<|T|>
                 contents: T
             end
 
@@ -309,11 +309,11 @@ describe("interfaces (typechecker)", function()
                 const contents: integer
             end
 
-            function wrap(box: IntegerBox): Box<integer>
+            function wrap(box: IntegerBox): Box<|integer|>
                 return box
             end
 
-            function read(box: Box<integer>): integer
+            function read(box: Box<|integer|>): integer
                 return box.contents
             end
         ]])
@@ -335,7 +335,7 @@ describe("interfaces (typechecker)", function()
         assert.equal(0, returned.exp.var._interface_field_index)
 
         ok, err, ast = run_checker([[
-            interface Box<T>
+            interface Box<|T|>
                 contents: T
             end
 
@@ -343,7 +343,7 @@ describe("interfaces (typechecker)", function()
                 const contents: integer
             end
 
-            function constrained<T: Box<integer>>(box: T): integer
+            function constrained<|T: Box<|integer|>|>(box: T): integer
                 return box.contents
             end
 
@@ -363,11 +363,11 @@ describe("interfaces (typechecker)", function()
     it("freezes callable Interface field snapshot adapters", function()
         local ok, err, ast = run_checker([[
             interface CallbackView
-                callback: (integer) -> integer
+                callback: function (integer): integer
             end
 
             record CallbackRecord
-                const callback: (value) -> value
+                const callback: function (value): value
             end
 
             function wrap(record_: CallbackRecord): CallbackView
@@ -609,7 +609,7 @@ describe("interfaces (typechecker)", function()
             end
 
             union Box
-                some: Item
+                some(Item)
             end
 
             function named(item: Item)
@@ -780,8 +780,8 @@ describe("interfaces (typechecker)", function()
             end
 
             union Either
-                empty
-                number: integer
+                empty()
+                number(integer)
             end
 
             function Either:put(y: integer, x: string)
@@ -956,7 +956,7 @@ describe("interfaces (typechecker)", function()
                     x = 1,
                 }
                 local forced: string = optional:put(2, "value")
-                local bound: (integer, string) -> string = pair:put
+                local bound: function (integer, string): string = pair:put
                 return named
             end
         ]])
@@ -1091,7 +1091,7 @@ describe("interfaces (typechecker)", function()
             end
 
             function bad_function()
-                local producer: () -> Item = make
+                local producer: function (): Item = make
             end
         ]])
         assert.falsy(ok)
@@ -1195,7 +1195,7 @@ describe("interfaces (typechecker)", function()
             ]],
             [[
                 union Same
-                    one
+                    one()
                 end
                 interface Same
                     function get()
@@ -1241,7 +1241,7 @@ describe("interfaces (typechecker)", function()
                 foreign import "]] .. header .. [["
 
                 interface Foreign
-                    function use(input: ffi.ffi_int): ffi.ffi_int
+                    function use(input: foreign ffi_int): foreign ffi_int
                 end
                 ]], session)
             end)
@@ -1268,8 +1268,8 @@ describe("interfaces (typechecker)", function()
                 end
 
                 local function Concrete:adapt(
-                    input: ffi.ffi_int
-                ): ffi.ffi_int
+                    input: foreign ffi_int
+                ): foreign ffi_int
                     return input
                 end
 
@@ -1300,7 +1300,7 @@ describe("interfaces (typechecker)", function()
                 end
 
                 local function Concrete:adapt(
-                    input: *ffi.ffi_int
+                    input: foreign *ffi_int
                 )
                 end
 
@@ -1599,13 +1599,13 @@ describe("interfaces (typechecker)", function()
                     number: value,
                     array: {integer},
                     map: {string: integer},
-                    callback: (integer) -> integer
+                    callback: function (integer): integer
                 ): (
                     value,
                     integer,
                     {value},
                     {value: value},
-                    (integer, integer) -> integer
+                    function (integer, integer): integer
                 )
                 function box(array: {integer})
                 function box_optional(array: {integer}?)
@@ -1627,13 +1627,13 @@ describe("interfaces (typechecker)", function()
                 number: integer,
                 array: {value},
                 map: {value: value},
-                callback: (integer, integer) -> integer
+                callback: function (integer, integer): integer
             ): (
                 integer,
                 value,
                 {integer},
                 {string: integer},
-                (integer) -> integer
+                function (integer): integer
             )
                 return 1, item, {1}, {["one"] = 1}, one
             end

@@ -35,14 +35,14 @@ local lexer = {}
 local number_start = P(".")^-1 * R("09")
 local expo = S("EePp") * S("+-")^-1
 local possible_number = (expo + R("09", "AZ", "az") + ".")^1
-local good_number = Cmt(possible_number, function(_, i, s)
+local good_number = C(Cmt(C(possible_number), function(_, i, s)
     local n = tonumber(s)
     if n then
-        return i, n
+        return i
     else
         return false
     end
-end)
+end)) / tonumber
 lexer.NUMBER = #number_start * (good_number + T("MalformedNumber"))
 
 --
@@ -122,8 +122,10 @@ do
             function(_, pos, digits)
                 local n = tonumber(digits, 16)
                 if n > 0x10FFFF then return false end
-                return pos, utf8.char(n)
-            end) + T("MalformedEscape_u"))) +
+                return pos
+            end) / function(sequence)
+                return utf8.char(tonumber(sequence:sub(2, -2), 16))
+            end + T("MalformedEscape_u"))) +
         (P("x") * (C(R("09", "af", "AF") * R("09", "af", "AF")) * Cc(16) + T("MalformedEscape_x"))) / tonumber / string.char +
         (P("z") * lpeg.space^0) +
         T("InvalidEscape")
@@ -173,36 +175,26 @@ local keywords = {
     "repeat", "return", "then", "true", "until", "while", "import",
     "record", "type", "as", "is", "foreign", "catch", "finally", "raise", "const",
     "owned", "union", "case", "when", "interface",
-
-    "boolean", "integer", "float", "string", "value"
 }
 
 for _, keyword in ipairs(keywords) do
     lexer[keyword:upper()] = P(keyword) * -idrest
 end
 
-local is_keyword = {}
-for _, keyword in ipairs(keywords) do
-    is_keyword[keyword] = true
+for _, word in ipairs({"boolean", "integer", "float", "string", "value"}) do
+    lexer[word:upper()] = P(word) * -idrest
 end
 
-lexer.NAME = Cmt(C(identifier), function(_, pos, name)
-    if is_keyword[name] then
-        return false
-    end
-    return pos, name
-end)
+local keyword_pattern = P(false)
+for _, keyword in ipairs(keywords) do
+    keyword_pattern = keyword_pattern + lexer[keyword:upper()]
+end
 
--- Named-call labels are source API spellings and may come from C prototypes,
--- where a parameter name can be a Titan keyword (for example, `repeat`). Keep
--- this raw identifier primitive separate from NAME so keywords remain illegal
--- in every ordinary Titan name position.
-lexer.NAMEDLABEL = C(identifier)
+lexer.NAME = C(identifier - keyword_pattern)
 
--- C identifiers are source API spellings too. The parser reaches this raw
--- capture only in contextual member/type positions after `.`, keeping Titan
--- keywords illegal in every ordinary name position.
-lexer.CNAME = C(identifier)
+-- Selected declaration/member/label positions admit reserved-word spellings.
+-- Local binders and bare expression names continue to use NAME.
+lexer.ANYNAME = C(identifier)
 
 --
 -- Symbolic tokens
@@ -221,10 +213,10 @@ local symbols = {
     LBRACKET = "[", RBRACKET = "]",
     LCURLY   = "{", RCURLY   = "}",
     SEMICOLON = ";", COMMA = ",",
-    DOT = ".", DOTS = "...", DBLCOLON = "::",
+    DOT = ".", DOTS = "...",
     -- Titan:
     COLON = ":",
-    RARROW = "->",
+    TYPEOPEN = "<|", TYPECLOSE = "|>",
     OPT = "?",
 }
 

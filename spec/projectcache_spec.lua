@@ -59,8 +59,8 @@ describe("declared project manifests", function()
 
     it("hydrates a private generic source entry and reuses it on the next edit", function()
         local provider = load_module("provider", [[
-            record Box<A> item: A end
-            local function secret<A>(item: A): A return item end
+            record Box<|A|> item: A end
+            local function secret<|A|>(item: A): A return item end
         ]])
         local payload = assert(driver.encode_project_entry(provider))
         driver.imported, types.registry = {}, {}
@@ -83,8 +83,8 @@ describe("declared project manifests", function()
         local ok, consumer = pcall(load_module, "consumer", [[
             local provider = import "provider.titan"
             function answer(): integer
-                local box = provider.Box<integer>.new(42)
-                return provider.secret<integer>(box.item)
+                local box = provider.Box<|integer|>.new(42)
+                return provider.secret<|integer|>(box.item)
             end
         ]], { provider = restored })
         parser.parse = original_parse
@@ -96,16 +96,16 @@ describe("declared project manifests", function()
 
     it("restores generic constraints, alias chains, local members and named parameters", function()
         local provider = load_module("generic_surface", [[
-            interface Show<A> function render(item: A): string end
+            interface Show<|A|> function render(item: A): string end
             record Printer prefix: string end
             function Printer:render(item: integer): string return self.prefix end
-            record Box<T> local hidden: T shown: T end
-            local function Box.make(item: T): Box<T> return Box<T>.new(item, item) end
-            local function Box:replace<V>(item: V): Box<V> return Box<V>.new(item, item) end
-            local union Choice<T> local hidden: T shown: T end
+            record Box<|T|> local hidden: T shown: T end
+            local function Box.make(item: T): Box<|T|> return Box<|T|>.new(item, item) end
+            local function Box:replace<|V|>(item: V): Box<|V|> return Box<|V|>.new(item, item) end
+            local union Choice<|T|> local hidden(T) shown(T) end
             type Alias = Box
             local type PrivateAlias = Alias
-            local function display<S: Show<integer>>(subject: S): string return subject:render(1) end
+            local function display<|S: Show<|integer|>|>(subject: S): string return subject:render(1) end
         ]])
         local restored = assert(driver.decode_project_entry(assert(driver.encode_project_entry(provider))))
         assert_declarations_only(restored)
@@ -118,14 +118,14 @@ describe("declared project manifests", function()
         local ok, consumer = pcall(load_module, "generic_surface_consumer", [[
             local provider = import "generic_surface.titan"
             function answer(): string
-                local box = provider.PrivateAlias<integer>.make { item = 42 }
-                local copy = box:replace<string> { item = "kept" }
+                local box = provider.PrivateAlias<|integer|>.make { item = 42 }
+                local copy = box:replace<|string|> { item = "kept" }
                 copy.hidden = copy.shown
-                local choice = provider.Choice<string>.hidden(copy.hidden)
+                local choice = provider.Choice<|string|>.hidden(copy.hidden)
                 case choice
-                when hidden: item then
-                    return provider.display<provider.Printer> { subject = provider.Printer.new(item) }
-                when shown: item then return item
+                when hidden(item) then
+                    return provider.display<|provider.Printer|> { subject = provider.Printer.new(item) }
+                when shown(item) then return item
                 end
             end
         ]], { generic_surface = restored })
@@ -135,10 +135,10 @@ describe("declared project manifests", function()
         assert.equal(restored, driver.imported.generic_surface)
         local bad_ok, bad = pcall(load_module, "generic_constraint_failure", [[
             local provider = import "generic_surface.titan"
-            function answer(): string return provider.display<integer>(42) end
+            function answer(): string return provider.display<|integer|>(42) end
         ]], { generic_surface = restored })
         assert.is_false(bad_ok)
-        assert.match("does not satisfy constraint 'generic_surface.Show<integer>'", tostring(bad), 1, true)
+        assert.match("does not satisfy constraint 'generic_surface.Show<|integer|>'", tostring(bad), 1, true)
     end)
 
     it("keeps public and source aliases distinct after hydration in either import order", function()
@@ -433,7 +433,7 @@ describe("declared project manifests", function()
         local ok, err = pcall(function()
             local provider = load_module("baseline_provider", string.format([[
                 foreign import %q
-                foreign function identity(input: ffi.retained_count): ffi.retained_count return input end
+                foreign function identity(input: retained_count): retained_count return input end
             ]], header), nil, { io = strategy, cache_adapter = adapter })
             -- The consumer now preprocesses its inherited C environment too.
             -- Prime that stable header graph before measuring later edits.
@@ -463,7 +463,7 @@ describe("declared project manifests", function()
     it("restores only the C declaration environment after a native resolver closes", function()
         local provider = load_module("provider", [[
             foreign import "stdint.h"
-            foreign function identity(input: ffi.int32_t): ffi.int32_t return input end
+            foreign function identity(input: int32_t): int32_t return input end
         ]], nil, { analysis_only = false })
         local original_header = assert(provider.checking_foreign_header)
         local original_ffi = assert(provider.checking_ffi_header)
@@ -504,11 +504,11 @@ describe("declared project manifests", function()
     it("replays inherited C type origins after all project resolver headers close", function()
         local provider = load_module("provider", [[
             foreign import "stdint.h"
-            foreign function identity(input: ffi.int32_t): ffi.int32_t return input end
+            foreign function identity(input: int32_t): int32_t return input end
         ]])
         local consumer = load_module("consumer", [[
             local provider = import "provider.titan"
-            foreign function identity(input: ffi.int32_t): ffi.int32_t
+            foreign function identity(input: int32_t): int32_t
                 return provider.identity(input)
             end
         ]], { provider = provider })
@@ -545,7 +545,7 @@ describe("declared project manifests", function()
         local ok, result = pcall(load_module, "after_restart", [[
             local consumer = import "consumer.titan"
             function answer(): integer
-                local result: ffi.int32_t = consumer.identity(42)
+                local result: foreign int32_t = consumer.identity(42)
                 return 42
             end
         ]], retained)
@@ -561,7 +561,7 @@ describe("declared project manifests", function()
     it("rejects incompatible project graph and ABI envelopes", function()
         local entry = load_module("durable", [[
             foreign import "stdint.h"
-            foreign function identity(input: ffi.int32_t): ffi.int32_t return input end
+            foreign function identity(input: int32_t): int32_t return input end
         ]])
         local payload = assert(driver.encode_project_entry(entry))
         local imported, registry = driver.imported, types.registry
@@ -593,8 +593,8 @@ describe("declared project manifests", function()
         local weak = setmetatable({}, { __mode = "v" })
         local function extract()
             local entry = load_module("released", [[
-                record Box<A> item: A end
-                local function identity<A>(input: A): A
+                record Box<|A|> item: A end
+                local function identity<|A|>(input: A): A
                     local hidden = "BODY_ONLY_MANIFEST_RELEASE_SENTINEL"
                     return input
                 end
@@ -623,10 +623,10 @@ describe("declared project manifests", function()
     it("does not retain fresh consumer bodies through reused declaration annotations", function()
         local function provider_manifest()
             local entry = load_module("retained_provider", [[
-                record Box<T> item: T end
-                function Box.make(item: T): Box<T> return Box<T>.new(item) end
-                function Box:replace<U>(item: U): Box<U> return Box<U>.new(item) end
-                function identity<T>(item: T): T return item end
+                record Box<|T|> item: T end
+                function Box.make(item: T): Box<|T|> return Box<|T|>.new(item) end
+                function Box:replace<|U|>(item: U): Box<|U|> return Box<|U|>.new(item) end
+                function identity<|T|>(item: T): T return item end
                 local counter: integer = 1
                 local function hidden(input: integer): integer return input + counter end
             ]])
@@ -646,11 +646,11 @@ describe("declared project manifests", function()
                         record Fresh item: integer end
                         function inspect(input: integer): integer
                             local marker = "TRANSIENT_CONSUMER_BODY_SENTINEL"
-                            local boxed = public.Box<integer>.make { item = input }
-                            local read: (integer) -> integer = source.hidden
-                            local changed = boxed:replace<Fresh> { item = Fresh.new(boxed.item) }
-                            local captured: () -> integer = function(): integer return read(changed.item.item) + #marker end
-                            return source.identity<integer>(captured())
+                            local boxed = public.Box<|integer|>.make { item = input }
+                            local read: function (integer): integer = source.hidden
+                            local changed = boxed:replace<|Fresh|> { item = Fresh.new(boxed.item) }
+                            local captured: function (): integer = function(): integer return read(changed.item.item) + #marker end
+                            return source.identity<|integer|>(captured())
                         end
                     ]], { retained_provider = retained })
                     weak.ast = consumer.ast
@@ -699,9 +699,9 @@ describe("declared project manifests", function()
         local ok, err = pcall(function()
             local provider = load_module("c_provider", string.format([[
                 foreign import %q
-                local type Node = ffi.Chain
-                local type Callback = foreign (*Node) -> ffi.DeclInt
-                foreign function read(node: *Node): ffi.DeclInt return node.value end
+                foreign type ManifestChain = Chain
+                foreign type ManifestCallback = function (*ManifestChain): DeclInt
+                foreign function read(node: *ManifestChain): DeclInt return node.value end
             ]], header))
             local payload = assert(driver.encode_project_entry(provider))
             assert.is_nil(payload:find("CPP_BODY_ONLY_MANIFEST_SENTINEL", 1, true))
@@ -709,7 +709,10 @@ describe("declared project manifests", function()
             driver.imported, types.registry = {}, {}
             local restored = assert(driver.decode_project_entry(payload))
             assert_declarations_only(restored)
-            local owner = types.resolve_c_typedef(restored.type.source_type_members.Node)
+            assert.is_nil(restored.type.source_type_members.ManifestChain)
+            assert.equal(2, #restored.ffi_header_descriptor.typedef_declarations)
+            local owner = types.resolve_c_typedef(
+                restored.type.source_members.read.type.params[1].pointee)
             assert.is_true(owner.complete)
             assert.equal(owner, owner.fields.next.type.pointee)
             assert.equal(3, owner.fields.row.type.len)
@@ -721,8 +724,8 @@ describe("declared project manifests", function()
             end
             local consumer = load_module("c_consumer", [[
                 local provider = import "c_provider.titan"
-                foreign function inspect(node: *provider.Node): ffi.DeclInt
-                    local callback: provider.Callback = provider.read
+                foreign function inspect(node: *ManifestChain): DeclInt
+                    local callback: foreign ManifestCallback = provider.read
                     return callback(node) + node.row[1] + node.value
                 end
             ]], { c_provider = restored })

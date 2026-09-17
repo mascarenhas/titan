@@ -6,6 +6,7 @@ function symtab.new(modname)
     local self = {
         blocks = { {} },
         type_aliases = {},
+        foreign_aliases = {},
         foreign_types = {},
         foreign_type_history = {},
         foreign_names = {},
@@ -68,7 +69,7 @@ function symtab:find_symbol(name)
             decl = nil
         end
     end
-    return decl
+    return decl or (name == "ffi" and self.ffi_namespace) or nil
 end
 
 -- Imports and module variables are the two sequential parts of top-level
@@ -110,6 +111,25 @@ end
 
 function symtab:find_type_alias(name)
     return self.type_aliases[name]
+end
+
+function symtab:add_foreign_alias(name, decl)
+    self.foreign_aliases[name] = decl
+end
+
+function symtab:find_foreign_alias(name)
+    return self.foreign_aliases[name]
+end
+
+-- A declaration-complete header is converted from its own immutable C graph.
+-- Do not retain tag owners or include provenance from the include-only pass
+-- used to resolve the module's authored typedefs.
+function symtab:reset_foreign_environment()
+    self.foreign_types, self.foreign_type_history = {}, {}
+    self.foreign_names, self.foreign_name_history = {}, {}
+    self.c_file_tags, self.c_prototype_tags = {}, {}
+    self._converted_c_aggregates, self._converted_c_enums = nil, nil
+    self.foreign_field_macro_cache = {}
 end
 
 function symtab:push_generic_type_scope(bindings)

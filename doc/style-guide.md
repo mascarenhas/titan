@@ -99,7 +99,7 @@ Use the first form when absence is an invariant violation and the second when
 it is part of normal control flow. Prefer `T?` to a sentinel value of type
 `T`, and handle the option near the lookup. Option coercions do not lift
 through containers or function types, so do not design an API that relies on
-`{T}` becoming `{T?}` or `() -> T` becoming `() -> T?`.
+`{T}` becoming `{T?}` or `function (): (T)` becoming `function (): (T?)`.
 
 Use `optional == nil` or `optional ~= nil` when presence must remain distinct
 from a falsy base value. A plain condition intentionally merges nil with a
@@ -230,7 +230,7 @@ local function close_file(file: fs.File)
 end
 
 function lines(file: fs.File):
-    ((fs.File) -> string?, fs.File, nil, (fs.File) -> ())
+    (function (fs.File): (string?), fs.File, nil, function (fs.File): ())
   return next_line, file, nil, close_file
 end
 ```

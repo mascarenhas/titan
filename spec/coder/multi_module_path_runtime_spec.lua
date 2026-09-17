@@ -362,7 +362,7 @@ assert(#xs == 6 and xs[7] == nil)
     it("uses native and strict entries from a selected static provider",
        function()
         write_file(source_one .. "/staticentry/api.titan", [[
-function probe(p: () -> integer): integer
+function probe(p: function (): integer): integer
     return p()
 end
 
@@ -380,26 +380,26 @@ end
         write_file(consumer_source .. "/static_entry_consumer.titan", [[
 local provider = import "staticentry.api"
 
-function direct_depth(p: () -> integer): integer
+function direct_depth(p: function (): integer): integer
     return provider.probe(p)
 end
 
-function exact_depth(p: () -> integer): integer
-    local f: (() -> integer) -> integer = provider.probe
+function exact_depth(p: function (): integer): integer
+    local f: function (function (): integer): integer = provider.probe
     return f(p)
 end
 
 function strict_result(): integer
-    local f: (integer) -> integer = provider.boundary
+    local f: function (integer): integer = provider.boundary
     return f(3)
 end
 
 function strict_argument(x: value): value
-    local f: (value) -> value = provider.boundary
+    local f: function (value): value = provider.boundary
     return f(x)
 end
 
-function boundary_function(): (integer) -> value
+function boundary_function(): function (integer): value
     return provider.boundary
 end
 ]])
@@ -458,16 +458,16 @@ record Delta
 end
 
 union Message
-    quit
-    local hidden: integer
-    move: Delta
+    quit()
+    local hidden(integer)
+    move(Delta)
 end
 
 function Message:total(): float
     case self
-    when move: delta then
+    when move(delta) then
         return delta.x + delta.y
-    when quit then
+    when quit() then
         return 0.0
     else
         return -1.0
@@ -495,7 +495,7 @@ local m = import "prefix.messages"
 local moved = m.Message.move({ x = 1.0, y = 2.0 })
 
 function total(): float
-    local make: (m.Delta) -> m.Message = m.Message.move
+    local make: function (m.Delta): m.Message = m.Message.move
     local another = make({ x = 20.0, y = 22.0 })
     return moved:total() + another:total()
 end
@@ -505,15 +505,15 @@ function same(): boolean
 end
 
 function bound(): float
-    local read: () -> float = moved:total
+    local read: function (): float = moved:total
     return read()
 end
 
 function hidden_else(): integer
     case m.hidden_message()
-    when quit then
+    when quit() then
         return 0
-    when move: delta then
+    when move(delta) then
         return 1
     else
         return 77

@@ -3,7 +3,7 @@ foreign import "titan/ffi.h"
 
 -- Mirror Lua's next while keeping every temporary Lua-stack value rooted until
 -- it has been copied into Titan's traced generic result representation.
-function next<K, V>(map: {K: V}, key: K?): (K?, V?)
+function next<|K, V|>(map: {K: V}, key: K?): (K?, V?)
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 3) == 0 then
@@ -21,12 +21,12 @@ function next<K, V>(map: {K: V}, key: K?): (K?, V?)
   return next_key, next_value
 end
 
-function pairs<K, V>(map: {K: V}):
-    (({K: V}, K?) -> (K?, V?), {K: V}, nil, nil)
+function pairs<|K, V|>(map: {K: V}):
+    (function ({K: V}, K?): (K?, V?), {K: V}, nil, nil)
   return next, map, nil, nil
 end
 
-local function array_next<T>(array: {T}, index: integer):
+local function array_next<|T|>(array: {T}, index: integer):
     (integer?, T?)
   local next_index = index + 1
   if next_index > #array then
@@ -35,7 +35,7 @@ local function array_next<T>(array: {T}, index: integer):
   return next_index, array[next_index]
 end
 
-function ipairs<T>(array: {T}):
-    (({T}, integer) -> (integer?, T?), {T}, integer, nil)
+function ipairs<|T|>(array: {T}):
+    (function ({T}, integer): (integer?, T?), {T}, integer, nil)
   return array_next, array, 0, nil
 end

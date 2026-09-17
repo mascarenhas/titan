@@ -104,7 +104,7 @@ describe(".so-only cross-module trace names", function()
                     raise "host"
                     return 0
                 end
-                function apply(f: () -> integer): integer
+                function apply(f: function (): integer): integer
                     return f()
                 end
             ]] },

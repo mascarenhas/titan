@@ -74,7 +74,7 @@ The terms used by the compiler and manuals are:
 
 Titan does not need a language-level subtyping relation. In particular,
 `T -> T?` is a direct coercion, not subtyping or consistency, and it does not
-license `() -> T` where `() -> T?` is expected.
+license `function (): (T)` where `function (): (T?)` is expected.
 
 ## Normalization and gradual consistency
 
@@ -317,7 +317,7 @@ cast calls that value and may inherit a forged entry's ordinary Lua error.
 
 `written_cast(source, target)` selects identity, direct coercion, dynamic
 coercion from `value`, gradual/callable view, or one separately enumerated
-explicit conversion. Under the raw-pointer policy, `value as *C` is the one
+explicit conversion. Under the raw-pointer policy, `value as foreign *C` is the one
 written unsafe reinterpretation: ordinary pointers check the broad
 lightuserdata/nil category, while Lua-internal `Udata *` checks
 full-userdata/nil. Neither proves an ordinary pointee type. No implicit

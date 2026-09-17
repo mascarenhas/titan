@@ -50,7 +50,7 @@ error status, and autocommit, is inside a worker batch. Pure allocation,
 memcpy/free, UTF-8 validation, reflection and Titan-value construction run on
 the loop thread.
 
-Each operation uses its own exact `foreign (*void) -> ()` entry. There is no
+Each operation uses its own exact `foreign function (*void): void` entry. There is no
 second operation dispatcher or actor. `sqlite_copy_bytes` always allocates
 one extra terminator byte, including for an empty BLOB; binding lengths remain
 explicit and use `SQLITE_TRANSIENT`.
@@ -167,6 +167,9 @@ outlive all native owners.
 Row filling first validates a one-to-one mapping from unique column names to
 every public record field and rejects const/unsupported destinations. Writes
 use 1-based public descriptor ordinals, never physical FieldType.index values.
+The inspected record exposes its schema through `.type.fields`; each
+`FieldType.type` supplies the destination's type. Reflected Blob bindings
+recover the original object through `.value`.
 The existing reflect setter owns dynamic conversion and the GC write barrier.
 Boolean conversion accepts only SQL integer 0/1; Options retain NULL. Named
 Blob fields recognize the one exact nominal owner without recursively

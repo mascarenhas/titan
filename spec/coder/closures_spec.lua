@@ -34,7 +34,7 @@ local function captured_lambda_source(count)
             string.format("total = total + capture_%03d", i)
     end
     return string.format([[
-        function make(): (() -> integer)
+        function make(): function (): (integer)
             %s
             return function(): integer
                 local total: integer = 0
@@ -53,7 +53,7 @@ describe("closures (end-to-end)", function()
 
     it("a counter closure increments a captured boxed integer", function()
         run_coder([[
-            function make_counter(): () -> integer
+            function make_counter(): function (): integer
                 local n = 0
                 return function (): integer
                     n = n + 1
@@ -78,7 +78,7 @@ describe("closures (end-to-end)", function()
 
     it("two counters are independent", function()
         run_coder([[
-            function make_counter(): () -> integer
+            function make_counter(): function (): integer
                 local n = 0
                 return function (): integer
                     n = n + 1
@@ -98,7 +98,7 @@ describe("closures (end-to-end)", function()
 
     it("a captured boxed integer starting from an argument", function()
         run_coder([[
-            function adder(start: integer): (integer) -> integer
+            function adder(start: integer): function (integer): integer
                 local acc = start
                 return function (x: integer): integer
                     acc = acc + x
@@ -115,7 +115,7 @@ describe("closures (end-to-end)", function()
 
     it("captures a mutated parameter (boxed param)", function()
         run_coder([[
-            function bump(n: integer): () -> integer
+            function bump(n: integer): function (): integer
                 return function (): integer
                     n = n + 5
                     return n
@@ -134,7 +134,7 @@ describe("closures (end-to-end)", function()
         -- stay consistent with the inner closure's view. Distinguishing values:
         -- if the body used _param_n while the closure used the box they'd diverge.
         run_coder([[
-            function make(n: integer): (integer) -> integer
+            function make(n: integer): function (integer): integer
                 n = n + 1            -- owning body mutates the boxed param
                 local first = n      -- owning body reads the boxed param
                 return function (x: integer): integer
@@ -156,7 +156,7 @@ describe("closures (end-to-end)", function()
         -- a captured+mutated string param is boxed too; writes through the box
         -- need the forward barrier (gc value into the CClosure-cell box).
         run_coder([[
-            function collect(s: string): (string) -> string
+            function collect(s: string): function (string): string
                 return function (x: string): string
                     s = s .. x
                     return s
@@ -174,7 +174,7 @@ describe("closures (end-to-end)", function()
 
     it("captures an immutable local by value", function()
         run_coder([[
-            function make_adder(k: integer): (integer) -> integer
+            function make_adder(k: integer): function (integer): integer
                 local base = k * 10
                 return function (x: integer): integer
                     return base + x
@@ -189,8 +189,8 @@ describe("closures (end-to-end)", function()
 
     it("loop-created closures each capture the per-iteration value", function()
         run_coder([[
-            function make_closures(): {(integer) -> integer}
-                local fns: {(integer) -> integer} = {}
+            function make_closures(): {function (integer): integer}
+                local fns: {function (integer): integer} = {}
                 local i = 1
                 while i <= 3 do
                     local captured = i
@@ -217,25 +217,25 @@ describe("closures (end-to-end)", function()
         -- DEPTH_PROBE assertion catches a regression that quietly downgraded the
         -- fast path to the slow one (a value-correct call on either path).
         run_coder([[
-            function make_g(): (() -> integer) -> integer
+            function make_g(): function (function (): integer): integer
                 local calls = 0
-                return function (p: () -> integer): integer
+                return function (p: function (): integer): integer
                     calls = calls + 1   -- genuine (boxed) capture: g is a closure
                     return p()           -- returned value is purely the probe
                 end
             end
-            function outer(g: (() -> integer) -> integer,
-                           p: () -> integer): integer
+            function outer(g: function (function (): integer): integer,
+                           p: function (): integer): integer
                 return g(p)
             end
             -- fast path: the captured-closure `g` is called at its exact type
-            function run_fast(p: () -> integer): integer
+            function run_fast(p: function (): integer): integer
                 return outer(make_g(), p)
             end
             -- slow path: `g` arrives as a value (here a Lua closure from the
             -- driver) whose tag is unknown statically -> generic call path
-            function run_slow(g: (() -> integer) -> integer,
-                              p: () -> integer): integer
+            function run_slow(g: function (function (): integer): integer,
+                              p: function (): integer): integer
                 return outer(g, p)
             end
         ]], h.DEPTH_PROBE .. [[
@@ -248,7 +248,7 @@ describe("closures (end-to-end)", function()
 
     it("captures a gc local (string) by value", function()
         run_coder([[
-            function make_tagger(prefix: string): (string) -> string
+            function make_tagger(prefix: string): function (string): string
                 local tag = prefix .. ':'
                 return function (s: string): string
                     return tag .. s
@@ -263,7 +263,7 @@ describe("closures (end-to-end)", function()
 
     it("captures a string (gc-typed by-value capture)", function()
         run_coder([[
-            function greeter(name: string): () -> string
+            function greeter(name: string): function (): string
                 return function (): string
                     return name
                 end
@@ -277,7 +277,7 @@ describe("closures (end-to-end)", function()
 
     it("captures and mutates a string (gc-typed boxed capture)", function()
         run_coder([[
-            function accum(): (string) -> string
+            function accum(): function (string): string
                 local s = ""
                 return function (piece: string): string
                     s = s .. piece
@@ -294,7 +294,7 @@ describe("closures (end-to-end)", function()
 
     it("captures and mutates an array (gc-typed boxed capture)", function()
         run_coder([[
-            function pusher(): (integer) -> integer
+            function pusher(): function (integer): integer
                 local xs: {integer} = {}
                 return function (v: integer): integer
                     xs[#xs + 1] = v
@@ -311,12 +311,12 @@ describe("closures (end-to-end)", function()
 
     it("transitive 3-level capture of a boxed and a by-value variable", function()
         run_coder([[
-            function outer(seed: integer): () -> integer
+            function outer(seed: integer): function (): integer
                 local total = 0
                 local label = seed * 1000
                 return function (): integer
                     -- middle level: itself a closure capturing total + label
-                    local inner: () -> integer = function (): integer
+                    local inner: function (): integer = function (): integer
                         -- deepest level: mutates total (boxed, shared two levels
                         -- up) and reads label (by-value, two levels up)
                         total = total + 1
@@ -335,7 +335,7 @@ describe("closures (end-to-end)", function()
 
     it("survives a hard GC between closure creation and call", function()
         run_coder([[
-            function make_counter(): () -> integer
+            function make_counter(): function (): integer
                 local n = 0
                 return function (): integer
                     n = n + 1
@@ -362,7 +362,7 @@ describe("closures (end-to-end)", function()
 
     it("GC stress over closures capturing strings", function()
         run_coder([[
-            function accum(): (string) -> string
+            function accum(): function (string): string
                 local s = "start:"
                 return function (piece: string): string
                     s = s .. piece
@@ -385,7 +385,7 @@ describe("closures (end-to-end)", function()
 
     it("GC stress over closures with boxed array captures", function()
         run_coder([[
-            function pusher(): (integer) -> integer
+            function pusher(): function (integer): integer
                 local xs: {integer} = {}
                 return function (v: integer): integer
                     xs[#xs + 1] = v * v
@@ -409,7 +409,7 @@ describe("closures (end-to-end)", function()
 
     it("infers lambda param and return from a higher-order argument", function()
         run_coder([[
-            function apply(f: (integer) -> integer, x: integer): integer
+            function apply(f: function (integer): integer, x: integer): integer
                 return f(x)
             end
             function run(): integer
@@ -424,7 +424,7 @@ describe("closures (end-to-end)", function()
 
     it("infers a closure's types and captures at the same time", function()
         run_coder([[
-            function apply(f: (integer) -> integer, x: integer): integer
+            function apply(f: function (integer): integer, x: integer): integer
                 return f(x)
             end
             function run(bias: integer): integer
@@ -440,7 +440,7 @@ describe("closures (end-to-end)", function()
         run_coder([[
             function run(): integer
                 local total = 0
-                local add: (integer) -> () = function (x: integer)
+                local add: function (integer): () = function (x: integer)
                     total = total + x
                 end
                 add(3)
@@ -455,9 +455,9 @@ describe("closures (end-to-end)", function()
 
     it("returns a lambda that escapes two frames and is called later", function()
         run_coder([[
-            function outer(): () -> (() -> integer)
+            function outer(): function (): (function (): integer)
                 local n = 41
-                return function (): () -> integer
+                return function (): function (): integer
                     return function (): integer
                         n = n + 1
                         return n
@@ -477,7 +477,7 @@ describe("closures (end-to-end)", function()
         -- (reference) pointer, so the lambda still sees field mutations.
         run_coder([[
             record Box v: integer end
-            function make(): (integer) -> integer
+            function make(): function (integer): integer
                 local b: Box = { v = 0 }
                 return function (x: integer): integer
                     b.v = b.v + x      -- mutate a field of the captured record
@@ -497,7 +497,7 @@ describe("closures (end-to-end)", function()
         -- forward barrier on a gc box store.
         run_coder([[
             record Box v: integer end
-            function make(): (integer) -> integer
+            function make(): function (integer): integer
                 local b: Box = { v = 1 }
                 return function (x: integer): integer
                     b = { v = b.v + x }   -- reassign the captured record local
@@ -516,7 +516,7 @@ describe("closures (end-to-end)", function()
         -- COLLECTABLE box store causes near-deterministic corruption, so drive
         -- the string boxed-capture mutation under it specifically.
         run_coder([[
-            function accum(): (string) -> string
+            function accum(): function (string): string
                 local s = "start:"
                 return function (piece: string): string
                     s = s .. piece
@@ -538,7 +538,7 @@ describe("closures (end-to-end)", function()
 
     it("GC stress (generational) over a gc-typed boxed array capture", function()
         run_coder([[
-            function pusher(): (integer) -> integer
+            function pusher(): function (integer): integer
                 local xs: {integer} = {}
                 return function (v: integer): integer
                     xs[#xs + 1] = v * v
@@ -564,7 +564,7 @@ describe("closures (end-to-end)", function()
         -- integer values; drive it under generational GC with allocation churn
         -- to confirm the untraced raw-TValue box round-trips and is GC-safe.
         run_coder([[
-            function make_optcell(): (integer) -> integer
+            function make_optcell(): function (integer): integer
                 local n: integer? = nil
                 return function (x: integer): integer
                     local prev = n or -1
@@ -603,7 +603,7 @@ describe("closures (end-to-end)", function()
         -- closure round-trips the boxed option across nil and float values under
         -- generational GC churn to confirm the untraced raw box is GC-safe.
         run_coder([[
-            function make_optf(): (float) -> float
+            function make_optf(): function (float): float
                 local n: float? = nil
                 return function (x: float): float
                     local prev = n or -1.0
@@ -648,7 +648,7 @@ describe("closures (end-to-end)", function()
         -- to the box representation, so it is deliberately avoided here.
         run_coder([[
             -- classify the boxed boolean?: 0 = nil, 1 = true, 2 = false
-            function make(init: boolean?): (boolean?) -> integer
+            function make(init: boolean?): function (boolean?): integer
                 local b: boolean? = init
                 return function (next: boolean?): integer
                     local r = 0
@@ -687,7 +687,7 @@ describe("closures (end-to-end)", function()
         -- never holds anything but a placeholder int; the test confirms the
         -- closure runs and the box survives GC churn.
         run_coder([[
-            function make_nilcell(): (integer) -> integer
+            function make_nilcell(): function (integer): integer
                 local n: nil = nil
                 return function (x: integer): integer
                     n = nil          -- reassign the boxed nil-typed local
@@ -709,8 +709,8 @@ describe("closures (end-to-end)", function()
         -- A `for` control variable is immutable (the implicit increment does not
         -- mark it assigned), so it is captured by value -> fresh per iteration.
         run_coder([[
-            function make_closures(): {() -> integer}
-                local fns: {() -> integer} = {}
+            function make_closures(): {function (): integer}
+                local fns: {function (): integer} = {}
                 for i = 1, 3 do
                     fns[i] = function (): integer return i * 100 end
                 end
@@ -740,7 +740,7 @@ describe("closures (end-to-end)", function()
         -- backing Udata); after a hard GC the stored closure and its captured
         -- box must still be intact.
         run_coder([[
-            record Holder f: () -> integer end
+            record Holder f: function (): integer end
             function make(): Holder
                 local n = 100
                 return { f = function (): integer
@@ -765,7 +765,7 @@ describe("closures (end-to-end)", function()
         run_coder([[
             local f = function(x: integer): integer return x * 2 end
             function apply(x: integer): integer return f(x) end
-            function setf(g: (integer) -> integer) f = g end
+            function setf(g: function (integer): integer) f = g end
         ]], [[
             assert(test.apply(10) == 20)
             test.setf(function(x) return x + 100 end)
@@ -788,11 +788,11 @@ describe("closures (end-to-end)", function()
                 return value_:get()
             end
 
-            function bind(value_: Counter): () -> integer
+            function bind(value_: Counter): function (): integer
                 return value_:get
             end
 
-            function capture(value_: integer): () -> integer
+            function capture(value_: integer): function (): integer
                 local captured = value_
                 return function (): integer
                     return captured
@@ -900,7 +900,7 @@ describe("closures (end-to-end)", function()
                 return self.total
             end
 
-            function make_lambda(start: integer): (integer) -> integer
+            function make_lambda(start: integer): function (integer): integer
                 local total = start
                 return function (delta: integer): integer
                     total = total + delta
@@ -908,7 +908,7 @@ describe("closures (end-to-end)", function()
                 end
             end
 
-            function make_bound(start: integer): (integer) -> integer
+            function make_bound(start: integer): function (integer): integer
                 return Counter.new(start):add
             end
         ]], [[
@@ -953,17 +953,17 @@ describe("closures (end-to-end)", function()
             record Source end
             function Source:get(): value return 2.0 end
 
-            local lambda: () -> value =
+            local lambda: function (): value =
                 function (): value return 2.0 end
-            local bound: () -> value = Source.new():get
+            local bound: function (): value = Source.new():get
 
             function call_lambda_as_integer(): integer
-                local f: () -> integer = lambda
+                local f: function (): integer = lambda
                 return f()
             end
 
             function call_bound_as_integer(): integer
-                local f: () -> integer = bound
+                local f: function (): integer = bound
                 return f()
             end
         ]], [[
@@ -984,13 +984,13 @@ describe("closures inside methods (end-to-end)", function()
     it("a method's lambda mutates self's field (self captured by value)", function()
         run_coder([[
             record C n: integer end
-            function C:bumper(): () -> integer
+            function C:bumper(): function (): integer
                 return function (): integer
                     self.n = self.n + 1   -- mutate a field through captured self
                     return self.n
                 end
             end
-            function make(): () -> integer
+            function make(): function (): integer
                 local c = C.new(10)
                 return c:bumper()
             end
@@ -1008,7 +1008,7 @@ describe("closures inside methods (end-to-end)", function()
         -- method must box self; the method body and the lambda then share the box.
         run_coder([[
             record C n: integer nxt: C? end
-            function C:walk(): () -> integer
+            function C:walk(): function (): integer
                 return function (): integer
                     local v = self.n
                     if self.nxt then
@@ -1017,7 +1017,7 @@ describe("closures inside methods (end-to-end)", function()
                     return v
                 end
             end
-            function build(): () -> integer
+            function build(): function (): integer
                 local c3: C = { n = 30, nxt = nil }
                 local c2: C = { n = 20, nxt = c3 }
                 local c1: C = { n = 10, nxt = c2 }
@@ -1043,7 +1043,7 @@ describe("closures across modules (end-to-end)", function()
     it("passes a lambda across a source-linked import and calls it", function()
         local ok, err = h.generate_modules({
             mka = [[
-                function make(start: integer): (integer) -> integer
+                function make(start: integer): function (integer): integer
                     local acc = start
                     return function (x: integer): integer
                         acc = acc + x
@@ -1054,7 +1054,7 @@ describe("closures across modules (end-to-end)", function()
             useb = [[
                 local a = import "mka"
                 function run(): integer
-                    local f: (integer) -> integer = a.make(100)
+                    local f: function (integer): integer = a.make(100)
                     return f(1) + f(2)   -- 101 + 103 = 204 (captured state survives)
                 end
             ]],
@@ -1089,7 +1089,7 @@ describe("closures over foreign-typed boxes (end-to-end)", function()
             run_coder([[
                 foreign import "]] .. header .. [["
 
-                function make(present: integer): (integer) -> boolean
+                function make(present: integer): function (integer): boolean
                     local file = ffi.ffi_open(present)
                     return function(next: integer): boolean
                         local was_open = false
@@ -1117,7 +1117,7 @@ describe("closures over foreign-typed boxes (end-to-end)", function()
         local ok, err = h.generate_modules({
             foo = [[
                 foreign import "stdio.h"
-                function make(name: string): (string) -> integer
+                function make(name: string): function (string): integer
                     local f = ffi.fopen(name, "r")   -- f: FILE* foreign pointer, boxed
                     return function (next: string): integer
                         local opened = 0
@@ -1166,7 +1166,7 @@ describe("closures over foreign-typed boxes (end-to-end)", function()
             run_coder([[
                 foreign import "]] .. header .. [["
 
-                function make(): () -> boolean
+                function make(): function (): boolean
                     local number = ffi.ffi_next_number()
                     return function(): boolean
                         local next_number = ffi.ffi_next_number()
@@ -1196,7 +1196,7 @@ describe("closures over foreign-typed boxes (end-to-end)", function()
         local ok, err = h.generate_modules({
             foo = [[
                 foreign import "string.h"
-                function make(s: string): (string) -> boolean
+                function make(s: string): function (string): (boolean)
                     local n = ffi.strlen(s)   -- n: size_t scalar typedef, boxed
                     return function (next: string): boolean
                         local same = (n == ffi.strlen(next))   -- read boxed size_t

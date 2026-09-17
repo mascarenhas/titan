@@ -17,7 +17,7 @@ result = yield operation parameters
 
 The public `async`, `timer`, `fs`, `net`, `io`, and `os` modules normally
 expose ordinary Titan records and Interfaces. `async.run_foreign` is the narrow
-exception: its self-contained `foreign (*void) -> ()` and `*void` signature is
+exception: its self-contained `foreign function (*void): void` and `*void` signature is
 portable compiled metadata. Request owners, callback records, the yield union,
 and libuv controls stay private to `titan.uv`.
 The `ssl` and `http` standard modules are higher-level consumers of those
@@ -137,7 +137,7 @@ access protection around it.
 
 The Runtime sets `current_task` immediately before entering a coroutine and
 clears it with `defer` as soon as that coroutine yields, returns, or escapes.
-`async.running()` returns that field as `Task<value, value>` and raises when
+`async.running()` returns that field as `Task<|value, value|>` and raises when
 it is absent. Terminal
 notification consequently runs on the Lua main thread after the terminating
 coroutine is no longer the running Task.
@@ -153,9 +153,9 @@ end
 The `async` facade re-exports that owner and declares the public suspension
 boundary separately:
 
-```titan
+```text
 type ResumeToken = uv.ResumeToken
-type SuspendCancelAction = () -> ()
+type SuspendCancelAction = function (): ()
 function suspend(token: ResumeToken,
                  cancel_action: SuspendCancelAction?)
 function Task:resume(token: ResumeToken)
@@ -220,15 +220,15 @@ without entering the terminal coroutine.
 
 ## High-level bounded channels
 
-`async.channel<T>` is implemented entirely in `titan/async.titan` over
+`async.channel<|T|>` is implemented entirely in `titan/async.titan` over
 `async.running`, token-bearing `async.suspend`, and `Task:resume(token)`; it adds no
 `Call` variant, native handle, callback trampoline, or Runtime queue. Each
 channel creates one fresh private `ResumeToken` shared by its send, receive,
 close, and cancellation paths. Its one generic source body returns this closure
 triple over one bounded circular buffer:
 
-```titan
-((T) -> (), () -> T, () -> ())
+```text
+(function (T): (), function (): (T), function (): ())
 ```
 
 - the declared `transfer: {T}` stores the live payloads;
@@ -290,7 +290,7 @@ closure triple directly.
 
 `async.reader_writer_channel` is also implemented in `titan/async.titan`. The
 module imports the public synchronous `string` facade; `string` has no reverse
-async dependency. The factory calls `channel<string>(size)` once and wraps its
+async dependency. The factory calls `channel<|string|>(size)` once and wraps its
 three adjusted closures in two nominal records whose fields are all local:
 
 - `ChannelReader` retains the receive and shared-close closures, an optional
@@ -298,8 +298,8 @@ three adjusted closures in two nominal records whose fields are all local:
 - `ChannelWriter` retains the send and same shared-close closures.
 
 Neither record exposes a constructor or a raw channel closure. The writer
-stores an exact `(string) -> ()` callback and the reader stores an exact
-`() -> string` callback; both are ordinary traced wrappers over the erased
+stores an exact `function (string): ()` callback and the reader stores an exact
+`function (): (string)` callback; both are ordinary traced wrappers over the erased
 channel body. `read` first consumes `excess`, if present, and otherwise
 option-wraps the exact receive result without a written cast. The public
 records deliberately remain non-generic string stream adapters.
@@ -534,12 +534,12 @@ lengths and never depend on C-string termination.
 
 ## Task completion and errors
 
-The public owners are `Task<A, B>`, `TaskStatus<A, B>`, and
-`CancellationReason<B>`. The Runtime itself is deliberately concrete:
+The public owners are `Task<|A, B|>`, `TaskStatus<|A, B|>`, and
+`CancellationReason<|B|>`. The Runtime itself is deliberately concrete:
 `task_roots: {Task}` and `current_task: Task?` are the exact bare
-`Task<value, value>` application, as are every waiter, request owner, callback,
-and operational helper. `run_internal` accepts `() -> value` and returns that
-all-value Task. Public `async.run<A, B>` wraps its `() -> A` callback as the real
+`Task<|value, value|>` application, as are every waiter, request owner, callback,
+and operational helper. `run_internal` accepts `function (): (value)` and returns that
+all-value Task. Public `async.run<|A, B|>` wraps its `function (): (A)` callback as the real
 erased callable and returns a shallow view of the same userdata; no type
 argument, witness, application descriptor, or parallel Task core enters
 Runtime state. `async.running()` truthfully returns the all-value view.
@@ -550,7 +550,7 @@ public status value. Its live variants are `ready`, `running`, and `waiting`.
 `Task:cancel` privately installs the first reason and invokes the current
 cancellation action without publishing an intermediate variant; the public
 state remains live until final `cancelled`. A dead coroutine's raw returned
-value becomes `TaskStatus<value, value>.succeeded`. A terminal raised value and
+value becomes `TaskStatus<|value, value|>.succeeded`. A terminal raised value and
 its catch-local traceback become `async.Error { error, traceback }`; libuv
 failures nested there retain their separate
 `async.OperationError { code, name, message, operation }` identity.
@@ -561,7 +561,7 @@ conversion. Both paths restore the exact entry stack top on success or error;
 the Lua conversion path reserves its temporary stack space before pushing.
 Rendering failures retain the conservative fallback text and cannot replace
 the Task's original error payload.
-Cancellation stores `CancellationReason<value>` privately until the terminal
+Cancellation stores `CancellationReason<|value|>` privately until the terminal
 `cancelled` variant. Its `simple` arm contains a string and its `complex` arm
 retains an arbitrary Titan value; an omitted reason becomes
 `CancellationReason.simple("cancelled")`. Constructor inference uses the
@@ -571,7 +571,7 @@ only when a typed public view projects a success or complex-cancellation
 payload.
 
 Each `add_terminal_listener` call creates a fresh local
-`TerminalRegistration<A, B> { listener, live }`, appends it, and returns a
+`TerminalRegistration<|A, B|> { listener, live }`, appends it, and returns a
 remover closure capturing that registration and Task. A live remover clears
 `live` and deletes that exact record from the dense Array; repeated calls are
 no-ops. Adjusted callbacks may have fresh closure identity, so neither removal

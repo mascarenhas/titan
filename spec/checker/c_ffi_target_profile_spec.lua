@@ -70,8 +70,8 @@ describe("direct-checker target profiles", function()
         local profile_calls = 0
         local probe_calls = 0
         check_profile_source([[
-            function identity(number: int): int return number end
-            function answer(callback: foreign (*lua_State) -> int): integer
+            function identity(number: foreign int): foreign int return number end
+            function answer(callback: foreign function (*lua_State): int): integer
                 return callback(L)
             end
         ]], {
@@ -104,7 +104,7 @@ describe("direct-checker target profiles", function()
         local profile_calls = 0
         local probe_calls = 0
         check_profile_source([[
-            function identity(number: int): int return number end
+            function identity(number: foreign int): foreign int return number end
         ]], {
             target_profile_provider = function()
                 profile_calls = profile_calls + 1
@@ -136,7 +136,7 @@ describe("direct-checker target profiles", function()
             assert(csemantics.export_profile(semantic))))
         local probe_calls = 0
         check_profile_source([[
-            function add(left: int, right: int): int
+            function add(left: foreign int, right: foreign int): foreign int
                 return left + right
             end
         ]], {

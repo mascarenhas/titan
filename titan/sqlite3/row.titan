@@ -24,15 +24,15 @@ end
 
 local function fill_type_supported(descriptor: reflect.Type): boolean
   case descriptor
-  when is_nil then return true
-  when is_value then return true
-  when is_boolean then return true
-  when is_integer then return true
-  when is_float then return true
-  when is_string then return true
-  when is_option: inner then return fill_type_supported(inner)
-  when is_named: named then return named.name == "titan.sqlite3.Blob"
-  when is_record: record_type then
+  when is_nil() then return true
+  when is_value() then return true
+  when is_boolean() then return true
+  when is_integer() then return true
+  when is_float() then return true
+  when is_string() then return true
+  when is_option(inner) then return fill_type_supported(inner)
+  when is_named(named) then return named.name == "titan.sqlite3.Blob"
+  when is_record(record_type) then
     return record_type.name == "titan.sqlite3.Blob"
   end
   return false
@@ -41,29 +41,29 @@ end
 local function fill_value(cell: value, descriptor: reflect.Type,
                           name: string): value
   case descriptor
-  when is_value then return cell
-  when is_nil then
+  when is_value() then return cell
+  when is_nil() then
     if cell == nil then return nil end
-  when is_option: inner then
+  when is_option(inner) then
     if cell == nil then return nil end
     return fill_value(cell, inner, name)
-  when is_boolean then
+  when is_boolean() then
     case reflect.inspect(cell)
-    when is_integer: number then
+    when is_integer(number) then
       if number == 0 then return false end
       if number == 1 then return true end
     end
     raise Error.new("field " .. name .. " requires SQL integer 0 or 1",
                     nil, nil, "row.fill")
-  when is_integer then
+  when is_integer() then
     if cell ~= nil then return cell end
-  when is_float then
+  when is_float() then
     if cell ~= nil then return cell end
-  when is_string then
+  when is_string() then
     if cell is string then return cell end
-  when is_named then
+  when is_named() then
     if cell is Blob then return cell end
-  when is_record then
+  when is_record() then
     if cell is Blob then return cell end
   end
   raise Error.new("incompatible SQL value for field " .. name,
@@ -72,19 +72,19 @@ end
 
 local function Row:fill_field(target: reflect.RecordValue, ordinal: integer,
                              column: integer)
-  local field = target.descriptor.fields[ordinal]
-  local cell = fill_value(self:get(column), field.descriptor, field.name)
+  local field = target.type.fields[ordinal]
+  local cell = fill_value(self:get(column), field.type, field.name)
   target:set(ordinal, cell)
 catch
   if error is Error then raise end
-  raise Error.new("field " .. target.descriptor.fields[ordinal].name ..
-                  ": " .. strings.tostring(error), nil, nil, "row.fill")
+  raise Error.new("field " .. target.type.fields[ordinal].name ..
+                  ": " .. string.tostring(error), nil, nil, "row.fill")
 end
 
 function Row:fill(target: value)
   local inspected = reflect.inspect(target)
   case inspected
-  when is_record: record_value then
+  when is_record(record_value) then
     local positions: {string: integer} = {}
     for index = 1, #self.columns do
       local name = self.columns[index].name
@@ -101,7 +101,7 @@ function Row:fill(target: value)
     -- Validate the whole shape before the first write. Value conversions are
     -- deliberately in public descriptor order and may leave prior writes.
     for ordinal = 1, record_value.n_fields do
-      local field = record_value.descriptor.fields[ordinal]
+      local field = record_value.type.fields[ordinal]
       if positions[field.name] == nil then
         raise Error.new("missing column for field " .. field.name,
                         nil, nil, "row.fill")
@@ -110,14 +110,14 @@ function Row:fill(target: value)
         raise Error.new("cannot fill const field " .. field.name,
                         nil, nil, "row.fill")
       end
-      if not fill_type_supported(field.descriptor) then
+      if not fill_type_supported(field.type) then
         raise Error.new("unsupported field type for " .. field.name,
                         nil, nil, "row.fill")
       end
     end
     for ordinal = 1, record_value.n_fields do
       self:fill_field(record_value, ordinal,
-                      positions[record_value.descriptor.fields[ordinal].name])
+                      positions[record_value.type.fields[ordinal].name])
     end
   else
     raise Error.new("row.fill requires a record", nil, nil, "row.fill")

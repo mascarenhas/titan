@@ -32,7 +32,10 @@
 4 spec/checker/flexible_returns_spec.lua 4.934
 1 spec/checker/for_in_spec.lua 4.939
 3 spec/checker/foreign_functions_spec.lua 50.335
+1 spec/checker/foreign_type_aliases_spec.lua 1.000
 3 spec/checker/generics_spec.lua 11.567
+1 spec/checker/generic_type_arguments_spec.lua 0.500
+4 spec/checker/grammar_semantics_spec.lua 1.000
 1 spec/checker/interfaces_spec.lua 7.153
 3 spec/checker/named_arguments_spec.lua 7.783
 1 spec/checker/optional_parameters_spec.lua 4.212
@@ -73,6 +76,7 @@
 2 spec/coder/flexible_returns_spec.lua 11.730
 4 spec/coder/folder_modules_spec.lua 3.164
 1 spec/coder/for_in_spec.lua 7.521
+2 spec/coder/grammar_semantics_spec.lua 3.000
 3 spec/coder/foreign_functions_spec.lua 10.204
 3 spec/coder/generics_spec.lua 22.919
 4 spec/coder/interfaces_spec.lua 18.208
@@ -108,6 +112,7 @@
 1 spec/csemantics_spec.lua 0.594
 4 spec/ctypes_spec.lua 3.087
 4 spec/driver_spec.lua 67.070
+2 spec/foreign_alias_headers_spec.lua 0.100
 1 spec/foreigncache_spec.lua 352.899
 4 spec/foreigntypes_spec.lua 0.165
 4 spec/graphcodec_spec.lua 7.127

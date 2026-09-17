@@ -5,7 +5,7 @@ local fs = import "fs"
 local stream = import "io"
 local net = import "net"
 local ssl = import "ssl"
-local str = import "string"
+local string = import "string"
 local timer = import "timer"
 local support = import "ssl.test_support.titan"
 local net_support = import "net.test_support.titan"
@@ -22,12 +22,12 @@ function test_ssl_combined_pem_and_binary_record_exchange(
     local server, port =
       support.listen_available(36000, certificate_bundle, nil)
     support.cleanup_server(context, server)
-    local peer = async.run<value, value>(function (): value
+    local peer = async.run<|value, value|>(function (): value
       local connection = server:accept()
       defer connection:close()
       local channel: stream.ReaderWriterCloser = connection
       local prefix = channel:read_until("\0END", true)
-      test.assert(prefix == str.rep("x", 40000),
+      test.assert(prefix == string.rep("x", 40000),
                   "TLS binary delimiter read returned the wrong prefix")
       test.assert(channel:read() == "tail",
                   "TLS delimiter read did not retain excess")
@@ -45,7 +45,7 @@ function test_ssl_combined_pem_and_binary_record_exchange(
     local connection = ssl.connect("127.0.0.1", port, support.TRUST_ROOT)
     support.cleanup_connection(context, connection)
     local channel: stream.ReaderWriterCloser = connection
-    channel:write(str.rep("x", 40000) .. "\0ENDtail")
+    channel:write(string.rep("x", 40000) .. "\0ENDtail")
     test.assert(channel:read_until("\n", true) == "reply\0",
                 "TLS response delimiter changed binary bytes")
     test.assert(channel:read() == "rest",
@@ -74,7 +74,7 @@ function test_ssl_split_pem_accepts_are_lazy(context: test.Context)
     local first = server:accept()
     support.cleanup_connection(context, first)
 
-    local second_peer = async.run<value, value>(function (): value
+    local second_peer = async.run<|value, value|>(function (): value
       local connection = server:accept()
       defer connection:close()
       connection:write("second")
@@ -104,7 +104,7 @@ function test_ssl_rejects_wrong_dns_identity(context: test.Context)
       support.listen_available(38000, support.WRONG_CERTIFICATE, support.PRIVATE_KEY)
     support.cleanup_server(context, server)
     local peer_failed = false
-    local peer = async.run<value, value>(function (): value
+    local peer = async.run<|value, value|>(function (): value
       local connection = server:accept()
       defer connection:close()
       do
@@ -148,7 +148,7 @@ function test_ssl_distinguishes_truncated_transport_from_clean_eof(
       end
     end)
     local handshake_done = false
-    local peer = async.run<value, value>(function (): value
+    local peer = async.run<|value, value|>(function (): value
       local connection = server:accept()
       accepted = connection
       connection:handshake()
@@ -179,7 +179,7 @@ function test_ssl_distinguishes_truncated_transport_from_clean_eof(
     do
       client:read()
     catch
-      local detail = str.tostring(error)
+      local detail = string.tostring(error)
       if error is async.OperationError then
         local transport_failure = error as async.OperationError
         detail = transport_failure.name .. " from " ..

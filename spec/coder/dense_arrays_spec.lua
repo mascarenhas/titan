@@ -837,7 +837,7 @@ describe("dense Array code generation and boundaries", function()
             end
 
             function exact_call(a: {integer}): {integer}
-                local f: ({integer}) -> {integer} = identity
+                local f: function ({integer}): ({integer}) = identity
                 return f(a)
             end
 
@@ -886,7 +886,7 @@ describe("dense Array code generation and boundaries", function()
             end
 
             function call_array_variadic(
-                f: (...: {integer}) -> {integer}?,
+                f: function (...: {integer}): {integer}?,
                 a: {integer},
                 b: {integer}
             ): {integer}?
@@ -894,7 +894,7 @@ describe("dense Array code generation and boundaries", function()
             end
 
             function call_map_variadic(
-                f: (...: {string: integer}) -> {string: integer}?,
+                f: function (...: {string: integer}): {string: integer}?,
                 a: {string: integer},
                 b: {string: integer}
             ): {string: integer}?
@@ -902,7 +902,7 @@ describe("dense Array code generation and boundaries", function()
             end
 
             function call_option_variadic(
-                f: (...: {integer}?) -> {integer}?,
+                f: function (...: {integer}?): {integer}?,
                 a: {integer}?,
                 b: {integer}?
             ): {integer}?
@@ -910,21 +910,21 @@ describe("dense Array code generation and boundaries", function()
             end
 
             function call_array_flexible(
-                f: ({integer}) -> (...: {integer}),
+                f: function ({integer}): (...: {integer}),
                 a: {integer}
             ): (...: {integer})
                 return f(a)
             end
 
             function call_map_flexible(
-                f: ({string: integer}) -> (...: {string: integer}),
+                f: function ({string: integer}): (...: {string: integer}),
                 m: {string: integer}
             ): (...: {string: integer})
                 return f(m)
             end
 
             function call_option_flexible(
-                f: ({integer}?) -> (...: {integer}?),
+                f: function ({integer}?): (...: {integer}?),
                 a: {integer}?
             ): (...: {integer}?)
                 return f(a)
@@ -1118,14 +1118,14 @@ describe("dense Array code generation and boundaries", function()
                 {{string: integer}},
                 {Owned},
                 {{integer}},
-                {() -> integer},
+                {function (): integer},
                 {value}
             )
                 local s: string = fresh()
                 local m: {string: integer} = { ["answer"] = 42 }
                 local r: Owned = Owned.new(43)
                 local inner: {integer} = { 44 }
-                local f: () -> integer =
+                local f: function (): integer =
                     function(): integer return 45 end
                 local vr: Owned = Owned.new(46)
                 local v: value = vr
@@ -1556,7 +1556,7 @@ describe("dense Array code generation and boundaries", function()
                     items[#items + 1] = increment(index)
                 end
                 local delta = count - count
-                local unrelated: () -> integer = function(): integer
+                local unrelated: function (): integer = function(): integer
                     return delta
                 end
                 if #items ~= count + unrelated() then
@@ -1694,9 +1694,9 @@ describe("dense Array code generation and boundaries", function()
                 return xs as const {integer}
             end
 
-            function map<A, B>(
+            function map<|A, B|>(
                 array: const? {A},
-                f: (A, integer) -> B
+                f: function (A, integer): B
             ): {B}
                 local mapped: {B} = {}
                 for i = #array, 1, -1 do

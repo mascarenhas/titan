@@ -6,7 +6,6 @@ foreign import "ctype.h"
 local peg = import "peg"
 local gc = import "gc"
 
-local type CChar = char
 
 -- The canonical folder main is the complete public surface. Contributors
 -- contain only module-local records, state, and shared helpers.
@@ -66,8 +65,8 @@ end
 function reverse(subject: string): string
   local length = #subject
   if length == 0 then return "" end
-  local storage = CChar.new_array(length)
-  local source = subject as const *char
+  local storage = foreign char.new_array(length)
+  local source = subject as foreign const *char
   local index = 0
   while index < length do
     storage[index] = source[length - index - 1]
@@ -79,13 +78,13 @@ end
 function lower(subject: string): string
   local length = #subject
   if length == 0 then return "" end
-  local storage = CChar.new_array(length)
-  local source = subject as const *char
+  local storage = foreign char.new_array(length)
+  local source = subject as foreign const *char
   local index = 0
   while index < length do
-    local octet = source[index] as unsigned char
+    local octet = source[index] as foreign unsigned char
     storage[index] =
-      ffi.tolower(octet as int) as char
+      ffi.tolower(octet as foreign int) as foreign char
     index = index + 1
   end
   return storage as string
@@ -94,13 +93,13 @@ end
 function upper(subject: string): string
   local length = #subject
   if length == 0 then return "" end
-  local storage = CChar.new_array(length)
-  local source = subject as const *char
+  local storage = foreign char.new_array(length)
+  local source = subject as foreign const *char
   local index = 0
   while index < length do
-    local octet = source[index] as unsigned char
+    local octet = source[index] as foreign unsigned char
     storage[index] =
-      ffi.toupper(octet as int) as char
+      ffi.toupper(octet as foreign int) as foreign char
     index = index + 1
   end
   return storage as string
@@ -127,29 +126,29 @@ function rep(subject: string, count: integer,
   local total_length = unit_length * count - separator_length
   if total_length == 0 then return "" end
 
-  local storage = CChar.new_array(total_length)
-  local output = storage as *char
-  local subject_bytes = subject as const *char
+  local storage = foreign char.new_array(total_length)
+  local output = storage as foreign *char
+  local subject_bytes = subject as foreign const *char
   local separator_bytes =
-    actual_separator as const *char
+    actual_separator as foreign const *char
   local occurrence = 1
   local offset = 0
   while occurrence < count do
     if subject_length > 0 then
       ffi.memcpy(output + offset, subject_bytes,
-                     subject_length as ffi.size_t)
+                     subject_length as foreign size_t)
       offset = offset + subject_length
     end
     if separator_length > 0 then
       ffi.memcpy(output + offset, separator_bytes,
-                     separator_length as ffi.size_t)
+                     separator_length as foreign size_t)
       offset = offset + separator_length
     end
     occurrence = occurrence + 1
   end
   if subject_length > 0 then
     ffi.memcpy(output + offset, subject_bytes,
-                   subject_length as ffi.size_t)
+                   subject_length as foreign size_t)
   end
   return storage as string
 end
@@ -167,7 +166,7 @@ function byte(subject: string, first: integer?,
   if normalized_last - normalized_first + 1 > 200 then
     raise "too many flexible return values (max 200)"
   end
-  local source = subject as const *unsigned char
+  local source = subject as foreign const *unsigned char
   local bytes: { integer } = {}
   for i = normalized_first, normalized_last do
     bytes[i - normalized_first + 1] = source[i - 1] as integer
@@ -178,15 +177,15 @@ end
 function char(...: integer): string
   local length = #...
   if length == 0 then return "" end
-  local storage = CChar.new_array(length)
+  local storage = foreign char.new_array(length)
   local index = 1
   while index <= length do
     local octet = ...[index]
     if octet < 0 or octet > 255 then
       raise "character value out of range"
     end
-    local byte = octet as unsigned char
-    storage[index - 1] = byte as char
+    local byte = octet as foreign unsigned char
+    storage[index - 1] = byte as foreign char
     index = index + 1
   end
   return storage as string
@@ -276,16 +275,16 @@ function find(subject: string, needle: string,
   end
 
   local subject_bytes =
-    subject as const *char
+    subject as foreign const *char
   local needle_bytes =
-    needle as const *char
+    needle as foreign const *char
   local offset = first - 1
   local limit = subject_length - needle_length
   while offset <= limit do
     if subject_bytes[offset] == needle_bytes[0] and
         ffi.memcmp(
           subject_bytes + offset, needle_bytes,
-          needle_length as ffi.size_t) == 0 then
+          needle_length as foreign size_t) == 0 then
       return offset + 1, offset + needle_length
     end
     offset = offset + 1
@@ -330,7 +329,7 @@ function pack(format_string: string, ...: value): string
       argument = argument + 1
       local number =
         (next_pack_argument(arguments, argument) as integer)
-          as ffi.lua_Integer
+          as foreign lua_Integer
       check_signed_pack_range(number, option.size)
       builder_append(
         builder,
@@ -340,7 +339,7 @@ function pack(format_string: string, ...: value): string
       argument = argument + 1
       local number =
         (next_pack_argument(arguments, argument) as integer)
-          as ffi.lua_Integer
+          as foreign lua_Integer
       check_unsigned_pack_range(number, option.size)
       builder_append(
         builder,
@@ -352,7 +351,7 @@ function pack(format_string: string, ...: value): string
         builder,
         pack_float_bytes(
           (next_pack_argument(arguments, argument) as float)
-            as ffi.lua_Number,
+            as foreign lua_Number,
           state.little_endian, state.native_little_endian))
     elseif option.kind == PACK_NUMBER then
       argument = argument + 1
@@ -360,7 +359,7 @@ function pack(format_string: string, ...: value): string
         builder,
         pack_number_bytes(
           (next_pack_argument(arguments, argument) as float)
-            as ffi.lua_Number,
+            as foreign lua_Number,
           state.little_endian, state.native_little_endian))
     elseif option.kind == PACK_DOUBLE then
       argument = argument + 1
@@ -368,7 +367,7 @@ function pack(format_string: string, ...: value): string
         builder,
         pack_double_bytes(
           (next_pack_argument(arguments, argument) as float)
-            as ffi.lua_Number,
+            as foreign lua_Number,
           state.little_endian, state.native_little_endian))
     elseif option.kind == PACK_CHAR then
       argument = argument + 1
@@ -387,11 +386,11 @@ function pack(format_string: string, ...: value): string
       local text =
         next_pack_argument(arguments, argument) as string
       check_unsigned_pack_range(
-        #text as ffi.lua_Integer, option.size)
+        #text as foreign lua_Integer, option.size)
       builder_append(
         builder,
         pack_integer_bytes(
-          #text as ffi.lua_Integer, option.size,
+          #text as foreign lua_Integer, option.size,
           state.little_endian, false))
       checked_pack_growth(builder.length, #text)
       builder_append(builder, text)
@@ -500,9 +499,9 @@ function unpack(format_string: string, data: string,
       local packed_length =
         unpack_integer_bytes(
           data, position, option.size,
-          state.little_endian, false) as ffi.lua_Unsigned
+          state.little_endian, false) as foreign lua_Unsigned
       if packed_length >
-          (MAXIMUM_STRING_BYTES as ffi.lua_Unsigned) then
+          (MAXIMUM_STRING_BYTES as foreign lua_Unsigned) then
         raise "data string too short"
       end
       local length = packed_length as integer
@@ -522,7 +521,7 @@ function unpack(format_string: string, data: string,
         raise "too many flexible return values (max 200)"
       end
       local bytes =
-        data as const *unsigned char
+        data as foreign const *unsigned char
       local ending = position
       while ending < #data and bytes[ending] ~= 0 do
         ending = ending + 1
@@ -587,7 +586,7 @@ function Regex:match(subject: string,
 end
 
 function Regex:gmatch(subject: string,
-                      init: integer?): () -> RegexMatch?
+                      init: integer?): function (): (RegexMatch?)
   local position, overshoot = regex_normalized_init(subject, init)
   local current = position
   local previous_end = 0
@@ -627,7 +626,7 @@ function Regex:gmatch(subject: string,
 end
 
 function Regex:gsub(subject: string,
-                    replacement: (string) -> string,
+                    replacement: function (string): (string),
                     maximum: integer?): (string, integer)
   local limit = #subject + 1
   if maximum then limit = maximum end
@@ -726,12 +725,12 @@ function match(subject: string, expression: string,
 end
 
 function gmatch(subject: string, expression: string,
-                init: integer?): () -> RegexMatch?
+                init: integer?): function (): (RegexMatch?)
   return cached_regex(expression):gmatch(subject, init)
 end
 
 function matches(subject: string, pattern: string):
-                 () -> (string?, ...: string?)
+                 function (): (string?, ...: string?)
   local iterator = cached_regex(pattern):gmatch(subject, nil)
   return function (): (string?, ...: string?)
     local found: RegexMatch? = iterator()
@@ -740,7 +739,7 @@ function matches(subject: string, pattern: string):
   end
 end
 
-function split(subject: string, delimiter: string?): () -> string?
+function split(subject: string, delimiter: string?): function (): (string?)
   if not delimiter then
     local position = 1
     return function (): string?
@@ -770,7 +769,7 @@ function split(subject: string, delimiter: string?): () -> string?
 end
 
 function gsub(subject: string, expression: string,
-              replacement: (string) -> string,
+              replacement: function (string): (string),
               maximum: integer?): (string, integer)
   return cached_regex(expression):gsub(subject, replacement, maximum)
 end

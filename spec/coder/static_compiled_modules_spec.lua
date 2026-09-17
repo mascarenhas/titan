@@ -137,7 +137,7 @@ function increment(value_: integer): integer
     return value_ + 1
 end
 
-function callable(): (integer) -> integer
+function callable(): function (integer): integer
     return increment
 end
 
@@ -792,26 +792,26 @@ record Box
 end
 
 function main(args: {string}): integer
-    local adjusted: (integer, value) -> value = provider.increment
+    local adjusted: function (integer, value): value = provider.increment
     if (adjusted(40, "ignored") as integer) ~= 41 then
         return 1
     end
 
     local erased: value = adjusted
-    local wider: (integer, value, value) -> value = erased
+    local wider: function (integer, value, value): value = erased
     if (wider(41, "a", "b") as integer) ~= 42 then
         return 2
     end
 
-    local from_result: (integer, value) -> value = provider.callable()
+    local from_result: function (integer, value): value = provider.callable()
     if (from_result(42, "ignored") as integer) ~= 43 then
         return 3
     end
 
-    local broad: (value) -> value = provider.identity
-    local narrowed: (Box) -> Box = broad
+    local broad: function (value): value = provider.identity
+    local narrowed: function (Box): Box = broad
     local dynamic: value = narrowed
-    local nominal: (Box, value) -> Box = dynamic
+    local nominal: function (Box, value): Box = dynamic
     if nominal(Box.new(44), "ignored").n ~= 44 then
         return 4
     end

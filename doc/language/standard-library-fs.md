@@ -7,16 +7,16 @@ The current supported hosts are Linux and macOS. The
 [libuv setup instructions](../../README.md#libuv-setup) cover the default
 pinned build and optional system-package mode on both platforms.
 
-```titan
+```text
 record File
 record Stat
 record Watcher
 
 union WatcherEvent
-  created: string
-  deleted: string
-  modified: string
-  error: async.OperationError
+  created(string)
+  deleted(string)
+  modified(string)
+  error(async.OperationError)
 end
 
 function open(path: string, mode: string): File
@@ -307,10 +307,10 @@ normally stay buffered for the next `poll`.
 
 ```titan
 union WatcherEvent
-  created: string
-  deleted: string
-  modified: string
-  error: async.OperationError
+  created(string)
+  deleted(string)
+  modified(string)
+  error(async.OperationError)
 end
 ```
 

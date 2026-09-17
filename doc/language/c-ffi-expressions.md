@@ -36,24 +36,24 @@ typedef struct Point Row[2];
 ```lua
 foreign import "geometry.h"
 
-local function x_of(point: ffi.Point): integer
+local function x_of(point: foreign Point): integer
     return point.x as integer
 end
 
-local function clear(cell: ffi.Cell)
+local function clear(cell: foreign Cell)
     cell.integer_value = 0
 end
 ```
 
-`ffi.Point` above denotes the real C type spelled `struct Point`, and
-`ffi.Cell` denotes `union Cell`. Titan does not invent C typedefs for
+`foreign Point` above denotes the real C type spelled `struct Point`, and
+`foreign Cell` denotes `union Cell`. Titan does not invent C typedefs for
 these names. Generated declarations, casts, and probes retain the exact
 `struct` or `union` spelling required by the header.
 
 Only named tags introduced at file scope are published this way. Anonymous
 aggregates, enum tags, and tags whose scope is only a function prototype are
 not source aliases. A forward declaration such as `struct Opaque;` does
-publish `module.Opaque`, but an incomplete aggregate may be used only behind a
+publish `foreign Opaque`, but an incomplete aggregate may be used only behind a
 pointer. By-value parameters, returns, locals, casts, field access, `sizeof`,
 and allocation require the complete definition to be visible at that source
 point.
@@ -68,7 +68,7 @@ typedef long Item;
 struct Item { int value; };
 ```
 
-Here `header.Item` is the real `typedef long Item`, regardless of whether the
+Here `foreign Item` is the real `typedef long Item`, regardless of whether the
 typedef appears before or after the tag declaration. The tag still describes
 C declarations that explicitly use `struct Item`, but Titan does not replace a
 real typedef with the convenient tag alias.
@@ -84,28 +84,24 @@ both `struct stat` and a function named `stat`, and Titan supports both:
 ```lua
 foreign import "sys/stat.h"
 
-local function inspect(path: string, info: *ffi.stat): integer
+local function inspect(path: string, info: foreign *stat): integer
     return ffi.stat(path, info)
 end
 ```
 
-An ordinary value wins when a dotted expression is ambiguous. Consequently,
-type pseudo-members such as `ffi.stat.new()`, `ffi.stat.new_array(n)`,
-`ffi.stat.sizeof`, or `ffi.stat.alignof` are unavailable when the ordinary member
-`ffi.stat` collides with the type name; the checker reports that collision
-specifically. Fields named `new`, `new_array`, or `alignof` on an actual
-aggregate value are ordinary C fields and remain usable (`sizeof` itself is a
-C keyword and cannot name a field).
+The value and type syntaxes are separate. `ffi.stat(path, info)` calls the C
+function, while `foreign stat.new()` allocates its tag type and
+`foreign stat.sizeof` queries its layout. A same-named value does not disable
+these operations. Fields named `new`, `new_array`, or `alignof` on actual C
+aggregate values remain ordinary fields (`sizeof` itself is a C keyword).
 
 ### Titan keywords as C names
 
-Member and qualified-type lookup after a foreign namespace or C receiver uses
-a contextual raw C identifier. A legal C spelling such as `when`, `type`,
+Foreign type names and selectors after a C receiver accept raw identifiers. A legal C spelling such as `when`, `type`,
 `repeat`, or `interface` is therefore available as `ffi.when`, `ffi.type`,
 `object.repeat`, or `ffi.interface` when the imported declarations provide it.
-This contextual rule continues to apply when a spelling is a current or future
-Titan keyword; it does not make a reserved spelling available for an ordinary
-Titan variable, declaration, record field, union variant, or member. Named C
+The grammar also admits reserved words at its `AnyName` declaration/member
+boundaries; ordinary locals and parameters still require nonreserved names. Named C
 parameter labels use the analogous contextual rule before `=` in a named call.
 
 ## Compiled probe cache
@@ -145,16 +141,16 @@ Titan admits such conversions only in a context that already supplies the
 destination C pointer type:
 
 ```lua
-local function close_tcp(tcp: *ffi.uv_tcp_t)
+local function close_tcp(tcp: foreign *uv_tcp_t)
     ffi.uv_close(tcp, nil)                 -- parameter supplies *uv_handle_t
 end
 
-local function as_handle(tcp: *ffi.uv_tcp_t): *ffi.uv_handle_t
+local function as_handle(tcp: foreign *uv_tcp_t): foreign *uv_handle_t
     return tcp                            -- return type supplies the target
 end
 
-local function explicit(tcp: *ffi.uv_tcp_t): *ffi.uv_handle_t
-    return tcp as *ffi.uv_handle_t
+local function explicit(tcp: foreign *uv_tcp_t): foreign *uv_handle_t
+    return tcp as foreign *uv_handle_t
 end
 ```
 
@@ -192,10 +188,10 @@ pointer adjustment:
 foreign import "geometry.h"
 
 local function use_owned()
-    local point: owned *ffi.Point = ffi.Point.new()
-    local points: owned ffi.Point[] = ffi.Point.new_array(8)
-    local mutable: *ffi.Point = point
-    local immutable: const *ffi.Point = points
+    local point: owned *Point = foreign Point.new()
+    local points: owned Point[] = foreign Point.new_array(8)
+    local mutable: foreign *Point = point
+    local immutable: foreign const *Point = points
     ffi.read_point(point)
     ffi.read_point(points)
 end
@@ -208,7 +204,7 @@ inclusion rule as array decay and ordinary pointer conversion: mutable storage
 may become `T *`, `const T *`, or a permitted `void *`, but qualification on
 the owned payload may not be discarded. An optional owner must be unwrapped
 before adjustment. Making the destination pointer optional does not combine
-the two operations: `owned *T?` does not implicitly become `*T?`.
+the two operations: `(owned *T)?` does not implicitly become `foreign *T?`.
 
 One separate written conversion erases stable native identities to C
 `void *`. Every non-function C pointer keeps the ordinary C object-pointer
@@ -243,7 +239,7 @@ pointer; other by-value object expressions can supply only a compatible
 Titan first takes the permitted address and then emits the validated C cast.
 
 For a mutable object-pointer local or parameter, an exact pointer-to-pointer
-target takes the address of the pointer variable itself. A `const *char` local
+target takes the address of the pointer variable itself. A `foreign const *char` local
 can therefore receive a `const char **` output without discarding `const`.
 This exact storage conversion does not change ordinary pointer-to-`void *`
 value conversion. Const bindings, captured locals, and temporary expressions
@@ -255,7 +251,7 @@ target is a pointer-to-pointer type; it does not implicitly take an address.
 
 An ordinary mutable local may omit its initializer only with an explicit type
 whose representation admits nil. A C object or function pointer is in that
-domain, so `local p: *ffi.Point` starts as `NULL`. C structures, unions, fixed
+domain, so `local p: foreign *Point` starts as `NULL`. C structures, unions, fixed
 arrays, numeric scalars, and enums do not admit nil and still require an
 initializer. Use `.new()` or `.new_array(...)` to ask for zeroed aggregate
 storage explicitly.
@@ -266,7 +262,7 @@ cannot be replaced, its inline fields/elements cannot be mutated, and it cannot
 take a mutable address or mutable automatic-decay path. Reaching separately
 owned storage through a pointer ends that inline walk, so the pointee keeps the
 mutability promised by the pointer type. This Titan binding rule is separate
-from the C pointee qualifier in `const *T`.
+from the C pointee qualifier in `foreign const *T`.
 
 The constructor's representation is selected at its direct local declaration
 sink. The checker records one allocation plan there; moving the call to a
@@ -277,10 +273,10 @@ For a complete non-GC-bearing C structure or union `T`, `.new()` selects:
 
 | Declaration | Local representation |
 | --- | --- |
-| `local x = T.new()` | automatic `T` |
-| `local x: T = T.new()` | automatic `T` |
-| `local x: owned *T = T.new()` | GC-owned object |
-| `local x: *T = T.new()` | pointer into a hidden rooted owner |
+| `local x = foreign T.new()` | automatic `T` |
+| `local x: foreign T = foreign T.new()` | automatic `T` |
+| `local x: owned *T = foreign T.new()` | GC-owned object |
+| `local x: foreign *T = foreign T.new()` | pointer into a hidden rooted owner |
 | any non-direct-local use | `owned *T` |
 
 Automatic inference is deliberately limited to structures and unions; it does
@@ -288,31 +284,33 @@ not make scalar, pointer, enum, function, incomplete, or C-array-typedef
 payloads into stack objects. An automatic aggregate must not transitively
 contain GC-bearing FFI storage.
 
-For `T.new_array(count)`, a positive source integer literal can select fixed
+For `foreign T.new_array(count)`, a positive integer literal or eligible macro can select fixed
 automatic storage:
 
 ```titan
-local inferred = ffi.Point.new_array(4)       -- ffi.Point[4]
-local exact: ffi.Point[4] = ffi.Point.new_array(4)
-local view: ffi.Point[] = ffi.Point.new_array(4) -- borrowed pointer
-local ptr: *ffi.Point = ffi.Point.new_array(4)   -- borrowed pointer
-local owner: owned ffi.Point[] = ffi.Point.new_array(count)
+local inferred = foreign Point.new_array(4)       -- inferred fixed Point array
+local view: foreign Point[] = foreign Point.new_array(4) -- borrowed pointer
+local ptr: foreign *Point = foreign Point.new_array(4)   -- borrowed pointer
+local owner: owned Point[] = foreign Point.new_array(count)
 ```
 
-An explicitly written fixed extent must be positive and equal the literal
-allocation count. A fixed C-array typedef imported from C may be an element only when a
-positive literal selects nested automatic backing; it cannot become an owned
-payload. A dynamic or zero count cannot create a C fixed array. An
-inferred dynamic/zero count remains `owned T[]`; an explicit borrowed pointer
-or `T[]` gets hidden owned backing instead. An explicit `owned T[]` always
-wins. `T[]` is an uncounted pointer view: `#view` is unavailable and indexing
-has raw-pointer semantics.
+A positive constant count selects the fixed extent. Eligible object-like
+integer macros use their exact target-profile value; named Titan constants and
+arbitrary expressions are not folded for this selection. There is no allocation
+size threshold. A fixed C-array typedef imported from C may be an element only
+when a positive constant selects nested automatic backing; it cannot become an
+owned payload. A dynamic or zero count cannot create a C fixed array.
+An inferred dynamic/zero count remains `owned T[]`; an explicit borrowed pointer
+or `foreign T[]` gets hidden owned backing instead. An explicit `owned T[]`
+always wins. `foreign T[]` is an uncounted pointer view: `#view` is unavailable
+and indexing has raw-pointer semantics.
 
-The source spellings `ffi.T[N]` and `ffi.T[]` are available only as the written
-target of an initialized direct allocation local. A fixed array is 0-based,
-`#array` is its fixed extent, and direct indexing is checked against that
-extent. It decays to an element pointer in pointer contexts. A whole C array is
-not an assignable/returnable value.
+Written `T[N]` annotations are removed. Inferred fixed arrays remain 0-based,
+`#array` is the fixed extent, and direct indexing is checked against that
+extent. They decay to element pointers in pointer contexts; a whole C array is
+not an assignable or returnable value.
+
+
 
 Automatic storage has ordinary C block lifetime and no escape analysis. A
 pointer returned, stored, or captured beyond that lifetime can dangle. A
@@ -328,15 +326,15 @@ checker-planned copy, not subtyping or a conversion lifted through containers.
 ## Flexible-array-member allocation
 
 If a complete C structure `T` ends in `E field[]`, allocate one extended object
-with `T.new(count)`:
+with `foreign T.new(count)`:
 
 ```titan
-local packet = ffi.Packet.new(8)                 -- literal automatic extent
-local owner: owned *ffi.Packet = ffi.Packet.new(n) -- dynamic owned extent
-local pointer: *ffi.Packet = ffi.Packet.new(n)     -- hidden owner backing
+local packet = foreign Packet.new(8)                 -- literal automatic extent
+local owner: owned *Packet = foreign Packet.new(n) -- dynamic owned extent
+local pointer: foreign *Packet = foreign Packet.new(n)     -- hidden owner backing
 ```
 
-`T.new()` has the wrong arity and `T.new_array(...)` is unavailable for a FAM
+`foreign T.new()` has the wrong arity and `foreign T.new_array(...)` is unavailable for a FAM
 structure. Titan never invents a stride for an array of variably extended
 objects.
 
@@ -386,10 +384,10 @@ Titan can construct the options in automatic storage and pass its address:
 foreign import "process_fixture.h"
 
 local function spawn(file: string): integer
-    local options = ffi.ProcessOptions.new()
+    local options = foreign ProcessOptions.new()
     options.file = file
     options.on_exit =
-        ffi.host_report_exit as ffi.process_exit_callback
+        ffi.host_report_exit as foreign process_exit_callback
     options.data = nil
     return ffi.host_spawn(options) as integer
 end
@@ -553,7 +551,7 @@ use and generated C continues to emit the public spelling:
 foreign import "header.h"
 
 local function set_public_member(): integer
-    local item: ffi.Record
+    local item: foreign Record
     item.public_member = 1
     return item.public_member as integer
 end

@@ -20,7 +20,7 @@ loop thread; CPU-bound code still blocks other I/O until it yields.
 
 ## API
 
-```titan
+```text
 record Connection
 record Server
 
@@ -160,7 +160,7 @@ function client(): value
 end
 
 function main(args: {string}): integer
-  async.run<value, value>(client)
+  async.run<|value, value|>(client)
   return 0
 end
 ```

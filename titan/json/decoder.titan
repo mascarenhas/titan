@@ -6,18 +6,18 @@ end
 local function Decoder:resolve(target: reflect.Type, position: integer,
                                path: Path): reflect.Type
   case target
-  when is_named: named then
+  when is_named(named) then
     local found? = reflect.find_nominal(named.name)
     if found == nil then
       json_fail("unknown_type", "nominal type is not registered: " .. named.name,
                 path, self.source, position)
     end
     case found
-    when is_record: descriptor then
+    when is_record(descriptor) then
       return reflect.Type.is_record(descriptor)
-    when is_union: descriptor then
+    when is_union(descriptor) then
       return reflect.Type.is_union(descriptor)
-    when is_interface: descriptor then
+    when is_interface(descriptor) then
       return reflect.Type.is_interface(descriptor)
     end
   else
@@ -65,7 +65,7 @@ local function Decoder:slot(node: Node, target: reflect.Type,
   local resolved = self:resolve(target, node.position, path)
   if node.kind == "null" then
     case resolved
-    when is_value then return self.settings.null_value
+    when is_value() then return self.settings.null_value
     else return nil
     end
   end
@@ -82,7 +82,7 @@ local function Decoder:decode_array(node: Node, descriptor: reflect.ArrayType,
       elements[index], descriptor.elem_descriptor, index_path(path, index))
   end
   case descriptor.is_const
-  when is_const then return result as const {value}
+  when is_const() then return result as const {value}
   else return result
   end
 end
@@ -93,8 +93,8 @@ local function Decoder:decode_map(node: Node, descriptor: reflect.MapType,
   local key_type = self:resolve(descriptor.key_descriptor, node.position, path)
   local string_keys = false
   case key_type
-  when is_string then string_keys = true
-  when is_value then string_keys = true
+  when is_string() then string_keys = true
+  when is_value() then string_keys = true
   end
   if not string_keys then
     json_fail("unsupported_type", "JSON objects require string or value Map keys",
@@ -114,9 +114,9 @@ local function Decoder:missing(target: reflect.Type, position: integer,
                                path: Path)
   local resolved = self:resolve(target, position, path)
   case resolved
-  when is_nil then return
-  when is_option then return
-  when is_value then return
+  when is_nil() then return
+  when is_option() then return
+  when is_value() then return
   end
   json_fail("missing_field", "required record field is missing",
             path, self.source, position)
@@ -207,7 +207,7 @@ local function Decoder:decode_union(node: Node, descriptor: reflect.UnionType,
               tag_path, self.source, tag.position)
   end
   local payload_path = field_path(path, "value")
-  local payload_type? = variant.descriptor
+  local payload_type? = variant.type
   if payload_type == nil then
     if payload ~= nil then
       json_fail("invalid_union", "empty union variant must not have a value",
@@ -228,33 +228,33 @@ local function Decoder:decode(node: Node, target: reflect.Type?,
   if target == nil then return self:dynamic(node, path) end
   local resolved = self:resolve(target, node.position, path)
   case resolved
-  when is_value then
+  when is_value() then
     return self:dynamic(node, path)
-  when is_option: base then
+  when is_option(base) then
     if node.kind == "null" then return nil end
     return self:decode(node, base, path)
-  when is_nil then
+  when is_nil() then
     self:require_kind(node, "null", path)
     return nil
-  when is_boolean then
+  when is_boolean() then
     self:require_kind(node, "boolean", path)
     return node.scalar
-  when is_string then
+  when is_string() then
     self:require_kind(node, "string", path)
     return node.scalar
-  when is_integer then
+  when is_integer() then
     self:require_kind(node, "number", path)
     return number_value(node, true, false, self.source, path)
-  when is_float then
+  when is_float() then
     self:require_kind(node, "number", path)
     return number_value(node, false, true, self.source, path)
-  when is_array: descriptor then
+  when is_array(descriptor) then
     return self:decode_array(node, descriptor, path)
-  when is_map: descriptor then
+  when is_map(descriptor) then
     return self:decode_map(node, descriptor, path)
-  when is_record: descriptor then
+  when is_record(descriptor) then
     return self:decode_record(node, descriptor, path)
-  when is_union: descriptor then
+  when is_union(descriptor) then
     return self:decode_union(node, descriptor, path)
   else
     json_fail("unsupported_type", "type has no JSON decoding representation",

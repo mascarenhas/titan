@@ -1,14 +1,14 @@
 local function cancel_join_with_finalizable(
-    operand: async.Task, callback: (value) -> ())
+    operand: async.Task, callback: function (value): ())
   local sentinel: {string: value} = {}
   support.mark_finalizable(sentinel, callback)
-  local joining = async.run<value, value>(function (): value
+  local joining = async.run<|value, value|>(function (): value
     async.join(operand)
     return nil
   end)
   defer task_support.cancel_and_join_task(joining, "listener probe cleanup")
   support.wait_until_waiting(joining)
-  joining:cancel(async.CancellationReason<value>.complex(sentinel))
+  joining:cancel(async.CancellationReason<|value|>.complex(sentinel))
   local status = async.join(joining)
   test.assert(status:has_cancelled(),
         "listener-retention probe did not cancel its combinator")
@@ -19,7 +19,7 @@ end
 function test_task_primitives_and_terminal_listeners(context: test.Context)
   runtime_test.run(function ()
     local self_task: async.Task? = nil
-    self_task = async.run<value, value>(function (): value
+    self_task = async.run<|value, value|>(function (): value
       test.assert(async.running() == (self_task as async.Task),
             "async.running did not return the current Task")
 
@@ -41,13 +41,13 @@ function test_task_primitives_and_terminal_listeners(context: test.Context)
         removed_listener_ran = true
         listener_order = listener_order .. "removed"
       end
-      local target = async.run<string, value>(function (): string
+      local target = async.run<|string, value|>(function (): string
           timer.sleep(2)
           return "listener-result"
         end)
       defer task_support.cancel_and_join_task(target, "listener target cleanup")
       local first_listener = function (
-          status: async.TaskStatus<string, value>)
+          status: async.TaskStatus<|string, value|>)
         listener_order = listener_order .. "1"
         listener_status = status:as_string()
         do
@@ -79,7 +79,7 @@ function test_task_primitives_and_terminal_listeners(context: test.Context)
       remove_duplicate_first()
 
       local remove_second_listener = target:add_terminal_listener(
-        function (_: async.TaskStatus<string, value>)
+        function (_: async.TaskStatus<|string, value|>)
           listener_order = listener_order .. "2"
           -- Terminal delivery uses a detached snapshot. A remover for an
           -- already-delivered registration must not shift it and skip 3.
@@ -88,7 +88,7 @@ function test_task_primitives_and_terminal_listeners(context: test.Context)
         end)
       defer remove_second_listener()
       local remove_third_listener = target:add_terminal_listener(
-        function (_: async.TaskStatus<string, value>)
+        function (_: async.TaskStatus<|string, value|>)
           listener_order = listener_order .. "3"
         end)
       defer remove_third_listener()
@@ -114,7 +114,7 @@ function test_task_primitives_and_terminal_listeners(context: test.Context)
 
       local late_listener_ran = false
       local remove_late_listener = target:add_terminal_listener(
-        function (_: async.TaskStatus<string, value>)
+        function (_: async.TaskStatus<|string, value|>)
           late_listener_ran = true
         end)
       remove_late_listener()
@@ -127,7 +127,7 @@ function test_task_primitives_and_terminal_listeners(context: test.Context)
       local resumed_count = 0
       local resume_token =
         async.ResumeToken.new("async Task primitive test")
-      suspended_task = async.run<value, value>(function (): value
+      suspended_task = async.run<|value, value|>(function (): value
         test.assert(async.running() == (suspended_task as async.Task),
               "async.running changed inside suspended Task")
         async.suspend(resume_token)
@@ -175,7 +175,7 @@ function test_resume_tokens_guard_identity_and_each_suspension(
       async.ResumeToken.new("first guarded suspension")
     local second = async.ResumeToken.new("second guarded suspension")
     local phase = 0
-    local target = async.run<nil, value>(function (): nil
+    local target = async.run<|nil, value|>(function (): nil
       phase = 1
       async.suspend(first)
       phase = 2
@@ -237,7 +237,7 @@ end
 function test_resume_token_rejects_ready_task(context: test.Context)
   runtime_test.run(function ()
     local started = false
-    local target = async.run<nil, value>(function (): nil
+    local target = async.run<|nil, value|>(function (): nil
       started = true
       return nil
     end)
@@ -265,7 +265,7 @@ function test_resume_token_reports_unknown_source(context: test.Context)
   runtime_test.run(function ()
     local expected = async.ResumeToken.new(nil)
     local wrong_token = async.ResumeToken.new(nil)
-    local target = async.run<nil, value>(function (): nil
+    local target = async.run<|nil, value|>(function (): nil
       async.suspend(expected)
       return nil
     end)
@@ -292,7 +292,7 @@ function test_resume_token_cannot_wake_native_callback_wait(
     context: test.Context)
   runtime_test.run(function ()
     local completed = false
-    local target = async.run<nil, value>(function (): nil
+    local target = async.run<|nil, value|>(function (): nil
       timer.sleep(50)
       completed = true
       return nil
@@ -322,7 +322,7 @@ function test_retired_resume_token_cannot_wake_next_native_wait(
     local token = async.ResumeToken.new("completed explicit suspension")
     local resumed_mismatch = ""
     local phase = 0
-    local target = async.run<nil, value>(function (): nil
+    local target = async.run<|nil, value|>(function (): nil
       phase = 1
       async.suspend(token)
       do
@@ -366,16 +366,16 @@ end
 -- the Runtime continues to own the same all-value Task userdata.
 function test_generic_task_payload_and_cancellation_views(context: test.Context)
   runtime_test.run(function ()
-    local successful: async.Task<string, {string: integer}>? = nil
-    successful = async.run<string, {string: integer}>(function (): string
+    local successful: async.Task<|string, {string: integer}|>? = nil
+    successful = async.run<|string, {string: integer}|>(function (): string
       test.assert(async.running() ==
-            (successful as async.Task<string, {string: integer}>),
+            (successful as async.Task<|string, {string: integer}|>),
             "monomorphic async.running lost generic Task identity")
       timer.yield()
       return "typed-success"
     end)
     local exact_successful =
-      successful as async.Task<string, {string: integer}>
+      successful as async.Task<|string, {string: integer}|>
     defer task_support.cancel_and_join_task(exact_successful,
                  "generic success Task cleanup")
     async.join(exact_successful)
@@ -387,35 +387,35 @@ function test_generic_task_payload_and_cancellation_views(context: test.Context)
     local cancellation_payload: {string: integer} = {
       ["code"] = 42,
     }
-    local cancelled = async.run<boolean, {string: integer}>(function (): boolean
+    local cancelled = async.run<|boolean, {string: integer}|>(function (): boolean
         timer.sleep(60000)
         return false
       end)
     defer task_support.cancel_and_join_task(cancelled,
                  "generic cancelled Task cleanup")
     cancelled:cancel(
-      async.CancellationReason<{string: integer}>.complex(
+      async.CancellationReason<|{string: integer}|>.complex(
         cancellation_payload))
     async.join(cancelled)
     local was_cancelled, reason? = cancelled:status():has_cancelled()
     test.assert(was_cancelled,
           "generic cancellation did not publish a cancelled status")
     local exact_reason =
-      reason as async.CancellationReason<{string: integer}>
+      reason as async.CancellationReason<|{string: integer}|>
     local exact_code = 0
     case exact_reason
-    when complex: payload then exact_code = payload["code"]
+    when complex(payload) then exact_code = payload["code"]
     else
     end
     test.assert(exact_code == 42,
           "generic cancellation projection lost its exact payload")
 
-    local raw_success = async.run<value, value>(function (): value
+    local raw_success = async.run<|value, value|>(function (): value
       return "polluted-success"
     end)
     defer task_support.cancel_and_join_task(raw_success,
                  "polluted success Task cleanup")
-    local integer_view = raw_success as async.Task<integer, value>
+    local integer_view = raw_success as async.Task<|integer, value|>
     async.join(raw_success)
     local success_projection_rejected = false
     do
@@ -426,25 +426,25 @@ function test_generic_task_payload_and_cancellation_views(context: test.Context)
     test.assert(success_projection_rejected,
           "generic success projection accepted a polluted Runtime payload")
 
-    local raw_cancelled = async.run<value, value>(function (): value
+    local raw_cancelled = async.run<|value, value|>(function (): value
       timer.sleep(60000)
       return nil
     end)
     defer task_support.cancel_and_join_task(raw_cancelled,
                  "polluted cancellation Task cleanup")
     local integer_reason_view =
-      raw_cancelled as async.Task<value, integer>
+      raw_cancelled as async.Task<|value, integer|>
     raw_cancelled:cancel(
-      async.CancellationReason<value>.complex("polluted-reason"))
+      async.CancellationReason<|value|>.complex("polluted-reason"))
     async.join(raw_cancelled)
     local cancellation_projection_rejected = false
     do
       local _, polluted_reason? =
         integer_reason_view:status():has_cancelled()
       local exact =
-        polluted_reason as async.CancellationReason<integer>
+        polluted_reason as async.CancellationReason<|integer|>
       case exact
-      when complex: _ then
+      when complex(_) then
       else
       end
     catch
@@ -462,7 +462,7 @@ function test_cancelled_combinator_removes_its_listener(context: test.Context)
   runtime_test.run(function ()
     local operand = support.sleeping(60000, "cancelled operand returned")
     task_support.cleanup_task(operand, "operand cleanup")
-    local joining = async.run<value, value>(function (): value
+    local joining = async.run<|value, value|>(function (): value
       async.join(operand)
       raise "cancelled combinator resumed user code"
       return nil
@@ -488,7 +488,7 @@ function test_self_cancelled_task_is_rejected_by_combinators(
     context: test.Context)
   runtime_test.run(function ()
     local candidate: async.Task? = nil
-    candidate = async.run<value, value>(function (): value
+    candidate = async.run<|value, value|>(function (): value
       timer.yield()
       local current = candidate as async.Task
       current:cancel(async.CancellationReason.simple("self-cancelled"))

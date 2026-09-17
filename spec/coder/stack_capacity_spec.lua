@@ -85,16 +85,16 @@ describe("generated Lua-stack capacity", function()
             end
 
             function exercise(
-                    f: () -> integer,
+                    f: function (): integer,
                     x: integer,
                     ...: integer): integer
                 local values: {integer} = { x }
                 local captured = x
-                local lambda: () -> integer = function(): integer
+                local lambda: function (): integer = function(): integer
                     return captured
                 end
                 local box = Box.new(x)
-                local bound: () -> integer = box:get
+                local bound: function (): integer = box:get
                 do
                     if x < 0 then
                         raise "negative"

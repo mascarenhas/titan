@@ -1,5 +1,5 @@
 local test = import "test"
-local str = import "string"
+local string = import "string"
 local url = import "url"
 
 local function error_detail(kind: string): string
@@ -36,7 +36,7 @@ end
 
 local function expected_message(kind: string, position: integer): string
   return "URL parse error [" .. kind .. "] at byte " ..
-    str.tostring(position) .. ": " .. error_detail(kind)
+    string.tostring(position) .. ": " .. error_detail(kind)
 end
 
 local function parse_valid(source: string): url.Url
@@ -71,8 +71,8 @@ local function expect_error(source: string, kind: string,
         ", expected " .. kind)
   test.assert(diagnostic.position == position,
         "URL diagnostic position was " ..
-        str.tostring(diagnostic.position) .. ", expected " ..
-        str.tostring(position))
+        string.tostring(diagnostic.position) .. ", expected " ..
+        string.tostring(position))
   test.assert(diagnostic.message == expected_message(kind, position),
         "URL diagnostic message was incomplete: " .. diagnostic.message)
 end
@@ -91,8 +91,8 @@ local function expect_request_error(scheme: string, authority: string,
         ", expected " .. kind)
   test.assert(diagnostic.position == position,
         "request URL diagnostic position was " ..
-        str.tostring(diagnostic.position) .. ", expected " ..
-        str.tostring(position))
+        string.tostring(diagnostic.position) .. ", expected " ..
+        string.tostring(position))
   test.assert(diagnostic.message == expected_message(kind, position),
         "request URL diagnostic message was incomplete: " ..
         diagnostic.message)
@@ -174,7 +174,7 @@ function test_url_normalization_and_errors(context: test.Context)
   for index = 1, #valid_ipv6 do
     local literal = valid_ipv6[index]
     local parsed = parse_valid("http://[" .. literal .. "]/address")
-    local normalized = str.lower(literal)
+    local normalized = string.lower(literal)
     test.assert(parsed.host == normalized and
           parsed.authority == "[" .. normalized .. "]",
           "valid IPv6 authority was not preserved: " .. literal)

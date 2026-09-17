@@ -80,7 +80,7 @@ describe("Titan utils", function()
          assert.are.equal(15, add_five(10))
          assert.are.equal(7, add_five(2))
      end)
-    
+
      it("splits strings", function()
          assert.same({ "a", "b", "c" }, util.split_string("a,b,c", ","))
          assert.same({ "abc" }, util.split_string("abc", ","))

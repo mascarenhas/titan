@@ -23,7 +23,7 @@ describe("first-class function values (typechecker)", function()
 
     it("accepts a function-type annotation", function()
         assert.equal(0, #check_errs([[
-            function apply(f: (integer) -> integer, x: integer): integer
+            function apply(f: function (integer): integer, x: integer): integer
                 return f(x)
             end
         ]]))
@@ -32,7 +32,7 @@ describe("first-class function values (typechecker)", function()
     it("accepts a top-level function referenced as a value", function()
         assert.equal(0, #check_errs([[
             function dbl(x: integer): integer return x * 2 end
-            function get(): (integer) -> integer
+            function get(): function (integer): integer
                 return dbl
             end
         ]]))
@@ -42,7 +42,7 @@ describe("first-class function values (typechecker)", function()
         assert.equal(0, #check_errs([[
             function dbl(x: integer): integer return x * 2 end
             function use(): integer
-                local f: (integer) -> integer = dbl
+                local f: function (integer): integer = dbl
                 return f(21)
             end
         ]]))
@@ -53,7 +53,7 @@ describe("first-class function values (typechecker)", function()
             function a(x: integer): integer return x end
             function b(x: integer): integer return x + 1 end
             function use(): integer
-                local f: (integer) -> integer = a
+                local f: function (integer): integer = a
                 f = b
                 return f(1)
             end
@@ -63,10 +63,10 @@ describe("first-class function values (typechecker)", function()
     it("accepts a higher-order function type", function()
         assert.equal(0, #check_errs([[
             function inc(y: integer): integer return y + 1 end
-            function twice(f: (integer) -> integer, x: integer): integer
+            function twice(f: function (integer): integer, x: integer): integer
                 return f(f(x))
             end
-            function make(): (integer) -> integer
+            function make(): function (integer): integer
                 return inc
             end
         ]]))

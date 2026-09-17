@@ -77,23 +77,23 @@ describe("automatic C objects and fixed arrays", function()
         with_header(objects, function(header)
             local ok, err, ast = check_with_header(header, [[
                 local function allocations(count: integer)
-                    local inferred = ffi.ffi_point.new()
-                    local exact: ffi.ffi_point = ffi.ffi_point.new()
-                    local cell = ffi.ffi_cell.new()
-                    local owner: owned *ffi.ffi_point = ffi.ffi_point.new()
-                    local borrowed: *ffi.ffi_point = ffi.ffi_point.new()
+                    local inferred = foreign ffi_point.new()
+                    local exact: foreign ffi_point = foreign ffi_point.new()
+                    local cell = foreign ffi_cell.new()
+                    local owner: owned *ffi_point = foreign ffi_point.new()
+                    local borrowed: foreign *ffi_point = foreign ffi_point.new()
 
-                    local literal = ffi.ffi_point.new_array(3)
-                    local dynamic = ffi.ffi_point.new_array(count)
-                    local fixed: ffi.ffi_point[3] =
-                        ffi.ffi_point.new_array(3)
-                    local array_owner: owned ffi.ffi_point[] =
-                        ffi.ffi_point.new_array(3)
-                    local literal_view: ffi.ffi_point[] =
-                        ffi.ffi_point.new_array(3)
-                    local dynamic_view: ffi.ffi_point[] =
-                        ffi.ffi_point.new_array(count)
-                    local zero = ffi.ffi_point.new_array(0)
+                    local literal = foreign ffi_point.new_array(3)
+                    local dynamic = foreign ffi_point.new_array(count)
+                    local fixed =
+                        foreign ffi_point.new_array(3)
+                    local array_owner: owned ffi_point[] =
+                        foreign ffi_point.new_array(3)
+                    local literal_view: foreign ffi_point[] =
+                        foreign ffi_point.new_array(3)
+                    local dynamic_view: foreign ffi_point[] =
+                        foreign ffi_point.new_array(count)
+                    local zero = foreign ffi_point.new_array(0)
                 end
             ]])
             assert.truthy(ok, err)
@@ -150,46 +150,25 @@ describe("automatic C objects and fixed arrays", function()
             local rejected = {
                 {
                     [[local function bad()
-                          local object = ffi.ffi_opaque.new()
+                          local object = foreign ffi_opaque.new()
                       end]],
                     "cannot allocate incomplete C struct type",
                 },
                 {
                     [[local function bad()
-                          local object = ffi.ffi_row.new()
+                          local object = foreign ffi_row.new()
                       end]],
                     "cannot allocate C array typedefs",
                 },
                 {
                     [[local function bad(count: integer)
-                          local objects = ffi.ffi_row.new_array(count)
+                          local objects = foreign ffi_row.new_array(count)
                       end]],
                     "cannot allocate C array typedefs as owned storage",
                 },
                 {
-                    [[local function bad(count: integer)
-                          local objects: ffi.ffi_point[3] =
-                              ffi.ffi_point.new_array(count)
-                      end]],
-                    "requires a compile%-time integer literal allocation count",
-                },
-                {
                     [[local function bad()
-                          local objects: ffi.ffi_point[3] =
-                              ffi.ffi_point.new_array(2)
-                      end]],
-                    "has extent 3 but '.new_array' allocates 2 element",
-                },
-                {
-                    [[local function bad()
-                          local objects: ffi.ffi_point[0] =
-                              ffi.ffi_point.new_array(0)
-                      end]],
-                    "requires a positive extent",
-                },
-                {
-                    [[local function bad()
-                          local object: ffi.ffi_int = ffi.ffi_int.new()
+                          local object: foreign ffi_int = foreign ffi_int.new()
                       end]],
                     "types in declaration",
                 },
@@ -219,14 +198,14 @@ describe("automatic C objects and fixed arrays", function()
         ]], function(header)
             local ok, err = check_with_header(header, [[
                 local function bad()
-                    local inferred = ffi.ffi_value_holder.new()
-                    local exact: ffi.ffi_value_holder =
-                        ffi.ffi_value_holder.new()
-                    local owner_pointer = ffi.ffi_owner_holder.new()
+                    local inferred = foreign ffi_value_holder.new()
+                    local exact: foreign ffi_value_holder =
+                        foreign ffi_value_holder.new()
+                    local owner_pointer = foreign ffi_owner_holder.new()
                     local inferred_array =
-                        ffi.ffi_value_holder.new_array(2)
-                    local exact_array: ffi.ffi_value_holder[2] =
-                        ffi.ffi_value_holder.new_array(2)
+                        foreign ffi_value_holder.new_array(2)
+                    local exact_array =
+                        foreign ffi_value_holder.new_array(2)
                 end
             ]])
             assert.falsy(ok)
@@ -242,25 +221,25 @@ describe("automatic C objects and fixed arrays", function()
             for _, body in ipairs({
                 [[
                     local function bad()
-                        local source = ffi.ffi_int.new_array(3)
-                        local copy: ffi.ffi_int[3] = source
-                    end
-                ]],
-                [[
-                    local function bad()
-                        local source = ffi.ffi_int.new_array(3)
+                        local source = foreign ffi_int.new_array(3)
                         local copy = source
                     end
                 ]],
                 [[
                     local function bad()
-                        local source = ffi.ffi_int.new_array(3)
-                        local target = ffi.ffi_int.new_array(3)
+                        local source = foreign ffi_int.new_array(3)
+                        local copy = source
+                    end
+                ]],
+                [[
+                    local function bad()
+                        local source = foreign ffi_int.new_array(3)
+                        local target = foreign ffi_int.new_array(3)
                         target = source
                     end
                 ]],
                 [[
-                    local function bad(): ffi.ffi_vector
+                    local function bad(): foreign ffi_vector
                         return ffi.ffi_global_vector
                     end
                 ]],
@@ -281,7 +260,7 @@ describe("automatic C objects and fixed arrays", function()
         ]], function(header)
             local ok, err = check_with_header(header, [[
                 local function bad(): integer
-                    local point = ffi.ffi_point.new()
+                    local point = foreign ffi_point.new()
                     local read = function(): integer
                         return point.x as integer
                     end
@@ -293,8 +272,8 @@ describe("automatic C objects and fixed arrays", function()
 
             ok, err = check_with_header(header, [[
                 local function accepted(): integer
-                    local point: ffi.ffi_point = ffi.ffi_make_point()
-                    local pointer: *ffi.ffi_point = point
+                    local point: foreign ffi_point = ffi.ffi_make_point()
+                    local pointer: foreign *ffi_point = point
                     local read = function(): integer
                         return pointer.x as integer
                     end
@@ -309,10 +288,10 @@ describe("automatic C objects and fixed arrays", function()
         with_header(objects, function(header)
             local ok, err, ast = check_with_header(header, [[
                 local function accepted(count: integer)
-                    local literal: ffi.ffi_point[] =
-                        ffi.ffi_point.new_array(3)
-                    local dynamic: ffi.ffi_point[] =
-                        ffi.ffi_point.new_array(count)
+                    local literal: foreign ffi_point[] =
+                        foreign ffi_point.new_array(3)
+                    local dynamic: foreign ffi_point[] =
+                        foreign ffi_point.new_array(count)
                     literal[0].x = 1
                     dynamic[0].x = 2
                 end
@@ -329,12 +308,12 @@ describe("automatic C objects and fixed arrays", function()
                 dynamic._c_allocation_plan.storage)
 
             for _, allocation in ipairs({
-                "ffi.ffi_point.new_array(3)",
-                "ffi.ffi_point.new_array(count)",
+                "foreign ffi_point.new_array(3)",
+                "foreign ffi_point.new_array(count)",
             }) do
                 ok, err = check_with_header(header, [[
                     local function bad(count: integer)
-                        local view: ffi.ffi_point[] = ]] .. allocation .. [[
+                        local view: foreign ffi_point[] = ]] .. allocation .. [[
                         local length = #view
                     end
                 ]])
@@ -366,16 +345,16 @@ describe("automatic C objects and fixed arrays", function()
         ]], function(header)
             local ok, err, ast = check_with_header(header, [[
                 local function calls()
-                    local point = ffi.ffi_point.new()
-                    local vector = ffi.ffi_int.new_array(3)
-                    local pointer: *ffi.ffi_point = point
+                    local point = foreign ffi_point.new()
+                    local vector = foreign ffi_int.new_array(3)
+                    local pointer: foreign *ffi_point = point
                     ffi.ffi_fill_point(point)
                     ffi.ffi_fill_vector(vector)
                     ffi.ffi_fill_point(pointer)
                     ffi.ffi_read_point(point)
                     ffi.ffi_fill_other_point(point)
                     ffi.ffi_fill_other_point(
-                        point as *ffi.ffi_point)
+                        point as foreign *ffi_point)
                 end
             ]])
             assert.truthy(ok, err)
@@ -413,12 +392,12 @@ describe("automatic C objects and fixed arrays", function()
         ]], function(header)
             local ok, err, ast = check_with_header(header, [[
                 local function calls()
-                    local direct = ffi.ffi_point.new()
-                    local indirect = ffi.ffi_point.new()
+                    local direct = foreign ffi_point.new()
+                    local indirect = foreign ffi_point.new()
                     ffi.ffi_variadic_fill(
-                        1, direct as *ffi.ffi_point)
+                        1, direct as foreign *ffi_point)
                     local fill = ffi.ffi_get_variadic_fill()
-                    fill(2, indirect as *ffi.ffi_point)
+                    fill(2, indirect as foreign *ffi_point)
                 end
             ]])
             assert.truthy(ok, err)

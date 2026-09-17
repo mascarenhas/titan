@@ -115,16 +115,16 @@ describe("C FFI operator type checking", function()
                 foreign import "]] .. header .. [["
 
                 local function matrix(
-                    small: ffi.ffi_uchar,
-                    wide: ffi.ffi_ulong,
-                    number: ffi.ffi_float,
-                    other_number: ffi.ffi_double,
+                    small: foreign ffi_uchar,
+                    wide: foreign ffi_ulong,
+                    number: foreign ffi_float,
+                    other_number: foreign ffi_double,
                     offset: integer,
-                    pointer: *ffi.ffi_item,
-                    second: const *ffi.ffi_item,
-                    unrelated: ffi.ffi_volatile_other_pointer,
-                    callback: ffi.ffi_callback,
-                    other_callback: ffi.ffi_callback
+                    pointer: foreign *ffi_item,
+                    second: foreign const *ffi_item,
+                    unrelated: foreign ffi_volatile_other_pointer,
+                    callback: foreign ffi_callback,
+                    other_callback: foreign ffi_callback
                 )
                     local unary_minus = -small
                     local unary_bits = ~small
@@ -285,77 +285,77 @@ describe("C FFI operator type checking", function()
             local cases = {
                 {
                     body = "local result = number % wide",
-                    params = "number: ffi.ffi_float, wide: ffi.ffi_ulong",
+                    params = "number: foreign ffi_float, wide: foreign ffi_ulong",
                     detail = "floating remainder",
                 },
                 {
                     body = "local result = pointer * offset",
-                    params = "pointer: *ffi.ffi_item, offset: integer",
+                    params = "pointer: foreign *ffi_item, offset: integer",
                     detail = "requires arithmetic operands",
                 },
                 {
                     body = "local result = pointer / offset",
-                    params = "pointer: *ffi.ffi_item, offset: integer",
+                    params = "pointer: foreign *ffi_item, offset: integer",
                     detail = "requires arithmetic operands",
                 },
                 {
                     body = "local result = pointer % offset",
-                    params = "pointer: *ffi.ffi_item, offset: integer",
+                    params = "pointer: foreign *ffi_item, offset: integer",
                     detail = "requires C integer operands",
                 },
                 {
                     body = "local result = pointer & offset",
-                    params = "pointer: *ffi.ffi_item, offset: integer",
+                    params = "pointer: foreign *ffi_item, offset: integer",
                     detail = "requires C integer operands",
                 },
                 {
                     body = "local result = pointer | offset",
-                    params = "pointer: *ffi.ffi_item, offset: integer",
+                    params = "pointer: foreign *ffi_item, offset: integer",
                     detail = "requires C integer operands",
                 },
                 {
                     body = "local result = pointer ~ offset",
-                    params = "pointer: *ffi.ffi_item, offset: integer",
+                    params = "pointer: foreign *ffi_item, offset: integer",
                     detail = "requires C integer operands",
                 },
                 {
                     body = "local result = pointer << offset",
-                    params = "pointer: *ffi.ffi_item, offset: integer",
+                    params = "pointer: foreign *ffi_item, offset: integer",
                     detail = "requires C integer operands",
                 },
                 {
                     body = "local result = pointer >> offset",
-                    params = "pointer: *ffi.ffi_item, offset: integer",
+                    params = "pointer: foreign *ffi_item, offset: integer",
                     detail = "requires C integer operands",
                 },
                 {
                     body = "local result = pointer == offset",
-                    params = "pointer: *ffi.ffi_item, offset: integer",
+                    params = "pointer: foreign *ffi_item, offset: integer",
                     detail = "pointer and nil",
                 },
                 {
                     body = "local result = pointer + offset",
-                    params = "pointer: *ffi.ffi_opaque, offset: integer",
+                    params = "pointer: foreign *ffi_opaque, offset: integer",
                     detail = "incomplete or not yet visible",
                 },
                 {
                     body = "local result = pointer + offset",
-                    params = "pointer: *ffi.ffi_void, offset: integer",
+                    params = "pointer: foreign *ffi_void, offset: integer",
                     detail = "complete non%-void object",
                 },
                 {
                     body = "local result = callback < callback",
-                    params = "callback: ffi.ffi_callback",
+                    params = "callback: foreign ffi_callback",
                     detail = "function pointers",
                 },
                 {
                     body = "local result = left == right",
-                    params = "left: ffi.ffi_item, right: ffi.ffi_item",
+                    params = "left: foreign ffi_item, right: foreign ffi_item",
                     detail = "object pointers",
                 },
                 {
                     body = "local result = left + right",
-                    params = "left: ffi.ffi_item, right: ffi.ffi_item",
+                    params = "left: foreign ffi_item, right: foreign ffi_item",
                     detail = "arithmetic pair",
                 },
             }
@@ -392,7 +392,7 @@ describe("C FFI operator type checking", function()
                 foreign import "]] .. header .. [["
                 local function accepted()
                     local c_value =
-                        (ffi.ffi_flags.bits as ffi.ffi_uint) + 1
+                        (ffi.ffi_flags.bits as foreign ffi_uint) + 1
                     local titan_value =
                         (ffi.ffi_flags.bits as integer) + 1
                 end
@@ -410,8 +410,8 @@ describe("C FFI operator type checking", function()
             local ok, err, ast = run_checker([[
                 foreign import "]] .. header .. [["
                 local function accepted(
-                    pointer: *ffi.ffi_item,
-                    wide: ffi.ffi_ulong,
+                    pointer: foreign *ffi_item,
+                    wide: foreign ffi_ulong,
                     exponent: float
                 )
                     local truth = not pointer
