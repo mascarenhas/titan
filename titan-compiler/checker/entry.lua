@@ -24,6 +24,7 @@ function checker.check(modname, ast, subject, filename, loader, options)
     loop_depth = 0
     loop_frames = {}
     local st = symtab.new(modname)
+    st.completion_request = options.completion
     st.cache_adapter = options.cache_adapter
     st.prepare_ffi_header = options.prepare_ffi_header
     st.filename = filename
@@ -91,6 +92,7 @@ function checker.check(modname, ast, subject, filename, loader, options)
                 generic_lower_erased_core(
                     modname, ast, st, errors)
         end
+        completion_finish(st, ast, errors)
         return result_type, errors
     end
 

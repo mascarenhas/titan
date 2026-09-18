@@ -656,7 +656,7 @@ type and a scalar-cast marker, not the parsed operand. Parser bodies, ordinary
 source-location maps, raw macro environments, CPP spelling/spacing sidecars,
 and registrar bookkeeping do not survive this boundary.
 
-The `c-header-v5` byte payload uses this same read-only extracted graph, including
+The `c-header-v6` byte payload uses this same read-only extracted graph, including
 declaration origins for typedefs and tags. A live
 hit shares it, while a disk restore reconstructs the closed schema once after
 codec/checksum and envelope validation. Real dependencies/search observations

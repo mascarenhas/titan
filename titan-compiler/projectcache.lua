@@ -6,8 +6,9 @@ local graphcodec = require "titan-compiler.graphcodec"
 local version = require "titan-compiler.version"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local ffiheaders = require "titan-compiler.ffiheaders"
+local completion = require "titan-compiler.completion"
 
-local projectcache = { VERSION = 4 }
+local projectcache = { VERSION = 5 }
 
 local schemas = require "titan-compiler.declarationschemas"
 
@@ -113,13 +114,19 @@ local function project(entry, options, strict, declarations_only)
         c_header_dependencies = copy(entry.c_header_dependencies or {}, "inputs"), declared_registry = registry,
     }
     if not declarations_only then
+        if strict and type(entry.completion_facts) ~= "table" then
+            fail("missing completion facts")
+        end
+        result.completion_facts = copy(entry.completion_facts or
+            completion.describe(entry).candidates, "completion_facts")
         result._analysis_manifest = true
         result.source_manifest = copy(entry.source_manifest, "string")
     end
     if strict then
         local fields = { kind = true, _analysis_manifest = true, filename = true, source_files = true,
             deps = true, source_imports = true, source_manifest = true, type = true,
-            c_header_dependencies = true, declared_registry = true, ffi_header_descriptor = true }
+            c_header_dependencies = true, declared_registry = true, ffi_header_descriptor = true,
+            completion_facts = true }
         if entry._analysis_manifest ~= true then fail("missing analysis capability") end
         if getmetatable(entry) ~= nil then fail("entry has a metatable") end
         for key in pairs(entry) do
@@ -199,7 +206,7 @@ local function project(entry, options, strict, declarations_only)
                 else target[key] = copy(value, "type") end
             end
         else
-            local element = ({ names = "string", types = "type", members = "type", inputs = "input", headers = "header" })[kind]
+            local element = ({ names = "string", types = "type", members = "type", inputs = "input", headers = "header", completion_facts = "completion_fact" })[kind]
             if not element then fail("unknown declaration role " .. tostring(kind)) end
             local count, maximum = 0, 0
             for key in pairs(source) do

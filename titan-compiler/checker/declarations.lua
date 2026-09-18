@@ -224,7 +224,7 @@ function checkinitializer(node, st, errors)
         block = node,
         _type = node._type,
     }
-    st:open_block()
+    st:open_block(node)
     checkfuncbody(init, st, errors, { module_initializer = true })
     st:close_block()
 end

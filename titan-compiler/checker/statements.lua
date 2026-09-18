@@ -1069,7 +1069,7 @@ checkstat_visitor = util.make_visitor({
             -- raised value) and `traceback: string` (its captured trace). They
             -- live in a fresh sibling scope so the body's locals are out of
             -- view. Mark them `_used` so the unused-local analysis ignores them.
-            st:open_block()
+            st:open_block(node.catchblock)
             local errdecl = ast.Decl(node.loc, "error", false, false, false)
             errdecl._type = types.Value()
             errdecl._used = true
@@ -1096,7 +1096,7 @@ checkstat_visitor = util.make_visitor({
             -- and stamp `finally_loop_floor` to the current loop depth (so a
             -- `break` to a loop opened INSIDE the finally is still legal),
             -- saving/restoring the outer floor for nested constructs.
-            st:open_block()
+            st:open_block(node.finallyblock)
             in_finally = in_finally + 1
             local saved_catch = catch_depth
             catch_depth = 0
@@ -1238,8 +1238,14 @@ checkstat_visitor = util.make_visitor({
 
     ["Ast.StatCall"] = function(node, st, errors)
         if node.callexp._tag ~= "Ast.ExpCall" then
+            local marked = completion_contains(node.callexp, st)
+            if marked then checkexp(node.callexp, st, errors) end
             checker.typeerror(errors, node.callexp.loc,
                 "only a function call may be used as a statement")
+            if marked then
+                st.completion_statement_errors = st.completion_statement_errors or {}
+                st.completion_statement_errors[errors[#errors]] = true
+            end
             return false
         end
         -- A call in statement position may discard its result, including a
@@ -1314,7 +1320,7 @@ checkstat_visitor = util.make_visitor({
         local covered_variants = 0
         local all_arms_return = true
         for _, arm in ipairs(node.arms) do
-            st:open_block()
+            st:open_block(arm)
             local variant = union and union.variants[arm.name] or nil
             if variant
                and not is_nominal_member_visible_from(st, variant) then

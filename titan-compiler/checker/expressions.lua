@@ -956,6 +956,7 @@ checkexp = util.make_visitor({
             end
         else
             local otype = node.exp._type
+            completion_members(node.args, node.exp, otype, st, errors, "colon")
             if otype._tag == "Type.Invalid" then
                 node._type = otype
                 check_call_argument_expressions(node.args, st, errors)
@@ -1293,7 +1294,7 @@ checkexp = util.make_visitor({
         -- enclosing scope (mirrors checkbodies+checkfunc). `with_block` keeps
         -- only the first return value, so open/close the block by hand to also
         -- recover the frame.
-        st:open_block()
+        st:open_block(node)
         local _, frame = checkfuncbody(node, st, errors)
         st:close_block()
 
@@ -1326,6 +1327,7 @@ checkexp = util.make_visitor({
             return node._type
         end
         local otype = node.exp._type
+        completion_members(node, node.exp, otype, st, errors, "colon")
         -- auto-unwrap an option receiver, like a method call does, so `p:m` on a
         -- Point? unwraps to the underlying record (the cast codegen nil-checks).
         if otype._tag == "Type.Option" and otype.base._tag == "Type.Nominal" then

@@ -422,6 +422,7 @@ function checker._ensure_c_enum_supported(
         resolved.bits = carrier.bits
         resolved._c_numeric = carrier._c_numeric
         resolved._c_numeric_carriers = carrier._c_numeric_carriers
+        resolved._c_enum_validated = true
         return true
     end
 

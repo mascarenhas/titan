@@ -178,7 +178,7 @@ describe("module foreign conversion payloads", function()
         assert_scopes(restored)
         assert.is_true(warm.conversion.hits > 0)
         for key in pairs(payloads) do
-            if key:find("ffi-conversion-v6\0", 1, true) == 1 then payloads[key] = nil end
+            if key:find("ffi-conversion-v7\0", 1, true) == 1 then payloads[key] = nil end
         end
         local raw_restored, raw_warm = check(consumer .. "\n-- raw header replay", adapter, provider)
         assert_scopes(raw_restored)
@@ -224,7 +224,7 @@ describe("module foreign conversion payloads", function()
         -- Reading the physical member during the first body check must not
         -- have inserted a false macro memo into that shared header graph.
         for key in pairs(payloads) do
-            if key:find("ffi-conversion-v6\0", 1, true) == 1 then
+            if key:find("ffi-conversion-v7\0", 1, true) == 1 then
                 payloads[key] = nil
             end
         end
@@ -321,7 +321,7 @@ describe("module foreign conversion payloads", function()
         local external = {}
         for name, value in pairs(refs) do external[value] = name end
         for key, payload in pairs(payloads) do
-            if key:find("ffi-conversion-v6\0", 1, true) == 1 then
+            if key:find("ffi-conversion-v7\0", 1, true) == 1 then
                 local snapshot = assert(cpp.decode_graph(payload, { references = refs }))
                 snapshot.converted_enums = {}
                 payloads[key] = assert(cpp.encode_graph(snapshot, { external = external }))
@@ -358,7 +358,7 @@ describe("module foreign conversion payloads", function()
         assert.equal(1, stats.conversion.hits)
         local first = restored.ast._ffi_namespace._type
         for key, payload in pairs(payloads) do
-            if key:sub(1, #"ffi-conversion-v6\0") == "ffi-conversion-v6\0" then
+            if key:sub(1, #"ffi-conversion-v7\0") == "ffi-conversion-v7\0" then
                 local snapshot = assert(cpp.decode_graph(payload, { references = graph_references(restored) }))
                 assert.equal('"a + b"', snapshot.field_macros.TEXT.replacement)
                 assert.is_nil(snapshot.roots)
@@ -378,7 +378,7 @@ describe("module foreign conversion payloads", function()
         check(source)
         local count = conversions
         for key in pairs(payloads) do
-            if key:sub(1, #"ffi-conversion-v6\0") == "ffi-conversion-v6\0" then payloads[key] = "corrupt" end
+            if key:sub(1, #"ffi-conversion-v7\0") == "ffi-conversion-v7\0" then payloads[key] = "corrupt" end
         end
         local _, corrupt = check(source)
         assert.is_true(conversions > count)
@@ -398,7 +398,7 @@ describe("module foreign conversion payloads", function()
         check(source)
         local count, get = conversions, adapter.get
         adapter.get = function(kind, key)
-            if kind == "ffi-conversion-v6" then
+            if kind == "ffi-conversion-v7" then
                 local malformed = {}
                 setmetatable(malformed, { __index = malformed })
                 return get(kind, key), { malformed }
@@ -417,7 +417,7 @@ describe("module foreign conversion payloads", function()
         check(source)
         local get, cancellation = adapter.get, {}
         adapter.get = function(kind, key)
-            if kind == "ffi-conversion-v6" then
+            if kind == "ffi-conversion-v7" then
                 local malformed = setmetatable({}, { __index = function() error(cancellation, 0) end })
                 return get(kind, key), { malformed }
             end
@@ -461,13 +461,13 @@ describe("module foreign conversion payloads", function()
         assert.equal(1, stats.conversion.hits)
         assert.equal(interface, assert(driver.serialize_source_interface(touched)))
         assert.same(original, payloads)
-        assert.is_true((refreshes["c-header-v5"] or 0) > 0)
-        assert.equal(1, refreshes["ffi-conversion-v6"])
+        assert.is_true((refreshes["c-header-v6"] or 0) > 0)
+        assert.equal(1, refreshes["ffi-conversion-v7"])
         local _, warm = check(source)
         assert.equal(count, conversions)
         assert.equal(0, warm.headers.file_reads)
         assert.equal(0, warm.headers.file_hashes)
-        assert.equal(1, refreshes["ffi-conversion-v6"])
+        assert.equal(1, refreshes["ffi-conversion-v7"])
     end)
 
     it("replays a fresh source-import context after its provider body changes", function()
@@ -549,7 +549,7 @@ describe("module foreign conversion payloads", function()
         ]]
         local hashes = 0
         adapter.sha256_binary = function(bytes)
-            if bytes:find("ffi-conversion-v6", 1, true) then hashes = hashes + 1 end
+            if bytes:find("ffi-conversion-v7", 1, true) then hashes = hashes + 1 end
             return require("titan-compiler.sha256").binary(bytes)
         end
         check(source)
@@ -560,7 +560,7 @@ describe("module foreign conversion payloads", function()
         assert.equal(count, conversions)
         local cancelled = {}
         adapter.sha256_binary = function(bytes)
-            if bytes:find("ffi-conversion-v6", 1, true) then error(cancelled, 0) end
+            if bytes:find("ffi-conversion-v7", 1, true) then error(cancelled, 0) end
             return require("titan-compiler.sha256").binary(bytes)
         end
         local ok, err = pcall(check, source)

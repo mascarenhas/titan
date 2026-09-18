@@ -835,6 +835,9 @@ function driver.new_resolver_context(options)
         prefer_static = options.prefer_static == true,
         source_first = options.source_first == true,
         analysis_only = options.analysis_only == true,
+        completion = options.completion,
+        transient_caches = options.transient_caches == true,
+        completion_closed_world = options.completion_closed_world == true,
         provider_cache = {},
         contextual_types = {},
         contextual_resolutions = {},
@@ -1150,6 +1153,31 @@ local function available_embedded_interface_provider(context)
     return provider
 end
 
+-- Called by saved indexing to publish the eligible detached binary catalog.
+-- No filesystem discovery is performed here; provider precedence is already
+-- settled by this resolver's complete source inventory.
+function driver.completion_binary_catalog(context)
+    local result = {}
+    local provider = available_embedded_interface_provider(context)
+    if provider then
+        for _, name in ipairs(provider.key_order) do
+            local entry = provider.entries[name]
+            result[name] = { serialized = entry.types, kind = "embedded",
+                filename = provider.provider_file }
+        end
+    end
+    for name, entry in pairs(driver.imported) do
+        if entry ~= CIRCULAR_MARK then
+            if entry.kind == "source" then result[name] = nil
+            elseif entry.kind == "dynamic" or entry.kind == "static" or entry.kind == "embedded" then
+                result[name] = { serialized = types.serialize(entry.type),
+                    kind = entry.kind, filename = entry.filename or entry.static_archive or "" }
+            end
+        end
+    end
+    return result
+end
+
 function driver.get_probe_service(context)
     if context.foreign_c_configuration_id ~=
        driver.FOREIGN_C_CONFIGURATION_ID then
@@ -1244,7 +1272,7 @@ function driver.get_probe_service(context)
         execution_trace = execution_trace,
         toolchain = toolchain,
         verbose = context.probe_verbose,
-        cache_directory = driver.PROBE_CACHE_DIRECTORY,
+        cache_directory = context.transient_caches and "" or driver.PROBE_CACHE_DIRECTORY,
     })
     if not service then
         context.probe_service_error = err
@@ -3470,7 +3498,17 @@ end
 
 local function check_source_module(
         context, modname, ast, input, filename, loader, source_output)
+    local completion_request
+    if context.completion then
+        for _, node in ipairs(ast) do
+            if node.loc and node.loc.filename == context.completion.filename then
+                completion_request = context.completion
+                break
+            end
+        end
+    end
     local check_options = {
+        completion = completion_request,
         cache_adapter = context.cache_adapter,
         header_observations = context.header_observations,
         target_profile_provider = function()
@@ -3500,6 +3538,7 @@ function driver.defaultloader(static_deps, options)
     local known_source_modules = options.known_source_modules or {}
     local cached_source_entries = options.cached_source_entries or {}
     local cached_interfaces = options.cached_interfaces or {}
+    local cached_binary_interfaces = options.cached_binary_interfaces or {}
     if type(known_source_modules) ~= "table" then
         error("known_source_modules must be a module-keyed table", 2)
     elseif type(cached_source_entries) ~= "table" then
@@ -3555,7 +3594,9 @@ function driver.defaultloader(static_deps, options)
         end
         context.source_modules[name] = true
     end
-    reconcile_embedded_import_cache(context, static_deps)
+    if not context.completion_closed_world then
+        reconcile_embedded_import_cache(context, static_deps)
+    end
 
     local function cached_string_list(value, label)
         if value == nil then return {} end
@@ -4260,6 +4301,7 @@ function driver.defaultloader(static_deps, options)
             filename = source.main,
             native_output = source.native_output or source.main,
             source_files = source.files,
+            completion = ast._completion,
             program_output = source.program_output,
             deps = direct_deps,
             c_header_dependencies = ast._c_header_dependencies or {},
@@ -4450,19 +4492,54 @@ function driver.defaultloader(static_deps, options)
             return false, "invalid logical Titan module name " ..
                 string.format("%q", modname)
         end
+        -- A completion resolver consumes one caller-captured committed catalog.
+        -- Missing descriptors are a conservative miss, never permission to read
+        -- a newer source/provider or restore the saved workspace registry.
+        if context.completion_closed_world then
+            if not context.analysis_only then
+                return false, "closed completion catalog requires analysis_only"
+            end
+            local existing = driver.imported[modname]
+            local source_required = request and request.kind == "source-import"
+            if existing and existing ~= CIRCULAR_MARK and source_required
+               and existing.kind ~= "source" then
+                return false, "source module '" .. modname .. "' is absent from completion catalog"
+            end
+            if not existing and not source_overrides[modname]
+               and not cached_source_entries[modname] then
+                local saved = cached_binary_interfaces[modname]
+                if not saved or source_required then
+                    return false, "module '" .. modname .. "' is absent from completion catalog"
+                end
+                if type(saved) ~= "table" or type(saved.serialized) ~= "string"
+                   or (saved.kind ~= "dynamic" and saved.kind ~= "static"
+                       and saved.kind ~= "embedded") then
+                    return false, "invalid captured binary interface for '" .. modname .. "'"
+                end
+                local modtype, decode_error = driver.decode_module_interface(
+                    saved.serialized, modname, saved.filename or modname)
+                if not modtype then return false, decode_error end
+                driver.imported[modname] = {
+                    kind = saved.kind, type = modtype, filename = saved.filename,
+                    compiled = true, deps = {},
+                }
+            end
+        end
         -- A borrowed context may learn a complete known-source catalog after
         -- an earlier loader selected embedded entries. Reconcile that late
         -- whole-provider rejection before either cache reuse or contextual
         -- owner recovery can observe the stale selection.
-        reconcile_embedded_import_cache(context, static_deps)
+        if not context.completion_closed_world then
+            reconcile_embedded_import_cache(context, static_deps)
+        end
         local embedded_overlap =
             context.embedded_interface_provider_overlap
-        if embedded_overlap then
+        if embedded_overlap and not context.completion_closed_world then
             local rebound, rebound_error =
                 rebind_overlapping_embedded_provider(embedded_overlap)
             if not rebound then return false, rebound_error end
         end
-        if request and request.kind == "nominal-owner" then
+        if not context.completion_closed_world and request and request.kind == "nominal-owner" then
             local contextual_ok, contextual_type, contextual_errors =
                 recover_contextual_owner(modname, request)
             if contextual_ok ~= nil then
@@ -4492,6 +4569,9 @@ function driver.defaultloader(static_deps, options)
             source_checked = true
             source = source_overrides[modname]
             if source then return source end
+            if context.completion_closed_world then
+                return nil, "source module '" .. modname .. "' is absent from completion catalog"
+            end
             if source_required then
                 source, source_err =
                     cached_interface_source_descriptor(modname)
@@ -5200,7 +5280,7 @@ function driver.tableloader(modtable, imported, deps, options)
         local ffi_descriptor = ast._ffi_header
         if #errors ~= 0 then
             imported[modname] = {
-                kind = "source", ast = ast, type = source_type,
+                kind = "source", ast = ast, type = source_type, completion = ast._completion,
                 source_type = source_type, filename = modf,
                 foreign_header = foreign_header,
                 checking_foreign_header = checking_foreign_header,
@@ -5223,7 +5303,7 @@ function driver.tableloader(modtable, imported, deps, options)
         local ok, modt_or_err = pcall(modtf)
         if not ok then return false, modt_or_err end
         imported[modname] = {
-            kind = "source", ast = ast, type = modt_or_err,
+            kind = "source", ast = ast, type = modt_or_err, completion = ast._completion,
             source_type = source_type, filename = modf,
             foreign_header = foreign_header,
             checking_foreign_header = checking_foreign_header,

@@ -773,6 +773,13 @@ function foreigntypes.surface_primitive(profile, surface)
     return entry and entry.type or nil
 end
 
+function foreigntypes.surface_primitive_names()
+    local names = {}
+    for name in pairs(surface_primitive_spellings) do names[#names + 1] = name end
+    table.sort(names)
+    return names
+end
+
 function foreigntypes.is_surface_primitive_name(name)
     return surface_primitive_spellings[name] ~= nil
 end
@@ -1230,6 +1237,67 @@ local function declaration_array_view(typ, memo)
     return view, cloned and true or false
 end
 
+-- A C99 enumerator whose exact value fits target int has that standard
+-- expression carrier. Preserve this narrow proof for completion without doing
+-- a native per-name query; extended/wide/unknown enums remain unproven. The
+-- ordinary checker still performs its existing compiler validation on use.
+local function completion_enum_values(st, ftype)
+    st._completion_enum_values = st._completion_enum_values or {}
+    if st._completion_enum_values[ftype] then return st._completion_enum_values[ftype] end
+    local known = {}
+    st._completion_enum_values[ftype] = known
+    if not st.c_profile then return known end
+    local literals = require('c-parser.cdefines').integer_literal_metadata
+    local function expression(node)
+        if type(node) == 'string' then
+            if literals(node) then return { integer_token = node } end
+            return known[node]
+        elseif type(node) ~= 'table' then return nil end
+        if not node.op and not node.unop then
+            return #node == 1 and expression(node[1]) or nil
+        end
+        local result = { op = node.op or node.unop }
+        for index, child in ipairs(node) do
+            result[index] = expression(child)
+            if not result[index] then return nil end
+        end
+        return result
+    end
+    local previous = { integer_token = '0' }
+    for _, item in ipairs(ftype.values or {}) do
+        local source = item.implicit and previous or expression(item.expression)
+        local evaluated = source and csemantics.evaluate_integer_expression(st.c_profile, source)
+        local int = st.c_profile.integers[st.c_profile.int]
+        local fits = evaluated and csemantics.integer_range_contains(int.type._c_numeric,
+            { kind = 'integer', minimum = evaluated.value, maximum = evaluated.value })
+        local lua_integer = st.c_profile.integers[st.c_profile.lua_integer]
+        fits = fits and csemantics.integer_range_contains(lua_integer.type._c_numeric,
+            { kind = 'integer', minimum = evaluated.value, maximum = evaluated.value })
+        if fits then
+            -- Collapse each exact result to one int literal, keeping implicit
+            -- ordinal sequences linear instead of retaining expression chains.
+            local value = evaluated.value
+            local literal = { integer_token = value }
+            if value:sub(1, 1) == '-' then
+                -- -(magnitude - 1) - 1 also represents target INT_MIN with
+                -- int-typed tokens; unary -INT_MAX_PLUS_ONE would widen it.
+                local digits = { value:sub(2):byte(1, -1) }
+                for index = #digits, 1, -1 do
+                    if digits[index] > 48 then digits[index] = digits[index] - 1; break end
+                    digits[index] = 57
+                end
+                local magnitude = string.char(table.unpack(digits)):gsub('^0+', '')
+                if magnitude == '' then magnitude = '0' end
+                literal = { { { integer_token = magnitude }, op = '-' },
+                    { integer_token = '1' }, op = '-' }
+            end
+            known[item.name] = literal
+            previous = { literal, { integer_token = '1' }, op = '+' }
+        else previous = nil end
+    end
+    return known
+end
+
 local function convert_declaration(st, ftype, member_name)
     if ftype.macro_expression
        and (ftype.has_integer_literals
@@ -1277,6 +1345,7 @@ local function convert_declaration(st, ftype, member_name)
                 "__typeof__((" .. tostring(member_name) .. "))"
             view._c_enum_probe_spelling = view._c_declaration_spelling
             view._c_enum_enumerator = tostring(member_name)
+            view._c_completion_int_enum = completion_enum_values(st, ftype)[member_name] ~= nil
             view._c_enum_owner = converted
             view._c_enum_unspellable = nil
             converted = view

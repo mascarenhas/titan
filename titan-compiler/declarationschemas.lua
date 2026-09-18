@@ -3,6 +3,13 @@
 -- A question mark marks an optional field; all other fields are required.
 -- Hybrid member lists derive string keys from their ordered descriptors.
 local schemas = {
+    completion_fact = {
+        name = "string", kind = "integer", detail = "string",
+        lookup_domain = "string", lookup_key = "string", type_key = "string",
+        scope_id = "integer", scope_depth = "integer", declaration_order = "integer",
+        available = "boolean", islocal = "boolean", visibility = "string",
+        owner_key = "string", access_mode = "string",
+    },
     ["Type.Invalid"] = {}, ["Type.Nil"] = {}, ["Type.Void"] = {},
     ["Type.Boolean"] = {}, ["Type.Integer"] = {}, ["Type.Float"] = {},
     ["Type.String"] = {}, ["Type.Value"] = {},
@@ -86,6 +93,7 @@ local schemas = {
         _c_enum_identity = "string?", _c_declaration_spelling = "string?",
         _c_enum_enumerator = "string?", _c_enum_probe_spelling = "string?",
         _c_enum_unspellable = "boolean?", _c_enum_owner = "type?",
+        _c_completion_int_enum = "boolean?", _c_enum_validated = "boolean?",
         _c_numeric = "numeric?", _c_numeric_carriers = "carriers?",
     },
     ["Type.CFloat"] = { spelling = "string", _c_numeric = "numeric?", _c_numeric_carriers = "carriers?" },
