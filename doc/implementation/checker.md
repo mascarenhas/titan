@@ -529,9 +529,16 @@ record/Interface fields, union variants and case arms, method/static names,
 alias namespaces, type spellings, and retained named labels to a canonical
 source or `Type.*`/`Checker.*` descriptor. Qualified type and alias spellings
 also carry `_module_decl`; method/static declarations carry `_owner_decl`.
-Generic lowering moves written binders and applications to
+With `checker.check(..., { analysis_only = true })`, checking preserves
+source-level expression types and the written `typeparams`/`typeargs` lists,
+including applied constructor selectors such as `Packet<|integer|>.moved`.
+The driver forwards this option for analysis resolver contexts and the AST
+carries `_analysis_only = true`, including when checking reports errors.
+Successful checks still freeze declared module/node annotations and the declared owner
+registry for semantic clients and compact manifests. Native compilation omits
+the option; generic lowering then moves written binders and applications to
 `_surface_typeparams` and `_surface_typeargs` before clearing the public runtime
-lists. These descriptors and lists are neither serialized ABI nor codegen
+lists and producing the erased registry required by the coder. These descriptors and lists are neither serialized ABI nor codegen
 input; the language-server API version in the driver guards consumers that rely
 on their exact availability.
 

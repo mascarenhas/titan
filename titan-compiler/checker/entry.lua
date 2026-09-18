@@ -13,6 +13,7 @@ local _ENV = core
 --   annotates duplicate top-level declarations with a "_ignore" boolean field
 function checker.check(modname, ast, subject, filename, loader, options)
     options = options or {}
+    ast._analysis_only = options.analysis_only == true or nil
     loader = loader or function ()
         return nil, "you must pass a loader to import modules"
     end
@@ -88,9 +89,18 @@ function checker.check(modname, ast, subject, filename, loader, options)
             end
         end
         if #errors == 0 then
-            result_type, st._surface_registry =
-                generic_lower_erased_core(
-                    modname, ast, st, errors)
+            if options.analysis_only then
+                -- Semantic clients need the checked source terms, including
+                -- applied call signatures and original case binders. Publish
+                -- the same detached declarations without runtime erasure.
+                local clone_memo
+                result_type, clone_memo = generic_freeze_declared_core(ast)
+                generic_freeze_declared_registry(ast, types.registry, clone_memo)
+            else
+                result_type, st._surface_registry =
+                    generic_lower_erased_core(
+                        modname, ast, st, errors)
+            end
         end
         completion_finish(st, ast, errors)
         return result_type, errors

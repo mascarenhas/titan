@@ -95,6 +95,11 @@ Use these resolver options together:
 - `cached_binary_interfaces`, mapping names to `{serialized, kind, filename}`;
 - `transient_caches = true` and a private I/O/cache adapter.
 
+Analysis-only checking retains source-level generic expression types and case
+bindings without runtime erasure. It still captures the detached declared
+interface/registry and finishes completion observation after semantic checking.
+Ordinary compilation continues to lower its checked AST for code generation.
+
 The binary kind is `embedded`, `dynamic`, or `static`. The closed catalog rejects
 missing dependencies and source-required imports of captured binaries. It never
 falls back to newer filesystem source or providers. Saved indexing obtains the

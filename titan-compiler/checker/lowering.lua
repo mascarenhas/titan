@@ -1431,13 +1431,26 @@ function generic_freeze_declared_annotations(root, clone_memo)
     visit(root)
 end
 
-function generic_lower_erased_core(modname, tree, st, errors)
+-- Both source analysis and runtime lowering publish detached declarations.
+-- Freezing that interface must not itself mutate the checked term graph.
+function generic_freeze_declared_core(tree)
     local clone_memo = {}
     local declared = clone_declared_interface_graph(assert(tree._type,
-        "generic erasure requires the declared module graph"), clone_memo)
+        "declared snapshot requires the checked module graph"), clone_memo)
     tree._declared_type = declared
     generic_freeze_declared_annotations(tree, clone_memo)
+    return declared, clone_memo
+end
 
+function generic_freeze_declared_registry(tree, registry, clone_memo)
+    -- Tooling restores this declared owner graph when normalizing a checked
+    -- project. Share the frozen interface nodes and strip source-navigation
+    -- edges from external owners.
+    tree._declared_registry = clone_declared_interface_graph(registry, clone_memo)
+end
+
+function generic_lower_erased_core(modname, tree, st, errors)
+    local declared, clone_memo = generic_freeze_declared_core(tree)
     local surface_registry = types.registry
     local erased_registry = generic_prepare_erased_registry(
         surface_registry)
@@ -1488,11 +1501,7 @@ function generic_lower_erased_core(modname, tree, st, errors)
     tree._type = makemoduletype(modname, tree, st)
     tree._erased_registry = erased_registry
     generic_refresh_erased_annotations(tree)
-    -- Tooling restores this declared owner graph when normalizing an opaque
-    -- checked-project payload. Share the already-frozen interface nodes and
-    -- strip the same source-navigation edges from external owners; an erased
-    -- registry cannot recover generic or source-private surface summaries.
-    tree._declared_registry = clone_declared_interface_graph(surface_registry, clone_memo)
+    generic_freeze_declared_registry(tree, surface_registry, clone_memo)
     types.assert_erased(tree._type)
     for _, owner in pairs(erased_registry) do types.assert_erased(owner) end
     return declared, surface_registry

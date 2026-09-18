@@ -766,6 +766,72 @@ describe("declared project manifests", function()
         assert.not_equal(compact, current)
     end)
 
+    it("rejects raw analysis ASTs as native inputs while retaining native cache reuse", function()
+        local name = "native_analysis_ast"
+        local source = "union Box<|T|> item(value: T) end " ..
+            "function create(): Box<|integer|> return Box<|integer|>.item(1) end"
+        local analyzed = load_module(name, source)
+        assert.is_true(analyzed.ast._analysis_only)
+        assert.is_nil(analyzed.ast._erased_registry)
+        for _, global_cache in ipairs({false, true}) do
+            driver.imported, types.registry = {}, {}
+            if global_cache then driver.imported[name] = analyzed end
+            local loader = driver.defaultloader({}, {
+                cached_source_entries = global_cache and {} or { [name] = analyzed },
+            })
+            loaders[#loaders + 1] = loader
+            local ok, err = loader(name)
+            assert.is_false(ok)
+            assert.match("cached analysis AST", err, 1, true)
+            assert.match("requires an analysis-only resolver", err, 1, true)
+        end
+        for _, source_first in ipairs({false, true}) do
+            driver.imported = { [name] = analyzed }
+            types.registry = {}
+            local native = load_module(name, source, { [name] = analyzed }, {
+                analysis_only = false, source_first = source_first,
+            })
+            assert.not_equal(analyzed, native)
+            assert.is_nil(native.ast._analysis_only)
+            assert.is_table(native.ast._erased_registry)
+            assert.equal(analyzed.source_manifest, native.source_manifest)
+            driver.imported, types.registry = {}, {}
+            local loader = driver.defaultloader({}, { cached_source_entries = { [name] = native } })
+            loaders[#loaders + 1] = loader
+            local ok, result, errors = loader(name)
+            assert.is_true(ok, tostring(result))
+            assert.equal(0, #errors, table.concat(errors, "\n"))
+            assert.equal(native, driver.imported[name])
+        end
+    end)
+
+    it("rejects analysis ASTs inside a retained native dependency closure", function()
+        local name, dependency = "native_analysis_root", "native_analysis_dependency"
+        local dependency_source = "union Box<|T|> item(value: T) end " ..
+            "function create(): Box<|integer|> return Box<|integer|>.item(1) end"
+        local source = 'local dependency = import "' .. dependency .. '" ' ..
+            'function create(): dependency.Box<|integer|> return dependency.create() end'
+        local overrides = {}
+        for module_name, contents in pairs({ [name] = source, [dependency] = dependency_source }) do
+            local filename = "/tmp/titan-project-cache-" .. module_name .. ".titan"
+            overrides[module_name] = { kind = "generated", main = filename,
+                files = { filename }, contents = { [filename] = contents } }
+        end
+        local native = load_module(name, source, nil, {
+            analysis_only = false, source_overrides = overrides,
+        })
+        assert.is_table(native.ast._erased_registry)
+        driver.imported[dependency] = nil
+        local analyzed = load_module(dependency, dependency_source)
+        assert.is_true(analyzed.ast._analysis_only)
+        local loader = driver.defaultloader({})
+        loaders[#loaders + 1] = loader
+        local ok, err = loader(name)
+        assert.is_false(ok)
+        assert.match("cached analysis AST for module '" .. dependency .. "'", err, 1, true)
+        assert.match("requires an analysis-only resolver", err, 1, true)
+    end)
+
     it("rejects unknown fields, forged source authority and stale C plans", function()
         local first = load_module("malformed_manifest", "record Box item: integer end")
         local payload = assert(driver.encode_project_entry(first))
