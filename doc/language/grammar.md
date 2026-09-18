@@ -159,7 +159,9 @@ tlforeignimport ::= foreign import importname
 importname ::= LiteralString | '(' LiteralString ')'
 moduleinit ::= do block end
 recordfield ::= [local] [const] AnyName ':' type [';']
-unionvariant ::= [local] AnyName '(' [type] ')' [';']
+unionvariant ::= [local] AnyName '(' [variantparts] ')' [';']
+variantparts ::= variantpart {',' variantpart} | type
+variantpart ::= AnyName ':' type
 interfacemember ::= interfacemethod | interfacefield
 interfacemethod ::= function AnyName [typeparams]
                     '(' [parlist] ')' [':' rettype] [';']
@@ -193,7 +195,11 @@ Titan imports do not. Source-defined C variadics remain unsupported: the
 foreign list syntax retains `...` so semantic analysis can diagnose it.
 
 Record fields use optional types (`field: T?`), not `field?: T`.
-Union variants use `none()` or `some(T)` and still carry at most one payload.
+Union variants may be empty (`none()`), carry one unnamed type (`some(T)`),
+or declare named parts (`point(x: float, y: float)`). The unnamed spelling is
+shorthand for `some(value: T)`. A name followed by `:` selects the named-part
+form; otherwise the declaration must contain exactly one type. Part names
+may be reserved words. A flexible tail `...: T` is not allowed.
 
 ## Types
 
@@ -275,7 +281,9 @@ statement ::= ';' | do block end
             | varlist '=' explist | break | raise [exp]
             | defer statement | callstmt
 returnstat ::= return [explist] [';']
-casearm ::= when AnyName '(' [Name] ')' then block
+casearm ::= when AnyName '(' [Name {',' Name}] ')' then block
+          | when AnyName '{' {namedbinder [fieldsep]} '}' then block
+namedbinder ::= Name ['=' AnyName]
 decl ::= Name ['?'] [':' type]
 decllist ::= decl {',' decl}
 varlist ::= prefixexp {',' prefixexp}
@@ -287,6 +295,13 @@ Semantic analysis requires assignment targets to be lvalues and expression
 statements to be calls. It also enforces legal `break`, `raise`, `defer`,
 case-arm payloads, const assignments, and nil initialization. A const local
 always needs an expression list. `return` is the final statement of its block.
+
+Positional case bindings select a prefix of the variant's parts. Named
+bindings select parts in any order: `local_name = part_name` puts the local
+alias on the left, and a bare name selects the same-named part. Keyword part
+names require an alias because a local binder must be `Name`. Repeating a
+part in one named pattern is a syntax error; selecting a nonexistent part is
+a type error. Either form may omit parts regardless of their types.
 
 ## Expressions
 

@@ -1,28 +1,22 @@
 # Unions
 
 Titan unions are nominal tagged values. A union declaration lists a fixed set
-of named variants; each variant either carries one payload value or carries no
-payload. Construction is explicit through a generated function, and inspection
+of named variants; each variant carries zero or more named payload parts. Construction is explicit through a generated function, and inspection
 is explicit through a `case` statement.
 
 ```titan
-record Point
-    x: float
-    y: float
-end
-
 union Message
     quit()
     write(string)
-    move(Point)
+    move(x: float, y: float)
 end
 
 function describe(message: Message): string
     case message
     when write(text) then
         return "write: " .. text
-    when move(point) then
-        return "move to " .. point.x .. ", " .. point.y
+    when move(x, y) then
+        return "move to " .. x .. ", " .. y
     when quit() then
         return "quit"
     else
@@ -46,6 +40,7 @@ The general form is:
 [local] union Name
     [local] empty_variant()
     [local] payload_variant(PayloadType)
+    [local] parts_variant(first: FirstType, second: SecondType)
     ...
 end
 ```
@@ -54,6 +49,12 @@ A union must declare at least one variant. Variant names are unique within the
 union. A `local union` and a `local` variant are visible only inside their
 declaring module. Local variants still consume their declaration-order tag:
 making a variant local does not renumber the public variants around it.
+
+Part names are unique within each variant and may be reserved words. The
+single unnamed form `write(string)` is shorthand for `write(value: string)`.
+A variant may use that single-type shorthand or a list of `name: Type` parts;
+it cannot mix the two. Payload lists have fixed arity: `...: Type` is not
+allowed. A variant supports at most 65,534 parts.
 
 The union is a type. Its variants are metadata belonging to that type, not
 separate types. In particular, `Message.write` is a constructor function, not
@@ -85,13 +86,13 @@ type Event = Message
 ## Constructors
 
 Each variant declaration synthesizes one static constructor named
-`Union.variant`. An empty variant takes no parameter; a payload variant takes
-exactly one parameter of the declared payload type.
+`Union.variant`, with one parameter per part in declaration order. An empty
+variant takes no parameters.
 
 ```titan
 local stopped = Message.quit()
 local line = Message.write("hello")
-local moved = Message.move(Point.new(10.0, 20.0))
+local moved = Message.move(10.0, 20.0)
 ```
 
 For a generic union, explicit owner arguments attach to the union namespace:
@@ -111,44 +112,34 @@ They use the normal fixed-call argument adjustment: omitted fixed arguments
 are nil-filled and surplus arguments are evaluated and discarded. The
 resulting value must still satisfy the declared payload type.
 
-Variant constructors are deliberately **positional-only** in this version.
-The named-call spelling is not accepted:
+Direct variant constructors also accept named arguments. Names select parts;
+explicit expressions evaluate in written order. Omitted parts receive nil and
+must accept it, either directly or through an ordinary implicit conversion.
+For example, `string?` and `value` accept nil, and `boolean` converts it to
+false; a required `integer` or `string` cannot be omitted.
 
 ```titan
--- not valid
 local message = Message.write { value = "hello" }
+local moved = Message.move { y = 20.0, x = 10.0 }
 ```
 
-The braces-only call form is Titan's named-argument syntax, not record payload
-syntax. When the payload itself is a record, keep the ordinary parentheses
-around the positional argument:
+These names also work through imported union namespaces and explicit generic
+owner applications. A constructor stored in an ordinary function variable is
+called positionally, following the usual [named-call rules](named-arguments.md).
+
+A record can still be one payload part. Keep parentheses to pass a record
+constructor positionally, or name the part in a named call:
 
 ```titan
-local message = Message.move({ x = 10.0, y = 20.0 })
-```
-
-The same rule applies through an imported union:
-
-```titan
--- messages.titan
-record Delta
+record Point
     x: float
     y: float
 end
-
-union Message
-    move(Delta)
+union Movement
+    move(Point)
 end
-```
-
-```titan
--- message_consumer.titan
-local m = import "messages"
-local moved = m.Message.move({ x = 1.0, y = 2.0 })
-
--- invalid: without the parentheses this is a named call, and generated
--- variant constructors publish no parameter names
--- local bad = m.Message.move { x = 1.0, y = 2.0 }
+local first = Movement.move({ x = 1.0, y = 2.0 })
+local second = Movement.move { value = { x = 1.0, y = 2.0 } }
 ```
 
 User-declared union functions and methods use the same syntax and rules as
@@ -171,12 +162,10 @@ end
 
 A generated constructor reserves its variant name in the union's static
 function namespace. User-declared union functions may use named calls in the
-same declaration-based situations as record functions; only generated variant
-constructors are forced to remain positional.
+same declaration-based situations as record functions.
 
 A genuine generated variant constructor is also a constant-expression form
-when its one payload argument is recursively constant (or when the variant is
-empty), so it may initialize a module variable. The checker recognizes the
+when all supplied arguments are recursively constant (including empty variants), so it may initialize a module variable. The checker recognizes the
 validated synthesized constructor metadata, not merely any static returning
 the owner: a user-written union function that happens to return `Message` is
 still an ordinary nonconstant call.
@@ -193,8 +182,8 @@ arrays, maps, records, unions, Titan function values, option types, and
 also eligible, as are the supported exact `TValue`/`Udata *` and owned-storage
 forms.
 
-Direct C aggregates, C arrays, direct C functions, and C function pointers are
-not eligible payloads. An option is eligible only when its base is eligible.
+Direct C aggregates, C arrays, and direct C functions are not eligible
+payloads. Portable C function pointers are eligible boxed values. An option is eligible only when its base is eligible.
 Arrays, Maps, and Titan function values are already boxed values, so their
 element, key/value, or signature types are not recursively subjected to this
 direct-storage test.
@@ -209,19 +198,42 @@ A case statement has one scrutinee, a sequence of `when` arms, and an optional
 
 ```text
 case expression
-when variant_name([binding]) then
+when variant_name([binding, ...]) then
     block
-when another_variant([binding]) then
+when another_variant{[part, alias = other_part, ...]} then
     block
 else
     block
 end
 ```
 
-The scrutinee must have the union's type. A payload arm may introduce one
-binding inside the parentheses; the binding has the variant's payload type. An empty
-variant cannot have a binding. Repeating the same variant in a case statement
-is an error.
+The scrutinee must have the union's type. Parenthesized binders select parts
+in declaration order. Any suffix may be omitted, including every part, and
+binder names need not match part names. Extra binders are a type error. An
+empty variant cannot have a binder.
+
+Curly braces select parts by name, in any order. `part` binds that part to a
+same-named local; `alias = part` binds it to the local on the **left**. A
+reserved-word part must use an ordinary nonreserved alias:
+
+```titan
+union Event
+    received(from: string, end: integer, text: string)
+end
+function describe_event(event: Event): string
+    case event
+    when received{body = text; finish = end} then
+        return body .. " through " .. finish
+    end
+end
+```
+
+Both forms may omit any unneeded values without a nil/type restriction; named
+binding can skip a middle part. Named binders may be separated by commas or
+semicolons, with optional separators and an optional trailing separator.
+Referencing a part twice is a syntax error, even with different aliases.
+Selecting an unknown part is a type error. Binder names follow ordinary local
+shadowing rules. Repeating the same variant in a case statement is also an error.
 
 Binding follows ordinary local-assignment value semantics. Scalar payloads
 are copied; identity- or reference-bearing payloads such as records, arrays,
@@ -381,16 +393,17 @@ Lua arguments and results cross the same checked boundary as records. A value
 passed where a particular union is required must carry that exact nominal
 union identity.
 
-## Version-one boundaries
+## Boundaries
 
-Union version one deliberately keeps the model small:
+Unions retain these boundaries:
 
-* each variant carries zero or one payload value;
+* each variant has a fixed list of named payload parts;
 * variants are not first-class types;
-* constructors are positional-only;
+* direct constructors support positional and named calls;
 * case coverage is not required (complete coverage is only a control-flow
   proof);
-* no variant/tag/payload reflection is exposed to Titan or Lua;
+* ordinary instance access keeps tags and parts opaque;
+  [reflection](standard-library-reflect.md) provides typed inspection;
 * there is no structural conversion to a C union; and
 * equality is identity equality rather than derived value equality.
 

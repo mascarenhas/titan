@@ -66,7 +66,7 @@ configure {
 
 Positional items, computed labels, `...`, and mixtures of positional and named
 arguments are syntax errors. A label uses an identifier's raw spelling, so a
-Titan keyword is legal in this one position. This matters for C APIs:
+Titan keyword is legal in this position. This matters for C APIs:
 
 ```lua
 ffi.uv_timer_start {
@@ -77,10 +77,10 @@ ffi.uv_timer_start {
 }
 ```
 
-The same raw-label rule applies to `interface` and every other keyword. Such a
-spelling remains unavailable as a variable, function, record field, or
-ordinary Titan member name; a contextual member resolved through a C
-`foreign import` is the separate C-name exception.
+The same raw-label rule applies to `interface` and every other keyword.
+Union payload names, record fields, and nominal members can also use keyword
+spellings. Local variables and written function parameters require ordinary
+nonreserved names.
 
 ## Which calls support names
 
@@ -93,7 +93,7 @@ parameter list:
 | An imported Titan module function | Yes |
 | A record static function, including `Rec.new` | Yes |
 | A user-declared union static function | Yes |
-| A generated union-variant constructor | **No; positional-only** |
+| A generated union-variant constructor | Yes; names come from its payload parts |
 | A direct record or union method call | Yes; the implicit receiver is not a named parameter |
 | A direct Interface method call | Yes; names come from the Interface signature |
 | A direct, fixed-arity C function with complete, unique prototype names | Yes |
@@ -167,17 +167,27 @@ option types, `value`, `boolean`, `nil`, and nullable pointer forms. Required
 numbers, strings, containers, records, unions, Interfaces, and functions cannot
 be omitted. An `I?` Interface option can be omitted like any other option.
 
-Union-variant constructors deliberately publish no parameter-name metadata.
-Their only accepted spelling is positional:
+Union-variant constructors use their declared part names. An unnamed single
+payload has the name `value`:
 
 ```titan
-local text = Message.write("hello")
-local moved = Message.move({ x = 10.0, y = 20.0 })
+union Message
+    write(string)
+    move(x: float, y: float)
+end
+
+function example(): (Message, Message)
+    local text = Message.write { value = "hello" }
+    local moved = Message.move { y = 20.0, x = 10.0 }
+    return text, moved
+end
 ```
 
-The parentheses in the second example are required: the record value is the
-one positional union payload. `Message.move { x = ..., y = ... }` selects
-named-call syntax and is rejected.
+Positional calls remain valid, including `Message.move(10.0, 20.0)`. If a
+variant instead has one record payload, pass the record with parentheses or
+under that payload's own name: `Message.move({ x = 10.0, y = 20.0 })` or
+`Message.move { value = { x = 10.0, y = 20.0 } }` for an unnamed payload.
+Record fields do not become separate union-constructor parameter names.
 
 ```titan
 function configure(label: string?, enabled: boolean, payload: value)

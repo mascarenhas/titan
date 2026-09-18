@@ -10,8 +10,8 @@ cross-cutting invariants are:
 
 * `Type.Union` is a nominal owner; `Type.Variant` is owner metadata only;
 * every variant has an absolute, zero-based declaration-order tag;
-* empty values have only a tag user value, payload values have one additional
-  user value;
+* empty values have only a tag user value; each payload part adds one
+  traced user value;
 * `case` coverage is optional, while complete coverage of the closed static
   union can prove non-fallthrough without an `else`;
 * arms and `else` are ordinary full blocks, so existing
@@ -24,20 +24,22 @@ cross-cutting invariants are:
 `ast.lua` declares these written nodes:
 
 ```text
-Ast.TopLevelUnion(loc, name, variants)
-Ast.UnionVariant(loc, name, payload)
+Ast.TopLevelUnion(loc, name, variants, typeparams)
+Ast.UnionVariant(loc, name, parts)
 Ast.StatCase(loc, exp, arms, elseblock)
-Ast.CaseArm(loc, name, binding, block)
+Ast.CaseArm(loc, name, bindings, block, named)
 ```
 
 and one parser-synthesized expression:
 
 ```text
-Ast.ExpUnionInit(loc, owner, variant, value)
+Ast.ExpUnionInit(loc, owner, variant, values)
 ```
 
-`payload`, `binding`, `elseblock`, and an empty constructor's `value` use
-`false` for absence, following the existing AST convention.
+`parts`, `bindings`, and `values` are dense lists, empty when absent.
+`elseblock` uses `false` for absence. Each part and binder is an `Ast.Decl`;
+a named binder carries `.part`, the selected source part name. The arm
+records `.named` even when its braces are empty.
 
 The grammar makes `union`, `case`, and `when` reserved keywords. A union
 declaration has one or more variants; the parser accepts an optional
@@ -45,17 +47,28 @@ semicolon after each variant:
 
 ```text
 ["local"] "union" Name union-variant+ "end"
-union-variant ::= ["local"] AnyName "(" [type] ")" [";"]
+union-variant ::= ["local"] AnyName "("
+    ( ")" | &(AnyName ":") part {"," part} ")" | type ")" ) [";"]
+part ::= AnyName ":" type
 ```
 
 A case parses its sequence of arms before the optional else block:
 
 ```text
 "case" expression
-    ("when" AnyName "(" [Name] ")" "then" block)*
+    ("when" AnyName ("(" [Name {"," Name}] ")"
+        | "{" {namedbinder [fieldsep]} "}") "then" block)*
     ["else" block]
 "end"
 ```
+
+The payload decision uses only the positive two-token lookahead
+`&(ANYNAME COLON)`: that prefix cannot begin a Titan type. The chosen list or
+single-type branch then descends into the type grammar once, with committed
+labels for missing names, colons, types and closing parentheses. Neither branch
+admits a flextail. Folded captures retain linear flat-list construction.
+Named binders use ordinary `NAME` on the left and `ANYNAME` after `=`;
+the parser rejects duplicate selected part names before checking.
 
 The `block` after `then` and `else` is the same grammar production used by
 other compound statements. It may therefore become either a plain
@@ -66,8 +79,10 @@ lowering may populate the existing finally representation. No restricted
 
 `defs.uniondecl` returns the `Ast.TopLevelUnion` followed immediately by one
 synthesized `Ast.TopLevelStatic` per variant. An empty variant produces a
-zero-parameter function. A payload variant receives one deliberately hidden
-parameter named `__union_payload`. Its body returns `Ast.ExpUnionInit`, and
+zero-parameter function. Other variants receive one parameter for each part,
+using the declared name and type; the single-type shorthand becomes the part
+`value`. Its body returns `Ast.ExpUnionInit` with the corresponding variable
+expressions in declaration order, and
 the static is annotated with:
 
 ```lua
@@ -77,8 +92,9 @@ constructor._union_variant = variant
 
 The checker uses those markers rather than the function spelling to identify
 genuine constructors. This is the union counterpart of
-`_record_constructor`, but its published `paramnames` is always `false`, so
-named-call checking cannot reinterpret the hidden parameter as source API.
+`_record_constructor`. Published `paramnames` now contains the ordered part
+names (including an empty list), so ordinary named-call checking supplies
+evaluation order, omissions, coercion and generic inference.
 The module-constant classifier accepts only a constructor whose nominal
 metadata validates against its owner/variant projection, with recursively
 constant arguments. It does not use the broad heuristic “static returns its
@@ -88,7 +104,7 @@ The ordinary type grammar has at most one qualifier component. A local
 `Message.move` written as an `as`/`is` target therefore reaches
 `Ast.TypeQualName` and receives the semantic “variant is not a type” error.
 An imported `m.Message.move` has three components and is rejected by the
-parser. Both outcomes enforce the same v1 boundary without adding a
+parser. Both outcomes enforce the same boundary without adding a
 variant-type AST node.
 
 `lexer.ANYNAME` admits keyword spellings in member selectors, named argument
@@ -102,13 +118,16 @@ These rules apply to Titan and C members without a C-only selector token.
 
 ```text
 Type.Union(name, variants, functions, methods, nvariants)
-Type.Variant(fqtn, name, payload, index)
+Type.Variant(fqtn, name, parts, index)
 ```
 
 `Type.Union.variants` has both a dense source-order array and name keys that
 point at the same `Type.Variant` objects. `nvariants` is the total declared
-count, including private variants. `Type.Variant.payload` is either a checked
-type or `false`; `index` is the absolute zero-based source-order tag.
+count, including private variants. `Type.Variant.parts` is a dense ordered
+list of `Type.Field(fqtn, name, type, index, false)` descriptors. Here the
+field index is the **1-based union uservalue slot**, and names are unique
+within the variant. Parts have no independent locality or const qualifier.
+The variant index remains the absolute zero-based source-order tag.
 
 `Type.Nominal(fqtn)` remains the source-level value type for both records and
 unions. A `Type.Variant` is never returned by `typefromnode` as a legal source
@@ -164,7 +183,7 @@ Before locality metadata is discarded, the producer calls
 `types.validate_union_source_projection` over the exact
 `types.public_union_projection`. It proves that every local/public variant is
 omitted/published together with its matching constructor, that constructor
-arity/payload/result and `paramnames=false` agree with the variant, and that a
+arity, part types, result and ordered parameter names agree with the variant, and that a
 local union publishes no nominal member.
 
 ## Payload eligibility
@@ -176,7 +195,8 @@ whitelist: both locations are stored in a Lua-traced user-value slot.
 The predicate permits ordinary Titan values, including `Type.Function`, and
 the supported boxable C scalars/object pointers, exact `TValue`, `Udata *`,
 and owned-storage forms. It rejects direct C aggregates, C arrays, direct C
-functions, and C function pointers. Applying the predicate to records as part
+functions. C function pointers are boxable through the supported portability
+cast, subject to the ordinary exported-type rules. Applying the predicate to records as part
 of this feature closes the
 older mismatch in which a field could be declared even though no safe
 user-value representation existed.
@@ -197,8 +217,8 @@ The `Ast.StatCase` checker:
 3. resolves each visible arm name to a variant;
 4. rejects repeated variants;
 5. opens one sibling block scope per arm;
-6. declares an optional payload binder at the variant payload type, rejecting
-   a binder for an empty variant;
+6. resolves each positional or named binder to its part, rejects nonexistent
+   parts and excess positional binders, and declares it at the exact part type;
 7. checks the arm's full block; and
 8. checks the optional `else` block.
 
@@ -230,7 +250,9 @@ The case checker annotates:
 StatCase._union
 CaseArm._variant
 CaseArm._variant_index
-CaseArm.binding._type
+CaseArm.bindings[i]._type
+CaseArm.bindings[i]._part
+CaseArm.bindings[i]._part_index
 ```
 
 No variant value type is introduced.
@@ -264,10 +286,10 @@ qualified union type:
 
 ```text
 empty variant:   luaS_newudata(L, 0, 1)
-payload variant: luaS_newudata(L, 0, 2)
+N-part variant:  luaS_newudata(L, 0, N + 1)
 
 uv[0] = integer absolute variant tag
-uv[1] = payload, when present
+uv[i] = payload part i, for i = 1..N
 ```
 
 There is no reserved raw payload and no hidden user value beyond these slots.
@@ -275,9 +297,11 @@ The empty representation's absence of `uv[1]` is why binding an empty variant
 must be rejected statically.
 
 `coder._codeunioninit` roots the new userdata immediately, installs the
-union's metatable, writes the integer tag, lowers the payload with the normal
-internal `setslot` conversion, and emits `luaC_barrierback` when the payload
-may be collectable. The ordinary `Type.Nominal` C representation remains
+union's metatable, writes the integer tag, lowers every part with the normal internal
+`setslot` conversion, and emits `luaC_barrierback` for each collectable part.
+All union slot reads and writes access `u->uv[index].uv` directly; they do not
+call Lua API uservalue getters or setters. The checker caps payload arity at
+65,534 to leave one slot for the tag in Lua's unsigned-short uservalue count. The ordinary `Type.Nominal` C representation remains
 `Udata *`.
 
 The metatable is separate from every record metatable and from other unions.
@@ -300,7 +324,7 @@ switch (_case_1_tag) {
 ```
 
 The labeled arm bodies live **outside** the C switch. Each body extracts
-`uv[1]` when it has a binder, emits the normal checked block, and jumps to the
+the selected `uv[i]` for every binder, emits the normal checked block, and jumps to the
 common end label. This shape has three useful properties:
 
 * Titan arms cannot fall through;
@@ -316,8 +340,8 @@ roots use the existing machinery.
 
 Generated variant constructors, user union functions, and union methods use
 the existing native function convention and canonical first-class
-`CClosure`s. Constructor descriptors force `paramnames=false`; user functions
-retain their declared parameter-name metadata.
+`CClosure`s. Constructor descriptors publish the part names; user functions
+retain their declared parameter-name metadata. Lua calls themselves remain positional.
 
 Every nominal owner receives a private namespace-table module slot. For an
 exported union, the module's read-only member map exposes that table as
@@ -336,7 +360,7 @@ Like records, union metatables carry discoverable runtime reflection metadata:
 * `TITAN_MT_TYPE`: lightuserdata key set to the serialized union type descriptor (`Union(...)`);
 * `TITAN_MT_MEMBERMAP`: lightuserdata key holding the public method map table (the `__index` table);
 * `TITAN_MT_STATICS`: lightuserdata key holding the union's static-namespace table containing variant constructors and static functions;
-* `TITAN_MT_PAYLOAD`: lightuserdata key holding the generated typed payload reader used by reflection; its tag switch covers public and private variants and boxes their payloads normally;
+* `TITAN_MT_PAYLOAD`: lightuserdata key holding the generated typed payload reader used by reflection; its tag and part-index switches cover public and private variants and box each selected part normally;
 * Registered in the per-state global metatables table `_titan_metatables[<fqtn>]` (`TITAN_METATABLES_KEY`), alongside the reverse pointer map in the Lua registry (`registry[metatable_pointer] = <fqtn>`).
 
 The `__index` entry first performs the same exact nominal metatable check used
@@ -361,7 +385,8 @@ Union(fqtn, { public Variant... },
       { public method-name = Method... },
       total_nvariants)
 
-Variant(fqtn, name, payload-or-false, absolute_index)
+Variant(fqtn, name, { Field(fqtn, part_name, type, part_index, false)... },
+        absolute_index)
 ```
 
 Variants retain source order. Static and method maps are serialized in
@@ -383,7 +408,8 @@ listed field or variant, and nominal callable must also be nonlocal: locality
 was already removed by the producer's public projection, so a truthy
 `islocal` decoration is malformed metadata. Union validation additionally
 checks the dense/name variant map, strictly increasing unique absolute tags,
-total count, constructor projection, and collisions among variant, function,
+total count, dense uniquely named part lists with canonical owner/slot indices,
+recursive part eligibility, matching constructor parameter names/types, and collisions among variant, function,
 and method namespaces before the interface can be used. Record validation
 requires public fields in increasing absolute-index order. An all-public
 record must carry `new`, whose parameter types and names exactly match those
@@ -415,15 +441,26 @@ rehydration or native linking.
 only exact known active artifacts and establishes ABI-keyed caches. Earlier
 Titan installations are not migrated or cleaned up.
 
-## Standard-library dogfooding
+## Standard-library use
 
-The regex parser in `titan.string` uses private unions for its internal
-regex-AST alternatives. Constructors replace the former record-plus-kind
-convention, and compiler passes dispatch with `case`. This is intentionally a
-private implementation conversion: the public string/regex API and provider
-key set do not change.
+The regex parser in `titan.string` stores variant-specific syntax data directly
+in named `RegexNode` parts. Named case binders select only each pass's needed
+values. Backreference validation returns a node with its final nullability;
+it no longer mutates an intermediate wrapper record. The private process
+`SpawnSlot.merged` variant similarly holds its child/parent stream pair directly.
+Records that own behavior, mutable shared state, or a reused domain type remain
+records, including libuv request owners and TCP state.
 
-The conversion is useful coverage for payloads containing records and Arrays,
-nested cases, local variants, and case use across the folder-module
-contributors. It must not expose tags or payloads through an auxiliary public
-API merely to simplify the implementation.
+Reflection exposes ordered public part descriptors and indexed active-value
+reads. Its `Value` and `Type` unions use parts for simple data alternatives,
+while method-owning accessors and shared nominal/callable descriptors keep
+records. The generated reader accepts a 1-based part index and reads its direct
+slot; `UnionValue:get(i)` owns bounds checks and keeps the union alive. Generic
+lowering converts each initialized part to its erased carrier and projects
+each bound part independently, including reordered named bindings. Projections
+precede the entire arm block so a trailing `catch` sees every binder.
+
+JSON maps union part names directly into the discriminator object in both
+directions. The unnamed `value` part preserves the existing single-payload
+format. See the [reflection](standard-library-reflect.md) and
+[JSON](json-library.md) chapters for those library contracts.

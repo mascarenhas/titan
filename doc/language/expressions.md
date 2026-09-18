@@ -613,11 +613,15 @@ See
 story on each constructor, including what `nil` elements mean.
 
 Union values do not use brace constructor expressions. Each variant has a
-generated positional function such as `Message.quit()` or
-`Message.write("hello")`. If the one payload is itself a record constructor,
-write `Message.move({ x = 1.0, y = 2.0 })`; the parentheses keep the record as
-one positional argument. A bare-brace call would select named syntax, which
-variant constructors reject.
+generated function such as `Message.quit()` or `Message.write("hello")`.
+Variants with several parts support positional and named calls:
+`Message.move(1.0, 2.0)` and `Message.move { y = 2.0, x = 1.0 }` when the
+parts are declared `x: float, y: float`. An unnamed single payload has the
+name `value`, so `Message.write { value = "hello" }` is also valid. If a
+single payload is itself a record constructor, write
+`Message.move({ x = 1.0, y = 2.0 })` or
+`Message.move { value = { x = 1.0, y = 2.0 } }`; the record fields remain
+inside one argument.
 
 ## Function values
 
