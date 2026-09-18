@@ -491,9 +491,24 @@ function defs.funcexp(pos, params, rettypes, flexrettype, block, end_loc)
         ast.ExpFunction(pos, params, rettypes, flexrettype, block), end_loc)
 end
 
-function defs.casearm(pos, name_loc, name, binding, block)
+function defs.casearm(pos, name_loc, name, pattern, block)
     return with_name_loc(
-        ast.CaseArm(pos, name, binding, block), name_loc)
+        ast.CaseArm(pos, name, pattern.bindings, block, pattern.named), name_loc)
+end
+
+function defs.positionalcasebindings(bindings)
+    return { bindings = bindings, named = false }
+end
+
+function defs.namedcasebindings(bindings)
+    local seen = {}
+    for _, binding in ipairs(bindings) do
+        if seen[binding.part] then
+            syntax_failure("DuplicateCasePart", binding._part_loc)
+        end
+        seen[binding.part] = true
+    end
+    return { bindings = bindings, named = true }
 end
 
 function defs.makefield(pos, name, exp)
@@ -575,19 +590,16 @@ function defs.uniondecl(pos, islocal, name_loc, name, typeparams, variants,
 
     local nodes = { union }
     for _, variant in ipairs(variants) do
-        local params = {}
-        local value = false
-        if variant.payload then
-            local param = ast.Decl(
-                variant.loc, "__union_payload", variant.payload, false, false)
-            params[1] = param
-            value = ast.ExpVar(
-                variant.loc,
-                ast.VarName(variant.loc, param.name))
+        local params, values = {}, {}
+        for i, part in ipairs(variant.parts) do
+            params[i] = with_name_loc(ast.Decl(
+                part.loc, part.name, part.type, false, false), part._name_loc)
+            values[i] = ast.ExpVar(
+                part.loc, ast.VarName(part.loc, part.name))
         end
 
         local init = ast.ExpUnionInit(
-            variant.loc, name, variant, value)
+            variant.loc, name, variant, values)
         local body = ast.StatBlock(variant.loc, {
             ast.StatReturn(variant.loc, { init }),
         })
@@ -618,6 +630,17 @@ end
 
 function defs.casebinding(pos, name)
     return with_name_loc(ast.Decl(pos, name, false, false, false), pos)
+end
+
+function defs.casepart(pos, name)
+    return { loc = pos, name = name }
+end
+
+function defs.namedcasebinding(pos, name, part)
+    local binding = defs.casebinding(pos, name)
+    binding.part = part and part.name or name
+    binding._part_loc = part and part.loc or pos
+    return binding
 end
 
 function defs.constlocalvardecl(pos, decls, exps)
@@ -860,10 +883,14 @@ function defs.recordfield(pos, islocal, isconst, name_loc, name, typ)
     return decl
 end
 
-function defs.unionvariant(pos, islocal, name_loc, name, payload)
-    local variant = with_name_loc(ast.UnionVariant(pos, name, payload), name_loc)
+function defs.unionvariant(pos, islocal, name_loc, name, parts)
+    local variant = with_name_loc(ast.UnionVariant(pos, name, parts), name_loc)
     if islocal then variant.islocal = true end
     return variant
+end
+
+function defs.unionpayload(typ)
+    return { ast.Decl(typ.loc, "value", typ, false, false) }
 end
 
 function defs.assignment_tail(vars, exps)
@@ -1133,11 +1160,18 @@ local grammar_source = [[
     recordfields <- (fresh (&fieldhead recordfield^FieldRecord)*) ~> append
     recordfield <- (P localopt constopt P ANYNAME COLON type^TypeRecordField
                     SEMICOLON?) -> recordfield
-    varianthead <- ANYNAME LPAREN / LOCAL ANYNAME LPAREN
+    varianthead <- !END ANYNAME / END LPAREN
     unionvariants <- (fresh (&varianthead unionvariant^NameUnionVariant)*) ~> append
-    unionvariant <- (P ((LOCAL !LPAREN)? -> boolopt) P ANYNAME
-                     LPAREN ((&typestart type^TypeUnionVariant)? -> opt) RPAREN^RParenVariant
+    unionvariant <- (P ((LOCAL !LPAREN)? -> boolopt) P ANYNAME^NameUnionVariant
+                     LPAREN^LParenVariant variantparts
                      SEMICOLON?) -> unionvariant
+    variantparts <- RPAREN fresh
+                  / &(ANYNAME COLON)
+                    ((fresh variantpart (COMMA variantpart^NameVariantPayload)*) ~> append)
+                    RPAREN^RParenVariant
+                  / (type^TypeUnionVariant -> unionpayload) RPAREN^RParenVariantPayload
+    variantpart <- (P ANYNAME^NameVariantPayload COLON^ColonVariantPayload
+                    type^TypeUnionVariant) -> typeddecl
     interfacememberstart <- ANYNAME COLON / FUNCTION
     interfacemembers <- (fresh (&interfacememberstart interfacemember^MemberInterface)*) ~> append
     interfacemember <- &(ANYNAME COLON)
@@ -1176,9 +1210,19 @@ local grammar_source = [[
     elseifstat <- (P ELSEIF exp^ExpElseIf THEN^ThenElseIf block^Statement) -> Then
     casestat <- (P CASE exp^ExpCase ((fresh (&WHEN casearm^NameCaseVariant)*) ~> append)
                  ((ELSE block^Statement)? -> opt) P END^EndCase) -> casestat
-    casearm <- (P WHEN P ANYNAME^NameCaseVariant LPAREN^LParenVariant
-                (((P NAME) -> casebinding)? -> opt)
-                RPAREN^RParenVariant THEN^ThenCase block^Statement) -> casearm
+    casearm <- (P WHEN P ANYNAME^NameCaseVariant casebindings^LParenCaseVariant
+                THEN^ThenCase block^Statement) -> casearm
+    casebindings <- (LPAREN
+                     ((fresh (!RPAREN casebinding^NameCaseBinding
+                       (COMMA casebinding^NameCaseBinding)*)?) ~> append)
+                     RPAREN^RParenVariant) -> positionalcasebindings
+                  / (LCURLY
+                     ((fresh (&NAME namedcasebinding fieldsep?)*) ~> append)
+                     RCURLY^RCurlyCaseVariant) -> namedcasebindings
+    casebinding <- (P NAME) -> casebinding
+    namedcasebinding <- (P NAME
+                         ((ASSIGN (P ANYNAME^NameCasePart) -> casepart)? -> opt))
+                        -> namedcasebinding
     forstat <- (P FOR decl^DeclFor forrest^InFor) -> forstat
     forrest <- (P ASSIGN exp^Exp1For COMMA^CommaFor exp^Exp2For
                 ((COMMA exp^Exp3For)? -> opt)
