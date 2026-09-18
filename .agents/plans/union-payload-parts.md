@@ -56,8 +56,11 @@ Completed implementation and independent review:
 - Full-suite attempts identified and corrected old metadata test expectations.
   Old untracked `titan.a` and `titan/uv.a` were preserved outside the checkout
   under `/tmp/titan-union-stale-artifacts`; they shadowed the new installation.
-- The complete native standard-library aggregate passed all 460 cases. The
-  final canonical `make test` run is rebuilding the current installation.
-- Work is recorded in small topic commits on the feature branch. Final full
-  validation, PR publication, and Linux CI monitoring remain. GitHub CLI
-  authentication needs renewal (HTTP 401); the maintainer has been notified.
+- Final canonical `make -j4 test` passed using the fresh prefix with ambient
+  root/CPP/line overrides cleared: 144 host/runtime/packaging checks, four
+  compiler shards (816 + 894 + 638 + 1156 = 3504 cases), and all 460 native
+  cases. Log: `/tmp/titan-union-parts-final-pass.log`.
+- Work is recorded in small topic commits on the feature branch. Local work
+  and independent reviews are complete. PR publication and Linux CI monitoring
+  remain; GitHub CLI authentication needs renewal (HTTP 401), and the maintainer
+  has been notified. Git SSH access works. No macOS workflow was dispatched.
