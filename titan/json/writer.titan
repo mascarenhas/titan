@@ -220,12 +220,26 @@ local function Encoder:union_value(subject: value, inspected: reflect.UnionValue
   if found == nil then
     json_fail("private_variant", "active union variant is private", path, nil, nil)
   end
-  self:append('{"tag":', path)
-  self:count_node(field_path(path, "tag"))
-  self:quoted(found.name, field_path(path, "tag"))
-  if found.type ~= nil then
-    self:append(',"value":', path)
-    self:visit(inspected.payload, field_path(path, "value"), depth)
+  local tag_field = self.settings.tag_field
+  local tag_path = field_path(path, tag_field)
+  for index = 1, #found.parts do
+    if found.parts[index].name == tag_field then
+      json_fail("invalid_union", "union part conflicts with tag field: " .. tag_field,
+                tag_path, nil, nil)
+    end
+  end
+  self:append("{", path)
+  self:quoted(tag_field, tag_path)
+  self:append(":", tag_path)
+  self:count_node(tag_path)
+  self:quoted(found.name, tag_path)
+  for index = 1, #found.parts do
+    local name = found.parts[index].name
+    local part_path = field_path(path, name)
+    self:append(",", path)
+    self:quoted(name, part_path)
+    self:append(":", part_path)
+    self:visit(inspected:get(index), part_path, depth)
   end
   self:append("}", path)
 end
@@ -266,9 +280,9 @@ local function Encoder:visit(subject: value, path: Path, depth: integer)
   when is_integer(integer_value) then self:append(string.format("%d", integer_value), path)
   when is_float(float_value) then self:append(float_text(float_value, path), path)
   when is_string(string_value) then self:quoted(string_value, path)
-  when is_array(array_value) then self:array(subject, array_value.value, path, depth)
-  when is_const_array(array_value) then self:array(subject, array_value.value, path, depth)
-  when is_map(map_value) then self:map(subject, map_value.value, path, depth)
+  when is_array(array_value) then self:array(subject, array_value, path, depth)
+  when is_const_array(array_value) then self:array(subject, array_value, path, depth)
+  when is_map(map_value) then self:map(subject, map_value, path, depth)
   when is_record(record_value) then
     self:record_fields(subject, record_value.type.fields,
       function(index: integer): value return record_value:get(index) end, path, depth)

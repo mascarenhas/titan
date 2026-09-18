@@ -37,40 +37,37 @@ function inspect(v: value): Value
 distinction between integers and floats: `3` is an `is_integer`, while `3.0`
 is an `is_float`.
 
-| Variant | Payload |
+| Variant | Named payload parts |
 | --- | --- |
 | `is_nil` | none |
-| `is_integer` | `integer` |
-| `is_float` | `float` |
-| `is_boolean` | `boolean` |
-| `is_string` | `string` |
-| `is_array` | `ArrayValue` |
-| `is_const_array` | `ConstArrayValue` |
-| `is_map` | `MapValue` |
-| `is_record` | `RecordValue` |
-| `is_union` | `UnionValue` |
-| `is_interface` | `InterfaceValue` |
-| `is_titan_function` | `TitanFunctionValue` |
-| `is_lua_function` | `LuaFunctionValue` |
-| `is_lua_c_function` | `LuaCFunctionValue` |
-| `is_owned_foreign_pointer` | `OwnedForeignPointerValue` |
-| `is_owned_foreign_array` | `OwnedForeignArrayValue` |
-| `is_lua_userdata` | `LuaUserdataValue` |
-| `is_lua_thread` | `LuaThreadValue` |
-| `is_raw_pointer` | `foreign *void` |
+| `is_integer`, `is_float`, `is_boolean`, `is_string` | `value` of the corresponding scalar type |
+| `is_array` | `value: {value}` |
+| `is_const_array` | `value: const {value}` |
+| `is_map` | `value: {value: value}` |
+| `is_record` | `value: RecordValue` |
+| `is_union` | `value: UnionValue` |
+| `is_interface` | `value: InterfaceValue` |
+| `is_titan_function` | `value`, `native_entry`, `lua_entry`, `type` |
+| `is_lua_function` | `value`, `type` |
+| `is_lua_c_function` | `value`, `entry` |
+| `is_owned_foreign_pointer` | `value`, `payload`, `size`, `type` |
+| `is_owned_foreign_array` | `value`, `payload`, `size`, `count`, `type` |
+| `is_lua_userdata` | `value: value` |
+| `is_lua_thread` | `value: value`, `thread: foreign *lua_State` |
+| `is_raw_pointer` | `value: foreign *void` |
 
 Use `case` to select the variant. `Value` describes the value's representation;
 the separate `Type` union describes its schema where one is available.
 
 ### Containers and opaque values
 
-`ArrayValue.value`, `ConstArrayValue.value`, and `MapValue.value` expose the original
-container as `{value}`, `const {value}`, and `{value: value}`, respectively.
+`is_array`, `is_const_array`, and `is_map` carry the original container
+directly as `{value}`, `const {value}`, and `{value: value}`, respectively.
 Inspection does not copy the container or recover erased element type
 arguments. A Lua table is classified as a Map, including one with a metatable.
 
-`LuaUserdataValue.value` retains an unrecognized full userdata object.
-`LuaThreadValue.value` retains a Lua thread, and `LuaThreadValue.thread` exposes
+`is_lua_userdata` retains an unrecognized full userdata object in its `value`
+part. `is_lua_thread` retains a Lua thread in `value`, and its `thread` part exposes
 its `foreign *lua_State` address. An ordinary C object or function pointer crosses
 through `value` as lightuserdata and produces `is_raw_pointer`; its address
 carries no pointee-type, C-signature, or ownership information.
@@ -112,23 +109,26 @@ write barrier. Callers do not need a separate GC operation around field access.
 ```text
 record UnionValue
   const tag: integer
-  const payload: value
+  const n_parts: integer
   const value: value
   const type: UnionType
 end
+
+function UnionValue:get(i: integer): value
 ```
 
-`tag` is the active variant's 0-based runtime tag. `payload` is the original
-payload in its normal boxed representation, or nil for an empty variant.
-A payload-bearing variant whose payload permits nil can also contain nil;
-use its variant descriptor to distinguish those cases.
+`tag` is the active variant's 0-based runtime tag. `n_parts` is its payload
+arity, including parts whose value is nil. `get(i)` returns the 1-based part
+in its normal boxed representation and rejects indices outside `1..n_parts`.
+An empty variant has zero parts; a one-part variant containing nil still has
+one. The retained `value` keeps the union and its parts alive.
 
 The inspected union's `.type.variants` contains public variants in declaration order. Their
 `VariantType.tag` values retain the original tags, including gaps left by
 private variants. Find an entry by comparing its `tag` with `UnionValue.tag`;
 the tag is not an index into the descriptor Array. A private active variant
 has no public variant descriptor, although inspection still exposes its
-runtime tag and payload.
+runtime tag, part count, and readable payload parts.
 
 ### Interfaces
 
@@ -151,15 +151,31 @@ descriptor. Use `wrapped` when inspecting the concrete value separately.
 
 ### Functions
 
-All three function-value records retain a callable `value` with type
-`function (...: value): (...: value)`. Calling it follows ordinary dynamic callable
-argument and result adjustment.
+All three function-value variants retain a callable `value` part with type
+`function (...: value): (...: value)`. Calling it follows ordinary dynamic
+callable argument and result adjustment.
 
-| Record | Additional public fields |
+| Variant | Additional parts |
 | --- | --- |
-| `TitanFunctionValue` | `native_entry: foreign *void`, `lua_entry: foreign function (*lua_State): int`, `type: FunctionType` |
-| `LuaFunctionValue` | `type: LuaFunctionType` |
-| `LuaCFunctionValue` | `entry: foreign function (*lua_State): int` |
+| `is_titan_function` | `native_entry: foreign *void`, `lua_entry: foreign function (*lua_State): int`, `type: FunctionType` |
+| `is_lua_function` | `type: LuaFunctionType` |
+| `is_lua_c_function` | `entry: foreign function (*lua_State): int` |
+
+Select just the parts you need. For example, `type` is a reserved word, so
+bind it using an alias:
+
+```titan
+local reflect = import "reflect"
+
+function fixed_parameter_count(candidate: value): integer
+  case reflect.inspect(candidate)
+  when is_titan_function{signature = type} then
+    return #signature.param_descriptors
+  else
+    raise "expected a Titan function"
+  end
+end
+```
 
 `LuaFunctionType` contains `source`, `short_source`, `line_defined`,
 `last_line_defined`, `what`, `is_vararg`, and `n_params`, as reported by Lua's
@@ -174,20 +190,12 @@ signature. Using those low-level entries requires the corresponding
 ### Owned C storage
 
 ```text
-record OwnedForeignPointerValue
-  const value: value
-  const payload: foreign *void
-  const size: integer
-  const type: OwnedForeignPointerType
-end
-
-record OwnedForeignArrayValue
-  const value: value
-  const payload: foreign *void
-  const size: integer
-  const count: integer
-  const type: OwnedForeignArrayType
-end
+-- Payload declarations within Value:
+is_owned_foreign_pointer(value: value, payload: foreign *void,
+                         size: integer, type: OwnedForeignPointerType)
+is_owned_foreign_array(value: value, payload: foreign *void,
+                       size: integer, count: integer,
+                       type: OwnedForeignArrayType)
 ```
 
 `size` reports the payload storage size in bytes; an owned Array also reports
@@ -260,33 +268,36 @@ union Type
   is_string()
   is_value()
   is_named(NamedType)
-  is_array(ArrayType)
-  is_map(MapType)
+  is_array(is_const: ArrayTypeConstness, elem_descriptor: Type)
+  is_map(key_descriptor: Type, value_descriptor: Type)
   is_record(RecordType)
   is_union(UnionType)
   is_interface(InterfaceType)
   is_option(Type)
   is_function(FunctionType)
-  is_foreign_function(ForeignFunctionType)
+  is_foreign_function(
+    param_descriptors: const { Type },
+    is_vararg: boolean,
+    return_descriptor: Type)
   is_owned_foreign_pointer(OwnedForeignPointerType)
   is_owned_foreign_array(OwnedForeignArrayType)
   is_foreign_void()
   is_foreign_named(ForeignNamedType)
-  is_foreign_integer(ForeignIntegerType)
-  is_foreign_float(ForeignFloatType)
-  is_foreign_pointer(ForeignPointerType)
-  is_foreign_array(ForeignArrayType)
+  is_foreign_integer(spelling: string, is_signed: boolean, rank: integer, bits: integer)
+  is_foreign_float(spelling: string)
+  is_foreign_pointer(pointee_descriptor: Type, quals: const { string })
+  is_foreign_array(elem_descriptor: Type, len: value, quals: const { string })
   is_foreign_struct(ForeignStructType)
   is_foreign_union(ForeignUnionType)
-  is_foreign_typedef(ForeignTypedefType)
+  is_foreign_typedef(name: string, target_descriptor: Type, quals: const { string })
 end
 ```
 
 ### Containers and callable signatures
 
-`ArrayType.elem_descriptor` describes the element and `ArrayType.is_const`
+`is_array` carries `elem_descriptor` for its element and `is_const`, which
 selects `ArrayTypeConstness.is_mutable`, `is_const`, or `is_maybe_const`.
-`MapType` has `key_descriptor` and `value_descriptor`. An `is_option`
+`is_map` carries `key_descriptor` and `value_descriptor`. An `is_option`
 directly carries the descriptor of its nonnil base.
 
 `FunctionType` contains const Arrays `param_descriptors` and
@@ -295,7 +306,7 @@ directly carries the descriptor of its nonnil base.
 variadic input or flexible output. An empty result Array with no flexible
 tail means zero results, not one nil result.
 
-`ForeignFunctionType` instead contains `param_descriptors`, `is_vararg`, and
+`is_foreign_function` instead carries `param_descriptors`, `is_vararg`, and
 one `return_descriptor`, which may be `is_foreign_void`.
 
 ### Public nominal members
@@ -328,11 +339,16 @@ record FieldType
   const is_const: boolean
 end
 
+record VariantPartType
+  const name: string
+  const type: Type
+end
+
 record VariantType
   const name: string
   const tag: integer
-  const type: Type?
-  const callable: function (value): (value)
+  const parts: const {VariantPartType}
+  const callable: function (...: value): (value)
 end
 ```
 
@@ -353,8 +369,9 @@ StaticFunctionType.callable: function (...: value): (...: value)
 
 Pass the corresponding inspected `value` as the first argument of a method
 callable. A static callable takes only its ordinary arguments. A variant
-callable constructs that variant; its absent `type` means it has no
-payload, so the callable may be invoked without a payload argument. Calls
+callable constructs that variant. Its `parts` Array describes each payload
+name and type in declaration order; an empty Array means an empty variant.
+Pass arguments in that order. An unnamed source payload has the name `value`. Calls
 retain the ordinary checks and argument/result adjustment of the underlying
 functions.
 
@@ -383,14 +400,14 @@ Owned descriptors expose `pointee_descriptor` or `elem_descriptor`. C pointer
 descriptors expose `pointee_descriptor` and const qualifier names; C Array
 descriptors expose `elem_descriptor`, `len`, and qualifier names.
 
-`ForeignIntegerType` reports `spelling`, `is_signed`, `rank`, and `bits`;
-`ForeignFloatType` reports `spelling`. These are target-dependent C types,
+`is_foreign_integer` carries `spelling`, `is_signed`, `rank`, and `bits`;
+`is_foreign_float` carries `spelling`. These are target-dependent C types,
 distinct from Titan's `integer` and `float`.
 
 C struct and union descriptors report their C names, typedef spelling,
 `fields`, and completeness; structs additionally report `has_fam`. Each
 `ForeignFieldType` supplies `name`, `type`, `bitfield`, and
-`is_flexible_array`. `ForeignTypedefType` supplies `name`,
+`is_flexible_array`. `is_foreign_typedef` supplies `name`,
 `target_descriptor`, and qualifiers. These descriptors do not make private
 header-dependent C types exportable or dynamically validate an arbitrary
 pointer's pointee.

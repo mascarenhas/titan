@@ -14,6 +14,7 @@ record Error
 end
 
 union EncodeOption
+  tag_field(name: string)
   null_value(value)
   max_depth(integer)
   max_bytes(integer)
@@ -21,6 +22,7 @@ union EncodeOption
 end
 
 union DecodeOption
+  tag_field(name: string)
   null_value(value)
   max_depth(integer)
   max_bytes(integer)
@@ -29,6 +31,7 @@ union DecodeOption
 end
 
 local record Settings
+  tag_field: string
   null_value: value
   max_depth: integer
   max_bytes: integer
@@ -90,7 +93,7 @@ local function index_path(path: Path, index: integer): Path
 end
 
 local function default_settings(): Settings
-  return Settings.new(nil, 32, 16 * 1024 * 1024, 1000000, false)
+  return Settings.new("tag", nil, 32, 16 * 1024 * 1024, 1000000, false)
 end
 
 local function validate_settings(settings: Settings)
@@ -109,6 +112,7 @@ function encode(subject: value, ...: EncodeOption): string
   local settings = default_settings()
   for index = 1, #... do
     case ...[index]
+    when tag_field(name) then settings.tag_field = name
     when null_value(sentinel) then settings.null_value = sentinel
     when max_depth(limit) then settings.max_depth = limit
     when max_bytes(limit) then settings.max_bytes = limit
@@ -123,6 +127,7 @@ function decode(source: string, target: reflect.Type?, ...: DecodeOption): value
   local settings = default_settings()
   for index = 1, #... do
     case ...[index]
+    when tag_field(name) then settings.tag_field = name
     when null_value(sentinel) then settings.null_value = sentinel
     when max_depth(limit) then settings.max_depth = limit
     when max_bytes(limit) then settings.max_bytes = limit

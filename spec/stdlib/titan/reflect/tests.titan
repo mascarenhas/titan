@@ -34,7 +34,7 @@ end
 
 local function function_type(candidate: value): reflect.FunctionType
   case reflect.inspect(candidate)
-  when is_titan_function(fn) then return fn.type
+  when is_titan_function{fn_type = type} then return fn_type
   else raise "expected a reflected Titan function"
   end
 end
@@ -194,8 +194,8 @@ function test_inspect_arrays(_context: test.Context)
   local arr: {integer} = {10, 20, 30}
   local v = reflect.inspect(arr)
   case v
-  when is_array(av) then
-    local elements = av.value
+  when is_array{av_value = value} then
+    local elements = av_value
     test.assert(#elements == 3)
     test.assert(elements[1] as integer == 10)
     test.assert(elements[2] as integer == 20)
@@ -209,8 +209,8 @@ function test_inspect_maps(_context: test.Context)
   local m: {string: integer} = { ["alpha"] = 1, ["beta"] = 2 }
   local v = reflect.inspect(m)
   case v
-  when is_map(mv) then
-    local map_val = mv.value
+  when is_map{mv_value = value} then
+    local map_val = mv_value
     test.assert(map_val["alpha"] as integer == 1)
     test.assert(map_val["beta"] as integer == 2)
   else
@@ -270,7 +270,7 @@ function test_value_and_type_fields_cross_lua_boundary(_context: test.Context)
   local read_fields = lua.load([[
     local reflected, payload, empty = ...
     return reflected.value, reflected.type, reflected.type.fields[1].type,
-           payload.type, empty.type
+           payload.parts[1].type, #empty.parts
   ]])
   local candidate, schema, field, payload, empty =
     read_fields(inspected, variants[1], variants[3])
@@ -278,7 +278,7 @@ function test_value_and_type_fields_cross_lua_boundary(_context: test.Context)
   test.assert(schema == inspected.type as value)
   assert_integer_type(field as reflect.Type)
   assert_integer_type(payload as reflect.Type)
-  test.assert(empty == nil)
+  test.assert(empty == 0)
 end
 
 function test_inspect_record_const_and_barrier(_context: test.Context)
@@ -316,7 +316,7 @@ function test_inspect_unions(_context: test.Context)
   case v
   when is_union(uv) then
     test.assert(uv.tag == 0)
-    test.assert(uv.payload as integer == 42)
+    test.assert(uv:get(1) as integer == 42)
     test.assert(#uv.type.variants == 3)
     test.assert(uv.type.variants[1].name == "circle")
   else
@@ -328,7 +328,8 @@ function test_inspect_unions(_context: test.Context)
   case ve
   when is_union(uve) then
     test.assert(uve.tag == 2)
-    test.assert(uve.payload == nil)
+    test.assert(uve.n_parts == 0)
+    expect_failure(function() uve:get(1) end)
     test.assert(uve.type.variants[3].name == "empty")
   else
     test.assert(false, "expected is_union")
@@ -360,10 +361,10 @@ end
 function test_inspect_functions(_context: test.Context)
   local v = reflect.inspect(test_inspect_primitives)
   case v
-  when is_titan_function(tf) then
-    test.assert(tf.native_entry ~= nil)
-    test.assert(tf.lua_entry ~= nil)
-    test.assert(#tf.type.param_descriptors >= 1)
+  when is_titan_function{tf_native_entry = native_entry, tf_lua_entry = lua_entry, tf_type = type} then
+    test.assert(tf_native_entry ~= nil)
+    test.assert(tf_lua_entry ~= nil)
+    test.assert(#tf_type.param_descriptors >= 1)
   else
     test.assert(false, "expected is_titan_function")
   end
@@ -381,7 +382,7 @@ function test_nominal_descriptors(_context: test.Context)
   test.assert(ut.name == "reflect.tests.TestShape")
   test.assert(#ut.variants == 3)
   test.assert(ut.variants[1].name == "circle")
-  test.assert(ut.variants[3].type == nil)
+  test.assert(#ut.variants[3].parts == 0)
 
   local ift = required_interface("reflect.tests.Greeter")
   test.assert(ift.name == "reflect.tests.Greeter")
@@ -400,7 +401,7 @@ end
 
 function test_named_type_resolve(_context: test.Context)
   local ut = required_union("reflect.tests.TestShape")
-  local payload = ut.variants[2].type as reflect.Type
+  local payload = ut.variants[2].parts[1].type as reflect.Type
   case payload
   when is_named(named) then
     test.assert(named.name == "reflect.tests.SimpleRecord")
@@ -683,8 +684,8 @@ function test_callable_descriptors_and_invocation(_context: test.Context)
   else raise "expected string flexible return"
   end
   case reflect.inspect(variadic_echo)
-  when is_titan_function(fn) then
-    local head, first, second = fn.value(9, "a", "b")
+  when is_titan_function{fn_value = value} then
+    local head, first, second = fn_value(9, "a", "b")
     test.assert(head as integer == 9)
     test.assert(first as string == "a" and second as string == "b")
   else raise "expected Titan function"
@@ -721,16 +722,16 @@ function test_unconstrained_generic_descriptors(_context: test.Context)
   assert_value_type(field_type(desc, "item"))
   assert_value_type(field_type(desc, "optional"))
   case field_type(desc, "items")
-  when is_array(arr) then assert_value_type(arr.elem_descriptor)
+  when is_array{arr_elem_descriptor = elem_descriptor} then assert_value_type(arr_elem_descriptor)
   else raise "expected generic Array descriptor"
   end
   case field_type(desc, "by_name")
-  when is_map(map) then
-    case map.key_descriptor
+  when is_map{map_key_descriptor = key_descriptor, map_value_descriptor = value_descriptor} then
+    case map_key_descriptor
     when is_string() then
     else raise "expected string Map key"
     end
-    assert_value_type(map.value_descriptor)
+    assert_value_type(map_value_descriptor)
   else raise "expected generic Map descriptor"
   end
   case field_type(desc, "callback")
@@ -758,11 +759,11 @@ function test_unconstrained_generic_descriptors(_context: test.Context)
   local un = GenericUnion<|integer|>.item(19)
   case reflect.inspect(un)
   when is_union(uv) then
-    assert_value_type(uv.type.variants[1].type as reflect.Type)
-    test.assert(uv.payload as integer == 19)
+    assert_value_type(uv.type.variants[1].parts[1].type as reflect.Type)
+    test.assert(uv:get(1) as integer == 19)
     local made: value = uv.type.variants[1].callable(false)
     case reflect.inspect(made)
-    when is_union(created) then test.assert(created.payload == false)
+    when is_union(created) then test.assert(created:get(1) == false)
     else raise "expected reflected variant constructor result"
     end
   else raise "expected generic union"
@@ -855,14 +856,14 @@ function test_const_arrays_preserve_identity_and_values(_context: test.Context)
   local source: {integer} = {2, 4, 6}
   local frozen = source as const {integer}
   case reflect.inspect(frozen)
-  when is_const_array(arr) then
-    test.assert(arr.value as value == frozen as value)
-    test.assert(#arr.value == 3)
-    test.assert(arr.value[2] as integer == 4)
+  when is_const_array{arr_value = value} then
+    test.assert(arr_value as value == frozen as value)
+    test.assert(#arr_value == 3)
+    test.assert(arr_value[2] as integer == 4)
   else raise "expected const Array value"
   end
   case reflect.inspect(source)
-  when is_array(arr) then test.assert(arr.value as value == source as value)
+  when is_array{arr_value = value} then test.assert(arr_value as value == source as value)
   else raise "snapshot must preserve mutable source"
   end
 end
@@ -880,15 +881,15 @@ function test_lua_function_c_function_and_thread_variants(_context: test.Context
                                  "=reflection-fixture")
   local candidate: value = make_function()
   case reflect.inspect(candidate)
-  when is_lua_function(fn) then
-    test.assert(fn.type.source == "=reflection-fixture")
-    test.assert(fn.type.short_source == "reflection-fixture")
-    test.assert(fn.type.what == "Lua")
-    test.assert(fn.type.line_defined == 1)
-    test.assert(fn.type.last_line_defined == 1)
-    test.assert(fn.type.n_params == 2)
-    test.assert(fn.type.is_vararg)
-    local a, b, c = fn.value(3, false, "tail")
+  when is_lua_function{fn_value = value, fn_type = type} then
+    test.assert(fn_type.source == "=reflection-fixture")
+    test.assert(fn_type.short_source == "reflection-fixture")
+    test.assert(fn_type.what == "Lua")
+    test.assert(fn_type.line_defined == 1)
+    test.assert(fn_type.last_line_defined == 1)
+    test.assert(fn_type.n_params == 2)
+    test.assert(fn_type.is_vararg)
+    local a, b, c = fn_value(3, false, "tail")
     test.assert(a as integer == 3 and b == false and c == "tail")
   else raise "expected Lua function"
   end
@@ -896,26 +897,26 @@ function test_lua_function_c_function_and_thread_variants(_context: test.Context
   local get_functions = lua.load("return math.abs, string.gmatch('ab', '.')")
   local light, closure = get_functions()
   case reflect.inspect(light)
-  when is_lua_c_function(fn) then
-    test.assert(fn.entry ~= nil)
-    local callable = fn.value
+  when is_lua_c_function{fn_value = value, fn_entry = entry} then
+    test.assert(fn_entry ~= nil)
+    local callable = fn_value
     test.assert(callable(-4) as integer == 4)
   else raise "expected light Lua C function"
   end
   case reflect.inspect(closure)
-  when is_lua_c_function(fn) then
-    test.assert(fn.entry ~= nil)
-    test.assert(fn.value() == "a")
-    test.assert(fn.value() == "b")
+  when is_lua_c_function{fn_value = value, fn_entry = entry} then
+    test.assert(fn_entry ~= nil)
+    test.assert(fn_value() == "a")
+    test.assert(fn_value() == "b")
   else raise "expected Lua C closure"
   end
 
   local create_thread = lua.load("return coroutine.create(function() end)")
   local thread: value = create_thread()
   case reflect.inspect(thread)
-  when is_lua_thread(inspected) then
-    test.assert(inspected.value == thread)
-    test.assert(inspected.thread ~= nil)
+  when is_lua_thread{inspected_value = value, inspected_thread = thread} then
+    test.assert(inspected_value == thread)
+    test.assert(inspected_thread ~= nil)
   else raise "expected Lua thread"
   end
 end
@@ -923,7 +924,7 @@ end
 function test_userdata_and_raw_pointer_variants(_context: test.Context)
   local candidate = plain_lua_userdata()
   case reflect.inspect(candidate)
-  when is_lua_userdata(udata) then test.assert(udata.value == candidate)
+  when is_lua_userdata{udata_value = value} then test.assert(udata_value == candidate)
   else raise "expected unbranded Lua userdata"
   end
   local storage = foreign char.new_array(1)
@@ -940,7 +941,7 @@ local function without_typedef(descriptor: reflect.Type): reflect.Type
   local result = descriptor
   for _ = 1, 16 do
     case result
-    when is_foreign_typedef(alias) then result = alias.target_descriptor
+    when is_foreign_typedef{alias_target_descriptor = target_descriptor} then result = alias_target_descriptor
     else return result
     end
   end
@@ -952,16 +953,16 @@ function test_owned_foreign_scalar_and_array_descriptors(_context: test.Context)
   local owned_storage: foreign *double = owner
   owned_storage[0] = 2.5
   case reflect.inspect(owner)
-  when is_owned_foreign_pointer(pointer) then
-    test.assert(pointer.value == owner as value)
-    test.assert(pointer.payload ~= nil)
-    test.assert(pointer.size == foreign double.sizeof)
-    case pointer.type.pointee_descriptor
-    when is_foreign_float(scalar) then test.assert(scalar.spelling == "double")
+  when is_owned_foreign_pointer{pointer_value = value, pointer_payload = payload, pointer_size = size, pointer_type = type} then
+    test.assert(pointer_value == owner as value)
+    test.assert(pointer_payload ~= nil)
+    test.assert(pointer_size == foreign double.sizeof)
+    case pointer_type.pointee_descriptor
+    when is_foreign_float{scalar_spelling = spelling} then test.assert(scalar_spelling == "double")
     else raise "expected owned double descriptor"
     end
     gc.collect()
-    local storage = pointer.payload as foreign *double
+    local storage = pointer_payload as foreign *double
     test.assert(storage[0] as float == 2.5)
   else raise "expected owned foreign pointer"
   end
@@ -969,29 +970,29 @@ function test_owned_foreign_scalar_and_array_descriptors(_context: test.Context)
   local numbers: owned int[] = foreign int.new_array(3)
   numbers[1] = 42
   case reflect.inspect(numbers)
-  when is_owned_foreign_array(arr) then
-    test.assert(arr.value == numbers as value)
-    test.assert(arr.count == 3)
-    test.assert(arr.size == 3 * foreign int.sizeof)
-    case arr.type.elem_descriptor
-    when is_foreign_integer(scalar) then
-      test.assert(scalar.spelling == "int")
-      test.assert(scalar.is_signed)
-      test.assert(scalar.rank > 0)
-      test.assert(scalar.bits == 8 * foreign int.sizeof)
+  when is_owned_foreign_array{arr_value = value, arr_payload = payload, arr_size = size, arr_count = count, arr_type = type} then
+    test.assert(arr_value == numbers as value)
+    test.assert(arr_count == 3)
+    test.assert(arr_size == 3 * foreign int.sizeof)
+    case arr_type.elem_descriptor
+    when is_foreign_integer{scalar_spelling = spelling, scalar_is_signed = is_signed, scalar_rank = rank, scalar_bits = bits} then
+      test.assert(scalar_spelling == "int")
+      test.assert(scalar_is_signed)
+      test.assert(scalar_rank > 0)
+      test.assert(scalar_bits == 8 * foreign int.sizeof)
     else raise "expected owned int Array descriptor"
     end
     gc.collect()
-    local storage = arr.payload as foreign *int
+    local storage = arr_payload as foreign *int
     test.assert(storage[1] as integer == 42)
   else raise "expected owned foreign Array"
   end
 
   local empty: owned int[] = foreign int.new_array(0)
   case reflect.inspect(empty)
-  when is_owned_foreign_array(arr) then
-    test.assert(arr.count == 0)
-    test.assert(arr.size == 0)
+  when is_owned_foreign_array{arr_size = size, arr_count = count} then
+    test.assert(arr_count == 0)
+    test.assert(arr_size == 0)
   else raise "zero-length owned Array must keep Array identity"
   end
 end
@@ -1001,9 +1002,9 @@ function test_owned_struct_describes_public_c_fields(_context: test.Context)
   owner.quot = 7
   owner.rem = 2
   case reflect.inspect(owner)
-  when is_owned_foreign_pointer(pointer) then
-    test.assert(pointer.size == foreign div_t.sizeof)
-    case without_typedef(pointer.type.pointee_descriptor)
+  when is_owned_foreign_pointer{pointer_size = size, pointer_type = type} then
+    test.assert(pointer_size == foreign div_t.sizeof)
+    case without_typedef(pointer_type.pointee_descriptor)
     when is_foreign_struct(aggregate) then
       test.assert(aggregate.is_complete)
       test.assert(not aggregate.has_fam)
@@ -1013,9 +1014,9 @@ function test_owned_struct_describes_public_c_fields(_context: test.Context)
       test.assert(not aggregate.fields[1].is_flexible_array)
       test.assert(aggregate.fields[1].bitfield == false)
       case without_typedef(aggregate.fields[1].type)
-      when is_foreign_integer(scalar) then
-        test.assert(scalar.is_signed)
-        test.assert(scalar.bits == 8 * foreign int.sizeof)
+      when is_foreign_integer{scalar_is_signed = is_signed, scalar_bits = bits} then
+        test.assert(scalar_is_signed)
+        test.assert(scalar_bits == 8 * foreign int.sizeof)
       else raise "expected div_t integer field"
       end
     else raise "expected div_t struct descriptor"
@@ -1036,25 +1037,25 @@ end
 function test_nested_container_qualifiers_and_optional_descriptors(_context: test.Context)
   local desc = required_record("reflect.tests.NestedDescriptors")
   case field_type(desc, "mutable")
-  when is_array(arr) then
-    assert_integer_type(arr.elem_descriptor)
-    case arr.is_const
+  when is_array{arr_is_const = is_const, arr_elem_descriptor = elem_descriptor} then
+    assert_integer_type(arr_elem_descriptor)
+    case arr_is_const
     when is_mutable() then
     else raise "expected mutable Array descriptor"
     end
   else raise "expected Array descriptor"
   end
   case field_type(desc, "immutable")
-  when is_array(arr) then
-    case arr.is_const
+  when is_array{arr_is_const = is_const} then
+    case arr_is_const
     when is_const() then
     else raise "expected const Array descriptor"
     end
   else raise "expected const Array descriptor"
   end
   case field_type(desc, "either")
-  when is_array(arr) then
-    case arr.is_const
+  when is_array{arr_is_const = is_const} then
+    case arr_is_const
     when is_maybe_const() then
     else raise "expected maybe-const Array descriptor"
     end
@@ -1071,7 +1072,7 @@ function test_nested_container_qualifiers_and_optional_descriptors(_context: tes
   case field_type(desc, "callback")
   when is_function(fn) then
     case fn.param_descriptors[1]
-    when is_array(arr) then assert_integer_type(arr.elem_descriptor)
+    when is_array{arr_elem_descriptor = elem_descriptor} then assert_integer_type(arr_elem_descriptor)
     else raise "expected nested Array argument"
     end
     case fn.return_descriptors[1]
@@ -1113,8 +1114,8 @@ function test_union_payload_readers_box_arrays_and_preserve_sparse_tags(_context
   local values: {integer} = {21, 34}
   local mutable = union_value(ArrayPayloads.mutable(values))
   test.assert(mutable.tag == 1)
-  test.assert(mutable.payload == values as value)
-  local roundtrip = mutable.payload as {integer}
+  test.assert(mutable:get(1) == values as value)
+  local roundtrip = mutable:get(1) as {integer}
   roundtrip[1] = 55
   test.assert(values[1] == 55)
   test.assert(#mutable.type.variants == 4)
@@ -1124,14 +1125,14 @@ function test_union_payload_readers_box_arrays_and_preserve_sparse_tags(_context
   test.assert(mutable.type.variants[4].tag == 4)
 
   local present = union_value(ArrayPayloads.optional(values))
-  test.assert(present.payload == values as value)
+  test.assert(present:get(1) == values as value)
   local absent = union_value(ArrayPayloads.optional(nil))
-  test.assert(absent.payload == nil and absent.tag == 2)
+  test.assert(absent:get(1) == nil and absent.tag == 2)
   local snapshot = values as const {integer}
   local frozen = union_value(ArrayPayloads.frozen(snapshot))
-  test.assert(frozen.payload == snapshot as value)
-  case reflect.inspect(frozen.payload)
-  when is_const_array(arr) then test.assert(arr.value[2] as integer == 34)
+  test.assert(frozen:get(1) == snapshot as value)
+  case reflect.inspect(frozen:get(1))
+  when is_const_array{arr_value = value} then test.assert(arr_value[2] as integer == 34)
   else raise "expected boxed const Array payload"
   end
 
@@ -1139,13 +1140,13 @@ function test_union_payload_readers_box_arrays_and_preserve_sparse_tags(_context
   -- declaration projection retains only visible variants and their real tags.
   local hidden = union_value(ArrayPayloads.private_array(values))
   test.assert(hidden.tag == 0)
-  test.assert(hidden.payload == values as value)
+  test.assert(hidden:get(1) == values as value)
   test.assert(hidden.type == mutable.type)
   local generic = union_value(GenericUnion<|{integer}|>.item(values))
-  test.assert(generic.payload == values as value)
+  test.assert(generic:get(1) == values as value)
   gc.collect()
-  test.assert((hidden.payload as {integer})[1] == 55)
-  test.assert((generic.payload as {integer})[2] == 34)
+  test.assert((hidden:get(1) as {integer})[1] == 55)
+  test.assert((generic:get(1) as {integer})[2] == 34)
 end
 
 record OptionalArrayField
@@ -1224,10 +1225,10 @@ function test_foreign_field_accessors_check_and_box_values(_context: test.Contex
   test.assert(candidate.storage[0] as integer == 23)
 
   case field_type(rv.type, "pointer")
-  when is_foreign_pointer(ptr) then
-    test.assert(#ptr.quals == 0)
-    case ptr.pointee_descriptor
-    when is_foreign_integer(scalar) then test.assert(scalar.spelling == "int")
+  when is_foreign_pointer{ptr_pointee_descriptor = pointee_descriptor, ptr_quals = quals} then
+    test.assert(#ptr_quals == 0)
+    case ptr_pointee_descriptor
+    when is_foreign_integer{scalar_spelling = spelling} then test.assert(scalar_spelling == "int")
     else raise "expected foreign integer pointee"
     end
   else raise "expected foreign pointer field descriptor"
@@ -1250,7 +1251,7 @@ end
 
 local function owned_pointee(candidate: value): reflect.Type
   case reflect.inspect(candidate)
-  when is_owned_foreign_pointer(owner) then return owner.type.pointee_descriptor
+  when is_owned_foreign_pointer{owner_type = type} then return owner_type.pointee_descriptor
   else raise "expected owned foreign pointer descriptor"
   end
 end
@@ -1262,9 +1263,9 @@ local function foreign_struct(descriptor: reflect.Type): reflect.ForeignStructTy
   end
 end
 
-local function foreign_pointer(descriptor: reflect.Type): reflect.ForeignPointerType
+local function foreign_pointee(descriptor: reflect.Type): reflect.Type
   case without_typedef(descriptor)
-  when is_foreign_pointer(pointer) then return pointer
+  when is_foreign_pointer{pointee_descriptor} then return pointee_descriptor
   else raise "expected foreign pointer descriptor"
   end
 end
@@ -1275,7 +1276,7 @@ function test_recursive_foreign_descriptors_resolve_with_retained_context(_conte
   test.assert(#self_type.fields == 2)
   test.assert(self_type.fields[1].name == "marker")
   test.assert(self_type.fields[2].name == "next")
-  local back_reference = foreign_pointer(self_type.fields[2].type).pointee_descriptor
+  local back_reference = foreign_pointee(self_type.fields[2].type)
   case back_reference
   when is_foreign_named(named) then
     test.assert(named.name ~= "")
@@ -1299,9 +1300,9 @@ function test_recursive_foreign_descriptors_resolve_with_retained_context(_conte
   local left_owner: owned *titan_reflect_left = foreign titan_reflect_left.new()
   local left_type = foreign_struct(owned_pointee(left_owner))
   test.assert(#left_type.fields == 1 and left_type.fields[1].name == "right")
-  local right_type = foreign_struct(foreign_pointer(left_type.fields[1].type).pointee_descriptor)
+  local right_type = foreign_struct(foreign_pointee(left_type.fields[1].type))
   test.assert(#right_type.fields == 1 and right_type.fields[1].name == "left")
-  local left_reference = foreign_pointer(right_type.fields[1].type).pointee_descriptor
+  local left_reference = foreign_pointee(right_type.fields[1].type)
   case left_reference
   when is_foreign_named() then
   else raise "mutually recursive C structs should close with a named link"
@@ -1309,4 +1310,57 @@ function test_recursive_foreign_descriptors_resolve_with_retained_context(_conte
   local resolved_left = foreign_struct(left_reference:resolve())
   test.assert(resolved_left == left_type)
   test.assert(foreign_struct(back_reference:resolve()) == self_type)
+end
+
+union NamedPayloads<|T|>
+  local hidden(label: string, items: {T})
+  empty()
+  legacy(T)
+  pieces(count: integer, type: string, values: {T}, last: T?)
+end
+
+function NamedPayloads:count(): integer return 1 end
+
+function NamedPayloads.private_value(items: {T}): NamedPayloads<|T|>
+  return NamedPayloads.hidden{label = "hidden", items = items}
+end
+
+function test_named_union_parts_descriptors_access_and_construction(_context: test.Context)
+  local items = {17, 23}
+  local original = NamedPayloads<|integer|>.pieces{count = 2, type = "numbers", values = items}
+  local inspected = union_value(original)
+  test.assert(inspected.tag == 3 and inspected.n_parts == 4)
+  local variants = inspected.type.variants
+  test.assert(#variants == 3 and variants[1].tag == 1)
+  test.assert(#variants[1].parts == 0)
+  test.assert(variants[2].parts[1].name == "value")
+  local variant = variants[3]
+  test.assert(#variant.parts == 4)
+  test.assert(variant.parts[1].name == "count")
+  test.assert(variant.parts[2].name == "type")
+  test.assert(variant.parts[3].name == "values")
+  test.assert(variant.parts[4].name == "last")
+  assert_integer_type(variant.parts[1].type)
+  assert_value_type(variant.parts[4].type)
+  case variant.parts[3].type
+  when is_array{elem_descriptor} then assert_value_type(elem_descriptor)
+  else raise "expected erased Array part schema"
+  end
+  test.assert(inspected:get(1) == 2 and inspected:get(2) == "numbers")
+  test.assert(inspected:get(3) == items as value and inspected:get(4) == nil)
+  expect_failure(function() inspected:get(0) end)
+  expect_failure(function() inspected:get(5) end)
+  local created: NamedPayloads<|integer|> = variant.callable(3, "made", items, nil)
+  case created
+  when pieces{label = type, count, last, values} then
+    test.assert(label == "made" and count == 3 and last == nil and values == items)
+  else raise "expected reflected constructor result"
+  end
+  expect_failure(function() variant.callable("bad", "made", items, nil) end)
+  local hidden = union_value(NamedPayloads<|integer|>.private_value(items))
+  test.assert(hidden.tag == 0 and hidden.n_parts == 2)
+  gc.collect()
+  test.assert(hidden:get(1) == "hidden")
+  test.assert((hidden:get(2) as {integer})[2] == 23)
+  test.assert((inspected:get(3) as {integer})[1] == 17)
 end

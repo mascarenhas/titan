@@ -6,11 +6,13 @@ The public API is documented in the
 runtime. The compiler emits its discoverable metadata in ordinary nominal
 metatables and callable closures.
 
-Inspection wrappers expose the retained object or callable as `value`. Where
-a wrapper exposes a type descriptor, that field is `type`. Field and variant
-metadata likewise use `type` for their described type. These are ordinary
-record fields admitted by the grammar;
-hydration and accessors use the same names when constructing and reading them.
+`Value` stores pure container, callable, thread, and owned-storage metadata as
+named union parts. `RecordValue`, `InterfaceValue`, and `UnionValue` remain
+records because they own typed accessor methods. `Type` similarly stores pure
+Array, Map, and scalar/pointer C metadata as named parts. Nominal descriptors
+shared by `NominalType`, callable/owned descriptors reused in `Value`, resolver
+owners, and retained recursive C aggregates remain records. The retained
+object or callable is named `value`; a corresponding descriptor is `type`.
 
 ## Metadata ownership
 
@@ -55,8 +57,12 @@ Its constructors match serializer spellings such as `Record`, `Field`,
 `Function`, `Nominal`, and `COwned`.
 
 The active nominal metatable supplies its member map, statics, and module
-owner. A `Field` constructor caches the typed native accessor and a traced
-module value in private const fields of `FieldType`. A `Method`,
+owner. For a record or Interface, a `Field` constructor caches the typed
+native accessor and a traced module value in private const fields of
+`FieldType`. Union parts use serialized `Field` metadata too, but have no
+field accessor; hydration must not treat a same-named union method as one.
+The `Variant` constructor projects the ordered fields into `VariantPartType`
+records containing only name and type, then publishes `VariantType.parts`. A `Method`,
 `StaticMethod`, or `Variant` constructor resolves its callable from the owning
 member/static table. Fields and variants retain declaration order; record and
 union method/static maps become sorted Arrays. Interface methods arrive as a
@@ -143,23 +149,26 @@ would lose that distinction.
 
 Mutable and const Arrays expose their erased container views; Lua tables
 become Map values. Unbranded or unrecognized full userdata remains an opaque
-`LuaUserdataValue`. Lightuserdata becomes `is_raw_pointer`, and Lua threads
+`Value.is_lua_userdata` variant. Lightuserdata becomes `is_raw_pointer`, and Lua threads
 retain both their traced value and raw state address.
 
 ### Union payloads
 
 Each generated union publishes a typed reader at `TITAN_MT_PAYLOAD`, cached
 in a private const field of `UnionType`. Its void-returning protocol accepts
-the Lua state, union userdata, and a `TValue` output pointer. The reader
-switches on the actual runtime tag and uses normal compiler boxing for that
-variant's payload; an empty variant yields nil.
+the Lua state, union userdata, a 1-based `lua_Integer` part index, and a
+`TValue` output pointer. The reader switches on the actual runtime tag and
+part index and uses normal compiler boxing; an invalid index yields nil.
+It reads the backing `Udata.uv` array directly, without Lua uservalue API calls.
 
 The switch covers private as well as public variants because either can occur
 in a runtime value. The separately serialized public descriptor continues to
 omit private variant names and schemas. `UnionValue` retains the original
-value and exposes the runtime tag plus the correctly boxed payload. This is
-necessary for representations such as Array payloads; copying a raw uservalue
-as a generic `TValue` is insufficient.
+value, its borrowed userdata address, the runtime tag, and `n_parts`, obtained
+from the userdata's uservalue count minus the tag slot. `get(i)` checks bounds
+before calling the typed reader. A nil part still occupies its uservalue slot.
+Normal compiler boxing is necessary for representations such as Arrays;
+copying raw uservalue bits as a generic `TValue` is insufficient.
 
 ### Interface receivers
 
@@ -179,18 +188,18 @@ Lua bytecode closures are inspected with `lua_getinfo(L, ">Su", ...)` for
 source, line, and parameter information. Keep the temporary stack transaction
 balanced on success and error and copy surviving values into traced Titan
 state. Ordinary C closures and light C functions both produce
-`LuaCFunctionValue`.
+`Value.is_lua_c_function`.
 
-The public `lua_entry`/`entry` fields are typed foreign Lua C function
-pointers. `native_entry` is an untyped address. The retained `.value` callable
+The public `lua_entry`/`entry` parts are typed foreign Lua C function
+pointers. `native_entry` is an untyped address. The retained `value` callable part
 is the ordinary application invocation path.
 
 ## Owned C storage
 
 The `TITAN_OWNED` brand selects an owned pointer or counted Array descriptor.
-The wrapper exposes `getudatamem(u)` as its payload address and `u->len` as
+The value variant exposes `getudatamem(u)` as its payload address and `u->len` as
 the storage size. Counted Arrays also carry their element count in user value
-0. A traced `.value` retains the storage owner; its raw payload pointer alone
+0. A traced `value` part retains the storage owner; its raw payload pointer alone
 does not root it or acquire any external resource lifetime.
 
 ## Verification boundaries
