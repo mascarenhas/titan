@@ -1158,6 +1158,17 @@ end
 -- settled by this resolver's complete source inventory.
 function driver.completion_binary_catalog(context)
     local result = {}
+    -- Finalization selects whole archives, including siblings that ordinary
+    -- imports never loaded. Capture their interfaces without selecting any
+    -- additional providers or publishing siblings into driver.imported.
+    for _, provider in ipairs(context.selected_static_providers or {}) do
+        for name, entry in pairs(provider.entries) do
+            result[name] = { serialized = types.serialize(entry.type),
+                kind = "static", filename = provider.archive }
+        end
+    end
+    -- Eligible embedded interfaces take precedence over filesystem providers,
+    -- followed by the resolver's actual imported selections below.
     local provider = available_embedded_interface_provider(context)
     if provider then
         for _, name in ipairs(provider.key_order) do

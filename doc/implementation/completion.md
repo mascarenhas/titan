@@ -100,7 +100,12 @@ missing dependencies and source-required imports of captured binaries. It never
 falls back to newer filesystem source or providers. Saved indexing obtains the
 eligible embedded and already selected binary inventory through
 `driver.completion_binary_catalog(context)` after source/provider precedence is
-settled. That helper does not discover filesystem modules.
+settled. Capture every module carried by each finalized selected static
+archive, including siblings that saved code never imported. Eligible embedded
+interfaces retain precedence over unimported static siblings; actual imported
+selections and source exclusions remain authoritative. Archives inspected only
+for contextual type recovery or displaced by source are not selected inventory.
+That helper does not discover filesystem modules or import archive siblings.
 
 `transient_caches` disables persistent native C-probe records per resolver; it
 never changes process environment. The host's private graph-cache adapter may

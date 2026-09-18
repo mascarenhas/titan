@@ -2,6 +2,7 @@ local lfs = require "lfs"
 local assert = require "luassert"
 
 local checker = require "titan-compiler.checker"
+local completion = require "titan-compiler.completion"
 local driver = require "titan-compiler.driver"
 local parser = require "titan-compiler.parser"
 local staticmetadata = require "titan-compiler.staticmetadata"
@@ -176,6 +177,98 @@ describe("static compiled-module checker provenance", function()
         types.registry = previous.registry
         titan._loadlib = previous.loadlib
         remove_tree(root)
+    end)
+
+    it("completes a newly imported archive sibling from the captured catalog",
+       function()
+        local sibling = types.Module("pkg.sibling", {
+            types.ModuleVariable("pkg.sibling", "answer", types.Integer(), false),
+        })
+        local context = driver.new_resolver_context({ prefer_static = true })
+        local provider = cache_provider(context, "pkg.a", {
+            ["pkg.api"] = types.Module("pkg.api", {}),
+            ["pkg.sibling"] = sibling,
+        })
+        local loader = driver.defaultloader({}, { context = context })
+        local ok, modtype, errors = loader("pkg.api")
+        assert.is_true(ok, tostring(modtype))
+        assert.same({}, errors)
+        local finalized, final_errors = driver.finalize_resolver_context(context)
+        assert.truthy(finalized, final_errors and table.concat(final_errors, "\n"))
+
+        local captured = driver.completion_binary_catalog(context)
+        assert.is_nil(driver.imported["pkg.sibling"])
+        assert.same({
+            serialized = types.serialize(sibling), kind = "static",
+            filename = provider.archive,
+        }, captured["pkg.sibling"])
+        assert.is_true(driver.close_loader(loader))
+
+        -- Private preparation must work after the original archive disappears,
+        -- without inheriting saved compiler state or importing its siblings.
+        assert(os.remove(provider.archive))
+        driver.imported = {}
+        types.registry = {}
+        local filename = root .. "/consumer.titan"
+        local prefix = 'local sibling = import "pkg.sibling"\n' ..
+            'function f() local x = sibling.'
+        local prepared = assert(completion.prepare(filename, prefix .. " end", #prefix))
+        loader = driver.defaultloader({}, {
+            analysis_only = true, completion_closed_world = true,
+            transient_caches = true, completion = prepared.request,
+            cached_binary_interfaces = captured,
+            source_roots = { consumer = true },
+            source_overrides = { consumer = {
+                kind = "generated", main = filename, files = { filename },
+                contents = { [filename] = prepared.text },
+            } },
+        })
+        ok, modtype = loader("consumer")
+        assert.is_true(ok, tostring(modtype))
+        local result = assert(driver.imported.consumer.completion)
+        assert.equal(1, #result.candidates)
+        assert.equal("answer", result.candidates[1].name)
+        assert.equal("integer", result.candidates[1].detail)
+        ok, modtype = loader("pkg.sibling", { kind = "source-import" })
+        assert.is_false(ok)
+        assert.matches("absent from completion catalog", modtype, 1, true)
+        assert.is_true(driver.close_loader(loader))
+    end)
+
+    it("keeps embedded lookup precedence over unimported archive siblings",
+       function()
+        local embedded = types.Module("pkg.sibling", {
+            types.ModuleVariable("pkg.sibling", "embedded", types.String(), false),
+        })
+        local context = driver.new_resolver_context({
+            prefer_static = true,
+            embedded_interface_provider = {
+                provider_file = root .. "/language-server",
+                entries = { ["pkg.sibling"] = {
+                    abi = driver.TITAN_ABI_VERSION, types = types.serialize(embedded),
+                } },
+            },
+        })
+        cache_provider(context, "pkg.a", {
+            ["pkg.api"] = types.Module("pkg.api", {}),
+            ["pkg.sibling"] = types.Module("pkg.sibling", {}),
+            ["pkg.static_only"] = types.Module("pkg.static_only", {}),
+        })
+        local loader = driver.defaultloader({}, { context = context })
+        local ok, modtype, errors = loader("pkg.api")
+        assert.is_true(ok, tostring(modtype))
+        assert.same({}, errors)
+        local finalized, final_errors = driver.finalize_resolver_context(context)
+        assert.truthy(finalized, final_errors and table.concat(final_errors, "\n"))
+        local captured = driver.completion_binary_catalog(context)
+        assert.same({
+            serialized = types.serialize(embedded), kind = "embedded",
+            filename = root .. "/language-server",
+        }, captured["pkg.sibling"])
+        assert.truthy(captured["pkg.static_only"])
+        assert.is_nil(driver.imported["pkg.sibling"])
+        assert.is_nil(driver.imported["pkg.static_only"])
+        assert.is_true(driver.close_loader(loader))
     end)
 
     it("recovers a direct-carried owner without importing archive siblings",
@@ -618,6 +711,9 @@ end
         assert.is_nil(context.native_static_names["dyn.owner"])
         assert.equal(owner_provider,
             context.provider_cache[owner_provider.archive])
+        local captured = driver.completion_binary_catalog(context)
+        assert.truthy(captured["dyn.facade"])
+        assert.is_nil(captured["dyn.owner"])
         assert.same({{
             owner = "dyn.owner",
             exposer = "dyn.facade",
@@ -777,6 +873,7 @@ end
         local provider = cache_provider(context, "replace.a", {
             ["replace.facade"] = facade,
             ["replace.owner"] = owner,
+            ["replace.unused"] = types.Module("replace.unused", {}),
         })
         ensure_directory(source .. "/replace")
         write_file(source .. "/replace/owner.titan", [[
@@ -821,6 +918,7 @@ end
             final_errors and table.concat(final_errors, "\n"))
         assert.same({}, context.selected_static_providers)
         assert.same({}, constraints(context, "replace.owner"))
+        assert.same({}, driver.completion_binary_catalog(context))
         assert.is_nil(context.physical_owner["replace.owner"])
         assert.equal("direct",
             context.native_bindings["replace.owner"])

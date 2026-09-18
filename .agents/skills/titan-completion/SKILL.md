@@ -38,6 +38,10 @@ process-local. Missing descriptors give an incomplete result; they do not
 justify reading a newer dependency or waiting for workspace hydration.
 
 Saved indexing alone publishes compact descriptors and scalar saved facts.
+Capture all modules from finalized selected static providers, including
+unimported siblings, while preserving embedded and actual selection precedence.
+Do not treat every inspected provider-cache entry as a selected archive or
+populate ordinary imports merely to capture their descriptors.
 Source-private capability requires a real compact source entry and ordered FFI
 header plan, not the equality-only source manifest. Completion SELECTs consume
 already materialized scalar rows; preparation owns parsing/checking/decoding.
