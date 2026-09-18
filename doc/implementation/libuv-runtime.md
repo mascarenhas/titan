@@ -445,6 +445,11 @@ the concrete configured streams. Each configurator initializes any required
 pipe or parent stream immediately, writes the stdio entry, and returns a
 status so the caller can stop the option sequence at its first failure.
 Replacing a choice closes unsubmitted streams that are no longer retained.
+The private `SpawnSlot` union distinguishes inherited, captured, and merged
+streams. Its merged variant stores `child` and `parent` as two payload parts;
+the stream selectors and discard path bind those parts directly, without an
+intermediate record. The existing stream objects retain native handle
+ownership and cleanup responsibility.
 Parent descriptors are always represented by the Runtime's pipe-or-TTY stream
 wrappers and inherited with `UV_INHERIT_STREAM`, never `UV_INHERIT_FD`.
 Classification preserves libuv's known TTY and named-pipe fast paths and

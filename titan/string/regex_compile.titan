@@ -53,11 +53,11 @@ local function regex_projected_size(node: RegexNode):
     return 5, 0
   when class() then
     return 5, 0
-  when sequence(sequence) then
+  when sequence{children} then
     local size = 1
     local index = 1
-    while index <= #sequence.children do
-      local child = sequence.children[index]
+    while index <= #children do
+      local child = children[index]
       local child_size, overflow = regex_projected_size(child)
       if overflow ~= 0 then return child_size, overflow end
       size = regex_saturating_add(
@@ -68,11 +68,11 @@ local function regex_projected_size(node: RegexNode):
       index = index + 1
     end
     return size, 0
-  when choice(choice) then
+  when choice{children} then
     local size = 1
     local index = 1
-    while index <= #choice.children do
-      local child = choice.children[index]
+    while index <= #children do
+      local child = children[index]
       local child_size, overflow = regex_projected_size(child)
       if overflow ~= 0 then return child_size, overflow end
       size = regex_saturating_add(
@@ -83,38 +83,38 @@ local function regex_projected_size(node: RegexNode):
       index = index + 1
     end
     return size, 0
-  when group(group) then
+  when group{position, child} then
     local child_size, overflow =
-      regex_projected_size(group.child)
+      regex_projected_size(child)
     if overflow ~= 0 then return child_size, overflow end
     local size = regex_saturating_add(child_size, 8)
     if size > REGEX_PATTERN_LIMIT then
-      return size, group.position
+      return size, position
     end
     return size, 0
-  when repetition(repetition) then
+  when repetition{position, minimum, maximum, child} then
     local child_size, overflow =
-      regex_projected_size(repetition.child)
+      regex_projected_size(child)
     if overflow ~= 0 then return child_size, overflow end
     local unit = regex_saturating_add(
       child_size, 4)
     local size = 0
-    if repetition.maximum < 0 then
+    if maximum < 0 then
       size = regex_saturating_add(
         regex_saturating_multiply(
-          unit, regex_saturating_add(repetition.minimum, 1)), 8)
+          unit, regex_saturating_add(minimum, 1)), 8)
     else
-      local optional = repetition.maximum - repetition.minimum
+      local optional = maximum - minimum
       local optional_overhead = REGEX_PATTERN_LIMIT + 1
       if optional <= REGEX_PATTERN_LIMIT then
         optional_overhead = optional + 1
       end
       size = regex_saturating_add(
-        regex_saturating_multiply(unit, repetition.maximum),
+        regex_saturating_multiply(unit, maximum),
         optional_overhead)
     end
     if size > REGEX_PATTERN_LIMIT then
-      return size, repetition.position
+      return size, position
     end
     return size, 0
   when backreference() then
@@ -191,53 +191,52 @@ local function regex_compile_node(node: RegexNode,
   case node
   when empty() then
     return continuation
-  when literal(literal) then
-    return peg.sequence(peg.literal(literal.text), continuation)
+  when literal{text} then
+    return peg.sequence(peg.literal(text), continuation)
   when any() then
     return peg.sequence(
       peg.difference(peg.any(), peg.literal("\n")), continuation)
-  when class(class) then
-    return peg.sequence(peg.set(class.text), continuation)
-  when sequence(sequence) then
+  when class{text} then
+    return peg.sequence(peg.set(text), continuation)
+  when sequence{children} then
     local result = continuation
-    local index = #sequence.children
+    local index = #children
     while index >= 1 do
       result = regex_compile_node(
-        sequence.children[index], result, state)
+        children[index], result, state)
       index = index - 1
     end
     return result
-  when choice(choice) then
+  when choice{children} then
     local result = regex_compile_node(
-      choice.children[1], continuation, state)
+      children[1], continuation, state)
     local index = 2
-    while index <= #choice.children do
+    while index <= #children do
       result = peg.choice(
         result,
         regex_compile_node(
-          choice.children[index], continuation, state))
+          children[index], continuation, state))
       index = index + 1
     end
     return result
-  when group(group) then
+  when group{number, child} then
     -- Keep group markers as siblings rather than wrapping the whole child in
     -- one named capture. LPeg scopes captures nested inside a named group;
     -- sibling markers leave nested numbered groups visible to the final Cb
     -- projection and to later backreferences.
     local start = peg.group(
-      peg.position(), regex_group_start_key(group.number))
+      peg.position(), regex_group_start_key(number))
     local finish = peg.group(
       peg.sequence(
-        peg.back_capture(regex_group_start_key(group.number)),
+        peg.back_capture(regex_group_start_key(number)),
         peg.position()),
-      regex_group_key(group.number))
+      regex_group_key(number))
     local body = regex_compile_node(
-      group.child, peg.sequence(finish, continuation), state)
+      child, peg.sequence(finish, continuation), state)
     return peg.sequence(start, body)
-  when repetition(repetition) then
-    local atom = repetition.child
+  when repetition{minimum, maximum, atom = child} then
     local result = continuation
-    if repetition.maximum < 0 then
+    if maximum < 0 then
       local active: RegexCompileState? = state
       local owns_scope = false
       if not active then
@@ -260,7 +259,7 @@ local function regex_compile_node(node: RegexNode,
         result = recursive
       end
     else
-      local optional_count = repetition.maximum - repetition.minimum
+      local optional_count = maximum - minimum
       local index = 1
       while index <= optional_count do
         result = peg.choice(
@@ -269,14 +268,14 @@ local function regex_compile_node(node: RegexNode,
       end
     end
     local index = 1
-    while index <= repetition.minimum do
+    while index <= minimum do
       result = regex_compile_node(atom, result, state)
       index = index + 1
     end
     return result
-  when backreference(backreference) then
+  when backreference{number} then
     local captured = peg.back_capture(
-      regex_group_key(backreference.number))
+      regex_group_key(number))
     return peg.sequence(
       peg.match_time(captured, regex_backreference_capture),
       continuation)
