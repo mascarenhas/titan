@@ -149,7 +149,7 @@ describe("checker semantic metadata", function()
             inspect.params[1].type._surface_typeargs[1]
                 ._resolved_typearg._decl == inspect._surface_typeparams[1])
         assert.equal("Type.Integer",
-            maybe.variants[1].payload._surface_typeargs[1]
+            maybe.variants[1].parts[1].type._surface_typeargs[1]
                 ._resolved_typearg._tag)
         assert.is_true(inspect.params[2].type._decl == alias)
         assert.is_true(inspect.params[3].type._decl == maybe)

@@ -916,11 +916,13 @@ describe("portable C99 compiled-interface validation", function()
 
         local union_name = modname .. ".Choice"
         local variant = types.Variant(
-            union_name, "present", callback, 0)
+            union_name, "present", {
+                types.Field(union_name, "value", callback, 1, false),
+            }, 0)
         local union = types.Union(union_name, { variant }, {
             present = types.StaticMethod(
                 union_name, "present", { callback },
-                { types.Nominal(union_name) }, false, false, false),
+                { types.Nominal(union_name) }, false, false, {"value"}),
         }, {}, 1)
         modules[#modules + 1] = types.Module(modname, {
             types.ModuleMember(modname, "Choice", union, false),
