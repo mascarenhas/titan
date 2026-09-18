@@ -665,13 +665,20 @@ The analysis-facing options are narrow and caller-owned:
   raw table identity as immutable. Ordinary compiler callers omit it.
 * `analysis_only = true` opts a resolver context into declaration-manifest
   reuse and suppresses generated source foreign-function `.titan.h` bodies.
-  Fresh dirty modules are still parsed and fully checked. Native compilation
-  leaves this option unset and requires the AST needed for code generation.
+  Fresh dirty modules are parsed and fully checked, retaining their source-level
+  typed AST: applied generic expression types, written generic arguments and
+  case bindings are not rewritten by runtime generic erasure. Declaration
+  snapshots and their detached owner registry remain available for compact
+  manifests and completion. Checking still performs semantic elaboration,
+  validation and FFI dependency capture; this is not a parser-only mode.
+  Native compilation leaves this option unset and receives the lowered AST
+  required for code generation. Analysis ASTs are not code-generation input.
 * `cached_source_entries` contains caller-certified clean `source` entries:
   either complete checked AST entries or compact declared manifests with a
   `Type.Module`, source filenames, dependency map, ordered source imports,
-  exact C-header inputs and generated C include plan. Compact entries require
-  an analysis-only resolver. The loader reuses entries only for non-dirty,
+  exact C-header inputs and generated C include plan. Compact entries and
+  source ASTs marked `_analysis_only` require an analysis-only resolver; native
+  checking must obtain a lowered AST from a fresh check instead. The loader reuses entries only for non-dirty,
   non-`source_first` modules, restores ordered source dependency environments
   and materializes their small `.ffi.h` include plans without reparsing the
   clean module or regenerating `.titan.h` bodies. Dirty overrides and native
@@ -1842,8 +1849,8 @@ the explicit public-header input for its native helper builds.
 | `options.incremental` | `titanc` / `driver.defaultloader` | `false` | Allows source companion objects no older than current source constituents to supply trusted declarations and native code; Make owns other invalidation. |
 | `options.forced_source_roots` | `titanc` / `driver.defaultloader` | `{}` | Complete explicit-root set for compile-only mode; bypasses object reuse even if a root is first reached through another import. |
 | `options.known_source_modules` | semantic clients / `driver.defaultloader` | `{}` | Validated module-name set used for resolver-wide source identity and source/provider overlap planning without marking modules dirty. |
-| `options.analysis_only` | semantic clients / `driver.new_resolver_context` | `false` | Enables compact analysis-manifest reuse and skips `.titan.h` body generation; these manifests cannot substitute for native source objects or checked ASTs. |
-| `options.cached_source_entries` | semantic clients / `driver.defaultloader` | `{}` | Caller-certified checked or compact declared source entries, including exact C-header inputs; compact entries require analysis-only mode and restore C include plans without AST replay. |
+| `options.analysis_only` | semantic clients / `driver.new_resolver_context` | `false` | Retains the source-level checked AST without runtime generic erasure, enables compact analysis-manifest reuse and skips `.titan.h` body generation; analysis ASTs/manifests are not native code-generation input. |
+| `options.cached_source_entries` | semantic clients / `driver.defaultloader` | `{}` | Caller-certified checked or compact declared source entries, including exact C-header inputs; compact entries and marked analysis ASTs require analysis-only mode; compact entries restore C include plans without AST replay. |
 | `options.cached_interfaces` | semantic clients / `driver.defaultloader` | `{}` | Serialized clean source interfaces plus exact source and C-header provenance; used without AST for ordinary imports and as transient reparse input for explicit `.titan` edges. |
 | `options.embedded_interface_provider` | semantic clients / `driver.new_resolver_context` | `nil` | Closed `{ provider_file, entries, target_profile? }` ABI/type inventory with an optional declarative build target profile, copied from a trusted host; it precedes disk compiled lookup but never becomes a static dependency or link input. |
 | `options.io` / `context.io` | semantic clients / `driver.new_resolver_context` | `compiler_io.new_sync()` | Validated context-owned filesystem, process, and cooperative-yield strategy. The omitted default preserves synchronous compiler and `titanc` behavior. |

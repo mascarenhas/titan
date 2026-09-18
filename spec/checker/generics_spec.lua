@@ -3266,3 +3266,157 @@ describe("generic declarations and explicit calls", function()
     end)
 
 end)
+
+describe("analysis-only checked source ASTs", function()
+    local source = [[
+        union Packet<|T|>
+            moved(x: T, text: string)
+            empty()
+        end
+        type IntPacket = Packet<|integer|>
+        function create(): Packet<|integer|>
+            return Packet<|integer|>.moved {x = 1, text = "ready"}
+        end
+        function generic_create<|T|>(item: T): Packet<|T|>
+            return Packet<|T|>.moved(item, "ready")
+        end
+        function alias_create(): Packet<|integer|>
+            return IntPacket.moved(1, "ready")
+        end
+        function project<|T|>(packet: Packet<|integer|>, fallback: T): integer
+            case packet
+            when moved{x} then return x
+            when empty() then return 0
+            end
+        end
+    ]]
+
+    local function check(analysis_only, input)
+        h.reset(true)
+        input = input or source
+        local ast = assert(h.parse(input, "test.titan"))
+        local modtype, errors = checker.check("test", ast, input,
+            "test.titan", nil, { analysis_only = analysis_only })
+        return ast, modtype, errors
+    end
+
+    local function returned_constructor(ast, name)
+        local fn = toplevel(ast, "Ast.TopLevelFunc", name)
+        return fn.block.stats[1].exps[1].exp.var
+    end
+
+    it("preserves applied constructor signatures and original generic case binders", function()
+        local ast, modtype, errors = check(true)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.is_true(ast._analysis_only)
+        assert.is_nil(ast._erased_registry)
+        local owner = toplevel(ast, "Ast.TopLevelUnion", "Packet")
+        assert.equal(1, #owner.typeparams)
+        assert.equal("Type.Parameter", owner._type.variants.moved.parts[1].type._tag)
+        local create = toplevel(ast, "Ast.TopLevelFunc", "create")
+        assert_nominal(create._type.rettypes[1], "test.Packet", {"integer"})
+        assert.equal("Ast.TypeInteger", create.rettypes[1].typeargs[1]._tag)
+        for _, name in ipairs({"create", "alias_create"}) do
+            local selector = returned_constructor(ast, name)
+            assert.equal("integer", types.tostring(selector._type.params[1]))
+            assert.equal("integer", types.tostring(
+                selector._closed_generic_declaration.params[1]))
+            assert.same({"x", "text"}, selector._closed_generic_declaration.paramnames)
+            assert.equal("Type.Parameter", selector._decl.params[1]._tag)
+            assert_nominal(selector._type.rettypes[1], "test.Packet", {"integer"})
+        end
+        local explicit = returned_constructor(ast, "create")
+        assert.equal("Ast.TypeInteger", explicit.exp._nominal_typeargs[1]._tag)
+        local generic = returned_constructor(ast, "generic_create")
+        assert.equal("Type.Parameter", generic._type.params[1]._tag)
+        assert_nominal(generic._type.rettypes[1], "test.Packet", {"T"})
+        local project = toplevel(ast, "Ast.TopLevelFunc", "project")
+        assert.equal("Type.FunctionScheme", project._type._tag)
+        assert.equal(1, #project.typeparams)
+        local arm = project.block.stats[1].arms[1]
+        assert.equal("x", arm.bindings[1].name)
+        assert.equal("integer", types.tostring(arm.bindings[1]._type))
+        assert.equal("Ast.StatReturn", arm.block.stats[1]._tag)
+        assert.equal(arm.bindings[1], arm.block.stats[1].exps[1].var._decl)
+        assert.equal(modtype, ast._declared_type)
+        assert.not_equal(ast._type, modtype)
+        assert.not_equal(types.registry["test.Packet"], ast._declared_registry["test.Packet"])
+        assert.equal(modtype.members.Packet.type, ast._declared_registry["test.Packet"])
+        assert.is_nil(modtype.members.create._decl)
+        assert.is_nil(ast._declared_registry["test.Packet"]._decl)
+    end)
+
+    it("retains ordinary runtime lowering and identical declared module interfaces", function()
+        local analysis, analysis_type, errors = check(true)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        local serialized = types.serialize(analysis_type)
+        local ast, native_type, native_errors = check(false)
+        assert.equal(0, #native_errors, table.concat(native_errors, "\n"))
+        assert.is_nil(ast._analysis_only)
+        assert.is_table(ast._erased_registry)
+        local project = toplevel(ast, "Ast.TopLevelFunc", "project")
+        assert.equal("Type.Function", project._type._tag)
+        assert.equal(0, #project.typeparams)
+        assert.not_equal("x", project.block.stats[1].arms[1].bindings[1].name)
+        assert.equal(serialized, types.serialize(native_type))
+        assert.equal(analysis_type.members.Packet.type.name, native_type.members.Packet.type.name)
+        assert_runtime_ast_erased(project.block)
+    end)
+
+    it("runs the same source diagnostics before choosing the result representation", function()
+        local invalid = source:gsub('x = 1', 'x = "wrong"', 1)
+        local _, _, analysis_errors = check(true, invalid)
+        local _, _, native_errors = check(false, invalid)
+        assert.is_true(#analysis_errors > 0)
+        assert.same(native_errors, analysis_errors)
+    end)
+
+    it("keeps failed analysis entries out of native caches and rechecks their diagnostics", function()
+        h.reset(true)
+        local invalid = source:gsub('x = 1', 'x = "wrong"', 1)
+        local entries = {}
+        local loader = driver.tableloader({ test = invalid }, entries, {}, { analysis_only = true })
+        local ok, result, errors = loader("test")
+        assert.is_true(ok, tostring(result))
+        assert.is_true(#errors > 0)
+        assert.is_true(entries.test.ast._analysis_only)
+        assert.is_true(driver.close_loader(loader))
+        loader = driver.tableloader({}, entries)
+        local native_ok, native_error = loader("test")
+        assert.is_false(native_ok)
+        assert.matches("requires an analysis-only resolver", native_error, 1, true)
+        assert.is_true(driver.close_loader(loader))
+        loader = driver.tableloader({ test = invalid }, entries)
+        local checked, _, native_errors = loader("test")
+        assert.is_true(checked)
+        assert.same(errors, native_errors)
+        assert.is_nil(entries.test.ast._analysis_only)
+        assert.is_true(driver.close_loader(loader))
+    end)
+
+    it("forwards analysis through tableloader and reparses cached analysis for native checking", function()
+        h.reset(true)
+        local entries = {}
+        local loader = driver.tableloader({ test = source }, entries, {},
+            { analysis_only = true, interface = "source" })
+        local ok, result, errors = loader("test")
+        assert.is_true(ok, tostring(result))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.is_true(driver.close_loader(loader))
+        local analyzed = entries.test
+        assert.is_true(analyzed.ast._analysis_only)
+        loader = driver.tableloader({}, entries)
+        local native_ok, native_error = loader("test")
+        assert.is_false(native_ok)
+        assert.matches("requires an analysis-only resolver", native_error, 1, true)
+        assert.is_true(driver.close_loader(loader))
+        loader = driver.tableloader({ test = source }, entries)
+        ok, result, errors = loader("test")
+        assert.is_true(ok, tostring(result))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.is_true(driver.close_loader(loader))
+        assert.not_equal(analyzed, entries.test)
+        assert.is_nil(entries.test.ast._analysis_only)
+        assert.is_table(entries.test.ast._erased_registry)
+    end)
+end)

@@ -3538,6 +3538,7 @@ local function check_source_module(
         end
     end
     local check_options = {
+        analysis_only = context.analysis_only,
         completion = completion_request,
         cache_adapter = context.cache_adapter,
         header_observations = context.header_observations,
@@ -3671,6 +3672,10 @@ function driver.defaultloader(static_deps, options)
         end
         if candidate._analysis_manifest and not context.analysis_only then
             return nil, "cached declared manifest for module '" .. modname ..
+                "' requires an analysis-only resolver"
+        end
+        if candidate.ast and candidate.ast._analysis_only and not context.analysis_only then
+            return nil, "cached analysis AST for module '" .. modname ..
                 "' requires an analysis-only resolver"
         end
         for dependency, present in pairs(candidate.deps) do
@@ -4107,10 +4112,14 @@ function driver.defaultloader(static_deps, options)
 
     local function remember_dependency_closure(modname, seen)
         seen = seen or {}
-        if seen[modname] then return end
+        if seen[modname] then return true end
         seen[modname] = true
         local mod = driver.imported[modname]
-        if not mod or mod == CIRCULAR_MARK then return end
+        if not mod or mod == CIRCULAR_MARK then return true end
+        if mod.ast and mod.ast._analysis_only and not context.analysis_only then
+            return nil, "cached analysis AST for module '" .. modname ..
+                "' requires an analysis-only resolver"
+        end
         if mod.ast or mod.kind == "source" or mod.kind == "static" then
             static_deps[modname] = true
             local embedded_provider =
@@ -4123,10 +4132,12 @@ function driver.defaultloader(static_deps, options)
                 if not (embedded_provider and
                         embedded_provider.entries[depname]) then
                     static_deps[depname] = true
-                    remember_dependency_closure(depname, seen)
+                    local retained, retain_error = remember_dependency_closure(depname, seen)
+                    if not retained then return nil, retain_error end
                 end
             end
         end
+        return true
     end
 
     local function remember_direct_dependency(modname)
@@ -4635,8 +4646,8 @@ function driver.defaultloader(static_deps, options)
             return ok, modt, errors, info
         end
 
-        -- Analysis manifests retain the declared source interface. Fresh raw
-        -- entries remain usable by native compiler clients. Only caller-
+        -- Analysis manifests retain the declared source interface. Raw entries
+        -- checked for native compilation remain usable by native clients. Only caller-
         -- certified clean modules are eligible; dirty roots, overrides and
         -- source-first builds always check source again.
         if (not driver.imported[modname] or driver.imported[modname]._analysis_manifest)
@@ -4658,6 +4669,8 @@ function driver.defaultloader(static_deps, options)
            ((not driver.imported[modname].ast and not object_loaded[modname] and
                 (not driver.imported[modname]._analysis_manifest or context.source_first
                     or not context.analysis_only)) or
+            (driver.imported[modname].ast and
+             driver.imported[modname].ast._analysis_only and not context.analysis_only) or
             (dirty_source_requested and
              (driver.imported[modname]._cached_source_entry
                 or driver.imported[modname]._analysis_manifest))) then
@@ -4675,7 +4688,8 @@ function driver.defaultloader(static_deps, options)
         end
         if driver.imported[modname] then
             local mod = driver.imported[modname]
-            remember_dependency_closure(modname)
+            local retained, retain_error = remember_dependency_closure(modname)
+            if not retained then return false, retain_error end
             remember_direct_dependency(modname)
             if mod.kind == "dynamic" or mod.kind == "static" or
                mod.kind == "embedded" or mod.compiled then
@@ -5263,6 +5277,14 @@ function driver.tableloader(modtable, imported, deps, options)
         if imported[modname] == CIRCULAR_MARK then
             imported[modname] = nil
             return false, "circular reference to module"
+        end
+        if imported[modname] and imported[modname].ast and
+           imported[modname].ast._analysis_only and not context.analysis_only then
+            if modtable[modname] == nil then
+                return false, "cached analysis AST for module '" .. modname ..
+                    "' requires an analysis-only resolver"
+            end
+            imported[modname] = nil
         end
         if imported[modname] then
             local mod = imported[modname]
