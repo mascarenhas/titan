@@ -37,7 +37,27 @@
    with no ambient root/CPP/line overrides; production-provider validation.
 5. Commit, push, PR, Linux CI monitor/fix loop; final report with evidence.
 
-Initial focused checks: parser 269 passed; checker/named/generics 99 passed
-before new cases; additional union checker cases pass; types/interface 155 passed;
-all 19 coder-union cases verified across full and focused runs. Canonical full
-validation and independent reviews remain required.
+Completed implementation and independent review:
+
+- Parser, checker, codegen, generic erasure, import schemas, reflection/JSON,
+  regex/process refactors, and both documentation audiences are implemented.
+- Independent compiler and runtime reviews found and resolved constructor
+  builtin-name collisions, generic case/catch projection placement, integer
+  part-index validation, and named omission metadata through generic erasure.
+- Independent stdlib review covered retained wrapper ownership, JSON names and
+  discriminator collisions, GC-stressed recursive round trips, and Lua opacity.
+- Human documentation and agent skills were reviewed separately. The three
+  changed skills passed their structural validator, and the programmer skill's
+  complete union example parsed and typechecked.
+- Focused checks include 269 parser cases, 242 types/interface/union/generic
+  cases, 54 completion/cache cases, 37 imported-interface cases, and the generic
+  omission and incremental-link regressions. The original reflection native
+  compilation failure is resolved.
+- Full-suite attempts identified and corrected old metadata test expectations.
+  Old untracked `titan.a` and `titan/uv.a` were preserved outside the checkout
+  under `/tmp/titan-union-stale-artifacts`; they shadowed the new installation.
+- The complete native standard-library aggregate passed all 460 cases. The
+  final canonical `make test` run is rebuilding the current installation.
+- Work is recorded in small topic commits on the feature branch. Final full
+  validation, PR publication, and Linux CI monitoring remain. GitHub CLI
+  authentication needs renewal (HTTP 401); the maintainer has been notified.
