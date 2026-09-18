@@ -426,9 +426,9 @@ describe("typechecker rehydration of .so-only imports", function()
         assert.equal(2, union.variants.move.index)
         assert.is_nil(union.variants.hidden)
         assert.is_nil(union.functions.hidden)
-        assert.is_false(union.functions.move.paramnames)
+        assert.same({"value"}, union.functions.move.paramnames)
         assert.equal("rhunionpoint.Delta",
-            union.variants.move.payload.fqtn)
+            union.variants.move.parts[1].type.fqtn)
         assert.truthy(types.registry["rhunionpoint.Delta"],
             "variant payload owner should be recovered through the DSO chain")
     end)

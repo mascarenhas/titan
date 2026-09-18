@@ -59,15 +59,10 @@ foreign function uv_process_exit_cb(process: *uv_process_t,
   ffi.lua_settop(L, top)
 end
 
-local record MergedSpawnSlot
-  local child: uv_stdio_t
-  local parent: uv_stdio_t
-end
-
 local union SpawnSlot
   inherit(uv_stdio_t)
   capture(uv_stdio_t)
-  merged(MergedSpawnSlot)
+  merged(child: uv_stdio_t, parent: uv_stdio_t)
 end
 
 local record uv_spawn_config
@@ -124,7 +119,7 @@ local function slot_child(slot: SpawnSlot): uv_stdio_t
   case slot
   when inherit(stream) then return stream
   when capture(stream) then return stream
-  when merged(streams) then return streams.child
+  when merged{child} then return child
   end
 end
 
@@ -132,13 +127,13 @@ local function slot_parent(slot: SpawnSlot): uv_stdio_t?
   case slot
   when inherit() then return nil
   when capture(stream) then return stream
-  when merged(streams) then return streams.parent
+  when merged{parent} then return parent
   end
 end
 
 local function slot_merged_child(slot: SpawnSlot): uv_stdio_t?
   case slot
-  when merged(streams) then return streams.child
+  when merged{child} then return child
   else return nil
   end
 end
@@ -656,9 +651,9 @@ local function discard_slot(candidate: SpawnSlot?,
     return
   when capture(stream) then
     discard_unpublished_stdio(stream)
-  when merged(streams) then
-    discard_unpublished_stdio(streams.child)
-    discard_unpublished_stdio(streams.parent)
+  when merged{child, parent} then
+    discard_unpublished_stdio(child)
+    discard_unpublished_stdio(parent)
   end
 end
 
@@ -759,8 +754,7 @@ local function config_merged_output(state: uv_spawn_config):
   status = ffi.uv_stream_set_blocking(stream_native(child_stream), 1)
   if status < 0 then return status, nil end
   keep = true
-  return 0, SpawnSlot.merged(
-      MergedSpawnSlot.new(child_stream, parent_stream))
+  return 0, SpawnSlot.merged(child_stream, parent_stream)
 end
 
 local function os_spawn_config_new(): uv_spawn_config

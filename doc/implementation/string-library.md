@@ -316,10 +316,10 @@ The private regex AST is a local `RegexNode` union rather than a record with
 an integer kind field. Its variants are `empty`, `literal`, `any`, `class`,
 `sequence`, `choice`, `group`, `repetition`, `backreference`, `word_start`,
 and `word_end`. Scalar alternatives carry their source position directly;
-the others carry the existing private payload records
-(`RegexTextNode`, `RegexChildrenNode`, `RegexGroupNode`,
-`RegexRepeatNode`, or `RegexBackreferenceNode`). Constructors are called
-positionally, including record payloads in parentheses.
+the others declare named payload parts directly: position/text,
+position/children, position/group number/child, position/repetition
+bounds/child, or position/backreference number/nullability. There are no
+intermediate payload records. Constructors supply their parts positionally.
 
 The grammar recognizes complete atoms, escapes, classes, quantifiers, group
 delimiters, alternation, and anchors. Syntax punctuation is written as
@@ -356,12 +356,15 @@ pattern that must follow it, which gives greedy repetition its required
 backtracking behavior. Ordered choice preserves left bias. Whole-expression
 anchors wrap the completed alternation instead of attaching to one branch.
 Position lookup, nullability, backreference validation, projected-size
-accounting, and continuation lowering dispatch through `case`/`when`. Each
-arm is an ordinary block and may bind the payload record. The total compiler
+accounting, and continuation lowering dispatch through `case`/`when`. Position
+lookup binds only the first positional part; the other passes select the
+needed named parts, omitting unused values. Each arm is an ordinary block. The total compiler
 passes list every local `RegexNode` variant, so closed-union control-flow
 analysis proves those cases non-fallthrough without defensive impossible
 `else` errors. Backreference validation deliberately remains a partial case
-whose unmatched variants continue normally.
+whose unmatched variants return the original node. A nullable referenced
+group produces a new backreference variant with its final nullability;
+the validation action passes that returned node to quantifier handling.
 The translated construction follows `pegex.lua` from ta-regex commit
 `857e48682791ba55c98a7dd99c5fc7d71c02597d` and the algorithm in Marcelo
 Oikawa, Roberto Ierusalimschy, and Ana Lucia de Moura, [“Converting regexes to
@@ -374,7 +377,8 @@ constructors and `case` uses span `regex_parser.titan` and
 `regex_compile.titan` through the ordinary shared module namespace. The
 conversion changes no public `Regex`, `RegexMatch`, function signature,
 logical provider key, or Lua API; it is production dogfooding of private
-unions, Array payloads, and cross-contributor nominal visibility.
+unions with several payload parts, selective named case bindings, Array
+payloads, and cross-contributor nominal visibility.
 
 Before construction, the compiler:
 

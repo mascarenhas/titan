@@ -351,8 +351,11 @@ function register_referenced_nominals(
         if ok then ok, err = visit_binders(t.typeparams) end
         if ok then
             for _, variant in ipairs(t.variants or {}) do
-                if not variant.islocal and variant.payload ~= false then
-                    ok, err = visit(variant.payload)
+                if not variant.islocal then
+                    for _, part in ipairs(variant.parts) do
+                        ok, err = visit(part.type)
+                        if not ok then break end
+                    end
                     if not ok then break end
                 end
             end
@@ -464,10 +467,11 @@ function first_local_nominal_type(typ, seen)
             if found then return found end
         end
         for _, variant in ipairs(typ.variants or {}) do
-            if not variant.islocal and variant.payload ~= false then
-                local found =
-                    first_local_nominal_type(variant.payload, seen)
-                if found then return found end
+            if not variant.islocal then
+                for _, part in ipairs(variant.parts) do
+                    local found = first_local_nominal_type(part.type, seen)
+                    if found then return found end
+                end
             end
         end
         for _, func in pairs(typ.functions or {}) do
@@ -791,12 +795,11 @@ function reject_exported_c_ffi_types(modname, modast, errors)
                 end
             elseif tag == "Ast.TopLevelUnion" and not node.islocal then
                 for _, variant in ipairs(node.variants) do
-                    if variant._type and not variant._type.islocal
-                       and variant._type.payload ~= false then
-                        reject_exported_c_ffi_type(
-                            modname, errors,
-                            variant.payload.loc or variant.loc,
-                            variant._type.payload)
+                    if variant._type and not variant._type.islocal then
+                        for i, part in ipairs(variant._type.parts) do
+                            reject_exported_c_ffi_type(
+                                modname, errors, variant.parts[i].loc, part.type)
+                        end
                     end
                 end
             elseif (tag == "Ast.TopLevelMethod" or tag == "Ast.TopLevelStatic")
@@ -846,12 +849,11 @@ function reject_exported_local_nominal_types(modname, modast, errors)
                 end
             elseif tag == "Ast.TopLevelUnion" and not node.islocal then
                 for _, variant in ipairs(node.variants) do
-                    if variant._type and not variant._type.islocal
-                       and variant._type.payload ~= false then
-                        reject_exported_local_nominal_type(
-                            modname, errors,
-                            variant.payload.loc or variant.loc,
-                            variant._type.payload)
+                    if variant._type and not variant._type.islocal then
+                        for i, part in ipairs(variant._type.parts) do
+                            reject_exported_local_nominal_type(
+                                modname, errors, variant.parts[i].loc, part.type)
+                        end
                     end
                 end
             elseif (tag == "Ast.TopLevelMethod" or tag == "Ast.TopLevelStatic")

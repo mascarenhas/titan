@@ -5,18 +5,6 @@ local iteration = import "iteration"
 local lua = import "lua"
 local string = import "string"
 
-record ArrayValue
-  const value: { value }
-end
-
-record ConstArrayValue
-  const value: const { value }
-end
-
-record MapValue
-  const value: { value: value }
-end
-
 record RecordValue
   -- value keeps this borrowed receiver alive.
   local const udata: foreign *Udata
@@ -29,7 +17,8 @@ end
 
 record UnionValue
   const tag: integer
-  const payload: value -- nil for empty variant
+  local const udata: foreign *Udata
+  const n_parts: integer
   -- union value for use as receiver in method calls
   const value: value
   const type: UnionType
@@ -43,66 +32,40 @@ record InterfaceValue
   const type: InterfaceType
 end
 
-record TitanFunctionValue
-  const value: function (...: value): (...: value)
-  const native_entry: foreign *void
-  const lua_entry: foreign function (*lua_State): int
-  const type: FunctionType
-end
-
-record LuaFunctionValue
-  const value: function (...: value): (...: value)
-  const type: LuaFunctionType
-end
-
-record LuaCFunctionValue
-  const value: function (...: value): (...: value)
-  const entry: foreign function (*lua_State): int
-end
-
-record OwnedForeignPointerValue
-  const value: value
-  const payload: foreign *void
-  const size: integer
-  const type: OwnedForeignPointerType
-end
-
-record OwnedForeignArrayValue
-  const value: value
-  const payload: foreign *void
-  const size: integer
-  const count: integer
-  const type: OwnedForeignArrayType
-end
-
-record LuaUserdataValue
-  const value: value
-end
-
-record LuaThreadValue
-  const value: value
-  const thread: foreign *lua_State
-end
-
 union Value
   is_nil()
   is_integer(integer)
   is_float(float)
   is_boolean(boolean)
   is_string(string)
-  is_array(ArrayValue)
-  is_const_array(ConstArrayValue)
-  is_map(MapValue)
+  is_array(value: { value })
+  is_const_array(value: const { value })
+  is_map(value: { value: value })
   is_record(RecordValue)
   is_union(UnionValue)
   is_interface(InterfaceValue)
-  is_titan_function(TitanFunctionValue)
-  is_lua_function(LuaFunctionValue)
-  is_lua_c_function(LuaCFunctionValue)
-  is_owned_foreign_pointer(OwnedForeignPointerValue)
-  is_owned_foreign_array(OwnedForeignArrayValue)
-  is_lua_userdata(LuaUserdataValue)
-  is_lua_thread(LuaThreadValue)
+  is_titan_function(
+    value: function (...: value): (...: value),
+    native_entry: foreign *void,
+    lua_entry: foreign function (*lua_State): int,
+    type: FunctionType)
+  is_lua_function(value: function (...: value): (...: value), type: LuaFunctionType)
+  is_lua_c_function(
+    value: function (...: value): (...: value),
+    entry: foreign function (*lua_State): int)
+  is_owned_foreign_pointer(
+    value: value,
+    payload: foreign *void,
+    size: integer,
+    type: OwnedForeignPointerType)
+  is_owned_foreign_array(
+    value: value,
+    payload: foreign *void,
+    size: integer,
+    count: integer,
+    type: OwnedForeignArrayType)
+  is_lua_userdata(value: value)
+  is_lua_thread(value: value, thread: foreign *lua_State)
   is_raw_pointer(foreign *void)
 end
 
@@ -116,16 +79,6 @@ union ArrayTypeConstness
   is_maybe_const()
 end
 
-record ArrayType
-  const is_const: ArrayTypeConstness
-  const elem_descriptor: Type
-end
-
-record MapType
-  const key_descriptor: Type
-  const value_descriptor: Type
-end
-
 record RecordType
   const name: string
   const fields: const { FieldType }
@@ -134,7 +87,7 @@ record RecordType
 end
 
 record UnionType
-  local const payload_reader: foreign function (*lua_State, *Udata, *TValue): void
+  local const payload_reader: foreign function (*lua_State, *Udata, lua_Integer, *TValue): void
   const name: string
   const variants: const { VariantType }
   const statics: const { StaticFunctionType }
@@ -178,11 +131,16 @@ record StaticFunctionType
   const callable: function (...: value): (...: value)
 end
 
+record VariantPartType
+  const name: string
+  const type: Type
+end
+
 record VariantType
   const name: string
   const tag: integer
-  const type: Type? -- absence means empty variant
-  const callable: function (value): (value)
+  const parts: const { VariantPartType }
+  const callable: function (...: value): (value)
 end
 
 record FunctionType
@@ -190,12 +148,6 @@ record FunctionType
   const vararg_descriptor: Type?
   const return_descriptors: const { Type }
   const flexret_descriptor: Type?
-end
-
-record ForeignFunctionType
-  const param_descriptors: const { Type }
-  const is_vararg: boolean
-  const return_descriptor: Type
 end
 
 record OwnedForeignPointerType
@@ -206,31 +158,9 @@ record OwnedForeignArrayType
   const elem_descriptor: Type
 end
 
-record ForeignIntegerType
-  const spelling: string
-  const is_signed: boolean
-  const rank: integer
-  const bits: integer
-end
-
-record ForeignFloatType
-  const spelling: string
-end
-
 record ForeignNamedType
   const name: string
   local const declarations: {string: Type}
-end
-
-record ForeignPointerType
-  const pointee_descriptor: Type
-  const quals: const { string }
-end
-
-record ForeignArrayType
-  const elem_descriptor: Type
-  const len: value
-  const quals: const { string }
 end
 
 record ForeignStructType
@@ -257,12 +187,6 @@ record ForeignFieldType
   const is_flexible_array: boolean
 end
 
-record ForeignTypedefType
-  const name: string
-  const target_descriptor: Type
-  const quals: const { string }
-end
-
 record LuaFunctionType
   const source: string
   const short_source: string
@@ -281,25 +205,28 @@ union Type
   is_string()
   is_value()
   is_named(NamedType)
-  is_array(ArrayType)
-  is_map(MapType)
+  is_array(is_const: ArrayTypeConstness, elem_descriptor: Type)
+  is_map(key_descriptor: Type, value_descriptor: Type)
   is_record(RecordType)
   is_union(UnionType)
   is_interface(InterfaceType)
   is_option(Type)
   is_function(FunctionType)
-  is_foreign_function(ForeignFunctionType)
+  is_foreign_function(
+    param_descriptors: const { Type },
+    is_vararg: boolean,
+    return_descriptor: Type)
   is_owned_foreign_pointer(OwnedForeignPointerType)
   is_owned_foreign_array(OwnedForeignArrayType)
   is_foreign_void()
   is_foreign_named(ForeignNamedType)
-  is_foreign_integer(ForeignIntegerType)
-  is_foreign_float(ForeignFloatType)
-  is_foreign_pointer(ForeignPointerType)
-  is_foreign_array(ForeignArrayType)
+  is_foreign_integer(spelling: string, is_signed: boolean, rank: integer, bits: integer)
+  is_foreign_float(spelling: string)
+  is_foreign_pointer(pointee_descriptor: Type, quals: const { string })
+  is_foreign_array(elem_descriptor: Type, len: value, quals: const { string })
   is_foreign_struct(ForeignStructType)
   is_foreign_union(ForeignUnionType)
-  is_foreign_typedef(ForeignTypedefType)
+  is_foreign_typedef(name: string, target_descriptor: Type, quals: const { string })
 end
 
 union NominalType
@@ -327,6 +254,15 @@ function RecordValue:set(i: integer, v: value)
   local module: foreign TValue = field.module
   local source: foreign TValue = v
   field.accessor(L, ffi.lmacro_uvalue(module), self.udata, source, 1)
+end
+
+function UnionValue:get(i: integer): value
+  if i < 1 or i > self.n_parts then
+    raise "part index " .. string.tostring(i) .. " out of bounds [1, " .. string.tostring(self.n_parts) .. "]"
+  end
+  local result: foreign TValue = nil
+  self.type.payload_reader(L, self.udata, i, result)
+  return result as value
 end
 
 function InterfaceValue:get(i: integer): value
@@ -401,6 +337,7 @@ local nominal_cache: {string: NominalType} = {}
 local active_membermap: { string: value }? = nil
 local active_statics: { string: value }? = nil
 local active_module: value = nil
+local active_has_fields = false
 local active_payload_reader: value = nil
 local seen_ctypes: { string: Type } = {}
 
@@ -499,11 +436,11 @@ local function init_hydration_env()
     else
       ic = ArrayTypeConstness.is_mutable()
     end
-    return Type.is_array({ is_const = ic, elem_descriptor = elem })
+    return Type.is_array{ is_const = ic, elem_descriptor = elem }
   end
 
   hydration_env["Map"] = function(keys: Type, values: Type): Type
-    return Type.is_map({ key_descriptor = keys, value_descriptor = values })
+    return Type.is_map{ key_descriptor = keys, value_descriptor = values }
   end
 
   hydration_env["Nominal"] = function(fqtn: string): Type
@@ -511,9 +448,13 @@ local function init_hydration_env()
   end
 
   hydration_env["Field"] = function(fqtn: string, name: string, typ: Type, index: integer, isconst: boolean): FieldType
+    local accessor: foreign function (*lua_State, *Udata, *Udata, *TValue, int): void = nil
+    if active_has_fields then
+      accessor = active_membermap[name] as foreign function (*lua_State, *Udata, *Udata, *TValue, int): void
+    end
     return {
       module = active_module,
-      accessor = active_membermap[name] as foreign function (*lua_State, *Udata, *Udata, *TValue, int): void,
+      accessor = accessor,
       name = name,
       index = index,
       type = typ,
@@ -521,11 +462,16 @@ local function init_hydration_env()
     }
   end
 
-  hydration_env["Variant"] = function(fqtn: string, name: string, payload: value, index: integer): VariantType
+  hydration_env["Variant"] = function(fqtn: string, name: string, fields: value, index: integer): VariantType
+    local descriptors = to_array(cast_metadata_optional<|{integer: FieldType}|>(fields))
+    local parts: {VariantPartType} = {}
+    for i = 1, #descriptors do
+      parts[i] = { name = descriptors[i].name, type = descriptors[i].type }
+    end
     return {
       name = name,
       tag = index,
-      type = cast_metadata_optional<|Type|>(payload),
+      parts = parts as const {VariantPartType},
       callable = active_statics[name]
     }
   end
@@ -587,7 +533,7 @@ local function init_hydration_env()
        functions: value, 
        methods: value): Type
     return Type.is_union({
-      payload_reader = active_payload_reader as foreign function (*lua_State, *Udata, *TValue): void,
+      payload_reader = active_payload_reader as foreign function (*lua_State, *Udata, lua_Integer, *TValue): void,
       name = name,
       variants = to_array(cast_metadata_optional<|{integer: VariantType}|>(variants)),
       statics = to_sorted_array(cast_metadata_optional<|{string: StaticFunctionType}|>(functions)),
@@ -614,31 +560,31 @@ local function init_hydration_env()
   end
 
   hydration_env["CInteger"] = function(spelling: string, is_signed: boolean, rank: value, bits: value): Type
-    return Type.is_foreign_integer({
+    return Type.is_foreign_integer{
       spelling = spelling,
       is_signed = is_signed,
       rank = cast_metadata_optional<|integer|>(rank),
       bits = cast_metadata_optional<|integer|>(bits)
-    })
+    }
   end
 
   hydration_env["CFloat"] = function(spelling: string): Type
-    return Type.is_foreign_float({ spelling = spelling })
+    return Type.is_foreign_float{ spelling = spelling }
   end
 
   hydration_env["CPointer"] = function(pointee: Type, quals: value): Type
-    return Type.is_foreign_pointer({
+    return Type.is_foreign_pointer{
       pointee_descriptor = pointee,
       quals = to_array(cast_metadata_optional<|{integer: string}|>(quals))
-    })
+    }
   end
 
   hydration_env["CArray"] = function(elem: Type, len: value, quals: value): Type
-    return Type.is_foreign_array({
+    return Type.is_foreign_array{
       elem_descriptor = elem,
       len = len,
       quals = to_array(cast_metadata_optional<|{integer: string}|>(quals))
-    })
+    }
   end
 
   hydration_env["CNamed"] = function(name: string): Type
@@ -696,21 +642,21 @@ local function init_hydration_env()
   end
 
   hydration_env["CTypedef"] = function(name: string, target: Type, quals: value): Type
-    local t = Type.is_foreign_typedef({
+    local t = Type.is_foreign_typedef{
       name = name,
       target_descriptor = target,
       quals = to_array(cast_metadata_optional<|{integer: string}|>(quals))
-    })
+    }
     seen_ctypes["typedef@" .. name] = t
     return t
   end
 
   hydration_env["CFunction"] = function(params: value, ret: Type, vararg: boolean): Type
-    return Type.is_foreign_function({
+    return Type.is_foreign_function{
       param_descriptors = to_array(cast_metadata_optional<|{integer: Type}|>(params)),
       is_vararg = vararg,
       return_descriptor = ret
-    })
+    }
   end
 
   -- Parameters erase at the outer nominal boundary. Generic arguments and
@@ -737,6 +683,7 @@ local function hydrate_type(typestr: string, mt: {value: value}?): Type
   local previous_membermap? = active_membermap
   local previous_statics? = active_statics
   local previous_module = active_module
+  local previous_has_fields = active_has_fields
   local previous_payload_reader = active_payload_reader
   local previous_ctypes = seen_ctypes
   seen_ctypes = {}
@@ -744,11 +691,14 @@ local function hydrate_type(typestr: string, mt: {value: value}?): Type
     active_membermap = mt[ffi.TITAN_MT_MEMBERMAP]
     active_statics = mt[ffi.TITAN_MT_STATICS]
     active_module = mt[ffi.TITAN_MT_MOD]
+    local brand: integer = mt[ffi.TITAN_BRAND]
+    active_has_fields = brand == ffi.TITAN_RECORD or brand == ffi.TITAN_INTERFACE
     active_payload_reader = mt[ffi.TITAN_MT_PAYLOAD]
   else
     active_membermap = nil
     active_statics = nil
     active_module = nil
+    active_has_fields = false
     active_payload_reader = nil
   end
   defer do
@@ -756,6 +706,7 @@ local function hydrate_type(typestr: string, mt: {value: value}?): Type
     active_membermap = previous_membermap
     active_statics = previous_statics
     active_module = previous_module
+    active_has_fields = previous_has_fields
     active_payload_reader = previous_payload_reader
   end
   local chunk = lua.load("return " .. typestr, "=descriptor", hydration_env)
@@ -848,10 +799,10 @@ local function inspect_function(v: value): Value
       is_vararg = ar.isvararg ~= 0,
       n_params = ar.nparams as integer
     }
-    return Value.is_lua_function({
+    return Value.is_lua_function{
       value = v as function (...: value): (...: value),
       type = desc
-    })
+    }
   elseif ffi.lmacro_ttisCclosure(tv) ~= 0 then
     local cl: foreign *CClosure = ffi.lmacro_clCvalue(tv)
     if is_titan_closure(cl) then
@@ -869,25 +820,25 @@ local function inspect_function(v: value): Value
       if desc == nil then
         raise "invalid function descriptor for Titan function"
       end
-      return Value.is_titan_function({
+      return Value.is_titan_function{
         value = v as function (...: value): (...: value),
         native_entry = native_entry,
         lua_entry = lua_entry,
         type = desc as FunctionType
-      })
+      }
     else
       local entry: foreign function (*lua_State): int = cl.f
-      return Value.is_lua_c_function({
+      return Value.is_lua_c_function{
         value = v as function (...: value): (...: value),
         entry = entry
-      })
+      }
     end
   elseif ffi.lmacro_ttislcf(tv) ~= 0 then
     local entry: foreign function (*lua_State): int = ffi.lmacro_fvalue(tv)
-    return Value.is_lua_c_function({
+    return Value.is_lua_c_function{
       value = v as function (...: value): (...: value),
       entry = entry
-    })
+    }
   else
     raise "unknown function representation"
   end
@@ -897,11 +848,11 @@ local brand_handlers: {function (value, {value: value}?): (Value)} = {}
 
 local function init_brand_handlers()
   brand_handlers[ffi.TITAN_ARRAY] = function(v: value, mt: {value: value}?): Value
-    return Value.is_array({ value = v as {value} })
+    return Value.is_array{ value = v as {value} }
   end
 
   brand_handlers[ffi.TITAN_CONST_ARRAY] = function(v: value, mt: {value: value}?): Value
-    return Value.is_const_array({ value = v as const {value} })
+    return Value.is_const_array{ value = v as const {value} }
   end
 
   brand_handlers[ffi.TITAN_RECORD] = function(v: value, mt: {value: value}?): Value
@@ -933,11 +884,10 @@ local function init_brand_handlers()
       if tag_val is integer then
         tag = tag_val as integer
       end
-      local payload: foreign TValue = nil
-      desc.payload_reader(L, u, payload)
       return Value.is_union({
         tag = tag,
-        payload = payload as value,
+        udata = u,
+        n_parts = (u.nuvalue as integer) - 1,
         value = v,
         type = desc
       })
@@ -982,20 +932,20 @@ local function init_brand_handlers()
           count = count_val as integer
         end
       end
-      return Value.is_owned_foreign_array({
+      return Value.is_owned_foreign_array{
         value = v,
         payload = payload,
         size = size,
         count = count,
         type = arr_t
-      })
+      }
     when is_owned_foreign_pointer(ptr_t) then
-      return Value.is_owned_foreign_pointer({
+      return Value.is_owned_foreign_pointer{
         value = v,
         payload = payload,
         size = size,
         type = ptr_t
-      })
+      }
     else
       raise "metatable " .. string.tostring(mt) .. " does not describe an owned type"
     end
@@ -1007,18 +957,18 @@ local function inspect_userdata(v: value): Value
   local ud: foreign *Udata = ffi.lmacro_uvalue(tv)
   local mt = ud.metatable
   if mt == nil then
-    return Value.is_lua_userdata({ value = v })
+    return Value.is_lua_userdata{ value = v }
   end
   local mtv: foreign TValue = nil
   ffi.lmacro_sethvalue(L, mtv, mt)
   local mtm: { value: value } = mtv as value
   local brand: integer? = mtm[ffi.TITAN_BRAND]
   if brand == nil then
-    return Value.is_lua_userdata({ value = v })
+    return Value.is_lua_userdata{ value = v }
   end
   local brand_handler? = brand_handlers[brand]
   if brand_handler == nil then
-    return Value.is_lua_userdata({ value = v })
+    return Value.is_lua_userdata{ value = v }
   end
   return brand_handler(v, mtm)
 end
@@ -1053,7 +1003,7 @@ local function init_tag_handlers()
   end
 
   tag_handlers[6] = function(v: value): Value
-    return Value.is_map({ value = v as {value: value} })
+    return Value.is_map{ value = v as {value: value} }
   end
 
   tag_handlers[7] = function(v: value): Value
@@ -1066,7 +1016,7 @@ local function init_tag_handlers()
 
   tag_handlers[9] = function(v: value): Value
     local tv: foreign TValue = v
-    return Value.is_lua_thread({ value = v, thread = ffi.lmacro_thvalue(tv) })
+    return Value.is_lua_thread{ value = v, thread = ffi.lmacro_thvalue(tv) }
   end
 end
 

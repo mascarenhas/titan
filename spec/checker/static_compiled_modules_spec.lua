@@ -515,8 +515,8 @@ end
         assert.equal(2, union.variants.box.index)
         assert.is_nil(union.variants.hidden)
         assert.is_nil(union.functions.hidden)
-        assert.is_false(union.functions.box.paramnames)
-        assert.equal("rich.api.Box", union.variants.box.payload.fqtn)
+        assert.same({"value"}, union.functions.box.paramnames)
+        assert.equal("rich.api.Box", union.variants.box.parts[1].type.fqtn)
         assert.equal(
             types.serialize(provider_type),
             types.serialize(driver.imported["rich.api"].type))

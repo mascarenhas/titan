@@ -563,19 +563,27 @@ details.
 ## Unions from Lua
 
 Each exported union name is served by the module metatable as the same kind of
-read-only static-namespace table. It contains public positional variant
-constructors and public user-declared union functions. Generated constructors
-are canonical `CClosure`s from the ABI-visible public prefix; their hidden
-payload parameter is not named-call metadata.
+read-only static-namespace table. It contains public variant constructors and
+public user-declared union functions. Generated constructors are canonical
+`CClosure`s from the ABI-visible public prefix, with one positional Lua
+argument per payload part. Titan named calls use their declared part names at
+compile time; Lua calls still pass positional arguments through the ordinary
+entry wrapper.
 
 The value returned by a constructor is the union's `Udata` itself. Its
 metatable is protected as `"Titan union <fqtn>"`; `__index` exposes only
 public methods, and `__newindex` rejects every write. Variant names, the
-integer tag, and the optional payload user value are deliberately absent from
+integer tag, and all payload user values are deliberately absent from
 the instance map. Both metamethods re-check the exact union metatable before
 dispatch, so a method extracted with `debug` cannot be borrowed onto another
 record or union. Plain Lua can construct and pass union values but cannot
 inspect or mutate their representation.
+
+The backing userdata has one tag uservalue plus one uservalue per payload
+part. Generated construction and case projection access `Udata.uv` directly:
+`uv[0].uv` is the tag and `uv[i].uv` is the one-based payload part `i`.
+They do not call Lua's uservalue getter or setter API. Collectable part writes
+retain the normal rooting and write-barrier discipline.
 
 Like record metatables, union metatables carry discoverable runtime metadata:
 * `TITAN_BRAND`: lightuserdata key set to integer constant `TITAN_UNION` (4);

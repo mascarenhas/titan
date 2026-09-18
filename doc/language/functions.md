@@ -12,7 +12,7 @@ function expressions** that close over the enclosing function's locals,
 which have their own chapter
 ([anonymous functions and closures](closures.md)). Everything this chapter
 says about parameters, return values and arity applies to every form, and
-to the compiler-synthesized `new` static of each record and the positional
+to the compiler-synthesized `new` static of each record and the
 constructor synthesized for each union variant. An
 [Interface](interfaces.md) contains bodyless method signatures that reuse the
 same parameter, variadic, and return grammar; calls through an Interface obey
@@ -216,8 +216,8 @@ An omitted formal receives the same synthesized `nil` and type check described
 above. Explicit expressions are nevertheless evaluated left to right as
 written, and each named item contributes exactly one value.
 
-Named syntax is available for direct Titan functions, user-declared
-record/union functions, and direct concrete or Interface methods, plus direct
+Named syntax is available for direct Titan functions, record/union functions
+(including generated constructors), and direct concrete or Interface methods, plus direct
 fixed-arity C functions whose
 prototypes publish complete
 parameter names. It is not available through a function value, anonymous
@@ -226,8 +226,8 @@ variadic functions. Bare braces always select this form; write
 `consume({ x = 1 })` to pass one constructor positionally. See
 [Named arguments](named-arguments.md) for the full syntax, eligibility table,
 evaluation order, FFI metadata rules, and Lua boundary.
-Generated union-variant constructors publish no parameter names and are
-always positional-only.
+Generated union-variant constructors publish their payload part names; an
+unnamed single payload uses `value`.
 
 ## Multiple return values
 

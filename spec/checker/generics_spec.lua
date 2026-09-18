@@ -265,12 +265,12 @@ describe("generic declarations and explicit calls", function()
             "test.Maybe", {})
         local read = toplevel(ast, "Ast.TopLevelFunc", "read")
         local case = read.block.stats[1]
-        assert.equal("value", types.tostring(case.arms[1].binding._type))
+        assert.equal("value", types.tostring(case.arms[1].bindings[1]._type))
         local projection = case.arms[1].block.stats[1]
         assert.equal("string", types.tostring(projection.decls[1]._type))
         assert.equal("gradual_view", projection.exps[1]._adjustment.kind)
         assert.equal("value", types.tostring(
-            case._union.variants.present.payload))
+            case._union.variants.present.parts[1].type))
 
         assert_error("expected test.Box<|string|> but found test.Box<|integer|>", [[
             record Box<|T|>

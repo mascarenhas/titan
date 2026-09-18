@@ -1346,18 +1346,40 @@ checkstat_visitor = util.make_visitor({
                 arm._variant_index = variant.index
             end
 
-            if arm.binding then
-                if not variant then
-                    arm.binding._type = types.Invalid()
-                elseif variant.payload == false then
-                    arm.binding._type = types.Invalid()
-                    checker.typeerror(errors, arm.binding.loc,
-                        "empty variant '%s.%s' has no payload to bind",
-                        union.name, variant.name)
-                else
-                    arm.binding._type = variant.payload
+            for index, binding in ipairs(arm.bindings) do
+                local part = variant and variant.parts[index]
+                if variant and arm.named then
+                    part = nil
+                    for _, candidate in ipairs(variant.parts) do
+                        if candidate.name == binding.part then
+                            part = candidate
+                            break
+                        end
+                    end
                 end
-                declare(arm.binding, st, errors)
+                if not variant then
+                    binding._type = types.Invalid()
+                elseif not part then
+                    binding._type = types.Invalid()
+                    if arm.named then
+                        checker.typeerror(errors, binding.loc,
+                            "payload part '%s' not found in variant '%s.%s'",
+                            binding.part, union.name, variant.name)
+                    elseif #variant.parts == 0 then
+                        checker.typeerror(errors, binding.loc,
+                            "empty variant '%s.%s' has no payload to bind",
+                            union.name, variant.name)
+                    else
+                        checker.typeerror(errors, binding.loc,
+                            "variant '%s.%s' has only %d payload parts to bind",
+                            union.name, variant.name, #variant.parts)
+                    end
+                else
+                    binding._type = part.type
+                    binding._part = part
+                    binding._part_index = part.index
+                end
+                declare(binding, st, errors)
             end
 
             local arm_returns = checkstat(arm.block, st, errors)

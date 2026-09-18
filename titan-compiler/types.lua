@@ -22,7 +22,7 @@ local types = typedecl("Type", {
         Record      = {"name", "fields", "functions", "methods", "nfields", "scope", "typeparams"},
         Union       = {"name", "variants", "functions", "methods", "nvariants", "scope", "typeparams"},
         Interface   = {"name", "fields", "methods", "scope", "typeparams"},
-        Variant     = {"fqtn", "name", "payload", "index"},
+        Variant     = {"fqtn", "name", "parts", "index"},
         Nominal     = {"fqtn", "args"},
         Field       = {"fqtn", "name", "type", "index", "isconst"},
         Method      = {"fqtn", "name", "params", "rettypes", "varargtype", "flexrettype", "paramnames", "scope", "typeparams"},
@@ -618,8 +618,11 @@ local function find_c_type(
             if typ.islocal then return nil end
             return visit_type(typ.type, seen)
         elseif tag == "Type.Variant" then
-            if typ.islocal or typ.payload == false then return nil end
-            return visit_type(typ.payload, seen)
+            if typ.islocal then return nil end
+            for _, part in ipairs(typ.parts) do
+                local ctyp = visit_type(part.type, seen)
+                if ctyp then return ctyp end
+            end
         elseif tag == "Type.Method" or tag == "Type.StaticMethod" then
             if typ.islocal then return nil end
             for _, typeparam in ipairs(typ.typeparams or {}) do
@@ -2090,9 +2093,7 @@ type_equals = function(t1, t2, seen)
         return t1.fqtn == t2.fqtn
            and t1.name == t2.name
            and t1.index == t2.index
-           and ((t1.payload == false and t2.payload == false)
-                or (t1.payload ~= false and t2.payload ~= false
-                    and type_equals(t1.payload, t2.payload, seen)))
+           and same_list(t1.parts, t2.parts, seen)
     elseif tag1 == "Type.Union" then
         return t1.name == t2.name
            and t1.nvariants == t2.nvariants
@@ -2454,8 +2455,7 @@ local function rewrite_type(root, policy)
                 rewrite(typ.type), typ.index, typ.isconst)
         elseif tag == "Type.Variant" then
             out = types.Variant(typ.fqtn, typ.name,
-                typ.payload == false and false or rewrite(typ.payload),
-                typ.index)
+                rewrite_list(typ.parts, rewrite), typ.index)
         elseif tag == "Type.Method" or tag == "Type.StaticMethod" then
             local constructor = tag == "Type.Method"
                 and types.Method or types.StaticMethod
@@ -4907,23 +4907,24 @@ function types.validate_union_source_projection(union)
            or constructor.name ~= variant.name
            or constructor.varargtype ~= false
            or constructor.flexrettype ~= false
-           or constructor.paramnames ~= false
+           or type(constructor.paramnames) ~= "table"
            or #constructor.rettypes ~= 1
            or constructor.rettypes[1]._tag ~= "Type.Nominal"
            or constructor.rettypes[1].fqtn ~= union.name then
             return nil, "variant '" .. variant.name ..
                 "' has no matching constructor"
         end
-        if variant.payload == false then
-            if #constructor.params ~= 0 then
-                return nil, "empty variant '" .. variant.name ..
-                    "' has a payload constructor"
-            end
-        elseif #constructor.params ~= 1
-               or not types.equals(
-                   constructor.params[1], variant.payload) then
+        if #constructor.params ~= #variant.parts
+           or #constructor.paramnames ~= #variant.parts then
             return nil, "payload variant '" .. variant.name ..
                 "' has a mismatched constructor"
+        end
+        for index, part in ipairs(variant.parts) do
+            if constructor.paramnames[index] ~= part.name
+               or not types.equals(constructor.params[index], part.type) then
+                return nil, "payload variant '" .. variant.name ..
+                    "' has a mismatched constructor"
+            end
         end
 
         local expected_local =
@@ -5090,8 +5091,7 @@ function types.serialize(t, seen_ctypes)
              tostring(t.isconst) .. ")"
     elseif tag == "Type.Variant" then
         return "Variant('" .. t.fqtn .. "', '" .. t.name .. "', " ..
-            (t.payload == false and "false"
-                or types.serialize(t.payload)) .. ", " ..
+            serialize_type_list(t.parts, seen_ctypes) .. ", " ..
             tostring(t.index) .. ")"
     elseif tag == "Type.Method" or tag == "Type.StaticMethod" then
         local ptypes = {}

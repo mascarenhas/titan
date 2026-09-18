@@ -72,7 +72,7 @@ local schemas = {
         isconst = "boolean", islocal = "boolean?",
     },
     ["Type.Variant"] = {
-        fqtn = "string", name = "string", payload = "maybe_type", index = "integer", islocal = "boolean?",
+        fqtn = "string", name = "string", parts = "types", index = "integer", islocal = "boolean?",
     },
     ["Type.Method"] = {
         fqtn = "string", name = "string", params = "types", rettypes = "types",

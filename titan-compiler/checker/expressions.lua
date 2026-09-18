@@ -99,7 +99,7 @@ checkexp = util.make_visitor({
             node._type = invalid(errors, node.loc,
                 "invalid synthesized union constructor owner '%s'",
                 tostring(node.owner))
-            if node.value then checkexp(node.value, st, errors) end
+            for _, value in ipairs(node.values) do checkexp(value, st, errors) end
             return
         elseif not variant or variant._tag ~= "Type.Variant"
            or variant.fqtn ~= union.name
@@ -107,29 +107,26 @@ checkexp = util.make_visitor({
             node._type = invalid(errors, node.loc,
                 "invalid synthesized variant constructor for union '%s'",
                 union.name)
-            if node.value then checkexp(node.value, st, errors) end
+            for _, value in ipairs(node.values) do checkexp(value, st, errors) end
             return
         end
 
         node._union = union
         node._variant = variant
-        if variant.payload == false then
-            if node.value then
-                checkexp(node.value, st, errors)
-                checker.typeerror(errors, node.loc,
-                    "empty variant '%s.%s' cannot receive a payload",
-                    union.name, variant.name)
-            end
-        elseif not node.value then
+        if #node.values ~= #variant.parts then
             checker.typeerror(errors, node.loc,
-                "payload variant '%s.%s' is missing its synthesized value",
+                "variant '%s.%s' has mismatched synthesized payload values",
                 union.name, variant.name)
-        else
-            checkexp(node.value, st, errors, variant.payload)
-            node.value = coerce_and_check(
-                node.value, variant.payload,
-                "payload of variant " .. variant.name,
-                errors, node.loc)
+        end
+        for index, value in ipairs(node.values) do
+            local part = variant.parts[index]
+            checkexp(value, st, errors, part and part.type)
+            if part then
+                node.values[index] = coerce_and_check(
+                    value, part.type,
+                    "part " .. part.name .. " of variant " .. variant.name,
+                    errors, value.loc)
+            end
         end
         node._type = types.Nominal(
             union.name, generic_parameter_arguments(union))

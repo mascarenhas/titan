@@ -97,9 +97,25 @@ local errors = {
 
    TypeUnionVariant = "Expected a union variant payload type.",
 
+   NameVariantPayload = "Expected a union variant payload name after ','.",
+
+   ColonVariantPayload = "Expected ':' after the union variant payload name.",
+
    LParenVariant = "Expected '(' after the variant name.",
 
    RParenVariant = "Expected ')' after the variant payload or binding.",
+
+   RParenVariantPayload = "Expected ')' after the single unnamed variant payload type.",
+
+   LParenCaseVariant = "Expected '(' or '{' after the case variant name.",
+
+   RCurlyCaseVariant = "Expected '}' after the named case bindings.",
+
+   NameCaseBinding = "Expected a local variable name in the case binding list.",
+
+   NameCasePart = "Expected a variant payload name after '=' in a named case binding.",
+
+   DuplicateCasePart = "A named case binding cannot reference the same payload part twice.",
 
    ForeignReturnColon = "Expected ':' before the foreign function result type.",
 

@@ -65,7 +65,7 @@ use the chapters below for the normative language reference.
 | [Flexible returns](flexible-returns.md) | Runtime-sized homogeneous result tails, finite option projection, open sinks, contextual calls through `value`, surplus adjustment, and directional callable adjustment. |
 | [Spread expressions](spread-expressions.md) | Tail-only expansion of whole or closed-range Array, integer-Map, and variadic subjects; exact subject rules, once-only evaluation, finite optional projections, open sinks, metamethods, and capacity limits. |
 | [Records](records.md) | Nominal record types, constructors, fields, methods, record functions, and records as seen from Lua. |
-| [Unions](unions.md) | Nominal tagged unions, positional variant constructors, full-block `when` arms, optional case coverage with closed-union control-flow proof, payload binding, and Lua visibility. |
+| [Unions](unions.md) | Nominal tagged unions with named payload parts, positional and named constructors and case bindings, full-block `when` arms, optional coverage with closed-union control-flow proof, and Lua visibility. |
 | [Arrays and maps](arrays-maps.md) | Mutable and const-qualified positive-only, holed Arrays with deterministic highest-present length and distinct canonical Lua userdata tags; ordinary Maps, positional integer-Map construction, metamethod-aware integer-Map length, conversions, and performance. |
 | [Modules](modules.md) | Logical modules, `import`, visibility, module variables, initialization, and the compilation model (shared libraries, executables, search paths). |
 | [Visibility through explicit source imports](source-import-visibility.md) | Explicit `.titan` source imports over local declarations, direct-only Titan permission, canonical logical identity, required-source lookup, normalized use-driven C declaration origins, and the public-only ordinary-import/binary/Lua boundary. |
@@ -164,11 +164,11 @@ remains rejected.
   but still have no statement form, so using them is a syntax error.
   `break` *is* supported (and a loop can also be exited with `return`)
   ([statements](statements.md#break-no-goto)).
-* **Union v1 is deliberately small.** A variant carries at most one payload,
-  variants are not first-class types, constructors are positional-only, and
-  the compiler never requires a `case` to be exhaustive. Complete coverage of
-  the statically known closed union can nevertheless prove that a case does
-  not fall through ([unions](unions.md#version-one-boundaries)).
+* **Union variants are not first-class types.** Variants may carry several
+  named payload parts, and construction and matching both accept positional
+  or named forms. A `case` need not be exhaustive; complete coverage of the
+  statically known closed union can nevertheless prove that it does not fall
+  through ([unions](unions.md)).
 
 ### The C FFI
 

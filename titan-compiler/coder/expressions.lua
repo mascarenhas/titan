@@ -812,7 +812,7 @@ end
 
 -- Lower the internal expression synthesized for one union-variant
 -- constructor. The union userdata is rooted immediately; its absolute tag and
--- opaque payload then use ordinary internal TValue slots.
+-- opaque payload parts then use ordinary internal TValue slots.
 function coder._codeunioninit(ctx, node, target)
     local union = assert(node._union)
     local variant = assert(node._variant)
@@ -838,33 +838,30 @@ function coder._codeunioninit(ctx, node, target)
             CTMP = ctmp,
             TMPNAME = tmpname,
             TMPSLOT = tmpslot,
-            NUSERVALUES = variant.payload == false and "1" or "2",
+            NUSERVALUES = c_integer_literal(#variant.parts + 1),
             META = c_integer_literal(type2metatable(ctx, node._type)),
             TAG = c_integer_literal(variant.index),
         }),
     }
 
-    if variant.payload ~= false then
-        assert(node.value and node.value ~= false,
-            "payload variant initializer has no value")
-        local cstats, cexp = codeexp(ctx, node.value)
-        local payloadslot = "&" .. tmpname .. "->uv[1].uv"
+    assert(#node.values == #variant.parts,
+        "union initializer payload count differs from variant")
+    for i, part in ipairs(variant.parts) do
+        local cstats, cexp = codeexp(ctx, node.values[i])
+        local payloadslot = "&" .. tmpname .. "->uv[" .. i .. "].uv"
         table.insert(stats, render([[
             $CSTATS
             $SETSLOT
             $BARRIER
         ]], {
             CSTATS = cstats,
-            SETSLOT = setslot(variant.payload, payloadslot, cexp),
-            BARRIER = types.is_gc(variant.payload)
+            SETSLOT = setslot(part.type, payloadslot, cexp),
+            BARRIER = types.is_gc(part.type)
                 and render("luaC_barrierback(L, obj2gco($UNION), $SLOT);", {
                     UNION = tmpname,
                     SLOT = payloadslot,
                 }) or "",
         }))
-    else
-        assert(node.value == false or node.value == nil,
-            "empty variant initializer unexpectedly has a value")
     end
 
     return table.concat(stats, "\n"), tmpname

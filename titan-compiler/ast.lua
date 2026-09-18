@@ -45,7 +45,7 @@ return typedecl("Ast", {
     },
 
     Union = {
-        UnionVariant = {"loc", "name", "payload"},
+        UnionVariant = {"loc", "name", "parts"},
     },
 
     Interface = {
@@ -74,7 +74,7 @@ return typedecl("Ast", {
     },
 
     Case = {
-        CaseArm         = {"loc", "name", "binding", "block"},
+        CaseArm         = {"loc", "name", "bindings", "block", "named"},
     },
 
     Var = {
@@ -102,7 +102,7 @@ return typedecl("Ast", {
         ExpExtra        = {"loc", "exp", "index", "_type"}, -- index-th (>1) value of call
         ExpFunction     = {"loc", "params", "rettypes", "flexrettype", "block"}, -- anonymous function expression
         ExpMethodRef    = {"loc", "exp", "name"}, -- bound method reference `obj:m` (no call)
-        ExpUnionInit    = {"loc", "owner", "variant", "value"}, -- synthesized union constructor body
+        ExpUnionInit    = {"loc", "owner", "variant", "values"}, -- synthesized union constructor body
         ExpDots         = {"loc"},          -- bare `...`
         ExpDotsIndex    = {"loc", "exp"},   -- `...[e]` (checker sets _nilfill, _type)
         ExpDotsLen      = {"loc"},          -- explicit `#...`

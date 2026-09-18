@@ -24,47 +24,18 @@ local REGEX_BELL_BYTE = "\7"
 local REGEX_ESCAPE_BYTE = "\27"
 local REGEX_WORD_BYTE_FLAGS: {integer: boolean} = {}
 
-local record RegexTextNode
-  position: integer
-  text: string
-end
-
-local record RegexChildrenNode
-  position: integer
-  children: {RegexNode}
-end
-
-local record RegexGroupNode
-  position: integer
-  number: integer
-  child: RegexNode
-end
-
-local record RegexRepeatNode
-  position: integer
-  minimum: integer
-  maximum: integer
-  child: RegexNode
-end
-
-local record RegexBackreferenceNode
-  position: integer
-  number: integer
-  nullable: boolean
-end
-
 local union RegexNode
-  empty(integer)
-  literal(RegexTextNode)
-  any(integer)
-  class(RegexTextNode)
-  sequence(RegexChildrenNode)
-  choice(RegexChildrenNode)
-  group(RegexGroupNode)
-  repetition(RegexRepeatNode)
-  backreference(RegexBackreferenceNode)
-  word_start(integer)
-  word_end(integer)
+  empty(position: integer)
+  literal(position: integer, text: string)
+  any(position: integer)
+  class(position: integer, text: string)
+  sequence(position: integer, children: {RegexNode})
+  choice(position: integer, children: {RegexNode})
+  group(position: integer, number: integer, child: RegexNode)
+  repetition(position: integer, minimum: integer, maximum: integer, child: RegexNode)
+  backreference(position: integer, number: integer, nullable: boolean)
+  word_start(position: integer)
+  word_end(position: integer)
 end
 
 local record ParsedRegex
@@ -112,22 +83,22 @@ local function RegexNode:position(): integer
   case self
   when empty(position) then
     return position
-  when literal(node) then
-    return node.position
+  when literal(position) then
+    return position
   when any(position) then
     return position
-  when class(node) then
-    return node.position
-  when sequence(node) then
-    return node.position
-  when choice(node) then
-    return node.position
-  when group(node) then
-    return node.position
-  when repetition(node) then
-    return node.position
-  when backreference(node) then
-    return node.position
+  when class(position) then
+    return position
+  when sequence(position) then
+    return position
+  when choice(position) then
+    return position
+  when group(position) then
+    return position
+  when repetition(position) then
+    return position
+  when backreference(position) then
+    return position
   when word_start(position) then
     return position
   when word_end(position) then
@@ -140,20 +111,20 @@ local function regex_empty(position: integer): RegexNode
 end
 
 local function regex_literal(position: integer, text: string): RegexNode
-  return RegexNode.literal(RegexTextNode.new(position, text))
+  return RegexNode.literal(position, text)
 end
 
 local function regex_sequence(position: integer,
                               children: {RegexNode}): RegexNode
   if #children == 0 then return regex_empty(position) end
   if #children == 1 then return children[1] end
-  return RegexNode.sequence(RegexChildrenNode.new(position, children))
+  return RegexNode.sequence(position, children)
 end
 
 local function regex_choice(position: integer,
                             children: {RegexNode}): RegexNode
   if #children == 1 then return children[1] end
-  return RegexNode.choice(RegexChildrenNode.new(position, children))
+  return RegexNode.choice(position, children)
 end
 
 local function regex_nullable(node: RegexNode): boolean
@@ -166,26 +137,26 @@ local function regex_nullable(node: RegexNode): boolean
     return false
   when class() then
     return false
-  when sequence(sequence) then
+  when sequence{children} then
     local index = 1
-    while index <= #sequence.children do
-      if not regex_nullable(sequence.children[index]) then return false end
+    while index <= #children do
+      if not regex_nullable(children[index]) then return false end
       index = index + 1
     end
     return true
-  when choice(choice) then
+  when choice{children} then
     local index = 1
-    while index <= #choice.children do
-      if regex_nullable(choice.children[index]) then return true end
+    while index <= #children do
+      if regex_nullable(children[index]) then return true end
       index = index + 1
     end
     return false
-  when group(group) then
-    return regex_nullable(group.child)
-  when repetition(repetition) then
-    return repetition.minimum == 0 or regex_nullable(repetition.child)
-  when backreference(backreference) then
-    return backreference.nullable
+  when group{child} then
+    return regex_nullable(child)
+  when repetition{minimum, child} then
+    return minimum == 0 or regex_nullable(child)
+  when backreference{nullable} then
+    return nullable
   when word_start() then
     return true
   when word_end() then
@@ -454,7 +425,7 @@ local function regex_class_node(
     if admitted then bytes = bytes .. candidate end
     all_position = all_position + 1
   end
-  return RegexNode.class(RegexTextNode.new(position, bytes))
+  return RegexNode.class(position, bytes)
 end
 
 local function regex_any_node(position: integer): RegexNode
@@ -463,8 +434,7 @@ end
 
 local function regex_builtin_node(position: integer,
                                   code: string): RegexNode
-  return RegexNode.class(
-    RegexTextNode.new(position, regex_builtin_bytes(code)))
+  return RegexNode.class(position, regex_builtin_bytes(code))
 end
 
 local function regex_boundary_node(position: integer,
@@ -484,8 +454,7 @@ local function regex_backreference_node(position: integer,
                                         digit: string): RegexNode
   local digit_position: integer? =
     find(REGEX_DIGIT_BYTES, digit, 1)
-  return RegexNode.backreference(RegexBackreferenceNode.new(
-    position, (digit_position as integer) - 1, false))
+  return RegexNode.backreference(position, (digit_position as integer) - 1, false)
 end
 
 local function regex_decimal(source: string, expression: string,
@@ -559,8 +528,8 @@ local function regex_apply_quantifier(
       "unbounded repetition operand may match the empty string",
       state.source, quantifier.position)
   end
-  return RegexNode.repetition(RegexRepeatNode.new(
-    quantifier.position, quantifier.minimum, quantifier.maximum, node))
+  return RegexNode.repetition(
+    quantifier.position, quantifier.minimum, quantifier.maximum, node)
 end
 
 local function regex_current_frame(
@@ -641,27 +610,27 @@ local function regex_parse_alternative(
 end
 
 local function regex_validate_backreference(
-    node: RegexNode, state: RegexParseState)
+    node: RegexNode, state: RegexParseState): RegexNode
   case node
-  when backreference(backreference) then
-    if not state.closed_groups[backreference.number] then
+  when backreference{position, number} then
+    if not state.closed_groups[number] then
       raise_regex_diagnostic(
         "invalid_backreference",
         "backreference must name a previously closed group",
-        state.source, backreference.position)
+        state.source, position)
     end
-    if state.nullable_groups[backreference.number] then
-      backreference.nullable = true
+    if state.nullable_groups[number] then
+      return RegexNode.backreference(position, number, true)
     end
   end
+  return node
 end
 
 local function regex_parse_atom_marker(
     _subject: string, _after: integer,
     node: RegexNode, state: RegexParseState):
     (boolean, RegexNode)
-  regex_validate_backreference(node, state)
-  return true, node
+  return true, regex_validate_backreference(node, state)
 end
 
 local function regex_parse_atom(
@@ -697,8 +666,7 @@ local function regex_parse_close_group(
     state.closed_groups[frame.group_index] = true
     state.nullable_groups[frame.group_index] =
       regex_nullable(child)
-    node = RegexNode.group(RegexGroupNode.new(
-      frame.group_position, frame.group_index, child))
+    node = RegexNode.group(frame.group_position, frame.group_index, child)
   end
   regex_append_node(
     state, regex_apply_quantifier(node, quantifier, state))

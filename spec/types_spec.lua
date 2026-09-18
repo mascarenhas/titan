@@ -1941,20 +1941,25 @@ describe("Titan types", function()
     function()
         local fqtn = "sample.Message"
         local result = types.Nominal(fqtn)
-        local quit = types.Variant(fqtn, "quit", false, 0)
-        local hidden = types.Variant(fqtn, "hidden", types.Integer(), 1)
+        local quit = types.Variant(fqtn, "quit", {}, 0)
+        local hidden = types.Variant(fqtn, "hidden", {
+            types.Field(fqtn, "value", types.Integer(), 1, false),
+        }, 1)
         hidden.islocal = true
-        local write = types.Variant(fqtn, "write", types.String(), 2)
+        local write = types.Variant(fqtn, "write", {
+            types.Field(fqtn, "value", types.String(), 1, false),
+            types.Field(fqtn, "end", types.Option(types.Integer()), 2, false),
+        }, 2)
 
         local quit_constructor = types.StaticMethod(
-            fqtn, "quit", {}, {result}, false, false, false)
+            fqtn, "quit", {}, {result}, false, false, {})
         local hidden_constructor = types.StaticMethod(
             fqtn, "hidden", {types.Integer()}, {result},
-            false, false, false)
+            false, false, {"value"})
         hidden_constructor.islocal = true
         local write_constructor = types.StaticMethod(
-            fqtn, "write", {types.String()}, {result},
-            false, false, false)
+            fqtn, "write", {types.String(), types.Option(types.Integer())}, {result},
+            false, false, {"value", "end"})
         local inspect = types.Method(
             fqtn, "inspect", {}, {types.String()}, false, false, {})
         local private = types.Method(
@@ -1998,10 +2003,14 @@ describe("Titan types", function()
         assert.is_nil(rebuilt.variants.hidden)
         assert.is_nil(rebuilt.functions.hidden)
         assert.is_nil(rebuilt.methods.private)
-        assert.is_false(rebuilt.functions.quit.paramnames)
-        assert.is_false(rebuilt.functions.write.paramnames)
+        assert.same({}, rebuilt.functions.quit.paramnames)
+        assert.same({"value", "end"}, rebuilt.functions.write.paramnames)
         assert.truthy(types.equals(types.String(),
-            rebuilt.variants.write.payload))
+            rebuilt.variants.write.parts[1].type))
+        assert.equal("end", rebuilt.variants.write.parts[2].name)
+        assert.equal(2, rebuilt.variants.write.parts[2].index)
+        assert.truthy(types.equals(types.Option(types.Integer()),
+            rebuilt.variants.write.parts[2].type))
         assert.truthy(types.equals(rebuilt, rebuilt_again))
         rebuilt_again.nvariants = 4
         assert.falsy(types.equals(rebuilt, rebuilt_again))
@@ -2012,21 +2021,27 @@ describe("Titan types", function()
 
     it("distinguishes an empty union variant from a nil payload", function()
         local fqtn = "sample.Maybe"
-        local empty = types.Variant(fqtn, "empty", false, 0)
-        local explicit_nil = types.Variant(fqtn, "nil_value", types.Nil(), 1)
+        local empty = types.Variant(fqtn, "empty", {}, 0)
+        local explicit_nil = types.Variant(fqtn, "nil_value", {
+            types.Field(fqtn, "value", types.Nil(), 1, false),
+        }, 1)
         local rebuilt = assert(load("return " .. types.serialize(types.Union(
             fqtn, {empty, explicit_nil}, {}, {}, 2)),
             "t", "t", types))()
 
-        assert.is_false(rebuilt.variants.empty.payload)
-        assert.equal("Type.Nil", rebuilt.variants.nil_value.payload._tag)
+        assert.same({}, rebuilt.variants.empty.parts)
+        assert.equal("Type.Nil", rebuilt.variants.nil_value.parts[1].type._tag)
     end)
 
     it("keeps variant descriptors out of value type relations", function()
         local first = types.Variant(
-            "sample.Message", "write", types.String(), 0)
+            "sample.Message", "write", {
+                types.Field("sample.Message", "value", types.String(), 1, false),
+            }, 0)
         local second = types.Variant(
-            "sample.Message", "write", types.String(), 0)
+            "sample.Message", "write", {
+                types.Field("sample.Message", "value", types.String(), 1, false),
+            }, 0)
         local value = types.Value()
 
         assert.truthy(types.equals(first, second),
@@ -2043,6 +2058,32 @@ describe("Titan types", function()
         assert.falsy(types.has_tvalue_representation(first))
     end)
 
+    it("rewrites every generic payload part and compares their ordered names", function()
+        local fqtn = "sample.Pair"
+        local scope = types.GenericScope(
+            "sample", fqtn, false, "owner", "union")
+        local parameter = types.Parameter(scope, 1, "T", false)
+        local variant = types.Variant(fqtn, "pair", {
+            types.Field(fqtn, "first", types.Integer(), 1, false),
+            types.Field(fqtn, "second", types.Array(parameter, false), 2, false),
+        }, 0)
+        assert.truthy(types.contains_generic(variant))
+        local applied = types.substitute(variant, scope, {types.String()})
+        assert.falsy(types.contains_generic(applied))
+        assert.equal("second", applied.parts[2].name)
+        assert.equal(2, applied.parts[2].index)
+        assert.truthy(types.equals(types.Array(types.String(), false),
+            applied.parts[2].type))
+        local erased = types.erase(variant)
+        assert.truthy(types.equals(types.Array(types.Value(), false),
+            erased.parts[2].type))
+        local rebuilt = assert(load(
+            "return " .. types.serialize(applied), "parts", "t", types))()
+        assert.truthy(types.equals(applied, rebuilt))
+        rebuilt.parts[2].name = "renamed"
+        assert.falsy(types.equals(applied, rebuilt))
+    end)
+
     it("rejects malformed source-union projections", function()
         local invalid, invalid_error =
             types.validate_union_source_projection(types.Integer())
@@ -2052,11 +2093,14 @@ describe("Titan types", function()
         local function source_union(payload)
             local fqtn = "sample.Source"
             local variant = types.Variant(
-                fqtn, "only", payload, 0)
+                fqtn, "only", payload == false and {} or {
+                    types.Field(fqtn, "value", payload, 1, false),
+                }, 0)
             local constructor = types.StaticMethod(
                 fqtn, "only",
                 payload == false and {} or {payload},
-                {types.Nominal(fqtn)}, false, false, false)
+                {types.Nominal(fqtn)}, false, false,
+                payload == false and {} or {"value"})
             return types.Union(
                 fqtn, {variant}, {only = constructor}, {}, 1),
                 variant, constructor
@@ -2070,7 +2114,7 @@ describe("Titan types", function()
                 end,
             },
             {
-                pattern = "empty variant 'only' has a payload constructor",
+                pattern = "payload variant 'only' has a mismatched constructor",
                 mutate = function(_, _, constructor)
                     constructor.params = {types.Integer()}
                 end,
@@ -3627,13 +3671,15 @@ describe("Titan types", function()
             local result_t = types.Parameter(
                 result_scope, 1, "T", false)
             local ok_variant = types.Variant(
-                "sample.Result", "ok", result_t, 0)
+                "sample.Result", "ok", {
+                    types.Field("sample.Result", "value", result_t, 1, false),
+                }, 0)
             local result = types.Union("sample.Result", {ok_variant}, {
                 ok = types.StaticMethod("sample.Result", "ok", {
                     result_t,
                 }, {
                     types.Nominal("sample.Result", {result_t}),
-                }, false, false, false),
+                }, false, false, {"value"}),
             }, {}, 1, result_scope, {
                 types.TypeParameter("T", false),
             })

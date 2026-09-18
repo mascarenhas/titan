@@ -1648,6 +1648,76 @@ end
     end)
 
     describe("can parse case statements", function()
+        it("retains ordered positional prefixes and named aliases", function()
+            assert_statements_ast([[
+                case message
+                when item(first, second) then use(first, second)
+                when item(first) then use(first)
+                when item{ second; alias = end, first } then use(alias)
+                when item{} then stop()
+                end
+            ]], {{
+                _tag = "Ast.StatCase",
+                arms = {
+                    { named = false, bindings = {
+                        { name = "first", type = false },
+                        { name = "second", type = false },
+                    } },
+                    { named = false, bindings = {{ name = "first" }} },
+                    { named = true, bindings = {
+                        { name = "second", part = "second" },
+                        { name = "alias", part = "end" },
+                        { name = "first", part = "first" },
+                    } },
+                    { named = true, bindings = {} },
+                },
+            }})
+        end)
+
+        it("accepts optional separators between named case bindings", function()
+            assert_statements_ast("case x when item{ one two alias = end; } then end", {{
+                arms = {{ bindings = {
+                    { name = "one", part = "one" },
+                    { name = "two", part = "two" },
+                    { name = "alias", part = "end" },
+                } }},
+            }})
+        end)
+
+        it("requires aliases for keyword parts and labels malformed bindings", function()
+            local cases = {
+                { "item{end}", "RCurlyCaseVariant" },
+                { "item{end = first}", "RCurlyCaseVariant" },
+                { "item{alias = }", "NameCasePart" },
+                { "item{alias", "RCurlyCaseVariant" },
+                { "item{one,,two}", "RCurlyCaseVariant" },
+                { "item(first,)", "NameCaseBinding" },
+                { "item(first end)", "RParenVariant" },
+                { "item(end)", "NameCaseBinding" },
+                { "item", "LParenCaseVariant" },
+            }
+            for _, test in ipairs(cases) do
+                assert_statements_syntax_error(
+                    "case x when " .. test[1] .. " then end", test[2])
+            end
+        end)
+
+        it("rejects duplicate part references even when aliases differ", function()
+            for _, bindings in ipairs({ "one, one", "one alias = one",
+                                         "a = end; b = end" }) do
+                assert_statements_syntax_error(
+                    "case x when item{" .. bindings .. "} then end", "DuplicateCasePart")
+            end
+            local tree, err = parser.parse("duplicate.titan", [[
+function f(x: value)
+  case x when item{ first, alias = first } then end
+end]])
+            assert.is_false(tree)
+            assert.are.equal("DuplicateCasePart", err.label)
+            assert.are.equal(2, err.loc.line)
+            assert.are.equal(36, err.loc.col)
+        end)
+
         it("parses one or more when arms, bindings, and else", function()
             assert_statements_ast([[
                 case msg
@@ -1669,18 +1739,20 @@ end
                         {
                             _tag = "Ast.CaseArm",
                             name = "quit",
-                            binding = false,
+                            bindings = {},
+                            named = false,
                             block = { _tag = "Ast.StatBlock" },
                         },
                         {
                             _tag = "Ast.CaseArm",
                             name = "move",
-                            binding = {
+                            bindings = {{
                                 _tag = "Ast.Decl",
                                 name = "delta",
                                 type = false,
                                 option = false,
-                            },
+                            }},
+                            named = false,
                             block = { _tag = "Ast.StatBlock" },
                         },
                     },
@@ -2708,21 +2780,20 @@ end
                     {
                         _tag = "Ast.UnionVariant",
                         name = "quit",
-                        payload = false,
+                        parts = {},
                     },
                     {
                         _tag = "Ast.UnionVariant",
                         name = "move",
-                        payload = {
-                            _tag = "Ast.TypeName",
-                            name = "Message",
-                        },
+                        parts = {{ name = "value", type = {
+                            _tag = "Ast.TypeName", name = "Message",
+                        } }},
                     },
                     {
                         _tag = "Ast.UnionVariant",
                         islocal = true,
                         name = "nil_payload",
-                        payload = { _tag = "Ast.TypeNil" },
+                        parts = {{ name = "value", type = { _tag = "Ast.TypeNil" } }},
                     },
                 },
             },
@@ -2741,7 +2812,7 @@ end
                                 {
                                     _tag = "Ast.ExpUnionInit",
                                     owner = "Message",
-                                    value = false,
+                                    values = {},
                                 },
                             },
                         },
@@ -2755,7 +2826,7 @@ end
                 params = {
                     {
                         _tag = "Ast.Decl",
-                        name = "__union_payload",
+                        name = "value",
                         type = {
                             _tag = "Ast.TypeName",
                             name = "Message",
@@ -2771,13 +2842,13 @@ end
                                 {
                                     _tag = "Ast.ExpUnionInit",
                                     owner = "Message",
-                                    value = {
+                                    values = {{
                                         _tag = "Ast.ExpVar",
                                         var = {
                                             _tag = "Ast.VarName",
-                                            name = "__union_payload",
+                                            name = "value",
                                         },
-                                    },
+                                    }},
                                 },
                             },
                         },
@@ -2805,6 +2876,85 @@ end
             local constructor = parsed[i + 1]
             assert.is_true(constructor._union_constructor)
             assert.are.equal(parsed[1].variants[i], constructor._union_variant)
+        end
+    end)
+
+    it("parses named union parts and synthesizes matching constructor arguments", function()
+        local tree = assert_parses_successfuly([[
+            union Packet<|T|>
+                data(item: T, end: integer, optional: string?)
+                empty()
+            end
+        ]])
+        local parts = tree[1].variants[1].parts
+        assert.are.equal(3, #parts)
+        assert_is_subset({
+            { name = "item", type = { _tag = "Ast.TypeName", name = "T" } },
+            { name = "end", type = { _tag = "Ast.TypeInteger" } },
+            { name = "optional", type = { _tag = "Ast.TypeOption" } },
+        }, parts)
+        local constructor = tree[2]
+        assert.are.equal(3, #constructor.params)
+        local values = constructor.block.stats[1].exps[1].values
+        for i, part in ipairs(parts) do
+            assert.are.equal(part.name, constructor.params[i].name)
+            assert.are.equal(part.type, constructor.params[i].type)
+            assert.are.equal(part.name, values[i].var.name)
+            assert.are.equal(part._name_loc, constructor.params[i]._name_loc)
+        end
+        assert.are.equal(0, #tree[1].variants[2].parts)
+    end)
+
+    it("distinguishes named parts from every single-type payload prefix", function()
+        local tree = assert_parses_successfuly([[
+            union Alternatives
+                named(nil: nil, function: function(integer): (integer), local: string)
+                scalar(integer)
+                nil_value(nil)
+                nominal(Item)
+                qualified(module.Item)
+                array({integer})
+                map({string: integer})
+                grouped((integer))
+                callable(function(integer, string): (integer, string))
+                c_pointer(foreign *int)
+                owned_pointer(owned *int)
+                optional(string?)
+                local()
+                end()
+                local local()
+            end
+        ]])
+        local variants = tree[1].variants
+        assert.are.equal(15, #variants)
+        assert.are.equal("nil", variants[1].parts[1].name)
+        assert.are.equal("function", variants[1].parts[2].name)
+        assert.are.equal("local", variants[1].parts[3].name)
+        for i = 2, 12 do
+            assert.are.equal(1, #variants[i].parts)
+            assert.are.equal("value", variants[i].parts[1].name)
+        end
+        assert.are.equal("local", variants[13].name)
+        assert.are.equal("end", variants[14].name)
+        assert.is_true(variants[15].islocal)
+    end)
+
+    it("labels malformed union payload lists and forbids flexible tails", function()
+        local cases = {
+            { "item", "LParenVariant" },
+            { "item(a:)", "TypeUnionVariant" },
+            { "item(a: integer,)", "NameVariantPayload" },
+            { "item(a: integer, b string)", "ColonVariantPayload" },
+            { "item(a: integer, b:)", "TypeUnionVariant" },
+            { "item(a: integer", "RParenVariant" },
+            { "item(integer", "RParenVariantPayload" },
+            { "item(integer, string)", "RParenVariantPayload" },
+            { "item(a: integer; b: string)", "RParenVariant" },
+            { "item(...: integer)", "TypeUnionVariant" },
+            { "item(a: integer, ...: string)", "NameVariantPayload" },
+        }
+        for _, test in ipairs(cases) do
+            assert_program_syntax_error("union U " .. test[1] .. " end", test[2])
         end
     end)
 
@@ -3361,7 +3511,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
         assert.same({filename="labels.titan",line=1,col=14},p[1].variants[1]._name_loc)
         local arm=p[3].block.stats[1].arms[1]
         assert.same({filename="labels.titan",line=2,col=35},arm._name_loc)
-        assert.same({filename="labels.titan",line=2,col=40},arm.binding._name_loc)
+        assert.same({filename="labels.titan",line=2,col=40},arm.bindings[1]._name_loc)
     end)
 
     describe("reports focused generic syntax errors", function()
@@ -3443,7 +3593,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
             {"type Alias =","TypeTypeAlias"},
             {"record","NameRecord"},
             {"record R x: integer","EndRecord"},
-            {"union U A(integer","RParenVariant"},
+            {"union U A(integer","RParenVariantPayload"},
             {"foreign function f(x) end","ParamSemicolon"},
             {"foreign type Callback = function(int) int","ForeignReturnColon"},
             {"local x: {integer","RCurlyType"},
@@ -5203,6 +5353,24 @@ describe("simplified grammar boundaries", function()
         assert.equal(20000, #tree[1].variants)
         assert.equal(20001, #tree)
         assert.equal("variant20000", tree[#tree].name)
+    end)
+
+    it("folds wide union payload and named case lists without capture-stack growth", function()
+        local parts, bindings = {}, {}
+        for i = 1, 1500 do
+            parts[i] = "part" .. i .. ": integer"
+            bindings[i] = "alias" .. i .. " = part" .. (1501 - i)
+        end
+        local tree = assert_parses_successfuly("union Wide item(" ..
+            table.concat(parts, ",") .. ") end\n" ..
+            "function f(x: Wide) case x when item{" ..
+            table.concat(bindings, ",") .. "} then end end")
+        assert.equal(1500, #tree[1].variants[1].parts)
+        assert.equal(1500, #tree[2].params)
+        assert.equal(1500, #tree[2].block.stats[1].exps[1].values)
+        local arm = tree[3].block.stats[1].arms[1]
+        assert.equal(1500, #arm.bindings)
+        assert.equal("part1", arm.bindings[1500].part)
     end)
 
     it("does not retain dynamic lexer captures across wide flat constructors", function()

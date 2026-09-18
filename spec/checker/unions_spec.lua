@@ -28,6 +28,121 @@ local function find_toplevel(ast, tag, name)
 end
 
 describe("unions (typechecker)", function()
+    it("checks named parts, missing-nil conversions, and arbitrary case selections", function()
+        local ast = assert_check([[
+            union Packet
+                data(count: integer, end: string, note: string?, enabled: boolean)
+                legacy(integer)
+            end
+            function make(): Packet
+                return Packet.data{end = "done", count = 3}
+            end
+            function read(packet: Packet): string
+                case packet
+                when data{last = end; count} then
+                    return last .. count
+                when legacy{number = value} then
+                    return "" .. number
+                end
+            end
+            function prefix(packet: Packet): integer
+                case packet
+                when data(first) then return first
+                when legacy() then return 0
+                end
+            end
+        ]])
+        local union = find_toplevel(ast, "Ast.TopLevelUnion", "Packet")._type
+        assert.same({"count", "end", "note", "enabled"}, union.functions.data.paramnames)
+        local arm = find_toplevel(ast, "Ast.TopLevelFunc", "read").block.stats[1].arms[1]
+        assert.equal(2, arm.bindings[1]._part_index)
+        assert.equal("Type.String", arm.bindings[1]._type._tag)
+        assert.equal(1, arm.bindings[2]._part_index)
+    end)
+
+    it("accepts builtin spellings as constructor part names", function()
+        assert_check([[
+            union Builtins part(L: integer, M: string) end
+            record Fields L: integer M: string end
+            function make(): Builtins
+                local r = Fields.new{L = 1, M = "text"}
+                return Builtins.part{M = r.M, L = r.L}
+            end
+            function read(v: Builtins): string
+                case v when part{left = L, module = M} then
+                    return module .. left
+                end
+            end
+        ]])
+    end)
+
+    it("projects every generic named binder outside its arm catch", function()
+        assert_check([[
+            union Pair<|A, B|> pair(left: A, right: B) end
+            function read(p: Pair<|integer, string|>): string
+                case p
+                when pair{right, left} then
+                    raise "handled"
+                catch
+                    return right .. left
+                end
+            end
+        ]])
+    end)
+
+    it("rejects duplicate declarations, unknown named parts, and excess binders", function()
+        assert_error("redeclaration of payload part 'x'", [[
+            union Pair pair(x: integer, x: string) end
+        ]])
+        assert_error("payload part 'missing' not found", [[
+            union Pair pair(x: integer, y: string) end
+            function read(p: Pair)
+                case p when pair{missing} then end
+            end
+        ]])
+        assert_error("has only 2 payload parts to bind", [[
+            union Pair pair(x: integer, y: string) end
+            function read(p: Pair)
+                case p when pair(a, b, c) then end
+            end
+        ]])
+        assert_error("integer", [[
+            union Pair pair(x: integer, y: string?) end
+            function make(): Pair return Pair.pair{} end
+        ]])
+    end)
+
+    it("checks eligibility and private export restrictions for every part", function()
+        assert_error("no TValue representation", [[
+            local union Pair pair(x: integer, invalid: foreign int[]) end
+        ]])
+        assert_error("cannot export local record type", [[
+            local record Secret x: integer end
+            union Pair pair(x: integer, secret: Secret) end
+        ]])
+    end)
+
+    it("preserves named generic parts and case projections through source imports", function()
+        local ok, err = run_checker_modules({
+            model = [[
+                union Pair<|T|> pair(first: T, second: T, end: string?) end
+            ]],
+            consumer = [[
+                local model = import "model"
+                function make(): model.Pair<|integer|>
+                    return model.Pair.pair{second = 20, first = 10}
+                end
+                function read(p: model.Pair<|integer|>): integer
+                    case p
+                    when pair{b = second, a = first} then
+                        return a + b
+                    end
+                end
+            ]],
+        }, "consumer")
+        assert.truthy(ok, err)
+    end)
+
     it("builds stable variant metadata and positional constructors", function()
         local ast, modtype = assert_check([[
             union Message
@@ -54,17 +169,17 @@ describe("unions (typechecker)", function()
         assert.equal(0, union.variants.quit.index)
         assert.equal(1, union.variants.hidden.index)
         assert.equal(2, union.variants.write.index)
-        assert.is_false(union.variants.quit.payload)
-        assert.equal("Type.Integer", union.variants.hidden.payload._tag)
-        assert.equal("Type.String", union.variants.write.payload._tag)
+        assert.same({}, union.variants.quit.parts)
+        assert.equal("Type.Integer", union.variants.hidden.parts[1].type._tag)
+        assert.equal("Type.String", union.variants.write.parts[1].type._tag)
         assert.truthy(union.variants.hidden.islocal)
 
         assert.same({}, union.functions.quit.params)
         assert.equal("Type.String", union.functions.write.params[1]._tag)
         assert.equal("test.Message",
             union.functions.write.rettypes[1].fqtn)
-        assert.is_false(union.functions.quit.paramnames)
-        assert.is_false(union.functions.write.paramnames)
+        assert.same({}, union.functions.quit.paramnames)
+        assert.same({"value"}, union.functions.write.paramnames)
         assert.truthy(union.functions.hidden.islocal)
 
         local exported_module = assert(load(
@@ -109,8 +224,8 @@ describe("unions (typechecker)", function()
         assert.equal("test.Message", statement.exp._type.fqtn)
         assert.equal(1, statement.arms[1]._variant_index)
         assert.equal("Type.String",
-            statement.arms[1].binding._type._tag)
-        assert.truthy(statement.arms[1].binding._used)
+            statement.arms[1].bindings[1]._type._tag)
+        assert.truthy(statement.arms[1].bindings[1]._used)
         assert.equal(0, statement.arms[2]._variant_index)
     end)
 
@@ -381,10 +496,9 @@ describe("unions (typechecker)", function()
             ]])
     end)
 
-    it("keeps variants positional and distinguishes real constructors",
+    it("accepts named variants and distinguishes real constructors",
     function()
-        assert_error(
-            "named arguments require a direct Titan module function", [[
+        assert_check([[
             union Message
                 write(string)
             end
@@ -680,10 +794,10 @@ describe("unions (typechecker)", function()
         local union_name = provider_name .. ".Payload"
         local payload = types.Map(types.String(), box_nominal)
         local variant = types.Variant(
-            union_name, "values", payload, 0)
+            union_name, "values", {types.Field(union_name, "value", payload, 1, false)}, 0)
         local constructor = types.StaticMethod(
             union_name, "values", {payload}, {types.Nominal(union_name)},
-            false, false, false)
+            false, false, {"value"})
         local union = types.Union(
             union_name, {variant}, {values = constructor}, {}, 1)
         local provider = types.Module(provider_name, {

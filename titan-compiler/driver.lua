@@ -2421,11 +2421,6 @@ local function validate_union_interface(union, context, seen)
             validation = context.validation,
         }, seen)
         if not ok then return nil, err end
-        if variant.payload ~= false
-           and not types.has_tvalue_representation(variant.payload) then
-            return nil, "union variant '" .. variant.name ..
-                "' payload has no TValue representation"
-        end
     end
     for key, variant in pairs(union.variants) do
         if type(key) == "string" and names[key] ~= variant then
@@ -2444,22 +2439,27 @@ local function validate_union_interface(union, context, seen)
                 variant.name .. "'"
         end
         local constructor = union.functions[variant.name]
-        local payload_params = variant.payload == false and 0 or 1
+        local payload_params = #variant.parts
         if not constructor
            or constructor.scope ~= false
            or #constructor.typeparams ~= 0
            or constructor.varargtype ~= false
            or constructor.flexrettype ~= false
-           or constructor.paramnames ~= false
+           or type(constructor.paramnames) ~= "table"
+           or #constructor.paramnames ~= payload_params
            or #constructor.params ~= payload_params
            or #constructor.rettypes ~= 1
            or not canonical_owner_application(
-               constructor.rettypes[1], union)
-           or (variant.payload ~= false
-               and not types.equals(
-                   constructor.params[1], variant.payload)) then
+               constructor.rettypes[1], union) then
             return nil, "union constructor '" .. variant.name ..
                 "' does not match its variant"
+        end
+        for index, part in ipairs(variant.parts) do
+            if constructor.paramnames[index] ~= part.name
+               or not types.equals(constructor.params[index], part.type) then
+                return nil, "union constructor '" .. variant.name ..
+                    "' does not match its variant"
+            end
         end
     end
     return true
@@ -2929,9 +2929,28 @@ validate_interface_type = function(typ, context, seen)
     elseif tag == "Type.Interface" then
         return validate_declared_interface(typ, context, seen)
     elseif tag == "Type.Variant" then
-        if typ.payload ~= false then
-            return validate_interface_type(
-                typ.payload, value_context(context), seen)
+        local count = dense_plain_list_length(typ.parts)
+        if not count or count > 65534 then
+            return nil, "union variant parts have an invalid schema"
+        end
+        local names = {}
+        for index, part in ipairs(typ.parts) do
+            if type(part) ~= "table" or part._tag ~= "Type.Field"
+               or part.fqtn ~= typ.fqtn
+               or not valid_source_identifier(part.name)
+               or names[part.name] or math.type(part.index) ~= "integer"
+               or part.index ~= index
+               or part.islocal or part.isconst ~= false then
+                return nil, "union variant part has an invalid schema"
+            end
+            names[part.name] = true
+            local ok, err = validate_interface_type(
+                part.type, value_context(context), seen)
+            if not ok then return nil, err end
+            if not types.has_tvalue_representation(part.type) then
+                return nil, "union variant '" .. typ.name ..
+                    "' payload has no TValue representation"
+            end
         end
         return true
     end

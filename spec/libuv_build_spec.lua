@@ -2335,15 +2335,14 @@ int main(void) {
             end
         end)
 
-    it("keeps the regex AST union and its payload records private",
+    it("keeps the regex AST union and parser state private",
         function()
             assert.same({
                 "RegexCompileState",
             }, local_record_declarations(
                 "titan/string/regex_compile.titan"))
             assert.same({
-                "RegexTextNode", "RegexChildrenNode", "RegexGroupNode",
-                "RegexRepeatNode", "RegexBackreferenceNode", "ParsedRegex",
+                "ParsedRegex",
                 "RegexQuantifier", "RegexClassItem", "RegexParseFrame",
                 "RegexParseState",
             }, local_record_declarations(

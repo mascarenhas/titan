@@ -73,7 +73,7 @@ end
 
 local function mapping_array(element: reflect.Type,
                               constness: reflect.ArrayTypeConstness): reflect.Type
-  return reflect.Type.is_array(reflect.ArrayType.new(constness, element))
+  return reflect.Type.is_array(constness, element)
 end
 
 local function mapping_error(source: string, target: reflect.Type,
@@ -247,7 +247,8 @@ function test_mapping_union_envelope_rejections(_context: test.Context)
                 "unknown_variant", "$[\"tag\"]")
   mapping_error([[{"tag":"empty","value":null}]], target,
                 "invalid_union", "$[\"value\"]")
-  mapping_error([[{"tag":"optional"}]], target, "invalid_union", "$[\"value\"]")
+  local omitted: MappingEvent = json.decode([[{"tag":"optional"}]], target)
+  test.assert(json.encode(omitted) == [[{"tag":"optional","value":null}]])
   mapping_error([[{"tag":"count","value":null}]], target,
                 "type_mismatch", "$[\"value\"]")
   local extra = expect_json_error(function()
@@ -269,17 +270,17 @@ function test_mapping_typed_container_holes_and_key_schemas(_context: test.Conte
   local dynamic: {value} = json.decode("[null,3,null]", values,
                                       json.DecodeOption.null_value(token))
   test.assert(#dynamic == 3 and dynamic[1] == token and dynamic[3] == token)
-  local map_target = reflect.Type.is_map(reflect.MapType.new(
-    reflect.Type.is_string(), reflect.Type.is_integer()))
+  local map_target = reflect.Type.is_map(
+    reflect.Type.is_string(), reflect.Type.is_integer())
   local map: {string: integer} = json.decode([[{"nil":null,"one":1}]], map_target,
                                             json.DecodeOption.null_value(token))
   test.assert(map["nil"] == nil and map["one"] == 1)
-  local wrong_keys = reflect.Type.is_map(reflect.MapType.new(
-    reflect.Type.is_integer(), reflect.Type.is_value()))
+  local wrong_keys = reflect.Type.is_map(
+    reflect.Type.is_integer(), reflect.Type.is_value())
   mapping_error("{}", wrong_keys, "unsupported_type", "$")
   mapping_error("[1,false]", integers, "type_mismatch", "$[2]")
-  local dynamic_keys = reflect.Type.is_map(reflect.MapType.new(
-    reflect.Type.is_value(), reflect.Type.is_string()))
+  local dynamic_keys = reflect.Type.is_map(
+    reflect.Type.is_value(), reflect.Type.is_string())
   local string_values: {string: string} = json.decode([[{"name":"Ada"}]], dynamic_keys)
   test.assert(string_values["name"] == "Ada")
 end
@@ -376,4 +377,107 @@ function test_mapping_allocated_constructor_arguments_survive_collection(_contex
   records = {}
   gc.collect()
   test.assert(first.name == "allocated person 1" and first.age == 1)
+end
+
+union MappingParts
+  pair(first: integer, type: string, note: string?, raw: value)
+  nullable(first: string?, last: integer?)
+  renamed(message: string)
+end
+
+function test_mapping_named_union_parts_roundtrip_and_nil_tails(_context: test.Context)
+  local target = mapping_target("MappingParts")
+  local original = MappingParts.pair{first = 19, type = "event"}
+  local text = json.encode(original)
+  test.assert(text == [[{"tag":"pair","first":19,"type":"event","note":null,"raw":null}]])
+  local decoded: MappingParts = json.decode(text, target)
+  case decoded
+  when pair{first, kind = type, note, raw} then
+    test.assert(first == 19 and kind == "event" and note == nil and raw == nil)
+  else raise "expected named union parts"
+  end
+  local reordered: MappingParts = json.decode(
+    [[{"type":"other","first":7,"tag":"pair"}]], target)
+  case reordered
+  when pair(first, kind, note, raw) then
+    test.assert(first == 7 and kind == "other" and note == nil and raw == nil)
+  else raise "expected reordered union parts"
+  end
+  local absent: MappingParts = json.decode([[{"tag":"nullable"}]], target)
+  test.assert(json.encode(absent) == [[{"tag":"nullable","first":null,"last":null}]])
+  local token = MappingToken.new()
+  local sentinel: MappingParts = json.decode(text, target, json.DecodeOption.null_value(token))
+  case sentinel
+  when pair{note, raw} then test.assert(note == nil and raw == token)
+  else raise "expected sentinel in dynamic part only"
+  end
+  local omitted: MappingParts = json.decode(
+    [[{"tag":"pair","first":3,"type":"missing"}]], target,
+    json.DecodeOption.null_value(token))
+  case omitted
+  when pair{raw} then test.assert(raw == nil)
+  else raise "expected omitted dynamic part"
+  end
+  local renamed: MappingParts = json.decode([[{"message":"hello","tag":"renamed"}]], target)
+  case renamed
+  when renamed(message) then test.assert(message == "hello")
+  else raise "expected explicitly named single part"
+  end
+  test.assert(json.encode(renamed) == [[{"tag":"renamed","message":"hello"}]])
+end
+
+function test_mapping_named_union_parts_rejections_and_limits(_context: test.Context)
+  local target = mapping_target("MappingParts")
+  mapping_error([[{"tag":"pair","type":"event"}]], target,
+                "missing_field", "$[\"first\"]")
+  mapping_error([[{"tag":"pair","first":null,"type":"event"}]], target,
+                "type_mismatch", "$[\"first\"]")
+  mapping_error([[{"tag":"pair","first":1,"type":"event","extra":2}]], target,
+                "invalid_union", "$[\"extra\"]")
+  local unknown = expect_json_error(function()
+    json.decode([[{"tag":"pair","first":1,"type":"event","extra":2}]], target,
+      json.DecodeOption.ignore_unknown_fields(true))
+  end)
+  test.assert(unknown.code == "invalid_union" and unknown.path == "$[\"extra\"]")
+  local original = MappingParts.nullable{}
+  test.assert(json.encode(original, json.EncodeOption.max_depth(1)) ==
+              [[{"tag":"nullable","first":null,"last":null}]])
+  local nodes = expect_json_error(function()
+    json.encode(original, json.EncodeOption.max_nodes(3))
+  end)
+  test.assert(nodes.code == "limit_exceeded" and nodes.path == "$[\"last\"]")
+end
+
+union MappingTagPart
+  tagged(tag: string, value: integer)
+end
+
+function test_mapping_union_custom_discriminator_and_collisions(_context: test.Context)
+  local original = MappingTagPart.tagged{tag = "payload tag", value = 31}
+  local target = mapping_target("MappingTagPart")
+  local collision = expect_json_error(function() json.encode(original) end)
+  test.assert(collision.code == "invalid_union" and collision.path == "$[\"tag\"]")
+  mapping_error([[{"tag":"tagged","value":31}]], target, "invalid_union", "$[\"tag\"]")
+  local text = json.encode(original, json.EncodeOption.tag_field("kind"))
+  test.assert(text == [[{"kind":"tagged","tag":"payload tag","value":31}]])
+  local decoded: MappingTagPart = json.decode(text, target, json.DecodeOption.tag_field("kind"))
+  case decoded
+  when tagged(tag, number) then test.assert(tag == "payload tag" and number == 31)
+  end
+  local escaped = "kind\"\n"
+  local escaped_text = json.encode(original, json.EncodeOption.tag_field("unused"),
+                                   json.EncodeOption.tag_field(escaped))
+  test.assert(escaped_text == [[{"kind\"\n":"tagged","tag":"payload tag","value":31}]])
+  local escaped_value: MappingTagPart = json.decode(escaped_text, target,
+    json.DecodeOption.tag_field("unused"), json.DecodeOption.tag_field(escaped))
+  test.assert(json.encode(escaped_value, json.EncodeOption.tag_field("kind")) == text)
+  local decode_collision = expect_json_error(function()
+    json.decode([[{"value":"tagged","tag":"payload tag"}]], target,
+      json.DecodeOption.tag_field("value"))
+  end)
+  test.assert(decode_collision.code == "invalid_union" and decode_collision.path == "$[\"value\"]")
+  local custom_collision = expect_json_error(function()
+    json.encode(original, json.EncodeOption.tag_field("value"))
+  end)
+  test.assert(custom_collision.code == "invalid_union" and custom_collision.path == "$[\"value\"]")
 end

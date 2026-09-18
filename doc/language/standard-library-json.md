@@ -52,11 +52,13 @@ const fields. Without a schema, the same document decodes to ordinary Maps.
 encode(subject: value, ...: EncodeOption): string
 decode(source: string, target: reflect.Type?, ...: DecodeOption): value
 
+EncodeOption.tag_field(name: string)
 EncodeOption.null_value(value)
 EncodeOption.max_depth(integer)
 EncodeOption.max_bytes(integer)
 EncodeOption.max_nodes(integer)
 
+DecodeOption.tag_field(name: string)
 DecodeOption.null_value(value)
 DecodeOption.max_depth(integer)
 DecodeOption.max_bytes(integer)
@@ -93,7 +95,7 @@ schema-directed call; there is no `decode<|T|>` type-inference API.
 | mutable or const Array | Array, visiting every position from 1 through its length |
 | Map with string keys | Object |
 | record | Object containing its public fields |
-| union | Object with the variant name in `tag` and its payload in `value` |
+| union | Object with the variant discriminator and each named payload part |
 | Interface | Object containing its captured public fields; encoding only |
 
 Dynamic decoding returns scalars, Titan `{value}` Arrays, and
@@ -103,7 +105,8 @@ and non-string Map keys raise `invalid_map_key`. A Map target schema must
 accept string keys (`is_string` or `is_value`), even for an empty object.
 
 Output is compact. Record fields follow declaration order. Map keys are sorted
-by their bytes, and union envelopes write `tag` before `value`. This ordering
+by their bytes, and union envelopes write the discriminator before payload
+parts in declaration order. This ordering
 is deterministic, but it is not a cryptographic JSON canonicalization format.
 Map enumeration uses existing entries; metatables do not manufacture members.
 Methods, statics, and source-private fields are not serialized.
@@ -174,7 +177,7 @@ these distinctions:
   container.
 - A required scalar, record field, root record/union, or nonnullable union
   payload rejects null. A `value` field or payload uses the sentinel policy.
-- A missing nil-admitting record field becomes nil. Absence is not explicit
+- A missing nil-admitting record field or union part becomes nil. Absence is not explicit
   JSON null and never creates a sentinel.
 
 ## Records and schemas
@@ -192,8 +195,8 @@ local json = import "json"
 local reflect = import "reflect"
 
 function read_integers(text: string): {integer}
-  local schema = reflect.Type.is_array(reflect.ArrayType.new(
-    reflect.ArrayTypeConstness.is_mutable(), reflect.Type.is_integer()))
+  local schema = reflect.Type.is_array(
+    reflect.ArrayTypeConstness.is_mutable(), reflect.Type.is_integer())
   return json.decode(text, schema)
 end
 ```
@@ -228,25 +231,37 @@ targets produce mutable Arrays. See [Arrays and Maps](arrays-maps.md).
 
 ## Tagged unions
 
-Union envelopes use fixed `tag` and `value` member names:
+Union envelopes use the variant's name as a discriminator and each payload
+part's declared name as an object key. The discriminator key defaults to `tag`.
+The old single-type declaration, such as `count(integer)`, is shorthand for
+`count(value: integer)`, so its JSON shape stays the same:
 
-| Titan value | JSON |
+| Declaration and value | JSON |
 | --- | --- |
-| `Message.idle()` | `{"tag":"idle"}` |
-| `Message.count(3)` | `{"tag":"count","value":3}` |
-| `Message.optional(nil)` | `{"tag":"optional","value":null}` |
+| `idle()`; `Message.idle()` | `{"tag":"idle"}` |
+| `count(integer)`; `Message.count(3)` | `{"tag":"count","value":3}` |
+| `optional(string?)`; `Message.optional(nil)` | `{"tag":"optional","value":null}` |
+| `text(message: string)`; `Message.text("hi")` | `{"tag":"text","message":"hi"}` |
+| `point(x: integer, y: integer)`; `Message.point(2, 3)` | `{"tag":"point","x":2,"y":3}` |
 
 The discriminator is the public variant arm name, not its numeric runtime tag
-or the union's type name. An object payload remains nested under `value`, so its member names do not
-collide with the envelope. A Map payload can contain both `"tag"` and `"value"`
-keys.
+or the union's type name. Each part retains its own JSON representation; a
+record or Map part remains an object under that part's name.
 
-Typed decoding requires one string tag identifying a public arm of the expected
-union. A payload-bearing arm must have `value`, including when its permitted
-payload is nil. A payloadless arm must omit `value`, even when it would be null.
-All other envelope members are rejected, including with
-`ignore_unknown_fields(true)`. Encoding an active private arm raises
-`private_variant`; decoding an unknown public arm raises `unknown_variant`.
+Typed decoding maps object keys to the selected variant's part names in any
+order. Missing nil-admitting parts become nil; other missing parts raise
+`missing_field`. An empty variant has no payload keys. Unknown envelope
+members are rejected, including with `ignore_unknown_fields(true)`.
+Encoding an active private arm raises `private_variant`; decoding an unknown
+public arm raises `unknown_variant`.
+
+Use matching `EncodeOption.tag_field("kind")` and
+`DecodeOption.tag_field("kind")` options to change the discriminator key.
+For example, `tagged(tag: string, count: integer)` can encode as
+`{"kind":"tagged","tag":"data","count":2}`. A discriminator that conflicts
+with any part name in the selected variant raises `invalid_union` in either
+direction; choose another key. The option applies to every nested union in
+that call. Discriminator keys are JSON strings and receive normal escaping.
 
 Without an explicit union schema, an object containing `tag` is an ordinary
 Map. JSON never chooses a nominal type from untrusted text.

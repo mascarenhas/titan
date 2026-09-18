@@ -149,8 +149,8 @@ for strings while native functions read their bytes.
 
 ## Reflection conversion
 
-Encoding dispatches through `reflect.inspect`. Container wrappers expose their
-original storage through `.value`; record and Interface schemas are selected
+Encoding dispatches through `reflect.inspect`. Container variants carry their
+original storage directly in their `value` part; record and Interface schemas are selected
 through `.type.fields`. Field access uses one-based public descriptor ordinals.
 Storage indices are not getter ordinals.
 Interface encoding reads the captured public view, not `.wrapped`. Union
@@ -174,12 +174,23 @@ would lose trailing optional nils. The ordinary constructor initializes const
 and mutable fields once. There is no partially initialized record, raw storage
 write, or allocate-then-`RecordValue:set` stage.
 
-Union decoding validates exact envelope membership and tag kind/name, checks
-whether payload presence matches the arm's optional `VariantType.type`,
-recursively decodes it, then invokes
-the reflected variant callable. Payloadless and nullable-payload arms remain
-distinct. Extra envelope fields are never covered by the record-only
-`ignore_unknown_fields` option.
+Union encoding emits the configured discriminator (default `tag`) followed by
+parts in `VariantType.parts` order. `UnionValue:get(i)` supplies correctly
+boxed values, including Arrays and nil parts. Union decoding finds the
+configured discriminator independently of source member order, validates its
+public variant name and exact envelope membership, and maps each remaining
+key to a part name. The unnamed single-part syntax supplies the name `value`,
+so legacy envelopes follow the same path. Missing nil-admitting parts stay
+nil; required missing parts fail. Preserve explicit arity when invoking the
+variadic reflected callable, including an all-nil argument Array.
+
+`EncodeOption.tag_field` and `DecodeOption.tag_field` share the Settings
+string field, apply to nested unions, and use last-option-wins semantics.
+Before part traversal, reject a selected variant whose part name collides with
+the configured discriminator. Do not emit duplicate JSON keys or silently lose
+a payload part. Extra envelope fields are never covered by the record-only
+`ignore_unknown_fields` option. Discriminator values count as ordinary JSON
+nodes; part keys add no node or container depth of their own.
 
 Array/Map conversion writes at each source index/key. It does not append based
 on a result length that may have shortened after a nil. Dynamic nulls use the

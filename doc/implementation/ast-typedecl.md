@@ -187,13 +187,15 @@ end
 ```
 
 `defs.uniondecl` similarly emits a `TopLevelUnion` followed by one
-`TopLevelStatic` per variant. `UnionVariant {name, payload}` stores an optional
-type-annotation node in `payload`; a local variant carries `islocal = true`.
+`TopLevelStatic` per variant. `UnionVariant {name, parts}` stores a dense list
+of `Decl` nodes, each with its payload name and type annotation; an empty
+variant has an empty list. The single unnamed type normalizes to a part named
+`value`. A local variant carries `islocal = true`.
 Each synthesized static is marked `_union_constructor` and points back to its
 variant through `_union_variant`. Its body returns
-`ExpUnionInit {owner, variant, value}`, and its hidden single payload parameter
-is never published as named-call metadata. Unlike `Rec.new`, variant
-constructors are positional-only.
+`ExpUnionInit {owner, variant, values}`, whose dense expression list reads the
+generated parameters in declaration order. The parameter names match the
+payload parts and are published as ordinary named-call metadata.
 
 `TopLevelInterface.fields` and `.methods` are independent declaration-order
 lists projected from `.members`. A field is a const `Decl`; a method is an
@@ -239,7 +241,7 @@ const module variables alike.
 | `StatWhile` | `condition`, `block` | |
 | `StatRepeat` | `block`, `condition` | note the field order: block first |
 | `StatIf` | `thens`, `elsestat` | `thens` is a flat list of `Then {condition, block}` (one per `if`/`elseif`); `elsestat` is a `StatBlock` or `false` |
-| `StatCase` | `exp`, `arms`, `elseblock` | `arms` is a list of `CaseArm {name, binding, block}`; `binding` and `elseblock` are `false` when absent |
+| `StatCase` | `exp`, `arms`, `elseblock` | `arms` is a list of `CaseArm {name, bindings, block, named}`; `bindings` is a dense `Decl` list and `named` distinguishes braces from positional parentheses; absent `elseblock` is `false` |
 | `StatFor` | `decl`, `start`, `finish`, `inc`, `block` | `inc` is `false` when the step is omitted; the checker fills in a literal `1`/`1.0` |
 | `StatForIn` | `decls`, `exps`, `block` | generic `for decllist in explist`; the checker pads/elaborates `exps` as the iterator tuple |
 | `StatAssign` | `vars`, `exps` | parser candidates have expression nodes in `vars` and `_parsed_candidates = true`; checking validates and extracts their `Var*` nodes |
@@ -274,7 +276,7 @@ to use it as an expression.
 | `ExpSpread` | `exp`, `first`, `last` | unique parser/checker carrier for one collection or ranged-vararg spread; owns subject/bound evaluation |
 | `ExpSpreadIndex` | `spread`, `index`, `_type` | checker-synthesized finite projection; every projection points to the same `ExpSpread` carrier |
 | `ExpFunction` | `params`, `rettypes`, `flexrettype`, `block` | anonymous function; the raw AST keeps an omitted result annotation as `rettypes = false`, distinct from explicit `: ()`; a matching expected Function may supply missing fixed/bare-variadic inputs and the complete result shape |
-| `ExpUnionInit` | `owner`, `variant`, `value` | parser-synthesized variant-constructor result; `value` is `false` for an empty variant |
+| `ExpUnionInit` | `owner`, `variant`, `values` | parser-synthesized variant-constructor result; `values` is a dense expression list in payload declaration order, empty for an empty variant |
 
 For `Owner<|T|>.member(...)`, the parser temporarily decorates the namespace
 `ExpVar` with `_nominal_typeargs` and `_nominal_typeargs_loc`. The checker
@@ -396,7 +398,7 @@ cross-pass fields (short-lived state used wholly inside one pass is omitted).
 | `_used` | `Decl`, top-level nodes (via `_decl`) | checker, on every read: `ExpVar`, `VarDot` receivers, call callees | coder | "this variable is read somewhere"; unused locals get no C variable — their initializer is evaluated and cast to `(void)` |
 | `_assigned` | `Decl` (via `_decl`) | checker, in `StatAssign` on `VarName` targets | coder | "this variable is reassigned"; GC-bearing parameters and `self` get a semantic local stack home only when assignment/spill requires it (otherwise they remain C formals and borrow existing allocation/result/semantic/VM provenance—native callers add no argument root; see [values and the GC](values-and-gc.md)) |
 | `_record_constructor` | synthesized `TopLevelStatic` | parser record desugaring | checker | identifies the adjacent synthesized `Rec.new`; explicit record functions, including an explicit `Rec.new`, do not carry it |
-| `_union_constructor`, `_union_variant` | synthesized `TopLevelStatic` | parser union desugaring | checker | identify an adjacent positional-only variant constructor and its `UnionVariant`; explicit union functions do not carry the markers |
+| `_union_constructor`, `_union_variant` | synthesized `TopLevelStatic` | parser union desugaring | checker | identify an adjacent variant constructor and its `UnionVariant`; explicit union functions do not carry the markers |
 | `_interface_conversion` | coercion-bearing expression, call adjustment, or written cast/test | checker | coder | frozen concrete-to-Interface wrapper plan, including ordered field snapshots, method mappings, and adapter graphs; the coder must not rerun structural matching |
 | `_interface_test`, `_interface_downcast` | `ExpIs`/`ExpCast` | checker | coder | respectively a statically proven concrete-to-Interface test and an exact Interface-wrapper-to-concrete payload check |
 | `_interface`, `_interface_method`, `_interface_method_index`, `_interface_bound` | Interface method call/reference | checker | coder | resolved Interface descriptor, method descriptor, declaration-order payload slot, and bound-reference marker |
@@ -408,6 +410,8 @@ cross-pass fields (short-lived state used wholly inside one pass is omitted).
 | `_record` | `TopLevelStatic`, `TopLevelMethod` | checker nominal-member declaration stages | checker (`checkmethod`, for `self`'s type) | the `Ast.TopLevelRecord` or `Ast.TopLevelUnion` node the member belongs to; the historical field name is retained |
 | `_union` | `StatCase` | checker | coder | the resolved `Type.Union` owner of the case scrutinee |
 | `_variant`, `_variant_index` | `CaseArm` | checker | coder | the resolved `Type.Variant` and its absolute zero-based dispatch tag |
+| `part`, `_part_loc` | `Decl` in a named `CaseArm.bindings` list | parser | checker, source analysis | selected source part name and location; the declaration's own `name` is its local alias, and positional bindings omit `part` |
+| `_part`, `_part_index` | checked case-binding `Decl` | checker | generic lowering, coder | resolved `Type.Field` and its one-based payload index, used to read the exact union uservalue slot |
 | `_always_returns` | every statement | checker | checker, coder | historical name for cached non-fallthrough analysis; a case is true when every arm is true and either its arms cover all `Type.Union.nvariants` or its reachable else is true, a literal-true `while` is true only when no reachable `break` targets it, and statement-list generation stops after any direct or compound true result |
 | `_method` | `ExpCall` (method calls) | checker | coder | the resolved `Type.Method` |
 | `_paramnames` | `TopLevelFunc` | checker callable-signature stage | checker, module-interface builder | dense names of fixed declared parameters; kept on the declaration rather than `Type.Function` |
@@ -448,7 +452,9 @@ At the semantic layer, both records and unions use `Type.Nominal(fqtn)` as
 their source-level value type. A union's registry entry is
 `Type.Union(name, variants, functions, methods, nvariants)`, whose hybrid
 dense/name map contains
-`Type.Variant(fqtn, name, payload, index)` descriptors. A variant descriptor
+`Type.Variant(fqtn, name, parts, index)` descriptors. Each `parts` list contains
+ordered `Type.Field` entries with names, types, and one-based indexes within
+that variant. A variant descriptor
 is declaration and serialized-interface metadata only: `typefromnode` never
 returns it as a source type, so annotations, aliases, `as`, and `is` may name
 the union but not `Union.variant`.
