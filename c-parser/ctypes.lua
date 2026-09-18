@@ -415,7 +415,10 @@ local function get_enum_items(_, values)
         else
             value = next_value
         end
-        table.insert(items, { name = v.id, value = value })
+        -- Completion eligibility must use the original target-neutral expression;
+        -- the historical `value` above intentionally uses host Lua arithmetic.
+        table.insert(items, { name = v.id, value = value,
+            expression = v.value, implicit = v.value == nil })
         if type(value) == "number" then
             by_name[v.id] = value
             next_value = value + 1

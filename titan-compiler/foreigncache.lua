@@ -7,7 +7,7 @@ local version = require "titan-compiler.version"
 local definitions = require "titan-compiler.cdefinitioncache"
 local graphcodec = require "titan-compiler.graphcodec"
 
-local foreigncache = { VERSION = 6, KIND = "ffi-conversion-v6" }
+local foreigncache = { VERSION = 7, KIND = "ffi-conversion-v7" }
 local statistics = setmetatable({}, { __mode = "k" })
 
 local function counters(st)

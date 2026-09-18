@@ -106,6 +106,7 @@ typefromnode = util.make_visitor({
 
     ["Ast.TypeName"] = function(node, st, errors,
                                     defer_c_enum_carrier)
+        completion_lexical(node, st, errors, "type")
         local parameter = st:find_type_parameter(node.name)
         if parameter then
             node._decl = parameter._decl or parameter
@@ -156,6 +157,7 @@ typefromnode = util.make_visitor({
 
     ["Ast.TypeQualName"] = function(node, st, errors,
                                         defer_c_enum_carrier)
+        completion_qualified_type(node, st, errors)
         local mod = st:find_symbol(node.module)
         if mod then node._module_decl = mod end
         if mod and mod._current_module then
@@ -290,6 +292,7 @@ typefromnode = util.make_visitor({
 
     ["Ast.TypeForeignName"] = function(node, st, errors,
                                            defer_c_enum_carrier)
+        completion_foreign(node, st, errors, defer_c_enum_carrier)
         local alias = st:find_foreign_alias(node.name)
         local typ
         if alias then

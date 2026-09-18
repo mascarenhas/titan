@@ -41,7 +41,7 @@ schemas.ctype = {
     macro_expression = "extent?", has_integer_literals = "boolean?", _macro_cast = "boolean?",
 }
 schemas.declaration = { name = "string", type = "ctype" }
-schemas.enumerator = { name = "string", value = "extent?" }
+schemas.enumerator = { name = "string", value = "extent?", expression = "extent?", implicit = "boolean?" }
 schemas.raw_tag = { name = "string", kind = "string", raw_key = "string", declarations = "provenances" }
 schemas.tag_provenance = {
     header = "string?", declaration_order = "integer?", scope = "string?", definition = "boolean?",

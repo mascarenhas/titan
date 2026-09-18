@@ -38,16 +38,21 @@ function symtab.new(modname)
     return setmetatable(self, symtab)
 end
 
-function symtab:open_block()
+function symtab:open_block(node)
     table.insert(self.blocks, {})
+    if self.completion_request then
+        self.completion_blocks = self.completion_blocks or {}
+        self.completion_blocks[#self.blocks] = node or false
+    end
 end
 
 function symtab:close_block()
+    if self.completion_blocks then self.completion_blocks[#self.blocks] = nil end
     table.remove(self.blocks)
 end
 
 function symtab:with_block(body, ...)
-    self:open_block()
+    self:open_block((...))
     local res = body(...)
     self:close_block()
     return res

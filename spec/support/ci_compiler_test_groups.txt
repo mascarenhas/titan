@@ -21,6 +21,7 @@
 3 spec/checker/checker_spec.lua 15.315
 2 spec/checker/closure_adjustment_wrappers_spec.lua 0.310
 1 spec/checker/closures_spec.lua 4.885
+2 spec/checker/completion_spec.lua 1.000
 4 spec/checker/const_values_spec.lua 0.228
 3 spec/checker/contextual_value_calls_spec.lua 4.670
 3 spec/checker/declaration_order_spec.lua 0.238

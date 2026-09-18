@@ -54,6 +54,13 @@ special cases, or another architectural workaround, first inspect the existing
 design and then pause to ask the maintainer about the intended invariant. Do
 not add epicycles around what may be a misunderstood simpler design.
 
+## Compiler completion work
+
+Use `.agents/skills/titan-completion/SKILL.md` for compiler completion contexts,
+detached descriptor contracts and language-server completion integration.
+Ordinary compilation retains its checker behavior; unsaved preparation uses a
+private captured dependency catalog and transient caches.
+
 ## Prerelease language-server API
 
 Keep `driver.LANGUAGE_SERVER_API_VERSION` at `1` until Titan's first public

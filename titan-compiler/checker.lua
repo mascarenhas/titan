@@ -12,6 +12,7 @@ require "titan-compiler.checker.declarations"
 require "titan-compiler.checker.imports"
 require "titan-compiler.checker.linear"
 require "titan-compiler.checker.lowering"
+require "titan-compiler.checker.completion"
 require "titan-compiler.checker.entry"
 
 local implementation = core.checker

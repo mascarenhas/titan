@@ -14,6 +14,7 @@ local _ENV = core
 --   annotates the node with its type in a "_type" field
 checkvar = util.make_visitor({
     ["Ast.VarName"] = function(node, st, errors, _)
+        completion_lexical(node, st, errors, node._current_module_member and "dot" or "lexical", node._current_module_member)
         local decl
         if node._current_module_member then
             decl = st.blocks[1][node.name]
@@ -108,6 +109,7 @@ checkvar = util.make_visitor({
            and receiver.var._tag == "Ast.VarName" then
             local binding = st:find_symbol(receiver.var.name)
             if binding and binding._current_module then
+                completion_lexical(node, st, errors, "dot", true)
                 node._tag = "Ast.VarName"
                 node._module_loc = receiver.loc
                 node._current_module_member = true
@@ -143,6 +145,7 @@ checkvar = util.make_visitor({
                 ltype = ltype.erased_constraint
             end
         end
+        completion_members(node, node.exp, ltype, st, errors, "dot")
         if node._contextual_c_name
            and ltype._tag ~= "Type.CModule"
            and not types.is_direct_c(ltype)
