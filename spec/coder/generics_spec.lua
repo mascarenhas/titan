@@ -25,6 +25,42 @@ end
 describe("generic erased core", function()
     after_each(clean_generated)
 
+    it("preserves omitted named arguments through generic erasure", function()
+        h.run_coder([[
+            union Packet<|T|>
+                pair(item: T, last: T?)
+            end
+
+            record Box<|T|>
+                item: T
+                last: T?
+            end
+
+            function missing<|T|>(item: T, last: T?): boolean
+                return last == nil
+            end
+
+            function run(): boolean
+                local explicit = Packet<|integer|>.pair{item = 42}
+                local inferred = Packet.pair{item = 43}
+                local box = Box<|integer|>.new{item = 44}
+                if box.last ~= nil then return false end
+                if not missing<|integer|>{item = 45} then return false end
+                if not missing{item = 46} then return false end
+                case explicit
+                when pair{item, last} then
+                    if item ~= 42 or last ~= nil then return false end
+                end
+                case inferred
+                when pair{last, item} then
+                    return item == 43 and last == nil
+                end
+            end
+        ]], [[
+            assert(test.run())
+        ]])
+    end)
+
     it("publishes declared generic nominal metadata beside erased accessors", function()
         local _, tree = h.with_extra_cflags({ "-DTITAN_COMPILER_TESTS" }, function()
             return h.compile_and_read_c([[
@@ -64,7 +100,9 @@ describe("generic erased core", function()
             assert(mt[registry.TITAN_MT_MEMBERMAP].hidden == nil)
             local choice = descriptor("union", "Choice")
             assert(#choice.variants == 1 and choice.variants[1].index == 1)
-            assert(choice.variants[1].payload._tag == "Type.Parameter")
+            assert(#choice.variants[1].parts == 1)
+            assert(choice.variants[1].parts[1].name == "value")
+            assert(choice.variants[1].parts[1].type._tag == "Type.Parameter")
             local reader = descriptor("interface", "Reader")
             assert(reader.methods[1].rettypes[1]._tag == "Type.Parameter")
             local holder = descriptor("record", "Holder")

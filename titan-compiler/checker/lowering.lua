@@ -296,6 +296,10 @@ end
 
 function generic_replace_argument_reference(node, old, new)
     if old == new then return end
+    -- Named-call omission belongs to the argument position. Erasing an
+    -- optional generic argument can replace its nil-introduction cast, but
+    -- the replacement is still synthesized rather than explicitly written.
+    if old._named_omitted then new._named_omitted = true end
     local args = node.args
     local values = args.args
     if values then
@@ -408,11 +412,13 @@ function generic_lower_call_arguments(
         local values = node.args.args or {}
         local fixed = math.min(#signature.params, #values)
         for index = 1, fixed do
-            values[index] = generic_peel_generic_ingress(
-                values[index], surface_signature.params[index])
-            values[index] = generic_erased_boundary_expression(
-                values[index], signature.params[index], state,
+            local exp = values[index]
+            local ingress = generic_peel_generic_ingress(
+                exp, surface_signature.params[index])
+            local lowered = generic_erased_boundary_expression(
+                ingress, signature.params[index], state,
                 "argument " .. index .. " of erased generic call")
+            generic_replace_argument_reference(node, exp, lowered)
         end
         if signature.varargtype then
             for index = #signature.params + 1, #values do
