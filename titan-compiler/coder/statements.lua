@@ -2865,14 +2865,14 @@ function coder._codecase(ctx, node)
 
         pushd(ctx)
         push_spillscope(ctx)
-        local binding = ""
-        if arm.binding then
-            local payload = assert(arm._variant.payload)
-            assert(payload ~= false,
-                "empty union variant unexpectedly has a payload binder")
-            binding = coder._codeinitializeddecl(ctx, arm.binding, "",
-                getslot(payload, nil,
-                    "&" .. scrutinee .. "->uv[1].uv"))
+        local bindings = {}
+        for _, binding in ipairs(arm.bindings) do
+            local part = assert(binding._part)
+            assert(arm._variant.parts[part.index],
+                "case binder refers to a missing payload part")
+            bindings[#bindings + 1] = coder._codeinitializeddecl(
+                ctx, binding, "", getslot(part.type, nil,
+                    "&" .. scrutinee .. "->uv[" .. part.index .. "].uv"))
         end
         local block = codestat(ctx, arm.block)
         pop_spillscope(ctx)
@@ -2886,7 +2886,7 @@ function coder._codecase(ctx, node)
             }
         ]], {
             LABEL = label,
-            BINDING = binding,
+            BINDING = table.concat(bindings, "\n"),
             BLOCK = block,
             END = endlabel,
         }))

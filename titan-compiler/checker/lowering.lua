@@ -701,8 +701,8 @@ function generic_lower_init_fields(node, state)
 end
 
 function generic_lower_union_init(node, state)
-    if node.value and node.value ~= false then
-        node.value = generic_lower_expression(node.value, state)
+    for index, value in ipairs(node.values) do
+        node.values[index] = generic_lower_expression(value, state)
     end
     local surface = node._variant
     if not surface or surface._tag ~= "Type.Variant" then return end
@@ -715,13 +715,14 @@ function generic_lower_union_init(node, state)
     if not carrier then return end
     node._union = erased_owner
     node._variant = carrier
-    if canonical and canonical.payload ~= false
-       and types.contains_generic(canonical.payload) then
-        node.value = generic_peel_generic_ingress(
-            node.value, canonical.payload)
-        node.value = generic_erased_boundary_expression(
-            node.value, carrier.payload, state,
-            "construction of erased generic union payload")
+    for index, part in ipairs(canonical and canonical.parts or {}) do
+        if types.contains_generic(part.type) then
+            node.values[index] = generic_peel_generic_ingress(
+                node.values[index], part.type)
+            node.values[index] = generic_erased_boundary_expression(
+                node.values[index], carrier.parts[index].type, state,
+                "construction of erased generic union payload")
+        end
     end
 end
 
@@ -1097,27 +1098,41 @@ function generic_lower_case(node, state)
             and generic_erased_descriptor(surface_variant, state)
             or nil
         if carrier then arm._variant = carrier end
-        if arm.binding and surface_variant and carrier
-           and surface_variant.payload ~= false then
-            local target = types.erase(arm.binding._type)
-            local source = carrier.payload
-            if not types.equals(source, target) then
-                state.hidden_case = state.hidden_case + 1
-                local original = arm.binding
-                local hidden = hidden_decl(arm.loc,
-                    "__generic_case_payload_" .. state.hidden_case, source)
-                arm.binding = hidden
-                local value = hidden_exp(arm.loc, hidden)
-                local projection = generic_erased_boundary_expression(
-                    value, target, state,
-                    "projection from erased generic union payload")
-                original._type = target
-                local declaration = ast.StatDecl(
-                    arm.loc, { original }, { projection })
-                table.insert(arm.block.stats, 1, declaration)
-            else
-                arm.binding._type = source
+        local projections = {}
+        for index, binding in ipairs(arm.bindings) do
+            local part = carrier and carrier.parts[binding._part_index]
+            if part then
+                local target = types.erase(binding._type)
+                local source = part.type
+                binding._part = part
+                if not types.equals(source, target) then
+                    state.hidden_case = state.hidden_case + 1
+                    local original = binding
+                    local hidden = hidden_decl(arm.loc,
+                        "__generic_case_payload_" .. state.hidden_case, source)
+                    hidden._part, hidden._part_index = part, part.index
+                    arm.bindings[index] = hidden
+                    local value = hidden_exp(arm.loc, hidden)
+                    local projection = generic_erased_boundary_expression(
+                        value, target, state,
+                        "projection from erased generic union payload")
+                    original._type = target
+                    local declaration = ast.StatDecl(
+                        arm.loc, { original }, { projection })
+                    projections[#projections + 1] = declaration
+                else
+                    binding._type = source
+                end
             end
+        end
+        if #projections > 0 then
+            -- Arm binders precede the whole block, including its catch. Keep
+            -- erased projections outside a possible StatTry for the same
+            -- visibility and error boundary as ordinary payload extraction.
+            local body = arm.block
+            projections[#projections + 1] = body
+            arm.block = ast.StatBlock(arm.loc, projections)
+            arm.block._always_returns = body._always_returns
         end
         generic_lower_node(arm.block, state)
     end

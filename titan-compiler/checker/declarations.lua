@@ -74,7 +74,11 @@ function checkfuncbody(node, st, errors, opts)
         module_initializer = opts.module_initializer and st.modname or false,
     }
     table.insert(func_stack, frame)
-    if not opts.foreign then
+    -- Synthesized constructors contain only member initializers, so they have
+    -- no source body that can refer to the L/M builtins. Their parameter names
+    -- are member names, which may legitimately be L or M.
+    if not opts.foreign and not node._record_constructor
+       and not node._union_constructor then
         local ldecl = ast.Decl(node.loc, "L", false, false, false)
         ldecl._type = lua_state_pointer_type(st)
         ldecl._funcdepth = #func_stack
@@ -398,11 +402,12 @@ function checkbodies(ast, st, errors)
                 end
             elseif node._tag == "Ast.TopLevelUnion" then
                 for _, variant in ipairs(node.variants) do
-                    if variant._type and variant._type.payload ~= false then
-                        check_user_value_slot_type(
-                            "union", node.name, "variant", variant.name,
-                            variant._type.payload,
-                            variant.payload.loc or variant.loc, errors)
+                    if variant._type then
+                        for i, part in ipairs(variant._type.parts) do
+                            check_user_value_slot_type(
+                                "union", node.name, "variant", variant.name,
+                                part.type, variant.parts[i].loc, errors)
+                        end
                     end
                 end
             elseif node._tag == "Ast.TopLevelInterface" then
@@ -470,12 +475,13 @@ function isconstructor(node)
         return true
     elseif owner._tag == "Type.Union" then
         local variant = owner.variants[decl.name]
-        if not variant or decl.paramnames ~= false then return false end
-        if variant.payload == false then
-            return #decl.params == 0
+        if not variant or #decl.params ~= #variant.parts then return false end
+        for index, part in ipairs(variant.parts) do
+            if not types.equals(decl.params[index], part.type) then
+                return false
+            end
         end
-        return #decl.params == 1
-            and types.equals(decl.params[1], variant.payload)
+        return true
     end
     return false
 end
@@ -1072,11 +1078,27 @@ toplevel_visitor = util.make_visitor({
                     variant._ignore = true
                 else
                     nameset[variant.name] = variant
-                    local payload = variant.payload
-                        and typefromnode(variant.payload, st, errors)
-                        or false
+                    local parts, partnames = {}, {}
+                    if #variant.parts > 65534 then
+                        checker.typeerror(errors, variant.loc,
+                            "variant '%s.%s' declares %d payload parts but at most 65534 are supported",
+                            node.name, variant.name, #variant.parts)
+                    end
+                    for part_index, part in ipairs(variant.parts) do
+                        if partnames[part.name] then
+                            checker.typeerror(errors, part.loc,
+                                "redeclaration of payload part '%s' in variant '%s.%s'",
+                                part.name, node.name, variant.name)
+                        end
+                        partnames[part.name] = true
+                        local ptype = typefromnode(part.type, st, errors)
+                        local tpart = types.Field(
+                            fqtn, part.name, ptype, part_index, false)
+                        part._type, part._decl = ptype, tpart
+                        parts[part_index] = tpart
+                    end
                     local tvariant = types.Variant(
-                        fqtn, variant.name, payload, index - 1)
+                        fqtn, variant.name, parts, index - 1)
                     tvariant.islocal =
                         (node.islocal or variant.islocal) and true or false
                     variant._type = tvariant
@@ -1165,13 +1187,9 @@ toplevel_visitor = util.make_visitor({
                         typefromnode(rt, st, errors)
                 end
                 local flexrettype = flexible_return_type(node, st, errors)
-                local published_paramnames = paramnames
-                if node._union_constructor then
-                    published_paramnames = false
-                end
                 node._type = types.StaticMethod(
                     ownertype.name, node.name, ptypes, rettypes,
-                    varargtype, flexrettype, published_paramnames,
+                    varargtype, flexrettype, paramnames,
                     node._generic_scope, node._generic_typeparams)
             end)
         end)

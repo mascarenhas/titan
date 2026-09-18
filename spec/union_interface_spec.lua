@@ -4,18 +4,29 @@ local types = require "titan-compiler.types"
 local function canonical_module()
     local fqtn = "sample.Message"
     local nominal = types.Nominal(fqtn)
-    local quit = types.Variant(fqtn, "quit", false, 0)
-    local write = types.Variant(fqtn, "write", types.String(), 2)
+    local quit = types.Variant(fqtn, "quit", {}, 0)
+    local write = types.Variant(fqtn, "write", {
+        types.Field(fqtn, "value", types.String(), 1, false),
+    }, 2)
     local union = types.Union(fqtn, {quit, write}, {
         quit = types.StaticMethod(
-            fqtn, "quit", {}, {nominal}, false, false, false),
+            fqtn, "quit", {}, {nominal}, false, false, {}),
         write = types.StaticMethod(
             fqtn, "write", {types.String()}, {nominal},
-            false, false, false),
+            false, false, {"value"}),
     }, {}, 3)
     return types.Module("sample", {
         types.ModuleMember("sample", "Message", union, false),
     }), union
+end
+
+local function multiple_part_module()
+    local module, union = canonical_module()
+    union.variants.write.parts[2] = types.Field(
+        union.name, "end", types.Option(types.Integer()), 2, false)
+    union.functions.write.params[2] = types.Option(types.Integer())
+    union.functions.write.paramnames[2] = "end"
+    return module, union
 end
 
 local function canonical_record_module()
@@ -162,9 +173,86 @@ describe("union module interfaces", function()
         assert.truthy(ok, err)
     end)
 
+    it("round-trips ordered payload parts and named constructor parameters", function()
+        local module = multiple_part_module()
+        local recovered, err = driver.decode_module_interface(
+            types.serialize(module), "sample", "multiple-parts")
+        assert.truthy(recovered, err)
+        local union = recovered.members.Message.type
+        assert.equal(3, union.nvariants)
+        assert.equal(2, union.variants.write.index)
+        assert.same({}, union.variants.quit.parts)
+        assert.same({}, union.functions.quit.paramnames)
+        assert.same({"value", "end"}, union.functions.write.paramnames)
+        assert.equal("value", union.variants.write.parts[1].name)
+        assert.equal("end", union.variants.write.parts[2].name)
+        assert.equal(2, union.variants.write.parts[2].index)
+        assert.truthy(types.equals(types.Option(types.Integer()),
+            union.variants.write.parts[2].type))
+    end)
+
+    it("rejects malformed later payload parts and their constructor positions", function()
+        local cases = {
+            {"union variant part has an invalid schema", function(union)
+                union.variants.write.parts[2].name = "value"
+            end},
+            {"union variant part has an invalid schema", function(union)
+                union.variants.write.parts[2].name = "$part"
+            end},
+            {"union variant part has an invalid schema", function(union)
+                union.variants.write.parts[2].fqtn = "other.Message"
+            end},
+            {"union variant part has an invalid schema", function(union)
+                union.variants.write.parts[2].index = 1
+            end},
+            {"union variant part has an invalid schema", function(union)
+                union.variants.write.parts[2].index = 2.0
+            end},
+            {"union variant part has an invalid schema", function(union)
+                union.variants.write.parts[2].isconst = true
+            end},
+            {"union variant part has an invalid schema", function(union)
+                union.variants.write.parts[2].islocal = true
+            end},
+            {"type graph contains an invalid descriptor", function(union)
+                union.variants.write.parts[2].type = {}
+            end},
+            {"is not valid in a value%-facing type graph", function(union)
+                union.variants.write.parts[2].type = types.Array(
+                    types.Field(union.name, "hidden", types.Integer(), 0, false), false)
+            end},
+            {"union variant parts have an invalid schema", function(union)
+                union.variants.write.parts.extra = union.variants.write.parts[2]
+            end},
+            {"union variant parts have an invalid schema", function(union)
+                union.variants.write.parts[3] = union.variants.write.parts[2]
+                union.variants.write.parts[2] = nil
+            end},
+            {"union variant parts have an invalid schema", function(union)
+                union.variants.write.parts = false
+            end},
+            {"union constructor 'write' does not match its variant", function(union)
+                union.functions.write.params[2] = types.String()
+            end},
+            {"union constructor 'write' does not match its variant", function(union)
+                union.functions.write.paramnames[2] = "other"
+            end},
+            {"union constructor 'quit' does not match its variant", function(union)
+                union.functions.quit.paramnames = false
+            end},
+        }
+        for index, case in ipairs(cases) do
+            local module, union = multiple_part_module()
+            case[2](union)
+            local ok, err = driver.validate_module_interface(module, "sample")
+            assert.falsy(ok, "malformed payload case " .. index)
+            assert.match(case[1], err)
+        end
+    end)
+
     it("rejects a variant outside its owning union", function()
         local escaped = types.Variant(
-            "sample.Message", "quit", false, 0)
+            "sample.Message", "quit", {}, 0)
         local module = types.Module("sample", {
             types.ModuleMember("sample", "quit", escaped, false),
         })
@@ -239,7 +327,7 @@ describe("union module interfaces", function()
     function()
         local fqtn = "sample.Message"
         local function escaped()
-            return types.Variant(fqtn, "quit", false, 0)
+            return types.Variant(fqtn, "quit", {}, 0)
         end
         local wrappers = {
             types.Field(fqtn, "field", escaped(), 0, false),
@@ -369,7 +457,7 @@ describe("union module interfaces", function()
             {
                 pattern = "type graph contains an invalid descriptor",
                 mutate = function(union)
-                    union.variants.write.payload = {}
+                    union.variants.write.parts[1].type = {}
                 end,
             },
         }

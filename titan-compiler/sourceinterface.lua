@@ -111,7 +111,7 @@ local SCHEMAS = {
     },
     ["Type.Variant"] = {
         { "fqtn", "atom" }, { "name", "atom" },
-        { "payload", "maybe_type" }, { "index", "atom" },
+        { "parts", "type_list" }, { "index", "atom" },
         { "islocal", "flag" },
     },
     ["Type.Method"] = {

@@ -171,6 +171,267 @@ describe("unions (end-to-end)", function()
         ]])
         end)
 
+    it("constructs named payload parts in written order and selects named binders",
+        function()
+            local csrc = h.compile_and_read_c([[
+                union Message
+                    packed(first: integer, second: integer, end: {integer},
+                           missing: string?, enabled: boolean, dynamic: value)
+                    legacy(integer)
+                end
+
+                trace: string = ""
+
+                local function observe(n: integer): integer
+                    trace = trace .. n
+                    return n
+                end
+
+                function named(): (integer, boolean)
+                    local message = Message.packed{
+                        second = observe(2),
+                        end = {observe(3)},
+                        first = observe(1),
+                    }
+                    case message
+                    when packed{ values = end, a = first, b = second,
+                                 missing, enabled, dynamic } then
+                        return a + b + values[1],
+                            missing == nil and not enabled and dynamic == nil
+                    else
+                        return -1, false
+                    end
+                end
+
+                function first(message: Message): integer
+                    case message
+                    when packed(renamed) then
+                        return renamed
+                    when legacy() then
+                        return -1
+                    end
+                end
+
+                function example(): Message
+                    return Message.packed(17, 2, {3})
+                end
+
+                function no_parts(message: Message): boolean
+                    case message
+                    when packed{} then
+                        return true
+                    when legacy{} then
+                        return false
+                    end
+                end
+
+                function old_sugar(): integer
+                    local message = Message.legacy{value = 42}
+                    case message
+                    when legacy{value} then
+                        return value
+                    else
+                        return -1
+                    end
+                end
+            ]])
+            assert.match("luaS_newudata%s*%(%s*L,%s*0,%s*7%s*%)", csrc)
+            assert.match("sethvalue%s*%(%s*L,%s*&_tmp_%d+%->uv%[3%]%.uv", csrc)
+            assert.match("hvalue%s*%(%s*&_tmp_%d+%->uv%[3%]%.uv%s*%)", csrc)
+            assert.not_match("lua_getiuservalue", csrc)
+            assert.not_match("lua_setiuservalue", csrc)
+            local ok, err = h.call("test", [[
+                local total, defaults = test.named()
+                assert(total == 6 and defaults)
+                assert(test.trace == "231")
+                local packed = test.example()
+                assert(test.first(packed) == 17)
+                assert(test.no_parts(packed))
+                assert(not test.no_parts(test.Message.legacy(9)))
+                assert(test.old_sugar() == 42)
+            ]])
+            assert.truthy(ok, err)
+        end)
+
+    it("preserves multiple payloads and captured binders across collections and handlers",
+        function()
+            h.run_coder([[
+                union Bundle
+                    item(text: string, values: {integer},
+                         callback: function (integer): integer)
+                end
+
+                function make(text: string, n: integer,
+                        callback: function (integer): integer): Bundle
+                    return Bundle.item(text, {n}, callback)
+                end
+
+                function capture(bundle: Bundle,
+                        collect: function (): ()): function (): string
+                    case bundle
+                    when item{ callback, numbers = values, label = text } then
+                        collect()
+                        return function(): string
+                            return label .. ":" .. callback(numbers[1])
+                        end
+                    end
+                end
+
+                function spills(bundle: Bundle): integer
+                    case bundle
+                    when item(label, numbers, callback) then
+                        local observed = 0
+                        do
+                            label = label .. "!"
+                            numbers = {numbers[1] + 1}
+                            raise "inspect binders"
+                        catch
+                            observed = #label + callback(numbers[1])
+                        end
+                        return observed
+                    end
+                end
+            ]], [[
+                for _, mode in ipairs({"incremental", "generational"}) do
+                    collectgarbage(mode)
+                    local bundle = test.make(
+                        string.rep("a", 5), 40, function(n) return n + 2 end)
+                    local captured = test.capture(bundle, function()
+                        collectgarbage("collect")
+                    end)
+                    assert(test.spills(bundle) == 49)
+                    bundle = nil
+                    collectgarbage("collect")
+                    collectgarbage("collect")
+                    assert(captured() == "aaaaa:42")
+                end
+                collectgarbage("incremental")
+            ]])
+        end)
+
+    it("infers and erases all parts of generic union constructors", function()
+        h.run_coder([[
+            union Pair<|A, B|>
+                pair(left: A, right: B)
+            end
+
+            function inferred(): string
+                local pair = Pair.pair{right = "answer", left = 42}
+                case pair
+                when pair{second = right, first = left} then
+                    return second .. ":" .. first
+                end
+            end
+
+            function contextual(): integer
+                local pair: Pair<|integer, {integer}|> = Pair.pair(20, {22})
+                case pair
+                when pair(left, right) then
+                    return left + right[1]
+                end
+            end
+        ]], [[
+            assert(test.inferred() == "answer:42")
+            assert(test.contextual() == 42)
+        ]])
+    end)
+
+    it("accepts builtin-local spellings as payload part and record field names", function()
+        h.run_coder([[
+            union Names
+                pair(L: integer, M: string)
+            end
+
+            record Fields
+                L: integer
+                M: string
+            end
+
+            function make(): Names
+                return Names.pair{M = "label", L = 42}
+            end
+
+            function read(names: Names): string
+                case names
+                when pair{label = M, number = L} then
+                    return label .. ":" .. number
+                end
+            end
+
+            function record_fields(): string
+                local fields = Fields.new{M = "record", L = 7}
+                return fields.M .. ":" .. fields.L
+            end
+        ]], [[
+            assert(test.read(test.make()) == "label:42")
+            assert(test.read(test.Names.pair(8, "Lua")) == "Lua:8")
+            assert(test.record_fields() == "record:7")
+        ]])
+    end)
+
+    it("projects multiple generic parts before an arm catch and captures them", function()
+        h.run_coder([[
+            union Pair<|A, B|>
+                pair(left: A, right: B)
+            end
+
+            function recover(pair: Pair<|integer, string|>): function (): string
+                case pair
+                when pair{label = right, number = left} then
+                    number = number + 1
+                    raise "recover"
+                catch
+                    return function(): string
+                        return label .. ":" .. number
+                    end
+                end
+            end
+        ]], [[
+            local captured = test.recover(test.Pair.pair(41, "answer"))
+            collectgarbage("collect")
+            assert(captured() == "answer:42")
+            -- Erased payload projection happens before entering the arm's
+            -- handler, so a malformed payload cannot be caught by that arm.
+            local ok, err = pcall(test.recover, test.Pair.pair("bad", "answer"))
+            assert(not ok)
+            assert(tostring(err):find("integer", 1, true))
+        ]])
+    end)
+
+    it("applies the ordinary Lua constructor boundary to every payload part", function()
+        h.run_coder([[
+            union Packet
+                data(count: integer, label: string, note: string?, enabled: boolean)
+            end
+
+            function Packet:read(): (integer, string, string?, boolean)
+                case self
+                when data(count, label, note, enabled) then
+                    return count, label, note, enabled
+                end
+            end
+        ]], [[
+            local packet = test.Packet.data(42.0, "answer")
+            assert(type(packet) == "userdata")
+            local count, label, note, enabled = packet:read()
+            assert(count == 42 and math.type(count) == "integer")
+            assert(label == "answer" and note == nil and enabled == false)
+            packet = test.Packet.data(7, "kept", "optional", true, "ignored")
+            count, label, note, enabled = packet:read()
+            assert(count == 7 and label == "kept" and note == "optional" and enabled)
+            for _, invoke in ipairs({
+                function() return test.Packet.data(1.5, "bad integer") end,
+                function() return test.Packet.data(1, {}) end,
+                function() return test.Packet.data(1, "label", {}) end,
+                function() return test.Packet.data(1) end,
+            }) do
+                assert(not pcall(invoke))
+            end
+            assert(not pcall(function() return packet.count end))
+            assert(not pcall(function() packet.count = 9 end))
+        ]])
+    end)
+
     it("compiles the exact imported positional record-payload example",
         function()
             local ok, err = h.generate_modules({
@@ -1326,7 +1587,7 @@ describe("unions (end-to-end)", function()
             local mt = debug.getmetatable(message)
             assert(type(mt) == "table")
             assert(mt[registry.TITAN_BRAND] == 4)
-            assert(mt[registry.TITAN_MT_TYPE] == "Union(\"test.Message\",{Variant('test.Message', 'quit', false, 0),Variant('test.Message', 'write', String(), 1)},{[\"quit\"] = StaticMethod('test.Message', 'quit',{},{Nominal('test.Message')},false,false,false),[\"write\"] = StaticMethod('test.Message', 'write',{String()},{Nominal('test.Message')},false,false,false)},{[\"length\"] = Method('test.Message', 'length',{},{Integer()},false,false,{})},3)")
+            assert(mt[registry.TITAN_MT_TYPE] == "Union(\"test.Message\",{Variant('test.Message', 'quit', {}, 0),Variant('test.Message', 'write', {Field('test.Message', 'value', String(), 1, false)}, 1)},{[\"quit\"] = StaticMethod('test.Message', 'quit',{},{Nominal('test.Message')},false,false,{}),[\"write\"] = StaticMethod('test.Message', 'write',{String()},{Nominal('test.Message')},false,false,{\"value\"})},{[\"length\"] = Method('test.Message', 'length',{},{Integer()},false,false,{})},3)")
             assert(mt[registry.TITAN_MT_MEMBERMAP].length(message) == 5)
             assert(mt[registry.TITAN_MT_STATICS].write == test.Message.write)
             assert(not pcall(function() return message.tag end))
@@ -1423,6 +1684,7 @@ describe("unions (end-to-end)", function()
                         local hidden(integer)
                         count(integer)
                         quit()
+                        pair(first: integer, second: integer)
                     end
 
                     function Message:measure(): integer
@@ -1465,6 +1727,29 @@ describe("unions (end-to-end)", function()
                     function same(): boolean
                         return provider.Message.count ==
                             provider.Message.count
+                    end
+
+                    function named_parts(): integer
+                        local message = provider.Message.pair{
+                            second = 2, first = provider.seed,
+                        }
+                        case message
+                        when pair{right = second, left = first} then
+                            return left + right
+                        else
+                            return -1
+                        end
+                    end
+
+                    function first_class_parts(): integer
+                        local make: function (integer, integer): provider.Message =
+                            provider.Message.pair
+                        case make(provider.seed, 2)
+                        when pair(left, right) then
+                            return left + right
+                        else
+                            return -1
+                        end
                     end
 
                     function direct(): integer
@@ -1516,6 +1801,8 @@ describe("unions (end-to-end)", function()
             [[
                 assert(union_so_consumer.run() == 42)
                 assert(union_so_consumer.same())
+                assert(union_so_consumer.named_parts() == 42)
+                assert(union_so_consumer.first_class_parts() == 42)
                 assert(union_so_consumer.direct() == 41)
                 assert(union_so_consumer.record_static() == 42)
                 assert(union_so_consumer.static_value() == 42)

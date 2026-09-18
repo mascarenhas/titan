@@ -153,7 +153,9 @@ collect_reads_exp = function(node, out)
             collect_reads_exp(arg, out)
         end
     elseif tag == "Ast.ExpUnionInit" then
-        collect_reads_exp(node.value, out)
+        for _, value in ipairs(node.values) do
+            collect_reads_exp(value, out)
+        end
     elseif tag == "Ast.ExpSpread" then
         -- The written carrier owns evaluation of the shared subject and bounds.
         -- Checker-synthesized ExpSpreadIndex projections deliberately do not
@@ -210,7 +212,9 @@ function coder._collect_writes_exp(node, out)
             coder._collect_writes_exp(arg, out)
         end
     elseif tag == "Ast.ExpUnionInit" then
-        coder._collect_writes_exp(node.value, out)
+        for _, value in ipairs(node.values) do
+            coder._collect_writes_exp(value, out)
+        end
     elseif tag == "Ast.ExpSpread" then
         coder._collect_writes_exp(node.exp, out)
         coder._collect_writes_exp(node.first, out)
@@ -343,7 +347,9 @@ collect_writes_stat = function(node, out)
     elseif tag == "Ast.StatCase" then
         coder._collect_writes_exp(node.exp, out)
         for _, arm in ipairs(node.arms) do
-            set_add(out, arm.binding)
+            for _, binding in ipairs(arm.bindings) do
+                set_add(out, binding)
+            end
             collect_writes_stat(arm.block, out)
         end
         collect_writes_stat(node.elseblock, out)

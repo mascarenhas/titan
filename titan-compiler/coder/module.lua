@@ -542,20 +542,37 @@ function coder._codeuniondec(ctx, code, initnominals, node)
         node._type.name, "payload_reader")
     local payload_cases = {}
     for _, variant in ipairs(node._type.variants) do
+        local part_cases = {}
+        for _, part in ipairs(variant.parts) do
+            part_cases[#part_cases + 1] = render([[
+                case $INDEX: {
+                    $PAYLOAD
+                    return;
+                }
+            ]], {
+                INDEX = c_integer_literal(part.index),
+                PAYLOAD = copyboxed(ctx, part.type, "tv",
+                    "&_union->uv[" .. part.index .. "].uv"),
+            })
+        end
         table.insert(payload_cases, render([[
             case $INDEX: {
-                $PAYLOAD
+                switch (part) {
+                    $PART_CASES
+                    default:
+                        setnilvalue(tv);
+                        return;
+                }
                 return;
             }
         ]], {
             INDEX = c_integer_literal(variant.index),
-            PAYLOAD = variant.payload and copyboxed(
-                ctx, variant.payload, "tv", "&_union->uv[1].uv")
-                or "setnilvalue(tv);",
+            PART_CASES = table.concat(part_cases, "\n"),
         }))
     end
     table.insert(code, render([[
-        static void $READER(lua_State *L, Udata *_union, TValue *tv) {
+        static void $READER(lua_State *L, Udata *_union, lua_Integer part,
+                            TValue *tv) {
             switch (ivalue(&_union->uv[0].uv)) {
                 $CASES
                 default:
