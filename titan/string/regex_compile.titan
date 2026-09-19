@@ -237,14 +237,12 @@ local function regex_compile_node(node: RegexNode,
   when repetition{minimum, maximum, atom = child} then
     local result = continuation
     if maximum < 0 then
-      local active: RegexCompileState? = state
-      local owns_scope = false
-      if not active then
+      local shared, owns_scope = (function (state: RegexCompileState?):
+          (RegexCompileState, boolean)
+        if state then return state as RegexCompileState, false end
         local rules: {peg.Rule} = {}
-        active = RegexCompileState.new(rules, 0)
-        owns_scope = true
-      end
-      local shared = active as RegexCompileState
+        return RegexCompileState.new(rules, 0), true
+      end)(state)
       shared.next_rule = shared.next_rule + 1
       local rule_name =
         "\0titan.regex.repeat." .. shared.next_rule

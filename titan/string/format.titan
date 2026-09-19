@@ -506,11 +506,11 @@ local function format_specification(
     precision: boolean,
     specifiers: string): peg.Pattern
   local digits = peg.ranges("09")
-  local width = peg.at_most(digits, 2)
-  if not zero_is_flag then
-    width = peg.optional(peg.sequence(
+  local width = (function (digits: peg.Pattern, zero_is_flag: boolean): peg.Pattern
+    if zero_is_flag then return peg.at_most(digits, 2) end
+    return peg.optional(peg.sequence(
       peg.ranges("19"), peg.optional(digits)))
-  end
+  end)(digits, zero_is_flag)
   local modifiers = peg.sequence(
     peg.zero_or_more(peg.set(flags)),
     width)

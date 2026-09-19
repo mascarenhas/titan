@@ -1,21 +1,21 @@
 -- This UTF-8 check accepts Unicode scalar values only. JSON text never carries
 -- surrogate code points or overlong byte sequences.
 local function utf8_width(subject: string, position: integer, path: Path): integer
-  local first = json_byte(subject, position)
-  local width = 0
-  local lower = 128
-  local upper = 191
-  if first >= 194 and first <= 223 then
-    width = 2
-  elseif first >= 224 and first <= 239 then
-    width = 3
-    if first == 224 then lower = 160 end
-    if first == 237 then upper = 159 end
-  elseif first >= 240 and first <= 244 then
-    width = 4
-    if first == 240 then lower = 144 end
-    if first == 244 then upper = 143 end
-  end
+  local width, lower, upper = (function (first: integer):
+      (integer, integer, integer)
+    if first >= 194 and first <= 223 then
+      return 2, 128, 191
+    elseif first >= 224 and first <= 239 then
+      if first == 224 then return 3, 160, 191 end
+      if first == 237 then return 3, 128, 159 end
+      return 3, 128, 191
+    elseif first >= 240 and first <= 244 then
+      if first == 240 then return 4, 144, 191 end
+      if first == 244 then return 4, 128, 143 end
+      return 4, 128, 191
+    end
+    return 0, 128, 191
+  end)(json_byte(subject, position))
   if width == 0 or position + width - 1 > #subject then
     json_fail("invalid_utf8", "string contains invalid UTF-8", path, nil, nil)
   end
@@ -212,11 +212,14 @@ local function Encoder:union_value(subject: value, inspected: reflect.UnionValue
                                     path: Path, depth: integer)
   self:enter(subject, path)
   defer self.active[subject] = nil
-  local found: reflect.VariantType?
-  for index = 1, #inspected.type.variants do
-    local variant = inspected.type.variants[index]
-    if variant.tag == inspected.tag then found = variant; break end
-  end
+  local found: reflect.VariantType? = (function (
+      inspected: reflect.UnionValue): reflect.VariantType?
+    for index = 1, #inspected.type.variants do
+      local variant = inspected.type.variants[index]
+      if variant.tag == inspected.tag then return variant end
+    end
+    return nil
+  end)(inspected)
   if found == nil then
     json_fail("private_variant", "active union variant is private", path, nil, nil)
   end

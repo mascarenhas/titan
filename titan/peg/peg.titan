@@ -559,16 +559,7 @@ end
 
 function match(subject: string, candidate: value,
                init: integer?): Match?
-  _relabel_ensure_initialized()
-  local compiled: Pattern = succeed()
-  if candidate is Pattern then
-    compiled = candidate as Pattern
-  elseif candidate is string then
-    compiled = _relabel_cached_source(
-      candidate as string, _relabel_match_cache)
-  else
-    raise "PEG expression must be a string or Pattern"
-  end
+  local compiled = compile(candidate)
 
   local start = _normalized_init(subject, init)
   while start <= #subject + 1 do
@@ -587,16 +578,7 @@ end
 
 function gsub(subject: string, candidate: value,
               replacement: function (string): (string)): string
-  _relabel_ensure_initialized()
-  local compiled: Pattern = succeed()
-  if candidate is Pattern then
-    compiled = candidate as Pattern
-  elseif candidate is string then
-    compiled = _relabel_cached_source(
-      candidate as string, _relabel_match_cache)
-  else
-    raise "PEG expression must be a string or Pattern"
-  end
+  local compiled = compile(candidate)
 
   local adapter: function (value): (string) =
     function(found: value): string

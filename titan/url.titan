@@ -344,13 +344,12 @@ function parse(source: string): (Url?, Error?)
 
   local path = normalize_component(parts["path"] as string, false)
   if #path == 0 then path = "/" end
-  local query: string? = nil
-  local query_text = parts["query"]
-  if query_text ~= nil then
-    query = normalize_component(query_text as string, false)
-  end
-  local target = path
-  if query then target = target .. "?" .. (query as string) end
+  local query: string?, target: string = (function (
+      query_text: value, path: string): (string?, string)
+    if query_text == nil then return nil, path end
+    local query = normalize_component(query_text as string, false)
+    return query, path .. "?" .. query
+  end)(parts["query"], path)
   return Url.new(scheme, host, port, path, query, target, authority), nil
 end
 

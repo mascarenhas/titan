@@ -305,9 +305,9 @@ end
 
 local function feed_input(connection: Connection, operation: string)
   if connection.transport_eof then return end
-  local encrypted: string? = nil
-  do
-    encrypted = connection.transport:read()
+  local encrypted: string? = (function (
+      connection: Connection, operation: string): string?
+    return connection.transport:read()
   catch
     if error is async.OperationError then
       local failure = error as async.OperationError
@@ -322,7 +322,7 @@ local function feed_input(connection: Connection, operation: string)
       end
     end
     raise error
-  end
+  end)(connection, operation)
   if not encrypted then
     mark_transport_eof(connection)
     return
@@ -1017,13 +1017,13 @@ function connect(host: string, port: integer,
   checked_text(host, "ssl.connect.host")
   if ca_file then checked_text(ca_file as string, "ssl.connect.ca-file") end
 
-  local context: foreign *SSL_CTX = nil
-  if ca_file then
-    local trust_data = fs.read_file(ca_file as string)
-    context = explicit_client_context(trust_data)
-  else
-    context = acquire_default_client_context()
-  end
+  local context = (function (ca_file: string?): foreign *SSL_CTX
+    if ca_file then
+      local trust_data = fs.read_file(ca_file as string)
+      return explicit_client_context(trust_data)
+    end
+    return acquire_default_client_context()
+  end)(ca_file)
   defer ffi.SSL_CTX_free(context)
   local transport = net.connect(host, port)
   local connection: Connection? = nil

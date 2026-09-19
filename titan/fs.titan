@@ -287,23 +287,16 @@ end
 local function RealpathRequest:finish()
   local waiter? = self.waiter
   self.waiter = nil
-  local failed = false
-  local payload: value = nil
-  do
-    defer ffi.uv_fs_req_cleanup(self.handle)
-    local result = ffi.uv_fs_get_result(self.handle) as integer
-    if result < 0 then
-      failed = true
-      payload = uv.make_error(result, "fs.realpath")
-    else
-      local resolved = ffi.uv_fs_get_ptr(
-          self.handle) as foreign const *char
-      payload = resolved as string
-    end
+  local failed, payload = (function (request: RealpathRequest): (boolean, value)
+    defer ffi.uv_fs_req_cleanup(request.handle)
+    local result = ffi.uv_fs_get_result(request.handle) as integer
+    if result < 0 then return true, uv.make_error(result, "fs.realpath") end
+    local resolved = ffi.uv_fs_get_ptr(
+        request.handle) as foreign const *char
+    return false, resolved as string
   catch
-    failed = true
-    payload = error
-  end
+    return true, error
+  end)(self)
 
   self.failed = failed
   self.payload = payload
@@ -640,13 +633,13 @@ local function Watcher:drain_notifications(): {WatcherEvent}
       events[#events + 1] = self:map_notification(notifications[index])
     end
 
-    local crosses_retirement = false
-    for index = 1, #self.notifications do
-      if self.notifications[index].registration.index == 0 then
-        crosses_retirement = true
-        break
+    local crosses_retirement = (function (
+        pending: {WatcherNotification}): boolean
+      for index = 1, #pending do
+        if pending[index].registration.index == 0 then return true end
       end
-    end
+      return false
+    end)(self.notifications)
     if not crosses_retirement then return events end
 
     -- Preserve callback order by pulling the whole follow-on batch into this

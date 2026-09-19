@@ -428,14 +428,11 @@ local function init_hydration_env()
   end
 
   hydration_env["Array"] = function(elem: Type, isconst: value): Type
-    local ic: ArrayTypeConstness? = nil
-    if isconst == "maybe" then
-      ic = ArrayTypeConstness.is_maybe_const()
-    elseif isconst then
-      ic = ArrayTypeConstness.is_const()
-    else
-      ic = ArrayTypeConstness.is_mutable()
-    end
+    local ic = (function (mode: value): ArrayTypeConstness
+      if mode == "maybe" then return ArrayTypeConstness.is_maybe_const() end
+      if mode then return ArrayTypeConstness.is_const() end
+      return ArrayTypeConstness.is_mutable()
+    end)(isconst)
     return Type.is_array{ is_const = ic, elem_descriptor = elem }
   end
 
@@ -812,19 +809,17 @@ local function inspect_function(v: value): Value
       local tag_ptr = ffi.lmacro_pvalue(upvalues[1]) as foreign *char
       local tag_str = tag_ptr as string
       local ftype = hydrate_type(tag_str)
-      local desc: FunctionType? = nil
-      case ftype
-      when is_function(ft) then
-        desc = ft
-      end
-      if desc == nil then
-        raise "invalid function descriptor for Titan function"
-      end
+      local desc = (function (descriptor: Type): FunctionType
+        case descriptor
+        when is_function(ft) then return ft
+        else raise "invalid function descriptor for Titan function"
+        end
+      end)(ftype)
       return Value.is_titan_function{
         value = v as function (...: value): (...: value),
         native_entry = native_entry,
         lua_entry = lua_entry,
-        type = desc as FunctionType
+        type = desc
       }
     else
       local entry: foreign function (*lua_State): int = cl.f

@@ -502,15 +502,13 @@ function spawn(file: string, args: {string},
     output = InputStream.new(stdio, -1, "")
   end
 
-  local diagnostics: InputStream? = nil
-  if raw_stderr then
-    if raw_stdout and raw_stderr == raw_stdout then
-      diagnostics = output
-    else
-      local stdio = raw_stderr as uv.uv_stdio_t
-      diagnostics = InputStream.new(stdio, -1, "")
-    end
-  end
+  local diagnostics: InputStream? =
+    (function (stderr: uv.uv_stdio_t?, stdout: uv.uv_stdio_t?,
+               output: InputStream?): InputStream?
+      if not stderr then return nil end
+      if stdout and stderr == stdout then return output end
+      return InputStream.new(stderr, -1, "")
+    end)(raw_stderr, raw_stdout, output)
 
   return Process.new(process_handle, input, output, diagnostics)
 end

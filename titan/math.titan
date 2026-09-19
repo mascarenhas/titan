@@ -102,19 +102,14 @@ function random(lower: integer?, upper: integer?): value
 end
 
 function randomseed(first: integer?, second: integer?): (integer, integer)
-  local actual_first = 0
-  local actual_second = 0
-  if first then
-    actual_first = first as integer
-    if second then actual_second = second as integer end
-  else
-    if second then raise "randomseed first component is required" end
-    -- Lua promises only a weak attempt at an unpredictable default seed.  C's
-    -- wall-clock and process-CPU clocks supply that weak seed without Lua APIs.
-    actual_first = (ffi.time(nil) as integer) ~
-                   (ffi.clock() as integer)
-    actual_second = next_random()
-  end
+  local actual_first, actual_second =
+    (function (first: integer?, second: integer?): (integer, integer)
+      if first then return first, second or 0 end
+      if second then raise "randomseed first component is required" end
+      -- Lua promises only a weak attempt at an unpredictable default seed.
+      -- Wall-clock and process-CPU clocks supply it without Lua APIs.
+      return (ffi.time(nil) as integer) ~ (ffi.clock() as integer), next_random()
+    end)(first, second)
   set_random_seed(actual_first, actual_second)
   return actual_first, actual_second
 end

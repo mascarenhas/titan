@@ -150,15 +150,15 @@ local function source_search(modname: string, path: string):
     if maybe_file then
       local file = maybe_file as fs.File
       defer file:close()
-      local loaded: LuaChunk? = nil
-      do
-        loaded = load_from_reader(file, "@" .. filename, nil)
+      local loaded = (function (file: fs.File, modname: string,
+                                filename: string): LuaChunk
+        return load_from_reader(file, "@" .. filename, nil)
       catch
         raise "error loading module '" .. modname ..
               "' from file '" .. filename .. "':\n\t" ..
               string.tostring(error)
-      end
-      return loaded as LuaChunk, filename, ""
+      end)(file, modname, filename)
+      return loaded, filename, ""
     end
 
     messages:write("\n\tno file '" .. filename .. "'")
