@@ -200,6 +200,10 @@ flexible-output descriptor when the function has one, resets
 `L->top.p = _base`, and returns the first fixed value in C (or `void` when
 there is no fixed result). See [Calls](#calls).
 
+An [immediately called anonymous function](immediate-functions.md) instead has
+an inline result destination: its return supplies outer holders and exits its
+own logical function scope, preserving the caller's stack frame and cleanup.
+
 ## The generic `for ... in`
 
 `codeforin` consumes the checker's elaborated `Ast.StatForIn`; it does no
@@ -888,6 +892,10 @@ therefore still propagate.
 `(f())` form) is a pass-through to the inner expression.
 
 ## Calls
+
+A direct anonymous-literal callee is lowered as an
+[inline scoped block](immediate-functions.md), sharing the argument plans and
+finite/open demand below but omitting closure allocation and callable dispatch.
 
 `codecall` implements the caller's half of the native calling convention
 ([overview](codegen-overview.md)). Argument marshaling is minimal: preliminary

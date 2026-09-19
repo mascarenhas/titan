@@ -2204,6 +2204,9 @@ function codevaluecall(ctx, node)
 end
 
 function codecall(ctx, node)
+    if coder._immediate_function(node) then
+        return codeimmediatecall(ctx, node)
+    end
     if node._named_arg_order then
         assert(node._named_call_kind == "titan")
     end

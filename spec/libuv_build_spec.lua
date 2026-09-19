@@ -4681,7 +4681,7 @@ done
                 assert.truthy(compiler_groups:find(required, 1, true),
                     required)
             end
-            assert.equal(3, count_literal(workflow,
+            assert.equal(4, count_literal(workflow,
                 "TITAN_PROBE_CACHE_DISABLE=1"), workflow)
             assert.equal(1, count_literal(coverage_job,
                 "needs: test-linux-compiler"), coverage_job)
@@ -4942,8 +4942,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 28, 35, 31, 34 }, shard_counts)
-            assert.equal(128, assigned_count)
+            assert.same({ 29, 35, 31, 34 }, shard_counts)
+            assert.equal(129, assigned_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")
@@ -5211,6 +5211,10 @@ done
                 },
                 {
                     "Run dense Array runtime sanitizer gate",
+                    { ".lua/bin/busted" },
+                },
+                {
+                    "Run immediate function compiler sanitizer gate",
                     { ".lua/bin/busted" },
                 },
                 {

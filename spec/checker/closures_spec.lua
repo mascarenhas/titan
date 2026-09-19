@@ -354,6 +354,58 @@ describe("closures (return inference)", function()
     end)
 end)
 
+describe("closures (immediate invocation preserves source checking)", function()
+    it("does not infer an immediate literal's parameter from its argument", function()
+        assert_type_error("cannot infer type of parameter 'item'", [[
+            function run(): integer
+                return (function (item): integer return 42 end)(1)
+            end
+        ]])
+    end)
+
+    it("does not infer an immediate literal's return shape from its consumer", function()
+        assert_type_error("expression list produces 0", [[
+            function run(): integer
+                local result: integer = (function () return 42 end)()
+                return result
+            end
+        ]])
+    end)
+
+    it("keeps enclosing varargs outside an immediate literal's function scope", function()
+        assert_type_error("'%.%.%.' is not visible inside an inner function", [[
+            function run(...: integer): integer
+                return (function (): integer return #... end)()
+            end
+        ]])
+    end)
+
+    it("preserves immediate literal and capture identities for source analysis", function()
+        local checker = require "titan-compiler.checker"
+        local source = [[
+            function run(): integer
+                local outer = 7
+                return (function (): integer return outer end)()
+            end
+        ]]
+        h.reset(true)
+        local ast = assert(h.parse(source, "test.titan"))
+        local _, errors = checker.check("test", ast, source, "test.titan",
+            nil, { analysis_only = true })
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.is_true(ast._analysis_only)
+        local stats = tlfunc_stats(ast)
+        local declaration = stats[1].decls[1]
+        local call = stats[2].exps[1]
+        assert.equal("Ast.ExpCall", call._tag)
+        local literal = call.exp
+        assert.equal("Ast.ExpFunction", literal._tag)
+        assert.equal(declaration, literal._captures[1])
+        assert.equal(declaration, literal.block.stats[1].exps[1].var._decl)
+        assert.is_true(declaration._captured)
+    end)
+end)
+
 describe("closures (top-level lambda initializer is sound)", function()
     it("accepts a top-level `local f = function...end`", function()
         -- Constructing a lambda reads no module variable's value (the body runs

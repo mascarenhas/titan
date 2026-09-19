@@ -130,46 +130,6 @@ function pop_spillscope(ctx)
     end
 end
 
--- Does `node` (a statement, typically a StatBlock) lexically contain a `StatTry`,
--- WITHOUT descending into nested function bodies (ExpFunction has its own codegen
--- context, entry-wrapper boundary, and errorjmp save)? Used to (a) run the
--- per-function spill analysis and entry errorjmp-save setup, and (b) decide
--- whether a loop must save its errorjmp at entry so a `break` crossing a try
--- boundary can restore it.
-function stat_contains_try(node)
-    if node == nil or node == false then return false end
-    local tag = node._tag
-    if tag == "Ast.StatTry" then
-        return true
-    elseif tag == "Ast.StatBlock" then
-        for _, s in ipairs(node.stats) do
-            if stat_contains_try(s) then return true end
-        end
-        return false
-    elseif tag == "Ast.StatWhile" or tag == "Ast.StatFor"
-           or tag == "Ast.StatRepeat" or tag == "Ast.StatForIn" then
-        if tag == "Ast.StatForIn" and node._has_close then
-            return true
-        end
-        return stat_contains_try(node.block)
-    elseif tag == "Ast.StatIf" then
-        for _, t in ipairs(node.thens) do
-            if stat_contains_try(t.block) then return true end
-        end
-        return stat_contains_try(node.elsestat)
-    elseif tag == "Ast.StatCase" then
-        for _, arm in ipairs(node.arms) do
-            if stat_contains_try(arm.block) then return true end
-        end
-        return stat_contains_try(node.elseblock)
-    else
-        -- StatDecl/StatAssign/StatCall/StatReturn/StatBreak/StatRaise and any
-        -- expression-bearing statement: no nested block that is not a function
-        -- body of its own. ExpFunction bodies are intentionally NOT scanned.
-        return false
-    end
-end
-
 -- Emit the statements of a block's `stats` list, stopping after the first
 -- terminator (the rest is unreachable, unchecked dead code).
 function codestats(ctx, stats_list)
@@ -1415,20 +1375,23 @@ function make_return_frame(ctx, id)
     end
     local flex = false
     if ctx.flexrettype then
+        local capacity = ctx.inline_return and ctx.inline_return.flex.capacity or 200
         local args = "_pa_flexargs_" .. id
         local count = "_pa_flexcount_" .. id
         local root_depth
         if types.is_gc(ctx.flexrettype) then
             root_depth = ctx.depth
-            for _ = 1, 200 do reserveslot(ctx) end
+            for _ = 1, capacity do reserveslot(ctx) end
         end
         table.insert(decls, render([[
-            $ELEM $ARGS[TITAN_VARARG_MAX] = {0};
+            $ELEM $ARGS[$CAPACITY] = {0};
             int volatile $COUNT = 0;
             (void)$ARGS;
             (void)$COUNT;
         ]], {
             ELEM = ctype(ctx.flexrettype),
+            CAPACITY = capacity == 200 and "TITAN_VARARG_MAX"
+                or c_integer_literal(math.max(capacity, 1)),
             ARGS = args,
             COUNT = count,
         }))
@@ -1438,7 +1401,7 @@ function make_return_frame(ctx, id)
             count = count,
             root_depth = root_depth,
             start = "0",
-            capacity = 200,
+            capacity = capacity,
             ownership = "pending",
         }
     end
@@ -1469,6 +1432,17 @@ end
 -- volatile and is the authoritative prefix length on recovery.
 function coder._reset_pending_flex(flex)
     if not flex then return "" end
+    if flex.slots then
+        local lines = {}
+        for _, save in ipairs(flex.slots) do
+            table.insert(lines, "setnilvalue(&" .. save.cvar .. ");")
+            if save.slot then
+                table.insert(lines, "setnilvalue(" .. slotat(save.slot) .. ");")
+            end
+        end
+        table.insert(lines, flex.count .. " = 0;")
+        return table.concat(lines, "\n")
+    end
     local clear = ""
     if flex.root_depth then
         clear = render([[
@@ -1487,6 +1461,9 @@ end
 -- fixed roots and copy the complete flexible run before resetting `L->top`;
 -- after that reset no allocation occurs before control reaches the caller.
 function dispatch_return_epilogue(ctx, frame)
+    if ctx.inline_return then
+        return coder._finish_immediate_return(ctx, frame)
+    end
     local from = frame.fixed
     local lines = {}
     -- restore the errorjmp chain to the function-entry values (this return is
@@ -1619,6 +1596,7 @@ function coder._lower_return_to_destination(ctx, node, destination)
 
     local cstats, fixednames = {}, {}
     local flex = destination.flex
+    local want = ctx.flexwant or "_flexwant"
     local openrun
     local tail_seen = 0
     if flex and destination.kind == "direct" then
@@ -1633,24 +1611,21 @@ function coder._lower_return_to_destination(ctx, node, destination)
 
     local function append_flexible(setup, value)
         assert(flex)
-        local root = coder._flex_root(flex, flex.count)
         return render([[
-            if (_flexwant == LUA_MULTRET || $COUNT < _flexwant) {
+            if ($WANT == LUA_MULTRET || $COUNT < $WANT) {
                 $SETUP
                 if (TITAN_UNLIKELY($COUNT >= TITAN_VARARG_MAX)) {
                     luaL_error(L, "too many flexible return values (max %d)",
                         (int)TITAN_VARARG_MAX);
                 }
-                $ARGS[$COUNT] = $VALUE;
-                $ROOT
+                $WRITE
                 $COUNT++;
             }
         ]], {
             COUNT = flex.count,
-            ARGS = flex.args,
             SETUP = setup,
-            VALUE = value,
-            ROOT = root,
+            WANT = want,
+            WRITE = coder._store_flex_result(flex, flex.count, value),
         })
     end
 
@@ -1673,13 +1648,14 @@ function coder._lower_return_to_destination(ctx, node, destination)
             local pending_tail = #adjusted.tail_scalars - tail_seen
             cs, ce, openrun = coder._code_open_source(ctx,
                 adjusted.open_source, render([[
-                ((_flexwant == LUA_MULTRET) ? LUA_MULTRET
-                    : ((_flexwant > ($COUNT + $PENDING))
-                        ? (_flexwant - $COUNT - $PENDING) : 0))
+                (($WANT == LUA_MULTRET) ? LUA_MULTRET
+                    : (($WANT > ($COUNT + $PENDING))
+                        ? ($WANT - $COUNT - $PENDING) : 0))
             ]], {
                 COUNT = flex.count,
                 PENDING = c_integer_literal(pending_tail),
-            }), "(_flexwant == LUA_MULTRET)", carrier)
+                WANT = want,
+            }), "(" .. want .. " == LUA_MULTRET)", carrier)
         else
             cs, ce = codeexp(ctx, carrier)
         end
@@ -1689,15 +1665,20 @@ function coder._lower_return_to_destination(ctx, node, destination)
             -- syntax, so use the destination type when such an unreachable
             -- return expression has no `_type` annotation.
             local sinktype = exp._type
-                or (destination.fixed and destination.fixed[fi].typ)
+                or (destination.fixed and destination.fixed[fi]
+                    and destination.fixed[fi].typ)
                 or ctx.rettypes[fi]
             local mstats, name = materialize_code(ctx,
                 assert(sinktype), cs, ce)
             table.insert(cstats, mstats)
             if destination.fixed then
-                local save = assert(destination.fixed[fi])
-                table.insert(cstats, save.cvar .. " = " .. name .. ";")
-                if save.slot then
+                local save = destination.fixed[fi]
+                if save then
+                    table.insert(cstats, save.cvar .. " = " .. name .. ";")
+                else
+                    table.insert(cstats, "(void)" .. name .. ";")
+                end
+                if save and save.slot then
                     -- Publish the frame root immediately: a later return
                     -- expression may allocate or relocate the Lua stack.
                     table.insert(cstats,
@@ -1749,7 +1730,7 @@ function coder._lower_return_to_destination(ctx, node, destination)
         -- result slot until the native caller consumes the completed buffer.
         -- Pending-finally destinations already own an equivalent root range.
         local read_root_depth = flex.root_depth
-        if not read_root_depth
+        if not flex.slots and not read_root_depth
            and (openrun.retain_read_results
                 or coder._adjustment_allocates_gc(openrun.adjustment)) then
             read_root_depth = ctx.depth
@@ -1765,7 +1746,7 @@ function coder._lower_return_to_destination(ctx, node, destination)
             result_root, result_stack)
         local adjustment_allocates =
             coder._adjustment_allocates_gc(openrun.adjustment)
-        if adjustment_allocates then
+        if adjustment_allocates and not flex.slots then
             assert(result_root,
                 "allocating open return adjustment lacks its selected root")
         end
@@ -1780,8 +1761,8 @@ function coder._lower_return_to_destination(ctx, node, destination)
         table.insert(cstats, render([[
             lua_Unsigned _open_return_count =
                 (lua_Unsigned)($RUNCOUNT);
-            if (_flexwant != LUA_MULTRET) {
-                int _open_return_remaining = _flexwant - $COUNT;
+            if ($WANT != LUA_MULTRET) {
+                int _open_return_remaining = $WANT - $COUNT;
                 if (_open_return_remaining < 0)
                     _open_return_remaining = 0;
                 if (_open_return_count >
@@ -1801,14 +1782,13 @@ function coder._lower_return_to_destination(ctx, node, destination)
             }
             for (lua_Unsigned _ori = 0;
                  _ori < _open_return_count; _ori++) {
-                if (_flexwant == LUA_MULTRET || $COUNT < _flexwant) {
+                if ($WANT == LUA_MULTRET || $COUNT < $WANT) {
                     if (TITAN_UNLIKELY($COUNT >= TITAN_VARARG_MAX)) {
                         luaL_error(L, "too many flexible return values (max %d)",
                             (int)TITAN_VARARG_MAX);
                     }
                     $CONVSTATS
-                    $ARGS[$COUNT] = $VALUE;
-                    $ROOT
+                    $WRITE
                     $COUNT++;
                 }
             }
@@ -1816,10 +1796,12 @@ function coder._lower_return_to_destination(ctx, node, destination)
         ]], {
             RUNCOUNT = openrun.count,
             COUNT = flex.count,
-            ARGS = flex.args,
             CONVSTATS = convstats,
-            VALUE = convexp,
-            ROOT = root,
+            WANT = want,
+            WRITE = flex.slots
+                and coder._store_flex_result(flex, flex.count, convexp)
+                or (flex.args .. "[" .. flex.count .. "] = "
+                    .. convexp .. ";\n" .. root),
             CLEANUP = coder._cleanup_result_run(openrun),
         }))
     end
@@ -1847,6 +1829,13 @@ function codereturn(ctx, node)
             restore_boundaries_to(ctx, fin.boundary_floor))
         table.insert(cstats, "goto " .. fin.label .. ";")
         return table.concat(cstats, "\n")
+    end
+
+    if ctx.inline_return then
+        local stats = coder._lower_return_to_destination(
+            ctx, node, ctx.inline_return)
+        table.insert(stats, coder._finish_immediate_return(ctx))
+        return table.concat(stats, "\n")
     end
 
     -- Clean-exit restore (#3): a `return` crossing one or more protected regions

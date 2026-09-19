@@ -111,6 +111,7 @@ build = {
       ["titan-compiler.checker.variables"] = "titan-compiler/checker/variables.lua",
       ["titan-compiler.coder"] = "titan-compiler/coder.lua",
       ["titan-compiler.coder.calls"] = "titan-compiler/coder/calls.lua",
+      ["titan-compiler.coder.immediate"] = "titan-compiler/coder/immediate.lua",
       ["titan-compiler.coder.core"] = "titan-compiler/coder/core.lua",
       ["titan-compiler.coder.declarations"] = "titan-compiler/coder/declarations.lua",
       ["titan-compiler.coder.expressions"] = "titan-compiler/coder/expressions.lua",

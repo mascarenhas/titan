@@ -638,6 +638,12 @@ boundary matrix are in
 
 ## Closures and captured variables
 
+An anonymous literal used directly as a call's callee instead follows the
+[inline immediate-call path](immediate-functions.md): its source body becomes
+a scoped block, so its closure and separate entries are omitted. The layout
+below applies when a function value is materialized, including nested closures
+that escape from an inline body.
+
 An anonymous function ([closures](../language/closures.md)) is a source function
 value just like a top-level reference — a `CClosure` whose `f` is the coercive
 genuine-Lua entry, with a four-slot header, one upvalue per captured variable,

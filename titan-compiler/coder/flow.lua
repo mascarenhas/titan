@@ -44,6 +44,133 @@ function set_copy(src)
     return set_union({}, src)
 end
 
+-- Only a directly called literal shares the caller's physical C frame.
+-- Parentheses around a literal preserve this shape; callable casts and stored
+-- function values retain their ordinary closure/call boundary.
+function coder._immediate_function(node)
+    if node and node._tag == "Ast.ExpCall"
+       and node.exp._tag == "Ast.ExpFunction" then
+        return node.exp
+    end
+end
+
+-- Visit expression operands in their evaluation order without entering a
+-- function body. Immediate bodies are entered explicitly by the physical-frame
+-- walkers below, after their arguments. Metadata references (notably spread
+-- projections) are not a second evaluation of the referenced expression.
+local function expression_children(node, visit)
+    if not node then return end
+    local tag = node._tag
+    if tag == "Ast.ExpCall" then
+        if visit(node.exp) then return true end
+        if node._named_arg_order then
+            for _, index in ipairs(node._named_arg_order) do
+                if visit(node.args.args[index]) then return true end
+            end
+        else
+            for _, arg in ipairs(node.args.args) do
+                if visit(arg) then return true end
+            end
+        end
+    elseif tag == "Ast.ExpVar" then
+        return visit(node.var)
+    elseif tag == "Ast.VarBracket" then
+        return visit(node.exp1) or visit(node.exp2)
+    elseif tag == "Ast.ExpInitList" then
+        for _, field in ipairs(node.fields) do
+            if type(field.name) == "table" and visit(field.name) then
+                return true
+            end
+            if visit(field.exp) then return true end
+        end
+    elseif tag == "Ast.ExpUnionInit" then
+        for _, value in ipairs(node.values) do
+            if visit(value) then return true end
+        end
+    elseif tag == "Ast.ExpSpread" then
+        return visit(node.exp) or visit(node.first) or visit(node.last)
+    elseif tag == "Ast.ExpAdjust" and node._adjusted_spread then
+        return visit(node._adjusted_spread)
+    elseif tag == "Ast.VarDot" or tag == "Ast.ExpUnop"
+            or tag == "Ast.ExpCast" or tag == "Ast.ExpIs"
+            or tag == "Ast.ExpAdjust" or tag == "Ast.ExpDotsIndex"
+            or tag == "Ast.ExpExtra" or tag == "Ast.ExpMethodRef" then
+        return visit(node.exp)
+    elseif tag == "Ast.ExpBinop" then
+        return visit(node.lhs) or visit(node.rhs)
+    elseif tag == "Ast.ExpConcat" then
+        for _, exp in ipairs(node.exps) do
+            if visit(exp) then return true end
+        end
+    end
+end
+
+-- Direct expression children of a statement, without its nested blocks.
+local function statement_expressions(node, visit)
+    local tag = node._tag
+    if tag == "Ast.StatAssign" then
+        for _, var in ipairs(node.vars) do
+            if visit(var) then return true end
+        end
+    end
+    if tag == "Ast.StatDecl" or tag == "Ast.StatAssign"
+            or tag == "Ast.StatReturn" or tag == "Ast.StatForIn" then
+        for _, exp in ipairs(node.exps) do
+            if visit(exp) then return true end
+        end
+    elseif tag == "Ast.StatCall" then
+        return visit(node.callexp)
+    elseif tag == "Ast.StatRaise" or tag == "Ast.StatCase" then
+        return visit(node.exp)
+    elseif tag == "Ast.StatWhile" or tag == "Ast.StatRepeat" then
+        return visit(node.condition)
+    elseif tag == "Ast.StatFor" then
+        return visit(node.start) or visit(node.finish) or visit(node.inc)
+    elseif tag == "Ast.StatIf" then
+        for _, arm in ipairs(node.thens) do
+            if visit(arm.condition) then return true end
+        end
+    end
+end
+
+local function expression_contains_try(node)
+    if not node then return false end
+    local immediate = coder._immediate_function(node)
+    return (immediate and stat_contains_try(immediate.block))
+        or expression_children(node, expression_contains_try) or false
+end
+
+-- Detect protected regions in this physical C activation, including direct
+-- immediate bodies in any expression position. Escaping lambdas still own
+-- independent C activations and are intentionally not entered.
+function stat_contains_try(node)
+    if not node then return false end
+    local tag = node._tag
+    if tag == "Ast.StatTry" then return true end
+    if statement_expressions(node, expression_contains_try) then return true end
+    if tag == "Ast.StatBlock" then
+        for _, stat in ipairs(node.stats) do
+            if stat_contains_try(stat) then return true end
+            if is_terminator(stat) then break end
+        end
+    elseif tag == "Ast.StatWhile" or tag == "Ast.StatRepeat"
+            or tag == "Ast.StatFor" or tag == "Ast.StatForIn" then
+        return (tag == "Ast.StatForIn" and node._has_close)
+            or stat_contains_try(node.block) or false
+    elseif tag == "Ast.StatIf" then
+        for _, arm in ipairs(node.thens) do
+            if stat_contains_try(arm.block) then return true end
+        end
+        return stat_contains_try(node.elsestat)
+    elseif tag == "Ast.StatCase" then
+        for _, arm in ipairs(node.arms) do
+            if stat_contains_try(arm.block) then return true end
+        end
+        return stat_contains_try(node.elseblock)
+    end
+    return false
+end
+
 -- C `setjmp` correctness (C11 §7.13.2.1): an automatic variable of a function
 -- that calls `setjmp`, is changed between that `setjmp` and its matching
 -- `longjmp`, and is read after the longjmp has an indeterminate value unless the
@@ -136,108 +263,34 @@ end
 
 collect_reads_exp = function(node, out)
     out = out or {}
-    if not node or node == false then return out end
+    if not node then return out end
     local tag = node._tag
     if tag == "Ast.VarName" or tag == "Ast.VarDot"
             or tag == "Ast.VarBracket" then
         collect_reads_var(node, out)
-    elseif tag == "Ast.ExpVar" then
-        collect_reads_var(node.var, out)
-    elseif tag == "Ast.ExpInitList" then
-        for _, field in ipairs(node.fields) do
-            collect_reads_exp(field.exp, out)
-        end
-    elseif tag == "Ast.ExpCall" then
-        collect_reads_exp(node.exp, out)
-        for _, arg in ipairs(node.args.args) do
-            collect_reads_exp(arg, out)
-        end
-    elseif tag == "Ast.ExpUnionInit" then
-        for _, value in ipairs(node.values) do
-            collect_reads_exp(value, out)
-        end
-    elseif tag == "Ast.ExpSpread" then
-        -- The written carrier owns evaluation of the shared subject and bounds.
-        -- Checker-synthesized ExpSpreadIndex projections deliberately do not
-        -- revisit this subtree.
-        collect_reads_exp(node.exp, out)
-        collect_reads_exp(node.first, out)
-        collect_reads_exp(node.last, out)
-    elseif tag == "Ast.ExpAdjust" and node._adjusted_spread then
-        collect_reads_exp(node._adjusted_spread, out)
-    elseif tag == "Ast.ExpUnop" or tag == "Ast.ExpCast"
-            or tag == "Ast.ExpIs"
-            or tag == "Ast.ExpAdjust" or tag == "Ast.ExpDotsIndex" then
-        collect_reads_exp(node.exp, out)
-    elseif tag == "Ast.ExpBinop" then
-        collect_reads_exp(node.lhs, out)
-        collect_reads_exp(node.rhs, out)
-    elseif tag == "Ast.ExpConcat" then
-        for _, exp in ipairs(node.exps) do
-            collect_reads_exp(exp, out)
-        end
-    elseif tag == "Ast.ExpExtra" then
-        collect_reads_exp(node.exp, out)
-    elseif tag == "Ast.ExpMethodRef" then
-        collect_reads_exp(node.exp, out)
-    elseif tag == "Ast.ExpFunction" then
-        -- Nested functions/lambdas have their own setjmp scopes and contexts.
     else
-        -- literals, ExpDots, ExpDotsLen
+        expression_children(node, function(child)
+            collect_reads_exp(child, out)
+        end)
     end
+    local immediate = coder._immediate_function(node)
+    if immediate then collect_reads_stat(immediate.block, out) end
     return out
 end
 
 function coder._collect_writes_exp(node, out)
     out = out or {}
-    if not node or node == false then return out end
-    local tag = node._tag
-    if tag == "Ast.VarDot" then
-        coder._collect_writes_exp(node.exp, out)
-    elseif tag == "Ast.VarBracket" then
-        coder._collect_writes_exp(node.exp1, out)
-        coder._collect_writes_exp(node.exp2, out)
-    elseif tag == "Ast.ExpVar" then
-        coder._collect_writes_exp(node.var, out)
-    elseif tag == "Ast.ExpInitList" then
-        for _, field in ipairs(node.fields) do
-            coder._collect_writes_exp(field.exp, out)
-        end
-    elseif tag == "Ast.ExpCall" then
+    if not node then return out end
+    if node._tag == "Ast.ExpCall" then
         for _, decl in ipairs(node._c_mutated_decls or {}) do
             set_add(out, decl)
         end
-        coder._collect_writes_exp(node.exp, out)
-        for _, arg in ipairs(node.args.args) do
-            coder._collect_writes_exp(arg, out)
-        end
-    elseif tag == "Ast.ExpUnionInit" then
-        for _, value in ipairs(node.values) do
-            coder._collect_writes_exp(value, out)
-        end
-    elseif tag == "Ast.ExpSpread" then
-        coder._collect_writes_exp(node.exp, out)
-        coder._collect_writes_exp(node.first, out)
-        coder._collect_writes_exp(node.last, out)
-    elseif tag == "Ast.ExpAdjust" and node._adjusted_spread then
-        coder._collect_writes_exp(node._adjusted_spread, out)
-    elseif tag == "Ast.ExpUnop" or tag == "Ast.ExpCast"
-            or tag == "Ast.ExpIs"
-            or tag == "Ast.ExpAdjust" or tag == "Ast.ExpDotsIndex"
-            or tag == "Ast.ExpExtra" or tag == "Ast.ExpMethodRef" then
-        coder._collect_writes_exp(node.exp, out)
-    elseif tag == "Ast.ExpBinop" then
-        coder._collect_writes_exp(node.lhs, out)
-        coder._collect_writes_exp(node.rhs, out)
-    elseif tag == "Ast.ExpConcat" then
-        for _, exp in ipairs(node.exps) do
-            coder._collect_writes_exp(exp, out)
-        end
-    elseif tag == "Ast.ExpFunction" then
-        -- Nested functions/lambdas have their own setjmp scopes and contexts.
-    else
-        -- names and literals do not write.
     end
+    expression_children(node, function(child)
+        coder._collect_writes_exp(child, out)
+    end)
+    local immediate = coder._immediate_function(node)
+    if immediate then collect_writes_stat(immediate.block, out) end
     return out
 end
 
@@ -369,26 +422,58 @@ end
 
 analyze_try_spills_block = nil
 
-function coder._analyze_try_spills_stat(stat, after)
+-- Work backwards through expression operands so a protected immediate body
+-- sees reads in the rest of the expression as well as later statements. Its
+-- local return resumes that continuation rather than leaving the C function.
+local function analyze_try_spills_exp(node, after)
+    if not node then return end
+    local operands = {}
+    expression_children(node, function(child)
+        if child then operands[#operands + 1] = child end
+    end)
+    local remaining = set_copy(after)
+    local immediate = coder._immediate_function(node)
+    if immediate then
+        coder._analyze_try_spills_stat(immediate.block, remaining, remaining)
+        collect_reads_stat(immediate.block, remaining)
+    end
+    for i = #operands, 1, -1 do
+        analyze_try_spills_exp(operands[i], remaining)
+        collect_reads_exp(operands[i], remaining)
+    end
+end
+
+function coder._analyze_try_spills_stat(stat, after, return_reads)
     if not stat or stat == false then return end
     local tag = stat._tag
     if tag == "Ast.StatBlock" then
-        analyze_try_spills_block(stat, after)
+        analyze_try_spills_block(stat, after, return_reads)
     elseif tag == "Ast.StatWhile" or tag == "Ast.StatRepeat"
             or tag == "Ast.StatFor" or tag == "Ast.StatForIn" then
         local loop_after = set_copy(after)
         collect_reads_stat(stat, loop_after)
-        coder._analyze_try_spills_stat(stat.block, loop_after)
+        coder._analyze_try_spills_stat(stat.block, loop_after, return_reads)
+        statement_expressions(stat, function(exp)
+            analyze_try_spills_exp(exp, loop_after)
+        end)
     elseif tag == "Ast.StatIf" then
         for _, t in ipairs(stat.thens) do
-            coder._analyze_try_spills_stat(t.block, after)
+            coder._analyze_try_spills_stat(t.block, after, return_reads)
         end
-        coder._analyze_try_spills_stat(stat.elsestat, after)
+        coder._analyze_try_spills_stat(stat.elsestat, after, return_reads)
+        local branch_after = set_copy(after)
+        collect_reads_stat(stat, branch_after)
+        statement_expressions(stat, function(exp)
+            analyze_try_spills_exp(exp, branch_after)
+        end)
     elseif tag == "Ast.StatCase" then
         for _, arm in ipairs(stat.arms) do
-            coder._analyze_try_spills_stat(arm.block, after)
+            coder._analyze_try_spills_stat(arm.block, after, return_reads)
         end
-        coder._analyze_try_spills_stat(stat.elseblock, after)
+        coder._analyze_try_spills_stat(stat.elseblock, after, return_reads)
+        local branch_after = set_copy(after)
+        collect_reads_stat(stat, branch_after)
+        analyze_try_spills_exp(stat.exp, branch_after)
     elseif tag == "Ast.StatTry" then
         local catch_reads = collect_reads_stat(stat.catchblock)
         local finally_reads = collect_reads_stat(stat.finallyblock)
@@ -411,18 +496,32 @@ function coder._analyze_try_spills_stat(stat, after)
         local nested_body_after = set_copy(after)
         set_union(nested_body_after, catch_reads)
         set_union(nested_body_after, finally_reads)
-        coder._analyze_try_spills_stat(stat.block, nested_body_after)
+        coder._analyze_try_spills_stat(stat.block, nested_body_after, return_reads)
 
         local nested_catch_after = set_copy(after)
         set_union(nested_catch_after, finally_reads)
-        coder._analyze_try_spills_stat(stat.catchblock, nested_catch_after)
-        coder._analyze_try_spills_stat(stat.finallyblock, after)
+        coder._analyze_try_spills_stat(stat.catchblock, nested_catch_after,
+            return_reads)
+        coder._analyze_try_spills_stat(stat.finallyblock, after, return_reads)
+    else
+        local operands = {}
+        statement_expressions(stat, function(exp)
+            if exp then operands[#operands + 1] = exp end
+        end)
+        local remaining = set_copy(after)
+        if stat._tag == "Ast.StatReturn" then
+            set_union(remaining, return_reads)
+        end
+        for i = #operands, 1, -1 do
+            analyze_try_spills_exp(operands[i], remaining)
+            collect_reads_exp(operands[i], remaining)
+        end
     end
 end
 
-analyze_try_spills_block = function(block, after_reads)
+analyze_try_spills_block = function(block, after_reads, return_reads)
     if not block or not block.stats then
-        coder._analyze_try_spills_stat(block, after_reads or {})
+        coder._analyze_try_spills_stat(block, after_reads or {}, return_reads)
         return
     end
     local stats = {}
@@ -433,10 +532,14 @@ analyze_try_spills_block = function(block, after_reads)
     local after = set_copy(after_reads or {})
     for i = #stats, 1, -1 do
         local stat = stats[i]
-        coder._analyze_try_spills_stat(stat, after)
+        coder._analyze_try_spills_stat(stat, after, return_reads)
 
         local reads = collect_reads_stat(stat)
         if is_terminator(stat) then
+            -- A return from an inline body resumes its caller expression.
+            -- Retain that continuation through compound terminating statements
+            -- too; ordinary separately emitted functions pass no such reads.
+            set_union(reads, return_reads)
             after = reads
         else
             set_union(reads, after)

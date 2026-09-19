@@ -58,7 +58,9 @@ return function (): integer return 42 end                   -- as a return value
 A lambda is a *simple* expression, not a prefix expression, so it cannot
 be **called directly**: `function () … end(x)` is a syntax error. Wrap it
 in parentheses to apply it immediately — `(function () … end)(x)` — exactly
-as Lua requires for an immediately-invoked function expression.
+as Lua requires for an immediately-invoked function expression. Titan
+[optimizes this direct immediate call](#immediate-calls-as-expressions) into
+an inline block.
 
 The body block follows the same rules as any function body, including the
 *return-on-every-path* rule for a value-returning lambda (see
@@ -186,6 +188,65 @@ To give such a lambda a return type, either annotate it (`function (x:
 integer): integer ...`) or place it where its function type is known (an
 annotated `local`, an argument slot, or a `return` position).
 
+## Immediate calls as expressions
+
+An anonymous function called immediately is a useful way to put statements
+inside an expression:
+
+```titan
+function choose(flag: boolean): integer
+    local result = (function (): integer
+        if flag then return 10 end
+        return 20
+    end)()
+    return result + 1
+end
+```
+
+Titan generates an inline scoped block for this call, with result holders
+outside the block. It allocates no function closure for the immediately called
+literal. Parameters, variadic inputs, captures, multiple results, and flexible
+results work with the same source rules as ordinary anonymous functions.
+
+This optimization applies when the call's callee is the anonymous function
+literal itself, including parentheses around that literal. It does not follow
+stored function values, inline a function returned by another call, or look
+through a callable cast. Parentheses around the **completed call** still force
+one result: `((function (): () end)())` produces one nil, while the unadjusted
+call produces no results.
+
+The call's consumer does not supply an expected function type for the literal.
+Annotate its parameters and results as needed: omitting its return annotation
+still means zero results, even when the body writes `return expression`.
+Inlining changes neither type checking nor capture restrictions.
+
+The compiler uses the consumer's existing result demand at each return:
+
+* A call statement retains no results; a scalar use retains one.
+* A fixed declaration, assignment, argument list, return list, or iterator
+  tuple retains the required remaining positions. Requested flexible positions
+  keep their ordinary `T?` type and missing-value behavior.
+* An open variadic argument tail, flexible return tail, or final positional
+  Array/integer-Map constructor entry preserves the actual result count.
+
+Only the final expression expands. A flexible return also respects any finite
+budget inherited from its enclosing caller; the existing result-count limits
+continue to apply.
+
+Argument expressions are evaluated once in their usual order before the body
+runs, and surplus arguments still execute. A return exits only this anonymous
+function. Its return expressions and declared-result conversions run before
+its `defer` cleanup, and caller-side conversions run afterward, outside its
+`catch`. For example, returning an integer through a declared `float` result
+and then storing it in `value` preserves the float tag. Discarded fixed-result
+conversions can still raise; discarded implicit flexible-tail adjustments can
+be skipped, while written casts and other source effects still execute.
+
+Nested functions that are stored or returned remain ordinary closures. Their
+captures stay alive after the immediate call exits, and mutable captures keep
+their normal shared-cell behavior. Errors retain the source filename and line;
+the optimized call does not require a separate anonymous native stack frame.
+
 ## Capturing enclosing locals
 
 A lambda may use the locals and parameters of the function(s) around it.
@@ -255,6 +316,10 @@ defines what equality means for lambdas:
 Equality on function values is object identity (raw closure-pointer
 comparison), the same rule that applies to any function value
 ([functions](functions.md#functions-as-values)).
+
+For a [direct immediate call](#immediate-calls-as-expressions), the function
+value never escapes or participates in an identity comparison, so the compiler
+can omit its allocation without changing these rules.
 
 This fresh lambda is the **source closure**. An exact target-typed use preserves
 it. Evaluating an admitted non-exact Function-to-Function edge may, when the
