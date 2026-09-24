@@ -949,6 +949,11 @@ jobs:
           bash spec/support/ci_sanitizer_capture.sh dense-array \
             env TITAN_PROBE_CACHE_DISABLE=1 .lua/bin/busted -o gtest -v spec/dense_array_runtime_spec.lua
 
+      - name: Run immediate function compiler sanitizer gate
+        run: |
+          bash spec/support/ci_sanitizer_capture.sh immediate-functions \
+            env TITAN_PROBE_CACHE_DISABLE=1 .lua/bin/busted -o gtest -v spec/coder/immediate_functions_spec.lua
+
       - name: Run native coroutine sanitizer gate
         run: |
           bash spec/support/ci_sanitizer_capture.sh coroutine-gc \

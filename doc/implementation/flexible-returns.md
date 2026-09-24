@@ -474,6 +474,21 @@ more than 200 actual tail values raise. A smaller finite inherited copy budget
 materializes only the requested prefix and ignores surplus raw Lua results
 without spuriously applying the open overflow rule.
 
+### Immediately called literals
+
+[Immediately called anonymous functions](immediate-functions.md) use the same
+checked finite/open demand and inherited budget within an inline scoped block.
+Finite demand supplies outer result holders directly at each return, avoiding
+a general descriptor followed by post-block projection. Open demand preserves
+the actual run/count and its traced ownership. The distinction between raw
+source effects and discardable implicit tail adjustments is unchanged.
+
+The return-expression-to-declared-result conversion still precedes the
+literal's cleanup; caller-side adjustments that can raise or allocate remain
+outside its protected boundary. Storage fusion must preserve both conversion
+edges and the result's intermediate representation. This optimization changes
+neither the public flexible-result ABI nor its capacity limits.
+
 ## Exact and generic calls
 
 Direct module functions, record statics, methods, bound methods, lambdas, and
