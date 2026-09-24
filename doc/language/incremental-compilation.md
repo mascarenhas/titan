@@ -80,7 +80,7 @@ producer object.
 ## Optimization and toolchain settings
 
 Titan-generated C defaults to `-O3` on Linux and macOS. On Linux, GCC and Clang
-also receive `-flto -ffat-lto-objects` during compilation and linking. These
+also receive `-flto=auto -ffat-lto-objects` during compilation and linking. These
 objects retain native code and readable Titan metadata alongside the compiler's
 intermediate representation. The final provider or executable link can inline
 and propagate constants across separately compiled source objects and members

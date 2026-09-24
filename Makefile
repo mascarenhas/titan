@@ -310,7 +310,7 @@ LUA_AR    ?= $(AR) rcu
 LUA_RANLIB ?= $(RANLIB)
 TITAN_DEFAULT_OPTFLAGS := -O3
 ifeq ($(HOST_OS),Linux)
-  TITAN_DEFAULT_OPTFLAGS += -flto -ffat-lto-objects
+  TITAN_DEFAULT_OPTFLAGS += -flto=auto -ffat-lto-objects
 endif
 CFLAGS    ?= --std=c99 $(TITAN_DEFAULT_OPTFLAGS) -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g
 LUA_MYCFLAGS  ?= -fPIC

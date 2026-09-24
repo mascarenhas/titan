@@ -428,7 +428,7 @@ module/header, compiler, and configuration invalidation; see
 for the complete contract and an example.
 
 Generated C defaults to `-O3`. Linux GCC/Clang builds also use
-`-flto -ffat-lto-objects`, retaining native object metadata while allowing the
+`-flto=auto -ffat-lto-objects`, retaining native object metadata while allowing the
 final provider/executable link to optimize across module objects and archives.
 macOS keeps ordinary native objects without default LTO. For a cheap fixture
 build, set `TITAN_EXTRA_CFLAGS='-O0 -fno-lto'` and

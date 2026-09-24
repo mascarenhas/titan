@@ -59,8 +59,10 @@ local function run(argv)
     return ok == true, output, why, code
 end
 
-local prefix = os.getenv("PREFIX") or os.getenv("TITAN_ROCKS_ROOT")
-if not prefix then
+local prefix = os.getenv("PREFIX")
+if not prefix or prefix == "" then prefix = os.getenv("TITAN_ROCKS_ROOT") end
+-- Make exports an empty TITAN_ROCKS_ROOT when no override was requested.
+if not prefix or prefix == "" then
     for template in package.cpath:gmatch("[^;]+") do
         prefix = template:match("^(.*)/lib/lua/5[.]5/[?][.]so$")
         if prefix then break end

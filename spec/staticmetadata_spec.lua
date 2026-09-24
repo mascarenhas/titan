@@ -401,7 +401,7 @@ describe("trusted object source metadata", function()
                 argv[#argv + 1] = flag
             end
             if linux then
-                argv[#argv + 1], argv[#argv + 2] = "-flto", "-ffat-lto-objects"
+                argv[#argv + 1], argv[#argv + 2] = "-flto=auto", "-ffat-lto-objects"
             end
             for _, argument in ipairs({ "-c", source, "-o", output }) do
                 argv[#argv + 1] = argument

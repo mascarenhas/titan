@@ -954,6 +954,11 @@ assert(support._loadlib(%q, "titan_uv_abi"))
         assert.truthy(entries > 0, output)
         assert.falsy(output:find(workspace .. "/lua_modules", 1, true), output)
 
+        -- Clean Lua derives its search paths from the physical executable
+        -- location; LuaRocks above retains the configured prefix spelling.
+        ok, output = run({ "pwd", "-P" }, PREFIX)
+        assert.truthy(ok, output)
+        local physical_prefix = assert(output:match("^(.-)\n$"))
         local runtime_program = string.format([[
             local provider_path = %q
             local shim_root = %q
@@ -1087,7 +1092,8 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             async.loop()
             assert(direct:status():as_string() == "succeeded")
             assert(direct_result == "direct")
-        ]], STDLIB_PROVIDER, STDLIB_SHIMDIR)
+        ]], physical_prefix .. "/lib/titan/0.6/titan.so",
+            physical_prefix .. "/share/lua/5.5/titan")
         ok, output, why, code = run(clean_environment({
             LUA, "-e", runtime_program,
         }), workspace)

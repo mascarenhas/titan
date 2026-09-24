@@ -705,7 +705,7 @@ describe("libuv Makefile configuration", function()
             end
             for _, compiler in ipairs({ "gcc", "clang" }) do
                 local linux = flags("Linux", compiler)
-                assert.matches("-O3 -flto -ffat-lto-objects", linux, 1, true)
+                assert.matches("-O3 -flto=auto -ffat-lto-objects", linux, 1, true)
                 local darwin = flags("Darwin", compiler)
                 assert.matches("-O3", darwin, 1, true)
                 assert.falsy(darwin:find("-flto", 1, true), darwin)
@@ -3253,7 +3253,14 @@ end)
                 assert.equal(prefix, checkout.root)
                 assert.equal(prefix .. "/include", checkout.include)
                 assert.equal(prefix .. "/src/lua-5.5.1", checkout.lua_source)
-                assert.equal(prefix .. "/lib/titan/0.6/titan.so",
+                -- Lua resolves its executable's physical prefix, whereas the
+                -- LuaRocks launcher retains the configured path spelling.
+                local prefix_ok, prefix_output = run_argv({
+                    "sh", "-c", 'cd "$1" && pwd -P', "titan-prefix", prefix,
+                })
+                assert.truthy(prefix_ok, prefix_output)
+                local physical_prefix = assert(prefix_output:match("^(.-)\n$"))
+                assert.equal(physical_prefix .. "/lib/titan/0.6/titan.so",
                     checkout.provider)
                 write_file(local_types,
                     'error("broken checkout compiler must propagate", 0)\n')

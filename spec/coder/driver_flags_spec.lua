@@ -243,7 +243,7 @@ describe("Titan driver generic build flags", function()
         for _, line in ipairs(command_lines(verbose_output, "'-O3'")) do
             if line:find("'-c'", 1, true) or line:find("'-shared'", 1, true) then
                 checked = checked + 1
-                assert.equal(linux, line:find("'-flto'", 1, true) ~= nil, line)
+                assert.equal(linux, line:find("'-flto=auto'", 1, true) ~= nil, line)
                 assert.equal(linux, line:find("'-ffat-lto-objects'", 1, true) ~= nil, line)
             end
         end
@@ -271,7 +271,7 @@ describe("Titan driver generic build flags", function()
                     local override = assert(line:find("'-O0'", 1, true), line)
                     assert.is_true(baseline < override, line)
                     local disabled = assert(line:find("'-fno-lto'", 1, true), line)
-                    local enabled = line:find("'-flto'", 1, true)
+                    local enabled = line:find("'-flto=auto'", 1, true)
                     assert.is_true(not enabled or enabled < disabled, line)
                     checked = checked + 1
                 end
