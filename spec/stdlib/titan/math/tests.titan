@@ -259,6 +259,22 @@ return function(lower, upper) return math.random(lower, upper) end
   end
 end
 
+function test_randomseed_optional_components_preserve_replay(_context: test.Context)
+  local first, second = mathlib.randomseed(0)
+  test.assert(first == 0 and second == 0,
+              "single zero seed must default only the second component")
+  local single_seed_draw = mathlib.random(0)
+  mathlib.randomseed(0, 0)
+  test.assert(mathlib.random(0) == single_seed_draw,
+              "single-component seed differs from explicit zero second seed")
+
+  local default_first, default_second = mathlib.randomseed()
+  local default_draw = mathlib.random(0)
+  mathlib.randomseed(default_first, default_second)
+  test.assert(mathlib.random(0) == default_draw,
+              "default seed components must reproduce the selected state")
+end
+
 function test_bounded_numerals_and_explicit_bases(_context: test.Context)
   local lua_tonumber = lua_helper([[
 return function(candidate) return tonumber(candidate) end

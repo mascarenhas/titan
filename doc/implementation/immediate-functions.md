@@ -151,3 +151,25 @@ Generated `#line` attribution retains the original source filename and line.
 The containing native function may supply the traceback frame; no synthetic
 anonymous frame is required. Escaping closure entry points and the public
 callable ABI are unchanged, as is `LANGUAGE_SERVER_API_VERSION = 1`.
+
+## Standard-library use
+
+The standard library uses immediate calls for computations such as
+`math.randomseed`'s seed pair, reflection descriptor selection, JSON descriptor
+searches, and protected filesystem result preparation. These sites pass their
+inputs explicitly and return the selected values instead of mutating captured
+placeholders. Optional result slots retain explicit annotations where absence
+is meaningful. Stored callbacks and returned iterators remain ordinary closures.
+
+Protected result preparation keeps the original cleanup boundary. Filesystem
+request cleanup finishes before a result resumes its Task; source loading keeps
+the file's close in the enclosing scope; TLS context cleanup remains outside the
+expression selecting that context. The inline function boundary must preserve
+these relationships even though the generated code shares one C activation.
+
+Validate adoption by comparing generated closure and capture-cell allocation
+sites against the statement-based source and running the owning native stdlib
+tests against a rebuilt provider. Closure-free lowering does not itself make an
+IIFE faster than the direct statements it replaces. Avoid constructing a
+discarded branch result, as in format grammar selection, when the expression
+can return just the chosen result.

@@ -87,6 +87,36 @@ function test_lua_require_cooperates_caches_and_rejects_a_duplicate(
   end)
 end
 
+function test_lua_source_compile_error_keeps_context_and_allows_retry(
+    context: test.Context)
+  runtime_test.run(function ()
+    local root = lua_support.temporary_directory(context)
+    local package_table = lua_support.lua_package_table()
+    local loaded = lua_support.package_loaded_table(package_table)
+    local saved_path = package_table["path"] as string
+    package_table["path"] = root .. "/?.lua"
+    defer package_table["path"] = saved_path
+
+    local modname = "lua_tests_source_syntax_error"
+    local filename = root .. "/" .. modname .. ".lua"
+    lua_support.owned_file(context, filename, "return )")
+    runtime_test.cleanup(function () loaded[modname] = nil end)
+
+    local failure: string? = lua_support.caught_string(function ()
+      tlua.require(modname)
+    end)
+    test.assert(failure ~= nil, "source compile error should be translated")
+    local message: string = failure
+    test.assert(common.contains(message, "error loading module '" .. modname ..
+                                "' from file '" .. filename .. "':"), message)
+    test.assert(common.contains(message, ":1:"), message)
+
+    fs.write_file(filename, "return 17")
+    test.assert(tlua.require(modname) as integer == 17,
+                "source compile error left a stale loading marker")
+  end)
+end
+
 function test_lua_reader_cancellation_stays_pending_after_translation(
     context: test.Context)
   runtime_test.run(function ()

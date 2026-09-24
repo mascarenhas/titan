@@ -458,17 +458,17 @@ local function execute_input(parser: Parser, input: string)
   local status = ffi.llhttp_execute(
     parser.native, bytes, #input as foreign size_t)
   parser.last_error = status as integer
-  local consumed = #input
-  if status ~= ffi.HPE_OK then
-    consumed = 0
+  local consumed = (function (
+      parser: Parser, input: string, bytes: foreign const *char,
+      status: foreign llhttp_errno_t): integer
+    if status == ffi.HPE_OK then return #input end
     local position = ffi.llhttp_get_error_pos(parser.native)
-    if position ~= nil then
-      if position < bytes or position > bytes + #input then
-        raise "HTTP parser reported an invalid consumed offset"
-      end
-      consumed = (position - bytes) as integer
+    if position == nil then return 0 end
+    if position < bytes or position > bytes + #input then
+      raise "HTTP parser reported an invalid consumed offset"
     end
-  end
+    return (position - bytes) as integer
+  end)(parser, input, bytes, status)
   if consumed < #input then
     parser.input_excess = string.sub(input, consumed + 1)
   end

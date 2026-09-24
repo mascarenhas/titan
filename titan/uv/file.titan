@@ -170,14 +170,12 @@ local function stat_result(task: Task, owner: uv_fs_t, result: integer,
   local statbuf = ffi.uv_fs_get_statbuf(owner.handle)
   local mode = statbuf.st_mode
   local file_type = mode & ffi.S_IFMT
-  local kind = "other"
-  if file_type == ffi.S_IFREG then
-    kind = "file"
-  elseif file_type == ffi.S_IFDIR then
-    kind = "directory"
-  elseif file_type == ffi.S_IFLNK then
-    kind = "symlink"
-  end
+  local kind = (function (file_type: foreign uint64_t): string
+    if file_type == ffi.S_IFREG then return "file" end
+    if file_type == ffi.S_IFDIR then return "directory" end
+    if file_type == ffi.S_IFLNK then return "symlink" end
+    return "other"
+  end)(file_type)
   return FsStatResult.new(statbuf.st_size, kind, mode,
                           statbuf.st_dev as foreign lua_Integer,
                           statbuf.st_ino as foreign lua_Integer,
@@ -246,16 +244,15 @@ end
 local function complete_fs(task: Task, owner: uv_fs_t, result: integer,
                            operation: string, keepalive: value,
                            success: FsResult)
-  local failed = false
-  local payload: value = nil
-  do
+  local failed, payload = (function (
+      task: Task, owner: uv_fs_t, result: integer, operation: string,
+      keepalive: value, success: FsResult): (boolean, value)
     defer ffi.uv_fs_req_cleanup(owner.handle)
     if result < 0 then raise make_error(result, operation) end
-    payload = success(task, owner, result, keepalive)
+    return false, success(task, owner, result, keepalive)
   catch
-    failed = true
-    payload = error
-  end
+    return true, error
+  end)(task, owner, result, operation, keepalive, success)
   resume_task_from_callback(task, failed, payload)
 catch
   fail_task_at_callback_boundary(task, error, traceback)

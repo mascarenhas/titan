@@ -49,12 +49,11 @@ local function check_result(packet: foreign *TitanSqlitePacket,
       message = message .. "SQLite code " .. (packet.cleanup_code as integer)
     end
   end
-  local code: integer?
-  local extended_code: integer?
-  if packet.code ~= 0 then
-    code = packet.code
-    extended_code = packet.extended_code
-  end
+  local code: integer?, extended_code: integer? =
+    (function (packet: foreign *TitanSqlitePacket): (integer?, integer?)
+      if packet.code ~= 0 then return packet.code, packet.extended_code end
+      return nil, nil
+    end)(packet)
   raise Error.new(message, code, extended_code, operation)
 end
 

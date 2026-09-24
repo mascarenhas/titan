@@ -101,18 +101,18 @@ local function decimal_float(token: string, source: string, position: integer,
                               path: Path): float
   local convention = ffi.localeconv()
   local point = convention.decimal_point as string
-  local normalized = token
-  if point ~= "." then
+  local normalized = (function (token: string, point: string): string
+    if point == "." then return token end
     local index = 1
     while index <= #token do
       if json_byte(token, index) == 46 then
-        normalized = string.sub(token, 1, index - 1) .. point ..
-                     string.sub(token, index + 1)
-        break
+        return string.sub(token, 1, index - 1) .. point ..
+               string.sub(token, index + 1)
       end
       index = index + 1
     end
-  end
+    return token
+  end)(token, point)
   local result: float = ffi.strtod(normalized, nil)
   if result ~= result or result == math.huge or result == -math.huge then
     json_fail("number_range", "number is outside the finite float range", path, source, position)

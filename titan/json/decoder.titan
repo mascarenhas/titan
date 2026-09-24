@@ -125,14 +125,14 @@ end
 local function Decoder:decode_record(node: Node, descriptor: reflect.RecordType,
                               path: Path): value
   self:require_kind(node, "object", path)
-  local constructor: reflect.StaticFunctionType?
-  for index = 1, #descriptor.statics do
-    local candidate = descriptor.statics[index]
-    if candidate.name == "new" then
-      constructor = candidate
-      break
+  local constructor: reflect.StaticFunctionType? = (function (
+      descriptor: reflect.RecordType): reflect.StaticFunctionType?
+    for index = 1, #descriptor.statics do
+      local candidate = descriptor.statics[index]
+      if candidate.name == "new" then return candidate end
     end
-  end
+    return nil
+  end)(descriptor)
   if constructor == nil then
     json_fail("constructor_unavailable", "record has no public constructor: " ..
               descriptor.name, path, self.source, node.position)
@@ -190,11 +190,14 @@ local function Decoder:decode_union(node: Node, descriptor: reflect.UnionType,
               tag_path, self.source, tag.position)
   end
   local name: string = tag.scalar
-  local variant: reflect.VariantType?
-  for index = 1, #descriptor.variants do
-    local candidate = descriptor.variants[index]
-    if candidate.name == name then variant = candidate; break end
-  end
+  local variant: reflect.VariantType? = (function (
+      descriptor: reflect.UnionType, name: string): reflect.VariantType?
+    for index = 1, #descriptor.variants do
+      local candidate = descriptor.variants[index]
+      if candidate.name == name then return candidate end
+    end
+    return nil
+  end)(descriptor, name)
   if variant == nil then
     json_fail("unknown_variant", "unknown public union variant: " .. name,
               tag_path, self.source, tag.position)

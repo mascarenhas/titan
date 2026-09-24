@@ -247,6 +247,29 @@ captures stay alive after the immediate call exits, and mutable captures keep
 their normal shared-cell behavior. Errors retain the source filename and line;
 the optimized call does not require a separate anonymous native stack frame.
 
+Immediate calls can initialize related values together without mutable
+placeholders. Annotate an optional receiving slot when nil is part of the
+result, so declaration inference does not force it before the caller can check:
+
+```titan
+function find_first(items: {integer}, minimum: integer): (integer?, integer?)
+    local position: integer?, found: integer? =
+        (function (items: {integer}, minimum: integer): (integer?, integer?)
+            for index = 1, #items do
+                if items[index] >= minimum then return index, items[index] end
+            end
+            return nil, nil
+        end)(items, minimum)
+    return position, found
+end
+```
+
+Use this shape for a computation that belongs at its expression site. Keep a
+useful named helper when the operation has its own meaning or callers. Passing
+inputs explicitly can avoid introducing shared capture cells. In either form,
+keep resource cleanup in the scope that owns the resource: a `defer` inside an
+immediate function runs before its caller uses the returned value.
+
 ## Capturing enclosing locals
 
 A lambda may use the locals and parameters of the function(s) around it.
