@@ -130,7 +130,7 @@ io.write(tostring(require("titan-compiler.driver").EMIT_LINE_DIRECTIVES))
             ok, output, why, status = run({
                 "env",
                 "CCACHE_DISABLE=1",
-                "MAKE=true",
+                "TITAN_RUNTIME_PREBUILT=1",
                 "TITAN_EXTRA_CPPFLAGS=",
                 "TITAN_EXTRA_CFLAGS=-O0 -fno-lto",
                 "TITAN_EXTRA_LDFLAGS=-fno-lto",

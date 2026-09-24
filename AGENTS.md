@@ -72,7 +72,10 @@ change them only when their own compatibility rules require it.
 
 - **Lua 5.5.** Both the compiler's own Lua code and generated C target Lua
   5.5 (rockspec: `lua ~> 5.5`). Use an absolute project-local prefix such as
-  `PREFIX=$HOME/.local/titan/titan-dev`. `make lua` configures Lua 5.5.1's
+  `PREFIX=$HOME/.local/titan/titan-dev` for the initial `make lua`. Once its
+  `bin` is on `PATH`, Make detects the Titan Lua prefix without Lua init/path
+  overrides; an explicit `PREFIX` wins and `/usr/local` remains the fallback.
+  Directory aliases retain their launch spelling when physically equivalent. `make lua` configures Lua 5.5.1's
   `LUA_ROOT` to `"!/"` and patches POSIX `loadlib.c` search-path expansion to
   resolve `!` from the actual executable's directory parent (`<root>/bin/lua`
   uses `<root>`). Linux uses `/proc/self/exe`; macOS canonicalizes
@@ -234,8 +237,8 @@ change them only when their own compatibility rules require it.
 
   Sanitizer execution retains ordinary Titan `#line` attribution: selected
   traceback gates require exact user and standard-provider frames. Use
-  `TITAN_NO_LINE_DIRECTIVES=1` only for an isolated reproduction. Before the
-  private generation stage disappears, `rock-post-install` saves its sanitized
+  `TITAN_NO_LINE_DIRECTIVES=1` only for an isolated reproduction. Before publication or later tests replace generated outputs, the shared
+  stdlib publication recipe saves its sanitized
   `titan.so`, every exact generated stdlib `.c`/`.o` pair used by that link, and
   the NUL-delimited generated-C compile-prefix argv. Each gate captures its
   original combined output, and only the failure-only diagnostic step reads
@@ -347,7 +350,10 @@ change them only when their own compatibility rules require it.
   pkg-config's ordered libuv and OpenSSL results remain final-link inputs, must
   be repeated by static consumers, and are never copied into `titan.a`.
 
-  The hook builds in a private destination-filesystem stage, validates twenty-two
+  The hook delegates to `install-stdlib`, retaining checkout objects, providers,
+  shims, and completion state for a no-op subsequent `make stdlib`. Both select
+  the installed compiler/SDK by default; `STDLIB_USE_INSTALLED_RUNTIME=0`
+  explicitly selects checkout compiler/runtime. The publisher validates twenty-two
   `luaopen_*` entries and all twenty-one logical protocols, requires exactly twenty-one
   embedded archive keys, and compares embedded ABI/types with both the staged
   DSO and a fresh-process archive-backed validation image before checking the
@@ -356,7 +362,8 @@ change them only when their own compatibility rules require it.
   `scripts/stdlib_installer.lua` under the same effective `CC`, `AR`, `RANLIB`,
   `TITAN_EXTRA_*`, `TITAN_ROCKS_ROOT`, and runtime-prebuilt environment for
   recoverable publication. The script is not part of the installed compiler
-  modules. It recognizes bootstrap-only and the current complete pair as
+  modules. It prepares private destination copies and recognizes bootstrap-only
+  and the current complete pair as
   bounded predecessor states; backs up the
   exact current DSO/archive/dSYM/shims/compiler source and stale active-layout
   copies; commits shims and compiler source, then dSYM and `titan.a`, and
@@ -442,6 +449,8 @@ make test                                           # prepare/install the rock, 
 TITAN_JOBS=4 make -j4 test                           # supported four-way build/compiler variant
 luarocks test                                       # test an already current install; PREFIX/ROCKS_TREE are not required when its bin is on PATH
 make rock-test BUSTED_FILTER='parser' TITAN_FILTER='^http[.]tests[.]'  # independent domain filters
+make stdlib                                         # incrementally build stdlib with the installed compiler/SDK
+make install-stdlib                                 # build if needed, validate, and publish stdlib
 make stdlib-test                                    # complete retained stdlib/runtime category without coverage
 make busted-test BUSTED_FILTER='for loop'           # Busted only
 make titan-stdlib-test TITAN_FILTER='^net[.]tests[.]' # build/run the aggregate native suite

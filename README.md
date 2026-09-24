@@ -32,13 +32,18 @@ opt-in mode. `CLANG_FORMAT` selects a different compatible command.
 For example:
 
 ```sh
-export PREFIX="$HOME/.local/titan/my-project"
-export PATH="$PREFIX/bin:$PATH"
-
-make lua
+make lua PREFIX="$HOME/.local/titan/my-project"
+export PATH="$HOME/.local/titan/my-project/bin:$PATH"
 make luarocks
-"$PREFIX/bin/luarocks" make
+luarocks make
 ```
+
+When `PREFIX` is unset, Make discovers the Titan Lua 5.5 on `PATH` from its
+executable-relative native module paths, even before LuaRocks or Titan is
+installed. Explicit command-line or environment `PREFIX` values take precedence;
+without a compatible Lua, the default remains `/usr/local`. Detection ignores
+Lua init and module-path overrides. A symlinked prefix such as `/home` retains
+its launch-path spelling when it names the same physical installation.
 
 `make lua` fetches the
 [Lua 5.5.1 sources](https://www.lua.org/ftp/lua-5.5.1.tar.gz) and configures
@@ -371,12 +376,13 @@ absent, the build atomically stages that bootstrap at
 `$ROCKS_TREE/lib/titan/0.6/titan.so` so the just-installed compiler can load
 its native support table; a repeated install preserves an already valid full
 image. After LuaRocks deploys the compiler, the source-only `post_install` hook
-uses that `titanc` with the same `stdlib-objects` Make dependency graph as a
-checkout build. Each logical module owns an object and its generated headers;
+calls `make install-stdlib` with that `titanc`, using the same dependency graph,
+checkout outputs, and completion stamp as a later `make stdlib`. Each logical module owns an object and its generated headers;
 unchanged objects are reused. One final incremental invocation links all
 twenty-one roots, with private LPegLabel, selected libuv, HTTP/llhttp, SQLite,
-and TLS/OpenSSL payload after `ltitanlib.o`. It stages the paired providers, generated loaders, and exact `titan.test`
-compiler source privately, validates them, and publishes them with rollback, committing
+and TLS/OpenSSL payload after `ltitanlib.o`. The publisher validates the paired
+providers, generated loaders, and exact `titan.test` compiler source, prepares
+private destination copies, and publishes them with rollback, committing
 `titan.a` before `titan.so` and using the DSO rename as the final commit point.
 Publication recognizes the bootstrap and current complete pair as recoverable
 states in the active `0.6` library namespace; twenty-one modules are the current
@@ -387,6 +393,22 @@ direct artifacts outside the rock manifest, so `luarocks remove titan` does
 not remove them. Titan does not provide binary rocks yet; packaging and
 uninstall ownership for these files will be revisited with a Titan
 library/application distribution system.
+
+For standard-library development after `luarocks make`, use:
+
+```sh
+make stdlib          # rebuild changed modules and their dependents, then relink
+make install-stdlib  # build if needed, validate, and publish to the selected tree
+```
+
+Both commands use the installed compiler and matching SDK by default. An
+unchanged `make stdlib` immediately after `luarocks make` reuses its outputs;
+it only checks completeness and archive metadata. Compilation, linking, and
+publication print progress messages. Make tracks installed compiler/SDK updates,
+source imports, native headers, and build flags. Keep the same provider modes and
+flags between invocations to preserve reuse. To exercise checkout compiler edits,
+reinstall with `luarocks make`, or explicitly select the checkout compiler/runtime
+with `make stdlib STDLIB_USE_INSTALLED_RUNTIME=0`.
 
 # Documentation
 

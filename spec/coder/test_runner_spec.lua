@@ -203,7 +203,7 @@ end
 local function compile_suite()
     return run({
         "env",
-        "MAKE=true",
+        "TITAN_RUNTIME_PREBUILT=1",
         "CCACHE_DISABLE=1",
         "TITAN_EXTRA_CPPFLAGS=",
         "TITAN_EXTRA_CFLAGS=",
@@ -242,7 +242,7 @@ end
 local function working_titanc_arguments()
     return {
         "env",
-        "MAKE=true",
+        "TITAN_RUNTIME_PREBUILT=1",
         "CCACHE_DISABLE=1",
         "TITAN_EXTRA_CPPFLAGS=",
         "TITAN_EXTRA_CFLAGS=",

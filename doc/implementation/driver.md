@@ -1453,15 +1453,23 @@ absent; an existing valid bootstrap or full image is preserved, and an
 incompatible image is left untouched with an error. The rock manifest then
 deploys the compiler script/Lua modules but does not own a `titan` C module.
 
-The source-only post-install hook runs the same `stdlib-objects` graph using the
-just-deployed `titanc`, then links once in a private staging directory on the
-destination filesystem. Source-adjacent objects remain in the persistent
-checkout, selected through `--tree`; a fresh publication stage does not force
-recompilation. Both phases use the same effective native toolchain, extra flags,
-rocks root, runtime mode, and libuv/OpenSSL policies. The hook snapshots
-`titan/test.titan` into that exact stage before linking. The publisher validates the twenty-two Lua entries, twenty-one logical
+The source-only post-install hook delegates to `install-stdlib` using the
+just-deployed `titanc`. It retains source-adjacent objects, checkout providers
+and shims, and the completion stamp. Once the prefix contains `titanc`, ordinary
+`make stdlib` selects that installed compiler and SDK too. Canonical compiler,
+Lua, and SDK paths keep the configuration identical even when LuaRocks and PATH
+spell a symlinked prefix differently. Installed compiler Lua files, the deployed
+CLI, and SDK headers invalidate objects; runtime archives also invalidate the
+final link. Published providers and shims are outputs, not prerequisites, so
+publication cannot invalidate the retained build. `STDLIB_USE_INSTALLED_RUNTIME=0`
+selects the checkout compiler/runtime explicitly.
+
+The shared publication recipe uses the same effective native toolchain, extra
+flags, rocks root, runtime mode, and libuv/OpenSSL policies as compilation.
+Optional sanitizer snapshots capture the retained provider and exact generated
+C/object pairs before publication or tests can replace them. The publisher validates the twenty-two Lua entries, twenty-one logical
 protocols, exact twenty-one-key archive metadata, three-way
-embedded/DSO/archive-backed ABI/types equality, twenty-one shims, the canonical test-support source, and Darwin dSYM. It backs up
+embedded/DSO/archive-backed ABI/types equality, twenty-one shims, the canonical test-support source, and Darwin dSYM. It prepares private destination copies and backs up
 the active `0.6` public set and stale active-layout copies, commits shims and
 the compiler source, then dSYM and `titan.a`, and renames the validated DSO last. A caught or injected
 failure restores either the prior complete pair or the first-install
@@ -1833,7 +1841,7 @@ the explicit public-header input for its native helper builds.
 
 | Name | Where read | Default / value | Meaning |
 | --- | --- | --- | --- |
-| `PREFIX` | Makefile / rockspec build input | `/usr/local` for direct Make; an absolute per-project path in the supported workflow | Owns the Lua installation plus the LuaRocks executable and configuration; Lua module paths resolve from the running executable rather than embedding this build destination. |
+| `PREFIX` | Makefile / rockspec build input | Titan Lua prefix detected from `PATH`, otherwise `/usr/local`; explicit `PREFIX` takes precedence | Owns the Lua installation plus the LuaRocks executable and configuration; Lua module paths resolve from the running executable rather than embedding this build destination. |
 | `ROCKS_TREE` | Makefile / rockspec build input | empty for a direct build; LuaRocks' `$(SCRIPTS_DIR)/..` for a source install | Owns the installed Titan rock, SDK, and stdlib. The supported workflow currently sets it equal to `PREFIX`, but they are separate ownership concepts. |
 | `TITAN_PATH_0_6` | `driver.lua` (compile time), `titan.c` `pushpath` (run time) | unset | Versioned module search path; wins over `TITAN_PATH`. |
 | `TITAN_PATH` | same | unset | Module search path; `;;` expands to the ordinary default at compile time and run time. |

@@ -157,6 +157,12 @@ and [Multi-module libraries](multi-module-libraries.md) for provider contracts.
 
 The standard library uses this same model: one object target per logical
 module, followed by the existing combined `titan.so`/`titan.a` publication.
+After installing with `luarocks make`, `make stdlib` uses that installed compiler
+and its SDK to rebuild changed standard modules and their dependents. With no
+changes and the same build settings, it reuses the objects and provider pair
+left by the installation. `make install-stdlib` builds if necessary, validates,
+and publishes that pair. With the prefix's Lua on `PATH`, these Make commands
+detect `PREFIX` automatically; an explicit `PREFIX` still takes precedence.
 
 ## Separate standalone executables
 

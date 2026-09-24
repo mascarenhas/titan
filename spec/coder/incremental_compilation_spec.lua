@@ -74,7 +74,7 @@ local function compiler_arguments()
     -- Match the existing CLI specs: exercise this checkout's CLI and compiler
     -- while keeping the selected installation's Lua/native SDK.
     return {
-        "env", "MAKE=true", "CCACHE_DISABLE=1", "TITAN_PROBE_CACHE_DISABLE=1",
+        "env", "TITAN_RUNTIME_PREBUILT=1", "CCACHE_DISABLE=1", "TITAN_PROBE_CACHE_DISABLE=1",
         "TITAN_ROCKS_ROOT=" .. assert(prefix, "incremental CLI specs require an installed SDK"),
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=-O0 -fno-lto", "TITAN_EXTRA_LDFLAGS=-fno-lto",
         LUA, "-E", "-e",
