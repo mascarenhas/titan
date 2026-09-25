@@ -263,6 +263,17 @@ function check_user_value_slot_type(
     end
 end
 
+function check_nominal_storage_type(
+        owner_kind, owner_name, member_kind, member_name, typ, loc, st, errors)
+    checktype(typ, loc, errors)
+    local err = checker._nominal_storage_error(typ, st)
+    if err then
+        checker.typeerror(errors, loc,
+            "%s %s '%s' in %s '%s': %s",
+            owner_kind, member_kind, member_name, owner_kind, owner_name, err)
+    end
+end
+
 checker._foreign_forbidden_statements = {
     ["Ast.StatForIn"] = "generic for loops",
     ["Ast.StatCase"] = "case statements",
@@ -395,18 +406,18 @@ function checkbodies(ast, st, errors)
             elseif node._tag == "Ast.TopLevelRecord" then
                 for _, field in ipairs(node.fields) do
                     if field._type then
-                        check_user_value_slot_type(
+                        check_nominal_storage_type(
                             "record", node.name, "field", field.name,
-                            field._type, field.loc, errors)
+                            field._type, field.loc, st, errors)
                     end
                 end
             elseif node._tag == "Ast.TopLevelUnion" then
                 for _, variant in ipairs(node.variants) do
                     if variant._type then
                         for i, part in ipairs(variant._type.parts) do
-                            check_user_value_slot_type(
+                            check_nominal_storage_type(
                                 "union", node.name, "variant", variant.name,
-                                part.type, variant.parts[i].loc, errors)
+                                part.type, variant.parts[i].loc, st, errors)
                         end
                     end
                 end
@@ -618,9 +629,13 @@ function check_foreign_environment(module_ast, st, errors)
     st.ffi_namespace, module_ast._ffi_namespace = namespace, namespace
     if not st:find_symbol("ffi") then st:add_symbol("ffi", namespace) end
     local nodes, names, has_source = {}, {}, false
+    st._native_record_fields_enabled = false
     for _, node in ipairs(module_ast) do
         if not node._ignore and node._tag == "Ast.TopLevelForeignImport" then
             nodes[#nodes + 1], names[#names + 1] = node, node.headername
+            if node.headername == "titan/ffi.h" then
+                st._native_record_fields_enabled = true
+            end
         elseif not node._ignore and node._tag == "Ast.TopLevelImport"
                and node._source_import then
             has_source = true
@@ -1035,12 +1050,16 @@ toplevel_visitor = util.make_visitor({
                         field.name, node.name)
                 else
                     nameset[field.name] = true
-                    local ftype = typefromnode(field.type, st, errors)
+                    local ftype, array_view = checker._nominal_member_type(
+                        field.type, typefromnode(field.type, st, errors))
                     field._type = ftype
                     local tfield = types.Field(
                         fqtn, field.name, ftype, i - 1,
                         field.isconst and true or false)
                     tfield.islocal = field.islocal and true or false
+                    field._nominal_storage =
+                        checker._nominal_storage_plan(ftype, array_view)
+                    tfield._nominal_storage = field._nominal_storage
                     tfield.dynamic_plan =
                         types.dynamic_coercion(ftype) or false
                     field._dynamic_plan = tfield.dynamic_plan
@@ -1091,10 +1110,14 @@ toplevel_visitor = util.make_visitor({
                                 part.name, node.name, variant.name)
                         end
                         partnames[part.name] = true
-                        local ptype = typefromnode(part.type, st, errors)
+                        local ptype, array_view = checker._nominal_member_type(
+                            part.type, typefromnode(part.type, st, errors))
                         local tpart = types.Field(
                             fqtn, part.name, ptype, part_index, false)
                         part._type, part._decl = ptype, tpart
+                        part._nominal_storage =
+                            checker._nominal_storage_plan(ptype, array_view)
+                        tpart._nominal_storage = part._nominal_storage
                         parts[part_index] = tpart
                     end
                     local tvariant = types.Variant(
@@ -1181,6 +1204,16 @@ toplevel_visitor = util.make_visitor({
             generic_with_generic_binding_map(st, node._generic_bindings, function()
                 local ptypes, varargtype, paramnames =
                     param_types(node.params, st, errors)
+                local constructor_slots = node._record_constructor
+                    and ownertype.fields or node._union_constructor
+                    and node._union_variant._type.parts
+                if constructor_slots then
+                    for index, slot in ipairs(constructor_slots) do
+                        ptypes[index] = slot.type
+                        node.params[index]._nominal_storage =
+                            slot._nominal_storage
+                    end
+                end
                 local rettypes = {}
                 for _, rt in ipairs(node.rettypes) do
                     rettypes[#rettypes + 1] =

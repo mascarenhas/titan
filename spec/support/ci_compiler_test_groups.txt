@@ -34,11 +34,12 @@
 1 spec/checker/for_in_spec.lua 4.939
 3 spec/checker/foreign_functions_spec.lua 50.335
 1 spec/checker/foreign_type_aliases_spec.lua 1.000
-3 spec/checker/generics_spec.lua 11.567
 1 spec/checker/generic_type_arguments_spec.lua 0.500
+3 spec/checker/generics_spec.lua 11.567
 4 spec/checker/grammar_semantics_spec.lua 1.000
 1 spec/checker/interfaces_spec.lua 7.153
 3 spec/checker/named_arguments_spec.lua 7.783
+4 spec/checker/nominal_storage_spec.lua 1.000
 1 spec/checker/optional_parameters_spec.lua 4.212
 1 spec/checker/semantic_metadata_spec.lua 3.385
 2 spec/checker/so_rehydration_spec.lua 4.535
@@ -77,9 +78,9 @@
 2 spec/coder/flexible_returns_spec.lua 11.730
 4 spec/coder/folder_modules_spec.lua 3.164
 1 spec/coder/for_in_spec.lua 7.521
-2 spec/coder/grammar_semantics_spec.lua 3.000
 3 spec/coder/foreign_functions_spec.lua 10.204
 3 spec/coder/generics_spec.lua 22.919
+2 spec/coder/grammar_semantics_spec.lua 3.000
 1 spec/coder/immediate_functions_spec.lua 10.000
 3 spec/coder/incremental_compilation_spec.lua 27.000
 4 spec/coder/interfaces_spec.lua 18.208
@@ -90,7 +91,10 @@
 4 spec/coder/multi_module_libraries_spec.lua 37.496
 3 spec/coder/multi_module_path_runtime_spec.lua 8.284
 2 spec/coder/named_arguments_spec.lua 7.477
+4 spec/coder/native_optional_storage_spec.lua 1.000
 3 spec/coder/native_symbol_names_spec.lua 0.479
+4 spec/coder/nominal_provider_spec.lua 3.000
+4 spec/coder/nominal_storage_spec.lua 1.000
 4 spec/coder/numeric_semantics_spec.lua 4.142
 3 spec/coder/optional_parameters_spec.lua 1.178
 4 spec/coder/parallel_compilation_spec.lua 23.951
@@ -123,6 +127,8 @@
 1 spec/installed_prefix_spec.lua 0.003
 4 spec/lexer_spec.lua 0.045
 2 spec/location_spec.lua 0.002
+4 spec/native_record_fields_spec.lua 1.000
+4 spec/nominal_layout_spec.lua 0.100
 1 spec/parser_spec.lua 0.587
 3 spec/projectcache_spec.lua 147.417
 1 spec/sha256_spec.lua 0.010

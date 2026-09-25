@@ -656,6 +656,7 @@ checkexp = util.make_visitor({
         return generic_with_inference_operation(node, st,
         function(inference_operation)
         demand = demand or default_call_result_demand(node, context)
+        if checker._native_record_field_call(node, st, errors, demand) then return end
         local written_exp = node.exp
         if node.exp._tag == "Ast.ExpVar" then
             local var = node.exp.var
@@ -683,6 +684,7 @@ checkexp = util.make_visitor({
             or argtag == "Ast.ArgsNamedMethod")
 
         if not method then
+            node._nominal_constructor = checker._direct_nominal_constructor(node)
             local ftype = generic_instantiate_direct_call(
                 node, node.exp._type, st, errors, demand)
             local fname = expname(node.exp)
@@ -713,6 +715,14 @@ checkexp = util.make_visitor({
                          or allocation_target._tag == "Type.CArray"
                          or checker._pointer_to_allocation_payload(
                              allocation_target, pseudo_new.ctype))
+                local nominal = demand and demand.nominal_constructor
+                local nominal_slot = nominal
+                    and nominal.slots[demand.nominal_slot_index]
+                if nominal_slot and types.is_c_array(nominal_slot.type)
+                   and types.equals(nominal_slot.type, pseudo_new.ctype)
+                   and not pseudo_new.array then
+                    allow_automatic_array = true
+                end
                 local alloc_err = c_allocation_error(
                     pseudo_new.ctype, st, allow_automatic_array)
                 if alloc_err then
@@ -921,7 +931,7 @@ checkexp = util.make_visitor({
                     dense, order = check_named_args(ftype, paramnames,
                         node.args.fields, node.loc,
                         "function '" .. fname .. "'", st, errors,
-                        named_call_declaration(node))
+                        named_call_declaration(node), node._nominal_constructor)
                 end
                 if dense then
                     local previous_args = node.args
@@ -939,7 +949,8 @@ checkexp = util.make_visitor({
                 else
                     annotate_call_arguments(node,
                         checkargs(ftype, node.args.args, node.loc,
-                            "function '" .. fname .. "'", st, errors))
+                            "function '" .. fname .. "'", st, errors,
+                            nil, node._nominal_constructor))
                 end
             end
             annotate_call_results(node, ftype, demand, errors)

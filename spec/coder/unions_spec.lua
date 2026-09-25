@@ -235,9 +235,9 @@ describe("unions (end-to-end)", function()
                     end
                 end
             ]])
-            assert.match("luaS_newudata%s*%(%s*L,%s*0,%s*7%s*%)", csrc)
-            assert.match("sethvalue%s*%(%s*L,%s*&_tmp_%d+%->uv%[3%]%.uv", csrc)
-            assert.match("hvalue%s*%(%s*&_tmp_%d+%->uv%[3%]%.uv%s*%)", csrc)
+            assert.match("luaS_newudata%s*%(%s*L,%s*sizeof%([^%)]+%),%s*3%s*%)", csrc)
+            assert.match("sethvalue%s*%(%s*L,%s*&%(%(_tmp_%d+%)%->uv%[0%]%.uv%)", csrc)
+            assert.match("hvalue%s*%(%s*&%(%(_tmp_%d+%)%->uv%[0%]%.uv%)%s*%)", csrc)
             assert.not_match("lua_getiuservalue", csrc)
             assert.not_match("lua_setiuservalue", csrc)
             local ok, err = h.call("test", [[
@@ -1018,11 +1018,11 @@ describe("unions (end-to-end)", function()
         ]])
 
         assert.match(
-            "sethvalue%s*%(%s*L,%s*&_tmp_%d+%->uv%[1%]%.uv,%s*", csrc)
+            "sethvalue%s*%(%s*L,%s*&%(%(_tmp_%d+%)%->uv%[0%]%.uv%),%s*", csrc)
         assert.match(
-            "hvalue%s*%(%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)", csrc)
-        assert.match("luaS_newudata%s*%(%s*L,%s*0,%s*1%s*%)", csrc)
-        assert.match("luaS_newudata%s*%(%s*L,%s*0,%s*2%s*%)", csrc)
+            "hvalue%s*%(%s*&%(%(_tmp_%d+%)%->uv%[0%]%.uv%)%s*%)", csrc)
+        assert.match("luaS_newudata%s*%(%s*L,%s*sizeof%([^%)]+%),%s*0%s*%)", csrc)
+        assert.match("luaS_newudata%s*%(%s*L,%s*sizeof%([^%)]+%),%s*1%s*%)", csrc)
         assert.not_match("titan_array_require_proxy",
             without_reflection_payload_reader(csrc, "Numbers"))
         assert.match("switch%s*%(%s*_case_%d+_tag%s*%)", csrc)
@@ -1115,14 +1115,14 @@ describe("unions (end-to-end)", function()
         ]])
 
             assert.match(
-                "sethvalue%s*%(%s*L,%s*&_tmp_%d+%->uv%[1%]%.uv,%s*", csrc)
+                "sethvalue%s*%(%s*L,%s*&%(%(_tmp_%d+%)%->uv%[0%]%.uv%),%s*", csrc)
             assert.match(
-                "hvalue%s*%(%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)", csrc)
+                "hvalue%s*%(%s*&%(%(_tmp_%d+%)%->uv%[0%]%.uv%)%s*%)", csrc)
             assert.not_match("titan_array_require_proxy",
                 without_reflection_payload_reader(csrc, "Payload"))
             assert.match(
                 "luaC_barrierback%s*%(%s*L,%s*obj2gco%s*%(%s*_tmp_%d+%s*%)"
-                .. ",%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)",
+                .. ",%s*&%(%(_tmp_%d+%)%->uv%[0%]%.uv%)%s*%)",
                 csrc)
 
             local ok, err = h.call("test", [[
@@ -1411,18 +1411,18 @@ describe("unions (end-to-end)", function()
             end
         ]])
 
-            -- Direct Array payloads remain a Table * in uv[1]. Present
+            -- Direct Array payloads remain a Table * in dense uv[0]. Present
             -- Option(Array) values likewise carry that backing in their TValue;
             -- neither construction nor case binding may introduce a proxy.
             assert.match(
-                "sethvalue%s*%(%s*L,%s*&_tmp_%d+%->uv%[1%]%.uv,%s*", csrc)
+                "sethvalue%s*%(%s*L,%s*&%(%(_tmp_%d+%)%->uv%[0%]%.uv%),%s*", csrc)
             assert.match(
-                "hvalue%s*%(%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)", csrc)
+                "hvalue%s*%(%s*&%(%(_tmp_%d+%)%->uv%[0%]%.uv%)%s*%)", csrc)
             assert.not_match("titan_array_require_proxy",
                 without_reflection_payload_reader(csrc, "Payload"))
             assert.match(
                 "luaC_barrierback%s*%(%s*L,%s*obj2gco%s*%(%s*_tmp_%d+%s*%)"
-                .. ",%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)",
+                .. ",%s*&%(%(_tmp_%d+%)%->uv%[0%]%.uv%)%s*%)",
                 csrc)
 
             local rok, err = h.call("test", [[

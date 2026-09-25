@@ -550,10 +550,13 @@ The native symbol contract has two ABI-visible properties: generated standard
 objects define callbacks absent from the runtime/HTTP support objects, and
 callable entry families use the separated module/nominal/member hierarchy.
 Current prerelease ABI 2 retains that contract together with generic and public
-standard-library metadata. The revised callable/owned type spellings change
-registry keys without an ABI-number increment during prerelease development.
-A mismatched runtime or generated object is rejected even when its
-serialized public types happen to match.
+standard-library metadata and [native nominal storage](nominal-storage.md).
+The earlier callable/owned type-spelling revision changed registry keys without
+an independent ABI-number increment during prerelease development.
+ABI-marker mismatches are rejected even when serialized public types match.
+Native compilation also rejects missing or malformed physical-layout metadata.
+Same-marker prerelease layout changes require a clean rebuild of the compiler,
+runtime, and providers together.
 
 `TITAN_VERSION` `0.6.0` derives the `0.6` library namespace used by
 `TITAN_PATH_0_6`, `lib/titan/0.6`, `share/titan/0.6`, and `stdlib_0_6`.

@@ -84,8 +84,10 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
         local pname = "_param_" .. tostring(i)
         local slot = "s2v(L->ci->func.p + " .. (i + hidden) .. ")"
         table.insert(pnames, pname)
-        table.insert(stats, cvardecl(tlcontext, param, pname)
-            .. " = " .. initval(param) .. ";")
+        local native_param = types.is_direct_c(param)
+            and cdeclarator.adjust_parameter_type(param) or param
+        table.insert(stats, cvardecl(tlcontext, native_param, pname)
+            .. " = " .. initval(native_param) .. ";")
         table.insert(stats, readfixed(param, pname, slot, i))
     end
     local call_entry = titan_entry
@@ -640,6 +642,9 @@ function codeboxparam(ctx, param)
 end
 
 function coder._foreign_function_is_inline(node)
+    -- Private nominal layout declarations belong to the producer C unit.
+    -- Its source header exports only the native callback prototype.
+    if node._native_record_fields then return false end
     local block = node.block
     if not block or block._tag ~= "Ast.StatBlock" then return false end
     local stats = block.stats
@@ -680,7 +685,7 @@ function coder._foreign_temp(ctx, typ, prefix)
     ctx.temporary = ctx.temporary + 1
     local name = "_foreign_" .. (prefix or "tmp") .. "_"
         .. tostring(ctx.temporary)
-    return coder._render_c_declaration(typ, name) .. ";", name
+    return coder._render_c_declaration(coder._c_value_type(typ), name) .. ";", name
 end
 
 function coder._foreign_freeze(ctx, node, target, prefix)
@@ -746,6 +751,9 @@ function coder._foreign_raw_var(ctx, node)
 end
 
 function coder._foreign_raw_call(ctx, node)
+    if node._native_record_field then
+        return coder._foreign_record_field_read(ctx, node)
+    end
     local signature
     local callee_stats = ""
     local callee
@@ -934,7 +942,7 @@ function coder._foreign_raw_stat(ctx, node)
             decl._foreign_cname = "_foreign_local_" .. decl.name .. "_"
                 .. tostring(ctx.local_count)
             out[#out + 1] = coder._render_c_declaration(
-                decl._type, decl._foreign_cname) .. ";"
+                coder._c_value_type(decl._type), decl._foreign_cname) .. ";"
         end
         for index, exp in ipairs(node.exps) do
             local decl = assert(node.decls[index],

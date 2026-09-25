@@ -55,34 +55,34 @@ local HTTP_SSL_BUNDLED_PAYLOAD = table.concat({
 local HTTP_SSL_SYSTEM_PAYLOAD =
     "llhttp-build/libtitan-llhttp.a sqlite3-build/libtitan-sqlite3.a"
 local HTTP_FOREIGN_CALLBACKS = {
-    { name = "llhttp_url_cb",    slot = 3, setting = "on_url" },
-    { name = "llhttp_status_cb", slot = 4, setting = "on_status" },
+    { name = "llhttp_url_cb",    field = "url_callback", setting = "on_url" },
+    { name = "llhttp_status_cb", field = "status_callback", setting = "on_status" },
     {
         name = "llhttp_header_field_cb",
-        slot = 5,
+        field = "header_field_callback",
         setting = "on_header_field"
     },
     {
         name = "llhttp_header_value_cb",
-        slot = 6,
+        field = "header_value_callback",
         setting = "on_header_value"
     },
     {
         name = "llhttp_header_value_complete_cb",
-        slot = 7,
+        field = "header_value_complete_callback",
         setting = "on_header_value_complete",
         no_data = true
     },
     {
         name = "llhttp_headers_complete_cb",
-        slot = 8,
+        field = "headers_complete_callback",
         setting = "on_headers_complete",
         no_data = true
     },
-    { name = "llhttp_body_cb", slot = 9, setting = "on_body" },
+    { name = "llhttp_body_cb", field = "body_callback", setting = "on_body" },
     {
         name = "llhttp_message_complete_cb",
-        slot = 10,
+        field = "message_complete_callback",
         setting = "on_message_complete",
         no_data = true
     },
@@ -93,83 +93,118 @@ local UV_FOREIGN_CALLBACKS = {
     {
         name = "uv_fs_cb",
         source = "titan/uv/file.titan",
-        slot = 1,
+        record = "uv_fs_t",
+        field = "callback",
         call = "entry(L, module, callback, owner)"
     },
     {
         name = "uv_signal_cb",
         source = "titan/uv/os.titan",
-        slot = 1,
+        record = "uv_signal_t",
+        field = "callback",
         call = "entry(L, module, callback, owner, signum as foreign lua_Integer)"
     },
     {
         name = "uv_process_exit_cb",
         source = "titan/uv/process.titan",
-        slot = 1,
+        record = "uv_process_t",
+        field = "exit_callback",
         call = "entry(L, module, callback, owner, " ..
             "exit_status as foreign lua_Integer, term_signal as foreign lua_Integer)"
     },
     {
         name = "uv_write_cb",
         source = "titan/uv/runtime.titan",
-        slot = 1,
+        record = "StreamWriteOwner",
+        field = "callback",
         call = "entry(L, module, callback, owner, status as foreign lua_Integer)"
     },
     {
-        name = "uv_alloc_cb",
+        name = "uv_tcp_alloc_cb",
         source = "titan/uv/runtime.titan",
-        slot = 1,
+        record = "uv_tcp_t",
+        field = "alloc_callback",
         call = "entry(L, module, callback, owner, suggested_size, " ..
             "buf as foreign *void)"
     },
     {
-        name = "uv_read_cb",
+        name = "uv_tcp_read_cb",
         source = "titan/uv/runtime.titan",
-        slot = 2,
+        record = "uv_tcp_t",
+        field = "read_callback",
+        call = "entry(L, module, callback, owner, nread as foreign lua_Integer)"
+    },
+    {
+        name = "uv_stdio_alloc_cb",
+        source = "titan/uv/runtime.titan",
+        record = "uv_stdio_t",
+        field = "alloc_callback",
+        call = "entry(L, module, callback, owner, suggested_size, " ..
+            "buf as foreign *void)"
+    },
+    {
+        name = "uv_stdio_read_cb",
+        source = "titan/uv/runtime.titan",
+        record = "uv_stdio_t",
+        field = "read_callback",
         call = "entry(L, module, callback, owner, nread as foreign lua_Integer)"
     },
     {
         name = "uv_close_cb",
         source = "titan/uv/runtime.titan",
-        slot = 1,
+        record = "CloseOwner",
+        field = "callback",
         call = "entry(L, module, callback, owner)"
     },
     {
         name = "uv_walk_cb",
         source = "titan/uv/runtime.titan",
-        slot = 1,
+        record = "WalkOwner",
+        field = "callback",
         call = "entry(L, module, callback, owner, " ..
             "handle as foreign *void)"
     },
     {
         name = "uv_timer_cb",
         source = "titan/uv/task.titan",
-        slot = 1,
+        record = "TimerOwner",
+        field = "callback",
+        call = "entry(L, module, callback, owner)"
+    },
+    {
+        name = "uv_ticker_cb",
+        source = "titan/uv/task.titan",
+        record = "uv_timer_t",
+        field = "callback",
         call = "entry(L, module, callback, owner)"
     },
     {
         name = "uv_getaddrinfo_cb",
         source = "titan/uv/tcp.titan",
-        slot = 1,
+        record = "uv_getaddrinfo_t",
+        field = "callback",
         call = "entry(L, module, callback, owner, status as foreign lua_Integer, " ..
             "result as foreign *void)"
     },
     {
         name = "uv_connect_cb",
         source = "titan/uv/tcp.titan",
-        slot = 1,
+        record = "uv_connect_t",
+        field = "callback",
         call = "entry(L, module, callback, owner, status as foreign lua_Integer)"
     },
     {
         name = "uv_shutdown_cb",
         source = "titan/uv/tcp.titan",
-        slot = 1,
+        record = "uv_shutdown_t",
+        field = "callback",
         call = "entry(L, module, callback, owner, status as foreign lua_Integer)"
     },
     {
         name = "uv_connection_cb",
         source = "titan/uv/tcp.titan",
-        slot = 3,
+        record = "uv_tcp_t",
+        field = "connection_callback",
         call = "entry(L, module, callback, owner, status as foreign lua_Integer)"
     },
     {
@@ -180,19 +215,22 @@ local UV_FOREIGN_CALLBACKS = {
     {
         name = "uv_after_work_cb",
         source = "titan/uv/work.titan",
-        slot = 2,
+        record = "WorkOwner",
+        field = "callback",
         call = "entry(L, module, callback, owner, status as foreign lua_Integer)"
     },
 }
 local FS_FOREIGN_CALLBACKS = {
     {
         name = "fs_realpath_cb",
-        slot = 1,
+        record = "RealpathRequest",
+        field = "callback",
         call = "entry(L, module, callback, owner)"
     },
     {
         name = "fs_watcher_event_cb",
-        slot = 1,
+        record = "WatchRegistration",
+        field = "callback",
         call = "entry(L, module, callback, owner, filename, " ..
             "events as foreign lua_Integer, status as foreign lua_Integer)"
     },
@@ -1546,8 +1584,14 @@ int main(void) {
             local last = assert(native:find("\nend", first, true), marker)
             local body = native:sub(first, last)
             assert.truthy(body:find(
-                "owner.uv[" .. callback.slot .. "].uv", 1, true), body)
-            assert.truthy(body:find("owner.uv[2].uv", 1, true), body)
+                'ffi.titan_record_field(owner, "Parser", "' ..
+                callback.field .. '")', 1, true), body)
+            assert.truthy(body:find(
+                'ffi.titan_record_field(owner, "Parser", "callback_state")',
+                1, true), body)
+            assert.falsy(body:find("owner.uv[", 1, true), body)
+            assert.truthy(body:find("callback.upvalue[0]", 1, true), body)
+            assert.truthy(body:find("callback.upvalue[2]", 1, true), body)
             assert.falsy(body:find(
                 "titan_ffi_pushudata", 1, true), body)
             assert.truthy(body:find("ffi.lua_settop(L, top)", 1, true), body)
@@ -1612,12 +1656,15 @@ int main(void) {
                     for _, forbidden in ipairs({
                         "carrier[0]", "owner.uv", "callback.upvalue",
                         "ffi.uv_loop_get_data", "ffi.lua_", "ffi.titan_ffi_",
+                        "ffi.titan_record_field",
                     }) do
                         assert.falsy(body:find(forbidden, 1, true), body)
                     end
                 else
                     assert.truthy(body:find(
-                        "owner.uv[" .. callback.slot .. "].uv", 1, true), body)
+                        'ffi.titan_record_field(owner, "' .. callback.record ..
+                        '", "' .. callback.field .. '")', 1, true), body)
+                    assert.falsy(body:find("owner.uv[", 1, true), body)
                     assert.truthy(body:find(
                         "callback.upvalue[0]", 1, true), body)
                     assert.truthy(body:find(
@@ -1738,7 +1785,9 @@ int main(void) {
             local last = assert(source:find("\nend", first, true), marker)
             local body = source:sub(first, last):gsub("%s+", " ")
             assert.truthy(body:find(
-                "owner.uv[" .. callback.slot .. "].uv", 1, true), body)
+                'ffi.titan_record_field(owner, "' .. callback.record ..
+                '", "' .. callback.field .. '")', 1, true), body)
+            assert.falsy(body:find("owner.uv[", 1, true), body)
             assert.truthy(body:find("callback.upvalue[0]", 1, true), body)
             assert.truthy(body:find("callback.upvalue[2]", 1, true), body)
             assert.truthy(body:find("ffi.uv_loop_get_data", 1, true), body)
@@ -4844,7 +4893,7 @@ done
                 assert.truthy(compiler_groups:find(required, 1, true),
                     required)
             end
-            assert.equal(4, count_literal(workflow,
+            assert.equal(5, count_literal(workflow,
                 "TITAN_PROBE_CACHE_DISABLE=1"), workflow)
             assert.equal(1, count_literal(coverage_job,
                 "needs: test-linux-compiler"), coverage_job)
@@ -5105,8 +5154,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 29, 35, 31, 34 }, shard_counts)
-            assert.equal(129, assigned_count)
+            assert.same({ 29, 35, 31, 40 }, shard_counts)
+            assert.equal(135, assigned_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")
@@ -5284,7 +5333,7 @@ done
 
             assert.equal(1, count_literal(sanitizer_job,
                 "make titan-stdlib-test-build"), sanitizer_job)
-            assert.equal(17, count_literal(sanitizer_job,
+            assert.equal(19, count_literal(sanitizer_job,
                 "make titan-stdlib-test-run"), sanitizer_job)
             for _, filter in ipairs({
                 "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
@@ -5294,6 +5343,7 @@ done
                 "TITAN_FILTER='^uv%.task_tests%.'",
                 "TITAN_FILTER='^uv%.runtime_tests%.'",
                 "TITAN_FILTER='test_run_foreign_'",
+                "TITAN_FILTER='test_signal_watcher_'",
                 "TITAN_FILTER='test_ssl_http_fresh_process_sanitizer_composition$'",
                 "TITAN_FILTER='^reflect%.tests%.'",
                 "TITAN_FILTER='^sqlite3%.tests%.'",
@@ -5306,11 +5356,22 @@ done
                 "TITAN_FILTER='^json%.tests%.test_parser_" ..
                 "peg_limit_is_independent_of_depth_option'",
                 "TITAN_FILTER='^json%.tests%.test_core_float_range_tags_and_round_trips'",
+                "TITAN_FILTER='^json%.tests%.test_mapping_.*native_numbers'",
                 "TITAN_FILTER='test_peg_roots_and_releases_" ..
                 "titan_callback_patterns$'",
                 "TITAN_FILTER='test_regex_gc_rooting$'",
             }) do
                 assert.equal(1, count_literal(sanitizer_job, filter), filter)
+            end
+            local nominal_sanitizer_step = named_step(sanitizer_job,
+                "Run native nominal storage sanitizer gate")
+            for _, required in ipairs({
+                "ci_sanitizer_capture.sh nominal-storage",
+                "spec/coder/nominal_storage_spec.lua",
+                "spec/coder/native_optional_storage_spec.lua",
+            }) do
+                assert.equal(1, count_literal(nominal_sanitizer_step, required),
+                    required)
             end
             local json_sanitizer_step = named_step(sanitizer_job,
                 "Run native JSON sanitizer gate")
@@ -5378,6 +5439,10 @@ done
                 },
                 {
                     "Run immediate function compiler sanitizer gate",
+                    { ".lua/bin/busted" },
+                },
+                {
+                    "Run native nominal storage sanitizer gate",
                     { ".lua/bin/busted" },
                 },
                 {

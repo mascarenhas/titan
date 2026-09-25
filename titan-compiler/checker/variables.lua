@@ -103,7 +103,7 @@ checkvar = util.make_visitor({
         end
     end,
 
-    ["Ast.VarDot"] = function(node, st, errors, context)
+    ["Ast.VarDot"] = function(node, st, errors, context, mode)
         local receiver = node.exp
         if receiver._tag == "Ast.ExpVar"
            and receiver.var._tag == "Ast.VarName" then
@@ -305,7 +305,11 @@ checkvar = util.make_visitor({
                     if field.name == node.name
                        and is_nominal_member_visible_from(st, field) then
                         node._decl = field
-                        node._type = field.type
+                        local storage = checker._nominal_storage_plan(field.type)
+                        node._nominal_storage = storage
+                        node._nominal_projection_type = storage.projection_type
+                        node._type = mode == "write" and storage.storage_type
+                            or storage.projection_type
                         nominal_field_projection = true
                         break
                     end
@@ -415,6 +419,8 @@ checkvar = util.make_visitor({
                     _interface_field = true,
                     _interface_field_index = true,
                     _rigid_receiver_type = true,
+                    _nominal_storage = true,
+                    _nominal_projection_type = true,
                     _assignment_adjustment = function(value)
                         return generic_finalize_adjustment_annotation(
                             operation, value)
@@ -660,7 +666,7 @@ end
 -- ABI shape. `allow_missing == false` is the existing call-site signal for a C
 -- function pointer/direct FFI/pseudo-constructor.
 function checkargs(callable, args, loc, fname, st, errors,
-                         allow_missing)
+                         allow_missing, nominal_constructor)
     local signature = assert(call_signature(callable),
         "call checking requires a callable signature")
     if allow_missing == nil then allow_missing = true end
@@ -680,6 +686,12 @@ function checkargs(callable, args, loc, fname, st, errors,
             slot_term = function(i)
                 return "argument " .. i .. " of call to " .. fname
             end,
+            check_expression = nominal_constructor and function(
+                    exp, est, eerrors, context, demand, index)
+                checker._nominal_argument_demand(
+                    demand, nominal_constructor, index)
+                checkexp(exp, est, eerrors, context, demand)
+            end or nil,
         }), st, errors)
 
     -- A runtime-sized Titan run has no C vararg promotion/ABI contract. Keep

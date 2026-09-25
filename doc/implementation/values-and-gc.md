@@ -65,7 +65,7 @@ for locals, parameters, return values and temporaries alike:
 | `value` | `TValue` | a full boxed Lua value, held **by value** |
 | function type (`function (P..., ...: I): (R..., ...: O)`) | `TValue` | boxed callable value; input/output tails change the callable type and native entry ABI, not the boxed representation |
 | record or union type (`Type.Nominal`) | `Udata*` | the nominal value *is* this userdata (below) |
-| `T?` (option) | `TValue` | boxed: nil or the payload |
+| `T?` (option) | `TValue`, or native presence/value struct for C numeric bases | nil or the exact payload; see [nominal storage](nominal-storage.md) |
 | foreign pointer except Lua `Udata *` | per `foreignctype` | e.g. `void*`, `char*`; ordinary borrowed pointers are not GC objects ([FFI internals](ffi-internals.md)) |
 | Lua-internal `Udata *` | `Udata *` | raw pointer to the full userdata object; GC-bearing |
 | Lua-internal `TValue` | `TValue` | boxed value copied by value; GC-bearing |
@@ -75,12 +75,11 @@ parameters and return values are ordinary C variables in their native,
 unboxed form. The Lua stack is never the transport for values between
 Titan functions — it is used only as a GC anchor, as described under
 [GC discipline](#gc-discipline-the-invariants). The dynamic types
-`value`, function types and `T?` are carried as `TValue` *by value*
+`value`, function types and options other than C numeric options are carried as `TValue` *by value*
 (struct copy), still without touching the Lua stack except when the
 function-value generic call path intentionally invokes Lua's call
 machinery. `initval` gives each type its zero value — `{ {0}, 0 }` (a nil
-`TValue`) for `value`, function values and options, `0` for everything
-else — so a declared-but-unset temporary is never garbage (it
+`TValue`) for boxed values, an absent native carrier for C numeric options, and `0` for scalar/pointer temporaries — so a declared-but-unset temporary is never garbage (it
 initializes `newtmp` temporaries and the Lua entry wrappers' argument
 holders; plain locals are declared bare and assigned immediately).
 
@@ -188,54 +187,21 @@ preserves the already rooted operand for generic fallback. See
 
 ## Records: a single tagged Udata
 
-A Titan record value is **one** Lua object — a full userdata (`Udata`).
-For
+A Titan record value is one Lua full userdata. Its metatable supplies nominal
+identity; its dense uservalues trace only GC-bearing fields, and its raw C
+payload holds native members. For `Point { x: float, y: float, name: string }`,
+there are two native number members and one traced string slot. Allocation uses
+`luaS_newudata(L, sizeof(PointPayload), 1)`, immediately roots the userdata, and
+then initializes the fields. Native field access uses a generated C member;
+`name` uses UV index 0 with the ordinary back barrier on writes.
 
-```titan
--- Titan
-record Point
-    x: float
-    y: float
-    name: string
-end
-```
-
-the synthesized `Point.new` (the parser desugars every record into a
-declaration plus a `new` record function) generates, in `coderecord`
-(`coder.lua`), a single allocation:
-
-```c
-{
-    Udata* _ud = luaS_newudata(L, 0, 3);               /* #fields user values, no raw payload */
-    setuvalue(L, _tmp_1_slot, _ud);                    /* anchor the udata first */
-    _ud->metatable = hvalue(&_mod->uv[3].uv);          /* this metatable IS the type identity */
-    /* per field i: store into &_ud->uv[i].uv, then for GC-able fields
-       luaC_barrierback(L, obj2gco(_ud), &_ud->uv[i].uv) */
-}
-```
-
-The layout:
-
-* **The `Udata`** has `#fields` user values (no reserved `uv[0]`):
-  `uv[i].uv` holds field `i`, **0-based** (`0..N-1`), assigned in
-  declaration order by the checker — `types.Field` in
-  `checker.lua`. Inside Titan code a record value *is* this udata
-  (`ctype` = `Udata*`), so field access is an indexed load — `p.x`
-  compiles to `fltvalue(&((_param_p)->uv[0].uv))` — and a mutable field write is
-  `setslot` into `&(_recobj->uv[i].uv)` plus a **back** barrier when the
-  field type is GC-able (a userdata owner uses `luaC_barrierback`, see
-  [write barriers](#5-write-barriers-back-for-userdata-and-tables-forward-for-closures)).
-  Local fields use the same slots as public fields. A serialized `.so`
-  interface may omit those local `Type.Field` entries, so `Type.Record.nfields`
-  carries the full allocation count and each public `Type.Field.index` keeps
-  the original slot number.
-* The udata has **no** raw payload (`luaS_newudata(L, 0, N)`): a record's
-  *type identity* is its `metatable` field (next section), set directly
-  from the module user value caching this record's metatable.
-
-There is no longer a backing `CClosure` and no closure↔udata
-cross-references: the value Titan computes with and the value Lua sees
-are the same object.
+Logical `Type.Field.index` values remain declaration-order indices. Public native
+members form an actual first prefix subobject, followed by private native members;
+public and private GC fields occupy independently mapped dense UV slots. Exported
+layout metadata supplies public mappings without revealing private C declarations.
+`Type.Record.nfields` remains the total logical field count, not the UV count.
+See [Native nominal storage](nominal-storage.md) for allocation, projections,
+union layouts, fresh tails and binary reconstruction.
 
 ### Type identity: the metatable pointer
 
@@ -333,40 +299,37 @@ and metamethod dispatch — a full userdata; the metatable's
 `__index`/`__newindex` serve field access and methods from Lua
 ([Lua interop internals](lua-interop-internals.md)), and the spec
 verifies `type(p) == "userdata"` and that two instances share a
-metatable. **Titan needs** fixed-slot, unboxed-pointer field access and
-a GC object with barrier support for mutable slots — exactly
-what a `Udata`'s `UValue uv[]` array is. `setboxed`/`checkandget`
+metatable. **Titan needs** direct native-member and traced-slot access and
+a GC object with barrier support for mutable traced fields. The `Udata` payload
+and its `UValue uv[]` array supply those two storage classes. `setboxed`/`checkandget`
 (Titan↔Lua) need no wrap or unwrap at all: the value crossing the
 boundary is the record itself, leaving only the one-pointer metatable
 compare on the way in.
 
-## Unions: tag and optional payload user values
+## Unions: native tag and independently stored parts
 
-A Titan union is also one zero-byte `Udata *`, with a distinct per-union
-metatable as its nominal identity. Its user-value layout is deliberately not
-the record field layout:
+A Titan union is one `Udata *`, with a distinct per-union metatable as its
+nominal identity. Each variant has its own generated payload struct and dense
+traced-slot count. Every payload starts with an actual common tag-header
+subobject containing the absolute variant tag. Even an empty variant has this
+native header, but needs no UV slots.
 
-```text
-uv[0]  integer absolute variant tag
-uv[1]  payload, only for a payload variant
-```
+Parts use the same physical classification as record fields. Non-GC scalars,
+eligible fixed aggregates and arrays, and fresh const tails occupy native
+storage; traced values occupy dense UV slots. An Array part retains its internal
+`Table *` backing in its assigned UV, without boxing a Lua proxy. Direct C
+functions remain ineligible, while C function pointers have native scalar
+storage. Storage eligibility is separate from `has_tvalue_representation`;
+embedding an aggregate does not make it generally boxable.
 
-An empty variant allocates with `luaS_newudata(L, 0, 1)`; a payload variant
-uses `luaS_newudata(L, 0, 2)`. The constructor roots the userdata before
-evaluating/storing a payload and applies `luaC_barrierback` when that payload
-may be collectable. No tag or payload is exposed as a Titan field or ordinary
-Lua member.
+Construction roots the final userdata before initializing its stored fields,
+and traced stores apply `luaC_barrierback`. `case` materializes the union once,
+reads the common tag header, and projects each checked binding through the
+selected variant's storage plan. Logical 1-based part indices are independent
+of native member names and UV indices. No tag or part is exposed as an ordinary
+Lua member. See [Native nominal storage](nominal-storage.md).
 
-Payloads use the same `types.has_tvalue_representation` rule as record fields
-because both are stored in a traced `TValue` user-value slot. Ordinary boxed
-Titan values—including Arrays, Maps, and function values—are eligible;
-options recurse into their base. Direct C aggregates, C arrays, direct C
-functions, and C function pointers have no such representation and are
-rejected. An Array payload stores its internal `Table *` backing in `uv[1]`,
-not its Lua proxy userdata.
-
-`case` materializes the union once, reads the integer tag, and extracts
-`uv[1]` only for a checked payload binding. Boxing into `value` keeps the same
+Boxing into `value` keeps the same
 userdata, and unboxing compares the exact union metatable just as a record
 check compares the exact record metatable. The reverse metatable map includes
 the protected `"Titan union <fqtn>"` identity for diagnostics.

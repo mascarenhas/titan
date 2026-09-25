@@ -724,6 +724,82 @@ function report_incomplete_c_object(typ, st, subject, loc, errors)
     return true
 end
 
+-- A nominal member owns fixed C bytes, but observing those bytes borrows an
+-- interior address. Keep this separate from TValue representation: admitting
+-- an embedded aggregate must not make it boxable in containers or calls.
+function checker._nominal_storage_plan(typ, written_array_view)
+    local projection = typ
+    local kind = written_array_view and "borrowed_array_view" or "value"
+    if types.is_c_aggregate(typ) and not types.is_c_tvalue(typ) then
+        local resolved = c_resolve(typ)
+        kind = "fixed_aggregate"
+        if resolved._tag == "Type.CArray" then
+            projection = types.CPointer(
+                resolved.elem, types.c_type_qualifiers(typ))
+        else
+            -- Retaining the declared pointee also retains typedef qualifiers;
+            -- the Titan member's binding constness never adds C qualifiers.
+            projection = types.CPointer(typ, {})
+        end
+    end
+    return {
+        kind = kind,
+        storage_type = typ,
+        projection_type = projection,
+    }
+end
+
+function checker._nominal_member_type(written, typ)
+    if written and written._tag == "Ast.TypeCArray"
+       and not written.length then
+        local resolved = c_resolve(typ)
+        if resolved and resolved._tag == "Type.CArray" then
+            return types.CPointer(
+                resolved.elem, types.c_type_qualifiers(typ)), true
+        end
+    end
+    return typ, false
+end
+
+local function nominal_embedded_object_error(typ, st, seen)
+    typ = c_resolve(typ)
+    if not typ or seen[typ] then return nil end
+    seen[typ] = true
+    local incomplete = incomplete_c_object_error(
+        typ, st, "embedded nominal storage")
+    if incomplete then return incomplete end
+    if typ._tag == "Type.CStruct" or typ._tag == "Type.CUnion" then
+        if typ.has_fam then
+            return string.format(
+                "embedded nominal storage cannot contain C type '%s' with a flexible array member",
+                types.tostring(typ))
+        end
+        for _, field in ipairs(typ.fields or {}) do
+            local err = nominal_embedded_object_error(field.type, st, seen)
+            if err then return err end
+        end
+    elseif typ._tag == "Type.CArray" then
+        return nominal_embedded_object_error(typ.elem, st, seen)
+    end
+end
+
+function checker._nominal_storage_error(typ, st)
+    if types.has_tvalue_representation(typ) then return nil end
+    if not types.is_c_aggregate(typ) then
+        return string.format(
+            "type '%s' has no nominal storage representation",
+            types.tostring(typ))
+    end
+    local err = nominal_embedded_object_error(typ, st, {})
+    if err then return err end
+    local bearing, offender = types.c_automatic_gc_bearing(typ)
+    if bearing then
+        return string.format(
+            "embedded nominal storage of type '%s' transitively contains GC-bearing FFI storage '%s', which payload bytes do not trace",
+            types.tostring(typ), types.tostring(offender))
+    end
+end
+
 -- C allocation pseudo-members are syntax-bound checker declarations, not
 -- boxed callable values. The singleton context lets VarDot expose their narrow
 -- call signature only while it is the direct callee of an ExpCall; every other
@@ -1247,6 +1323,94 @@ function checker._pointer_to_allocation_payload(target, payload)
        and types.equals(resolved.pointee, payload)
 end
 
+local function nominal_fixed_array_extent(target, payload, count, st, loc, errors)
+    if not count or count <= 0 then
+        checker.typeerror(errors, loc,
+            "fixed nominal C array initialization requires a positive compile-time allocation count")
+        return false
+    end
+    local resolved = c_resolve(target)
+    if type(resolved.len) == "number" then
+        if resolved.len ~= count then
+            checker.typeerror(errors, loc,
+                "fixed nominal C array has extent %d but '.new_array' allocates %d element(s)",
+                resolved.len, count)
+            return false
+        end
+        return true
+    end
+    -- Header extents can be C integer constant expressions. The target
+    -- compiler proves their extent; evaluating that expression in Lua would
+    -- silently substitute host arithmetic and macro context.
+    local probe, probe_error = checker._probe_for_c_types(st)
+    if not probe then
+        checker.typeerror(errors, loc,
+            "cannot validate fixed nominal C array extent: %s", tostring(probe_error))
+        return false
+    end
+    local result = probe:validate_declaration_compatibilities({ {
+        left_type = target,
+        right_type = types.CArray(payload, count),
+    } })[1]
+    if not result or result.status == "infrastructure_failure" then
+        checker.typeerror(errors, loc,
+            "cannot validate fixed nominal C array extent: %s",
+            result and (result.message or result.summary or result.status)
+                or "the C probe returned no result")
+        return false
+    elseif not result.accepted then
+        checker.typeerror(errors, loc,
+            "fixed nominal C array extent does not match '.new_array' count %d", count)
+        return false
+    end
+    return true
+end
+
+local function plan_nominal_c_allocation(node, pseudo, demand, plan, st, errors)
+    local constructor = demand and demand.nominal_constructor
+    local index = demand and demand.nominal_slot_index
+    local slot = constructor and constructor.slots[index]
+    if not slot then return false end
+    local target, payload = slot.type, pseudo.ctype
+    local resolved_target = c_resolve(target)
+    local fixed = types.is_c_aggregate(target)
+        and not types.is_c_tvalue(target)
+    local initialize_fixed = fixed and not pseudo.fam
+        and not pseudo.array and types.equals(target, payload)
+    local initialize_array = fixed and pseudo.array
+        and resolved_target._tag == "Type.CArray"
+        and types.equals(resolved_target.elem, payload)
+    local tail = (constructor.kind == "union" or slot.isconst)
+        and (pseudo.array or pseudo.fam)
+        and checker._pointer_to_allocation_payload(target, payload)
+    if not initialize_fixed and not initialize_array and not tail then return false end
+
+    if tail then
+        local bearing, offender = types.c_automatic_gc_bearing(payload)
+        if bearing then
+            checker.typeerror(errors, node.loc,
+                "fused nominal tail of type '%s' transitively contains GC-bearing FFI storage '%s', which payload bytes do not trace",
+                types.tostring(payload), types.tostring(offender))
+        elseif pseudo.array then
+            local err = checker._nominal_storage_error(payload, st)
+            if err then checker.typeerror(errors, node.loc, "%s", err) end
+        end
+        plan.storage = "nominal_tail"
+    else
+        local err = checker._nominal_storage_error(target, st)
+        if err then checker.typeerror(errors, node.loc, "%s", err) end
+        if initialize_array then
+            nominal_fixed_array_extent(target, payload,
+                plan.array_count_literal, st, node.loc, errors)
+        end
+        plan.storage = "nominal_fixed"
+    end
+    plan.result_type = target
+    plan.nominal_slot_index = index
+    constructor.allocation_plans[index] = plan
+    return true
+end
+
 function checker._plan_c_allocation(node, pseudo, demand, st, errors)
     local decl = demand and demand.allocation_decl
     local payload = pseudo.ctype
@@ -1262,8 +1426,17 @@ function checker._plan_c_allocation(node, pseudo, demand, st, errors)
     }
     local count_argument = node._arg_adjustment
         and node._arg_adjustment.fixed[1] or node.args.args[1]
+    plan.count_expression = count_argument
+    plan.array_count_literal = pseudo.array
+        and checker._allocation_integer_literal(count_argument, st) or nil
+    plan.fam_count_literal = pseudo.fam
+        and checker._allocation_integer_literal(count_argument, st) or nil
 
-    if pseudo.array then
+    if plan_nominal_c_allocation(node, pseudo, demand, plan, st, errors) then
+        -- The direct nominal constructor owns these bytes. Retain the checked
+        -- C allocation at its lexical argument position until nominal lowering
+        -- consumes it; ordinary function parameter passing would lose this.
+    elseif pseudo.array then
         local count = checker._allocation_integer_literal(count_argument, st)
         plan.array_count_literal = count
         if target and target._tag == "Type.COwned" then
@@ -1326,7 +1499,8 @@ function checker._plan_c_allocation(node, pseudo, demand, st, errors)
     end
 
     if resolved_payload and resolved_payload._tag == "Type.CArray"
-       and not plan.storage:match("^automatic") then
+       and not plan.storage:match("^automatic")
+       and plan.storage ~= "nominal_fixed" then
         checker.typeerror(errors, node.loc,
             "cannot allocate C array typedefs as owned storage in this FFI version")
     end

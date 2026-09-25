@@ -35,15 +35,18 @@ llhttp invokes callbacks synchronously inside `llhttp_execute` and
 `native.titan` defines the exact restricted source foreign entries and follows
 the same callback-owner protocol without introducing an asynchronous boundary.
 
-The Titan `Parser` record owns its `llhttp_t` and `llhttp_settings_t` as
-GC-managed foreign objects. Its first fields also hold the Lua state active for
+The Titan `Parser` record embeds its `llhttp_t` and `llhttp_settings_t` in
+its own native payload. Construction precedes settings/llhttp initialization,
+so native self-pointers target the final stored objects. Its fields also hold the Lua state active for
 the current synchronous parse and one exact Titan closure for each registered
 llhttp callback: URL, status, header field, header value, header-value complete,
 headers complete, body, and message complete. `llhttp_t.data` points back to
 that Parser owner. Each correspondingly named source callback recovers the
-owner and active Lua state, extracts the fixed closure's module and native
-entry, temporarily stack-roots the owner, invokes that exact generated Titan
-signature, and restores the previous stack top.
+owner and uses `ffi.titan_record_field` to read its active Lua state and
+callback without assuming UV indices. It extracts the closure's module and native
+entry, invokes that exact generated Titan signature, and restores the previous
+stack top. The synchronous caller and ordinary callback keep the Parser traced
+through the invocation.
 
 The foreign-function boundary allocates no parser, event descriptor, arena, or
 copied byte storage. It has no execute, finish, reset, getter, event-accessor, pause-policy,

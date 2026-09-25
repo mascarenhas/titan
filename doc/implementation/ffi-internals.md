@@ -426,7 +426,7 @@ attaches the checker-only lowering traits, rejecting a mismatch before the
 interface is published. These checks, not the availability of a constructor in
 the deserialization environment, are the authority for portable C metadata.
 
-An API-5 analysis-only embedded provider may supply that target through a
+An analysis-only embedded provider may supply that target through a
 validated build-profile manifest rather than native SDK discovery. The pure
 profile boundary does not skip numeric normalization or synthesize traits from
 individual module types. Exported profile data contains only version/identity,
@@ -437,10 +437,12 @@ probes independently acquire the live target and reject disagreement with the
 semantic host's declared target.
 
 The decoder also reapplies `types.has_tvalue_representation` to every decoded
-module variable, record field, union payload, and interface field, so a hostile
-interface cannot place an unboxable direct C aggregate or function in a
-runtime `TValue` slot that source checking would reject. Function pointers
-have a lightuserdata representation and pass this independent storage check.
+module variable, public record field, public union part, and Interface field.
+The public serialization contract remains restricted to portable types;
+private embedded foreign aggregates do not enter this graph. Function pointers
+have a lightuserdata representation and pass this check. Nominal physical
+storage is selected separately: passing this semantic-interface check does not
+imply that a record field or union part occupies a UV slot.
 
 ## Converting C Declarations
 
@@ -512,10 +514,11 @@ The checker has FFI-specific handling in a few narrow places:
   scalars and object/function pointers while rejecting by-value C
   aggregates/arrays and direct C functions before `getslot`/`setslot` code
   generation.
-  Record fields and union payloads use the same predicate because they occupy
-  the same kind of user-value slot. It treats Arrays, Maps, and Titan function
-  values as already boxed and recurses only through `Option`; it does not
-  recursively reject their component/signature types.
+  This predicate treats Arrays, Maps, and Titan function values as already
+  boxed and recurses only through `Option`; it does not recursively reject
+  their component/signature types. Record fields and union parts instead use
+  separate nominal-storage eligibility, which admits complete fixed non-GC
+  aggregates and arrays without granting them a general boxed representation.
 * `Ast.VarDot` on a `CModule` selects only ordinary C value members.
   `Ast.ExpForeignType` is the dedicated type receiver for `foreign T.new()`,
   `.new_array(n)`, `.sizeof`, and `.alignof`; same-named values do not interfere.
@@ -871,8 +874,12 @@ function-pointer/`void *` conversions remain written-only, and function
 pointers do not participate in object-pointer address coercions. By-value C
 structs/unions are deliberately not boxable in v1.
 
-An option uses one `TValue` slot and delegates its present arm to these same
-checked helpers, which is why `TypeOption` validates the base eagerly.
+An Option over a C integer or float uses a native presence/value carrier across
+exact native calls, locals, and nominal storage. Its present arm invokes these
+checked helpers only when boxing is requested. Other Options retain their
+ordinary `TValue` carrier. `TypeOption` still validates its base's boxed
+representation eagerly; this eligibility check does not force an early carrier
+conversion. See [Native nominal storage](nominal-storage.md).
 Owner-to-pointer
 coercion also stops at an outer option: `Option(COwned(T))` cannot coerce
 directly to either `CPointer(T)` or `Option(CPointer(T))`. The source must first

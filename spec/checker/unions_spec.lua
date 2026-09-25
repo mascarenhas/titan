@@ -113,8 +113,8 @@ describe("unions (typechecker)", function()
     end)
 
     it("checks eligibility and private export restrictions for every part", function()
-        assert_error("no TValue representation", [[
-            local union Pair pair(x: integer, invalid: foreign int[]) end
+        assert_check([[
+            local union Pair pair(x: integer, borrowed: foreign int[]) end
         ]])
         assert_error("cannot export local record type", [[
             local record Secret x: integer end

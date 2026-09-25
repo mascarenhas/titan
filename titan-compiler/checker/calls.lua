@@ -1,6 +1,43 @@
 local core = require "titan-compiler.checker.core"
 local _ENV = core
 
+-- Only a resolved nominal namespace selector identifies the synthesized
+-- constructor. A first-class callable alias has an ordinary declaration and
+-- must retain its independent allocation/borrowing behavior.
+function checker._direct_nominal_constructor(node)
+    local variable = node.exp and node.exp._tag == "Ast.ExpVar"
+        and node.exp.var
+    local declaration = variable and variable._decl
+    if not declaration or declaration._tag ~= "Type.StaticMethod" then return nil end
+    local owner = types.registry[declaration.fqtn]
+    local variant, slots
+    if owner and owner._tag == "Type.Record" and declaration.name == "new" then
+        slots = owner.fields
+    elseif owner and owner._tag == "Type.Union" then
+        variant = owner.variants[declaration.name]
+        slots = variant and variant.parts
+    end
+    if not slots then return nil end
+    local indices = {}
+    for index, slot in ipairs(slots) do indices[index] = slot.index end
+    return {
+        kind = variant and "union" or "record",
+        owner = owner,
+        variant = variant or false,
+        slots = slots,
+        field_indices = indices,
+        allocation_plans = {},
+    }
+end
+
+function checker._nominal_argument_demand(demand, constructor, index)
+    if constructor and constructor.slots[index] then
+        demand.nominal_constructor = constructor
+        demand.nominal_slot_index = index
+    end
+    return demand
+end
+
 -- Check a named list in lexical order, then produce the positional dense list
 -- consumed by the existing native/direct-C lowering. The separate order map is
 -- retained so codegen can evaluate explicit expressions in source order before
@@ -13,7 +50,8 @@ function named_call_declaration(node)
 end
 
 function check_named_args(
-        callable, paramnames, fields, loc, fname, st, errors, declaration)
+        callable, paramnames, fields, loc, fname, st, errors, declaration,
+        nominal_constructor)
     local signature = assert(call_signature(callable),
         "named-call checking requires a callable signature")
     assert(type(paramnames) == "table")
@@ -57,7 +95,10 @@ function check_named_args(
             local ptype = signature.params[index]
             field._decl = named_parameter_declaration(
                 declaration, index, field.name)
-            checkexp(field.exp, st, errors, ptype)
+            checkexp(field.exp, st, errors, ptype,
+                checker._nominal_argument_demand(
+                    result_demand({ ptype }, false, { term = fname }),
+                    nominal_constructor, index))
             local term =
                 "named argument '" .. field.name .. "' of " .. fname
             local exp = coerce_and_check(
@@ -2169,7 +2210,8 @@ function generic_resolve_deferred_generic_arguments(
 end
 
 function generic_infer_positional_call(context, signature, args,
-                                                st, errors, term)
+                                                st, errors, term,
+                                                nominal_constructor)
     local deferred, deferred_by_exp = {}, {}
     local consumed_results, consumed_open = {}, {}
     local consumed_spreads = {}
@@ -2212,6 +2254,8 @@ function generic_infer_positional_call(context, signature, args,
 
                 local demand = generic_discovery_demand(
                     context, signature, sink_index, subdemand)
+                checker._nominal_argument_demand(
+                    demand, nominal_constructor, sink_index)
                 checkexp(exp, est, eerrors, expected, demand)
                 generic_unify_expression_results(
                     context, signature, exp, sink_index, "argument")
@@ -2314,7 +2358,8 @@ function generic_decl_paramnames(node)
 end
 
 function generic_infer_named_call(context, signature, fields,
-                                  paramnames, st, errors, term, declaration)
+                                  paramnames, st, errors, term, declaration,
+                                  nominal_constructor)
     if type(paramnames) ~= "table" then
         for _, field in ipairs(fields) do checkexp(field.exp, st, errors) end
         return { unavailable = true, fields = fields }
@@ -2350,10 +2395,11 @@ function generic_infer_named_call(context, signature, fields,
                     generic_substitute_inference(
                         context, pattern, false) or false
                 checkexp(field.exp, st, errors, expected,
-                    result_demand({ expected or UNKNOWN_SLOT }, false, {
+                    checker._nominal_argument_demand(result_demand(
+                        { expected or UNKNOWN_SLOT }, false, {
                         term = "named generic argument",
                         inference_fixed = { provisional },
-                    }))
+                    }), nominal_constructor, index))
                 local evidence =
                     generic_contextual_record_constructor_evidence(
                         context, pattern, field.exp, field.exp._type)
@@ -2453,10 +2499,12 @@ function generic_infer_call_application(context, use, signature, node,
             named_plan = generic_infer_named_call(
                 context, signature, node.args.fields,
                 paramnames or generic_decl_paramnames(node),
-                st, errors, term, named_call_declaration(node))
+                st, errors, term, named_call_declaration(node),
+                node._nominal_constructor)
         else
             adjusted, deferred = generic_infer_positional_call(
-                context, signature, node.args.args, st, errors, term)
+                context, signature, node.args.args, st, errors, term,
+                node._nominal_constructor)
             node._generic_arg_adjustment = adjusted
         end
     end)

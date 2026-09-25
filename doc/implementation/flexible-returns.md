@@ -22,7 +22,7 @@ of native ABI truth.
 
 This chapter describes the completed implementation, including the generic
 open-consumer and pending-`finally` lifetime paths. Flexible-return metadata and
-native signatures are part of ABI 2.
+native signatures are part of the compiled-module ABI.
 
 ## Representation in the AST and type graph
 
@@ -51,7 +51,7 @@ Type.StaticMethod(fqtn, name, params, rettypes,
 ```
 
 The third `Type.Function` position remains a required reserved-false sentinel
-in ABI 2. `varargtype` is Titan's typed input tail, while `flexrettype` is
+in the current ABI. `varargtype` is Titan's typed input tail, while `flexrettype` is
 Titan's typed output tail; the two may coexist. Direct C declarations instead
 use `Type.CFunction(params, ret, vararg, abi)`: C `...` belongs only to its
 `vararg` bit, and a C signature has neither a flexible result tail nor any
@@ -355,7 +355,10 @@ relation. See
 
 The runtime already defines seven exact-layout descriptor families in
 `titan-runtime/titan.h`: integer, float, boolean, string, array/map, `TValue`,
-and nominal userdata. Each is a pair:
+and nominal userdata. `coder/nativeoption.lua` adds exact foreign numeric
+Option descriptors beside its generated presence/value carriers; the elements
+remain native across flexible and immediate return adjustment. Each descriptor
+has the same pair shape:
 
 ```c
 typedef struct {

@@ -93,9 +93,11 @@ fairness turn. Application code is the body of the current libuv callback.
 
 `async.run_foreign(f, arg)` yields `Call.run_foreign(WorkCall)`. Its dispatcher
 allocates one `WorkOwner`, stores that owner in `Task.pending`, and submits the
-owner's `uv_work_t` through `uv_queue_work` exactly once. `WorkOwner` retains
-the request, a three-slot raw `WorkPointer` carrier, and the loop-thread Titan
-completion callback. Only submission status zero is accepted; any nonzero
+owner's `uv_work_t` through `uv_queue_work` exactly once. `WorkCall` stores
+only the raw function and argument. `WorkOwner` embeds the request and receives
+a fresh three-slot `WorkPointer` tail in its direct constructor, alongside the
+traced loop-thread completion callback. Request data is installed only after
+that final owner exists. Only submission status zero is accepted; any nonzero
 status is the no-callback case, so dispatch clears the pending owner and
 returns an immediate `OperationError` whose operation is
 `async.run_foreign`.
@@ -110,8 +112,10 @@ Lua state; access `TValue`/`Udata`; or call any Titan/Lua helper.
 `uv_after_work_cb` runs on the event-loop thread and may recover the rooted
 `WorkOwner`. Its `complete_work` callback translates status zero to ordinary
 completion and a nonzero status to `OperationError`, then uses the normal Task
-resumption path. That path clears `Task.pending`; the suspended native frame
-keeps an adjusted owned argument alive until this terminal callback. Once
+resumption path. That path clears `Task.pending`; the ordinary callback
+explicitly stack-roots `WorkOwner` until resumption finishes, keeping its request
+and tail alive even if resumed user code collects. The suspended native frame
+also keeps an adjusted owned argument alive until this terminal callback. Once
 submission succeeds, cancellation neither invokes `uv_cancel` nor releases the
 carrier early. The after-work callback remains authoritative and pending
 cancellation is injected only when it resumes the Task.
@@ -201,7 +205,7 @@ Task. Calls outside an explicit suspension continue to mismatch until another
 suspension deliberately stores a token.
 
 `ResumeToken`, `SuspendCancelAction`, both required token parameters, and the
-nil-accepting cancellation-action parameter are part of compiled-module ABI 2.
+nil-accepting cancellation-action parameter are part of the compiled-module ABI.
 They appear in the serialized `titan.async` interface and exact native
 signatures. A mismatched provider is rejected rather than migrated or adapted.
 
@@ -387,10 +391,11 @@ across an unrelated event-loop turn.
 
 ## One-shot requests
 
-Each one-shot operation allocates one request record containing only its
-GC-owned, immovable native request storage and operation-specific callback.
-That callback closure captures the suspended Task and any buffer, address, or
-argument that libuv still borrows.
+Each one-shot operation allocates a request record with embedded, immovable
+native request storage and its traced operation-specific callback. The callback
+closure captures the suspended Task and separately owned arguments libuv still
+borrows. Foreign callbacks recover fields through `ffi.titan_record_field`,
+never source field ordinals interpreted as UV indices.
 
 The Task's `pending` field roots that request until its terminal callback.
 Accepted operations produce exactly one callback. Titan does not suppress that
@@ -400,8 +405,12 @@ negative submission result produces none.
 The Titan filesystem handler reads its result with public
 `uv_fs_get_result`, runs `uv_fs_req_cleanup` exactly once, and only then resumes
 the Task; its source-defined foreign entry passes only the exact owner and
-native callback parameters. Read storage and the original string used by a
-write remain rooted through that point. DNS handling counts usable `addrinfo`
+native callback parameters. Filesystem read storage is a fresh trailing
+buffer of that request owner: the count reaches its direct constructor, and
+`read_result` reads `owner.buffer`. Non-read operations store a NULL buffer
+view, while a zero-count fresh read allocation remains distinct. Write closures
+retain the original string.
+Both remain rooted through completion. DNS handling counts usable `addrinfo`
 entries, allocates one GC-owned `sockaddr_storage` array, and copies each
 reported byte prefix directly with `memcpy` before `uv_freeaddrinfo`; there is
 no address-copy shim. Connect, write, and shutdown requests
@@ -525,8 +534,12 @@ owner and resumes its Task. The high-level filesystem watcher uses this local
 Call when `stop` or `clear` must wait for closure, without adding a public
 `uv` API.
 
-Owned C objects and arrays provide stable native addresses. Automatic C
-aggregates are used only for synchronous calls whose pointers cannot escape.
+Embedded native fields and fused tails provide stable addresses while their
+nominal owner remains traced; separately owned C objects remain valid where
+needed. Construct the final owner before initializing any handle or request
+whose internal state retains its address. Automatic local aggregates are used
+only for synchronous calls whose pointers cannot escape. See
+[Native nominal storage](nominal-storage.md).
 Stream and filesystem writes assign immutable Titan strings directly to
 `uv_buf_t.base` through the documented `string`-to-`char *` conversion and keep
 those original strings reachable until the callback. Libuv borrows but does

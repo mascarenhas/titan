@@ -87,6 +87,17 @@ function objectmetadata.decode(payload, origin, expected_abi)
             return nil, "object source metadata ABI mismatch: expected "
                 .. tostring(expected_abi) .. " but found " .. tostring(record.abi)
         end
+        local native = record.entry and record.entry.object_metadata
+        if native and native.layouts ~= nil then
+            local inventory, layout_error =
+                require("titan-compiler.nominallayout").decode(
+                    native.layouts, record.module)
+            if not inventory then
+                return nil, "invalid object nominal layout metadata: " ..
+                    tostring(layout_error)
+            end
+            record.entry.layout_inventory = inventory
+        end
         return record.entry
     end)
     if not ok then return nil, tostring(entry) end

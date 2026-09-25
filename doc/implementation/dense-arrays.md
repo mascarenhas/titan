@@ -240,8 +240,8 @@ Consequences:
 - Map storage boxes Array keys and values; and
 - record/module accessors box on get and unbox on set while their internal
   slots stay raw; and
-- union construction/extraction likewise keeps the backing Table in `uv[1]`
-  rather than passing through the Lua proxy.
+- union construction/extraction likewise keeps the backing Table in the
+  part's assigned dense UV slot rather than passing through the Lua proxy.
 
 The shared `Table *` carrier never determines mutability. Boxing, unboxing,
 strict guards, dynamic conversion, generic descriptors, and Interface field

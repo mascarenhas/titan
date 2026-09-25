@@ -92,6 +92,11 @@ function test_run_foreign_keeps_the_event_loop_live_and_publishes_result(
     task_support.cleanup_task(releaser, "foreign-work releaser cleanup")
 
     async.run_foreign(blocking_foreign_work, fixture as foreign *void)
+    -- This continuation is still inside after-work. Task.pending has already
+    -- been cleared, but libuv's embedded request and raw carrier must survive
+    -- until that callback returns to C.
+    support.collect_garbage()
+    support.collect_garbage()
     test.assert(async.join(releaser):has_succeeded() and release_status == 0,
           "event-loop Task did not release blocked foreign work")
     test.assert(ffi.titan_async_work_fixture_result(

@@ -954,6 +954,13 @@ jobs:
           bash spec/support/ci_sanitizer_capture.sh immediate-functions \
             env TITAN_PROBE_CACHE_DISABLE=1 .lua/bin/busted -o gtest -v spec/coder/immediate_functions_spec.lua
 
+      - name: Run native nominal storage sanitizer gate
+        run: |
+          bash spec/support/ci_sanitizer_capture.sh nominal-storage \
+            env TITAN_PROBE_CACHE_DISABLE=1 .lua/bin/busted -o gtest -v \
+              spec/coder/nominal_storage_spec.lua \
+              spec/coder/native_optional_storage_spec.lua
+
       - name: Run native coroutine sanitizer gate
         run: |
           bash spec/support/ci_sanitizer_capture.sh coroutine-gc \
@@ -982,6 +989,8 @@ jobs:
             make titan-stdlib-test-run TITAN_FILTER='^uv%.runtime_tests%.'
           bash spec/support/ci_sanitizer_capture.sh foreign-work-tests \
             make titan-stdlib-test-run TITAN_FILTER='test_run_foreign_'
+          bash spec/support/ci_sanitizer_capture.sh signal-owner-tests \
+            make titan-stdlib-test-run TITAN_FILTER='test_signal_watcher_'
 
       - name: Run native TLS/HTTP sanitizer gate
         run: |
@@ -1008,6 +1017,8 @@ jobs:
             make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_parser_peg_limit_is_independent_of_depth_option'
           bash spec/support/ci_sanitizer_capture.sh json-numbers \
             make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_core_float_range_tags_and_round_trips'
+          bash spec/support/ci_sanitizer_capture.sh json-native-storage \
+            make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_mapping_.*native_numbers'
           for nesting_log in json-nesting json-nesting-mixed json-nesting-peg-limit; do
             if ! grep -Eq '^\[==========\] [1-9][0-9]* tests? ran\.$' \
                 "$TITAN_SANITIZER_LOG_DIR/$nesting_log.log"; then

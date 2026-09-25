@@ -808,7 +808,7 @@ function coder._code_coercion_predicate(
         return render([[
             $CBASE
             $CRESULT
-            if (ttisnil(&$SOURCE)) {
+            if (!($PRESENT)) {
                 $RESULT = $NILRESULT;
             } else {
             $GETBASE;
@@ -818,10 +818,10 @@ function coder._code_coercion_predicate(
         ]], {
             CBASE = cbase,
             CRESULT = cresult,
-            SOURCE = source,
+            PRESENT = coder._option_present(source_type, source),
             RESULT = result,
             NILRESULT = op == "option_map" and "1" or "0",
-            GETBASE = getslot(source_base, basename, "&" .. source),
+            GETBASE = coder._option_get(source_type, basename, source),
             INNERSTATS = innerstats,
             INNEREXP = innerexp,
         }), result
@@ -968,6 +968,14 @@ function coder._codeis(ctx, node)
            and node._written_cast.op == "gradual"
            and source_type._tag == "Type.Option"
            and target_type._tag == "Type.Option" then
+        if coder._is_native_option(source_type)
+           and coder._is_native_option(target_type)
+           and coder._native_option_ctype(source_type)
+                == coder._native_option_ctype(target_type) then
+            -- Transparent numeric typedef views already have the target's
+            -- exact carrier; there is no boxed payload tag to inspect.
+            return stats .. "\n(void)(" .. source .. ");", "1"
+        end
         -- Option has no separate component-bearing backing. A written gradual
         -- test therefore observes its present payload now, with strict
         -- consistency guards rather than Lua-boundary coercions. Structural
@@ -976,7 +984,7 @@ function coder._codeis(ctx, node)
             ctx, node._written_cast.guard, node.target, "&" .. source)
     elseif original_source_type._tag == "Type.Option"
            and types.equals(original_source_type.base, node.target) then
-        predicate = render("!ttisnil(&$SOURCE)", { SOURCE = source })
+        predicate = coder._option_present(original_source_type, source)
         predicate_stats = ""
     elseif node._written_cast
            and node._written_cast.op == "explicit"

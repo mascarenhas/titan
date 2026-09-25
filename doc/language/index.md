@@ -64,6 +64,7 @@ use the chapters below for the normative language reference.
 | [Variadic parameters](variadic-parameters.md) | The trailing `...: t` parameter, `#...`, the raising `...[e]` index, spreading `...` into calls, returns, and positional Array/integer-Map constructors, slot-driven adjust-up, variadic functions as values, and the limits and bans. |
 | [Flexible returns](flexible-returns.md) | Runtime-sized homogeneous result tails, finite option projection, open sinks, contextual calls through `value`, surplus adjustment, and directional callable adjustment. |
 | [Spread expressions](spread-expressions.md) | Tail-only expansion of whole or closed-range Array, integer-Map, and variadic subjects; exact subject rules, once-only evaluation, finite optional projections, open sinks, metamethods, and capacity limits. |
+| [Native storage in records and unions](nominal-storage.md) | Exact foreign values, embedded C objects, borrowed interior pointers, shallow constness, and fresh buffers sharing their nominal owner. |
 | [Records](records.md) | Nominal record types, constructors, fields, methods, record functions, and records as seen from Lua. |
 | [Unions](unions.md) | Nominal tagged unions with named payload parts, positional and named constructors and case bindings, full-block `when` arms, optional coverage with closed-union control-flow proof, and Lua visibility. |
 | [Arrays and maps](arrays-maps.md) | Mutable and const-qualified positive-only, holed Arrays with deterministic highest-present length and distinct canonical Lua userdata tags; ordinary Maps, positional integer-Map construction, metamethod-aware integer-Map length, conversions, and performance. |
@@ -107,7 +108,7 @@ implemented and covered by the compiler's test suite. Its boundaries are
 mostly missing features, plus a handful of constructs the compiler rejects
 with a clean error; each links to the chapter that documents it in full.
 
-Interfaces are part of ABI 2. A record
+Interfaces are part of the compiled-module ABI. A record
 or union satisfies an Interface structurally at a statically known conversion
 site, but the conversion constructs a fresh wrapper; it is not subtyping or
 gradual consistency and does not lift through containers or functions. Dynamic

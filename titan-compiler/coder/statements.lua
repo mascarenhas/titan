@@ -812,23 +812,11 @@ function codeassignment(ctx, var, cexp, etype, lvalue)
             else
                 lstats, lexp = codeexp(ctx, var.exp)
             end
-            local index = var._decl.index
-            return render([[
-                $STATS
-                {
-                    Udata *_recobj = $RECORD;
-                    TValue *_fieldslot = &(_recobj->uv[$INDEX].uv);
-                    $SETSLOT
-                    $BARRIER
-                }
-            ]], {
-                STATS = lstats,
-                RECORD = lexp,
-                INDEX = index,
-                SETSLOT = setslot(var._type, "_fieldslot", cexp),
-                BARRIER = types.is_gc(var._type)
-                          and "luaC_barrierback(L, obj2gco(_recobj), _fieldslot);" or ""
-            })
+            local plan = coder._nominal_plan(ctx, var.exp._type)
+            return lstats .. "\n{ Udata *_recobj = " .. lexp .. ";\n"
+                .. coder._nominal_store(ctx, plan,
+                    assert(plan.by_index[var._decl.index]),
+                    var._decl.type, "_recobj", cexp) .. "\n}"
         elseif vtag == "Ast.VarDot" and var._decl._tag == "Type.CField" then
             local spill = spill_update(coder._lvalue_root_decl(var))
             if lvalue and lvalue.cfield_base then
@@ -1243,17 +1231,28 @@ function coder._codeadjustedfixed(ctx, node, stabilize)
         local i = fixed_index[exp]
         if i then
             local mstats, name
-            if types.is_direct_c(exp._type)
+            local sink = node.vars and node.vars[i]
+            local storage = sink and sink._nominal_storage
+            if storage and storage.kind == "fixed_aggregate"
+               and types.resolve_c_typedef(storage.storage_type)._tag
+                   == "Type.CArray" then
+                -- A whole nominal array assignment copies its value now,
+                -- before a later RHS can mutate the source or another target
+                -- can overwrite bytes shared by this source.
+                name = fresh_lowering_name(ctx, "_nominal_array_copy_")
+                mstats = cstats .. "\nunsigned char " .. name .. "[sizeof("
+                    .. cdeclarator.render_declaration(storage.storage_type, "")
+                    .. ")];\nmemcpy(" .. name .. ", " .. cexp
+                    .. ", sizeof(" .. name .. "));"
+            elseif types.is_direct_c(exp._type)
                and not types.is_gc(exp._type) then
-                -- C structs/unions cannot be initialized from scalar zero;
-                -- use the foreign declaration helper, which intentionally
-                -- leaves aggregate temporaries uninitialized until assignment.
+                -- Initialize directly: aggregates can contain const members
+                -- and therefore support initialization but not C assignment.
                 local decl
-                decl, name = newforeigntmp(ctx, exp._type)
+                decl, name = newforeigntmp(ctx, exp._type, cexp)
                 mstats = render([[
                     $CSTATS
                     $DECL
-                    $NAME = $EXP;
                 ]], {
                     CSTATS = cstats,
                     DECL = decl,
@@ -1435,7 +1434,7 @@ function coder._reset_pending_flex(flex)
     if flex.slots then
         local lines = {}
         for _, save in ipairs(flex.slots) do
-            table.insert(lines, "setnilvalue(&" .. save.cvar .. ");")
+            table.insert(lines, coder._option_nil(save.typ, save.cvar))
             if save.slot then
                 table.insert(lines, "setnilvalue(" .. slotat(save.slot) .. ");")
             end
@@ -2452,7 +2451,9 @@ function localname(ctx, name)
 end
 
 function forin_is_nil(typ, cexp)
-    if typ._tag == "Type.Option" or typ._tag == "Type.Value" then
+    if coder._is_native_option(typ) then
+        return "!(" .. coder._option_present(typ, cexp) .. ")"
+    elseif typ._tag == "Type.Option" or typ._tag == "Type.Value" then
         return "ttisnil(&" .. cexp .. ")"
     elseif types.is_c_tvalue(typ) then
         return "ttisnil(&" .. cexp .. ")"
@@ -2859,9 +2860,11 @@ function coder._codecase(ctx, node)
             local part = assert(binding._part)
             assert(arm._variant.parts[part.index],
                 "case binder refers to a missing payload part")
+            local plan = coder._nominal_plan(ctx, node.exp._type, arm._variant)
+            local reads, value = coder._nominal_read(ctx, plan,
+                assert(plan.by_index[part.index]), part.type, scrutinee)
             bindings[#bindings + 1] = coder._codeinitializeddecl(
-                ctx, binding, "", getslot(part.type, nil,
-                    "&" .. scrutinee .. "->uv[" .. part.index .. "].uv"))
+                ctx, binding, reads, value)
         end
         local block = codestat(ctx, arm.block)
         pop_spillscope(ctx)
@@ -2903,7 +2906,7 @@ function coder._codecase(ctx, node)
     return render([[
         {
             $SCRUTINEE_STATS
-            lua_Integer $TAGNAME = ivalue(&$SCRUTINEE->uv[0].uv);
+            lua_Integer $TAGNAME = $TAG;
             switch ($TAGNAME) {
                 $DISPATCH
                 default: goto $ELSE;
@@ -2914,7 +2917,7 @@ function coder._codecase(ctx, node)
     ]], {
         SCRUTINEE_STATS = scrutinee_stats,
         TAGNAME = prefix .. "_tag",
-        SCRUTINEE = scrutinee,
+        TAG = coder._nominal_tag(scrutinee),
         DISPATCH = table.concat(dispatch, "\n"),
         ELSE = elselabel,
         BODIES = table.concat(bodies, "\n"),

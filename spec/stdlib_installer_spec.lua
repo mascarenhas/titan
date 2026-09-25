@@ -141,6 +141,7 @@ local function fake_entries(extra)
         entries[name] = {
             abi = "2",
             types = "types:" .. name,
+            layouts = "layouts:" .. name,
         }
     end
     if extra then
@@ -155,6 +156,7 @@ local function clone_entries(entries)
         clone[name] = {
             abi = entry.abi,
             types = entry.types,
+            layouts = entry.layouts,
         }
     end
     return clone
@@ -831,6 +833,24 @@ os.exit(1)
                 return { archive_callables = callables }
             end)(),
             "type metadata for module 'titan.timer' differs",
+        },
+        {
+            "embedded/DSO native layout mismatch",
+            (function()
+                local dso = fake_entries()
+                dso["titan.fs"].layouts = "different DSO layout"
+                return { dso = dso }
+            end)(),
+            "layout metadata for module 'titan.fs' differs",
+        },
+        {
+            "embedded/archive-callable native layout mismatch",
+            (function()
+                local callables = fake_entries()
+                callables["titan.timer"].layouts = "different archive layout"
+                return { archive_callables = callables }
+            end)(),
+            "layout metadata for module 'titan.timer' differs",
         },
         {
             "missing logical native protocol",

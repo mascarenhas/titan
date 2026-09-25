@@ -172,21 +172,19 @@ still an ordinary nonconstant call.
 
 ## Payload types
 
-A payload occupies the same run-time kind of value slot as a record field.
-Consequently the eligible payload types are exactly the eligible record-field
-types.
+Union parts have the same storage eligibility as record fields. Ordinary
+Titan values are supported, including primitive values, strings, Arrays, Maps,
+records, unions, functions, Options, and `value`. Foreign scalars and object or
+function pointers retain their native values; exact `TValue`/`Udata *` and
+`owned` forms remain traced.
 
-Ordinary Titan values are eligible, including primitive values, strings,
-arrays, maps, records, unions, Titan function values, option types, and
-`value`. C scalars and object pointers that can be boxed as a Titan value are
-also eligible, as are the supported exact `TValue`/`Udata *` and owned-storage
-forms.
-
-Direct C aggregates, C arrays, and direct C functions are not eligible
-payloads. Portable C function pointers are eligible boxed values. An option is eligible only when its base is eligible.
-Arrays, Maps, and Titan function values are already boxed values, so their
-element, key/value, or signature types are not recursively subjected to this
-direct-storage test.
+Eligible complete C structs, C unions, and fixed C arrays are stored by value.
+A case binder for one of these parts receives a borrowed interior pointer
+(an element pointer for an array). Direct C function types remain ineligible;
+a C function pointer is a separate supported type. By-value C aggregates and
+arrays are not Option bases and do not become generally boxable in `value`,
+Arrays, or Maps. See [Native storage in records and unions](nominal-storage.md)
+for the complete rules, including fresh trailing allocations.
 
 An empty variant has no hidden user payload. It is therefore an error to bind
 one in a `case` arm.
@@ -239,7 +237,10 @@ Binding follows ordinary local-assignment value semantics. Scalar payloads
 are copied; identity- or reference-bearing payloads such as records, arrays,
 maps, unions, and functions keep the same underlying object. Mutating a
 mutable record or container through the binding is therefore visible through
-every other alias.
+every other alias. Embedded C aggregate and fixed-array parts instead project
+borrowed pointers into the union. Their contents may be mutated through those
+pointers unless the declared C type is const-qualified; keep the union alive
+for the entire borrowed lifetime.
 
 The binding is scoped to that arm. Each arm and the `else` clause is a regular
 Titan block, not merely a list of simple statements. It can therefore contain
@@ -409,4 +410,6 @@ Unions retain these boundaries:
 
 The compiled-module interface carries union and variant metadata so imported
 modules preserve constructor, method, visibility, and tag information. That
-interface and the corresponding run-time layout are part of ABI 2.
+interface and the corresponding run-time layout are part of the compiled-module
+ABI. Rebuild incompatible providers and consumers together; there is no layout
+adapter.

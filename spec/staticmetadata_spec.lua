@@ -357,6 +357,24 @@ describe("trusted object source metadata", function()
         assert.equal(payload, assert(objectmetadata.encode(entry, native)))
     end)
 
+    it("retains and validates independent nominal layout bytes", function()
+        local layouts = require("titan-compiler.nominallayout")
+        local entry = source_entry()
+        local before = types.serialize(entry.type)
+        local encoded = assert(layouts.encode(entry.type.name, {}))
+        local payload = assert(objectmetadata.encode(entry, { layouts = encoded }))
+        local restored = assert(objectmetadata.decode(payload))
+        assert.equal(encoded, restored.object_metadata.layouts)
+        assert.equal(entry.type.name, restored.layout_inventory.module)
+        assert.same({}, restored.layout_inventory.layouts)
+        assert.equal(before, types.serialize(restored.type))
+
+        payload = assert(objectmetadata.encode(entry, { layouts = "invalid" }))
+        local invalid, err = objectmetadata.decode(payload)
+        assert.is_nil(invalid)
+        assert.matches("invalid object nominal layout metadata", err, 1, true)
+    end)
+
     it("reads source records from ELF and Mach-O without interpreting them as public metadata", function()
         local payload = assert(objectmetadata.encode(source_entry(), {}))
         for _, width in ipairs({ 32, 64 }) do
@@ -604,6 +622,46 @@ describe("static compiled-module metadata", function()
     end)
 
     describe("canonical Lua payload", function()
+        it("keeps physical layouts independent from semantic-only readers", function()
+            local payload = assert(staticmetadata.render("pkg.mod", ABI, TYPES, "layout-bytes"))
+            local semantic = assert(staticmetadata.validate(payload, "analysis", {
+                expected_abi = ABI,
+                validate_types = function(name, serialized)
+                    assert.equal("pkg.mod", name)
+                    assert.equal(TYPES, serialized)
+                    return { semantic = true }
+                end,
+            }))
+            assert.same({ semantic = true }, semantic.decoded_types)
+            assert.is_nil(semantic.decoded_layouts)
+            assert.equal("layout-bytes", semantic.layouts)
+            local physical = assert(staticmetadata.validate(payload, "native", {
+                expected_abi = ABI, require_layouts = true,
+                validate_layouts = function(name, serialized)
+                    assert.equal("pkg.mod", name)
+                    assert.equal("layout-bytes", serialized)
+                    return { physical = true }
+                end,
+            }))
+            assert.same({ physical = true }, physical.decoded_layouts)
+            assert.is_nil(physical.decoded_types)
+            assert(staticmetadata.validate(PAYLOAD, "legacy analysis"))
+            local missing, err = staticmetadata.validate(PAYLOAD, "native", {
+                require_layouts = true,
+            })
+            assert.is_nil(missing)
+            assert.matches("missing nominal layout metadata", err, 1, true)
+            local invalid
+            invalid, err = staticmetadata.validate(payload, "native", {
+                validate_layouts = function() return nil, "bad physical plan" end,
+            })
+            assert.is_nil(invalid)
+            assert.matches("bad physical plan", err, 1, true)
+            invalid, err = staticmetadata.render("pkg.mod", ABI, TYPES, {})
+            assert.is_nil(invalid)
+            assert.matches("layouts must be a string", err, 1, true)
+        end)
+
         it("renders exact stable bytes and a numeric C initializer", function()
             assert.equal([[
 -- Titan archive module metadata v1

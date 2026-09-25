@@ -25,12 +25,11 @@ local record Event
   local upgrade: boolean
 end
 
--- The first eleven fields are a native callback ABI. The llhttp foreign
--- callbacks use these exact zero-based slots for the active Lua state and the
--- eight exact Titan closures, mirroring titan.uv's native-owner protocol.
+-- The Parser owns stable inline llhttp storage and the exact traced closures
+-- used by its synchronous native callbacks.
 local record Parser
-  local native: owned *llhttp_t
-  local settings: owned *llhttp_settings_t
+  local native: foreign llhttp_t
+  local settings: foreign llhttp_settings_t
   local callback_state: foreign *lua_State
   local url_callback: function (Parser, foreign const *char, foreign size_t): (foreign int)
   local status_callback: function (Parser, foreign const *char, foreign size_t): (foreign int)
@@ -68,17 +67,17 @@ local record Parser
   local closed: boolean
 end
 
--- These callbacks mirror the first eleven Parser fields as zero-based raw
--- Udata slots: state at 2 and the exact llhttp closures at 3 through 10. The
--- Parser owner remains traced throughout each synchronous Titan entry call;
+-- The compiler resolves field names to each native or traced storage location.
+-- The Parser owner remains traced throughout each synchronous Titan entry call;
 -- each callback restores the pre-callback Lua stack before returning its exact
 -- C result.
 foreign function llhttp_url_cb(
     parser: *llhttp_t, data: const *char,
     length: size_t): int
   local owner = parser.data as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[3].uv)
-  local L = ffi.lmacro_pvalue(owner.uv[2].uv) as foreign *lua_State
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "Parser", "url_callback"))
+  local L = ffi.titan_record_field(owner, "Parser", "callback_state")
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry =
     ffi.lmacro_pvalue(callback.upvalue[2]) as foreign LlhttpDataCallbackEntry
@@ -92,8 +91,9 @@ foreign function llhttp_status_cb(
     parser: *llhttp_t, data: const *char,
     length: size_t): int
   local owner = parser.data as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[4].uv)
-  local L = ffi.lmacro_pvalue(owner.uv[2].uv) as foreign *lua_State
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "Parser", "status_callback"))
+  local L = ffi.titan_record_field(owner, "Parser", "callback_state")
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry =
     ffi.lmacro_pvalue(callback.upvalue[2]) as foreign LlhttpDataCallbackEntry
@@ -107,8 +107,9 @@ foreign function llhttp_header_field_cb(
     parser: *llhttp_t, data: const *char,
     length: size_t): int
   local owner = parser.data as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[5].uv)
-  local L = ffi.lmacro_pvalue(owner.uv[2].uv) as foreign *lua_State
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "Parser", "header_field_callback"))
+  local L = ffi.titan_record_field(owner, "Parser", "callback_state")
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry =
     ffi.lmacro_pvalue(callback.upvalue[2]) as foreign LlhttpDataCallbackEntry
@@ -122,8 +123,9 @@ foreign function llhttp_header_value_cb(
     parser: *llhttp_t, data: const *char,
     length: size_t): int
   local owner = parser.data as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[6].uv)
-  local L = ffi.lmacro_pvalue(owner.uv[2].uv) as foreign *lua_State
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "Parser", "header_value_callback"))
+  local L = ffi.titan_record_field(owner, "Parser", "callback_state")
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry =
     ffi.lmacro_pvalue(callback.upvalue[2]) as foreign LlhttpDataCallbackEntry
@@ -136,8 +138,9 @@ end
 foreign function llhttp_header_value_complete_cb(
     parser: *llhttp_t): int
   local owner = parser.data as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[7].uv)
-  local L = ffi.lmacro_pvalue(owner.uv[2].uv) as foreign *lua_State
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "Parser", "header_value_complete_callback"))
+  local L = ffi.titan_record_field(owner, "Parser", "callback_state")
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry =
     ffi.lmacro_pvalue(callback.upvalue[2]) as foreign LlhttpCallbackEntry
@@ -150,8 +153,9 @@ end
 foreign function llhttp_headers_complete_cb(
     parser: *llhttp_t): int
   local owner = parser.data as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[8].uv)
-  local L = ffi.lmacro_pvalue(owner.uv[2].uv) as foreign *lua_State
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "Parser", "headers_complete_callback"))
+  local L = ffi.titan_record_field(owner, "Parser", "callback_state")
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry =
     ffi.lmacro_pvalue(callback.upvalue[2]) as foreign LlhttpCallbackEntry
@@ -165,8 +169,9 @@ foreign function llhttp_body_cb(
     parser: *llhttp_t, data: const *char,
     length: size_t): int
   local owner = parser.data as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[9].uv)
-  local L = ffi.lmacro_pvalue(owner.uv[2].uv) as foreign *lua_State
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "Parser", "body_callback"))
+  local L = ffi.titan_record_field(owner, "Parser", "callback_state")
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry =
     ffi.lmacro_pvalue(callback.upvalue[2]) as foreign LlhttpDataCallbackEntry
@@ -179,8 +184,9 @@ end
 foreign function llhttp_message_complete_cb(
     parser: *llhttp_t): int
   local owner = parser.data as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[10].uv)
-  local L = ffi.lmacro_pvalue(owner.uv[2].uv) as foreign *lua_State
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "Parser", "message_complete_callback"))
+  local L = ffi.titan_record_field(owner, "Parser", "callback_state")
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry =
     ffi.lmacro_pvalue(callback.upvalue[2]) as foreign LlhttpCallbackEntry
@@ -312,20 +318,9 @@ end
 local function new_parser(connection: io.ReaderWriterCloser,
                           parser_type: foreign llhttp_type_t,
                           response_to_head: boolean): Parser
-  local native: owned *llhttp_t = foreign llhttp_t.new()
-  local settings: owned *llhttp_settings_t = foreign llhttp_settings_t.new()
-  ffi.llhttp_settings_init(settings)
-  settings.on_url = llhttp_url_cb
-  settings.on_status = llhttp_status_cb
-  settings.on_header_field = llhttp_header_field_cb
-  settings.on_header_value = llhttp_header_value_cb
-  settings.on_header_value_complete = llhttp_header_value_complete_cb
-  settings.on_headers_complete = llhttp_headers_complete_cb
-  settings.on_body = llhttp_body_cb
-  settings.on_message_complete = llhttp_message_complete_cb
   local parser = Parser.new {
-    native = native,
-    settings = settings,
+    native = foreign llhttp_t.new(),
+    settings = foreign llhttp_settings_t.new(),
     callback_state = L,
     url_callback = url_callback,
     status_callback = status_callback,
@@ -362,8 +357,18 @@ local function new_parser(connection: io.ReaderWriterCloser,
     paused = false,
     closed = false,
   }
-  ffi.llhttp_init(native, parser_type, settings)
-  native.data = parser as foreign *void
+  local settings = parser.settings
+  ffi.llhttp_settings_init(settings)
+  settings.on_url = llhttp_url_cb
+  settings.on_status = llhttp_status_cb
+  settings.on_header_field = llhttp_header_field_cb
+  settings.on_header_value = llhttp_header_value_cb
+  settings.on_header_value_complete = llhttp_header_value_complete_cb
+  settings.on_headers_complete = llhttp_headers_complete_cb
+  settings.on_body = llhttp_body_cb
+  settings.on_message_complete = llhttp_message_complete_cb
+  ffi.llhttp_init(parser.native, parser_type, settings)
+  parser.native.data = parser as foreign *void
   return parser
 end
 

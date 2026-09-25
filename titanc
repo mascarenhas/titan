@@ -452,6 +452,7 @@ for _, name in ipairs(linked_names) do
         static_deps = resolver_context.native_static_names,
         options = {
             pretty_print = args.pretty_print,
+            nominal_layouts = resolver_context.nominal_layouts,
             extra_compile_flags = test_modules[name]
                 and test_runner.TEST_COMPILE_FLAGS or nil,
         },

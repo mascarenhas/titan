@@ -16,6 +16,10 @@ local types = require "titan-compiler.types"
 local util = require "titan-compiler.util"
 local titan = require "titan"
 
+local function empty_layouts(name)
+    return (assert(require("titan-compiler.nominallayout").encode(name, {})))
+end
+
 local function write_file(path, contents)
     local previous = lfs.attributes(path, "modification")
     local file = assert(io.open(path, "wb"))
@@ -37,6 +41,72 @@ local function remove_tree(path)
         assert(os.remove(path))
     end
 end
+
+describe("independent nominal layout metadata", function()
+    local previous_loadlib
+    local serialized = types.serialize(types.Module("physical", {}, {}))
+    local layouts
+    local requested
+
+    before_each(function()
+        previous_loadlib = titan._loadlib
+        layouts = assert(require("titan-compiler.nominallayout").encode("physical", {}))
+        requested = {}
+        titan._loadlib = function(_, symbol)
+            requested[#requested + 1] = symbol
+            if symbol == "physical_abi" then
+                return function() return driver.TITAN_ABI_VERSION end
+            elseif symbol == "physical_types" then
+                return function() return serialized end
+            elseif symbol == "physical_layouts" and layouts then
+                return function() return layouts end
+            end
+            return nil, "undefined symbol", "init"
+        end
+    end)
+
+    after_each(function() titan._loadlib = previous_loadlib end)
+
+    it("loads separate physical plans only for native consumers", function()
+        local status, modtype, metadata = driver.probe_compiled_interface("physical", "physical.so")
+        assert.equal("valid", status)
+        assert.equal(serialized, types.serialize(modtype))
+        assert.equal(layouts, metadata.layouts)
+        assert.same({}, metadata.layout_inventory.layouts)
+        assert.same({ "physical_abi", "physical_types", "physical_layouts" }, requested)
+        requested = {}
+        layouts = nil
+        status, modtype, metadata = driver.probe_compiled_interface(
+            "physical", "physical.so", { analysis_only = true })
+        assert.equal("valid", status)
+        assert.equal(serialized, types.serialize(modtype))
+        assert.is_nil(metadata.layouts)
+        assert.is_nil(metadata.layout_inventory)
+        assert.same({ "physical_abi", "physical_types" }, requested)
+    end)
+
+    it("rejects absent and invalid physical plans before native access", function()
+        layouts = nil
+        local status, err = driver.probe_compiled_interface("physical", "physical.so")
+        assert.equal("error", status)
+        assert.matches("missing metadata symbol 'physical_layouts'", err, 1, true)
+        layouts = "malformed"
+        status, err = driver.probe_compiled_interface("physical", "physical.so")
+        assert.equal("error", status)
+        assert.matches("invalid nominal layout metadata", err, 1, true)
+    end)
+
+    it("includes physical plans in archive and callable protocol equality", function()
+        local expected = { physical = { abi = driver.TITAN_ABI_VERSION,
+            types = serialized, layouts = layouts } }
+        assert(driver.compare_archive_entries(expected, expected, "provider"))
+        local actual = { physical = { abi = driver.TITAN_ABI_VERSION,
+            types = serialized, layouts = "other" } }
+        local valid, err = driver.compare_archive_entries(actual, expected, "provider")
+        assert.is_nil(valid)
+        assert.matches("nominal layout metadata", err, 1, true)
+    end)
+end)
 
 describe("compiler installation discovery", function()
     it("exports the language-server compiler API independently of the ABI",
@@ -2175,6 +2245,9 @@ describe("compiler module loader", function()
             provider.entries[name] = {
                 type = modtype,
                 types = types.serialize(modtype),
+                layouts = empty_layouts(name),
+                layout_inventory = assert(require("titan-compiler.nominallayout").decode(
+                    empty_layouts(name), name)),
                 origin = filename .. ":" .. name,
             }
             provider.key_order[#provider.key_order + 1] = name
@@ -2195,6 +2268,8 @@ describe("compiler module loader", function()
                 elseif symbol == prefix .. "_types" then
                     local serialized = types.serialize(modtype)
                     return function() return serialized end
+                elseif symbol == prefix .. "_layouts" then
+                    return function() return empty_layouts(name) end
                 end
             end
             error("unexpected symbol " .. symbol)
@@ -2514,6 +2589,7 @@ describe("compiler module loader", function()
             local native = {
                 has_main = false, imports = {}, native_references = {},
                 external_symbols = {},
+                layouts = empty_layouts(entry.type.name),
                 foreign_header = entry.ast and entry.ast._foreign_header_recipe,
             }
             if payload == nil then payload = assert(objectmetadata.encode(entry, native)) end
@@ -5062,6 +5138,8 @@ end
                 return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "titan_timer_types" then
                 return function() return "Module('titan.timer',{})" end
+            elseif symbol == "titan_timer_layouts" then
+                return function() return empty_layouts("titan.timer") end
             end
             return nil, "unexpected symbol " .. symbol
         end
@@ -5071,7 +5149,7 @@ end
         assert.truthy(ok)
         assert.equal("Type.Module", modtype._tag)
         assert.equal(0, #errors)
-        assert.same({ "titan_timer_abi", "titan_timer_types" }, symbols)
+        assert.same({ "titan_timer_abi", "titan_timer_types", "titan_timer_layouts" }, symbols)
         assert.is_nil(driver.imported["titan.timer"].ast)
 
         -- A later explicit build request replaces a cached binary interface
@@ -5299,6 +5377,8 @@ end
                 return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "fallback_types" then
                 return function() return "Module('fallback',{})" end
+            elseif symbol == "fallback_layouts" then
+                return function() return empty_layouts("fallback") end
             end
             error("unexpected symbol " .. symbol)
         end
@@ -5352,6 +5432,8 @@ end
                 return function()
                     return "Module('fallback_static',{})"
                 end
+            elseif symbol == "fallback_static_layouts" then
+                return function() return empty_layouts("fallback_static") end
             end
             error("unexpected symbol " .. symbol)
         end
@@ -6427,6 +6509,8 @@ typedef double titan_driver_symlink_value;
                 return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "a_b_c_types" then
                 return function() return "Module('a.b.c',{})" end
+            elseif symbol == "a_b_c_layouts" then
+                return function() return empty_layouts("a.b.c") end
             end
             return nil, "undefined symbol: " .. symbol, "init"
         end
@@ -6461,6 +6545,8 @@ typedef double titan_driver_symlink_value;
                 return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "choice_types" then
                 return function() return "Module('choice',{})" end
+            elseif symbol == "choice_layouts" then
+                return function() return empty_layouts("choice") end
             end
             error("unexpected metadata symbol " .. symbol)
         end
@@ -6786,6 +6872,8 @@ typedef double titan_driver_symlink_value;
                 return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "a_b_c_types" then
                 return function() return "Module('a.b.c',{})" end
+            elseif symbol == "a_b_c_layouts" then
+                return function() return empty_layouts("a.b.c") end
             end
             return nil, "undefined symbol: " .. symbol, "init"
         end
@@ -7013,6 +7101,8 @@ typedef double titan_driver_symlink_value;
                 return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "dup_item_types" then
                 return function() return "Module('dup.item',{})" end
+            elseif symbol == "dup_item_layouts" then
+                return function() return empty_layouts("dup.item") end
             end
             error("unexpected metadata symbol " .. symbol)
         end
@@ -7023,7 +7113,7 @@ typedef double titan_driver_symlink_value;
         assert.equal("dup.so", modtype.file)
         assert.equal(binary .. "/dup.so",
             driver.imported["dup.item"].filename)
-        assert.same({ "dup_item_abi", "dup_item_types" }, symbols)
+        assert.same({ "dup_item_abi", "dup_item_types", "dup_item_layouts" }, symbols)
     end)
 
     it("caches two logical interfaces from one physical container separately",
@@ -7034,10 +7124,12 @@ typedef double titan_driver_symlink_value;
             bundle_left_types = function()
                 return "Module('bundle.left',{})"
             end,
+            bundle_left_layouts = function() return empty_layouts("bundle.left") end,
             bundle_right_abi = function() return driver.TITAN_ABI_VERSION end,
             bundle_right_types = function()
                 return "Module('bundle.right',{})"
             end,
+            bundle_right_layouts = function() return empty_layouts("bundle.right") end,
         }
         local symbols = {}
         titan._loadlib = function(filename, symbol)
@@ -7063,8 +7155,8 @@ typedef double titan_driver_symlink_value;
         assert.equal(binary .. "/bundle.so",
             driver.imported["bundle.right"].filename)
         assert.same({
-            "bundle_left_abi", "bundle_left_types",
-            "bundle_right_abi", "bundle_right_types",
+            "bundle_left_abi", "bundle_left_types", "bundle_left_layouts",
+            "bundle_right_abi", "bundle_right_types", "bundle_right_layouts",
         }, symbols)
         local call_count = #symbols
         local cached_ok, cached_left, cached_errors = loader("bundle.left")
@@ -7396,6 +7488,8 @@ typedef double titan_driver_symlink_value;
                 return function()
                     return "Module('titan.sample.child',{})"
                 end
+            elseif symbol == "titan_sample_child_layouts" then
+                return function() return empty_layouts("titan.sample.child") end
             end
             return nil, "unexpected symbol " .. symbol
         end

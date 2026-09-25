@@ -56,8 +56,10 @@ Two facts shape everything downstream of the checker:
   a Lua value, and generated GC allocations obey Lua's (now generational)
   collector invariants: fresh objects are anchored in stack slots and writes
   receive the required barriers. Direct C FFI locals are the deliberate
-  exception: a target-directed `.new`/`.new_array` plan may select ordinary C
-  automatic storage with block lifetime instead of a Lua object.
+  exception: exact native scalars and eligible fixed aggregates can live in
+  nominal payloads, with checked boxing only at a real dynamic boundary. A
+  target-directed `.new`/`.new_array` plan can also select automatic storage or
+  storage inside the final nominal owner.
 
 ## Reading guide
 
@@ -77,6 +79,7 @@ Two facts shape everything downstream of the checker:
 | [Union implementation](unions.md) | Named payload-part AST and constructor synthesis, declaration staging, variant metadata, payload eligibility, positional and named case projections, optional coverage and closed-union control-flow proof, userdata slots, Lua exposure, and the compiled union schema. |
 | [Code generator: overview](codegen-overview.md) | What a generated translation unit looks like; native, strict Titan-generic, and coercive genuine-Lua function entries; the native calling convention (including `_fn`); exact source/wrapper, branded-mismatch, and non-Titan `codevaluecall` branches; closure branding, captures and bound-method trampolines; the module `_init`/`luaopen_*`/`*_types` protocol; static vs dynamic linking of imports. |
 | [Values and the GC](values-and-gc.md) | The C representation of every Titan type; records as a single tagged Udata; the module Udata `_mod`; stack-slot anchoring; `luaC_checkGC` placement; write barriers. Canonical source function CClosures use the fixed `_mod`/tag/native/brand header, captures, and strict trailer; realized adjustment wrappers replace tag/native, retain captures, and add traced immediate-source plus target-relay links under the same GC discipline. |
+| [Native nominal storage](nominal-storage.md) | Separate traced UV/native payload plans, public prefix reconstruction, exact native options, fixed aggregate projections, direct fresh tails, callback access, and separate native layout metadata. |
 | [Dense Arrays](dense-arrays.md) | The dense backing/length protocol plus ABI-2 mutable/const proxy tags, backing key 0, mutable writer versus const nil user value, shallow copy/freeze, stock GC/barriers, strict typed reads, Lua behavior, internal/boxed representations, and generated operations. |
 | [Code generator: constructs](codegen-constructs.md) | Construct-by-construct translation with generated-C excerpts, including cast/type-test predicates, Array operations, Map raw/partial/VM-finish metamethod paths and equality dispatch, and the inlined Lua-semantics arithmetic. |
 | [Immediately called anonymous functions](immediate-functions.md) | Direct-literal eligibility, inline scoped blocks and outer result holders, logical function boundaries within one C frame, finite/open return demand, conversion and cleanup ordering, captures, rooting, and protected-control-flow analysis. |

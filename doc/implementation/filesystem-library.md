@@ -31,7 +31,7 @@ independently of the suspended continuation stack.
 
 The source-defined `fs_realpath_cb` follows the standard foreign callback
 sequence: it recovers the owner through `uv_req_get_data`, reads the callback
-closure from the owner's second user value, obtains the main Lua state from the
+closure through `ffi.titan_record_field`, obtains the main Lua state from the
 request loop, invokes the closure's exact native entry, and restores the Lua
 stack top. The ordinary Titan handler copies `uv_fs_get_ptr` to a Titan string
 before `uv_fs_req_cleanup`, removes the Map root, and records the result. While
@@ -203,7 +203,7 @@ The explicit-suspension protocol also exposes `ResumeToken`, requires that token
 in `titan.async.suspend(token, ...)` and `Task:resume(token)`, and retains the optional
 `SuspendCancelAction` as the second suspend parameter; the source-private
 `titan.uv` entry has the same exact parameters. Both serialized public
-interfaces and native signatures therefore require ABI 2. A mismatched
+interfaces and native signatures therefore require the current compiled-module ABI. A mismatched
 provider is rejected before either boundary is used rather than migrated or
 adapted.
 

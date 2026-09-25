@@ -7,6 +7,10 @@ local _ENV = core
 -- publication and traced program homes retain ownership; any fresh allocation
 -- performed while evaluating it establishes its own root immediately.
 function coder._freeze_code(ctx, typ, stats, exp)
+    if types.is_c_aggregate(typ) then
+        local decl, name = newforeigntmp(ctx, typ, exp)
+        return stats .. "\n" .. decl, name
+    end
     local decl, name = newtmp(ctx, typ, false)
     return render([[
         $STATS
@@ -1300,7 +1304,9 @@ end
 function coder._interface_adapter_nil_fill(typ, destination)
     typ = types.normalize(typ)
     assert(typ, "Interface adapter nil-fill target is unnormalizable")
-    if typ._tag == "Type.Value"
+    if coder._is_native_option(typ) then
+        return coder._option_nil(typ, destination)
+    elseif typ._tag == "Type.Value"
        or typ._tag == "Type.Option"
        or types.is_c_tvalue(typ) then
         return "setnilvalue(&" .. destination .. ");"
@@ -2102,11 +2108,10 @@ function coder._code_interface_field_snapshots(
             mapping.adjustment, mapping.source, mapping.target,
             "Interface field snapshot adjustment")
 
-        local source = getslot(mapping.source, nil, render(
-            "&(($CONCRETE)->uv[$INDEX].uv)", {
-                CONCRETE = concrete_value,
-                INDEX = c_integer_literal(mapping.source_index),
-            }))
+        local plan = coder._nominal_plan(ctx, pair.concrete)
+        local read_stats, source = coder._nominal_read(ctx, plan,
+            assert(plan.by_index[concrete.index]), concrete.type, concrete_value)
+        stats[#stats + 1] = read_stats
         local result_root
         if coder._adjustment_allocates_gc(mapping.adjustment) then
             result_root = newslot(ctx)

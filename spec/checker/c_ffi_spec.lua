@@ -2231,7 +2231,7 @@ describe("C FFI type checking", function()
         end)
     end)
 
-    it("uses one TValue-slot representation rule for records and unions",
+    it("accepts fixed C storage in private records and unions without general boxing",
     function()
         with_header([[
             typedef struct ffi_struct { int value; } ffi_struct;
@@ -2262,18 +2262,7 @@ describe("C FFI type checking", function()
                     callback(foreign ffi_callback)
                 end
             ]])
-            assert.same(6, #errs)
-            local all = table.concat(errs, "\n")
-            for _, member in ipairs({
-                "structure", "aggregate", "values",
-            }) do
-                assert.match(
-                    "record field '" .. member ..
-                        "'.-has no TValue representation", all)
-                assert.match(
-                    "union variant '" .. member ..
-                        "'.-has no TValue representation", all)
-            end
+            assert.same(0, #errs)
         end)
     end)
 

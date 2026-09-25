@@ -10,8 +10,8 @@ foreign type ParentStdioStat = stat
 -- reader. Every write independently owns one uv_write_t; libuv supplies the
 -- native stream ordering.
 local union StdioNative
-  pipe(owned *uv_pipe_t)
-  tty(owned *uv_tty_t)
+  pipe(foreign uv_pipe_t)
+  tty(foreign uv_tty_t)
 end
 
 local record uv_stdio_t
@@ -33,7 +33,7 @@ local record ProcessExitResult
 end
 
 local record uv_process_t
-  local handle: owned *uv_process_t
+  local handle: foreign uv_process_t
   local exit_callback: function (uv_process_t, integer, integer): ()
   local runtime: Runtime
   local waiter: Task?
@@ -46,7 +46,8 @@ foreign function uv_process_exit_cb(process: *uv_process_t,
                                     term_signal: int)
   local handle = process as foreign *uv_handle_t
   local owner = ffi.uv_handle_get_data(handle) as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "uv_process_t", "exit_callback"))
   local loop = ffi.uv_handle_get_loop(handle)
   local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
@@ -67,8 +68,8 @@ end
 
 local record uv_spawn_config
   local runtime: Runtime
-  local options: owned *uv_process_options_t
-  local stdio: owned uv_stdio_container_t[]
+  local options: foreign uv_process_options_t
+  local const stdio: foreign uv_stdio_container_t[]
   local slots: {SpawnSlot}
   local consumed: boolean
 end
@@ -271,8 +272,8 @@ end
 
 local function start_stream_read(stdio: uv_stdio_t): integer
   local status = ffi.uv_read_start(
-      stream_native(stdio), uv_alloc_cb,
-      uv_read_cb)
+      stream_native(stdio), uv_stdio_alloc_cb,
+      uv_stdio_read_cb)
   if status == ffi.UV_EALREADY then return 0 end
   return status
 end
@@ -401,8 +402,8 @@ local function ProcessSpawnFailureCall:dispatch(task: Task): Immediate?
 end
 
 local function new_pipe_stdio(runtime: Runtime): (integer, uv_stdio_t?)
-  local native: owned *uv_pipe_t = foreign uv_pipe_t.new()
-  local stdio = new_stdio(StdioNative.pipe(native), runtime)
+  local stdio = new_stdio(StdioNative.pipe(foreign uv_pipe_t.new()), runtime)
+  local native = stream_native(stdio) as foreign *uv_pipe_t
   stdio.root_index = root_handle(runtime, stdio)
   local status = ffi.uv_pipe_init(runtime.loop, native, 0)
   if status < 0 then
@@ -594,8 +595,8 @@ local function initialize_parent_stdio(runtime: Runtime,
   local keep = false
   defer if not keep then discard_unpublished_stdio(stdio) end
   if guessed == ffi.UV_TTY then
-    local native: owned *uv_tty_t = foreign uv_tty_t.new()
-    local owner = new_stdio(StdioNative.tty(native), runtime)
+    local owner = new_stdio(StdioNative.tty(foreign uv_tty_t.new()), runtime)
+    local native = stream_native(owner) as foreign *uv_tty_t
     owner.root_index = root_handle(runtime, owner)
     local status = ffi.uv_tty_init(
         runtime.loop, native, duplicate, 0)
@@ -760,20 +761,17 @@ end
 local function os_spawn_config_new(): uv_spawn_config
   local task = running_task()
   accepting_work(task.runtime, "configure a Process")
-  local options: owned *uv_process_options_t =
-      foreign uv_process_options_t.new()
-  local stdio: owned uv_stdio_container_t[] =
-      foreign uv_stdio_container_t.new_array(3)
-  options.exit_cb = uv_process_exit_cb
-  options.stdio_count = 3 as foreign int
-  options.stdio = stdio
-  return uv_spawn_config.new {
+  local config = uv_spawn_config.new {
     runtime = task.runtime,
-    options = options,
-    stdio = stdio,
+    options = foreign uv_process_options_t.new(),
+    stdio = foreign uv_stdio_container_t.new_array(3),
     slots = {},
     consumed = false,
   }
+  config.options.exit_cb = uv_process_exit_cb
+  config.options.stdio_count = 3 as foreign int
+  config.options.stdio = config.stdio
+  return config
 end
 
 local function configure_capture(config: uv_spawn_config,
@@ -836,9 +834,8 @@ local function os_spawn_config_error(config: uv_spawn_config, status: integer)
 end
 
 local function new_process(runtime: Runtime): uv_process_t
-  local native: owned *uv_process_t = foreign uv_process_t.new()
   return uv_process_t.new {
-    handle = native,
+    handle = foreign uv_process_t.new(),
     exit_callback = process_exit_callback,
     runtime = runtime,
     waiter = nil,

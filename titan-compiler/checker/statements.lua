@@ -1150,7 +1150,9 @@ checkstat_visitor = util.make_visitor({
             checkvar(var, st, errors, nil, "write")
             check_const_assignment(var, st, errors)
             check_c_assignment_storage(var, errors)
-            if var._type and types.is_c_array(var._type) then
+            if var._type and types.is_c_array(var._type)
+               and not (var._nominal_storage
+                        and var._nominal_storage.kind == "fixed_aggregate") then
                 checker.typeerror(errors, var.loc,
                     "cannot assign to a whole C array; assign its elements "
                     .. "or retain a pointer instead")
@@ -1375,7 +1377,10 @@ checkstat_visitor = util.make_visitor({
                             union.name, variant.name, #variant.parts)
                     end
                 else
-                    binding._type = part.type
+                    local storage = checker._nominal_storage_plan(part.type)
+                    binding._nominal_storage = storage
+                    binding._nominal_projection_type = storage.projection_type
+                    binding._type = storage.projection_type
                     binding._part = part
                     binding._part_index = part.index
                 end

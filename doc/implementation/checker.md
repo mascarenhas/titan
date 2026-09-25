@@ -130,10 +130,13 @@ and detects cycles with a `resolving` state.
    nominal owners are available while their field types and method signatures
    are checked.
    Each synthesized constructor is then attached to its complete nominal
-   namespace. Record fields and union payloads share
-   `types.has_tvalue_representation`: Titan function values are legal, while
-   direct C aggregates, C arrays, and direct C functions are rejected. Eligible
-   C function pointers use their supported boxed pointer representation.
+   namespace. Record fields and union parts use the nominal-storage eligibility
+   check, distinct from `types.has_tvalue_representation`. Complete fixed,
+   non-GC foreign aggregates and arrays can be embedded; borrowed array views
+   normalize to pointers. Direct C functions remain ineligible, while function
+   pointers use native scalar storage. Constructor and projection annotations
+   preserve the selected storage operation; see
+   [Native nominal storage](nominal-storage.md).
 5. Ordinary function and module-initializer signatures are collected, followed
    by explicit methods and nominal functions. Because names, imports, aliases,
    nominal owners, and synthesized constructors are already available, these
@@ -339,8 +342,9 @@ source carrier.
 Option types retain their explicit lowering shapes, but the relation result
 names what happens: `option_map` propagates nil while converting a present
 base, `option_force` checks nil before its inner plan, `option_wrap` converts a
-present source then boxes it, `option_nil` supplies nil, and
-`to_c_tvalue` copies a whole slot without forcing an option first. The checker
+present source into the target's Option carrier, `option_nil` supplies an absent
+carrier, and `to_c_tvalue` boxes without forcing an option first. C numeric
+Options use native presence/value carriers; other Options use `TValue`. The checker
 emits one outer `Ast.ExpCast` carrying that complete decision. Code generation
 consumes its recorded inner identity/conversion plan when lowering the
 present-value branch; it does not ask the relation again or infer Option
@@ -670,8 +674,8 @@ Equality keeps options rather than forcing them. In `==`/`~=`, if either side
 is an Option, each side is first lifted to the option of its own type (`s? ==
 s` lifts the right side to `string?`). The exception is Nil opposite an
 Option: the Nil expression is coerced directly to that existing Option with
-the ordinary `option_nil` direct-coercion plan. This preserves nil as a boxed
-option value instead of constructing an incomparable `nil?`. The checker then
+the ordinary `option_nil` direct-coercion plan. This preserves an absent Option
+in its selected carrier instead of constructing an incomparable `nil?`. The checker then
 calls the symmetric `types.comparable` classifier on the adjusted pair. A
 successful ComparisonPlan may carry a gradual injection when exactly one
 comparable operand is Value; only

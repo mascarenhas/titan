@@ -102,7 +102,7 @@ function coder._assert_erased_boundary(ast)
     walk(types.registry, "active type registry", false)
 end
 
-function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
+function coder.generate(modname, ast, static_deps, abi, emit_line_directives, options)
     -- Omission preserves the historical default. Reset this before any
     -- validation that may fail so a previous invocation's policy never leaks
     -- into the next generation.
@@ -145,6 +145,9 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         lambda_count = 0,             -- counter for unique lambda native/Lua names
         names = {},                   -- { native C symbol, qualified Titan name } pairs for the trace name table
         source_foreign_headers = {},
+        nominal_plans = {},
+        nominal_plan_list = {},
+        imported_nominal_layouts = options and options.nominal_layouts or {},
         upvalue = 0
     }
 
@@ -219,8 +222,12 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
             elseif tag == "Ast.TopLevelVar" then
                 codevardec(initctx, initvars, switch_get, switch_set, gvar_map, node)
             elseif tag == "Ast.TopLevelRecord" then
+                coder._nominal_plan(initctx, node._type)
                 coderecorddec(initctx, code, initrecs, node)
             elseif tag == "Ast.TopLevelUnion" then
+                for _, variant in ipairs(node._type.variants) do
+                    coder._nominal_plan(initctx, node._type, variant)
+                end
                 coder._codeuniondec(initctx, code, initrecs, node)
             elseif tag == "Ast.TopLevelInterface" then
                 coder._codeinterfacedec(
@@ -692,8 +699,21 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
     local metadata_type = rawget(ast, "_declared_type")
     if metadata_type == nil then metadata_type = ast._type end
     local serialized_type = types.serialize(metadata_type)
+    local own_layouts = {}
+    for _, node in ipairs(ast) do
+        if not node._ignore and node._tag == "Ast.TopLevelRecord" then
+            own_layouts[node._type.name] = coder._nominal_plan(initctx, node._type)
+        elseif not node._ignore and node._tag == "Ast.TopLevelUnion" then
+            for _, variant in ipairs(node._type.variants) do
+                own_layouts[node._type.name .. "." .. variant.name] =
+                    coder._nominal_plan(initctx, node._type, variant)
+            end
+        end
+    end
+    local encoded_layouts = assert(require("titan-compiler.nominallayout")
+        .encode(modname, own_layouts))
     local metadata, metadata_err =
-        staticmetadata.render(modname, abi, serialized_type)
+        staticmetadata.render(modname, abi, serialized_type, encoded_layouts)
     assert(metadata, metadata_err)
     local initializer, initializer_err =
         staticmetadata.c_initializer(metadata)
@@ -706,6 +726,16 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
     table.insert(code, render(modtypes, {
         TYPESNAME = tlcontext.prefix .. "types",
         TYPES = c_string_literal(serialized_type),
+    }))
+    table.insert(code, render([[
+        int $TYPESNAME(lua_State *L) {
+            static const char layouts[] = $TYPES;
+            lua_pushlstring(L, layouts, sizeof(layouts) - 1);
+            return 1;
+        }
+    ]], {
+        TYPESNAME = tlcontext.prefix .. "layouts",
+        TYPES = c_string_literal(encoded_layouts),
     }))
 
     table.insert(code, render(modabi, {
@@ -896,9 +926,11 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         FIXEDPREFIX =
             require("titan-compiler.cpreamble").fixed_prefix,
         AFTERFOREIGNIMPORTS =
-            require("titan-compiler.cpreamble").after_foreign_imports,
+            require("titan-compiler.cpreamble").after_foreign_imports
+            .. "\n" .. coder._native_option_declarations(),
         INCLUDES = table.concat(includes, "\n"),
-        SIGS = table.concat(sigs, "\n"),
+        SIGS = coder._nominal_declarations(tlcontext) .. "\n"
+            .. table.concat(sigs, "\n"),
     }
     local foreignimports_begin, foreignimports_end =
         preamble:find("$FOREIGNIMPORTS", 1, true)
@@ -957,7 +989,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         source, removed = source:gsub(
             "([ \t]*#line[^\n]*\n)[ \t]*\n", "%1")
     until removed == 0
-    return source, direct_native_modules, foreign_header, native_bindings
+    return source, direct_native_modules, foreign_header, native_bindings, encoded_layouts
 end
 
 return core.coder

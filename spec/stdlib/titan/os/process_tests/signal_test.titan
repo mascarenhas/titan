@@ -1,3 +1,5 @@
+local gc = import "gc"
+
 local function send_self_signal(name: string)
   local spelling = ""
   if name == "usr1" then
@@ -37,6 +39,7 @@ function test_signal_watcher_validation_delivery_cancellation_and_replacement(
     end)
     task_support.cleanup_task(waiter, "signal waiter cleanup")
     process_support.wait_until_waiting(waiter, "signal Task")
+    gc.collect()
     send_self_signal("usr1")
     process_support.wait_until_finished(waiter)
     test.assert(waiter:status():as_string() == "succeeded" and
@@ -51,8 +54,10 @@ function test_signal_watcher_validation_delivery_cancellation_and_replacement(
     end)
     task_support.cleanup_task(cancelled, "cancelled signal waiter cleanup")
     process_support.wait_until_waiting(cancelled, "cancelled signal Task")
+    gc.collect()
     cancelled:cancel(
       async.CancellationReason.simple("discard signal wait"))
+    gc.collect()
     test.assert(cancelled:status():as_string() == "waiting" and
                 not cancelled_resumed,
                 "signal cancellation resumed before its close callback")

@@ -53,6 +53,18 @@ function coder._foreign_include_line(include)
         "foreign include has no normalized spelling")
 end
 
+-- Numeric expressions copy C values, so their mutable native carriers must
+-- not inherit a typedef's top-level const/volatile qualification. Keep the
+-- checked declaration identity and every pointer/aggregate qualifier intact.
+function coder._c_value_type(typ)
+    local resolved = types.resolve_c_typedef(typ)
+    if (resolved._tag == "Type.CInteger" or resolved._tag == "Type.CFloat")
+       and #types.c_type_qualifiers(typ) > 0 then
+        return resolved
+    end
+    return typ
+end
+
 function coder._render_c_type_name(typ)
     return cdeclarator.render_type_name(typ)
 end
@@ -115,6 +127,8 @@ function getslot(typ --[[:table]], dst --[[:string?]], src --[[:string]])
     elseif typ._tag == "Type.Value" then tmpl = "$DST *($SRC)"
     elseif types.is_c_tvalue(typ) then tmpl = "$DST *($SRC)"
     elseif typ._tag == "Type.Nominal" then tmpl = "$DST uvalue($SRC)"
+    elseif coder._is_native_option(typ) then
+        return dst .. " " .. coder._native_option_from_slot(typ, src)
     elseif typ._tag == "Type.Option" then tmpl = "$DST *($SRC)"
     elseif typ._tag == "Type.Function" then tmpl = "$DST *($SRC)"
     elseif typ._tag == "Type.CInteger" or
@@ -148,6 +162,8 @@ function toboolean(typ --[[:table]], src --[[:string]])
     elseif typ._tag == "Type.Boolean" then return src
     elseif typ._tag == "Type.Value" then
         tmpl = "!l_isfalse(&$SRC)"
+    elseif coder._is_native_option(typ) then
+        return coder._option_present(typ, src)
     elseif typ._tag == "Type.Option" and typ.base._tag == "Type.Boolean" then
         tmpl = "!l_isfalse(&$SRC)"
     elseif typ._tag == "Type.Option" and typ.base._tag ~= "Type.Boolean" then
@@ -334,6 +350,7 @@ function coder.external_symbols(modname, ast)
     local symbols = {
         { symbol = mangled .. "_abi", owner = "module ABI entry" },
         { symbol = mangled .. "_types", owner = "module type entry" },
+        { symbol = mangled .. "_layouts", owner = "module layout entry" },
         { symbol = mangled .. "_init", owner = "module initializer entry" },
         { symbol = "luaopen_" .. mangled, owner = "module Lua entry" },
         { symbol = coder._source_module_identity_name(modname),
@@ -394,6 +411,7 @@ function coder.interface_external_symbols(modname, modtype)
     local symbols = {
         { symbol = mangled .. "_abi", owner = "module ABI entry" },
         { symbol = mangled .. "_types", owner = "module type entry" },
+        { symbol = mangled .. "_layouts", owner = "module layout entry" },
         { symbol = mangled .. "_init", owner = "module initializer entry" },
         { symbol = "luaopen_" .. mangled, owner = "module Lua entry" },
         { symbol = coder._source_module_identity_name(modname),

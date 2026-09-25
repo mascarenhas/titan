@@ -220,28 +220,28 @@ pointer/function/owner graph containing one are likewise nonexportable. This
 keeps compiled metadata independent of another module's C declarations and
 macro environment.
 
-A module variable, record field, or union payload may mention only a C type
-with a real `TValue` representation: a boxable scalar, object or function
-pointer, exact `TValue`/`Udata *`, or owned form. Direct C aggregates, arrays,
-and functions remain ineligible as stored payloads even when their type is
-otherwise portable. Source-written owned types may be used in aliases, variables,
-eligible record fields/union payloads, callable parameters and results,
-options, Arrays, and Maps; public use is accepted only when the complete owner
-graph is built from the portable primitives above.
+A module variable still requires a C type with a `TValue` representation:
+a boxable scalar, object or function pointer, exact `TValue`/`Udata *`, or owned
+form. Records and unions additionally support complete, non-GC-bearing C
+aggregates and fixed arrays as native embedded storage. Direct C functions
+remain ineligible as stored values. See [Native storage in records and
+unions](nominal-storage.md) for initialization and borrowed projection rules.
+Source-written owned types may be used in aliases, variables, eligible record
+fields/union parts, callable parameters and results, Options, Arrays, and Maps;
+public use is accepted only when the complete owner graph is built from the
+portable primitives above.
 
-An option stores its present value in a Lua `TValue`. A direct C type may
-therefore be used as an option base only when it has that boxed
-representation: C integers, C floats, object and function pointers, exact
-`TValue`, and owned C storage are supported. By-value C aggregates and arrays
-and direct C functions are not valid option bases.
-This is a storage-shape rule, not a promise that every value of a boxable C
-scalar fits Titan's configured carrier. Storing a particular C integer or
-floating value in an Option, Array, Map, record field, union payload, or
-`value` still performs the checked `lua_Integer`/`lua_Number` conversion
-described below.
-This restriction does not make an ordinary Titan container foreign: an Array,
-Map, or local callable containing owned C values remains a boxed Titan value
-and may itself cross through `value`.
+C integers, C floats, object and function pointers, exact `TValue`, and owned C
+storage are supported Option bases. By-value C aggregates and arrays and direct
+C functions are not. Foreign numeric Options retain their exact present C value
+through native locals, calls, and nominal storage. A real boxed boundary such
+as `value`, an Array or Map slot, Lua, or reflection performs the checked
+`lua_Integer`/`lua_Number` conversion described below. Plain foreign numeric
+record fields and union parts follow the same native-exact rule.
+
+An ordinary Titan container containing owned C values remains a boxed Titan
+value and may itself cross through `value`; its element types do not make the
+container a foreign object.
 
 Pointer types can also be written directly from a C type:
 
@@ -843,11 +843,12 @@ typedefs, Titan types, and nested owned storage. Fixed extents such as
 count when allocating. A flexible-array-member struct is a scalar owner and is
 allocated with its dedicated `foreign T.new(fam_count)` form.
 
-Outside a direct function-local declaration sink, `foreign T.new()` produces
-one zeroed `owned *T` and `foreign T.new_array(count)` produces a zeroed
-`owned T[]`.
-At a direct local sink the target/literal may instead select automatic or
-borrowed storage; see
+Ordinarily, `foreign T.new()` produces one zeroed `owned *T` and
+`foreign T.new_array(count)` produces a zeroed `owned T[]`. A direct local sink
+can instead select automatic or borrowed storage. A direct generated record or
+variant constructor can select final embedded storage or a fresh trailing
+buffer as described in [Native storage](nominal-storage.md). For the local
+allocation rules, see
 [Target-directed C allocation](c-ffi-expressions.md#target-directed-c-allocation).
 These are syntax-bound foreign allocation expressions, not first-class callable
 values. Owned results are full userdata whose lifetime belongs to Titan's Lua

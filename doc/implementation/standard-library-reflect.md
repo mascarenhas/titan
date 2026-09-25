@@ -118,8 +118,9 @@ The generated body knows the field's type and physical slot:
 
 - A read uses the compiler's normal boxing operation, including fields whose
   storage omits a complete boxed tag.
-- A write to a mutable record field uses its existing checker-owned dynamic
-  boundary plan, then applies the Lua GC write barrier to the receiver.
+- A write to a mutable record field completes its checker-owned dynamic
+  boundary conversion before mutation, then applies the Lua GC write barrier
+  only if the selected slot is traced.
 - A const record field or Interface field rejects the write mode.
 
 Ordinary Lua member access and reflection use the same generated field
@@ -156,19 +157,19 @@ retain both their traced value and raw state address.
 
 Each generated union publishes a typed reader at `TITAN_MT_PAYLOAD`, cached
 in a private const field of `UnionType`. Its void-returning protocol accepts
-the Lua state, union userdata, a 1-based `lua_Integer` part index, and a
-`TValue` output pointer. The reader switches on the actual runtime tag and
-part index and uses normal compiler boxing; an invalid index yields nil.
-It reads the backing `Udata.uv` array directly, without Lua uservalue API calls.
+the Lua state, union userdata, a `lua_Integer` selector, and a `TValue` output
+pointer. Selector 0 returns the native tag; -1 returns the active variant's
+logical arity; positive selectors read 1-based parts. The generated tag/part
+switch boxes from the physical plan, including native numeric checks and
+borrowed aggregate/array addresses. An invalid selector yields nil.
 
 The switch covers private as well as public variants because either can occur
-in a runtime value. The separately serialized public descriptor continues to
-omit private variant names and schemas. `UnionValue` retains the original
-value, its borrowed userdata address, the runtime tag, and `n_parts`, obtained
-from the userdata's uservalue count minus the tag slot. `get(i)` checks bounds
-before calling the typed reader. A nil part still occupies its uservalue slot.
-Normal compiler boxing is necessary for representations such as Arrays;
-copying raw uservalue bits as a generic `TValue` is insufficient.
+in a runtime value. The semantic descriptor still omits private names and
+schemas. `UnionValue` retains the original value, borrowed userdata address,
+reported tag, and logical `n_parts`; `get(i)` checks its ordinal bounds before
+calling the reader. A nil part still counts, independently of whether it has a
+traced slot. Reflection never derives tag or arity from UV count. See
+[Native nominal storage](nominal-storage.md).
 
 ### Interface receivers
 

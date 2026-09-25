@@ -1,0 +1,47 @@
+foreign import "limits.h"
+
+record MappingNativeNumbers
+  count: foreign unsigned long long
+  optional: (foreign unsigned long long)?
+end
+
+record MappingPrivateNativeNumber
+  local hidden: foreign unsigned long long
+  visible: integer
+end
+
+local function expect_native_json_boxing_failure(candidate: value)
+  local failed = false
+  do
+    json.encode(candidate)
+  catch
+    failed = true
+    test.assert(not (error is json.Error), "JSON relabeled a native boxing failure")
+    test.assert(error is string)
+    test.assert(string.find(error as string,
+        "C scalar is outside its Titan carrier range", 1, true) ~= nil)
+  end
+  test.assert(failed, "JSON should check a native number when boxing it")
+end
+
+function test_mapping_native_numbers_fail_only_at_the_boxed_boundary(_context: test.Context)
+  local candidate = MappingNativeNumbers.new(ffi.ULLONG_MAX, ffi.ULLONG_MAX)
+  expect_native_json_boxing_failure(candidate)
+  test.assert(candidate.count == ffi.ULLONG_MAX)
+  test.assert((candidate.optional as foreign unsigned long long) == ffi.ULLONG_MAX)
+
+  candidate.count = 7
+  expect_native_json_boxing_failure(candidate)
+  test.assert(candidate.count == 7)
+  test.assert((candidate.optional as foreign unsigned long long) == ffi.ULLONG_MAX)
+  candidate.optional = nil
+  test.assert(json.encode(candidate) == '{"count":7,"optional":null}')
+  candidate.optional = 11
+  test.assert(json.encode(candidate) == '{"count":7,"optional":11}')
+end
+
+function test_mapping_private_native_numbers_do_not_cross_the_boxed_boundary(_context: test.Context)
+  local candidate = MappingPrivateNativeNumber.new(ffi.ULLONG_MAX, 42)
+  test.assert(json.encode(candidate) == '{"visible":42}')
+  test.assert(candidate.hidden == ffi.ULLONG_MAX)
+end

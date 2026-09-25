@@ -1,7 +1,7 @@
 local type Bytes = owned char[]
 
 local record StreamWriteOwner
-  local handle: owned *uv_write_t
+  local const handle: foreign uv_write_t
   local callback: function (StreamWriteOwner, integer): ()
 end
 
@@ -11,7 +11,7 @@ local record Immediate
 end
 
 local record Runtime
-  local loop: owned *uv_loop_t
+  local const loop: foreign uv_loop_t
   local task_roots: {Task}
   local next_task_root: integer
   local handle_roots: {value}
@@ -30,8 +30,7 @@ local record HandleCloseCall
 end
 
 -- The callback closure retains the native owner and optional suspended Task.
--- The record itself contains only the root slot and the callback in reviewed
--- zero-based Udata slot 1 used by uv_close_cb.
+-- uv_close_cb reads the callback through the compiled record layout.
 local record CloseOwner
   local root_index: integer
   local callback: function (CloseOwner): ()
@@ -46,7 +45,8 @@ foreign function uv_write_cb(req: *uv_write_t,
                              status: int)
   local owner = ffi.uv_req_get_data(
       req as foreign *uv_req_t) as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "StreamWriteOwner", "callback"))
   local handle = req.handle as foreign *uv_handle_t
   local loop = ffi.uv_handle_get_loop(handle)
   local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
@@ -58,11 +58,12 @@ foreign function uv_write_cb(req: *uv_write_t,
   ffi.lua_settop(L, top)
 end
 
-foreign function uv_alloc_cb(handle: *uv_handle_t,
-                             suggested_size: size_t,
-                             buf: *uv_buf_t)
+foreign function uv_tcp_alloc_cb(handle: *uv_handle_t,
+                                 suggested_size: size_t,
+                                 buf: *uv_buf_t)
   local owner = ffi.uv_handle_get_data(handle) as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "uv_tcp_t", "alloc_callback"))
   local loop = ffi.uv_handle_get_loop(handle)
   local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
@@ -74,12 +75,47 @@ foreign function uv_alloc_cb(handle: *uv_handle_t,
   ffi.lua_settop(L, top)
 end
 
-foreign function uv_read_cb(stream: *uv_stream_t,
-                            nread: ssize_t,
-                            buf: const *uv_buf_t)
+foreign function uv_tcp_read_cb(stream: *uv_stream_t,
+                                nread: ssize_t,
+                                buf: const *uv_buf_t)
   local handle = stream as foreign *uv_handle_t
   local owner = ffi.uv_handle_get_data(handle) as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[2].uv)
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "uv_tcp_t", "read_callback"))
+  local loop = ffi.uv_handle_get_loop(handle)
+  local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry = ffi.lmacro_pvalue(
+      callback.upvalue[2]) as foreign UvIntegerCallbackEntry
+  local top = ffi.lua_gettop(L)
+  entry(L, module, callback, owner, nread as foreign lua_Integer)
+  ffi.lua_settop(L, top)
+end
+
+foreign function uv_stdio_alloc_cb(handle: *uv_handle_t,
+                                   suggested_size: size_t,
+                                   buf: *uv_buf_t)
+  local owner = ffi.uv_handle_get_data(handle) as foreign *Udata
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "uv_stdio_t", "alloc_callback"))
+  local loop = ffi.uv_handle_get_loop(handle)
+  local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry = ffi.lmacro_pvalue(
+      callback.upvalue[2]) as foreign UvSizePointerCallbackEntry
+  local top = ffi.lua_gettop(L)
+  entry(L, module, callback, owner, suggested_size,
+        buf as foreign *void)
+  ffi.lua_settop(L, top)
+end
+
+foreign function uv_stdio_read_cb(stream: *uv_stream_t,
+                                  nread: ssize_t,
+                                  buf: const *uv_buf_t)
+  local handle = stream as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(handle) as foreign *Udata
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "uv_stdio_t", "read_callback"))
   local loop = ffi.uv_handle_get_loop(handle)
   local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
@@ -92,7 +128,8 @@ end
 
 foreign function uv_close_cb(handle: *uv_handle_t)
   local owner = ffi.uv_handle_get_data(handle) as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "CloseOwner", "callback"))
   local loop = ffi.uv_handle_get_loop(handle)
   local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
@@ -106,7 +143,8 @@ end
 foreign function uv_walk_cb(handle: *uv_handle_t,
                             arg: *void)
   local owner = arg as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "WalkOwner", "callback"))
   local loop = ffi.uv_handle_get_loop(handle)
   local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
@@ -194,15 +232,14 @@ local function submit_stream_write(task: Task,
   local descriptor = foreign uv_buf_t.new()
   descriptor.base = data
   descriptor.len = #data as foreign size_t
-  local native: owned *uv_write_t = foreign uv_write_t.new()
   local callback = function (_owner: StreamWriteOwner, status: integer)
     -- Libuv borrows the string bytes through write_cb, so retain the string.
     local _data = data
     complete_status(task, status, operation)
   end
-  local owner = StreamWriteOwner.new(native, callback)
+  local owner = StreamWriteOwner.new(foreign uv_write_t.new(), callback)
   task.pending = owner
-  local request: foreign *uv_write_t = native
+  local request = owner.handle
   ffi.uv_req_set_data(request as foreign *uv_req_t,
                         owner as foreign *void)
   local status = ffi.uv_write {
@@ -319,11 +356,10 @@ local function accepting_work(runtime: Runtime, operation: string)
 end
 
 local function new_runtime(): Runtime
-  local native: owned *uv_loop_t = foreign uv_loop_t.new()
   -- Allocate every GC-owned Runtime field before uv_loop_init gives the native
   -- loop resources that require an explicit uv_loop_close.
   local runtime = Runtime.new {
-    loop = native,
+    loop = foreign uv_loop_t.new(),
     task_roots = {},
     next_task_root = 1,
     handle_roots = {},
@@ -333,6 +369,7 @@ local function new_runtime(): Runtime
     cleanup_done = false,
     exit_code = nil,
   }
+  local native = runtime.loop
   check_status(ffi.uv_loop_init(native), "runtime.loop.init")
   ffi.uv_loop_set_data(native,
                          main_thread as foreign *void)

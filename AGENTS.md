@@ -728,9 +728,12 @@ shadows the same pathname in later roots for that format, and the `.so` and
 A DSO claims a module through its callable `<mangled>_abi`/`_types` pair. Both
 absent is a clean nonclaim only for an ancestor; a half claim, open failure,
 bad ABI, malformed types, or logical-name mismatch is terminal, and an exact
-markerless DSO remains an error. A regular static provider is self-describing:
+markerless DSO remains an error. Native compilation also requires valid
+`<mangled>_layouts` metadata for native nominal storage; analysis-only recovery
+continues to accept the ABI/types pair without physical layouts. A regular
+static provider is self-describing:
 each Titan-generated ELF/Mach-O object carries one canonical `.titan.meta` or
-`__TEXT,__titanmeta` section with exactly one logical ABI/types entry. The
+`__TEXT,__titanmeta` section with exactly one logical ABI/types/layouts entry. The
 in-process reader rejects thin/nested/raw/unsupported archives, duplicate
 logical keys, malformed or incompatible entries, and an exact archive without
 the requested key; an ancestor archive without that key is a clean nonclaim.
@@ -872,7 +875,12 @@ tools expose UTF-8 `ℳ`/`ℱ`. Serialized interfaces include generic binder
 scopes, applied nominal arguments, declaration schemes, generic owners and
 methods, and constructor-preserving aliases. Const-qualified descriptors,
 Interface field wrappers, and the mutable/const Array runtime split are also
-ABI-visible. `TITAN_ABI_VERSION` is `2`; `TITAN_VERSION` is `0.6.0`; and
+ABI-visible. The prerelease compiler also uses native nominal payloads, exact
+native optional carriers, and the separate public nominal-layout protocol; see
+[Native nominal storage](doc/implementation/nominal-storage.md).
+Cleanly rebuild the compiler, runtime, and providers together after these layout
+changes; they do not increment the prerelease version markers.
+`TITAN_ABI_VERSION` is `2`; `TITAN_VERSION` is `0.6.0`; and
 `TITAN_LIBRARY_VERSION_SUFFIX`, `TITAN_PATH_0_6`, `lib/titan/0.6`, and
 `stdlib_0_6` follow the derived `0.6` library version. A mismatched provider is
 rejected before its type metadata is decoded. `.so`/`.a` providers built for a
@@ -924,7 +932,7 @@ LuaRocks config migration cannot safely rewrite them.
 
 ### Lua 5.5 internals conventions in generated C
 
-The coder targets Lua 5.5 internals; keep these idioms when touching templates: stack fields are unions (`L->top.p`, `L->ci->func.p`, `StkId` + `s2v()` to view a slot as `TValue*`); the table array part has no `TValue` slots (read via `luaH_fastgeti`/`luaH_getint` into a local `TValue` holder testing `tagisempty(tag)`, write via `obj2arr`/`luaH_setint`/`luaH_set` — `luaO_nilobject` and `luaH_newkey` no longer exist); booleans carry no payload (`ttistrue`, `titan_setbvalue` from titan.h); `ttypetag()`/`LUA_V*` are the variant tags (old `ttnov` is now `ttype`); a record value IS a `Udata` (created with `luaS_newudata(L, 0, N)`) — its fields live in `uv[0..N-1].uv` (0-based, no reserved `uv[0]`), the record's TYPE IDENTITY is its metatable pointer (a type check compares `uvalue(v)->metatable`; the udata has no raw payload), and that metatable sits on the udata's `metatable` field; `_mod` (module state) is likewise a single `Udata`. Stores of collectable values into a `CClosure` upvalue (function values; capture boxes are userdata, see below) need the **forward** `luaC_barrier(L, owner, slot)`, while record-field and module-slot stores into a `Udata` user value and table stores need the **back** `luaC_barrierback(L, obj2gco(o), v)` (genlink-safe on userdata) — the generational GC makes missing barriers near-deterministic corruption, not a rare race.
+The coder targets Lua 5.5 internals; keep these idioms when touching templates: stack fields are unions (`L->top.p`, `L->ci->func.p`, `StkId` + `s2v()` to view a slot as `TValue*`); the table array part has no `TValue` slots (read via `luaH_fastgeti`/`luaH_getint` into a local `TValue` holder testing `tagisempty(tag)`, write via `obj2arr`/`luaH_setint`/`luaH_set` — `luaO_nilobject` and `luaH_newkey` no longer exist); booleans carry no payload (`ttistrue`, `titan_setbvalue` from titan.h); `ttypetag()`/`LUA_V*` are the variant tags (old `ttnov` is now `ttype`); a record or union value is one `Udata` whose metatable pointer supplies nominal type identity. Its checked layout assigns traced fields/parts to dense user values and non-GC fields/parts to native payload members; the union tag is native too. Logical member indices are never physical UV offsets. Public record native fields form the first actual C subobject and public UV fields precede private UV fields; see [Native nominal storage](doc/implementation/nominal-storage.md). `_mod` (module state) is likewise a single `Udata`. Stores of collectable values into a `CClosure` upvalue (function values; capture boxes are userdata, see below) need the **forward** `luaC_barrier(L, owner, slot)`, while record-field and module-slot stores into a `Udata` user value and table stores need the **back** `luaC_barrierback(L, obj2gco(o), v)` (genlink-safe on userdata) — the generational GC makes missing barriers near-deterministic corruption, not a rare race.
 
 Titan Arrays are a deliberate exception to ordinary Lua Table semantics.
 Their exact/internal value remains a backing `Table *`; exact
@@ -1446,7 +1454,7 @@ substitution, recursive; error on missing keys). Key facts:
   publishes the owner's method entry points. The importer then resolves those
   transitive symbols through `RTLD_DEFAULT`; it does not open the owner DSO a
   second time.
-- Module state is a `Udata` (`_mod`), allocated with `luaS_newudata(L, 0, NUPVALS)`. Its ABI-visible prefix is exported variables, exported top-level function closures, then exported static closures of public record/union owners in module-member and bytewise-static order. The unconditional per-state Array-metatable cache follows that prefix, then one lightuserdata source-provider identity token, then the deterministic source-private variable/callable region. An explicit source importer compares that token with its exact linked producer's hidden immutable identity entry before reading any private slot; a same-name module state installed by another physical provider is an error. Remaining private user values hold imported modules, record/union metatables, per-nominal static-namespace tables, and module-local Array-writer closures allocated once per constructed structural element type; there is no distinguished `uv[0]` header. Publish function-type tags before any module-variable initializer can construct a lambda or bound-method closure, and initialize Array writers before module variable initializers. There is **no** Lua-facing module table — `require` returns the module `Udata` itself (so `type(require "m")` is `"userdata"`), and all member access (functions, variables, nominal namespaces such as `m.Rec`/`m.Union`) flows through a metatable `__index`/`__newindex` over a unified name→slot member map; functions and nominal namespaces are served read-only (assigning errors), variables use the same dynamic boundary coercions as Lua function arguments and Array writes, and the "not found" message is "member '%s' does not exist". A record instance is likewise a single `Udata` (fields in `uv[0..N-1]`, type identity is its metatable pointer, no raw payload); Lua field writes use that same dynamic policy. A union instance is a single zero-byte `Udata` with the union metatable identity, integer tag in `uv[0]`, and optional payload in `uv[1]`; empty variants allocate no payload slot and instance Lua access exposes methods only.
+- Module state is a `Udata` (`_mod`), allocated with `luaS_newudata(L, 0, NUPVALS)`. Its ABI-visible prefix is exported variables, exported top-level function closures, then exported static closures of public record/union owners in module-member and bytewise-static order. The unconditional per-state Array-metatable cache follows that prefix, then one lightuserdata source-provider identity token, then the deterministic source-private variable/callable region. An explicit source importer compares that token with its exact linked producer's hidden immutable identity entry before reading any private slot; a same-name module state installed by another physical provider is an error. Remaining private user values hold imported modules, record/union metatables, per-nominal static-namespace tables, and module-local Array-writer closures allocated once per constructed structural element type; there is no distinguished `uv[0]` header. Publish function-type tags before any module-variable initializer can construct a lambda or bound-method closure, and initialize Array writers before module variable initializers. There is **no** Lua-facing module table — `require` returns the module `Udata` itself (so `type(require "m")` is `"userdata"`), and all member access (functions, variables, nominal namespaces such as `m.Rec`/`m.Union`) flows through a metatable `__index`/`__newindex` over a unified name→slot member map; functions and nominal namespaces are served read-only (assigning errors), variables use the same dynamic boundary coercions as Lua function arguments and Array writes, and the "not found" message is "member '%s' does not exist". Record and union instances are single `Udata` objects with metatable identity, dense traced user values, and native payload members selected by the nominal layout plan. Union tags live in the native payload; variant parts use their own dense UV/native mapping. Never derive UV offsets from logical field/part indices. Record Lua field access uses the same checked layout and dynamic conversion policy; union instance Lua access exposes methods only. See [Native nominal storage](doc/implementation/nominal-storage.md) for public-prefix reconstruction, aggregate projections, and constructor tails.
 - Typedef-resolved pointers to Lua's internal `Udata` are GC-bearing FFI
   values, not ordinary C pointers: boxing a non-NULL `Udata *` emits a full
   userdata `TValue` for that same object, NULL boxes as nil, and unboxing
@@ -1455,7 +1463,8 @@ substitution, recursive; error on missing keys). Key facts:
   top-level initializers and keep their userdata rooted in the module state.
 - **Semantic state must live in the Lua registry or GC-traced Lua objects, never
   in shared C globals.** Several logical modules may share one physical DSO or
-  static provider; once linked, each keeps its own `_abi`, `_types`, `_init`,
+  static provider; once linked, each keeps its own `_abi`, `_types`, `_layouts`,
+  `_init`,
   `luaopen_*`, registry module `Udata`, initializer, record identities,
   closures, and file-local native wiring. The ABI-2 `titan.so`/`titan.a`
   pair carries all twenty-one current logical modules, including the

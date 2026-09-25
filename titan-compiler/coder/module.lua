@@ -342,6 +342,7 @@ end
 function coderecorddec(ctx, code, initrecs, node)
     -- (the type tag is forward-declared up front in generate(), so that
     -- forward/mutually-recursive record field types resolve)
+    local plan = coder._nominal_plan(ctx, node._type)
     local fieldmap = {}
     for _, field in ipairs(node._type.fields) do
         if not field.islocal then
@@ -355,6 +356,7 @@ function coderecorddec(ctx, code, initrecs, node)
                 NAME = c_string_literal(field.name),
                 ACCESSOR = accessor,
             }))
+            local slot = assert(plan.by_index[field.index])
             local write
             if field.isconst then
                 write = render([[
@@ -368,16 +370,23 @@ function coderecorddec(ctx, code, initrecs, node)
                     FIELD = c_string_literal(field.name),
                     FQTN = c_string_literal(node._type.name),
                 })
+            elseif field.dynamic_plan == false then
+                write = coder._dynamiccheckandget(ctx, false, field.type,
+                    "_unavailable", "tv", node.loc, "Lua record-field write")
             else
+                local converted = "_converted"
                 write = render([[
-                    TValue *_dst = &_rec->uv[$INDEX].uv;
-                    $CHECKANDSET
-                    luaC_barrierback(L, obj2gco(_rec), _dst);
+                    $DECL = $INIT;
+                    $CHECK
+                    $STORE
                 ]], {
-                    INDEX = c_integer_literal(field.index),
-                    CHECKANDSET = coder._dynamiccheckandset(
-                        ctx, field.dynamic_plan, field.type, "_dst", "tv",
-                        node.loc, "Lua record-field write")
+                    DECL = cvardecl(ctx, field.type, converted),
+                    INIT = initval(field.type),
+                    CHECK = coder._dynamiccheckandget(
+                        ctx, field.dynamic_plan, field.type, converted, "tv",
+                        node.loc, "Lua record-field write"),
+                    STORE = coder._nominal_store(ctx, plan, slot,
+                        field.type, "_rec", converted),
                 })
             end
             table.insert(code, render([[
@@ -386,15 +395,14 @@ function coderecorddec(ctx, code, initrecs, node)
                     if (write) {
                         $WRITE
                     } else {
-                        TValue *_slot = &_rec->uv[$INDEX].uv;
                         $SETWRAPPED
                     }
                 }
             ]], {
                 ACCESSOR = accessor,
                 WRITE = write,
-                INDEX = c_integer_literal(field.index),
-                SETWRAPPED = copyboxed(ctx, field.type, "tv", "_slot"),
+                SETWRAPPED = coder._nominal_box(ctx, plan, slot,
+                    field.type, "_rec", "tv"),
             }))
         end
     end
@@ -542,6 +550,7 @@ function coder._codeuniondec(ctx, code, initnominals, node)
         node._type.name, "payload_reader")
     local payload_cases = {}
     for _, variant in ipairs(node._type.variants) do
+        local plan = coder._nominal_plan(ctx, node._type, variant)
         local part_cases = {}
         for _, part in ipairs(variant.parts) do
             part_cases[#part_cases + 1] = render([[
@@ -551,13 +560,15 @@ function coder._codeuniondec(ctx, code, initnominals, node)
                 }
             ]], {
                 INDEX = c_integer_literal(part.index),
-                PAYLOAD = copyboxed(ctx, part.type, "tv",
-                    "&_union->uv[" .. part.index .. "].uv"),
+                PAYLOAD = coder._nominal_box(ctx, plan,
+                    assert(plan.by_index[part.index]), part.type, "_union", "tv"),
             })
         end
         table.insert(payload_cases, render([[
             case $INDEX: {
                 switch (part) {
+                    case 0: setivalue(tv, $INDEX); return;
+                    case -1: setivalue(tv, $ARITY); return;
                     $PART_CASES
                     default:
                         setnilvalue(tv);
@@ -567,13 +578,14 @@ function coder._codeuniondec(ctx, code, initnominals, node)
             }
         ]], {
             INDEX = c_integer_literal(variant.index),
+            ARITY = #variant.parts,
             PART_CASES = table.concat(part_cases, "\n"),
         }))
     end
     table.insert(code, render([[
         static void $READER(lua_State *L, Udata *_union, lua_Integer part,
                             TValue *tv) {
-            switch (ivalue(&_union->uv[0].uv)) {
+            switch ($TAG) {
                 $CASES
                 default:
                     luaL_error(L, "malformed internal tag for union '%s'", $FQTN);
@@ -582,6 +594,7 @@ function coder._codeuniondec(ctx, code, initnominals, node)
         }
     ]], {
         READER = payload_reader,
+        TAG = coder._nominal_tag("_union"),
         CASES = table.concat(payload_cases, "\n"),
         FQTN = c_string_literal(node._type.name),
     }))

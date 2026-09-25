@@ -235,9 +235,9 @@ iterators are ordinary function-value calls emitted by `codevaluecall`, so
 an exact Titan iterator can take the native fast path and a Lua callable can
 take the generic Lua-stack path. C function-pointer iterators carry
 `_c_pointer_call` and use `codecfunctionptrcall` instead. The nil test is
-not truthiness: for option, `value`, and raw C `TValue` controls it is
-`ttisnil(&ctrl)`, and for nullable C pointer controls it is `ctrl == NULL`,
-so `false` keeps iterating.
+not truthiness: native foreign numeric Options test their presence flag;
+ordinary Options, `value`, and raw C `TValue` controls use `ttisnil(&ctrl)`;
+nullable C pointer controls use `ctrl == NULL`. Thus `false` keeps iterating.
 
 When the close slot is present, `codeforin` wraps the run node in a
 synthetic `Ast.StatTry` whose `finally` block calls the hidden close
@@ -505,41 +505,23 @@ reevaluating either operand.
 
 ## Records
 
-### Construction (`coderecord`)
+### Construction and field access
 
-One allocation (real output for `Point.new`; the layout's rationale is in
-[values and the GC](values-and-gc.md)):
+`nominallayout.lua` assigns physical slots independently of logical field
+indices. GC-bearing fields occupy dense user values, with public slots before
+private slots. Non-GC fields occupy generated C payload members; fixed
+aggregates and arrays are copied there, and eligible direct fresh allocations
+can occupy checked, aligned trailing regions. The new userdata is rooted before
+field initialization can allocate. Traced stores retain the ordinary userdata
+back barrier.
 
-```c
-{
-    Udata* _ud = luaS_newudata(L, 0, 2);              /* #fields user values, no raw payload */
-    setuvalue(L, _tmp_1_slot, _ud);                   /* anchor the udata FIRST */
-    _ud->metatable = hvalue(&_mod->uv[1].uv);         /* this metatable IS the type identity */
-    /* per field i: setobj2t(L, &(_ud->uv[i].uv), $SLOT), then
-       luaC_barrierback(L, obj2gco(_ud), &(_ud->uv[i].uv)) for GC-able
-       field types */
-}
-```
-
-The udata is anchored *before* any field expression can collect (no
-second allocation to order, and no closure↔udata cross-link to install).
-fields are 0-based at `uv[0..N-1]` (no reserved slot); field initializers
-each go through an anchored temp and a `setobj2t` into `&(_ud->uv[i].uv)`
-plus a **back** barrier (the owner is a userdata) for GC-able field types.
-
-### Field access
-
-A read is an indexed load from the udata — no hashing, no metatable:
-`return fltvalue(&((__self__)->uv[0].uv));`. A write is the user-value
-store plus a *back* barrier (`Udata` owner, like table stores, unlike
-closure stores):
-
-```c
-Udata *_recobj = _param_p;
-TValue *_fieldslot = &(_recobj->uv[0].uv);
-setfltvalue(_fieldslot, _param_v);
-/* + luaC_barrierback(L, obj2gco(_recobj), _fieldslot); for GC-able fields */
-```
+`coder/nominal.lua` lowers reads, writes, and boxing from that plan. A native
+scalar read uses its payload member directly. An embedded aggregate or array
+read projects a borrowed interior pointer. Writes complete the checker-owned
+conversion before changing storage; only traced writes need a GC barrier.
+Ordinary typed access remains direct and requires neither hashing nor Lua
+member lookup. See [Native nominal storage](nominal-storage.md) for the public
+prefix, allocation, and separate-compilation contracts.
 
 ### Method and static calls
 
@@ -584,34 +566,21 @@ the ordinary branded-closure shape. See [Interfaces](interfaces.md).
 
 ## Unions and `case`
 
-`coder._codeunioninit` allocates a zero-byte `Udata` whose metatable is the
-union identity. It requests one user value for an empty variant and two for a
-payload variant:
+`coder._codeunioninit` allocates the selected variant's payload size and dense
+traced-slot count. Every variant payload starts with an actual shared tag-header
+subobject; the absolute tag is native data, never a user value. Empty variants
+therefore need no traced slots. Parts use the same native/traced classification
+as record fields. An Array part retains its internal `Table *` backing in its
+assigned UV slot, with a userdata back barrier.
 
-```c
-Udata *_u = luaS_newudata(L, 0, 2);
-setuvalue(L, _slot, _u);              /* root before payload evaluation */
-_u->metatable = hvalue(&_mod->uv[META].uv);
-setivalue(&_u->uv[0].uv, TAG);        /* absolute zero-based variant tag */
-/* setslot(payload_type, &_u->uv[1].uv, payload), then a back barrier
-   when the payload may be collectable */
-```
-
-An Array payload stores its internal `Table *` backing in `uv[1]`; it is not
-boxed to the Lua proxy at this internal boundary. Empty variants do not
-allocate a dummy payload user value. Union/value boxing and exact metatable
-checks otherwise use the same nominal-identity path as records.
-
-`coder._codecase` evaluates and roots the scrutinee exactly once, reads
-`ivalue(&u->uv[0].uv)`, and emits a switch containing only
-`case TAG: goto ARM;` entries. Arm bodies and the optional/default body are
-labeled blocks outside that switch, each ending at a shared case-end label.
-There is therefore no fallthrough, and a Titan `break` inside an arm still
-targets its enclosing Titan loop rather than the implementation switch.
-Payload bindings extract `uv[1]` through the ordinary internal `getslot`
-conversion before the full arm block runs. Since those blocks use existing
-statement lowering, their `catch`, `finally`, and `defer` behavior is
-unchanged.
+`coder._codecase` evaluates and roots the scrutinee once, reads its tag header,
+and emits a switch containing only `case TAG: goto ARM;` entries. Arm bodies
+are labeled blocks outside the switch and end at one case-end label, preserving
+ordinary `break`, `catch`, `finally`, and `defer` behavior. Bindings use the
+selected variant's physical plan; aggregates and arrays project borrowed
+pointers, while numeric Options keep their exact native value. Logical part
+indices remain independent of both payload members and UV indices. See
+[Native nominal storage](nominal-storage.md).
 
 Statement-list generation stops after `break` or the first statement whose
 checker decoration has `_always_returns = true`. The coder therefore consumes
@@ -742,10 +711,13 @@ exponent `2` is special-cased as `b * b` (where `b` is the base hoisted
 into a float temp), every other exponent uses `pow(b, e)` — both
 operands are materialized into float temps first, so each is evaluated
 once. **Equality on ordinary dynamic values**: when both operands are
-`TValue`-represented (`value` or options), `==`/`~=` normally compile to
+`TValue`-represented (`value` or ordinary Options), `==`/`~=` normally compile to
 `luaV_rawequalobj(&l, &r)` and its negation. The narrowly selected
 [Map/`value` path](#equality-codebinaryop) adds table `__eq` after a failed raw
-check; `value`/`value` remains raw. **`and`/`or`** specialize on static truthiness.
+check; `value`/`value` remains raw. When both operands have native C numeric
+Option carriers, equality compares presence and exact native payloads directly.
+A mixed native/boxed or gradual comparison performs checked boxing before Lua
+equality. **`and`/`or`** specialize on static truthiness.
 For a boolean result the checker wraps non-boolean operands with an
 `_operator_conversion` whose operation is `truthiness`; `not` uses the same
 operation. The coder consumes this annotation before ordinary cast dispatch,

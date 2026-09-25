@@ -252,6 +252,20 @@ function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:string]
             EXP = exp,
             VAR = cvar
         })
+    elseif coder._is_native_option(typ) then
+        return render([[
+            if (ttisnil($EXP)) {
+                $NIL
+            } else {
+                $CHECK
+                ($VAR).present = 1;
+            }
+        ]], {
+            EXP = exp,
+            VAR = cvar,
+            NIL = coder._option_nil(typ, cvar),
+            CHECK = checkandget(ctx, typ.base, "(" .. cvar .. ").value", exp, loc),
+        })
     elseif typ._tag == "Type.Option" then
         return render([[
             if(ttisnil($EXP)) {
@@ -400,6 +414,8 @@ function setslot(typ --[[:table]], dst --[[:string]], src --[[:string]])
     elseif typ._tag == "Type.Value" then tmpl = "do { TValue _titan_v = $SRC; setobj2t(L, $DST, &_titan_v); } while (0);"
     elseif types.is_c_tvalue(typ) then tmpl = "do { TValue _titan_v = $SRC; setobj2t(L, $DST, &_titan_v); } while (0);"
     elseif typ._tag == "Type.Nominal" then tmpl = "setuvalue(L, $DST, $SRC);"
+    elseif coder._is_native_option(typ) then
+        return coder._native_option_box(typ, dst, src)
     elseif typ._tag == "Type.Option" then tmpl = "do { TValue _titan_v = $SRC; setobj2t(L, $DST, &_titan_v); } while (0);"
     elseif typ._tag == "Type.Function" then tmpl = "do { TValue _titan_v = $SRC; setobj2t(L, $DST, &_titan_v); } while (0);"
     elseif types.resolve_c_typedef(typ)._tag == "Type.CInteger" then
@@ -641,7 +657,8 @@ function coder._raw_ctype(typ --[[:table]])
         return cdeclarator.render_type_name(typ)
     elseif types.is_direct_c(typ) then
         return cdeclarator.render_type_name(
-            cdeclarator.adjust_parameter_type(typ))
+            coder._c_value_type(cdeclarator.adjust_parameter_type(typ)))
+    elseif coder._is_native_option(typ) then return coder._native_option_ctype(typ)
     elseif typ._tag == "Type.Option" then return "TValue"
     -- A first-class function value is boxed (it may be a Titan closure, a Lua
     -- closure, a C function, or a `__call` object), like `value`/`option`.
@@ -657,6 +674,7 @@ function ctype(typ --[[:table]])
 end
 
 function initval(typ --[[:table]])
+    if coder._is_native_option(typ) then return "{0}" end
     if typ._tag == "Type.Value" or typ._tag == "Type.Option"
        or typ._tag == "Type.Function" or types.is_c_tvalue(typ) then
         return "{ {0}, 0 }"
@@ -673,7 +691,7 @@ end
 -- local/param C autos ordinary (and avoiding volatile in the function ABI).
 function cvardecl(ctx, typ, name)
     if types.is_direct_c(typ) then
-        return coder._render_c_declaration(typ, name)
+        return coder._render_c_declaration(coder._c_value_type(typ), name)
     end
     return ctype(typ) .. " " .. name
 end
@@ -725,6 +743,23 @@ function coder._dynamiccheckandget(
             THROW = codethrow(loc,
                 "%s:%d:%d: type error, dynamic coercion to %s is unavailable",
                 { "$FILE", "$LINE", "$COL", "$TYPE" }),
+        })
+    elseif plan.op == "option" and coder._is_native_option(typ) then
+        return render([[
+            if (ttisnil($EXP)) {
+                $NIL
+            } else {
+                $PRESENT
+                ($VAR).present = 1;
+            }
+        ]], {
+            EXP = exp,
+            VAR = cvar,
+            NIL = coder._option_nil(typ, cvar),
+            PRESENT = coder._dynamiccheckandget(
+                ctx, plan.inner, typ.base, "(" .. cvar .. ").value", exp, loc,
+                (use or "dynamic boundary") .. " Option present value",
+                retain_interface_result),
         })
     elseif plan.op == "option" then
         return render([[
@@ -1751,6 +1786,23 @@ function coder._strictcheckandget(
     elseif resolved._tag == "Type.CFloat" then
         return coder._code_checked_boxed_numeric(
             ctx, typ, cvar, exp, loc, true)
+    elseif coder._is_native_option(typ) then
+        return render([[
+            if (ttisnil($EXP)) {
+                $NIL
+            } else {
+                $CHECK
+                ($VAR).present = 1;
+            }
+        ]], {
+            EXP = exp,
+            VAR = cvar,
+            NIL = coder._option_nil(typ, cvar),
+            CHECK = coder._strictcheckandgetmixed(
+                ctx, plan.inner, typ.base, "(" .. cvar .. ").value", exp, loc,
+                (use or "strict gradual observation") .. " Option present value",
+                retain_interface_result),
+        })
     elseif typ._tag == "Type.Option" then
         return render([[
             if (ttisnil($EXP)) {
@@ -1887,6 +1939,23 @@ function coder._strictcheckandgetmixed(
             CONST_META = array_metatable_kind(ctx, true),
             VAR = cvar,
         })
+    elseif coder._is_native_option(typ) then
+        return render([[
+            if (ttisnil($EXP)) {
+                $NIL
+            } else {
+                $CHECK
+                ($VAR).present = 1;
+            }
+        ]], {
+            EXP = exp,
+            VAR = cvar,
+            NIL = coder._option_nil(typ, cvar),
+            CHECK = coder._strictcheckandgetmixed(
+                ctx, plan.inner, typ.base, "(" .. cvar .. ").value", exp, loc,
+                (use or "strict gradual observation") .. " Option present value",
+                retain_interface_result),
+        })
     elseif typ._tag == "Type.Option" then
         return render([[
             if (ttisnil($EXP)) {
@@ -1984,14 +2053,15 @@ end
 function cpointerdecl(typ, name)
     if types.is_direct_c(typ) then
         return coder._render_c_declaration(
-            types.CPointer(typ, {}), name)
+            types.CPointer(coder._c_value_type(typ), {}), name)
     end
     return ctype(typ) .. " *" .. name
 end
 
 function cpointertype(typ)
     if types.is_direct_c(typ) then
-        return coder._render_c_type_name(types.CPointer(typ, {}))
+        return coder._render_c_type_name(
+            types.CPointer(coder._c_value_type(typ), {}))
     end
     return ctype(typ) .. "*"
 end

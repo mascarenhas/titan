@@ -71,18 +71,20 @@ local record FsListCall
   local path: string
 end
 
--- One owner exists for exactly one accepted uv_fs_* submission. Libuv copies
--- path and uv_buf_t arguments before returning. Its callback closure retains
--- the Task and any pointed-to read or write data through completion.
+-- One owner exists for exactly one accepted uv_fs_* submission. Its native
+-- request and read buffer share that allocation. Libuv copies path and uv_buf_t
+-- arguments before returning; the closure retains the Task and write string.
 local record uv_fs_t
-  local handle: owned *uv_fs_t
+  local handle: foreign uv_fs_t
+  local const buffer: foreign char[]
   local callback: function (uv_fs_t): ()
 end
 
 foreign function uv_fs_cb(req: *uv_fs_t)
   local owner = ffi.uv_req_get_data(
       req as foreign *uv_req_t) as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "uv_fs_t", "callback"))
   local L = ffi.uv_loop_get_data(req.loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
@@ -135,15 +137,22 @@ end
 local function new_fs_request(task: Task,
                               operation: string,
                               keepalive: value,
-                              success: FsResult): uv_fs_t
+                              success: FsResult,
+                              read_size: integer): uv_fs_t
   accepting_work(task.runtime, operation)
-  local native: owned *uv_fs_t = foreign uv_fs_t.new()
   local callback = function (owner: uv_fs_t)
     local result = ffi.uv_fs_get_result(owner.handle) as integer
     complete_fs(task, owner, result, operation, keepalive, success)
   end
-  local owner = uv_fs_t.new(native, callback)
-  local request: foreign *uv_fs_t = native
+  local owner = (function (read_size: integer,
+                           callback: function (uv_fs_t): ()): uv_fs_t
+    if read_size >= 0 then
+      return uv_fs_t.new(
+          foreign uv_fs_t.new(), foreign char.new_array(read_size), callback)
+    end
+    return uv_fs_t.new(foreign uv_fs_t.new(), nil, callback)
+  end)(read_size, callback)
+  local request: foreign *uv_fs_t = owner.handle
   ffi.uv_req_set_data(request as foreign *uv_req_t,
                         owner as foreign *void)
   task.pending = owner
@@ -222,7 +231,7 @@ end
 local function read_result(task: Task, owner: uv_fs_t, result: integer,
                            keepalive: value): value
   if result == 0 then return nil end
-  return bytes_string(keepalive as Bytes, result)
+  return bytes_string(owner.buffer, result)
 end
 
 local function write_result(task: Task, owner: uv_fs_t, result: integer,
@@ -259,7 +268,7 @@ catch
 end
 
 local function FsOpenCall:dispatch(task: Task): Immediate?
-  local owner = new_fs_request(task, "fs.open", nil, open_result)
+  local owner = new_fs_request(task, "fs.open", nil, open_result, -1)
   local status = ffi.uv_fs_open {
     loop = task.runtime.loop,
     req = owner.handle,
@@ -272,12 +281,11 @@ local function FsOpenCall:dispatch(task: Task): Immediate?
 end
 
 local function FsReadCall:dispatch(task: Task): Immediate?
-  local bytes = foreign char.new_array(self.maximum)
-  local descriptor = foreign uv_buf_t.new()
-  descriptor.base = bytes
-  descriptor.len = self.maximum as foreign size_t
   local owner = new_fs_request(
-      task, "fs.read", bytes, read_result)
+      task, "fs.read", nil, read_result, self.maximum)
+  local descriptor = foreign uv_buf_t.new()
+  descriptor.base = owner.buffer
+  descriptor.len = self.maximum as foreign size_t
   local status = ffi.uv_fs_read {
     loop = task.runtime.loop,
     req = owner.handle,
@@ -296,7 +304,7 @@ local function FsWriteCall:dispatch(task: Task): Immediate?
   descriptor.base = base + self.offset
   descriptor.len = (#self.data - self.offset) as foreign size_t
   local owner = new_fs_request(
-      task, "fs.write", self.data, write_result)
+      task, "fs.write", self.data, write_result, -1)
   local status = ffi.uv_fs_write {
     loop = task.runtime.loop,
     req = owner.handle,
@@ -310,7 +318,7 @@ local function FsWriteCall:dispatch(task: Task): Immediate?
 end
 
 local function FsFlushCall:dispatch(task: Task): Immediate?
-  local owner = new_fs_request(task, "fs.flush", nil, unit_result)
+  local owner = new_fs_request(task, "fs.flush", nil, unit_result, -1)
   local status = ffi.uv_fs_fsync(task.runtime.loop, owner.handle,
                                   self.file,
                                   uv_fs_cb)
@@ -318,7 +326,7 @@ local function FsFlushCall:dispatch(task: Task): Immediate?
 end
 
 local function FsCloseCall:dispatch(task: Task): Immediate?
-  local owner = new_fs_request(task, "fs.close", nil, unit_result)
+  local owner = new_fs_request(task, "fs.close", nil, unit_result, -1)
   local status = ffi.uv_fs_close(task.runtime.loop, owner.handle,
                                   self.file,
                                   uv_fs_cb)
@@ -329,7 +337,7 @@ local function FsCloseCall:dispatch(task: Task): Immediate?
 end
 
 local function FsStatCall:dispatch(task: Task): Immediate?
-  local owner = new_fs_request(task, "fs.stat", nil, stat_result)
+  local owner = new_fs_request(task, "fs.stat", nil, stat_result, -1)
   local status = ffi.uv_fs_stat(task.runtime.loop, owner.handle,
                                  self.path,
                                  uv_fs_cb)
@@ -337,7 +345,7 @@ local function FsStatCall:dispatch(task: Task): Immediate?
 end
 
 local function FsLstatCall:dispatch(task: Task): Immediate?
-  local owner = new_fs_request(task, "fs.lstat", nil, stat_result)
+  local owner = new_fs_request(task, "fs.lstat", nil, stat_result, -1)
   local status = ffi.uv_fs_lstat(task.runtime.loop, owner.handle,
                                   self.path,
                                   uv_fs_cb)
@@ -346,7 +354,7 @@ end
 
 local function FsTmpnameCall:dispatch(task: Task): Immediate?
   local owner = new_fs_request(
-      task, "fs.tmpname", nil, tmpname_result)
+      task, "fs.tmpname", nil, tmpname_result, -1)
   local status = ffi.uv_fs_mkstemp(task.runtime.loop, owner.handle,
                                     self.path,
                                     uv_fs_cb)
@@ -354,7 +362,7 @@ local function FsTmpnameCall:dispatch(task: Task): Immediate?
 end
 
 local function FsMkdirCall:dispatch(task: Task): Immediate?
-  local owner = new_fs_request(task, "fs.mkdir", nil, unit_result)
+  local owner = new_fs_request(task, "fs.mkdir", nil, unit_result, -1)
   local status = ffi.uv_fs_mkdir {
     loop = task.runtime.loop,
     req = owner.handle,
@@ -366,7 +374,7 @@ local function FsMkdirCall:dispatch(task: Task): Immediate?
 end
 
 local function FsUnlinkCall:dispatch(task: Task): Immediate?
-  local owner = new_fs_request(task, "fs.unlink", nil, unit_result)
+  local owner = new_fs_request(task, "fs.unlink", nil, unit_result, -1)
   local status = ffi.uv_fs_unlink(task.runtime.loop, owner.handle,
                                    self.path,
                                    uv_fs_cb)
@@ -374,7 +382,7 @@ local function FsUnlinkCall:dispatch(task: Task): Immediate?
 end
 
 local function FsRmdirCall:dispatch(task: Task): Immediate?
-  local owner = new_fs_request(task, "fs.rmdir", nil, unit_result)
+  local owner = new_fs_request(task, "fs.rmdir", nil, unit_result, -1)
   local status = ffi.uv_fs_rmdir(task.runtime.loop, owner.handle,
                                   self.path,
                                   uv_fs_cb)
@@ -382,7 +390,7 @@ local function FsRmdirCall:dispatch(task: Task): Immediate?
 end
 
 local function FsRenameCall:dispatch(task: Task): Immediate?
-  local owner = new_fs_request(task, "fs.rename", nil, unit_result)
+  local owner = new_fs_request(task, "fs.rename", nil, unit_result, -1)
   local status = ffi.uv_fs_rename(task.runtime.loop, owner.handle,
                                    self.from, self.to,
                                    uv_fs_cb)
@@ -390,7 +398,7 @@ local function FsRenameCall:dispatch(task: Task): Immediate?
 end
 
 local function FsListCall:dispatch(task: Task): Immediate?
-  local owner = new_fs_request(task, "fs.list", nil, list_result)
+  local owner = new_fs_request(task, "fs.list", nil, list_result, -1)
   local status = ffi.uv_fs_scandir {
     loop = task.runtime.loop,
     req = owner.handle,

@@ -596,6 +596,9 @@ varg_struct_by_ctype = {
 }
 
 function varg_struct_name(elemtype --[[:table]])
+    if coder._is_native_option(elemtype) then
+        return coder._native_option_ctype(elemtype) .. "_varg"
+    end
     -- An owned C value is represented by its owning full Udata, just like a
     -- Titan nominal value. Select this semantically: C declarator rendering
     -- spells the owner as `Udata *`, while the ordinary nominal ctype is
@@ -905,6 +908,10 @@ end
 -- reserved stack slot so a subsequent collection cannot sweep them; the slot
 -- itself is addressed by offset because a call may reallocate the Lua stack.
 function materialize_code(ctx, typ, stats, exp)
+    if types.is_c_aggregate(typ) then
+        local decl, name = newforeigntmp(ctx, typ, exp)
+        return stats .. "\n" .. decl, name
+    end
     local decl, name, slot = newtmp(ctx, typ, types.is_gc(typ))
     local anchor = slot and setslot(typ, slot, name) or ""
     return render([[

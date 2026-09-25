@@ -5,15 +5,16 @@ foreign type WorkPointer = *void
 foreign type WorkFunction = function (*void): void
 
 local record WorkCall
-  local carrier: owned WorkPointer[]
+  local f: foreign WorkFunction
+  local arg: foreign WorkPointer
 end
 
 -- Task.pending roots this complete owner from accepted submission through the
--- after-work callback. The raw carrier separately gives the worker a C-only
--- view that contains no TValue fields.
+-- after-work callback. The embedded request and trailing carrier share this
+-- allocation; the worker receives only a C-only view of the carrier bytes.
 local record WorkOwner
-  local request: owned *uv_work_t
-  local carrier: owned WorkPointer[]
+  local request: foreign uv_work_t
+  local const carrier: foreign WorkPointer[]
   local callback: function (WorkOwner, integer): ()
 end
 
@@ -29,7 +30,8 @@ foreign function uv_after_work_cb(req: *uv_work_t, status: int)
   local carrier = ffi.uv_req_get_data(
       req as foreign *uv_req_t) as foreign *WorkPointer
   local owner = carrier[0] as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[2].uv)
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "WorkOwner", "callback"))
   local L = ffi.uv_loop_get_data(req.loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
@@ -52,16 +54,23 @@ end
 
 local function WorkCall:dispatch(task: Task): Immediate?
   accepting_work(task.runtime, "async.run_foreign")
-  local native: owned *uv_work_t = foreign uv_work_t.new()
-  local callback = function (_owner: WorkOwner, status: integer)
+  local callback = function (owner: WorkOwner, status: integer)
+    -- Resumption clears Task.pending before it can collect. Libuv still owns
+    -- the request until this callback returns, so retain its complete owner.
+    local top = ffi.lua_gettop(L)
+    defer ffi.lua_settop(L, top)
+    ffi.lua_pushtvalue(L, owner)
     complete_work(task, status)
   end
-  local owner = WorkOwner.new(native, self.carrier, callback)
-  local request: foreign *uv_work_t = native
+  local owner = WorkOwner.new(
+      foreign uv_work_t.new(), foreign WorkPointer.new_array(3), callback)
+  local request: foreign *uv_work_t = owner.request
 
-  self.carrier[0] = owner as foreign WorkPointer
+  owner.carrier[0] = owner as foreign WorkPointer
+  owner.carrier[1] = self.f as foreign WorkPointer
+  owner.carrier[2] = self.arg
   ffi.uv_req_set_data(
-      request as foreign *uv_req_t, self.carrier as foreign WorkPointer)
+      request as foreign *uv_req_t, owner.carrier as foreign WorkPointer)
   task.pending = owner
 
   local status = ffi.uv_queue_work(
@@ -75,11 +84,7 @@ local function WorkCall.from_callback(f: foreign WorkFunction,
                                       arg: foreign WorkPointer): WorkCall
   if not f then raise "async.run_foreign callback must not be NULL" end
 
-  local carrier: owned WorkPointer[] = foreign WorkPointer.new_array(3)
-  carrier[0] = nil
-  carrier[1] = f as foreign WorkPointer
-  carrier[2] = arg
-  return WorkCall.new(carrier)
+  return WorkCall.new(f, arg)
 end
 
 local function run_foreign(f: foreign WorkFunction, arg: foreign WorkPointer)

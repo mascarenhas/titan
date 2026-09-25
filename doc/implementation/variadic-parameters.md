@@ -107,7 +107,7 @@ shared finite `ExpSpreadIndex` projections or its open-run descriptor; see
 `types.lua` adds `varargtype` to `Type.Function`
 (`{"params","rettypes","vararg","varargtype","flexrettype"}`) and to
 `Type.Method` / `Type.StaticMethod` (whose declaration descriptors also carry
-`paramnames`). In the current ABI-2 `Type.Function`, the third positional
+`paramnames`). In the current `Type.Function`, the third positional
 `vararg` field is a required **reserved `false` sentinel** retained only to keep
 serialized constructor arity stable; it has no C or Titan variadic meaning. A
 Titan variadic sets `varargtype = T`. A direct foreign declaration instead has
@@ -323,15 +323,20 @@ typedef struct { lu_byte n_args; Udata      **args; } TitanVargNominal;
 ```
 
 Scalars are unboxed; collectable elements are raw pointers (`TString*`,
-`Table*`); `value`/option/function elements are tagged 16-byte `TValue`s; a
+`Table*`); `value`, ordinary Options, and function elements use `TValue`; a
 record (`Type.Nominal`) and an owned C value (`Type.COwned`) use the
 `Udata*`/`TitanVargNominal` family with **no extra boxing**. The coder normally
 picks the struct with `varg_struct_name(elemtype)`, keyed on the
 `ctype(elemtype)` string via `varg_struct_by_ctype` (the Lua-side mirror of the
-seven typedefs). `COwned` is selected semantically rather than from rendered C
+seven typedefs). Native foreign numeric Options additionally use generated
+presence/value structs and matching `{ lu_byte n_args; OptionType *args; }`
+descriptors, so exact native calls do not introduce a boxed numeric boundary.
+See [Native nominal storage](nominal-storage.md). `COwned` is selected
+semantically rather than from rendered C
 declarator whitespace. A Pointer element has no entry and would `error`, but
-the checker bans it first. Because the structs live in `titan.h` (which every
-generated unit `#include`s), the coder emits no struct definitions.
+the checker bans it first. The seven built-in descriptor families live in
+`titan.h`, which every generated unit includes. Only the native numeric Option
+families require additional generated struct definitions.
 The same family serves flexible *output* runs. Ownership distinguishes the
 directions: an input descriptor is a borrowed view of caller arguments, while
 an output descriptor points at capacity supplied by the caller and the callee
@@ -450,7 +455,8 @@ $RESULT = _varargs->args[_start + _vi - 1];
 For `_nilfill == false` (user `...[i]`, non-optional adjust-up) out-of-range
 raises and the result is the unboxed `ctype(t)` value, type `t`. For
 `_nilfill == true` (optional adjust-up) out-of-range yields nil and the result
-is a `t?` `TValue`, mirroring the `codeindexarray` option branch.
+uses the exact `t?` carrier: a native presence/value struct for foreign
+numeric Options, otherwise the ordinary boxed representation.
 
 **`#...` (`ExpDotsLen`)** is the bare expression
 `((lua_Integer)_varargs->n_args - _start)`.
