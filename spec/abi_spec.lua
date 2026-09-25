@@ -90,7 +90,7 @@ describe("compiled-module ABI version", function()
             driver.TITAN_LIBRARY_VERSION)
         assert.equal("_" .. driver.TITAN_LIBRARY_VERSION:gsub("%.", "_"),
             driver.TITAN_LIBRARY_VERSION_SUFFIX)
-        assert.equal("3", driver.TITAN_ABI_VERSION)
+        assert.equal("2", driver.TITAN_ABI_VERSION)
         assert.equal("0.6.0", driver.TITAN_VERSION)
         assert.equal("0.6", driver.TITAN_LIBRARY_VERSION)
         assert.equal("_0_6", driver.TITAN_LIBRARY_VERSION_SUFFIX)
@@ -139,14 +139,14 @@ describe("compiled-module ABI version", function()
             1, true))
         assert.truthy(makefile:find(
             "-Wl,-l:libtinfo.so.6", 1, true))
-        assert.match("TITAN_ABI_VERSION%s*:?=%s*3", makefile)
+        assert.match("TITAN_ABI_VERSION%s*:?=%s*2", makefile)
         assert.match("TITAN_VERSION%s*:?=%s*0%.6%.0", makefile)
         assert.match("TITAN_LIBRARY_VERSION%s*:?=", makefile)
         assert.truthy(makefile:find(
             "TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)", 1, true))
         assert.match("TITAN_PATH_0_6", workflow)
         assert.equal(1, count_plain(
-            workflow, 'TITAN_ABI_VERSION: "3"'))
+            workflow, 'TITAN_ABI_VERSION: "2"'))
         local cache_abi = "abi-${{ env.TITAN_ABI_VERSION }}"
         assert.equal(4, count_plain(workflow, cache_abi))
         assert.equal(4, count_plain(workflow,

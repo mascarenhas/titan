@@ -68,7 +68,7 @@ typedef struct lua_longjmp {
    the compiler and standard-library semantic version.
    TITAN_LIBRARY_VERSION is its major/minor component and owns installed
    library paths plus the versioned TITAN_PATH override. */
-#define TITAN_ABI_VERSION "3"
+#define TITAN_ABI_VERSION "2"
 #define TITAN_VERSION "0.6.0"
 #define TITAN_LIBRARY_VERSION "0.6"
 #define TITAN_LIBRARY_VERSION_SUFFIX "_0_6"

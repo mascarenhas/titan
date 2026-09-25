@@ -108,8 +108,10 @@ consumers build full plans; binary consumers reconstruct exported public plans.
 Semantic `_types` serialization, analysis catalogs, and the language-server API
 remain independent. Analysis can inspect ABI/types without requiring native
 layout decoding. Native consumers require compatible complete physical metadata.
-ABI 3 is a clean rebuild boundary for code, providers, runtime SDK, and cached
-objects; no adapter reads the old all-UV layout.
+The prerelease ABI marker remains 2 and the compiler version remains 0.6.0.
+Rebuild code, providers and cached objects with the matching compiler and SDK;
+no adapter reads the old all-UV layout. Native imports require the new separate
+layout protocol even though the version marker is unchanged.
 
 ## Native owners and callback access
 

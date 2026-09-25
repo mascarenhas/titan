@@ -11,7 +11,8 @@ migrations. Commit milestones, obtain independent implementation and audience-
 aware documentation reviews, run the complete local mixed suite, push and obtain
 green Linux CI (including sanitizer) before opening the completed PR. Leave the
 PR unmerged. macOS CI is waived: never dispatch it. Keep the language-server API
-marker at 1; the generated-code ABI requires a clean rebuild transition.
+marker at 1. The maintainer explicitly keeps the prerelease generated-code ABI
+at 2 and compiler version at 0.6.0; rebuild artifacts for the new representation.
 
 Update both human language/implementation manuals and relevant agent skills.
 Human language docs explain behavior and runnable examples; implementation docs
@@ -69,7 +70,7 @@ additional implementation requirement. The durable goal remains the full issue
 ## Implementation stages
 
 1. Define checked nominal storage and separate physical metadata; implement
-   producer/consumer reconstruction and ABI/cache/publication updates. Test
+   producer/consumer reconstruction and cache/publication updates, without a version bump. Test
    source-free DSO/archive consumers with interleaved logical private fields,
    private foreign aggregates in producer-only tails, public prefix offsets and
    alignment, and analysis-only imports.
@@ -126,3 +127,30 @@ Use the existing native HTTP/fs/net/os/uv/async/reflect/json owners. Compiler
 representation and allocator probes belong in Busted/native harness coverage,
 not library API tests. Shared checkout artifacts prohibit concurrent compiler
 fixtures without isolated copies.
+
+## Implementation progress and reviews
+
+Milestones committed through native codegen and all enumerated stdlib owner
+migrations. ABI remains 2 and compiler remains 0.6.0 by the maintainer's later
+explicit instruction; an intermediate ABI-3 development build was stopped and
+its isolated validation prefix is being rebuilt with unchanged version markers.
+
+Independent code review identified const-qualified aggregate initialization,
+const numeric copy carriers and fixed-array assignment snapshots; all were fixed
+with focused regressions. Cross-review approved the scalar and array fixes.
+Separate code reviews covered source-free/incremental metadata, publication
+layout comparisons, native options, and every migrated callback lifetime.
+
+Human language docs and examples received independent audience review; examples
+compiled. Agent skills and implementation docs received separate independent
+reviews, correcting a TValue-by-value description and stale logical-index terms.
+Native reflect/JSON/provider regressions received independent review as well.
+
+Focused evidence so far: nominal storage 11 cases passed (one additional call
+adjustment case added for the full suite); native numeric options 6 cases passed
+plus alias-type-test regression; callback intrinsic 6 cases passed; source-free
+archive and incremental provider tests 2 cases passed; installer32 cases passed.
+The complete matching-provider mixed test run is still pending, logged at
+`/tmp/titan-174-full-test.log`. Do not treat this intermediate evidence as delivery.
+Allocation audit script and target-specific report are in preparation. No push,
+PR or Linux CI has been performed yet, and macOS remains waived.

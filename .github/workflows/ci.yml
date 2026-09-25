@@ -12,7 +12,7 @@ on:
 env:
   MAKEFLAGS: "-j2"
   TITAN_JOBS: "2"
-  TITAN_ABI_VERSION: "3"
+  TITAN_ABI_VERSION: "2"
 
 jobs:
   # Build and install the regular Linux tree once, run every uncovered
@@ -1017,6 +1017,8 @@ jobs:
             make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_parser_peg_limit_is_independent_of_depth_option'
           bash spec/support/ci_sanitizer_capture.sh json-numbers \
             make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_core_float_range_tags_and_round_trips'
+          bash spec/support/ci_sanitizer_capture.sh json-native-storage \
+            make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_mapping_.*native_numbers'
           for nesting_log in json-nesting json-nesting-mixed json-nesting-peg-limit; do
             if ! grep -Eq '^\[==========\] [1-9][0-9]* tests? ran\.$' \
                 "$TITAN_SANITIZER_LOG_DIR/$nesting_log.log"; then
