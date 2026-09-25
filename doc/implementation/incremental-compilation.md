@@ -86,7 +86,7 @@ objects after prerelease compiler/record representation changes within that ABI.
 ## Optimization across native objects
 
 `driver.CFLAGS` supplies `-O3` on supported platforms. Platform initialization
-adds `-flto -ffat-lto-objects` on Linux for GCC and Clang; macOS retains native
+adds `-flto=auto -ffat-lto-objects` on Linux for GCC and Clang; macOS retains native
 Mach-O objects without default LTO. Both generated-object compilation and
 the shared/executable link helpers use these defaults, including archive-backed
 validation images and executable protocol probes.

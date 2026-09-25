@@ -111,7 +111,6 @@ local function titanc(
     end
     for _, argument in ipairs({
         "CC=" .. (compiler or WRAPPER),
-        "MAKE=true",
         "TITAN_EXTRA_CPPFLAGS=",
         "TITAN_EXTRA_CFLAGS=",
         "TITAN_EXTRA_LDFLAGS=",

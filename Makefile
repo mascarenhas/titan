@@ -7,10 +7,17 @@
 #
 # Run `make help` to list the available targets.
 
-# Titan owns the Lua installation it runs on. Keep PREFIX absolute for native
-# dependency configuration and installation; Lua's default module paths derive
-# their root at runtime from the executable in <prefix>/bin.
-PREFIX ?= /usr/local
+# Quote one shell argument, including configured paths and command strings.
+make_shell_quote = '$(subst ','"'"',$(1))'
+make_shell_quote_value = '$(subst ','"'"',$(value $(1)))'
+
+# An explicit PREFIX always wins. After the initial `make lua`, discover the
+# Titan-owned Lua on PATH without loading ambient Lua init/module overrides.
+# Keep the launch path's spelling when it names that same physical prefix.
+ifeq ($(origin PREFIX),undefined)
+  _TITAN_PATH_PREFIX := $(shell sh $(call make_shell_quote,$(dir $(lastword $(MAKEFILE_LIST)))scripts/detect_lua_prefix.sh) 2>/dev/null)
+  PREFIX := $(if $(strip $(_TITAN_PATH_PREFIX)),$(_TITAN_PATH_PREFIX),/usr/local)
+endif
 override PREFIX := $(abspath $(PREFIX))
 
 # Must match the Lua source layout resolved by titan-compiler/driver.lua and
@@ -310,7 +317,7 @@ LUA_AR    ?= $(AR) rcu
 LUA_RANLIB ?= $(RANLIB)
 TITAN_DEFAULT_OPTFLAGS := -O3
 ifeq ($(HOST_OS),Linux)
-  TITAN_DEFAULT_OPTFLAGS += -flto -ffat-lto-objects
+  TITAN_DEFAULT_OPTFLAGS += -flto=auto -ffat-lto-objects
 endif
 CFLAGS    ?= --std=c99 $(TITAN_DEFAULT_OPTFLAGS) -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g
 LUA_MYCFLAGS  ?= -fPIC
@@ -323,10 +330,6 @@ TITAN_EXTRA_LDFLAGS  ?=
 TITAN_NO_LINE_DIRECTIVES ?=
 export CLANG_FORMAT TITAN_EXTRA_CPPFLAGS TITAN_EXTRA_CFLAGS \
 	TITAN_EXTRA_LDFLAGS TITAN_NO_LINE_DIRECTIVES
-# Quote one complete environment value for the recipe shell.  This preserves
-# embedded quotes in user flag strings so Titan's own argv parser sees them.
-make_shell_quote = '$(subst ','"'"',$(1))'
-make_shell_quote_value = '$(subst ','"'"',$(value $(1)))'
 RUNTIME_O := titan-runtime/titan.o
 MINICORO_O := titan-runtime/minicoro.o
 LTITANLIB_O := titan-runtime/ltitanlib.o
@@ -476,14 +479,17 @@ endif
 ROCKS_TREE      ?=
 ROCK_TITANC     ?=
 ROCK_LUA        ?= $(LUA_BIN)
-STDLIB_USE_INSTALLED_RUNTIME ?= 0
+STDLIB_USE_INSTALLED_RUNTIME ?= $(if $(wildcard $(TITAN_INSTALL_TREE)/bin/titanc),1,0)
 TITAN_ROCKS_ROOT ?=
 export TITAN_ROCKS_ROOT
-TITAN_LUA ?= $(ROCK_LUA)
-# Run the checkout's compiler sources with PREFIX's Lua. Prepending the checkout
-# keeps developer stdlib rebuilds on the edits that triggered them, while Lua's
-# configured default paths still find third-party dependencies under PREFIX.
-TITANC    ?= $(TITAN_LUA) -E -e 'package.path="./?.lua;./?/init.lua;" .. package.path; package.cpath="./titan-runtime/bootstrap/?.so;" .. package.cpath' ./titanc
+TITAN_LUA ?= $(or $(realpath $(ROCK_LUA)),$(ROCK_LUA))
+# Stdlib development uses the deployed compiler and its matching SDK once
+# installed. The checkout compiler remains the bootstrap path and an explicit
+# option through STDLIB_USE_INSTALLED_RUNTIME=0. Canonicalize only these build
+# inputs, so a LuaRocks /var/home root and a PATH /home alias share one stamp.
+STDLIB_INSTALLED_ROOT = $(or $(realpath $(TITAN_INSTALL_TREE)),$(abspath $(TITAN_INSTALL_TREE)))
+STDLIB_ROCKS_ROOT = $(if $(strip $(TITAN_ROCKS_ROOT)),$(or $(realpath $(TITAN_ROCKS_ROOT)),$(abspath $(TITAN_ROCKS_ROOT))),$(if $(filter 1,$(STDLIB_USE_INSTALLED_RUNTIME)),$(STDLIB_INSTALLED_ROOT)))
+TITANC ?= $(if $(filter 1,$(STDLIB_USE_INSTALLED_RUNTIME)),$(call make_shell_quote,$(STDLIB_INSTALLED_ROOT)/bin/titanc),$(TITAN_LUA) -E -e 'package.path="./?.lua;./?/init.lua;" .. package.path; package.cpath="./titan-runtime/bootstrap/?.so;" .. package.cpath' ./titanc)
 TITAN_COMPILER_LUA := $(wildcard titan-compiler/*.lua \
 	titan-compiler/checker/*.lua titan-compiler/coder/*.lua c-parser/*.lua)
 
@@ -493,7 +499,7 @@ TITAN_COMPILER_LUA := $(wildcard titan-compiler/*.lua \
 # it is not part of an installed Titan tree.
 TITAN_INSTALL_TREE         := $(if $(strip $(ROCKS_TREE)),$(ROCKS_TREE),$(PREFIX))
 STDLIB_INSTALL_STAGE       ?= $(CURDIR)
-# CI may preserve the exact private-stage provider and its generated C/object
+# CI may preserve the exact provider and its generated C/object
 # pairs for failure-only sanitizer symbolization before later tests can replace
 # those outputs. Ordinary builds leave this empty and pay no snapshot cost.
 TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT ?=
@@ -572,8 +578,10 @@ help: ## Show this help
 	@echo "install libuv openssl@3 pkgconf. Add clang-format only for --pretty-print."
 	@echo "llhttp and SQLite $(SQLITE3_VERSION) are always bundled."
 	@echo "For a standalone installation, choose one writable PREFIX and run:"
-	@echo "  make lua PREFIX=/path && make luarocks PREFIX=/path && make libuv"
-	@echo "  PATH=/path/bin:\$$PATH /path/bin/luarocks make"
+	@echo "  make lua PREFIX=/path"
+	@echo "  export PATH=/path/bin:\$$PATH"
+	@echo "  make luarocks && luarocks make"
+	@echo "Later Make commands detect PREFIX from Titan's Lua on PATH."
 
 libuv: ## Build/validate libuv (bundled by default; LIBUV_MODE=system is optional)
 
@@ -2135,8 +2143,11 @@ install-titan-sdk: $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) $(TITAN_RUNTIME_LU
 # archive to titanc through the same -X payload as ltitanlib.o and the private
 # LPegLabel archive.
 ifeq ($(STDLIB_USE_INSTALLED_RUNTIME),1)
-  STDLIB_PLATFORM_PREREQS :=
-  STDLIB_NATIVE_PREREQS := $(STDLIB_EXTRA_OBJECTS)
+  STDLIB_PLATFORM_PREREQS := libuv openssl
+  STDLIB_NATIVE_PREREQS := $(STDLIB_EXTRA_OBJECTS) \
+	$(STDLIB_ROCKS_ROOT)/lib/titan/$(TITAN_LIBRARY_VERSION)/libtitan.a \
+	$(STDLIB_ROCKS_ROOT)/lib/libbacktrace.a $(STDLIB_ROCKS_ROOT)/lib/liblua.a
+  STDLIB_BOOTSTRAP_PREREQ :=
   STDLIB_RUNTIME_ARCHIVE_PREREQ :=
   STDLIB_TOOL_PREREQS :=
   ifeq ($(LIBUV_MODE),system)
@@ -2169,11 +2180,23 @@ endif
 # Compiler/SDK changes invalidate every module; native header changes enter at
 # their owning modules and propagate through the explicit source import graph.
 # Track the selected SDK's source headers, including installed-prefix updates.
-STDLIB_COMPILER_PREREQS = titanc $(TITAN_COMPILER_LUA) Makefile \
+ifeq ($(STDLIB_USE_INSTALLED_RUNTIME),1)
+  STDLIB_COMPILER_PREREQS = Makefile $(STDLIB_ROCKS_ROOT)/bin/titanc \
+	$(wildcard $(STDLIB_ROCKS_ROOT)/lib/luarocks/rocks-$(LUA_ABI_VERSION)/titan/*/bin/titanc) \
+	$(wildcard $(STDLIB_ROCKS_ROOT)/share/lua/$(LUA_ABI_VERSION)/titan-compiler/*.lua \
+	$(STDLIB_ROCKS_ROOT)/share/lua/$(LUA_ABI_VERSION)/titan-compiler/checker/*.lua \
+	$(STDLIB_ROCKS_ROOT)/share/lua/$(LUA_ABI_VERSION)/titan-compiler/coder/*.lua \
+	$(STDLIB_ROCKS_ROOT)/share/lua/$(LUA_ABI_VERSION)/c-parser/*.lua) \
+	$(STDLIB_ROCKS_ROOT)/include/minicoro.h $(STDLIB_ROCKS_ROOT)/include/titan.h \
+	$(STDLIB_ROCKS_ROOT)/include/titan/ffi.h \
+	$(wildcard $(STDLIB_ROCKS_ROOT)/src/$(LUA_DIR)/*.h)
+else
+  STDLIB_COMPILER_PREREQS = titanc $(TITAN_COMPILER_LUA) Makefile \
 	$(TITAN_SDK_ROOT_HEADERS) $(TITAN_SDK_NAMESPACED_HEADERS) \
 	$(TITAN_RUNTIME_LUA_HEADERS)
+endif
 ifeq ($(LIBUV_MODE),bundled)
-  STDLIB_UV_HEADER_DIRS = $(LIBUV_INCLUDE_DIR)
+  STDLIB_UV_HEADER_DIRS = $(if $(filter 1,$(STDLIB_USE_INSTALLED_RUNTIME)),$(STDLIB_ROCKS_ROOT)/include,$(LIBUV_INCLUDE_DIR))
 else
   STDLIB_UV_HEADER_DIRS = $(shell $(LIBUV_PKG_CONFIG) --variable=includedir libuv 2>/dev/null)
 endif
@@ -2195,7 +2218,7 @@ STDLIB_C_INPUTS_sqlite3 = $(SQLITE3_HEADER) $(SQLITE3_TITAN_HEADERS)
 STDLIB_COMPILER_ENV = CC=$(call make_shell_quote,$(CC)) \
 	AR=$(call make_shell_quote,$(AR)) RANLIB=$(call make_shell_quote,$(RANLIB)) \
 	TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
-	TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)) TITAN_RUNTIME_PREBUILT=1 \
+	TITAN_ROCKS_ROOT=$(call make_shell_quote,$(STDLIB_ROCKS_ROOT)) TITAN_RUNTIME_PREBUILT=1 \
 	TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_SQLITE3_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
 	TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))) \
 	TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS) $(STDLIB_OPENSSL_LDFLAGS)))
@@ -2220,6 +2243,7 @@ $(call stdlib_stem,$(1)).o: FORCE $(filter titan/$(1).titan titan/$(1)/%.titan,$
 	  test -f "$$$$output" && test ! -L "$$$$output" || stale=1; \
 	done; \
 	if test "$$$$stale" = 1; then \
+	  echo "==> Compiling stdlib module titan.$(1)"; \
 	  rm -f "$$@"; \
 	  unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 	  $$(STDLIB_COMPILER_ENV) $$(TITANC) --source-first --incremental -j1 -c titan.$(1); \
@@ -2261,7 +2285,7 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 		$(call make_shell_quote,RANLIB=$(RANLIB)) \
 		$(call make_shell_quote,TITANC=$(TITANC)) \
 		$(call make_shell_quote,TITAN_LUA=$(TITAN_LUA)) \
-		$(call make_shell_quote,TITAN_ROCKS_ROOT=$(TITAN_ROCKS_ROOT)) \
+		$(call make_shell_quote,TITAN_ROCKS_ROOT=$(STDLIB_ROCKS_ROOT)) \
 		$(call make_shell_quote,STDLIB_USE_INSTALLED_RUNTIME=$(STDLIB_USE_INSTALLED_RUNTIME)) \
 		$(call make_shell_quote,STDLIB_ROOTS=$(STDLIB_ROOTS)) \
 		$(call make_shell_quote,STDLIB_TITAN_SOURCES=$(STDLIB_TITAN_SOURCES)) \
@@ -2354,6 +2378,7 @@ $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_MODULE_OBJECTS) \
 	}; \
 	if test "$$stale" = 0 && ! validate_archive; then stale=1; fi; \
 	if test "$$stale" = 1; then \
+	  echo "==> Linking paired Titan stdlib providers"; \
 	  rm -f "$@"; \
 	  rm -f $(STDLIB_SOS) $(STDLIB_QUALIFIED_SOS); \
 	  rm -rf $(addsuffix .dSYM,$(STDLIB_SOS)) \
@@ -2392,34 +2417,22 @@ install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 	root=$$(CDPATH= cd "$(TITAN_INSTALL_TREE)" && pwd -P); \
 	stage=$(call make_shell_quote,$(STDLIB_INSTALL_STAGE)); \
 	( unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
-	  export CC=$(call make_shell_quote,$(CC)); \
-	  export AR=$(call make_shell_quote,$(AR)); \
-	  export RANLIB=$(call make_shell_quote,$(RANLIB)); \
-	  export TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(CURDIR)); \
-	  export TITAN_PATH=; \
-	  export TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)); \
-	  export TITAN_RUNTIME_PREBUILT=1; \
-	  export TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_SQLITE3_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))); \
-	  export TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))); \
-	  export TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS) $(STDLIB_OPENSSL_LDFLAGS))); \
-	  "$(TITAN_LUA)" -E "$(CURDIR)/scripts/stdlib_installer.lua" \
-	    "$$stage" "$$root" )
+	  if test -n $(call make_shell_quote,$(strip $(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT))); then \
+	    $(STDLIB_COMPILER_ENV) "$(TITAN_LUA)" -E \
+	      "$(CURDIR)/spec/support/ci_asan_generated_c_context.lua" snapshot \
+	      $(call make_shell_quote,$(strip $(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT))) \
+	      "$$stage/titan.so" "$(CURDIR)/titan" \
+	      "$$root/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.so" "$(CURDIR)/titan"; \
+	  fi; \
+	  echo "==> Validating and publishing Titan stdlib to $$root"; \
+	  $(STDLIB_COMPILER_ENV) "$(TITAN_LUA)" -E \
+	    "$(CURDIR)/scripts/stdlib_installer.lua" "$$stage" "$$root" )
 
-# The post-install compiler runs in a private destination-filesystem directory,
-# so every -X input is absolute. Both modes carry ltitanlib.o, private LPegLabel,
-# private llhttp, and private SQLite. Bundled mode additionally
-# carries the pinned libuv and OpenSSL archives; system dependencies remain
-# final-link inputs instead.
-STDLIB_STAGED_EXTRA_OBJECTS = $(foreach object,$(STDLIB_EXTRA_OBJECTS),$(abspath $(object)))
-
-# LuaRocks invokes this only after deploying titanc and its Lua compiler
-# modules. Reuse the ordinary object DAG with that deployed compiler, then link
-# the paired provider in a private directory on the destination filesystem.
-# The Lua publisher validates the complete protocol
-# and exact staged titan.test compiler source, commits twenty-one shims, that
-# source, the archive, and the one macOS dSYM before renaming titan.so last;
-# any caught failure restores the prior pair or first-install bootstrap.
-rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
+# LuaRocks invokes this after deploying the compiler and SDK. Use the same
+# object DAG, provider pair, and completion stamp as a later make stdlib.
+# The publisher validates and copies the outputs into private destination
+# siblings, preserving its rollback and final-DSO-rename publication protocol.
+rock-post-install:
 	@test -n "$(strip $(ROCKS_TREE))" || { \
 	  echo "ERROR: rock-post-install requires ROCKS_TREE" >&2; exit 1; \
 	}
@@ -2429,52 +2442,11 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 	@test -n "$(strip $(ROCK_LUA))" && test -x "$(ROCK_LUA)" || { \
 	  echo "ERROR: rock-post-install requires ROCK_LUA" >&2; exit 1; \
 	}
-	+$(RECURSIVE_WRAPPER_GUARD) $(MAKE) --no-print-directory stdlib-objects \
-	  $(call make_shell_quote,TITANC=$(call make_shell_quote,$(ROCK_TITANC))) \
-	  TITAN_LUA=$(call make_shell_quote,$(ROCK_LUA)) \
-	  TITAN_ROCKS_ROOT=$(call make_shell_quote,$(abspath $(ROCKS_TREE))) \
+	+$(RECURSIVE_WRAPPER_GUARD) $(MAKE) --no-print-directory install-stdlib \
+	  $(call make_shell_quote,TITANC=$(call make_shell_quote,$(realpath $(ROCK_TITANC)))) \
+	  TITAN_LUA=$(call make_shell_quote,$(realpath $(ROCK_LUA))) \
+	  TITAN_ROCKS_ROOT=$(call make_shell_quote,$(STDLIB_INSTALLED_ROOT)) \
 	  STDLIB_USE_INSTALLED_RUNTIME=1
-	@set -e; \
-	mkdir -p "$(ROCKS_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)"; \
-	rocks_tree=$$(CDPATH= cd "$(ROCKS_TREE)" && pwd -P); \
-	version_dir="$$rocks_tree/lib/titan/$(TITAN_LIBRARY_VERSION)"; \
-	share_dir="$$rocks_tree/share/titan"; \
-	mkdir -p "$$share_dir/LICENSES"; \
-	install -m 0644 THIRD_PARTY_NOTICES.md \
-	  "$$share_dir/THIRD_PARTY_NOTICES.md"; \
-	install -m 0644 $(STDLIB_LICENSES) "$$share_dir/LICENSES/"; \
-	stage=$$(mktemp -d "$$version_dir/.titan-stdlib-stage.XXXXXX"); \
-	trap 'rm -rf "$$stage"' EXIT HUP INT TERM; \
-	echo "==> Building paired Titan stdlib providers with $(ROCK_TITANC)"; \
-	( cd "$$stage"; \
-	  unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
-	  mkdir -p titan; \
-	  install -m 0644 "$(CURDIR)/titan/test.titan" titan/test.titan; \
-	  export TITAN_ROCKS_ROOT="$$rocks_tree"; \
-	  export TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)="$$version_dir"; \
-	  export TITAN_PATH=; \
-	  export TITAN_RUNTIME_PREBUILT=1; \
-	  export CC=$(call make_shell_quote,$(CC)); \
-	  export AR=$(call make_shell_quote,$(AR)); \
-	  export RANLIB=$(call make_shell_quote,$(RANLIB)); \
-	  export TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_SQLITE3_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))); \
-	  export TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))); \
-	  export TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS) $(STDLIB_OPENSSL_LDFLAGS))); \
-	  $(call make_shell_quote,$(ROCK_TITANC)) --source-first --incremental --tree \
-	    $(call make_shell_quote,$(CURDIR)) $(STDLIB_ROOTS) \
-	    -X $(STDLIB_STAGED_EXTRA_OBJECTS); \
-	  if test -n $(call make_shell_quote,$(strip $(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT))); then \
-	    "$(ROCK_LUA)" -E \
-	      "$(CURDIR)/spec/support/ci_asan_generated_c_context.lua" \
-	      snapshot \
-	      $(call make_shell_quote,$(strip $(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT))) \
-	      "$$stage/titan.so" "$(CURDIR)/titan" "$$version_dir/titan.so" \
-	      "$(CURDIR)/titan"; \
-	  fi; \
-	  "$(ROCK_LUA)" -E "$(CURDIR)/scripts/stdlib_installer.lua" \
-	    "$$stage" "$$rocks_tree" ); \
-	trap - EXIT HUP INT TERM; \
-	rm -rf "$$stage"
 
 # Compatibility name for callers of the former rockspec build target.  It no
 # longer builds stdlib before LuaRocks has deployed the compiler.

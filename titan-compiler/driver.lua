@@ -474,7 +474,7 @@ local function select_platform_defaults(uname, is_darwin)
     if uname == "Linux" then
         -- Fat objects retain the native sections needed by the metadata and
         -- target readers, plus IR for GCC/Clang's optimizing final link.
-        defaults = defaults .. " -flto -ffat-lto-objects"
+        defaults = defaults .. " -flto=auto -ffat-lto-objects"
     end
     if driver.CFLAGS == default_cflags then driver.CFLAGS = defaults end
     default_cflags = defaults

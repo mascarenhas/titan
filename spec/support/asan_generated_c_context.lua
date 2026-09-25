@@ -355,9 +355,9 @@ function M.snapshot(snapshot, provider, source_root, runtime_provider,
             join(join(snapshot, "headers"), header.relative))
         if not ok then return nil, err end
     end
-    -- Capture the compiler argv while rock-post-install's private stdlib flags
-    -- are still in the environment.  Reconstructing those flags after the
-    -- private stage has been deleted would make the shadow proof unreliable.
+    -- Capture the compiler argv under the shared stdlib build environment.
+    -- Reconstructing those flags after publication or later tests replace the
+    -- generated outputs would make the shadow proof unreliable.
     local driver = require "titan-compiler.driver"
     local compile_argv
     compile_argv, err = driver.generated_compile_prefix()

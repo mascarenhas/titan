@@ -254,11 +254,11 @@ duplicate definitions.
 
 The Linux sanitizer workflow keeps normal Titan attribution on the code that
 it executes, but preserves an exact second view for a failed AddressSanitizer
-report. When the opt-in diagnostic snapshot is configured, `rock-post-install`
-copies the sanitized `titan.so` from the standard library's private destination
-stage, together with every matching generated `.c`/`.o` translation-unit pair
-from the source output paths used for that link, after `titanc` has completed
-and before publication removes that stage. The snapshot also records the
+report. When the opt-in diagnostic snapshot is configured, the shared stdlib
+publication recipe copies the sanitized checkout `titan.so`, together with
+every matching generated `.c`/`.o` translation-unit pair from the source output
+paths used for that link, after `titanc` has completed and before publication
+or later tests can replace those outputs. The snapshot also records the
 canonical installed provider path and source display root plus the NUL-delimited
 argv returned by
 `driver.generated_compile_prefix()`. It therefore describes the precise

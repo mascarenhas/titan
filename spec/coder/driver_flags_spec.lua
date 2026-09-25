@@ -39,6 +39,7 @@ local ENVIRONMENT_KEYS = {
     "CLANG_FORMAT",
     "CCACHE_DISABLE",
     "MAKE",
+    "TITAN_RUNTIME_PREBUILT",
     "TITAN_EXTRA_CPPFLAGS",
     "TITAN_EXTRA_CFLAGS",
     "TITAN_EXTRA_LDFLAGS",
@@ -51,6 +52,8 @@ local function titanc(overrides, ...)
         CLANG_FORMAT = "clang-format",
         CCACHE_DISABLE = "1",
         MAKE = "make",
+        -- Preserve the shared runtime without replacing the Make used by GCC LTO.
+        TITAN_RUNTIME_PREBUILT = "1",
         TITAN_EXTRA_CPPFLAGS = "",
         TITAN_EXTRA_CFLAGS = "",
         TITAN_EXTRA_LDFLAGS = "",
@@ -120,11 +123,6 @@ describe("Titan driver generic build flags", function()
             CC = "env TITAN_DRIVER_CC_SENTINEL=present cc " ..
                 "-DTITAN_DRIVER_CC_HONORED=1",
             CLANG_FORMAT = "sh -c 'exit 23' --",
-            -- The prepared checkout runtime is shared Make-owned state. Keep
-            -- this compiler-flags test from feeding its sentinel CC back into
-            -- Make's dependency configuration stamps; the real compile and
-            -- foreign-import probe below still use that CC.
-            MAKE = "true",
             TITAN_EXTRA_CPPFLAGS = "-iquote '" .. INCLUDE .. "' " ..
                 "-DTITAN_DRIVER_CPP_BRANCH=37",
             TITAN_EXTRA_CFLAGS =
@@ -227,12 +225,6 @@ describe("Titan driver generic build flags", function()
             verbose_output)
         assert.truthy(verbose_output:find("'-L" .. INCLUDE .. "'", 1,
             true), verbose_output)
-
-        local runtime_checks = command_lines(verbose_output,
-            "TITAN_RUNTIME_LUA_SOURCE_PATH=lua-5.5.1/src")
-        assert.equal(1, #runtime_checks, verbose_output)
-        assert.truthy(runtime_checks[1]:find(
-            "titan-runtime/libtitan.a", 1, true), runtime_checks[1])
     end)
 
     it("uses O3 everywhere and native-container LTO by default on Linux", function()
@@ -243,7 +235,7 @@ describe("Titan driver generic build flags", function()
         for _, line in ipairs(command_lines(verbose_output, "'-O3'")) do
             if line:find("'-c'", 1, true) or line:find("'-shared'", 1, true) then
                 checked = checked + 1
-                assert.equal(linux, line:find("'-flto'", 1, true) ~= nil, line)
+                assert.equal(linux, line:find("'-flto=auto'", 1, true) ~= nil, line)
                 assert.equal(linux, line:find("'-ffat-lto-objects'", 1, true) ~= nil, line)
             end
         end
@@ -255,7 +247,6 @@ describe("Titan driver generic build flags", function()
 
     it("lets explicit compile and link flags disable optimization and LTO", function()
         local ok, output = titanc({
-            MAKE = "true",
             CC = "cc -DTITAN_DRIVER_CC_HONORED=1",
             TITAN_EXTRA_CPPFLAGS = "-iquote '" .. INCLUDE .. "' " ..
                 "-DTITAN_DRIVER_CPP_BRANCH=37",
@@ -271,7 +262,7 @@ describe("Titan driver generic build flags", function()
                     local override = assert(line:find("'-O0'", 1, true), line)
                     assert.is_true(baseline < override, line)
                     local disabled = assert(line:find("'-fno-lto'", 1, true), line)
-                    local enabled = line:find("'-flto'", 1, true)
+                    local enabled = line:find("'-flto=auto'", 1, true)
                     assert.is_true(not enabled or enabled < disabled, line)
                     checked = checked + 1
                 end
@@ -282,7 +273,6 @@ describe("Titan driver generic build flags", function()
 
     it("preserves an explicitly selected compiler random seed", function()
         local ok, output = titanc({
-            MAKE = "true",
             CC = "cc -DTITAN_DRIVER_CC_HONORED=1",
             TITAN_EXTRA_CPPFLAGS = "-iquote '" .. INCLUDE .. "' " ..
                 "-DTITAN_DRIVER_CPP_BRANCH=37",
@@ -293,27 +283,40 @@ describe("Titan driver generic build flags", function()
         assert.falsy(output:find("'-frandom-seed=" .. MODULE .. "'", 1, true), output)
     end)
 
-    it("builds the source runtime against the Lua tree selected by --lua",
-       function()
-        local lua_source = lfs.currentdir() .. "/lua-5.5.1/src"
-        -- Explicit command-line roots are source-first. Supply this fixture's
-        -- required foreign-import inputs instead of relying on the binary
-        -- produced by setup to hide its source.
-        local ok, output, why, code = titanc({
-            MAKE = "true",
-            CC = "cc -DTITAN_DRIVER_CC_HONORED=1",
-            TITAN_EXTRA_CPPFLAGS = "-I '" .. INCLUDE .. "' " ..
-                "-DTITAN_DRIVER_CPP_BRANCH=37",
-        }, "-v",
-            "--lua", lua_source, "--tree", APPLICATION, MODULE)
-        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-            tostring(code) .. ")")
-        local runtime_checks = command_lines(output,
-            "TITAN_RUNTIME_LUA_SOURCE_PATH=" .. lua_source)
-        assert.equal(1, #runtime_checks, output)
-        assert.truthy(runtime_checks[1]:find(
-            "titan-runtime/libtitan.a", 1, true), runtime_checks[1])
-    end)
+    for _, explicit in ipairs({ false, true }) do
+        local selection = explicit and "selected by --lua" or "selected by default"
+        it("builds the source runtime against the Lua tree " .. selection,
+           function()
+            local lua_source = "lua-5.5.1/src"
+            local arguments = { "-v" }
+            if explicit then
+                lua_source = lfs.currentdir() .. "/" .. lua_source
+                arguments[#arguments + 1] = "--lua"
+                arguments[#arguments + 1] = lua_source
+            end
+            arguments[#arguments + 1] = "--tree"
+            arguments[#arguments + 1] = APPLICATION
+            arguments[#arguments + 1] = MODULE
+            -- Inspect the runtime Make argv without rebuilding shared state.
+            -- Disable LTO only here, because GCC also consumes this fake MAKE.
+            local ok, output, why, code = titanc({
+                MAKE = "true",
+                TITAN_RUNTIME_PREBUILT = "0",
+                CC = "cc -DTITAN_DRIVER_CC_HONORED=1",
+                TITAN_EXTRA_CPPFLAGS = "-I '" .. INCLUDE .. "' " ..
+                    "-DTITAN_DRIVER_CPP_BRANCH=37",
+                TITAN_EXTRA_CFLAGS = "-O0 -fno-lto",
+                TITAN_EXTRA_LDFLAGS = "-fno-lto",
+            }, table.unpack(arguments))
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                tostring(code) .. ")")
+            local runtime_checks = command_lines(output,
+                "TITAN_RUNTIME_LUA_SOURCE_PATH=" .. lua_source)
+            assert.equal(1, #runtime_checks, output)
+            assert.truthy(runtime_checks[1]:find(
+                "titan-runtime/libtitan.a", 1, true), runtime_checks[1])
+        end)
+    end
 end)
 
 describe("Titan generated-source pretty-printing", function()
@@ -323,7 +326,6 @@ describe("Titan generated-source pretty-printing", function()
         return {
             CC = "cc -DTITAN_DRIVER_CC_HONORED=1",
             CLANG_FORMAT = "sh -c 'exit 23' --",
-            MAKE = "true",
             TITAN_EXTRA_CPPFLAGS = "-iquote '" .. INCLUDE .. "' " ..
                 "-DTITAN_DRIVER_CPP_BRANCH=37",
         }
@@ -408,7 +410,6 @@ describe("Titan driver malformed build flags", function()
         local malformed = {
             CLANG_FORMAT = "'unterminated",
             CC = "cc -DTITAN_DRIVER_CC_HONORED=1",
-            MAKE = "true",
             TITAN_EXTRA_CPPFLAGS = "-iquote '" .. INCLUDE .. "' " ..
                 "-DTITAN_DRIVER_CPP_BRANCH=37",
         }

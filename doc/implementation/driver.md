@@ -982,12 +982,12 @@ invocation-wide source-header plan when the CLI owns the compilation:
    concurrently, bounded by `--jobs`/`TITAN_JOBS`:
 
    ```sh
-   cc --std=c99 -O3 -flto -ffat-lto-objects -Wall -fPIC -g -c foo/bar.c \
+   cc --std=c99 -O3 -flto=auto -ffat-lto-objects -Wall -fPIC -g -c foo/bar.c \
       -I <root>/include -I <root>/src/lua-5.5.1 -o foo/bar.o
    ```
 
    These command examples show Linux defaults. Both GCC and Clang use
-   `-O3 -flto -ffat-lto-objects` there, retaining native object sections for
+   `-O3 -flto=auto -ffat-lto-objects` there, retaining native object sections for
    metadata loading while enabling LTO. Other platforms, including macOS,
    use `-O3` without the two LTO options. Compilation and final links share
    those defaults; an explicit LTO opt-out requires `-fno-lto` in both
@@ -1112,7 +1112,7 @@ explicitly named DSO from the complete logical source-module object union.
 The final argument is an optional Darwin install name:
 
 ```sh
-cc --std=c99 -O3 -flto -ffat-lto-objects -Wall -fPIC -g -shared \
+cc --std=c99 -O3 -flto=auto -ffat-lto-objects -Wall -fPIC -g -shared \
    -o app.so app_model.o app_view.o dep.o ... \
    [force-load selected-provider.a ...] \
    [ordered extra.o ... force-load native-payload.a ...] \
@@ -1194,11 +1194,11 @@ srlua-derived C `main` — compiles it with the normal extra compile flags,
 and then links its object with the same object set as a library:
 
 ```sh
-cc [TITAN_EXTRA_CPPFLAGS...] --std=c99 -O3 -flto -ffat-lto-objects -Wall -fPIC -g \
+cc [TITAN_EXTRA_CPPFLAGS...] --std=c99 -O3 -flto=auto -ffat-lto-objects -Wall -fPIC -g \
    [TITAN_EXTRA_CFLAGS...] \
    -c foo/bar__entrypoint.c -I <root>/include -I <root>/src/lua-5.5.1 \
    -o foo/bar__entrypoint.o
-cc --std=c99 -O3 -flto -ffat-lto-objects -Wall -fPIC -g -o foo/bar \
+cc --std=c99 -O3 -flto=auto -ffat-lto-objects -Wall -fPIC -g -o foo/bar \
    foo/bar__entrypoint.o foo/bar.o ... \
    [selected-provider.a ...] [extra.o ...] \
    <root>/lib/titan/0.6/libtitan.a [selected-provider.a ...] \
@@ -1453,15 +1453,23 @@ absent; an existing valid bootstrap or full image is preserved, and an
 incompatible image is left untouched with an error. The rock manifest then
 deploys the compiler script/Lua modules but does not own a `titan` C module.
 
-The source-only post-install hook runs the same `stdlib-objects` graph using the
-just-deployed `titanc`, then links once in a private staging directory on the
-destination filesystem. Source-adjacent objects remain in the persistent
-checkout, selected through `--tree`; a fresh publication stage does not force
-recompilation. Both phases use the same effective native toolchain, extra flags,
-rocks root, runtime mode, and libuv/OpenSSL policies. The hook snapshots
-`titan/test.titan` into that exact stage before linking. The publisher validates the twenty-two Lua entries, twenty-one logical
+The source-only post-install hook delegates to `install-stdlib` using the
+just-deployed `titanc`. It retains source-adjacent objects, checkout providers
+and shims, and the completion stamp. Once the prefix contains `titanc`, ordinary
+`make stdlib` selects that installed compiler and SDK too. Canonical compiler,
+Lua, and SDK paths keep the configuration identical even when LuaRocks and PATH
+spell a symlinked prefix differently. Installed compiler Lua files, the deployed
+CLI, and SDK headers invalidate objects; runtime archives also invalidate the
+final link. Published providers and shims are outputs, not prerequisites, so
+publication cannot invalidate the retained build. `STDLIB_USE_INSTALLED_RUNTIME=0`
+selects the checkout compiler/runtime explicitly.
+
+The shared publication recipe uses the same effective native toolchain, extra
+flags, rocks root, runtime mode, and libuv/OpenSSL policies as compilation.
+Optional sanitizer snapshots capture the retained provider and exact generated
+C/object pairs before publication or tests can replace them. The publisher validates the twenty-two Lua entries, twenty-one logical
 protocols, exact twenty-one-key archive metadata, three-way
-embedded/DSO/archive-backed ABI/types equality, twenty-one shims, the canonical test-support source, and Darwin dSYM. It backs up
+embedded/DSO/archive-backed ABI/types equality, twenty-one shims, the canonical test-support source, and Darwin dSYM. It prepares private destination copies and backs up
 the active `0.6` public set and stale active-layout copies, commits shims and
 the compiler source, then dSYM and `titan.a`, and renames the validated DSO last. A caught or injected
 failure restores either the prior complete pair or the first-install
@@ -1833,7 +1841,7 @@ the explicit public-header input for its native helper builds.
 
 | Name | Where read | Default / value | Meaning |
 | --- | --- | --- | --- |
-| `PREFIX` | Makefile / rockspec build input | `/usr/local` for direct Make; an absolute per-project path in the supported workflow | Owns the Lua installation plus the LuaRocks executable and configuration; Lua module paths resolve from the running executable rather than embedding this build destination. |
+| `PREFIX` | Makefile / rockspec build input | Titan Lua prefix detected from `PATH`, otherwise `/usr/local`; explicit `PREFIX` takes precedence | Owns the Lua installation plus the LuaRocks executable and configuration; Lua module paths resolve from the running executable rather than embedding this build destination. |
 | `ROCKS_TREE` | Makefile / rockspec build input | empty for a direct build; LuaRocks' `$(SCRIPTS_DIR)/..` for a source install | Owns the installed Titan rock, SDK, and stdlib. The supported workflow currently sets it equal to `PREFIX`, but they are separate ownership concepts. |
 | `TITAN_PATH_0_6` | `driver.lua` (compile time), `titan.c` `pushpath` (run time) | unset | Versioned module search path; wins over `TITAN_PATH`. |
 | `TITAN_PATH` | same | unset | Module search path; `;;` expands to the ordinary default at compile time and run time. |
@@ -1869,7 +1877,7 @@ the explicit public-header input for its native helper builds.
 | `CC` / `driver.CC` | environment / `driver.lua` | `"cc"` | C compiler command, parsed as shell words and shared with foreign-import probing. |
 | `TITAN_JOBS` / `titanc --jobs` | environment / CLI | `1` | Positive bound for concurrent generated logical-module C object compilations. The CLI wins over the environment. It does not affect checker probes, code generation, formatting, entrypoints, linking, archiving, or provider validation. |
 | `CLANG_FORMAT` / `driver.CLANG_FORMAT` | environment / `driver.lua` | `"clang-format"` | Formatter command used only by `titanc --pretty-print`, then parsed as shell words. The driver appends its in-place operation, fixed explicit style with include sorting disabled, and generated-source path; default builds neither parse nor invoke it. |
-| `driver.CFLAGS` | `driver.lua` | C99, `-O3`, warnings, PIC and debug info; Linux additionally uses `-flto -ffat-lto-objects` | Shared compile/link defaults for both GCC and Clang. macOS keeps native objects without LTO. |
+| `driver.CFLAGS` | `driver.lua` | C99, `-O3`, warnings, PIC and debug info; Linux additionally uses `-flto=auto -ffat-lto-objects` | Shared compile/link defaults for both GCC and Clang. macOS keeps native objects without LTO. |
 | `TITAN_EXTRA_CPPFLAGS` / `driver.EXTRA_CPPFLAGS` | environment / `driver.lua` | empty | Parsed `-I`/`-D` and other preprocessing inputs; used by foreign-import compiler probes and prepended to every Titan/runtime/entrypoint compilation. |
 | `TITAN_EXTRA_CFLAGS` / `driver.EXTRA_CFLAGS` | environment / `driver.lua` | empty | Parsed compilation-only flags, after fixed defaults; never used by final links. |
 | `TITAN_EXTRA_LDFLAGS` / `driver.EXTRA_LDFLAGS` | environment / `driver.lua` | empty | Parsed ordered linker inputs appended to final module and program links. |

@@ -954,6 +954,11 @@ assert(support._loadlib(%q, "titan_uv_abi"))
         assert.truthy(entries > 0, output)
         assert.falsy(output:find(workspace .. "/lua_modules", 1, true), output)
 
+        -- Clean Lua derives its search paths from the physical executable
+        -- location; LuaRocks above retains the configured prefix spelling.
+        ok, output = run({ "pwd", "-P" }, PREFIX)
+        assert.truthy(ok, output)
+        local physical_prefix = assert(output:match("^(.-)\n$"))
         local runtime_program = string.format([[
             local provider_path = %q
             local shim_root = %q
@@ -1087,7 +1092,8 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             async.loop()
             assert(direct:status():as_string() == "succeeded")
             assert(direct_result == "direct")
-        ]], STDLIB_PROVIDER, STDLIB_SHIMDIR)
+        ]], physical_prefix .. "/lib/titan/0.6/titan.so",
+            physical_prefix .. "/share/lua/5.5/titan")
         ok, output, why, code = run(clean_environment({
             LUA, "-e", runtime_program,
         }), workspace)
@@ -1298,6 +1304,204 @@ assert(type(uv.Error.new) == "function")
         }), workspace)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
+    end)
+end)
+
+describe("automatic Lua prefix selection", function()
+    local workspace
+    local repository
+    local make_command
+    local tools_path
+    local inspection
+
+    local function checked_run(argv)
+        local ok, output = run(argv, workspace)
+        assert.truthy(ok, output)
+        return output
+    end
+
+    local function environment(path, extra)
+        local argv = { "env" }
+        for _, name in ipairs({
+            "PREFIX", "MAKEFLAGS", "MFLAGS", "MAKEOVERRIDES", "MAKELEVEL",
+            "GNUMAKEFLAGS", "LUA_INIT", "LUA_INIT_5_5", "LUA_PATH",
+            "LUA_PATH_5_5", "LUA_CPATH", "LUA_CPATH_5_5",
+        }) do
+            argv[#argv + 1] = "-u"
+            argv[#argv + 1] = name
+        end
+        argv[#argv + 1] = "PATH=" .. path
+        for _, word in ipairs(extra or {}) do argv[#argv + 1] = word end
+        return argv
+    end
+
+    local function inspect(path, arguments, extra_environment, include_sdk)
+        local argv = environment(path, extra_environment)
+        for _, word in ipairs({
+            make_command, "--no-print-directory", "-s",
+            "-f", repository .. "/Makefile", "-f", inspection,
+            "HOST_OS=Linux", "HOST_ARCH=prefix-probe",
+            "READLINE_PKG_CONFIG=false", "TEST_LUA=false",
+            include_sdk and "inspect-prefix-sdk" or "inspect-prefix",
+        }) do argv[#argv + 1] = word end
+        -- TEST_LUA=false suppresses the unrelated native-test SDK probe; this
+        -- inspection exercises only PREFIX discovery and SDK path selection.
+        for _, word in ipairs(arguments or {}) do argv[#argv + 1] = word end
+        return checked_run(argv)
+    end
+
+    local function detect(path)
+        local argv = environment(path)
+        argv[#argv + 1] = "/bin/sh"
+        argv[#argv + 1] = repository .. "/scripts/detect_lua_prefix.sh"
+        return checked_run(argv)
+    end
+
+    local function copy_lua(prefix)
+        make_directory(prefix .. "/bin")
+        checked_run({ "cp", "-p", LUA, prefix .. "/bin/lua" })
+        return prefix .. "/bin:" .. tools_path
+    end
+
+    local function prefix_output(prefix)
+        return prefix .. "\n" .. prefix .. "/bin/lua\n"
+    end
+
+    before_each(function()
+        repository = assert(lfs.currentdir())
+        workspace = temporary_directory("prefix-discovery")
+        workspace = assert(checked_run({ "pwd", "-P" }):match("^(.-)\n$"))
+        make_command = assert(checked_run({ "sh", "-c", "command -v make" })
+            :match("^(.-)\n$"))
+        tools_path = workspace .. "/tools"
+        make_directory(tools_path)
+        checked_run({ "ln", "-s", "/bin/sh", tools_path .. "/sh" })
+        local uname = assert(checked_run({ "sh", "-c", "command -v uname" })
+            :match("^(.-)\n$"))
+        checked_run({ "ln", "-s", uname, tools_path .. "/uname" })
+        inspection = workspace .. "/inspect.mk"
+        -- The semicolons force Make through the shell's printf builtin, so
+        -- this intentionally narrow PATH needs no external printf program.
+        write_file(inspection, [[
+.PHONY: inspect-prefix inspect-prefix-sdk
+inspect-prefix:
+	@printf '%s\n' '$(PREFIX)' '$(LUA_BIN)';
+inspect-prefix-sdk:
+	@printf '%s\n' '$(PREFIX)' '$(LUA_BIN)' '$(TITAN_RUNTIME_LUA_SOURCE_PATH)' '$(TITAN_RUNTIME_LUA_LIB)';
+]])
+    end)
+
+    after_each(function()
+        if workspace then remove_tree(workspace); workspace = nil end
+    end)
+
+    it("selects PATH Lua before LuaRocks or Titan have been installed",
+    function()
+        local prefix = workspace .. "/prefix"
+        local path = copy_lua(prefix)
+        assert.equal(prefix_output(prefix), inspect(path))
+        assert_absent(prefix .. "/bin/luarocks")
+        assert_absent(prefix .. "/lib/titan")
+        assert_absent(prefix .. "/src")
+    end)
+
+    it("preserves directory aliases and resolves external launcher symlinks",
+    function()
+        local prefix = workspace .. "/prefix"
+        copy_lua(prefix)
+        local alias = workspace .. "/alias"
+        checked_run({ "ln", "-s", prefix, alias })
+        assert.equal(prefix_output(alias), inspect(alias .. "/bin:" .. tools_path))
+        assert.equal(prefix_output(workspace .. "/alias"),
+            inspect("alias/bin:" .. tools_path))
+
+        local launcher = workspace .. "/launcher/bin"
+        make_directory(launcher)
+        checked_run({ "ln", "-s", prefix .. "/bin/lua", launcher .. "/lua" })
+        assert.equal(prefix_output(prefix), inspect(launcher .. ":" .. tools_path))
+    end)
+
+    it("detects a Lua prefix containing spaces", function()
+        local prefix = workspace .. "/prefix with spaces"
+        assert.equal(prefix .. "\n", detect(copy_lua(prefix)))
+    end)
+
+    it("keeps explicit environment and command-line prefixes without probing Lua",
+    function()
+        local marker = workspace .. "/lua-was-probed"
+        local lua = tools_path .. "/lua"
+        write_file(lua, "#!/bin/sh\n: > " .. quote(marker) .. "\nexit 1\n")
+        checked_run({ "chmod", "+x", lua })
+        local configured = workspace .. "/configured"
+        assert.equal(prefix_output(configured),
+            inspect(tools_path, nil, { "PREFIX=" .. configured }))
+        local selected = workspace .. "/selected"
+        assert.equal(prefix_output(selected), inspect(tools_path,
+            { "PREFIX=" .. selected }, { "PREFIX=" .. configured }))
+        assert_absent(marker)
+    end)
+
+    it("ignores ambient Lua startup code and module paths", function()
+        local prefix = workspace .. "/prefix"
+        local path = copy_lua(prefix)
+        local marker = workspace .. "/lua-init-was-run"
+        local init = string.format(
+            "assert(io.open(%q, 'w')):close(); error('unexpected startup')", marker)
+        assert.equal(prefix_output(prefix), inspect(path, nil, {
+            "LUA_INIT=" .. init, "LUA_INIT_5_5=" .. init,
+            "LUA_PATH=/unrelated/?.lua", "LUA_PATH_5_5=/unrelated/?.lua",
+            "LUA_CPATH=/unrelated/lib/titan/0.6/?.so",
+            "LUA_CPATH_5_5=/unrelated/lib/titan/0.6/?.so",
+        }))
+        assert_absent(marker)
+    end)
+
+    it("falls back when PATH has no Lua or an interpreter that fails",
+    function()
+        assert.equal(prefix_output("/usr/local"), inspect(tools_path))
+        write_file(tools_path .. "/lua", "#!/bin/sh\nexit 1\n")
+        checked_run({ "chmod", "+x", tools_path .. "/lua" })
+        assert.equal(prefix_output("/usr/local"), inspect(tools_path))
+    end)
+
+    it("rejects unrelated Lua paths and incompatible interpreter versions",
+    function()
+        local lua = tools_path .. "/lua"
+        -- Run the real interpreter with stock-looking defaults before the
+        -- detector's -e chunk, without requiring another system Lua version.
+        local wrapper = "#!/bin/sh\nexec " .. quote(LUA) ..
+            " -E -e %s \"$@\"\n"
+        write_file(lua, string.format(wrapper,
+            quote('package.cpath = "/usr/lib/lua/5.5/?.so"')))
+        checked_run({ "chmod", "+x", lua })
+        assert.equal(prefix_output("/usr/local"), inspect(tools_path))
+        write_file(lua, string.format(wrapper, quote('_VERSION = "Lua 5.4"')))
+        assert.equal(prefix_output("/usr/local"), inspect(tools_path))
+    end)
+
+    it("retains an incomplete detected SDK so its missing archive is an error",
+    function()
+        local prefix = workspace .. "/prefix"
+        local path = copy_lua(prefix)
+        make_directory(prefix .. "/src/lua-5.5.1")
+        for _, header in ipairs({ "lua.h", "lobject.h" }) do
+            write_file(prefix .. "/src/lua-5.5.1/" .. header, "header fixture\n")
+        end
+        assert.equal(prefix .. "\n" .. prefix .. "/bin/lua\n" ..
+            prefix .. "/src/lua-5.5.1\n" .. prefix .. "/lib/liblua.a\n",
+            inspect(path, nil, nil, true))
+        local argv = environment(path, { "LC_ALL=C" })
+        for _, word in ipairs({
+            make_command, "--no-print-directory", "-s",
+            "-f", repository .. "/Makefile", "HOST_OS=Linux",
+            "HOST_ARCH=prefix-probe", "READLINE_PKG_CONFIG=false",
+            "TEST_LUA=false", prefix .. "/lib/liblua.a",
+        }) do argv[#argv + 1] = word end
+        local ok, output = run(argv, workspace)
+        assert.falsy(ok, output)
+        assert.truthy(output:find("No rule to make target", 1, true), output)
+        assert.truthy(output:find(prefix .. "/lib/liblua.a", 1, true), output)
+        assert_absent(workspace .. "/lua-5.5.1")
     end)
 end)
 
