@@ -179,3 +179,16 @@ an earlier facade electing an embedded provider, executable-embedded providers,
 and two simultaneous Lua states choosing different compatible providers while
 sharing one consumer DSO. Independent code and documentation review and full
 local validation are being repeated for this extension before publication.
+
+## Local delivery validation
+
+Implementation, human manuals, and applicable skills are complete and reviewed
+independently. The final matching compiler/runtime/stdlib installation succeeded.
+The complete unfiltered `luarocks test` run passed on 2026-09-25: 155 retained
+runtime/packaging cases, 3,673 compiler cases across all four isolated shards,
+and all 468 native standard-library tests. The 46 new end-to-end compatibility
+cases are included in that result. Generated-symbol and per-state cache
+assertions were updated without weakening their runtime or ordering checks.
+
+Publish the branch and pull request next, monitor Linux CI at ten-minute
+intervals, and leave the PR open. macOS dispatch remains waived.
