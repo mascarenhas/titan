@@ -149,6 +149,48 @@ describe("native nominal storage", function()
         ]])
     end)
 
+    it("preserves constructor padding, expansion, surplus effects, and first-class calls", function()
+        h.run_coder([[
+            record Pair
+                first: integer?
+                second: integer?
+            end
+            effects: integer = 0
+            local function none()
+                effects = effects + 1
+            end
+            local function mark(): integer
+                effects = effects + 1
+                return 99
+            end
+            local function values(): (integer, integer) return 20, 22 end
+            function padded(): Pair return Pair.new(none()) end
+            function expanded(): Pair return Pair.new(values()) end
+            function spread(items: {integer}): Pair return Pair.new(...items) end
+            function forwarded(...: integer): Pair return Pair.new(...) end
+            function discarded()
+                Pair.new(1, 2, mark())
+            end
+            function indirect(): Pair
+                local constructor = Pair.new
+                return constructor(3, 4)
+            end
+        ]], [[
+            local p = test.padded()
+            assert(p.first == nil and p.second == nil and test.effects == 1)
+            p = test.expanded()
+            assert(p.first == 20 and p.second == 22)
+            p = test.spread({42})
+            assert(p.first == 42 and p.second == nil)
+            p = test.forwarded(10, 11, 12)
+            assert(p.first == 10 and p.second == 11)
+            test.discarded()
+            assert(test.effects == 2)
+            p = test.indirect()
+            assert(p.first == 3 and p.second == 4)
+        ]])
+    end)
+
     it("defers wide native conversion until a boxed accessor is requested", function()
         h.run_coder([[
             foreign import "limits.h"

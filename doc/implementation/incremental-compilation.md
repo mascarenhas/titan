@@ -59,7 +59,7 @@ not publish an object which a later invocation can mistake for a success.
 ## Trusted source record
 
 Each generated relocatable module keeps its existing public `.titan.meta`
-(ELF) or `__TEXT,__titanmeta` (Mach-O) and callable ABI/type protocol. A second
+(ELF) or `__TEXT,__titanmeta` (Mach-O) and callable ABI/type/layout protocol. A second
 `.titan.source` / `__TEXT,__titansrc` section holds a Lua reconstruction chunk.
 The existing in-process section reader locates these bytes. Emission uses the
 same byte alignment, `used` retention, relocation-free representation, and
@@ -74,12 +74,17 @@ is no additional checksum, deep schema validation, or hostile-input policy.
 
 The graph retains declared public/private views, owner registry, source/output
 paths, main/symbol facts, ordered imports and native bindings, and replayable
-header data. It does not retain checked function ASTs. `types.serialize`
+header data. `native.layouts` also carries the independently encoded public
+physical layout inventory; native reuse requires and validates it before
+installing its plans in the resolver. It does not retain checked function ASTs. `types.serialize`
 continues to represent only the public compiled interface; `source_manifest`
 is an equality representation, not the source record's restore format.
 
 The source section may remain inert in archives and DSOs. Their readers still
-consume only public metadata. `LANGUAGE_SERVER_API_VERSION` remains 1, and the
+consume only public metadata. Physical layouts remain separate from semantic
+`types.serialize` and analysis inventories, which expose only ABI/types.
+See [Native nominal storage](nominal-storage.md). `LANGUAGE_SERVER_API_VERSION`
+remains 1, and the
 source record does not itself change the generated-code ABI. Make must rebuild
 objects after prerelease compiler/record representation changes within that ABI.
 

@@ -207,7 +207,9 @@ currently `2`; a mismatch is terminal before type metadata is evaluated or
 native linking begins. The current ABI covers callable metadata and signatures,
 physical-provider selection, canonical Array proxies, unions, Interfaces,
 generic declarations, source-private provider identity, source foreign
-callbacks, and const-qualified descriptors and wrappers.
+callbacks, const-qualified descriptors and wrappers, and native nominal storage.
+The separate `<mangled>_layouts` protocol supplies validated public physical
+plans; see [Native nominal storage](nominal-storage.md).
 
 `TITAN_VERSION` is the independent compiler and standard-library semantic
 version, currently `0.6.0`. Its derived `0.6` library version selects

@@ -101,6 +101,7 @@ TITAN_TEST_IMPORTS_iteration.tests := support.common
 TITAN_TEST_SOURCES_json.tests := spec/stdlib/titan/json/tests/tests.titan \
 	spec/stdlib/titan/json/tests/core_test.titan \
 	spec/stdlib/titan/json/tests/mapping_test.titan \
+	spec/stdlib/titan/json/tests/native_storage_test.titan \
 	spec/stdlib/titan/json/tests/parser_test.titan
 TITAN_TEST_IMPORTS_json.tests :=
 

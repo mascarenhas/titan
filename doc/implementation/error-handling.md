@@ -374,9 +374,10 @@ therefore not itself a stack-relocation hazard.
 The error-handling control-flow machinery is part of compiled-module ABI `2`.
 That ABI also covers variadic and flexible-result descriptors, module schemas,
 physical-provider selection, canonical Array proxies, unions, Interfaces,
-generic metadata, source-private identity, foreign callbacks, and const-qualified
-descriptors. Errors raised by adapters, guards, conversions, or downcasts still
-use the same Titan error handler; all wrapper roots are ordinary Lua-traced
+generic metadata, source-private identity, foreign callbacks, const-qualified
+descriptors, and [native nominal storage](nominal-storage.md), including exact
+native optional carriers across spills and recovery. Errors raised by adapters,
+guards, conversions, or downcasts still use the same Titan error handler; all wrapper roots are ordinary Lua-traced
 values, so unwinding needs no resource-specific cleanup path.
 
 The compiler and runtime therefore agree on:

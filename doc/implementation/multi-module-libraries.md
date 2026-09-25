@@ -94,10 +94,13 @@ The states are deliberately strict:
 * once both symbols exist, a call failure, result-count/type error, ABI
   mismatch, malformed serialized type, or logical-name mismatch is terminal;
 * both valid symbols claim the logical module and end the search;
+* after that semantic claim, native compilation additionally requires a valid
+  `<mangled>_layouts` string; a missing/malformed physical layout is terminal.
+  Analysis-only queries retain the ABI/types pair and do not expose layouts;
 * an exact candidate with neither symbol retains the markerless-binary error
   instead of falling through to source.
 
-The ABI marker must return exactly one string equal to `2`. The types entry
+The ABI marker must return exactly one string equal to `TITAN_ABI_VERSION`. The types entry
 must return exactly one serialized `Type.Module` for the requested logical
 name, with a canonical public schema. The loader does not scan later images
 after a claim; visible duplicate providers are resolved by ordinary first
@@ -181,7 +184,7 @@ code generation instead of as an opaque duplicate-symbol linker error.
 Both native provider forms contain independent copies of every logical
 protocol:
 
-* `<mangled>_abi` and `<mangled>_types`;
+* `<mangled>_abi`, semantic `<mangled>_types`, and physical `<mangled>_layouts`;
 * `<mangled>_init` and `luaopen_<mangled>`;
 * a file-local `_initialized` wiring flag;
 * a distinct registry-owned module `Udata`, variables, canonical closures,
@@ -192,6 +195,9 @@ module having the provider's own name. Requiring one logical child from the
 DSO initializes only that child and its imports. Each Titan-generated object
 also carries its one-key archive metadata section; the archive's validated
 union is physical membership metadata, not a new run-time module table.
+Layout strings are independent of semantic descriptors and analysis inventories;
+paired archive/DSO publication compares both byte strings. The public-prefix
+layout rules are in [Native nominal storage](nominal-storage.md).
 
 ## Validated publication and generated shims
 
@@ -374,7 +380,7 @@ as the final candidate in each format, but a mismatched marker is terminal
 before metadata decoding or native linking.
 
 Current lookup uses `TITAN_PATH_0_6` and `lib/titan/0.6`; those paths derive
-from `TITAN_VERSION` `0.6.0`, independently of ABI `2`. Earlier Titan
+from `TITAN_VERSION` `0.6.0`, independently of `TITAN_ABI_VERSION`. Earlier Titan
 installations are not migrated, cleaned up, or used as compatibility inputs.
 See [Dense Arrays](dense-arrays.md#abi-boundary).
 

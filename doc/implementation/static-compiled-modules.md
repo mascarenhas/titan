@@ -2,7 +2,7 @@
 
 Static compiled modules extend the compiled-module loader and native-output
 pipeline without giving archives a different logical interface or native
-calling convention from DSOs. Current artifacts carry ABI 2. One checked interface can come
+calling convention from DSOs. Artifacts carry the current compiled-module ABI. One checked interface can come
 from a DSO's callable metadata or from a canonical section embedded in an
 archive member.
 
@@ -50,7 +50,7 @@ requests byte alignment, while the Clang-only `no_sanitize("address")`
 attribute prevents AddressSanitizer from adding a global redzone to the custom
 section. Together they keep the section length equal to the canonical payload
 length in both ordinary and sanitized builds. The interface therefore travels
-with the object that defines the module's `_abi`, `_types`, `_init`, and
+with the object that defines the module's `_abi`, `_types`, `_layouts`, `_init`, and
 `luaopen_` entries. Archive flattening naturally retains it, with no aggregate
 metadata member to regenerate and no archive leaf name used as logical
 identity.
@@ -60,15 +60,18 @@ payload do not carry logical metadata.
 
 ## Canonical payload
 
-`coder.generate` computes `types.serialize(ast._type)` once. The same bytes
-feed the callable `_types` entry and:
+`coder.generate` computes the semantic `types.serialize(ast._type)` bytes and
+separately encodes the public physical plans with `nominallayout.encode`.
+The exact strings feed callable `_types`/`_layouts` entries and their separate
+archive fields (shown schematically):
 
 ```lua
 -- Titan archive module metadata v1
 return {
     ["pkg.left"] = {
-        abi = "2",
+        abi = "<current ABI>",
         types = "Module('pkg.left', ...)",
+        layouts = "<encoded public physical layouts>",
     },
 }
 ```
@@ -79,8 +82,11 @@ the compiled-module ABI.
 
 Validation compiles the chunk as text with an empty `_ENV`, protected-calls it
 while counting results, and accepts exactly one plain table containing one
-valid dotted module key. Its value must be a plain table with exactly string
-fields `abi` and `types`. Traversal uses `next` and `rawget` only after the
+valid dotted module key. Its value must be a plain table with string
+fields `abi` and `types`, plus an optional string `layouts`. Native compilation
+requires `layouts` and validates its closed module-specific graph separately;
+analysis-only inventory readers may accept its absence and expose only ABI/types.
+Traversal uses `next` and `rawget` only after the
 metatable checks. The validator then re-renders the entry and requires exact
 payload equality.
 
@@ -98,6 +104,11 @@ C FFI descriptors, legacy wrappers, and unknown tags are rejected from
 arbitrary value positions. The decoded module name and canonical logical
 `.so` filename must
 match the key. An archive path is never stored in `Type.Module.file`.
+
+Physical plans reconstruct only exported record prefixes and public variants;
+private C declarations never enter that graph. Native provider and paired
+publication checks compare layout bytes as well as semantic type bytes. See
+[Native nominal storage](nominal-storage.md).
 
 The empty environment is a declarative-artifact contract, not a hostile-code
 sandbox: static providers are trusted native inputs just like DSOs.
@@ -363,7 +374,7 @@ states within that active library namespace. Earlier Titan installations are
 not migrated, cleaned up, or treated as active-layout predecessors.
 
 The embedded metadata container is independent of the compiled-module ABI,
-but every entry carries ABI `2`. Static validation checks it before schema
+but every entry carries `TITAN_ABI_VERSION`. Static validation checks it before schema
 decoding or native linking. This protects the current Array and function
 representations, union and Interface schemas, generic declarations,
 source-private provider identity, callable symbol hierarchy, callback

@@ -968,7 +968,7 @@ returns also with a`...: T` tail
 * FFI with C (C primitive types, pointers, arrays/structs/unions including
 stack allocation and FAMs, owned heap allocation, explicit C varargs, C function calls)
 * `foreign` functions, for defining C callbacks entirely in Titan
-* nominal records: fields map to compact slots, module-local fields, `{ ... }`
+* nominal records: [traced slots and native storage](doc/language/nominal-storage.md), module-local fields, `{ ... }`
 constructor syntax, record functions, methods with `:` method declaration and call
 syntax, bound methods (`rec:method`) as first-class values
 * nominal unions: variants map to dense integer tags, immutable, `case/when`

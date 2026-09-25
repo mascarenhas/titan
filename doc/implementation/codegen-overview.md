@@ -119,7 +119,9 @@ semantic effect may still use `pairs`. The pieces appear in this order:
    from Lua ([Lua interop internals](lua-interop-internals.md)). A
    record's type identity is its metatable (cached per-Lua-state in a
    `_mod` user value), so there is no per-record C tag static to declare
-   up front.
+   up front. Generated native payload declarations, exact numeric Option
+   carriers, and public-prefix physical plans are described in
+   [Native nominal storage](nominal-storage.md).
 6. **Function bodies**: native-convention bodies plus the required stack
    entries. Ordinary functions and statics that become values have coercive
    genuine-Lua and strict Titan-generic entries. Methods have their ordinary
@@ -131,7 +133,8 @@ semantic effect may still use `pairs`. The pieces appear in this order:
    serves all members — variables, functions
    and public record namespaces — through the metatable installed on the module
    `Udata`.
-8. **`<prefix>_abi`**, **`<prefix>_types`**, **`<prefix>_init`**, **`luaopen_<prefix>`**: the
+8. **`<prefix>_abi`**, **`<prefix>_types`**, **`<prefix>_layouts`**,
+   **`<prefix>_init`**, **`luaopen_<prefix>`**: the
    module-protocol functions, described below. One final DSO may contain this
    complete set for several translation units; every set remains independent.
 
@@ -220,7 +223,7 @@ replaces `.`
 and `-` with `_`. The driver has already restricted every logical component to
 `[A-Za-z_][A-Za-z0-9_-]*`, so this does not admit arbitrary path or template
 bytes. Module `foo.bar` yields `foo_bar_init`, `foo_bar_abi`, `foo_bar_types`,
-and `luaopen_foo_bar`.
+`foo_bar_layouts`, and `luaopen_foo_bar`.
 
 Callable names have two structural boundaries. `_function_prefix`
 separates the flattened module prefix from the remaining callable with the C99
@@ -381,7 +384,7 @@ It comes **immediately after `_mod` and before the method `self`**, and
 *every* Titan function takes it even when the body never reads it: the
 fast value-call path dispatches purely on the function-type tag, so all
 native entries of a given `Type.Function` must share one ABI. This type is
-exclusively a boxed Titan/Lua callable; its ABI-2 third constructor
+exclusively a boxed Titan/Lua callable; its third constructor
 position remains reserved `false`, not C variadicity. Its value at a call site
 depends on the
 path:
@@ -773,7 +776,8 @@ wrapper layout, pair initialization, and all four dispatch paths are in
 ### Compiled-module ABI
 
 `TITAN_ABI_VERSION` is the monotonic compatibility marker carried by every
-compiled provider, currently `2`. It covers native entry signatures, serialized
+compiled provider. It covers native entry signatures, physical nominal layout
+metadata and exact native Option carriers, serialized
 type schemas, module-state layout, canonical Array proxies, unions, Interfaces,
 generic metadata, source-private provider identity, foreign callback symbols,
 and const-qualified descriptors and wrappers. A mismatched provider is rejected
@@ -891,7 +895,7 @@ would still re-emit their handles.) `$LOADGLOBALS` is independent of that
 optimization because its symbols are not associated with a direct import
 handle.
 
-### Lua entries, `<prefix>_abi`, and `<prefix>_types`
+### Lua entries and ABI, type, and layout metadata
 
 `luaopen_<mangled-modname>` is what `require` finds. Standard-library short
 imports are desugared before module resolution, so Titan `import "os"` compiles
@@ -908,8 +912,8 @@ constructors) — are all served by a metatable on the
 `<prefix>_abi` is a tiny marker function that returns the current
 `TITAN_ABI_VERSION`; both the compile-time DSO loader and generated dynamic imports
 check it before trusting any other callable symbol. Static providers embed
-the same ABI and serialized interface in each logical object, and archive
-validation compares those bytes with the callable protocol before
+the same ABI, serialized interface, and separate physical layout string in each
+logical object, and archive validation compares those bytes with the callable protocol before
 publication. `<prefix>_types` is the separate-compilation interface:
 
 ```c
@@ -932,7 +936,8 @@ direct Interface declarations. Neither creates a module slot or Lua-visible
 member. Keyed type-member, nominal-method, and nominal-static maps are
 serialized in locale-independent numeric-byte name order so equivalent
 interfaces have reproducible text; ordered Interface methods, module members,
-record fields, and union variants retain their established source/slot order.
+record fields, and union variants retain their established logical source order.
+Physical UV/member indices are independent and never enter that semantic schema.
 Contextual `CVoid`/`CInteger`/`CFloat` descriptors and recursively portable
 `CPointer`, nonvariadic `CFunction`, and `COwned` graphs are also serialized
 structurally. Their encoding omits all source scope and header provenance, and
@@ -951,10 +956,19 @@ when the expression is evaluated; only a successful DSO claim overwrites it
 with the selected relative shared-provider path. Static archive paths never
 enter the serialized type or this transient field.
 
+`<prefix>_layouts` returns one binary graphcodec string emitted with
+`lua_pushlstring` and an explicit byte count. `nominallayout.decode` validates
+its module identity and closed physical schema independently of `_types`.
+Native loading retains those plans in the resolver's `nominal_layouts` map and
+passes them as separate coder options; analysis clients keep their existing
+ABI/types inventory. No private C declaration graph is exported. See
+[Native nominal storage](nominal-storage.md).
+
 When the driver's loader finds a compiled provider for an import, it recovers
 the requested ABI/types from either the DSO's callable pair or the selected
 archive object's canonical metadata section, rejects partial or invalid
-claims, and evaluates the serialized expression to recover the interface —
+claims, validates the additional layout string for native compilation, and
+evaluates the serialized expression to recover the interface —
 letting the checker type the importing module against a dependency whose
 source is gone. Libuv does not add another result or a special binary
 classification. Dependencies selected from a DSO use dynamic handle-scoped

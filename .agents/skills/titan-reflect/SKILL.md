@@ -56,7 +56,7 @@ ArrayValue/MapValue or ArrayType/MapType wrapper records.
 
 `RecordValue:get(i)` and `set(i, v)` use **1-based public descriptor ordinals**,
 matching the inspected wrapper's `.type.fields[i]`; `n_fields` counts public fields. The separate
-`FieldType.index` is a 0-based storage index and can have gaps from local
+`FieldType.index` is a 0-based logical field index and can have gaps from local
 fields. Do not pass it to these methods. Both bounds are checked, const writes
 raise, and mutable writes use the declared field's normal Lua-boundary
 conversion. For example, integer fields accept integral floats but reject

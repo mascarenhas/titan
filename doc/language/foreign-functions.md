@@ -280,8 +280,10 @@ the UCN spellings; object and tool names contain UTF-8 `ℳ` and `ℱ`.
 The callable hierarchy, source-defined standard-library callbacks, generic
 interface metadata, and affected public standard-library signatures are all
 part of the current prerelease ABI 2. Function and owned type registry
-identities use the revised type spellings. The grammar change keeps the
-prerelease ABI and language versions unchanged.
+identities use the revised type spellings. The earlier grammar change did not
+require an independent ABI or language-version change.
+[Native record and union storage](nominal-storage.md) requires rebuilding
+compiler, runtime, and providers together without a prerelease version bump.
 
 ## Related chapters
 

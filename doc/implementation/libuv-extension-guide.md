@@ -141,9 +141,12 @@ Every callback follows the reviewed sequence:
    `uv_req_get_data` or `uv_handle_get_data`, or the explicit `uv_walk`
    argument;
 2. recover the main Lua state from the loop;
-3. recover the exact stored Titan callback closure, module, and native entry;
-4. save the Lua stack top and push the **owner** as full userdata;
-5. invoke the exact native Titan entry with its original closure as `_fn`; and
+3. read the exact callback with `ffi.titan_record_field(owner, "Record", "field")`,
+   then recover its module and native entry; never hard-code a nominal UV index;
+4. save the Lua stack top;
+5. invoke the exact native Titan entry with its original closure as `_fn`,
+   keeping the complete owner traced through its ordinary callback frame or an
+   explicit stack root until any resumed continuation finishes; and
 6. restore the stack top before returning to libuv.
 
 Keep filesystem's owner-only Titan protocol: the continuation reads
@@ -167,13 +170,14 @@ must not perform any step in that sequence: it cannot recover a Titan owner,
 closure, Task, runtime, module, or `lua_State`, and it cannot inspect
 `TValue`/`Udata` or call a Titan/Lua helper.
 
-`async.run_foreign` is the model. `WorkOwner` roots an owned `uv_work_t`, an
-owned three-slot raw pointer carrier, and the loop-thread completion callback.
+`async.run_foreign` is the model. `WorkOwner` embeds `uv_work_t` and receives a
+fresh three-slot raw pointer tail beside its traced completion callback.
 Before submission the carrier receives the after-work owner pointer, erased
 foreign function pointer, and argument. `uv_work_cb` reads only the latter two
 slots and performs exactly `f(arg)`. `uv_after_work_cb` runs on the loop thread,
 recovers the owner from the first slot, and enters the ordinary protected Titan
-completion path.
+completion path. That path stack-roots the owner through resumed user code
+after `Task.pending` is cleared.
 
 After `uv_queue_work` succeeds, the after-work callback is authoritative even
 when the Task is cancelled; do not call `uv_cancel` or release the carrier
@@ -235,7 +239,7 @@ The current DNS owner is:
 
 ```titan
 local record uv_getaddrinfo_t
-  local native: owned *uv_getaddrinfo_t
+  local native: foreign uv_getaddrinfo_t
   local callback: function (uv_getaddrinfo_t, integer, foreign *void): ()
 end
 ```
@@ -248,9 +252,15 @@ submission, so they need no separate owner field afterward. Derive each
 interval from the pinned libuv contract; do not generalize one operation's
 borrowing rule to another.
 
+Construct the final owner before initializing its embedded request or taking
+an address retained by libuv. A direct fresh array/FAM argument may share that
+owner's allocation; existing owners retain their separate identities. See
+[Native nominal storage](nominal-storage.md).
+
 Set request data to the owner and assign `task.pending = owner` before libuv
 accepts ownership. The Task root is the request's lifetime root until callback
-entry; the native context helper then stack-roots the owner while
+entry; the callback's traced frame or explicit stack root then retains the
+complete owner while
 `resume_task_from_callback` clears `task.pending`. Do not add the request to
 the Runtime handle-root set: requests are not handles and `uv_walk` does not
 enumerate them.
@@ -526,9 +536,9 @@ parallel kind tag.
 
 The normal order is:
 
-1. allocate every Titan and owned FFI field;
-2. root the wrapper in `handle_roots`;
-3. call `uv_X_init`;
+1. construct the final wrapper, including embedded fields and fresh tails;
+2. root that wrapper in `handle_roots`;
+3. call `uv_X_init` on its final embedded field address;
 4. on init failure, apply that API's verified ownership contract;
 5. on success, install the wrapper with `uv_handle_set_data`; and
 6. configure or start the handle.

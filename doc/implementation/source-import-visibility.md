@@ -173,9 +173,15 @@ The overlay itself introduces no serialized constructor. ABI 2 covers the
 localized `titan.uv` public schema and closure prefix, every module's physical-
 provider identity slot, source foreign collaboration, callable symbol families,
 generic declarations, and current public standard-library and const metadata.
-The grammar change retains prerelease ABI 2, language version 0.6.0, and
-language-server API marker 1.
-A mismatched provider is rejected before decoding or native linking. Earlier
-installations are neither migrated nor deleted. The explicit `.titan` parser marker and
+The current compiler uses ABI 2, language version 0.6.0, and language-server
+API marker 1. The separate public nominal-layout protocol is described
+in [Native nominal storage](nominal-storage.md); private native layout remains
+producer-owned. Rebuild the compiler, runtime, and providers together after
+prerelease layout changes.
+An ABI-marker mismatch is rejected before type decoding or native linking.
+Native compilation also rejects missing or malformed physical-layout metadata;
+analysis-only recovery does not require it. These checks do not replace the
+clean rebuild required for same-marker prerelease changes. Earlier installations
+are neither migrated nor deleted. The explicit `.titan` parser marker and
 source-required request add no serialized field or native identity and
 therefore require no additional ABI change.

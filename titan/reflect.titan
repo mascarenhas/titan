@@ -875,9 +875,9 @@ local function init_brand_handlers()
       local u = ffi.lmacro_uvalue(tv)
       local descriptor: foreign TValue = nil
       desc.payload_reader(L, u, 0, descriptor)
-      local tag = descriptor as integer
+      local tag: integer = descriptor as value
       desc.payload_reader(L, u, -1, descriptor)
-      local arity = descriptor as integer
+      local arity: integer = descriptor as value
       return Value.is_union({
         tag = tag,
         udata = u,
