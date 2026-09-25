@@ -1,5 +1,7 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
+local coder_core = require "titan-compiler.coder.core"
+local coder_names = require "titan-compiler.coder.names"
 local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
 local staticmetadata = require "titan-compiler.staticmetadata"
@@ -1222,9 +1224,12 @@ end
         assert.truthy(generated:find(
             'titan_module_provider(L, "shape.provider", NULL)', 1, true),
             generated)
+        local plus_symbol = coder_core.c_string_literal(
+            coder_names._linkage_symbol_name(
+                "shape_provider_\\u2133_Foo_\\u2131_plus_titanmethod"))
         assert.match(
-            'titan_module_symbol%s*%(%s*L,%s*shape_provider_provider,%s*"shape_provider_' ..
-                '\\u2133_Foo_\\u2131_plus_titanmethod"%s*%)',
+            'titan_module_symbol%s*%(%s*L,%s*shape_provider_provider,%s*' ..
+                plus_symbol .. '%s*%)',
             generated)
         assert.falsy(generated:find(
             "shape_api_init", 1, true), generated)

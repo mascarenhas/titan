@@ -2,11 +2,11 @@
 -- only as a compiled shared library, not as `.titan` source. This path differs
 -- from source linking (which the cross-module tests in coder_spec exercise):
 -- the importer recovers the dependency's interface from its compiled
--- `<mangled>_types` symbol, the dependency is dlopened at run time, and its
--- native functions are reached through dlsym'd `static` pointers (rather than
--- statically-linked `extern`s). Records and function/variable slots are
--- reconstructed purely from the serialized interface, and record/function type
--- tags must be recovered from the registry the dependency's `.so` published.
+-- `<mangled>_types` symbol. At run time it reuses the canonical provider when
+-- present, otherwise loads the selected DSO. Native pointers and public slot
+-- indices are resolved from that provider and stored in the importer's
+-- per-state native payload. Record interfaces and layouts are recovered without
+-- source, and record/function type tags come from the canonical state.
 --
 -- Each dependency is compiled to a `.so` straight from its AST, so its
 -- `.titan` source never touches the source path and the default loader is
@@ -14,9 +14,16 @@
 -- one can itself be a `.so`-only dependency of a later one (transitive case).
 local h = require 'spec.support.helpers'
 local lfs = require 'lfs'
+local coder_core = require 'titan-compiler.coder.core'
+local coder_names = require 'titan-compiler.coder.names'
 local driver = require 'titan-compiler.driver'
 local call = h.call
 local generated_modules = {}
+
+local function symbol_literal(c_spelling)
+    return coder_core.c_string_literal(
+        coder_names._linkage_symbol_name(c_spelling))
+end
 
 local function remove_tree(path)
     local mode = lfs.symlinkattributes(path, "mode")
@@ -817,7 +824,8 @@ describe(".so-only cross-module imports", function()
             'titan_module_provider%s*%(%s*L,%s*"tfoo",%s*"tfoo%.so"%s*%)', generated)
         assert.match(
             'titan_module_symbol%s*%(%s*L,%s*tfoo_provider,%s*'
-                .. '"tfoo_\\u2133_Point_\\u2131_move_titanmethod"%s*%)',
+                .. symbol_literal("tfoo_\\u2133_Point_\\u2131_move_titanmethod")
+                .. '%s*%)',
             generated)
         local rok, out = call("tbar",
             "local x,y = tbar.bar(); assert(x == 4.0 and y == 6.0)")
@@ -895,7 +903,8 @@ describe(".so-only cross-module imports", function()
         -- payload and the owner's metatable instead of loading a call entry.
         assert.not_match(
             'titan_module_symbol%s*%(%s*L,%s*alias_provider_provider,%s*'
-                .. '"alias_provider_\\u2133_Foo_\\u2131_new_titanstatic"%s*%)',
+                .. symbol_literal("alias_provider_\\u2133_Foo_\\u2131_new_titanstatic")
+                .. '%s*%)',
             facade_c)
 
         assert.match(
@@ -914,25 +923,28 @@ describe(".so-only cross-module imports", function()
             consumer_c)
         assert.match(
             'titan_module_symbol%s*%(%s*L,%s*alias_provider_provider,%s*'
-                .. '"alias_provider_\\u2133_Foo_\\u2131_plus_titanmethod"%s*%)',
+                .. symbol_literal("alias_provider_\\u2133_Foo_\\u2131_plus_titanmethod")
+                .. '%s*%)',
             consumer_c)
         assert.match(
             'titan_module_symbol%s*%(%s*L,%s*alias_provider_provider,%s*'
-                .. '"alias_provider_\\u2133_Foo_\\u2131_plus_boundmethod"%s*%)',
+                .. symbol_literal("alias_provider_\\u2133_Foo_\\u2131_plus_boundmethod")
+                .. '%s*%)',
             consumer_c)
         local merged_consumer_c = consumer_c:gsub('"%s*"', '')
         for _, role in ipairs({
             "boundlua", "boundstrict",
         }) do
             assert.match(
-                'titan_module_symbol%s*%(%s*L,%s*alias_provider_provider,%s*"alias_provider_' ..
-                    '\\u2133_Foo_\\u2131_plus_titanentry_' ..
-                    role .. '"%s*%)',
+                'titan_module_symbol%s*%(%s*L,%s*alias_provider_provider,%s*' ..
+                    symbol_literal("alias_provider_\\u2133_Foo_\\u2131_plus_titanentry_" ..
+                        role) .. '%s*%)',
                 merged_consumer_c)
         end
         assert.match(
             'titan_module_symbol%s*%(%s*L,%s*alias_provider_provider,%s*'
-                .. '"alias_provider_\\u2133_Foo_\\u2131_make_titanstatic"%s*%)',
+                .. symbol_literal("alias_provider_\\u2133_Foo_\\u2131_make_titanstatic")
+                .. '%s*%)',
             consumer_c)
         assert.match(
             'lua_getfield%s*%(%s*L,%s*LUA_REGISTRYINDEX,%s*'
