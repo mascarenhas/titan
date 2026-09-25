@@ -146,3 +146,36 @@ language/unions.md, language/nominal-storage.md; implementation/lua-interop-inte
 implementation/nominal-storage.md, implementation/unions.md, provider docs and
 indexes. titan-programmer covers module packaging and needs updated operational
 guidance; add/update relevant tester/FFI guidance only where contracts change.
+
+## Canonical provider clarification during implementation
+
+The maintainer confirmed that dynamic runtime imports must consult the logical
+module registry first. An already initialized provider wins even when a
+consumer was built against a different physical file. This includes providers
+embedded in the executable. Check compatibility against that canonical provider
+and use its native functions and slots; do not reject it merely for differing
+from the recorded file, and do not load the alternate file first.
+
+Research exposed the gap: the registry already canonicalized module userdata,
+but generated imports first dlopened the recorded filename and cached its
+symbols. Mixed provider versions could therefore use v2 slot numbers/native
+code with v1 userdata. The reproduced read returned an unrelated value 99
+instead of the canonical count 42.
+
+Implementation now publishes a compiler-generated native export resolver in
+each module userdata's native payload, reachable from every initialization path.
+Dynamic imports select/check/initialize serially so an earlier dependency can
+elect an embedded provider for a later import. Bindings are recovered from the
+resulting canonical provider. Transitive owners use logical registry lookup.
+Imported native addresses, slot indexes, Interface method tables, and function
+tag caches live with each Lua state's importing module, avoiding cross-state
+rebinding through file-static C globals. Generated ELF exports bind locally
+through protected visibility; ordinary Darwin two-level linkage already has
+that property. Direct/source/static edges retain their frozen bindings and use
+the existing physical-provider identity guard.
+
+Regression coverage includes absent alternate files, canonical incompatibility,
+an earlier facade electing an embedded provider, executable-embedded providers,
+and two simultaneous Lua states choosing different compatible providers while
+sharing one consumer DSO. Independent code and documentation review and full
+local validation are being repeated for this extension before publication.

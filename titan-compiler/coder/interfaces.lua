@@ -1620,6 +1620,8 @@ function coder._emit_interface_adapter_call(
             ctx, adapter.concrete_owner)
         args = { "L", concrete_mod, "NULL", "_self" }
         invocation_name = method_name(adapter.concrete_method)
+        invocation_name = coder._external_reference(ctx,
+            adapter.concrete_method.fqtn:match("^(.*)[.]"), invocation_name)
     end
     for index = 1, #concrete.params do
         args[#args + 1] =
@@ -2351,7 +2353,7 @@ function coder._prepare_interface_pair_wrapper(tlcontext, pair)
                         pair.interface_metatable_slot),
                 }),
             field_count = 0,
-            vtable = pair.id,
+            vtable = coder._module_native_ref(tlcontext, pair.id),
         })
         pair.wrapper_sig = render(
             "static int $NAME(lua_State *L);", {
@@ -2397,7 +2399,8 @@ function coder._prepare_interface_pair_wrapper(tlcontext, pair)
         field_stats = field_stats,
         field_stores = field_stores,
         after_allocation = "_base = restorestack(L, _base_off);",
-        vtable = #pair.methods > 0 and pair.id or nil,
+        vtable = #pair.methods > 0
+            and coder._module_native_ref(tlcontext, pair.id) or nil,
     })
 
     local reserve = ""
@@ -2511,7 +2514,7 @@ function coder._code_interface_wrapper(
             field_count = 0,
             after_allocation =
                 "_base = restorestack(L, _base_off);",
-            vtable = pair.id,
+            vtable = coder._module_native_ref(ctx, pair.id),
         }), wrapper
     end
 

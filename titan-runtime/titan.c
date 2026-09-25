@@ -1180,26 +1180,87 @@ void *loadglobalsym (lua_State *L, const char *sym) {
     return f;
 }
 
-void titan_check_abi(lua_State *L, void *lib, const char *sym,
-                     const char *file) {
-    typedef int (*titan_abi_fn)(lua_State *);
+TitanModuleProvider titan_module_provider(lua_State *L, const char *module,
+                                           const char *file) {
+    TitanModuleProvider provider = { NULL, NULL };
+    luaL_checkstack(L, 1, "looking up a Titan module provider");
+    lua_pushfstring(L, "Titan module %s", module);
+    lua_rawget(L, LUA_REGISTRYINDEX);
+    if (!lua_isnil(L, -1)) {
+        Udata *canonical;
+        const TitanModuleData *data;
+        if (lua_type(L, -1) != LUA_TUSERDATA) {
+            lua_pop(L, 1);
+            luaL_error(L, "Titan canonical module '%s' has invalid module state",
+                module);
+        }
+        canonical = uvalue(s2v(L->top.p - 1));
+        if (canonical->len < sizeof(TitanModuleData)) {
+            lua_pop(L, 1);
+            luaL_error(L, "Titan canonical module '%s' is missing its native "
+                "export descriptor", module);
+        }
+        data = (const TitanModuleData *)getudatamem(canonical);
+        provider.symbols = data->symbols;
+        lua_pop(L, 1);
+        if (provider.symbols == NULL)
+            luaL_error(L, "Titan canonical module '%s' has an invalid native "
+                "export descriptor", module);
+        return provider;
+    }
+    lua_pop(L, 1);
+    if (file == NULL)
+        luaL_error(L, "Titan canonical module '%s' is unavailable", module);
+    provider.handle = loadlib(L, file);
+    return provider;
+}
+
+static void *titan_find_module_symbol(TitanModuleProvider provider,
+                                      const char *sym, const char **error) {
     void *raw;
+    *error = NULL;
+    if (provider.symbols != NULL) {
+        raw = provider.symbols(sym);
+        if (raw == NULL) *error = "symbol not found in canonical module";
+        return raw;
+    }
+    if (provider.handle == NULL) {
+        *error = "module provider is unavailable";
+        return NULL;
+    }
+    dlerror();
+    raw = dlsym(provider.handle, sym);
+    if (raw == NULL) *error = dlerror();
+    return raw;
+}
+
+void *titan_module_symbol(lua_State *L, TitanModuleProvider provider,
+                          const char *sym) {
+    const char *error;
+    void *raw = titan_find_module_symbol(provider, sym, &error);
+    if (raw == NULL)
+        luaL_error(L, "Titan module provider is missing symbol '%s': %s",
+            sym, error ? error : "symbol not found");
+    return raw;
+}
+
+static void titan_check_abi_entry(lua_State *L, void *raw, const char *sym,
+                                  const char *file, const char *error) {
+    typedef int (*titan_abi_fn)(lua_State *);
     titan_abi_fn fn;
     int top = lua_gettop(L);
     int nresults;
     const char *actual;
-    dlerror();  /* clear stale error */
-    raw = dlsym(lib != NULL ? lib : RTLD_DEFAULT, sym);
     if (raw == NULL) {
-        const char *err = dlerror();
         luaL_error(L,
             "Titan compiled module '%s' is missing ABI symbol '%s' "
             "(expected ABI " TITAN_ABI_VERSION "): %s",
-            file, sym, err ? err : "symbol not found");
+            file, sym, error ? error : "symbol not found");
     }
     fn = titan_cast_func(titan_abi_fn, raw);
     nresults = fn(L);
-    if (nresults != 1 || !lua_isstring(L, -1)) {
+    if (nresults != 1 || lua_gettop(L) != top + 1
+        || lua_type(L, -1) != LUA_TSTRING) {
         lua_settop(L, top);
         luaL_error(L,
             "Titan compiled module '%s' has an invalid ABI marker '%s' "
@@ -1215,6 +1276,23 @@ void titan_check_abi(lua_State *L, void *lib, const char *sym,
             file, actual);
     }
     lua_settop(L, top);
+}
+
+void titan_check_abi(lua_State *L, void *lib, const char *sym,
+                     const char *file) {
+    void *raw;
+    const char *error;
+    dlerror();
+    raw = dlsym(lib != NULL ? lib : RTLD_DEFAULT, sym);
+    error = raw == NULL ? dlerror() : NULL;
+    titan_check_abi_entry(L, raw, sym, file, error);
+}
+
+void titan_check_module_abi(lua_State *L, TitanModuleProvider provider,
+                            const char *sym, const char *file) {
+    const char *error;
+    void *raw = titan_find_module_symbol(provider, sym, &error);
+    titan_check_abi_entry(L, raw, sym, file, error);
 }
 
 void titan_check_types(lua_State *L, void *lib, const char *sym,
@@ -1287,21 +1365,17 @@ static void titan_load_compatibility_chunk(lua_State *L, const char *source,
     if (lua_setupvalue(L, -2, 1) == NULL) lua_pop(L, 1);
 }
 
-void titan_check_compatibility(lua_State *L, void *lib, const char *sym,
-                              const char *file, const char *verifier,
-                              size_t verifier_size) {
+static void titan_check_compatibility_entry(lua_State *L, void *raw,
+    const char *sym, const char *file, const char *verifier,
+    size_t verifier_size, const char *error) {
     typedef int (*titan_metadata_fn)(lua_State *);
     int top = lua_gettop(L);
-    void *raw;
     const char *source;
     size_t size;
     luaL_checkstack(L, 10, "loading Titan compatibility metadata");
-    dlerror();
-    raw = dlsym(lib != NULL ? lib : RTLD_DEFAULT, sym);
     if (raw == NULL) {
-        const char *err = dlerror();
         luaL_error(L, "Titan compiled module '%s' is missing compatibility "
-            "symbol '%s': %s", file, sym, err ? err : "symbol not found");
+            "symbol '%s': %s", file, sym, error ? error : "symbol not found");
     }
     titan_metadata_fn fn = titan_cast_func(titan_metadata_fn, raw);
     if (fn(L) != 1 || lua_gettop(L) != top + 1
@@ -1320,6 +1394,27 @@ void titan_check_compatibility(lua_State *L, void *lib, const char *sym,
     lua_insert(L, -2); /* verifier function, provider metadata */
     lua_call(L, 1, 0);
     lua_settop(L, top);
+}
+
+void titan_check_compatibility(lua_State *L, void *lib, const char *sym,
+                              const char *file, const char *verifier,
+                              size_t verifier_size) {
+    void *raw;
+    const char *error;
+    dlerror();
+    raw = dlsym(lib != NULL ? lib : RTLD_DEFAULT, sym);
+    error = raw == NULL ? dlerror() : NULL;
+    titan_check_compatibility_entry(L, raw, sym, file, verifier,
+        verifier_size, error);
+}
+
+void titan_check_module_compatibility(lua_State *L, TitanModuleProvider provider,
+    const char *sym, const char *file, const char *verifier,
+    size_t verifier_size) {
+    const char *error;
+    void *raw = titan_find_module_symbol(provider, sym, &error);
+    titan_check_compatibility_entry(L, raw, sym, file, verifier,
+        verifier_size, error);
 }
 
 /* Returns nonzero (and clears the pin) if the trace slot is pinned, i.e. a

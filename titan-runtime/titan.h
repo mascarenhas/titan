@@ -280,6 +280,31 @@ inline static TString *_float2str(lua_State *L, lua_Number f) {
 LUAI_FUNC void *loadlib(lua_State *L, const char *file);
 LUAI_FUNC void *loadsym(lua_State *L, void *lib, const char *sym);
 LUAI_FUNC void *loadglobalsym(lua_State *L, const char *sym);
+/* Every generated module payload begins with this header. The resolver belongs
+** to the image which created the canonical module userdata, including a module
+** linked directly into an executable rather than opened as a shared library. */
+typedef void *(*TitanModuleSymbols)(const char *symbol);
+typedef struct TitanModuleData {
+  TitanModuleSymbols symbols;
+} TitanModuleData;
+
+typedef struct TitanModuleProvider {
+  void *handle;
+  TitanModuleSymbols symbols;
+} TitanModuleProvider;
+
+/* Prefer the initialized logical module without opening another image. A NULL
+** file permits only that canonical lookup, as used for transitive owners. All
+** successful lookups and checks preserve the Lua stack. */
+LUAI_FUNC TitanModuleProvider titan_module_provider(lua_State *L,
+    const char *module, const char *file);
+LUAI_FUNC void *titan_module_symbol(lua_State *L,
+    TitanModuleProvider provider, const char *sym);
+LUAI_FUNC void titan_check_module_abi(lua_State *L,
+    TitanModuleProvider provider, const char *sym, const char *file);
+LUAI_FUNC void titan_check_module_compatibility(lua_State *L,
+    TitanModuleProvider provider, const char *sym, const char *file,
+    const char *verifier, size_t verifier_size);
 LUAI_FUNC void titan_check_abi(lua_State *L, void *lib, const char *sym,
                                const char *file);
 LUAI_FUNC void titan_check_types(lua_State *L, void *lib, const char *sym,

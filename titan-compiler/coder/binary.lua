@@ -1,6 +1,19 @@
 local core = require "titan-compiler.coder.core"
 local _ENV = core
 
+function coder._module_native_ref(ctx, name)
+    local top = ctx.tlcontext or ctx
+    return "((" .. top.prefix .. "native_data *)getudatamem(_mod))->" .. name
+end
+
+function coder._external_reference(ctx, module, name)
+    local top = ctx.tlcontext or ctx
+    if module == top.module or top.static_deps[module] == true then
+        return name
+    end
+    return coder._module_native_ref(top, name)
+end
+
 -- Slots are provider-owned data just like native callable symbols. The
 -- importing module's own slot holding its dependency remains a constant.
 function coder._binary_slot_name(module, kind, declaration)
@@ -20,7 +33,7 @@ function coder._imported_slot(ctx, module, kind, declaration)
     end
     local name = coder._binary_slot_name(module, kind, declaration)
     ctx.tlcontext.external_slots[name] = { module = module }
-    return name
+    return coder._module_native_ref(ctx, name)
 end
 
 function coder._binary_check(tlcontext, module, handle, file)
@@ -31,7 +44,7 @@ function coder._binary_check(tlcontext, module, handle, file)
         tlcontext.binary_registry, tlcontext.binary_usage[module] or {})
     local verifier = compatibility.verifier(expected, tlcontext.module, module)
     return render([[
-        titan_check_compatibility(L, $HANDLE, $SYMBOL, $FILE,
+        titan_check_module_compatibility(L, $HANDLE, $SYMBOL, $FILE,
             $VERIFIER, $LENGTH);
     ]], {
         HANDLE = handle,
@@ -81,28 +94,89 @@ function coder._binary_imports(tlcontext, includes, loadmods, loadglobals,
     for _, module in ipairs(modules) do
         local file = module .. " (transitive dependency)"
         table.insert(loadglobals, render([[
-            titan_check_abi(L, NULL, $ABI, $FILE);
+            TitanModuleProvider $PROVIDER =
+                titan_module_provider(L, $MODULE, NULL);
+            titan_check_module_abi(L, $PROVIDER, $ABI, $FILE);
         ]], {
+            PROVIDER = mangle_qn(module) .. "_provider",
+            MODULE = c_string_literal(module),
             ABI = c_string_literal(mangle_qn(module) .. "_abi"),
             FILE = c_string_literal(file),
         }))
         table.insert(loadglobals,
-            coder._binary_check(tlcontext, module, "NULL", file))
+            coder._binary_check(tlcontext, module,
+                mangle_qn(module) .. "_provider", file))
     end
     local names = {}
     for name in pairs(tlcontext.external_slots) do names[#names + 1] = name end
     table.sort(names, util.bytewise_less)
     for _, name in ipairs(names) do
         local module = tlcontext.external_slots[name].module
-        table.insert(includes, "static unsigned int " .. name .. ";")
+        tlcontext.native_fields[name] = "unsigned int " .. name .. ";"
         local prefix = mprefixes[module]
-        local lookup = prefix
-            and ("loadsym(L, " .. prefix .. "handle, $SYMBOL)")
-            or "loadglobalsym(L, $SYMBOL)"
-        table.insert(prefix and loadmods or loadglobals, render(
-            "$NAME = *(const unsigned int *)" .. lookup .. ";", {
-                NAME = name,
+        local provider = (prefix or mangle_qn(module) .. "_") .. "provider"
+        table.insert(loadglobals, render(
+            "$NAME = *(const unsigned int *)titan_module_symbol(L, $PROVIDER, $SYMBOL);", {
+                NAME = coder._module_native_ref(tlcontext, name),
+                PROVIDER = provider,
                 SYMBOL = c_string_literal(coder._linkage_symbol_name(name)),
             }))
     end
+end
+
+-- Every initialization path publishes the same native export descriptor with
+-- the canonical userdata, including executable/static and package.loadlib
+-- entry paths which have no runtime-owned DSO handle.
+function coder._binary_resolver(tlcontext, ast)
+    local slots = {}
+    for _, entry in ipairs(coder._public_prefix_layout(ast._type)) do
+        slots[coder._binary_slot_name(tlcontext.module,
+            entry.kind, entry.value)] = true
+    end
+    local symbols = coder.interface_external_symbols(tlcontext.module, ast._type)
+    table.sort(symbols, function(a, b)
+        return util.bytewise_less(a.symbol, b.symbol)
+    end)
+    local entries, seen = {}, {}
+    for _, entry in ipairs(symbols) do
+        local name = entry.symbol
+        if not seen[name] then
+            seen[name] = true
+            entries[#entries + 1] = render([[
+                if (strcmp(symbol, $SYMBOL) == 0) return $ADDRESS;
+            ]], {
+                SYMBOL = c_string_literal(coder._linkage_symbol_name(name)),
+                ADDRESS = slots[name] and ("(void *)&" .. name)
+                    or ("titan_cast_func(void *, " .. name .. ")"),
+            })
+        end
+    end
+    return render([[
+        static void *$NAME(const char *symbol) {
+            $ENTRIES
+            return NULL;
+        }
+    ]], {
+        NAME = tlcontext.prefix .. "native_symbol",
+        ENTRIES = table.concat(entries, "\n"),
+    })
+end
+
+function coder._binary_payload(tlcontext)
+    local names, fields = {}, { "TitanModuleData provider;" }
+    for name in pairs(tlcontext.native_fields) do names[#names + 1] = name end
+    table.sort(names, util.bytewise_less)
+    for _, name in ipairs(names) do
+        fields[#fields + 1] = tlcontext.native_fields[name]
+    end
+    return render([[
+        typedef struct {
+            $FIELDS
+        } $TYPE;
+        static void *$RESOLVER(const char *symbol);
+    ]], {
+        FIELDS = table.concat(fields, "\n"),
+        TYPE = tlcontext.prefix .. "native_data",
+        RESOLVER = tlcontext.prefix .. "native_symbol",
+    })
 end

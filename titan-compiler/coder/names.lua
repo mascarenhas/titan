@@ -664,7 +664,7 @@ function function_type_tag(tlcontext, ftype --[[:table]])
         tlcontext.functags[key] = entry
         table.insert(tlcontext.functag_list, entry)
     end
-    return entry.id
+    return coder._module_native_ref(tlcontext, entry.id)
 end
 
 return core.coder

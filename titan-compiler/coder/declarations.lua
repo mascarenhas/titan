@@ -396,6 +396,7 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
             HIDDEN = c_integer_literal(hidden),
         })
     end
+    local module_setup = "Udata *_mod = uvalue(&_fn->upvalue[0]);"
     local carrier
     if strict then
         assert(options.strict_name)
@@ -421,7 +422,6 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
                         &_fn->upvalue[_fn->nupvalues - 2])
                     || !ttislcf(&_fn->upvalue[
                         _fn->nupvalues - 1])
-                    || pvalue(&_fn->upvalue[1]) != $FUNCTAG
                     || pvalue(&_fn->upvalue[2])
                         != titan_cast_func(void *, $ADAPTER)
                     || pvalue(&_fn->upvalue[3])
@@ -431,7 +431,14 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
                 return luaL_error(L,
                     "invalid callable strict-relay wrapper");
             }
+            Udata *_mod = uvalue(&_fn->upvalue[0]);
+            if (TITAN_UNLIKELY(_mod->len < sizeof($NATIVETYPE)
+                    || pvalue(&_fn->upvalue[1]) != $FUNCTAG)) {
+                return luaL_error(L,
+                    "invalid callable strict-relay wrapper");
+            }
             ]], {
+                NATIVETYPE = tlcontext.prefix .. "native_data",
                 STRICTENTRY = options.strict_name,
                 ADAPTER = titan_entry,
                 FUNCTAG = function_type_tag(tlcontext, callable_type),
@@ -455,22 +462,44 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
                         != $STRICTENTRY)) {
                 return luaL_error(L, "invalid Titan strict-call closure");
             }
-            if (TITAN_UNLIKELY(
+            Udata *_mod = uvalue(&_fn->upvalue[0]);
+            if (TITAN_UNLIKELY(_mod->len < sizeof($NATIVETYPE) ||
                     pvalue(&_fn->upvalue[1]) != $FUNCTAG)) {
                 return luaL_error(L, "mistagged Titan strict-call closure");
             }
             ]], {
+                NATIVETYPE = tlcontext.prefix .. "native_data",
                 LUAENTRY = options.lua_entry,
                 STRICTENTRY = options.strict_name,
                 FUNCTAG = function_type_tag(tlcontext, callable_type),
             })
         end
+        module_setup = ""
     else
-        carrier = [[
+        carrier = render([[
         CClosure *_fn = clCvalue(s2v(func));
-        ]]
+        /* Callable views keep the source's genuine-Lua entry, but their
+         * native adapter and module belong to the adapting consumer. Follow
+         * the checked source trailer before reading source-owned payload. */
+        while (_fn->nupvalues >= 6
+                && ttisfulluserdata(&_fn->upvalue[0])
+                && ttislightuserdata(&_fn->upvalue[3])
+                && pvalue(&_fn->upvalue[3]) == TITAN_BRAND
+                && ttislightuserdata(&_fn->upvalue[2])
+                && ttislcf(&_fn->upvalue[_fn->nupvalues - 1])
+                && ttisCclosure(&_fn->upvalue[_fn->nupvalues - 2])
+                && pvalue(&_fn->upvalue[2])
+                    != titan_cast_func(void *, $NATIVE)) {
+            CClosure *_source = clCvalue(
+                &_fn->upvalue[_fn->nupvalues - 2]);
+            if (TITAN_UNLIKELY(_source->f != _fn->f
+                    || _source->nupvalues + 1 != _fn->nupvalues)) {
+                return luaL_error(L, "invalid callable Lua-entry source");
+            }
+            _fn = _source;
+        }
+        ]], { NATIVE = options.native_carrier_entry or titan_entry })
     end
-    local module_setup = "Udata *_mod = uvalue(&_fn->upvalue[0]);"
     return render([[
     $STORAGE int $LUANAME(lua_State *L) {
         StkId func = L->ci->func.p;
@@ -1620,6 +1649,9 @@ function codemethodref(ctx, node)
         -- shaped, so it gets its own extern/dlsym registry entry
         ctx.bound_luas[luaname] = { module = mod }
         ctx.bound_stricts[strictname] = { module = mod }
+        nativename = coder._external_reference(ctx, mod, nativename)
+        luaname = coder._external_reference(ctx, mod, luaname)
+        strictname = coder._external_reference(ctx, mod, strictname)
         if not ctx.modules[mod] then
             ctx.modules[mod] = nextupvalue(ctx.tlcontext)
         end

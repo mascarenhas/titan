@@ -40,6 +40,80 @@ local function read(path)
     return contents
 end
 
+local function save_artifact(source, target, suffix)
+    local file = assert(io.open(scoped(target .. suffix), "wb"))
+    assert(file:write(read(source .. suffix)))
+    assert(file:close())
+    generated[scoped(target)] = true
+end
+
+local function run_native_harness(source, objects)
+    local cdriver = require "c-parser.cdriver"
+    local core = require "titan-compiler.coder.core"
+    local prefix = require("spec.support.installed_prefix").active()
+    local paths = driver.installed_paths(prefix)
+    local stem = scoped("bc180_harness")
+    generated[stem] = true
+    local file = assert(io.open(stem .. ".c", "w"))
+    assert(file:write([[
+#include <assert.h>
+#include <stdio.h>
+#include "lua.h"
+#include "lauxlib.h"
+#include "lualib.h"
+#include "titan.h"
+
+static int execute(lua_State *L, const char *source) {
+    if (luaL_dostring(L, source) != LUA_OK) {
+        fprintf(stderr, "%s\n", lua_tostring(L, -1));
+        return 0;
+    }
+    return 1;
+}
+
+static lua_State *new_state(void) {
+    lua_State *L = luaL_newstate();
+    assert(L != NULL);
+    luaL_openlibs(L);
+    lua_getglobal(L, "package");
+    lua_pushstring(L, ]] .. core.c_string_literal(package.path) .. [[);
+    lua_setfield(L, -2, "path");
+    lua_pushstring(L, ]] .. core.c_string_literal(package.cpath) .. [[);
+    lua_setfield(L, -2, "cpath");
+    lua_pop(L, 1);
+    titan_init_paths(L);
+    return L;
+}
+]], scoped(source)))
+    assert(file:close())
+    local argv = assert(cdriver.split_shell_words(driver.CC))
+    for _, argument in ipairs({ "--std=c99", "-O0", "-g", "-Wall", "-Wextra",
+            "-I" .. paths.include, "-I" .. paths.lua_source,
+            stem .. ".c" }) do
+        argv[#argv + 1] = argument
+    end
+    for _, object in ipairs(objects or {}) do argv[#argv + 1] = scoped(object) end
+    for _, input in ipairs(driver.installed_link_inputs(paths, driver.IS_DARWIN)) do
+        argv[#argv + 1] = input
+    end
+    argv[#argv + 1] = "-pthread"
+    argv[#argv + 1] = driver.IS_DARWIN and "-Wl,-export_dynamic" or "-Wl,--export-dynamic"
+    argv[#argv + 1], argv[#argv + 2] = "-o", stem .. ".exe"
+    local function run(arguments)
+        local quoted = {}
+        for index, argument in ipairs(arguments) do
+            quoted[index] = assert(cdriver.shell_quote(argument))
+        end
+        local pipe = assert(io.popen(table.concat(quoted, " ") .. " 2>&1", "r"))
+        local output = assert(pipe:read("*a"))
+        local ok = pipe:close()
+        assert.is_true(ok, output)
+    end
+    run(argv)
+    run({ "./" .. stem .. ".exe" })
+    return function() run({ "./" .. stem .. ".exe" }) end
+end
+
 local function build(modules)
     for _, module in ipairs(modules) do
         module.name, module.src = scoped(module.name), scoped(module.src)
@@ -93,7 +167,7 @@ describe("selective binary dependency compatibility", function()
     after_each(function()
         for name in pairs(generated) do
             for _, suffix in ipairs({ ".c", ".o", ".so", ".a",
-                    ".ffi.h", ".titan.h", ".so.dSYM" }) do
+                    ".ffi.h", ".titan.h", ".so.dSYM", ".exe", ".exe.dSYM" }) do
                 remove_tree(name .. suffix)
             end
         end
@@ -174,6 +248,68 @@ describe("selective binary dependency compatibility", function()
         ]])
     end)
 
+    it("uses source module state for Lua calls through cross-module callable adapters", function()
+        -- Different provider-only callable signatures move its private tag
+        -- slots away from the consumer's. A wrong module owner must not happen
+        -- to find the expected tag at the same private slot in both modules.
+        local unrelated = {}
+        for count = 1, 15 do
+            local parameters = {}
+            for index = 1, count do
+                parameters[index] = "p" .. index .. ": integer"
+            end
+            unrelated[#unrelated + 1] = "function unused" .. count .. "("
+                .. table.concat(parameters, ",") .. "): integer return 0 end"
+        end
+        fixture(table.concat(unrelated, "\n") .. [[
+            function factory(x: integer): function(): integer
+                return function(): integer return x + 1 end
+            end
+            record Factory n: integer end
+            function Factory:make(x: integer): function(): integer
+                local n = self.n
+                return function(): integer return n + x end
+            end
+            function new_factory(): Factory return Factory.new(1) end
+        ]], [[
+            local p = import "bc180_provider"
+            function view(): function(value): value
+                local adjusted: function(value): value = p.factory
+                return adjusted
+            end
+            function nested_view(): function(value, value): value
+                local first: function(value): value = p.factory
+                local second: function(value, value): value = first
+                return second
+            end
+            function bound_view(): function(value): value
+                local bound = p.new_factory():make
+                local adjusted: function(value): value = bound
+                return adjusted
+            end
+            function invoke(candidate: value): integer
+                local f: function(): integer = candidate
+                return f()
+            end
+        ]])
+        runs([[
+            local p = require "bc180_provider"
+            local direct = p.factory(41)
+            local direct_bound = p.new_factory():make(41)
+            local adapted = consumer.view()(41)
+            local nested = consumer.nested_view()(41, "ignored")
+            local bound = consumer.bound_view()(41)
+            local _, direct_tag = debug.getupvalue(direct, 2)
+            assert(direct_tag ~= nil, "source function tag is absent")
+            for _, inner in ipairs({direct, direct_bound, adapted, nested, bound}) do
+                local _, tag = debug.getupvalue(inner, 2)
+                assert(tag == direct_tag, "adapter lost the canonical returned function tag")
+                assert(inner() == 42)
+                assert(consumer.invoke(inner) == 42)
+            end
+        ]])
+    end)
+
     local changed_functions = {
         { name = "parameter type", replacement = [[
             function consume(input: string): integer return 42 end
@@ -207,7 +343,7 @@ describe("selective binary dependency compatibility", function()
         end)
     end
 
-    it("checks a nominal-only dependency when another image owns canonical state", function()
+    it("returns the canonical consumer without checking another image's dependencies", function()
         build({ { name = "bc180_consumer", src = [[
             function seed(): integer return 1 end
         ]] } })
@@ -222,21 +358,242 @@ describe("selective binary dependency compatibility", function()
             function read(box: p.Box): integer return box.n end
         ]])
         replace("record Box n: string end", image)
+        assert(os.remove(scoped("bc180_provider.so")))
         local ok, out = call([[
             local seed = assert(package.loadlib("./bc180_seed.so",
                 "luaopen_bc180_consumer"))()
             assert(seed.seed() == 1)
-            -- Select the second physical image while retaining the first
-            -- image's canonical registry userdata.
-            package.preload.bc180_consumer = nil
+            -- Enter the second image directly: the registered logical module
+            -- wins before the unused image's dependencies are inspected.
             for attempt = 1, 2 do
-                local ok, err = pcall(require, "bc180_consumer")
-                assert(not ok, "reused state bypassed the only dependency check")
-                assert(err:find("compatibility", 1, true), err)
-                assert(err:find("Box", 1, true), err)
+                local second = assert(package.loadlib("./bc180_consumer.so",
+                    "luaopen_bc180_consumer"))()
+                assert(rawequal(second, seed))
+                assert(second.seed() == 1)
+                assert(rawequal(require "bc180_consumer", seed))
             end
         ]])
         assert.truthy(ok, out)
+    end)
+
+    describe("canonical providers", function()
+        local original = [[
+            count: integer = 10
+            spare: integer = 99
+            function answer(input: integer): integer return count + input end
+            record Box n: integer end
+            function make(n: integer): Box return Box.new(n) end
+            function Box.answer(input: integer): integer return count + input + 100 end
+            function Box:read(input: integer): integer return self.n + count + input end
+        ]]
+        local replacement = [[
+            added: string = "different slots and implementation"
+            spare: integer = 999
+            count: integer = 200
+            function unused(): integer return -1 end
+            record Box n: integer end
+            function Box.aaa(): integer return -2 end
+            function Box.answer(input: integer): integer return count + input + 1100 end
+            function make(n: integer): Box return Box.new(n) end
+            function answer(input: integer): integer return count + input + 1000 end
+            function Box:read(input: integer): integer return self.n + count + input + 1000 end
+        ]]
+        local consumer = [[
+            local p = import "bc180_provider"
+            interface ExactRead
+                function read(input: integer): integer
+            end
+            interface AdjustedRead
+                function read(input: value): value
+            end
+            function count(): integer return p.count end
+            function set(n: integer) p.count = n end
+            function direct(input: integer): integer return p.answer(input) end
+            function first(input: integer): integer
+                local f = p.answer
+                return f(input)
+            end
+            function get_function(): function(integer): integer return p.answer end
+            function static_call(input: integer): integer return p.Box.answer(input) end
+            function static_value(input: integer): integer
+                local f = p.Box.answer
+                return f(input)
+            end
+            function get_static(): function(integer): integer return p.Box.answer end
+            function method(input: integer): integer return p.make(7):read(input) end
+            function get_bound(n: integer): function(integer): integer
+                return p.make(n):read
+            end
+            function exact_read(input: integer): integer
+                local wrapped: ExactRead = p.make(7)
+                return wrapped:read(input)
+            end
+            function adjusted_read(input: integer): integer
+                local wrapped: AdjustedRead = p.make(7)
+                return wrapped:read(input) as integer
+            end
+        ]]
+
+        local function assertions(count, offset)
+            return string.format([[
+                consumer.set(%d)
+                assert(consumer.count() == %d)
+                assert(provider.count == %d and provider.spare == %d)
+                assert(consumer.direct(2) == %d)
+                assert(consumer.first(3) == %d)
+                assert(consumer.static_call(4) == %d)
+                assert(consumer.static_value(5) == %d)
+                assert(consumer.method(6) == %d)
+                assert(held(8) == %d)
+                assert(consumer.exact_read(9) == %d)
+                assert(consumer.adjusted_read(10) == %d)
+                assert(rawequal(consumer.get_function(), provider.answer))
+                assert(rawequal(consumer.get_static(), provider.Box.answer))
+            ]], count, count, count, offset == 0 and 99 or 999,
+                count + offset + 2, count + offset + 3,
+                count + offset + 104, count + offset + 105,
+                count + offset + 13, count + offset + 15,
+                count + offset + 16, count + offset + 17)
+        end
+
+        it("uses the elected provider before a reordered or absent candidate DSO", function()
+            local image = fixture(original, consumer)
+            save_artifact("bc180_provider", "bc180_saved", ".so")
+            replace(replacement, image)
+            local script = [[
+                local provider = assert(package.loadlib("./bc180_saved.so",
+                    "luaopen_bc180_provider"))()
+                local consumer = require "bc180_consumer"
+                local held = consumer.get_bound(7)
+            ]] .. assertions(40, 0)
+            local ok, out = call(script)
+            assert.truthy(ok, out)
+            assert(os.remove(scoped("bc180_provider.so")))
+            ok, out = call(script)
+            assert.truthy(ok, out)
+            assert.truthy(read("bc180_consumer.so") == image)
+        end)
+
+        it("checks the canonical provider contract even when the candidate matches", function()
+            build({ { name = "bc180_provider", src = [[
+                function answer(): string return "original" end
+            ]] } })
+            save_artifact("bc180_provider", "bc180_saved", ".so")
+            fixture([[
+                function answer(): integer return 42 end
+            ]], [[
+                local p = import "bc180_provider"
+                function run(): integer return p.answer() end
+            ]])
+            local ok, out = call([[
+                local provider = assert(package.loadlib("./bc180_saved.so",
+                    "luaopen_bc180_provider"))()
+                assert(provider.answer() == "original")
+                for attempt = 1, 2 do
+                    local ok, err = pcall(require, "bc180_consumer")
+                    assert(not ok, "candidate metadata overrode the canonical contract")
+                    assert(err:find("compatibility", 1, true), err)
+                    assert(err:find("answer", 1, true), err)
+                end
+            ]])
+            assert.truthy(ok, out)
+        end)
+
+        it("uses the provider elected while initializing an earlier dependency", function()
+            local sources = {
+                bc180_provider = original,
+                bc180_facade = [[
+                    local p = import "bc180_provider"
+                    function count(): integer return p.count end
+                ]],
+            }
+            local modules = {}
+            for name, source in pairs(sources) do
+                modules[scoped(name)] = scoped(source)
+                generated[scoped(name)] = true
+            end
+            local ok, err = h.generate_modules(modules, scoped("bc180_facade"))
+            assert.truthy(ok, err)
+            build({
+                { name = "bc180_provider", src = replacement },
+                { name = "bc180_consumer", src = [[
+                    local facade = import "bc180_facade"
+                ]] .. consumer .. [[
+                    function facade_count(): integer return facade.count() end
+                ]] },
+            })
+            local called, out = call([[
+                local consumer = require "bc180_consumer"
+                local provider = require "bc180_provider"
+                local held = consumer.get_bound(7)
+                assert(consumer.count() == 10)
+            ]] .. assertions(40, 0) .. [[
+                assert(consumer.facade_count() == 40)
+            ]])
+            assert.truthy(called, out)
+        end)
+
+        it("keeps an executable's embedded provider when a dynamic consumer is loaded", function()
+            local image = fixture(original, consumer)
+            save_artifact("bc180_provider", "bc180_embedded", ".o")
+            replace(replacement, image)
+            local core = require "titan-compiler.coder.core"
+            local source = [[
+extern int luaopen_bc180_provider(lua_State *L);
+int main(void) {
+    lua_State *L = new_state();
+    assert(luaopen_bc180_provider(L) == 1);
+    lua_setglobal(L, "provider");
+    int ok = execute(L, ]] .. core.c_string_literal([[
+        consumer = require "bc180_consumer"
+        held = consumer.get_bound(7)
+    ]] .. assertions(40, 0)) .. [[);
+    lua_close(L);
+    return ok ? 0 : 1;
+}
+]]
+            local rerun = run_native_harness(source, { "bc180_embedded.o" })
+            assert(os.remove(scoped("bc180_provider.so")))
+            rerun()
+            assert.truthy(read("bc180_consumer.so") == image)
+        end)
+
+        it("keeps one consumer DSO's bindings independent in two live Lua states", function()
+            local image = fixture(original, consumer)
+            save_artifact("bc180_provider", "bc180_saved_first", ".so")
+            replace(replacement, image)
+            save_artifact("bc180_provider", "bc180_saved_second", ".so")
+            assert(os.remove(scoped("bc180_provider.so")))
+            local core = require "titan-compiler.coder.core"
+            local function initialize(path, count)
+                return string.format([[
+                    local support = require "titan"
+                    provider = assert(support._loadlibglobal(%q,
+                        "luaopen_bc180_provider"))()
+                    assert(provider.count == %d)
+                    consumer = assert(support._loadlibglobal("./bc180_consumer.so",
+                        "luaopen_bc180_consumer"))()
+                    held = consumer.get_bound(7)
+                ]], path, count)
+            end
+            run_native_harness([[
+int main(void) {
+    lua_State *first = new_state();
+    lua_State *second = new_state();
+    int ok = execute(first, ]] .. core.c_string_literal(initialize("./bc180_saved_first.so", 10)) .. [[)
+        && execute(second, ]] .. core.c_string_literal(initialize("./bc180_saved_second.so", 200)) .. [[);
+    for (int i = 0; ok && i < 4; i++) {
+        ok = execute(first, ]] .. core.c_string_literal(assertions(40, 0)) .. [[)
+            && execute(second, ]] .. core.c_string_literal(assertions(400, 1000)) .. [[);
+    }
+    lua_close(second);
+    if (ok) ok = execute(first, ]] .. core.c_string_literal(assertions(50, 0)) .. [[);
+    lua_close(first);
+    return ok ? 0 : 1;
+}
+]])
+            assert.truthy(read("bc180_consumer.so") == image)
+        end)
     end)
 
     it("keeps verification independent of mutable Lua globals", function()

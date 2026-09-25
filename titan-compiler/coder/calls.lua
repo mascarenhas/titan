@@ -2257,6 +2257,7 @@ function codecall(ctx, node)
                         name = fnode._decl.name,
                         mangled = fname
                     }
+                    fname = coder._external_reference(ctx, mod, fname)
                     if fnode._alias_namespace then
                         modarg = coder._nominal_owner_module_expr(
                             ctx, fnode._decl.fqtn)
@@ -2280,6 +2281,7 @@ function codecall(ctx, node)
                         type = fnode._type,
                         mangled = fname
                     }
+                    fname = coder._external_reference(ctx, mod, fname)
                 end
                 modarg = render("uvalue(&_mod->uv[$INDEX].uv)", {
                     INDEX = c_integer_literal(fnode.exp.var._decl._upvalue)
@@ -2356,6 +2358,7 @@ function codecall(ctx, node)
                     type = mtype,
                     mangled = fname
                 }
+                fname = coder._external_reference(ctx, mod, fname)
                 if not ctx.modules[mod] then
                     ctx.modules[mod] = nextupvalue(ctx.tlcontext)
                 end
