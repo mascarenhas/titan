@@ -91,8 +91,11 @@ fields, equal to `#record_value.type.fields` for an inspected `record_value`.
 can leave gaps in the separate, 0-based `FieldType.index`, so do not pass that
 stored index to `get` or `set`.
 
-Both operations reject indices outside `1..n_fields`. `get` returns the field
-in its normal boxed representation. `set` rejects const fields and applies the
+Both operations reject indices outside `1..n_fields`. `get` converts the field
+to its boxed representation. Native numeric values are checked at that boundary;
+a failed conversion leaves the field unchanged. An eligible embedded C object
+projects a borrowed raw address, retaining the lifetime rules described in
+[Native storage](nominal-storage.md). `set` rejects const fields and applies the
 same target-directed conversion as a Lua write to the declared field. For
 example, an integral float can be written to an integer field, but a
 fractional float cannot. Conversion failure leaves the field unchanged.
@@ -118,8 +121,11 @@ function UnionValue:get(i: integer): value
 ```
 
 `tag` is the active variant's 0-based runtime tag. `n_parts` is its payload
-arity, including parts whose value is nil. `get(i)` returns the 1-based part
-in its normal boxed representation and rejects indices outside `1..n_parts`.
+arity, including parts whose value is nil. `get(i)` selects the 1-based part
+and rejects indices outside `1..n_parts`. It boxes ordinary parts with the
+normal conversion checks; a native numeric value may fail that conversion. An
+embedded C aggregate or fixed array returns its projected borrowed address,
+without allocating an owned copy or Titan Array.
 An empty variant has zero parts; a one-part variant containing nil still has
 one. The retained `value` keeps the union and its parts alive.
 

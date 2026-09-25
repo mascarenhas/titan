@@ -264,10 +264,11 @@ owned storage through a pointer ends that inline walk, so the pointee keeps the
 mutability promised by the pointer type. This Titan binding rule is separate
 from the C pointee qualifier in `foreign const *T`.
 
-The constructor's representation is selected at its direct local declaration
-sink. The checker records one allocation plan there; moving the call to a
-return, argument, later assignment, or nested expression retains the ordinary
-GC-owned result.
+A direct local declaration selects the allocation representation described
+below. Direct generated record and variant constructors also support final
+embedded objects and fresh trailing buffers; see [Native storage in records and
+unions](nominal-storage.md). Other return, argument, later-assignment, and
+nested-expression uses retain the ordinary GC-owned result.
 
 For a complete non-GC-bearing C structure or union `T`, `.new()` selects:
 
@@ -277,7 +278,7 @@ For a complete non-GC-bearing C structure or union `T`, `.new()` selects:
 | `local x: foreign T = foreign T.new()` | automatic `T` |
 | `local x: owned *T = foreign T.new()` | GC-owned object |
 | `local x: foreign *T = foreign T.new()` | pointer into a hidden rooted owner |
-| any non-direct-local use | `owned *T` |
+| other uses outside a direct nominal constructor | `owned *T` |
 
 Automatic inference is deliberately limited to structures and unions; it does
 not make scalar, pointer, enum, function, incomplete, or C-array-typedef
@@ -340,7 +341,9 @@ objects.
 
 A direct inferred/by-value local with a nonnegative integer literal gets
 aligned automatic byte backing. An explicit owner/pointer, dynamic count, or
-non-direct-local use gets one owner userdata. Both are zeroed through:
+ordinary non-local use gets one owner userdata. A direct nominal constructor
+can place a fresh FAM object in its own allocation. Every form zeroes the full
+extent:
 
 ```text
 max(sizeof(T), offsetof(T, field) + count * sizeof(E))

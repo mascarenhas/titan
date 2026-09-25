@@ -10,8 +10,8 @@ cross-cutting invariants are:
 
 * `Type.Union` is a nominal owner; `Type.Variant` is owner metadata only;
 * every variant has an absolute, zero-based declaration-order tag;
-* empty values have only a tag user value; each payload part adds one
-  traced user value;
+* each active variant has a native tag header and native members, plus dense
+  uservalues only for GC-bearing parts;
 * `case` coverage is optional, while complete coverage of the closed static
   union can prove non-fallthrough without an `else`;
 * arms and `else` are ordinary full blocks, so existing
@@ -125,7 +125,7 @@ Type.Variant(fqtn, name, parts, index)
 point at the same `Type.Variant` objects. `nvariants` is the total declared
 count, including private variants. `Type.Variant.parts` is a dense ordered
 list of `Type.Field(fqtn, name, type, index, false)` descriptors. Here the
-field index is the **1-based union uservalue slot**, and names are unique
+field index is the **1-based logical payload-part index**, and names are unique
 within the variant. Parts have no independent locality or const qualifier.
 The variant index remains the absolute zero-based source-order tag.
 
@@ -188,24 +188,18 @@ local union publishes no nominal member.
 
 ## Payload eligibility
 
-The checker applies `types.has_tvalue_representation` to both record fields
-and union payloads. This is an intentional shared rule, not a separate union
-whitelist: both locations are stored in a Lua-traced user-value slot.
+The checker uses nominal storage eligibility separately from general TValue
+boxability. Complete fixed non-GC C aggregates and fixed arrays may be copied
+into a record or variant; their projections borrow interior pointers. Unsized
+array declarations become uncounted pointer views. GC-bearing content, including
+exact C TValue and Udata pointers, always remains traced. Public foreign-type
+export restrictions still apply. See [Native nominal storage](nominal-storage.md)
+for recursive eligibility and fresh tail plans.
 
-The predicate permits ordinary Titan values, including `Type.Function`, and
-the supported boxable C scalars/object pointers, exact `TValue`, `Udata *`,
-and owned-storage forms. It rejects direct C aggregates, C arrays, direct C
-functions. C function pointers are boxable through the supported portability
-cast, subject to the ordinary exported-type rules. Applying the predicate to records as part
-of this feature closes the
-older mismatch in which a field could be declared even though no safe
-user-value representation existed.
-
-Array payloads are a representation-sensitive case. Generated Titan code
-stores the internal `Table *` backing in the payload `TValue`, not the
-Lua-facing proxy userdata. Extraction reads that backing directly. Boxing to
-a proxy still happens only at an actual Lua/value boundary, preserving the
-one-proxy-per-backing invariant.
+Titan Array parts store their internal backing Table in a traced UV slot.
+Projection reads the backing directly; a real Lua/value boundary boxes it into
+its canonical proxy. Native C numbers stay exact until an actual conversion or
+boxing boundary.
 
 ## Case checking and control flow
 
@@ -282,27 +276,15 @@ finally execute.
 ## Run-time representation
 
 A union value is a Lua 5.5 `Udata *` whose metatable identifies its fully
-qualified union type:
+qualified union type. Every variant payload begins with an actual common header
+subobject containing an unsigned tag, followed by its native parts. Only traced
+parts occupy dense UV slots. Allocation uses the active variant's generated C
+size and traced count; an empty variant has a tag header and zero uservalues.
 
-```text
-empty variant:   luaS_newudata(L, 0, 1)
-N-part variant:  luaS_newudata(L, 0, N + 1)
-
-uv[0] = integer absolute variant tag
-uv[i] = payload part i, for i = 1..N
-```
-
-There is no reserved raw payload and no hidden user value beyond these slots.
-The empty representation's absence of `uv[1]` is why binding an empty variant
-must be rejected statically.
-
-`coder._codeunioninit` roots the new userdata immediately, installs the
-union's metatable, writes the integer tag, lowers every part with the normal internal
-`setslot` conversion, and emits `luaC_barrierback` for each collectable part.
-All union slot reads and writes access `u->uv[index].uv` directly; they do not
-call Lua API uservalue getters or setters. The checker caps payload arity at
-65,534 to leave one slot for the tag in Lua's unsigned-short uservalue count. The ordinary `Type.Nominal` C representation remains
-`Udata *`.
+The constructor roots the userdata immediately, installs the metatable, writes
+the tag and initializes parts through their layout plan. UV writes retain normal
+GC barriers; native members are untraced. The existing conservative logical arity
+limit remains 65,534, independently of physical UV usage.
 
 The metatable is separate from every record metatable and from other unions.
 `value` boxing stores the userdata, checked conversion back to the union
@@ -312,7 +294,7 @@ userdata identity. There is no Titan-union/C-union structural lowering.
 ## Generated case dispatch
 
 `coder._codecase` evaluates and materializes the scrutinee once, reads
-`ivalue(&u->uv[0].uv)`, and emits a tag-only `switch`. The switch contains
+the raw common-header tag, and emits a tag-only `switch`. The switch contains
 only `case tag: goto arm_label;` dispatch entries:
 
 ```c
@@ -324,7 +306,7 @@ switch (_case_1_tag) {
 ```
 
 The labeled arm bodies live **outside** the C switch. Each body extracts
-the selected `uv[i]` for every binder, emits the normal checked block, and jumps to the
+each selected part through its native-member or dense-UV plan, emits the normal checked block, and jumps to the
 common end label. This shape has three useful properties:
 
 * Titan arms cannot fall through;
@@ -360,7 +342,7 @@ Like records, union metatables carry discoverable runtime reflection metadata:
 * `TITAN_MT_TYPE`: lightuserdata key set to the serialized union type descriptor (`Union(...)`);
 * `TITAN_MT_MEMBERMAP`: lightuserdata key holding the public method map table (the `__index` table);
 * `TITAN_MT_STATICS`: lightuserdata key holding the union's static-namespace table containing variant constructors and static functions;
-* `TITAN_MT_PAYLOAD`: lightuserdata key holding the generated typed payload reader used by reflection; its tag and part-index switches cover public and private variants and box each selected part normally;
+* `TITAN_MT_PAYLOAD`: lightuserdata key holding the generated typed payload reader used by reflection; index 0 returns the active tag, -1 returns arity, and positive indices box parts; its switches cover public and private variants;
 * Registered in the per-state global metatables table `_titan_metatables[<fqtn>]` (`TITAN_METATABLES_KEY`), alongside the reverse pointer map in the Lua registry (`registry[metatable_pointer] = <fqtn>`).
 
 The `__index` entry first performs the same exact nominal metatable check used
@@ -391,8 +373,8 @@ Variant(fqtn, name, { Field(fqtn, part_name, type, part_index, false)... },
 
 Variants retain source order. Static and method maps are serialized in
 `util.bytewise_less` name order. Private variants and members are omitted,
-while `absolute_index` and `total_nvariants` preserve the producer's native
-layout. The recursive compiled-interface validator accepts these constructors
+while `absolute_index` and `total_nvariants` preserve logical ordinals. A separate
+native layout inventory carries physical storage plans. The recursive compiled-interface validator accepts these constructors
 only as fields of a valid module/nominal schema; it does not make
 `Type.Variant` a source type.
 

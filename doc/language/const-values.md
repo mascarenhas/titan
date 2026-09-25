@@ -133,6 +133,13 @@ prevent `request.metadata = another_map`, but would not prevent
 `request.metadata["trace"] = true`. Use `const { T }` when the Array container
 itself must be read-only.
 
+A const field containing an embedded C aggregate or fixed C array follows the
+same shallow rule. Reading it projects a borrowed pointer: the field cannot be
+replaced, but the pointed-to contents may be mutated unless the declared C type
+itself imposes `const`. A const raw pointer/array-view field can also receive a
+fresh buffer in the record's allocation. See [Native storage in records and
+unions](nominal-storage.md).
+
 The field's visibility is independent of constness. A local const field is
 still visible only to its defining source module, and an exported record with a
 local field keeps the existing constructor restrictions.
@@ -327,11 +334,13 @@ problems. A const local containing inline C aggregate or fixed-array storage
 cannot mutate that storage, take a mutable address of it, or use a mutable
 automatic-decay path. The rule remains shallow across a pointer or `owned`
 value: a const binding cannot be replaced, but an independently mutable
-pointee is not frozen. See [C FFI declarations and expressions](c-ffi-expressions.md).
+pointee is not frozen. A nominal embedded-field or union-part projection is
+such a borrowed pointer; assigning that projection to a const local prevents
+replacing the pointer, not writing through it. See [C FFI declarations and expressions](c-ffi-expressions.md).
 
 ## ABI boundary
 
 Const module/field metadata, Interface fields and wrapper snapshots, and
-qualified Array tags are part of ABI 2. The compiler rejects a mismatched
+qualified Array tags are part of the compiled-module ABI. The compiler rejects a mismatched
 provider before decoding its descriptor or exchanging values; there is no
 in-place compatibility adapter.

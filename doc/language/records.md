@@ -2,8 +2,8 @@
 
 Records are Titan's structured data type: named, fixed-shape values with
 a declared set of typed fields, plus methods. They are the moral
-equivalent of structs — fields live at fixed slots, so reading `p.x`
-compiles to an indexed load, not a hash lookup. Like Arrays but unlike Maps,
+equivalent of structs — the compiler knows each field location, so reading
+`p.x` uses direct access rather than a hash lookup. Like Arrays but unlike Maps,
 records are **not** Lua tables at the Lua boundary; they are userdata.
 Records are a distinct kind of value with their own identity, and they are typed
 *nominally* — by which declaration they come from, not by what fields
@@ -106,16 +106,16 @@ end
 ```
 
 This module-wide visibility is independent of field order: the parameters of
-the synthesized `new` function and the record's fixed field slots still follow
+the synthesized `new` function and the logical field indices still follow
 the order written inside the `record` declaration.
 
-Record fields and union payloads share one representation rule: the declared
-type must fit a Lua-traced value slot. Ordinary Titan values, including Titan
-function values, and the supported boxable C scalar/object-pointer, exact
-`TValue`/`Udata *`, and owned forms are allowed. Direct C aggregates, C
-arrays, direct C functions, and C function pointers are not. This is the same
-rule on both constructs because neither
-stores an untraced C object inline.
+Record fields and union parts support ordinary Titan values, foreign scalars
+and pointers, and eligible complete C structs, C unions, and fixed C arrays.
+Fixed C objects are copied into their owner and project borrowed interior
+pointers on access. Native foreign numbers keep their exact C values until an
+actual conversion boundary. See [Native storage in records and
+unions](nominal-storage.md) for eligibility, shallow constness, pointer
+lifetimes, and fresh buffer construction.
 
 ## Records are nominal
 
@@ -343,7 +343,7 @@ record Box
 end
 ```
 
-Local fields are real fields with fixed slots, but only code in the defining
+Local fields are real fields, but only code in the defining
 module may read or write them. Importing Titan modules and Lua code see only the
 public fields; attempting to read or write a hidden field reports the same
 "field not found" error as an absent field.
