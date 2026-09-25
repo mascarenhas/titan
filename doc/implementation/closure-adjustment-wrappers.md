@@ -263,9 +263,14 @@ the immediate source value, so genuine Lua preserves whatever Lua surface that
 value already carries—ultimately the original source declaration's statically
 baked arity, source-directed dynamic parameter conversions, and result
 behavior. In a wrapper chain this inherited entry need not match the immediate
-edge's static source tag. It also passes the wrapper as `_fn`; copied
-capture/bound-receiver slots and layered source links preserve the source
-body's expectations.
+edge's static source tag. Before recovering `_mod`, the genuine Lua entry
+follows adapter source links and passes the original source closure as `_fn`.
+It recognizes a view by its changed native entry and guarded source trailer;
+each link must preserve `CClosure.f` and reduce the upvalue count by exactly
+one. Ordinary lambda captures and bound receivers therefore do not become
+adapter links. This keeps source captures, module variables, and per-state
+native caches owned by the source provider even when another module created
+the callable view.
 
 The source declaration's strict trailer cannot simply be copied. Providers
 compile a declaration-specific source-tag check, which

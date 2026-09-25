@@ -201,7 +201,6 @@ static int __newindex(lua_State *L) { ... } /* module metatable: member write */
 int counter_abi(lua_State* L) { ... }       /* returns TITAN_ABI_VERSION */
 int counter_types(lua_State* L) { ... }     /* serialized interface, below  */
 
-static int _initialized = 0; /* tags and external functions are set up */
 Udata *counter_init(lua_State *L) { ... }
 
 int luaopen_counter(lua_State *L) {
@@ -513,8 +512,9 @@ if (TITAN_LIKELY(runtime_tag == <function-type tag>)) {
 }
 ```
 
-Those tags are the `static const void *` identities allocated by
-`function_type_tag` and publish-or-recovered through the Lua registry so
+Those tags are canonical pointers cached in the current module native payload.
+`function_type_tag` allocates the cache entry; initialization publishes or
+recovers its immutable candidate through the Lua registry so
 source-linked and `.so`-loaded modules agree on the pointer for the same exact
 type. All shapes use `types.runtime_identity(ftype)`, which retains nested
 declarator qualifiers and adds C declaration origins to header-dependent shapes.
@@ -797,103 +797,59 @@ ABI advance.
 
 ## The module protocol
 
-All semantic module state lives in the Lua registry or GC-traced Lua objects,
-never in shared C globals. In particular, per-Lua-state module state lives in
-one `Udata` (`_mod`) created by `_init`: the module table's slot is gone
-entirely, and member slots are 0-based with no reserved user value. The user values hold module
-variables, imported modules' `Udata`s, exported-function and
-exported-nominal-static canonical closures, the unconditional Array-metatable
-cache, the immutable physical-provider identity token, module-local Array
-writer closures, cached record/union/Interface metatables, and
-per-nominal static-namespace tables
-(allocation order below). Every generated function receives this `Udata` as its
-`_mod` parameter; the Lua wrappers recover it from their closure's
-upvalue 0. Around `_mod`, each module exports three protocol symbols:
+Each Lua state owns one canonical `Udata` for each initialized logical module,
+registered under `"Titan module <modname>"`. Generated functions receive that
+userdata as `_mod`; Lua wrappers recover it from closure upvalue 0. A module
+has two storage regions:
 
-### `<prefix>_init` — idempotent at two levels
+* traced uservalues hold variables, imported module userdata, canonical
+  closures, metatables, Array writer closures, and nominal namespaces;
+* its native payload begins with `TitanModuleData` and holds its immutable
+  symbol-resolver callback, resolved dependency pointers and slot numbers,
+  canonical function-type tag pointers, and Interface implementation arrays.
 
-```c
-static int _initialized = 0; /* external functions are stitched up */
-Udata *counter_init(lua_State *L) {
-    titan_ensure_stack(L, 10);
-    lua_getfield(L, LUA_REGISTRYINDEX, "Titan module counter");
-    if(lua_isnil(L, -1)) {
-        _initialized = 1;
-        /* create and register _mod (luaS_newudata(L, 0, NUPVALS));
-           titan_ensure_metatables_table(L) (ensures global _titan_metatables table),
-           $INITSOURCEIDENTITY (this translation unit's immutable token),
-           $INITARRAYMETA (canonical mutable/const Array metatable caches),
-           $LOADMODULES1 (dlopen dynamic deps), $INITMODULES (dep inits),
-           $LOADGLOBALS (symbols published by transitive RTLD_GLOBAL deps),
-           $INITRECORDS (record, union, and Interface metatables, stamping
-           TITAN_BRAND, TITAN_MT_TYPE, TITAN_MT_MEMBERMAP, and registering
-           into _titan_metatables),
-           $INITFUNCTAGS, $INITPAIRS (Interface method payloads and
-           conditional concrete-metatable witness registration),
-           $INITARRAYWRITERS (module-local writer closures), then canonical
-           function closures; $INITNAMES (trace names), $INITVARS (variable
-           initializers); install public nominal namespaces into their uv
-           slots and attach them to record and union metatables at TITAN_MT_STATICS;
-           $CREATEMETA
-           (member metatable on the udata) */
-        return _mod;
-    } else {
-        Udata *_mod = uvalue(s2v(L->top.p - 1));
-        lua_pop(L, 1);
-        if(!_initialized) {
-            _initialized = 1;
-            $LOADMODULES2  /* re-stitch directly imported function pointers */
-            $LOADGLOBALS   /* re-stitch transitive global symbols */
-            $INITFUNCTAGS  /* restore exact function identities first */
-            $INITPAIRS     /* then Interface payloads/witness registration */
-            $INITNAMES     /* then trace names for those restored pointers */
-        }
-        return _mod;
-    }
-}
-```
+State-dependent native bindings never live in mutable file-global C variables.
+An immutable symbol resolver can belong to a shared object, a linked archive,
+or an executable; it identifies the code that created this module state without
+recovering a filename or loader handle.
 
-Idempotency works at two independent levels:
+Generated Titan declarations and definitions have protected visibility on ELF,
+so a resolver's native addresses bind to its own image despite duplicate
+logical-module exports elsewhere. The pragma begins after foreign headers and
+ends with the generated module; foreign C linkage is unaffected. Darwin's
+ordinary two-level namespace already preserves these image-local bindings.
 
-* **Per Lua state**: the module `Udata` is registered in the Lua registry
-  under `"Titan module <modname>"`; a second `require`, or a dependent
-  module calling `_init` again, finds it and returns it untouched. A
-  second Lua *state* in the same process misses the registry and gets a
-  fresh `Udata` and metatables — there is no semantic per-state C global, so
-  one compiled module serves many states.
-* **Per translation unit**: the C `static int _initialized` guards only
-  nonsemantic native wiring and caches — here, the dlsym'd function pointers.
-  Several translation units may share a physical provider, but each retains
-  this separate flag and module protocol. The standard library installs a
-  paired `titan.so`/`titan.a` provider; dynamic Titan imports and Lua requires
-  share the DSO form, while static selection uses the archive. Record type
-  identity is the metatable, a
-  per-Lua-state object cached in a `_mod` user value rather than a C static, so
-  this branch no longer re-fetches any tag cache. Nominal metatables are
-  discoverable across modules through the registry's `TITAN_METATABLES_KEY`
-  table and carry typed runtime metadata (`TITAN_BRAND`, `TITAN_MT_TYPE`,
-  `TITAN_MT_MEMBERMAP`, `TITAN_MT_STATICS`).
+### `<prefix>_init` — one canonical module per Lua state
 
-`$INITPAIRS` serves both native and per-state work. It fills each private
-exact/adjusted pair array after function pointers are available, then raw-checks
+The initializer first checks the logical registry key. If a module exists, it
+returns that userdata immediately. It does not load dependencies or initialize
+another image's function tags, Interface arrays, or native bindings.
+
+When the module is absent, initialization allocates its complete native payload
+and uservalues and roots the object privately. It installs the native export
+header and physical-provider identity and prepares Array caches. Each explicit
+import is selected, checked, and initialized before selecting the next; a
+changed canonical selection after initialization is checked again. The module
+then resolves transitive owners and fills native entry and slot bindings from
+the final canonical providers.
+Dependency-check failures occur before the new module is published in the
+logical registry, so a caught failure cannot make a retry bypass verification.
+Nominal metatables, function tags, Interface arrays and witnesses, Array writers,
+canonical closures, variable initializers, Lua member access, and the module
+initializer are then prepared in their required dependency order.
+
+A fresh Lua state gets a fresh userdata and fresh native caches even when the
+same generated code is shared by both states. Consequently one state's selected
+provider cannot overwrite another state's dynamic calls or Interface dispatch.
+Record, union, and Interface identity remains the per-state metatable, discoverable
+through `TITAN_METATABLES_KEY` and cached in traced module uservalues.
+
+`$INITPAIRS` fills the current module payload's exact/adjusted Interface arrays
+once imported native pointers are available. It then raw-checks
 `concrete_metatable[target_Interface_metatable]`. A nil entry receives the
-pair's private C witness closure with the emitting `_mod` as upvalue 0; a
-non-nil entry is preserved. Thus equivalent compiled conversion sites obey
-first-writer wins in one state, while every fresh state receives its own
-registration. The closure and metatables are traced Lua objects, not semantic C
-global state.
-
-*Detail:* the re-initialization branch substitutes `$LOADMODULES2` only
-when the dynamic-load list has more than one entry (`#loadmods > 1` in
-`coder.generate`); with exactly one entry it is left empty. Entries come
-in two kinds — one `loadlib` handle line per dynamic dep, then one
-`loadsym` stitch line per imported function, always after its handle —
-so a single entry is necessarily a bare handle with no function pointers
-to re-stitch, and skipping it just avoids declaring an unused handle.
-(The converse is not exact: two dynamic deps with no functions called
-would still re-emit their handles.) `$LOADGLOBALS` is independent of that
-optimization because its symbols are not associated with a direct import
-handle.
+pair's private C witness closure with the emitting `_mod` as upvalue 0; an
+existing witness is preserved. The closure and metatables are traced Lua
+objects, while the pair array contains only native function pointers.
 
 ### Lua entries and ABI, type, and layout metadata
 
@@ -971,7 +927,7 @@ claims, validates the additional layout string for native compilation, and
 evaluates the serialized expression to recover the interface —
 letting the checker type the importing module against a dependency whose
 source is gone. Libuv does not add another result or a special binary
-classification. Dependencies selected from a DSO use dynamic handle-scoped
+classification. Dependencies selected from a DSO use canonical logical-provider
 wiring; dependencies selected from source or a static provider use direct
 native wiring. Explicit command-line roots are the source-first exception.
 The tests' in-memory `tableloader` exercises the same serialization
@@ -990,66 +946,47 @@ compiled-module ABI.
 
 ## Static vs dynamic dependency wiring
 
-`coder.generate` decides per import, by `static_deps[modname]`
-(`import_module` and `init_data_from_other_modules`).
+`coder.generate` decides per import using finalized `static_deps[modname]`
+provenance (`import_module` and `init_data_from_other_modules`).
 
-**Direct/static** (the dependency's source object is compiled in, or its
-logical module is physically carried by a selected static provider): plain
-`extern` declarations and direct calls — each cross-module function used gets
-an `extern` prototype in `$INCLUDES`, and the dependency's initializer is
-declared and called directly:
+**Direct/static** dependencies are source objects or archive members carried
+inside the same binary. Their native functions use `extern` declarations and
+direct calls, and their public slots retain compile-time constants. Their
+initializer is called directly, and its returned module must carry the exact
+linked producer's physical identity. A same-name module created by another
+image cannot safely supply the private state expected by direct native code.
 
-```c
-extern Udata *dep_init(lua_State *L);
-/* in _init: */ { Udata *_m = dep_init(L); setuvalue(L, &_mod->uv[1].uv, _m); }
-```
+**Dynamic** dependencies first use `titan_module_provider` to look up the
+logical module in the Lua registry. An initialized module supplies its native
+export callback, even if its code is embedded in the executable or was opened
+locally through `package.loadlib`. The selected DSO filename is consulted only
+when the logical module is absent. ABI and consumer-specific compatibility
+checks run before initializing a newly opened dependency.
 
-**Ordinary dynamic** (shared-provider dependency): each imported function is
-declared in `$INCLUDES` as a `static` function *pointer*; the generated
-`_init` dlopens the exact selected DSO and stitches the pointers by symbol
-name with the runtime's lazy/global `loadlib` and handle-scoped `loadsym`
-(`titan-runtime/titan.c`: Titan-path search, registry-cached handles, Lua
-error on failure):
+`titan_module_symbol` resolves the required metadata callbacks, native entries,
+bound-method trampolines, and public slot numbers through that selected provider.
+The importer saves its bindings in its own module native payload. Direct calls
+remain typed native calls with the dependency's module userdata and `NULL`
+closure argument; they do not fetch a first-class closure or invoke a Lua
+namespace lookup. First-class functions instead read the canonical closure at
+the provider's resolved slot.
 
-```c
-static Udata* (*dep_\u2133_mk_titan)(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer);
-/* in _init ($LOADMODULES1), at first init in the process: */
-void *dep_handle = loadlib(L, "selected/provider.so");
-dep_\u2133_mk_titan = titan_cast_func(Udata* (*)(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer),
-                               loadsym(L, dep_handle, "dep_\u2133_mk_titan"));
-```
+For a **transitive dynamic owner**, initialize the explicit exposing imports
+first, then use `titan_module_provider` with the owner's logical name and a null
+filename. That owner must already be initialized. Its own ABI and selective
+compatibility checks precede native lookup through its export callback; global
+symbol order does not choose the owner. The corresponding module userdata and
+nominal metatables are recovered from the same Lua state's registry. See
+[Type aliases](type-aliases.md) and [Selective binary dependency
+verification](binary-compatibility.md).
 
-A direct-libuv DSO follows this exact regime. Its explicit `import "uv"` is
-ordinary generated import wiring inside that DSO: lazy mapping leaves normal
-`uv_*` function calls unresolved long enough for the DSO's initializer to load
-the combined `titan.so` globally before those calls bind. `RTLD_NOW` would reject the DSO
-before its initializer ran, while a provider loaded `RTLD_LOCAL` later would
-not satisfy those bindings. The coder emits no provider marker or alternate
-loader call. Eager libuv relocations and constructors cannot rely on this
-initializer ordering. Compiler interface inspection is a separate
-`RTLD_LAZY | RTLD_LOCAL` operation.
-
-The dep's `_init` is fetched and called the same way inside
-`$INITMODULES`. In both regimes the *call sites are identical* C calls —
-only the storage class of the callee name differs — and the caller passes
-the callee's module `Udata` read from its own user value and `NULL` for
-the direct-call `_fn`: `dep_\u2133_mk_titan(L, uvalue(&_mod->uv[1].uv), NULL, 7)`.
-Imported record metatables are not wired through symbols at all: they are
-recovered through the Lua registry at init time under
-`"Titan record <fqtn> metatable"`. The metatable pointer itself is the record's
-type identity; see [Lua interop internals](lua-interop-internals.md).
-
-A third, **global/dynamic**, path handles a nominal record owner re-exported
-through another compiled interface when that producer selected the owner
-dynamically. If C imports only re-exporter B but calls a method owned by A,
-B's initializer has already loaded A with `RTLD_GLOBAL`. C therefore does not
-`loadlib` A: after `$INITMODULES` initializes B, `$LOADGLOBALS` resolves A's
-native method entry (and any bound-method Lua trampoline) with
-`loadglobalsym`/`dlsym(RTLD_DEFAULT, ...)`. The corresponding module userdata
-and record metatable are then recovered from the Lua registry. Resolver
-finalization rejects an independently selected A that could violate this
-producer-chosen native identity. See
-[Type aliases](type-aliases.md).
+The underlying `loadlib` still maps newly needed DSOs with
+`RTLD_LAZY | RTLD_GLOBAL`. This supports ordinary native-library relocations:
+for example, an extension can initialize its imported standard provider before
+its lazy `uv_*` calls bind. This C-linker behavior is distinct from Titan's
+logical module binding. Eager data/function-address relocations and native
+constructors cannot rely on initializer ordering. Compiler interface inspection
+remains a separate `RTLD_LAZY | RTLD_LOCAL` operation.
 
 ## User-value allocation
 
@@ -1073,9 +1010,10 @@ slot containing the source producer's immutable physical-provider token
 follows them, before the
 fixed AST-order allocation for local variables/imports, referenced local
 ordinary-function closures, every static not already in the public prefix, and
-each nominal owner's private static-namespace table. An explicit source importer
+each nominal owner's private static-namespace table. Every direct importer
 compares that token with the hidden identity function of its exact linked
-producer before reading any source-private slot. Remaining private slots are
+producer before using its state; explicit source imports additionally depend
+on the fixed source-private slots. Remaining private slots are
 allocated as
 their inventories or first uses are encountered during code generation:
 module-local Array writers; record/union, Interface, and owned-C metatables;
@@ -1108,10 +1046,10 @@ verification](binary-compatibility.md#provider-owned-slots-and-direct-calls).
 A nominal owner's type identity is its per-Lua-state metatable
 pointer, so record and union metatables must live in module user values and are
 recovered through the Lua registry for imported owners. Function-type tags use
-a separate registry-published C-static mechanism before any variable
-initializer can construct a closure. The type-independent closure brand is a
+a separate registry-published identity whose pointer is cached in the module
+native payload before any variable initializer can construct a closure. The type-independent closure brand is a
 compile-time ABI sentinel and needs no initialization or registry state.
-Canonical top-level/static closures are populated after variable initializers
+Canonical top-level/static closures are populated before variable initializers
 and before module exposure.
 
 ## Per-function code-generation contexts

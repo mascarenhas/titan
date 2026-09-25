@@ -511,7 +511,8 @@ parameter:
 
 A variadic function is an ordinary first-class value; `codevaluecall` dispatches
 it exactly like a non-variadic value. The runtime function-type tag is a
-`static const void *` published/recovered through the Lua registry. C-free
+`const void *` published/recovered through the Lua registry and cached in the
+current module's per-state native payload. C-free
 callable shapes use `types.runtime_identity(ftype)` so different modules agree.
 That key preserves the full callable structure and the declaration origins of
 header-dependent C types. The same C declaration shares identity across modules;

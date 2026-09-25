@@ -116,17 +116,43 @@ chunk. `_abi`, `_types`, and `_layouts` retain their existing independent
 contracts. Compiler-time DSO membership and metadata recovery still use those
 existing entries.
 
-For an explicit dynamic dependency, `coder/module.lua` emits:
+Every generated module userdata has a native payload beginning with
+`TitanModuleData`. Its `symbols` callback resolves the native entries, metadata
+callbacks, and public slot symbols belonging to the image that created that
+userdata. The callback is an immutable generated function; it requires neither
+a filename nor a dynamic-loader handle. Source-linked, archive-linked, and
+Lua-loaded modules publish the same header.
+
+On ELF, generated Titan declarations and definitions use protected visibility,
+after the foreign headers. Their addresses therefore refer to their own image
+even when another version of the same logical module is globally mapped.
+Darwin's ordinary two-level namespace supplies the corresponding binding.
+Foreign C declarations retain their normal linkage policy.
+
+For an explicit dynamic dependency, `coder/module.lua` uses:
 
 ```c
-void *handle = loadlib(L, "some/provider.so");
-titan_check_abi(L, handle, "some_module_abi", "some/provider.so");
-titan_check_compatibility(L, handle, "some_module_compatibility",
+TitanModuleProvider provider = titan_module_provider(L,
+    "some.module", "some/provider.so");
+titan_check_module_abi(L, provider, "some_module_abi", "some/provider.so");
+titan_check_module_compatibility(L, provider, "some_module_compatibility",
     "some/provider.so", verifier_source, verifier_length);
 ```
 
-Only after these checks does initialization use the dependency's native
-entries. `titan_check_compatibility` resolves the metadata symbol, checks the
+`titan_module_provider` first looks up `"Titan module some.module"` in the Lua
+registry. An existing canonical module supplies its payload callback, and the
+selected file is never opened. Only a missing logical module invokes `loadlib`
+for that file. ABI and compatibility checks precede initialization of a newly
+loaded provider. Native symbol and slot resolution use `titan_module_symbol`
+with the selected provider, keeping the metadata, code, and module state together.
+
+Explicit imports are selected, checked, and initialized in sequence: an earlier
+initializer may establish a later import's canonical module. After each
+initializer returns, the importer recovers the canonical callback and repeats
+the checks if selection changed. Native entry and slot bindings are filled only
+after those initializations, using the final canonical providers.
+
+The shared compatibility checker resolves the metadata symbol, checks the
 entry's result count, Lua stack delta, and exact string type, evaluates the
 metadata and verifier chunks, and calls the verifier on the resulting table.
 A successful check restores the original Lua stack top. Missing entries,
@@ -140,13 +166,16 @@ The metadata string remains rooted while its chunk is loaded and evaluated.
 This is a protocol between generated native providers, not a sandbox for
 untrusted shared libraries.
 
-Transitive nominal owners use the existing global-symbol path after explicit
-providers initialize. Their ABI and consumer-specific compatibility checks run
-before using their global native entries. The final `static_deps`/provider
-provenance bypasses these checks for source or archive code residing in the
-same binary; it also preserves direct initialization and source-provider
-identity checks. An already initialized dependency does not authorize a new
-consumer to skip its own requirements.
+Transitive nominal owners use the same logical registry lookup after explicit
+providers initialize, with a null filename. The owner must already exist; no
+second DSO is selected and no `RTLD_DEFAULT` lookup chooses its native entries.
+Their ABI and consumer-specific compatibility checks run before native use.
+Final `static_deps`/provider provenance bypasses compatibility checks for source
+or archive code residing in the same binary. Those direct edges instead require
+the exact linked provider's identity before using its fixed layout or code.
+An already initialized dynamic dependency does not authorize a new consumer to
+skip its own requirements. Returning an existing canonical module also does
+not initialize caches belonging to another image of that logical module.
 
 ## Provider-owned slots and direct calls
 
@@ -158,11 +187,19 @@ compatible additions or reordering may move them.
 `coder/binary.lua` exports one `const unsigned int` for each public variable
 or canonical closure slot. Names derive from the existing native callable
 prefixes with `_variable_slot` or `_closure_slot`. A dynamic consumer resolves
-the required data symbols once, through its explicit provider handle or the
-existing global owner path, and uses the resulting index for reads and writes.
+the required data symbols once through the logical provider selected above,
+and uses the resulting index for reads and writes.
 The containing consumer-owned slot that stores its import remains constant.
 Self-owned and same-binary provider accesses retain their known constant
 indices.
+
+Resolved native function pointers and slot numbers live in the importing
+module's native payload, alongside its per-state function-type tag cache and
+Interface implementation arrays. They are not mutable file-global bindings:
+two Lua states can select different canonical providers without overwriting
+each other's calls, slot indices, or Interface dispatch. The payload contains
+native pointers and scalars; GC-bearing module and closure references remain
+in traced uservalue slots.
 
 `mod.func()` still calls the resolved native symbol with the imported module
 state and `NULL` closure argument. It never fetches a function value first.
@@ -181,7 +218,16 @@ path. Assertions cover both accepted changes and load-time rejection before
 unsafe native use, including moved variable/callable slots, alias owners,
 construction, closed-union proofs, ABI precedence, and protocol failures.
 
+Canonical-provider tests initialize one provider first, leave a different
+compatible image at the consumer's selected filename, and prove that the
+consumer uses the existing module's code and slots. Cover executable-embedded
+and `package.loadlib` providers, transitive owners, and two Lua states with
+different elected providers. Direct edges must reject a different canonical
+physical provider.
+
 Provider and incremental integration must additionally preserve the driver's
-direct/handle/global provenance after object reuse and final linking. An exact
+direct/handle/global provenance after object reuse and final linking. These are
+link-plan classifications; dynamic runtime lookup still obeys logical module
+identity. An exact
 incremental-cache validity decision is separate from an already-built
 consumer's selective runtime compatibility check.

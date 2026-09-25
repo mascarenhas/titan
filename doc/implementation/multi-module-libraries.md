@@ -120,34 +120,39 @@ constructed. Rehydration overwrites it with the selected relative provider.
 It is intentionally omitted from `types.serialize`: physical deployment is a
 property of this lookup, not part of the module's public type interface.
 
-## Runtime imports retain the selected provider
+## Runtime imports reuse canonical logical modules
 
-The coder reads `node._type.file`; it does not repeat candidate probing in
-generated C. An import of `a.b.c` selected from `a/b.so` emits:
+The coder retains `node._type.file` as the fallback provider filename; it does
+not repeat candidate probing in generated C. An import of `a.b.c` selected
+from `a/b.so` emits:
 
 ```c
-void *a_b_c_handle = loadlib(L, "a/b.so");
-titan_check_abi(L, a_b_c_handle, "a_b_c_abi", "a/b.so");
-titan_check_compatibility(L, a_b_c_handle, "a_b_c_compatibility", "a/b.so",
+TitanModuleProvider a_b_c_provider =
+    titan_module_provider(L, "a.b.c", "a/b.so");
+titan_check_module_abi(L, a_b_c_provider, "a_b_c_abi", "a/b.so");
+titan_check_module_compatibility(L, a_b_c_provider, "a_b_c_compatibility", "a/b.so",
     verifier_source, verifier_length);
 ```
 
-It then resolves `a_b_c_init` and the used native entries from that handle.
-`loadlib` still walks the runtime Titan path, caches by relative provider file,
-maps with `RTLD_LAZY | RTLD_GLOBAL`, and invalidates the backtrace image cache.
-Two logical imports in one provider therefore reuse one handle but request
-different fully mangled symbols. Transitive record-alias method lookup still
-uses `loadglobalsym` only after explicit providers have initialized.
-The compatibility verifier checks this consumer's required erased contracts,
-not equality of the full semantic interface. Transitive owner checks also run
-ABI-first before their global native entries are used. Required imported
-variable and canonical-closure slot symbols follow the same handle/global
-provenance. See [Selective binary dependency
-verification](binary-compatibility.md).
+The registry entry for `"Titan module a.b.c"` takes precedence over the filename.
+If it exists, its native payload supplies an export callback, including when
+the module was initialized from an executable, archive, or `package.loadlib`.
+Only an absent logical module reaches `loadlib`, which walks the runtime Titan
+path, caches by relative provider file, maps with `RTLD_LAZY | RTLD_GLOBAL`,
+and invalidates the backtrace image cache. Two logical imports in one provider
+can reuse one handle while requesting different fully mangled symbols.
+
+After ABI and selective compatibility checks, `titan_module_symbol` resolves
+`a_b_c_init`, used native entries, and required variable/canonical-closure slot
+symbols through the selected callback or handle. The importer caches native
+bindings in its own per-state payload. Transitive nominal owners use their
+logical registry callbacks after explicit dependencies initialize, with their
+own ABI-first compatibility checks. They do not use global symbol selection.
+See [Selective binary dependency verification](binary-compatibility.md).
 
 This separation is important: candidate membership is a compiler concern;
-the selected relative file makes generated runtime loading exact and
-relocatable.
+the selected relative file makes fallback runtime loading exact and relocatable,
+while the logical registry owns initialized module identity.
 
 ## One object per logical module
 
@@ -192,7 +197,7 @@ protocol:
 * `<mangled>_abi`, semantic `<mangled>_types`, physical `<mangled>_layouts`, and
   the separate `<mangled>_compatibility` projection;
 * `<mangled>_init` and `luaopen_<mangled>`;
-* a file-local `_initialized` wiring flag;
+* a native export descriptor and per-state binding caches in the module payload;
 * a distinct registry-owned module `Udata`, variables, canonical closures,
   record/union metatables, initializer, and nominal owners.
 

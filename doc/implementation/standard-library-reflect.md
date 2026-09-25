@@ -44,9 +44,12 @@ export metadata retain their existing representations. Every specialization
 continues to share its declaration's runtime nominal identity.
 
 `types.serialize` omits local members. Public record fields retain their
-original storage indices; public union variants retain their original tags.
-Hydration preserves a dense Array of visible descriptors without treating its
-ordinal as that storage index or tag.
+original logical indices, including gaps left by private fields. Public union
+variants retain their runtime tags, which form a dense zero-based public range;
+private variants follow that range regardless of interleaved source declarations.
+Hydration preserves a dense Array of visible descriptors. Record field ordinals
+are distinct from logical field indices, and private active union tags have no
+public descriptor.
 
 ## Descriptor hydration
 

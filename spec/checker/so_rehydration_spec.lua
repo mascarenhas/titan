@@ -358,7 +358,7 @@ describe("typechecker rehydration of .so-only imports", function()
             table.concat(constructor, "\n"))
     end)
 
-    it("rehydrates unions with hidden tag holes and transitive payload owners",
+    it("rehydrates public-first union tags and transitive payload owners",
     function()
         local deps = {
             { name = "rhunionpoint", src = [[
@@ -423,7 +423,7 @@ describe("typechecker rehydration of .so-only imports", function()
         assert.equal(3, union.nvariants)
         assert.equal(2, #union.variants)
         assert.equal(0, union.variants.quit.index)
-        assert.equal(2, union.variants.move.index)
+        assert.equal(1, union.variants.move.index)
         assert.is_nil(union.variants.hidden)
         assert.is_nil(union.functions.hidden)
         assert.same({"value"}, union.functions.move.paramnames)

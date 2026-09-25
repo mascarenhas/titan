@@ -114,33 +114,38 @@ C imports B and uses B.Foo.new, B.Foo.static, and a method on B.Foo
 ```
 
 The alias keeps every member's defining name as `A.Foo`, so C code refers to
-A's native static, method, and bound-method trampoline symbols. C must not open
-A directly: B's initializer already calls Titan's `loadlib` for A with
-`RTLD_LAZY | RTLD_GLOBAL` and initializes A's canonical module userdata.
+A's native static, method, and bound-method trampoline symbols. Initializing B
+establishes A's canonical module userdata, either by reusing the already
+initialized logical module or by loading B's selected provider for A.
 
 Code generation separates those transitive symbols from ordinary direct
 imports. `_init` performs the steps in this order:
 
 ```text
-load C's explicit dependency B
-initialize B (which globally loads and initializes A)
-resolve any directly called A member symbols with loadglobalsym / dlsym(RTLD_DEFAULT, ...)
+select and check C's explicit dependency B
+initialize B (which establishes A's canonical module userdata)
+select A through its logical registry entry and check C's requirements for A
+resolve A member symbols and public slot numbers through A's native export callback
 recover A's module userdata and record metatable from the Lua registry
 ```
 
-Direct dynamic imports still use their own checked handle and `loadsym`.
-Transitive symbol lookup deliberately has no `loadlib("A.so")` or redundant
-ABI check in C: B checked A before publishing its interface and symbols. The
-module userdata used as a method or static function's `_mod` argument is
-recovered under `"Titan module A"`, which B's initialization has populated.
+The transitive lookup calls `titan_module_provider(L, "A", NULL)`: it must find
+an initialized logical module and never opens `A.so` or selects a symbol through
+`RTLD_DEFAULT`. C checks A's ABI and its own selective compatibility requirements
+before using A's callback. The module userdata used as a method or static
+function's `_mod` argument comes from that same `"Titan module A"` registry
+entry. A can therefore belong to an executable, a linked archive, or a locally
+loaded DSO without changing alias semantics.
 
 A first-class static selector does not need another native symbol lookup. It
-reads the canonical closure from the recovered A userdata at the checker-stamped
-public-prefix index; the closure already carries A's module, type tag, native
+reads the canonical closure from the recovered A userdata at the provider's
+resolved public slot; the closure already carries A's module, type tag, native
 entry, and strict entry. A direct static call uses the same recovered owner
-userdata and the statically resolved A entry point. Thus neither path reads a
+userdata and A's resolved native entry point. C caches the pointer and slot in
+its per-state module native payload. Thus neither path reads a
 nonexistent namespace or closure slot from B.
 
 This ordering also applies to Lua trampolines for bound method references.
-Static archive and multi-module providers use the same logical owner and
-registry recovery; only their native symbol linkage differs from the DSO path.
+Static archive and same-binary providers use the same logical owner and
+registry recovery, but retain direct native linkage and constant slot indices.
+Their returned module must match the exact linked producer's physical identity.

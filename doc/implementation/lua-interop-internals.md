@@ -78,7 +78,8 @@ for labels. Declaration `paramnames` exist only in Titan's compiled interface,
 not in the Lua wrapper or a run-time map; see
 [named-argument internals](named-arguments.md).
 
-The following is the coercive entry for `fmod`, trimmed only of the two
+The following abridged canonical-closure entry for `fmod` omits adapter-source
+traversal and the two
 argument conversions:
 
 ```c
@@ -164,11 +165,12 @@ Walking through it:
 * **Module recovery.** The canonical source closure is built with the module
   `Udata` in upvalue 0, followed by its type tag, native entry pointer, fixed
   closure brand, any captures, and the declaration strict-entry trailer. A
-  realized adjustment wrapper copies that module/captures and source Lua entry,
-  replaces the tag/native pointer, and appends the immediate source plus target
-  relay. The ordinary Lua entry therefore recovers `_mod` from
-  `_fn->upvalue[0]` with `uvalue`; it does not rely on the obsolete one-upvalue
-  wrapper shape.
+  realized adjustment wrapper keeps the source captures and Lua entry but uses
+  the adapting module in upvalue 0, replaces the tag/native pointer, and appends
+  the immediate source plus target relay. The ordinary Lua entry follows those
+  guarded source links before recovering `_fn` and its owning `_mod`. Native
+  adapters and strict relays retain the adapting module; genuine Lua calls use
+  the original provider's module data and captures.
 * **Arguments.** Each parameter is a C local of its native
   [`ctype`](values-and-gc.md), filled by the checker-attached
   `DynamicCoercionPlan` from `s2v(func + i)`. The location baked into boundary error messages is
@@ -729,13 +731,13 @@ fails the userdata-has-no-`__index` way.
 Everything per-Lua-state that generated code and runtime must find again
 lives in the Lua registry or in GC-traced objects reachable from it. Semantic
 module state and native caches never live in mutable shared or per-image C
-globals; translation-unit statics are limited to immutable constants and
-non-stateful wiring that is identical for every Titan module. The complete key
-inventory:
+globals. Translation-unit statics hold immutable candidates and generated code;
+state-dependent pointers and Interface arrays belong to the module native
+payload. The complete key inventory:
 
 | Registry key | Value |
 | --- | --- |
-| `"Titan module <modname>"` | the module `Udata` (`_init`'s idempotency check) |
+| `"Titan module <modname>"` | canonical module `Udata`, including its native export descriptor and per-state binding caches |
 | `"Titan module <modname> metatable"` | the module `Udata`'s member metatable (only if the module exports anything) |
 | `"Titan record <fqtn> metatable"` | the record metatable (`luaL_newmetatable`) — also the record's type identity (a type check compares `uvalue(v)->metatable`) |
 | `"Titan union <fqtn> metatable"` | the union metatable and exact nominal identity; its `__index` exposes only methods and its `__newindex` rejects writes |
@@ -826,44 +828,58 @@ install the async program hook.
 The selected relative provider is attached transiently as `Type.Module.file`;
 it is not serialized.
 
-### 3. Titan runtime lazy/global imports
+### 3. Canonical Titan runtime imports
 
-Generated code loads that exact selected provider through
-`titan-runtime/titan.c`:
+Generated code selects the logical provider through `titan-runtime/titan.c`:
 
 ```c
-void *some_dep_handle = loadlib(L, "some/provider.so");
-titan_check_abi(L, some_dep_handle, "some_dep_abi", "some/provider.so");
-titan_check_compatibility(L, some_dep_handle, "some_dep_compatibility",
+TitanModuleProvider some_dep_provider =
+    titan_module_provider(L, "some.dep", "some/provider.so");
+titan_check_module_abi(L, some_dep_provider, "some_dep_abi", "some/provider.so");
+titan_check_module_compatibility(L, some_dep_provider, "some_dep_compatibility",
     "some/provider.so", verifier_source, verifier_length);
 Udata* (*some_dep_init)(lua_State *L) =
     titan_cast_func(Udata* (*)(lua_State*),
-        loadsym(L, some_dep_handle, "some_dep_init"));
+        titan_module_symbol(L, some_dep_provider, "some_dep_init"));
 ```
 
-`loadlib` consults `TITAN_LIBS_KEY`, then walks `TITAN_PATH_0_6`,
-`TITAN_PATH`, or `".;<root>/lib/titan/0.6"`, with `;;` splicing the
-ordinary default. It maps `dir/file` with `RTLD_LAZY | RTLD_GLOBAL`, caches
-the handle by relative provider for the state, invalidates native backtrace
-state, and never calls `dlclose`. Two logical modules in one image reuse the
-handle and resolve different mangled entries. `titan_check_abi` runs before
-`titan_check_compatibility`, which checks the consumer's required erased
-signatures and nominal shapes through separate Lua metadata/verifier chunks.
-Compilation still validates semantic types and physical layouts through their
-own protocols. `loadsym` resolves handle-local symbols;
-`loadglobalsym` uses `RTLD_DEFAULT` only after explicit providers initialize,
-for entries owned through re-exported nominal aliases. Those transitive owners
-receive the same ABI-first compatibility checks before their native entries
-are used. Required variable and canonical first-class callable slots are
-resolved as provider-owned data symbols; direct calls still use native function
-symbols. Same-binary dependencies retain direct, constant-slot access. See
-[Selective binary dependency verification](binary-compatibility.md).
+`titan_module_provider` looks up `"Titan module some.dep"` before loading any
+file. An initialized module must have a native payload beginning with
+`TitanModuleData` and a non-null symbol callback. That callback supplies this
+canonical provider's metadata, native entries, and public slot symbols even if
+it came from a linked executable, archive, or local `package.loadlib` call.
+Returning the canonical module does not initialize a second image's caches.
 
-Lazy binding permits an imported extension to initialize a provider before
-its ordinary unresolved function calls bind. Global visibility lets that
-provider satisfy the calls. Native constructors, imported data, and taken
-function-address relocations are eager and remain outside this ordering
-contract.
+Only when that logical module is absent does selection call `loadlib` for the
+compile-selected relative filename. `loadlib` consults `TITAN_LIBS_KEY`, then
+walks `TITAN_PATH_0_6`, `TITAN_PATH`, or `".;<root>/lib/titan/0.6"`, with `;;`
+splicing the ordinary default. It maps `dir/file` with
+`RTLD_LAZY | RTLD_GLOBAL`, caches the handle by relative provider for the state,
+invalidates native backtrace state, and never calls `dlclose`. Two logical
+modules in one image can reuse that handle and resolve different mangled entries.
+
+The ABI check precedes the consumer's required erased-signature and nominal-shape
+checks, both before newly loaded dependency initialization. Compilation still
+validates semantic types and physical layouts through their own protocols.
+`titan_module_symbol` uses the canonical callback or the newly opened handle;
+required variable and canonical callable slots are provider-owned data symbols.
+Resolved pointers and indices stay in the importer's per-state native payload.
+Function-tag caches and Interface pair arrays also belong there, so another Lua
+state cannot overwrite these bindings.
+
+After explicit imports initialize, transitive nominal owners use the same
+logical lookup with a null filename. They must already exist and receive their
+own ABI-first compatibility checks; no global symbol lookup chooses their code.
+Same-binary dependencies keep direct, constant-slot access and check the exact
+linked producer's physical identity. See [Selective binary dependency
+verification](binary-compatibility.md).
+
+Lazy binding still permits an imported extension to initialize a provider
+before its ordinary unresolved C function calls bind. Global visibility lets
+that provider satisfy those calls. This native-linker behavior does not choose
+Titan's logical provider. Native constructors, imported data, and taken
+function-address relocations are eager and remain outside the initializer
+ordering contract.
 
 ### 4. Generated-shim lazy/global loading and promotion
 
@@ -897,12 +913,11 @@ provider before the extension is mapped and can therefore also satisfy eager
 relocations and constructors. Neither path has libuv-specific metadata or a
 provider-specific runtime loader.
 
-Every cross-module function called from a dynamic dependency is declared as a
-`static` C function pointer and stitched by symbol name in `_init`; static
-dependencies use plain `extern` declarations and direct calls. This includes
-the reinitialization branch that re-stitches pointers when the same module code
-is present twice in a process, and its `#loadmods > 1` quirk that can leave that
-branch empty. The complete wiring is in the [code generator
+Dynamic imports resolve native function addresses through the canonical logical
+provider and retain them in the importing module's per-state native payload.
+Static dependencies use `extern` declarations and direct calls with a provider
+identity check. Returning an existing canonical module does not overwrite its
+native bindings or initialize another image's caches. The complete wiring is in the [code generator
 overview](codegen-overview.md#static-vs-dynamic-dependency-wiring), and the
 provider claim/search rules are in [Multi-module
 libraries](multi-module-libraries.md#compiled-module-candidate-search).

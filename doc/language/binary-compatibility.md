@@ -11,6 +11,15 @@ are fixed parts of that binary. Replacing an archive or source file on disk
 does not replace its already-linked code. See [Modules](modules.md) and
 [Static compiled modules](static-compiled-modules.md) for dependency selection.
 
+Within one Lua state, the first initialized provider of a logical module is
+canonical. A later dynamic import uses that module and checks its own requirements
+against it before using its native entries. It does not open a second provider
+just because a different file was selected when the consumer was compiled.
+This also applies when the canonical module was linked into the executable,
+loaded from an archive, or initialized through Lua's `package.loadlib`.
+For example, a dynamically loaded plugin importing a module already supplied
+by its host executable uses the host's initialized module.
+
 ## What a consumer requires
 
 Titan first checks the provider's compiled-code ABI. If that matches, it checks
@@ -144,5 +153,9 @@ Titan compiler/runtime; the current compiler version remains `0.6.0` and the
 compiled-code ABI remains `2`.
 
 Checks occur during loading. Replacing a file does not hot-reload a provider
-already initialized in a running Lua state. Test a deployment using a fresh
-process and the unchanged consumer binary.
+already initialized in a running Lua state. Each Lua state owns its module
+instances and native bindings independently. Dependencies linked directly into
+a binary must use that binary's own provider; finding a different initialized
+provider for such a dependency is an error. Test a replacement deployment using
+a fresh process and the unchanged consumer binary, and test plugin integration
+with the host's modules already initialized.

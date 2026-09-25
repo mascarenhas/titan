@@ -1168,10 +1168,19 @@ closed-inventory assumption; an unreachable falling-through `else` does.
 
 Keep `mod.func()` as a direct native call and `mod.func` as the canonical
 function value. Separate shared dependencies resolve moved variable/closure
-slots during loading. Source/archive dependencies already linked into the same
-binary remain fixed. Replacing a file does not hot-reload an initialized module;
-validate replacements in a fresh process with the consumer unchanged. Compiler
-cache validity and rebuilding affected consumers are separate decisions. See
+slots through the selected logical provider. Within one Lua state, an already
+initialized module wins before any selected DSO filename is opened, including
+providers embedded in an executable, linked from an archive, or initialized
+through `package.loadlib`. Each new dynamic consumer checks its own requirements
+against that canonical provider. Source/archive dependencies linked into the same
+binary keep fixed native bindings and require that exact linked provider's state.
+Native pointers, callable-tag caches, and Interface arrays belong to per-state
+module payloads, so another Lua state cannot overwrite them.
+
+Replacing a file does not hot-reload an initialized module. Validate replacement
+files in a fresh process with the consumer unchanged; also exercise plugins
+against an already initialized host provider when that is the deployment model.
+Compiler cache validity and rebuilding affected consumers are separate decisions. See
 [`binary-compatibility.md`](../../../doc/language/binary-compatibility.md).
 
 ## Errors, `catch`, and `defer`

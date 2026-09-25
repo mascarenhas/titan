@@ -250,18 +250,27 @@ interface guarantees.
 
 The existing three code-generation paths remain:
 
-* `direct`: `extern` declarations and direct `_init`/function/method calls;
-* `handle`: load the selected `Type.Module.file`, check ABI followed by the
-  consumer's selective compatibility requirements, and use handle-scoped
-  `loadsym`; and
-* `global`: initialize the exposing DSO and recover a transitive owner with
-  ABI-first compatibility checks and `loadglobalsym`.
+* `direct`: `extern` declarations and direct `_init`/function/method calls,
+  checking that the returned module belongs to the exact linked producer;
+* `handle`: select the already initialized logical module, or load the selected
+  `Type.Module.file` only if absent, then check ABI followed by the consumer's
+  selective compatibility requirements before initialization; and
+* `global`: initialize the exposing dependency and recover the transitive
+  owner's logical registry entry, with its own ABI-first compatibility checks.
+
+The latter two names describe finalized dependency provenance. Both resolve
+native entries and public slot data with `titan_module_symbol`: an initialized
+module supplies its native export callback, while a newly opened provider
+supplies its handle. A transitive owner must already exist and never uses
+`RTLD_DEFAULT`. The callback also supports executable-embedded and locally
+loaded providers that have no Titan runtime handle.
 
 Static archive selection changes an import to `direct`; it does not introduce
 a runtime archive reader. Finalized same-binary provenance also bypasses runtime
 compatibility verification and keeps provider slot indices constant. Separate
-DSO variable/closure slots use exported data symbols through their existing
-handle/global path. The [compatibility projection](binary-compatibility.md)
+DSO variable/closure slots use exported data symbols, cached alongside native
+function pointers in the importer's per-state module payload. The
+[compatibility projection](binary-compatibility.md)
 does not alter archive metadata or the direct/handle/global ownership rules.
 
 ## Native composition

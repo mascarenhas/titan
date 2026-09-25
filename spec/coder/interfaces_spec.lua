@@ -952,9 +952,9 @@ describe("interfaces (end-to-end)", function()
                     registration.pair .. "[0]=titan_cast_func(")
                 local closures = occurrences(init,
                     "lua_pushcclosure(L," .. registration.wrapper .. ",1);")
-                assert.equal(2, #fills)
-                assert.equal(2, #closures)
-                for index = 1, 2 do
+                assert.equal(1, #fills)
+                assert.equal(1, #closures)
+                for index = 1, #fills do
                     local conditional = assert(init:find(
                         "if(tagisempty(_titan_interface_existing_tag)){",
                         fills[index], true))
@@ -1739,12 +1739,18 @@ describe("interfaces (end-to-end)", function()
         local zed = interface_pair_id(
             "test_", "test.ZedRecord", "test.ZedInterface")
         local alpha_decl = assert(csrc:find(
-            "static TitanInterfaceMethod " .. alpha .. "[2]",
+            "TitanInterfaceMethod " .. alpha .. "[2]",
             1, true))
         local zed_decl = assert(csrc:find(
-            "static TitanInterfaceMethod " .. zed .. "[2]",
+            "TitanInterfaceMethod " .. zed .. "[2]",
             1, true))
         assert.is_true(alpha_decl < zed_decl)
+        assert.is_nil(csrc:find("static TitanInterfaceMethod ", 1, true))
+        for _, pair in ipairs({ alpha, zed }) do
+            assert.truthy(csrc:find(
+                "((test_native_data*)getudatamem(_mod))->" .. pair .. "[0]",
+                1, true), csrc)
+        end
         assert.matches(alpha .. "%[0%]%s*=%s*titan_cast_func%(%s*"
             .. "TitanInterfaceMethod,%s*"
             .. "test_\\u2133_AlphaRecord_\\u2131_exact_titanmethod%)", csrc)
@@ -1760,10 +1766,10 @@ describe("interfaces (end-to-end)", function()
         assert.is_nil(csrc:find(alpha .. "_adapter_0", 1, true))
         assert.is_nil(csrc:find(zed .. "_adapter_0", 1, true))
         local _, alpha_declarations = csrc:gsub(
-            "static TitanInterfaceMethod " .. alpha:gsub("(%W)", "%%%1")
+            "TitanInterfaceMethod " .. alpha:gsub("(%W)", "%%%1")
             .. "%[2%];", "")
         local _, zed_declarations = csrc:gsub(
-            "static TitanInterfaceMethod " .. zed:gsub("(%W)", "%%%1")
+            "TitanInterfaceMethod " .. zed:gsub("(%W)", "%%%1")
             .. "%[2%];", "")
         assert.equal(1, alpha_declarations)
         assert.equal(1, zed_declarations)
@@ -1905,6 +1911,7 @@ describe("interfaces (end-to-end)", function()
                 raw_csrc, "test_init("))
             local pair = interface_pair_id(
                 "test_", "test.Caller", "test.Callback")
+            local pair_ref = "((test_native_data*)getudatamem(_mod))->" .. pair
             local function locate(fragment, start)
                 local position = csrc:find(fragment, start or 1, true)
                 assert.truthy(position, "missing generated C fragment: "
@@ -1918,14 +1925,15 @@ describe("interfaces (end-to-end)", function()
                 return position
             end
 
-            assert.matches("static TitanInterfaceMethod "
+            assert.matches("TitanInterfaceMethod "
                 .. pair .. "%[1%];", csrc)
+            assert.is_nil(csrc:find("static TitanInterfaceMethod ", 1, true))
 
             -- The generated module initializer follows the exact allocation/rooting
             -- protocol and performs no allocating/raising work after publishing
             -- the half-built wrapper and before installing both ownership edges.
             local allocation =
-                locate_initializer("L,sizeof(" .. pair .. "),2);")
+                locate_initializer("L,sizeof(" .. pair_ref .. "),2);")
             local rebase =
                 locate_initializer(
                     "_base=restorestack(L,_base_off);", allocation)
@@ -1964,37 +1972,36 @@ describe("interfaces (end-to-end)", function()
                 "/sizeof%(TitanInterfaceMethod%)", csrc)
             locate(",NULL,uvalue(&")
 
-            -- Both init branches publish function tags before pair pointers. In
-            -- the fresh branch, pairs precede canonical closures/trace names and
-            -- the user initializer that allocates the eager wrapper.
+            -- The fresh module publishes function tags before its per-state
+            -- pair pointers, canonical closures/trace names, and the user
+            -- initializer that allocates the eager wrapper.
             local fresh = locate("if(lua_isnil(L,-1))")
             local first_tag =
                 locate("titan_publish_function_type_tag", fresh)
             local first_pair =
-                locate(pair .. "[0]=titan_cast_func(", fresh)
+                locate(pair_ref .. "[0]=titan_cast_func(", fresh)
             local first_closure =
                 locate("TITAN_BRAND", first_pair)
             local names = locate("TITAN_NAMES_KEY", first_closure)
             local eager_allocation =
-                locate("sizeof(" .. pair .. "),2", names)
+                locate("sizeof(" .. pair_ref .. "),2", names)
             assert.is_true(first_tag < first_pair
                 and first_pair < first_closure
                 and first_closure < names
                 and names < eager_allocation)
 
-            local existing = locate("if(!_initialized)", eager_allocation)
-            local second_tag =
-                locate("titan_publish_function_type_tag", existing)
-            local second_pair =
-                locate(pair .. "[0]=titan_cast_func(",
-                    first_pair + 1)
-            local second_names = locate("TITAN_NAMES_KEY", second_pair)
-            assert.is_true(existing < second_tag
-                and second_tag < second_pair
-                and second_pair < second_names)
+            -- Existing logical modules retain the native payload initialized by
+            -- their elected image; this image must not rebind any of its caches.
+            local existing = locate_initializer(
+                "Udata*_mod=uvalue(s2v(L->top.p-1));")
+            local existing_branch = initializer:sub(existing)
+            assert.is_nil(existing_branch:find(
+                "titan_publish_function_type_tag", 1, true))
+            assert.is_nil(existing_branch:find(pair_ref, 1, true))
+            assert.is_nil(existing_branch:find("TITAN_NAMES_KEY", 1, true))
             assert.is_nil(csrc:find(
-                pair .. "[0]=titan_cast_func(",
-                second_pair + 1, true))
+                pair_ref .. "[0]=titan_cast_func(",
+                first_pair + 1, true))
 
             local called, callerr = h.call("test", h.DEPTH_PROBE .. [[
             assert(test.run_record(function() return 7 end) == 7)

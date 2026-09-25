@@ -812,11 +812,11 @@ describe(".so-only cross-module imports", function()
         local generated = f:read("*a")
         f:close()
         assert.match(
-            'loadlib%s*%(%s*L,%s*"tbaz%.so"%s*%)', generated)
+            'titan_module_provider%s*%(%s*L,%s*"tbaz",%s*"tbaz%.so"%s*%)', generated)
         assert.not_match(
-            'loadlib%s*%(%s*L,%s*"tfoo%.so"%s*%)', generated)
+            'titan_module_provider%s*%(%s*L,%s*"tfoo",%s*"tfoo%.so"%s*%)', generated)
         assert.match(
-            'loadglobalsym%s*%(%s*L,%s*'
+            'titan_module_symbol%s*%(%s*L,%s*tfoo_provider,%s*'
                 .. '"tfoo_\\u2133_Point_\\u2131_move_titanmethod"%s*%)',
             generated)
         local rok, out = call("tbar",
@@ -890,11 +890,11 @@ describe(".so-only cross-module imports", function()
         local facade_c = bf:read("*a")
         bf:close()
         assert.match(
-            'loadlib%s*%(%s*L,%s*"alias_provider%.so"%s*%)', facade_c)
+            'titan_module_provider%s*%(%s*L,%s*"alias_provider",%s*"alias_provider%.so"%s*%)', facade_c)
         -- A direct synthesized constructor uses the reconstructed public
         -- payload and the owner's metatable instead of loading a call entry.
         assert.not_match(
-            'loadsym%s*%(%s*L,%s*alias_provider_handle,%s*'
+            'titan_module_symbol%s*%(%s*L,%s*alias_provider_provider,%s*'
                 .. '"alias_provider_\\u2133_Foo_\\u2131_new_titanstatic"%s*%)',
             facade_c)
 
@@ -906,16 +906,18 @@ describe(".so-only cross-module imports", function()
         local consumer_c = cf:read("*a")
         cf:close()
         assert.match(
-            'loadlib%s*%(%s*L,%s*"alias_facade%.so"%s*%)', consumer_c)
+            'titan_module_provider%s*%(%s*L,%s*"alias_facade",%s*"alias_facade%.so"%s*%)', consumer_c)
         assert.not_match(
-            'loadlib%s*%(%s*L,%s*"alias_provider%.so"%s*%)', consumer_c)
-        assert.not_match("alias_provider_handle", consumer_c)
+            'titan_module_provider%s*%(%s*L,%s*"alias_provider",%s*"alias_provider%.so"%s*%)', consumer_c)
         assert.match(
-            'loadglobalsym%s*%(%s*L,%s*'
+            'titan_module_provider%s*%(%s*L,%s*"alias_provider",%s*NULL%s*%)',
+            consumer_c)
+        assert.match(
+            'titan_module_symbol%s*%(%s*L,%s*alias_provider_provider,%s*'
                 .. '"alias_provider_\\u2133_Foo_\\u2131_plus_titanmethod"%s*%)',
             consumer_c)
         assert.match(
-            'loadglobalsym%s*%(%s*L,%s*'
+            'titan_module_symbol%s*%(%s*L,%s*alias_provider_provider,%s*'
                 .. '"alias_provider_\\u2133_Foo_\\u2131_plus_boundmethod"%s*%)',
             consumer_c)
         local merged_consumer_c = consumer_c:gsub('"%s*"', '')
@@ -923,13 +925,13 @@ describe(".so-only cross-module imports", function()
             "boundlua", "boundstrict",
         }) do
             assert.match(
-                'loadglobalsym%s*%(%s*L,%s*"alias_provider_' ..
+                'titan_module_symbol%s*%(%s*L,%s*alias_provider_provider,%s*"alias_provider_' ..
                     '\\u2133_Foo_\\u2131_plus_titanentry_' ..
                     role .. '"%s*%)',
                 merged_consumer_c)
         end
         assert.match(
-            'loadglobalsym%s*%(%s*L,%s*'
+            'titan_module_symbol%s*%(%s*L,%s*alias_provider_provider,%s*'
                 .. '"alias_provider_\\u2133_Foo_\\u2131_make_titanstatic"%s*%)',
             consumer_c)
         assert.match(

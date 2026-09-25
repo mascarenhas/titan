@@ -174,9 +174,9 @@ end
 
         local facade_c = read_file(source_root .. "/dynamic/facade.c")
         assert.truthy(facade_c:find(
-            'loadlib(L, "dynamic/owner.so")', 1, true), facade_c)
+            'titan_module_provider(L, "dynamic.owner", "dynamic/owner.so")', 1, true), facade_c)
         assert.truthy(facade_c:find(
-            'loadsym%s*%(%s*L%s*,%s*dynamic_owner_handle%s*,%s*' ..
+            'titan_module_symbol%s*%(%s*L%s*,%s*dynamic_owner_provider%s*,%s*' ..
                 '"dynamic_owner_\\u2133_Box_\\u2131_make_titanstatic"%s*%)'), facade_c)
         local facade_archive = workspace .. "/dynamic/facade.a"
         local facade, facade_err =
@@ -224,8 +224,11 @@ end
             tostring(code) .. ")")
 
         local generated = read_file(source_root .. "/app.c")
+        assert.truthy(generated:find(
+            'titan_module_provider(L, "dynamic.owner", NULL)', 1, true),
+            generated)
         assert.match(
-            'loadglobalsym%s*%(%s*L,%s*"dynamic_owner_' ..
+            'titan_module_symbol%s*%(%s*L,%s*dynamic_owner_provider,%s*"dynamic_owner_' ..
                 '\\u2133_Box_\\u2131_add_titanmethod"%s*%)',
             generated)
         assert.truthy(generated:find(
