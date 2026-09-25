@@ -299,40 +299,37 @@ and metamethod dispatch — a full userdata; the metatable's
 `__index`/`__newindex` serve field access and methods from Lua
 ([Lua interop internals](lua-interop-internals.md)), and the spec
 verifies `type(p) == "userdata"` and that two instances share a
-metatable. **Titan needs** fixed-slot, unboxed-pointer field access and
-a GC object with barrier support for mutable slots — exactly
-what a `Udata`'s `UValue uv[]` array is. `setboxed`/`checkandget`
+metatable. **Titan needs** direct native-member and traced-slot access and
+a GC object with barrier support for mutable traced fields. The `Udata` payload
+and its `UValue uv[]` array supply those two storage classes. `setboxed`/`checkandget`
 (Titan↔Lua) need no wrap or unwrap at all: the value crossing the
 boundary is the record itself, leaving only the one-pointer metatable
 compare on the way in.
 
-## Unions: tag and optional payload user values
+## Unions: native tag and independently stored parts
 
-A Titan union is also one zero-byte `Udata *`, with a distinct per-union
-metatable as its nominal identity. Its user-value layout is deliberately not
-the record field layout:
+A Titan union is one `Udata *`, with a distinct per-union metatable as its
+nominal identity. Each variant has its own generated payload struct and dense
+traced-slot count. Every payload starts with an actual common tag-header
+subobject containing the absolute variant tag. Even an empty variant has this
+native header, but needs no UV slots.
 
-```text
-uv[0]  integer absolute variant tag
-uv[1]  payload, only for a payload variant
-```
+Parts use the same physical classification as record fields. Non-GC scalars,
+eligible fixed aggregates and arrays, and fresh const tails occupy native
+storage; traced values occupy dense UV slots. An Array part retains its internal
+`Table *` backing in its assigned UV, without boxing a Lua proxy. Direct C
+functions remain ineligible, while C function pointers have native scalar
+storage. Storage eligibility is separate from `has_tvalue_representation`;
+embedding an aggregate does not make it generally boxable.
 
-An empty variant allocates with `luaS_newudata(L, 0, 1)`; a payload variant
-uses `luaS_newudata(L, 0, 2)`. The constructor roots the userdata before
-evaluating/storing a payload and applies `luaC_barrierback` when that payload
-may be collectable. No tag or payload is exposed as a Titan field or ordinary
-Lua member.
+Construction roots the final userdata before initializing its stored fields,
+and traced stores apply `luaC_barrierback`. `case` materializes the union once,
+reads the common tag header, and projects each checked binding through the
+selected variant's storage plan. Logical 1-based part indices are independent
+of native member names and UV indices. No tag or part is exposed as an ordinary
+Lua member. See [Native nominal storage](nominal-storage.md).
 
-Payloads use the same `types.has_tvalue_representation` rule as record fields
-because both are stored in a traced `TValue` user-value slot. Ordinary boxed
-Titan values—including Arrays, Maps, and function values—are eligible;
-options recurse into their base. Direct C aggregates, C arrays, direct C
-functions, and C function pointers have no such representation and are
-rejected. An Array payload stores its internal `Table *` backing in `uv[1]`,
-not its Lua proxy userdata.
-
-`case` materializes the union once, reads the integer tag, and extracts
-`uv[1]` only for a checked payload binding. Boxing into `value` keeps the same
+Boxing into `value` keeps the same
 userdata, and unboxing compares the exact union metatable just as a record
 check compares the exact record metatable. The reverse metatable map includes
 the protected `"Titan union <fqtn>"` identity for diagnostics.

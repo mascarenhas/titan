@@ -411,13 +411,13 @@ cross-pass fields (short-lived state used wholly inside one pass is omitted).
 | `_union` | `StatCase` | checker | coder | the resolved `Type.Union` owner of the case scrutinee |
 | `_variant`, `_variant_index` | `CaseArm` | checker | coder | the resolved `Type.Variant` and its absolute zero-based dispatch tag |
 | `part`, `_part_loc` | `Decl` in a named `CaseArm.bindings` list | parser | checker, source analysis | selected source part name and location; the declaration's own `name` is its local alias, and positional bindings omit `part` |
-| `_part`, `_part_index` | checked case-binding `Decl` | checker | generic lowering, coder | resolved `Type.Field` and its one-based payload index, used to read the exact union uservalue slot |
+| `_part`, `_part_index` | checked case-binding `Decl` | checker | generic lowering, coder | resolved `Type.Field` and its one-based logical part index; the variant's separate storage plan selects the native member or dense UV slot |
 | `_always_returns` | every statement | checker | checker, coder | historical name for cached non-fallthrough analysis; a case is true when every arm is true and either its arms cover all `Type.Union.nvariants` or its reachable else is true, a literal-true `while` is true only when no reachable `break` targets it, and statement-list generation stops after any direct or compound true result |
 | `_method` | `ExpCall` (method calls) | checker | coder | the resolved `Type.Method` |
 | `_paramnames` | `TopLevelFunc` | checker callable-signature stage | checker, module-interface builder | dense names of fixed declared parameters; kept on the declaration rather than `Type.Function` |
 | `_named_arg_order`, `_named_call_kind` | checked named `ExpCall` | checker | coder | formal indexes of explicit expressions in lexical order, plus `"titan"` or `"foreign"`; the `Args*` payload itself has already been normalized to formal order |
 | `_named_omitted` | synthesized nil fill in a named call or record constructor | checker | coder assertions for named calls; specs | distinguishes checked omissions from explicit expressions while source-order lowering runs first |
-| `_field` | `Field` (record constructors) | checker | coder | the resolved `Type.Field` descriptor; its `index` is the record `Udata` user-value slot (`uv[index].uv`) the field occupies, including synthesized omitted fields |
+| `_field` | `Field` (record constructors) | checker | coder | the resolved `Type.Field` descriptor, including synthesized omitted fields; its `index` is the zero-based logical declaration position, mapped independently to a native member or dense UV slot |
 | `_omitted_initializer` | mutable `StatDecl` | checker | specs | the source omitted the expression list; checked nil expressions were synthesized for all declared slots |
 | `_initializerless_const` | const `TopLevelVar` | checker | assignment authorization, coder | the source omitted the module initializer and passed the explicit nil-bearing-type rule; only its owner root initializer frame may assign it |
 | `_forcontrol` | `Decl` | checker | checker | marks numeric and generic `for` control variables as read-only assignment targets |

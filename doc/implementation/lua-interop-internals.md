@@ -413,9 +413,10 @@ metatable at lightuserdata key `TITAN_MT_MEMBERMAP` for runtime reflection.
 It maps each public field name to the lightuserdata address of its generated
 typed accessor and each public method name to the method's Lua-entry C
 closure, itself closed over the module. Local fields and local methods are
-absent. The accessor knows the original storage index and uses ordinary
-boxing on reads and the field's dynamic conversion plan plus a GC barrier on
-writes. Reflection caches that same accessor with the module owner stored
+absent. The accessor maps its logical field through the separate native/UV
+storage plan. Reads use checked boxing; writes use the field's dynamic
+conversion plan and apply a GC barrier only to traced stores.
+Reflection caches that same accessor with the module owner stored
 under `TITAN_MT_MOD`; it does not inspect the metamethod closure's upvalues.
 
 The record metatable also records:
@@ -437,24 +438,26 @@ The record metatable also records:
 ```c
 static int interop_\u2133_Point_\u2131_meta_index(lua_State *L) {
     TValue *_recslot = s2v(L->ci->func.p + 1);
+    CClosure *_func = clCvalue(s2v(L->ci->func.p));
+    Udata *_mod = uvalue(&_func->upvalue[1]);
     Udata *_rec = NULL;
     /* ... full nominal checkandget of the receiver: tag compare,
        three-way "expected interop.Point but found %s" errors ... */
     TValue *_fieldslot = s2v(L->ci->func.p + 2);
-    CClosure *_func = clCvalue(s2v(L->ci->func.p));
     Table *_fieldmap = hvalue(&(_func->upvalue[0]));
-    TValue _fieldidxv;
-    lu_byte _fieldtag = luaH_get(_fieldmap, _fieldslot, &_fieldidxv);
+    TValue _memberv;
+    lu_byte _fieldtag = luaH_get(_fieldmap, _fieldslot, &_memberv);
     if(TITAN_LIKELY(!tagisempty(_fieldtag))) {
-        const TValue *_fieldidx = &_fieldidxv;
-        if(ttisCclosure(_fieldidx)) {
-            setobj2s(L, L->top.p - 1, _fieldidx);   /* a method */
+        if(ttisCclosure(&_memberv)) {
+            setobj2s(L, L->top.p - 1, &_memberv);   /* a method */
+        } else if (ttislightuserdata(&_memberv) && pvalue(&_memberv) != NULL) {
+            void (*_accessor)(lua_State *, Udata *, Udata *, TValue *, int) =
+                titan_cast_func(
+                    void (*)(lua_State *, Udata *, Udata *, TValue *, int),
+                    pvalue(&_memberv));
+            _accessor(L, _mod, _rec, s2v(L->top.p - 1), 0);
         } else {
-            TValue *_slot = &_rec->uv[ivalue(_fieldidx)].uv;
-            switch(ivalue(_fieldidx)) {
-                case 0: { setobj2s(L, L->top.p - 1, _slot); break; }
-                /* ... one case per field ... */
-            }
+            return luaL_error(L, "malformed internal member map for record 'interop.Point'");
         }
         return 1;
     } else {
@@ -468,41 +471,39 @@ though dispatch already went through the right metatable — so extracting
 the raw metamethod with the `debug` library and calling it on a bogus
 receiver still errors safely. A fieldmap hit that is a C closure is a
 method, returned as-is (this is how `p:move(2, 3)` from Lua reaches the
-`genluaentry` wrapper, with `p` then checked as argument 1). An integer
-hit reads the corresponding record user value; a record-typed field is
-already its own Udata, handed out directly. Unknown keys raise
+`genluaentry` wrapper, with `p` then checked as argument 1). A non-NULL
+lightuserdata hit selects the typed accessor in read mode. It loads the native
+member or traced slot and boxes the result; an exact wide C number may fail
+this conversion without changing storage. A record-typed field is already
+its own Udata, handed out directly. Unknown keys raise
 `field '%s' not found in record '%s'`, located at the record
 declaration.
 
 ### `__newindex`: checked mutable writes and const rejection
 
 `<module>_\u2133_<rec>_\u2131_meta_newindex` does the same receiver re-validation and fieldmap
-lookup, but additionally requires the hit to be an **integer** — so
+lookup, but additionally requires a non-NULL **lightuserdata accessor** — so
 assigning to a method name (`p.move = 2`) raises the same "not found"
-error; methods are not assignable. Each generated field arm first checks the
-descriptor's required `isconst` boolean. A const arm raises the const-field
-write error without conversion or mutation. A mutable arm consumes the field's
+error; methods are not assignable. The accessor runs in write mode and checks
+the descriptor's required `isconst` boolean. A const accessor raises the const-field
+write error without conversion or mutation. A mutable accessor consumes the field's
 `DynamicCoercionPlan` into a temporary and, only after conversion succeeds,
-stores that value followed by a GC
-[write barrier](values-and-gc.md#5-write-barriers-back-for-userdata-and-tables-forward-for-closures):
+stores that value in its selected native member or UV slot. A traced-slot write
+also applies a GC
+[write barrier](values-and-gc.md#5-write-barriers-back-for-userdata-and-tables-forward-for-closures).
+For example, the traced-store portion is:
 
 ```c
-case 1: {
-    TValue _converted;
-    /* render the field's DynamicCoercionPlan into _converted */
-    setobj2t(L, _dst, &_converted);
-    break;
-}
-/* ... */
+TValue _converted;
+/* render the field's DynamicCoercionPlan into _converted */
+setobj2t(L, _dst, &_converted);
 luaC_barrierback(L, obj2gco(_rec), _dst);
 ```
 
 The barrier is the **back** barrier now that `_rec` is a `Udata`, not the forward
 barrier the old `CClosure` record used. Mutable record-field writes from Lua
 are thus **coerced and type-enforced by the same matrix as function
-arguments**, while const fields remain readable but cannot be replaced. Records with zero
-fields get stub `__index`/`__newindex` that always error, with an
-unquoted message variant (`field %s not found in record %s`).
+arguments**, while const fields remain readable but cannot be replaced.
 
 Record functions need no record metatable: each record name becomes a plain Lua
 **static-namespace table** with its public record functions inserted, held in a dedicated
@@ -573,17 +574,21 @@ entry wrapper.
 The value returned by a constructor is the union's `Udata` itself. Its
 metatable is protected as `"Titan union <fqtn>"`; `__index` exposes only
 public methods, and `__newindex` rejects every write. Variant names, the
-integer tag, and all payload user values are deliberately absent from
+native tag, and all payload parts are deliberately absent from
 the instance map. Both metamethods re-check the exact union metatable before
 dispatch, so a method extracted with `debug` cannot be borrowed onto another
 record or union. Plain Lua can construct and pass union values but cannot
 inspect or mutate their representation.
 
-The backing userdata has one tag uservalue plus one uservalue per payload
-part. Generated construction and case projection access `Udata.uv` directly:
-`uv[0].uv` is the tag and `uv[i].uv` is the one-based payload part `i`.
-They do not call Lua's uservalue getter or setter API. Collectable part writes
-retain the normal rooting and write-barrier discipline.
+The backing userdata contains the active variant's native payload, starting
+with a real common tag-header subobject, plus dense UV slots only for traced
+parts. Generated construction and case projection follow the separate physical
+plan; logical part ordinals never stand in for UV indices. Native access uses
+payload members and traced access uses `Udata.uv` directly, without Lua's
+uservalue getter/setter API. Collectable stores retain normal rooting and write
+barriers. The producer's `TITAN_MT_PAYLOAD` reader gives reflection the tag,
+logical arity, and checked boxed part values; see
+[Native nominal storage](nominal-storage.md).
 
 Like record metatables, union metatables carry discoverable runtime metadata:
 * `TITAN_BRAND`: lightuserdata key set to integer constant `TITAN_UNION` (4);

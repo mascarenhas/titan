@@ -1112,6 +1112,53 @@ local function union_value(candidate: value): reflect.UnionValue
   end
 end
 
+union NativeAggregatePayloads
+  local hidden(pair: foreign titan_reflect_pair, row: foreign titan_reflect_row)
+  empty()
+end
+
+function test_private_union_native_parts_project_borrowed_interior_addresses(_context: test.Context)
+  local pair = foreign titan_reflect_pair.new()
+  pair.quot = 17
+  pair.rem = 3
+  local row = foreign int.new_array(3)
+  row[0] = 5
+  row[1] = 7
+  row[2] = 11
+  local owner = NativeAggregatePayloads.hidden(pair, row)
+  local inspected = union_value(owner)
+  test.assert(inspected.tag == 0 and inspected.n_parts == 2)
+  test.assert(#inspected.type.variants == 1)
+  test.assert(inspected.type.variants[1].name == "empty")
+  test.assert(inspected.type.variants[1].tag == 1)
+  local pair_pointer = inspected:get(1) as foreign *titan_reflect_pair
+  local row_pointer = inspected:get(2) as foreign *int
+  case owner
+  when hidden(actual_pair, actual_row) then
+    test.assert(pair_pointer == actual_pair as foreign *titan_reflect_pair)
+    test.assert(row_pointer == actual_row as foreign *int)
+  else raise "expected private native payload"
+  end
+
+  -- The constructor copied both source objects; reflection borrows the stored
+  -- copies rather than returning the originals or creating new owned storage.
+  pair.quot = 99
+  row[0] = 99
+  gc.collect()
+  test.assert(pair_pointer.quot as integer == 17)
+  test.assert(pair_pointer.rem as integer == 3)
+  test.assert(row_pointer[0] as integer == 5)
+  pair_pointer.rem = 13
+  row_pointer[1] = 19
+  case owner
+  when hidden(actual_pair, actual_row) then
+    test.assert(actual_pair.rem as integer == 13)
+    test.assert(actual_row[1] as integer == 19)
+    test.assert(actual_row[2] as integer == 11)
+  else raise "expected private native payload"
+  end
+end
+
 function test_union_payload_readers_box_arrays_and_preserve_sparse_tags(_context: test.Context)
   local values: {integer} = {21, 34}
   local mutable = union_value(ArrayPayloads.mutable(values))

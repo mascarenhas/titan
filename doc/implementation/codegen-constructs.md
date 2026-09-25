@@ -711,10 +711,13 @@ exponent `2` is special-cased as `b * b` (where `b` is the base hoisted
 into a float temp), every other exponent uses `pow(b, e)` — both
 operands are materialized into float temps first, so each is evaluated
 once. **Equality on ordinary dynamic values**: when both operands are
-`TValue`-represented (`value` or options), `==`/`~=` normally compile to
+`TValue`-represented (`value` or ordinary Options), `==`/`~=` normally compile to
 `luaV_rawequalobj(&l, &r)` and its negation. The narrowly selected
 [Map/`value` path](#equality-codebinaryop) adds table `__eq` after a failed raw
-check; `value`/`value` remains raw. **`and`/`or`** specialize on static truthiness.
+check; `value`/`value` remains raw. When both operands have native C numeric
+Option carriers, equality compares presence and exact native payloads directly.
+A mixed native/boxed or gradual comparison performs checked boxing before Lua
+equality. **`and`/`or`** specialize on static truthiness.
 For a boolean result the checker wraps non-boolean operands with an
 `_operator_conversion` whose operation is `truthiness`; `not` uses the same
 operation. The coder consumes this annotation before ordinary cast dispatch,
