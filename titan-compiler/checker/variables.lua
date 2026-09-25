@@ -666,7 +666,7 @@ end
 -- ABI shape. `allow_missing == false` is the existing call-site signal for a C
 -- function pointer/direct FFI/pseudo-constructor.
 function checkargs(callable, args, loc, fname, st, errors,
-                         allow_missing)
+                         allow_missing, nominal_constructor)
     local signature = assert(call_signature(callable),
         "call checking requires a callable signature")
     if allow_missing == nil then allow_missing = true end
@@ -686,6 +686,12 @@ function checkargs(callable, args, loc, fname, st, errors,
             slot_term = function(i)
                 return "argument " .. i .. " of call to " .. fname
             end,
+            check_expression = nominal_constructor and function(
+                    exp, est, eerrors, context, demand, index)
+                checker._nominal_argument_demand(
+                    demand, nominal_constructor, index)
+                checkexp(exp, est, eerrors, context, demand)
+            end or nil,
         }), st, errors)
 
     -- A runtime-sized Titan run has no C vararg promotion/ABI contract. Keep

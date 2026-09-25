@@ -10,6 +10,7 @@ local declarations = [[
     typedef union ns_cell { int count; double number; } ns_cell;
     typedef int ns_row[3];
     typedef int ns_short_row[2];
+    typedef int ns_symbolic_row[(1 + 2)];
     typedef const int ns_const_row[3];
     typedef int ns_incomplete_row[];
     typedef struct ns_incomplete ns_incomplete;
@@ -45,6 +46,11 @@ local function declaration(ast, name, tag)
         end
     end
     error("missing declaration " .. name)
+end
+
+local function uncast(exp)
+    while exp._tag == "Ast.ExpCast" do exp = exp.exp end
+    return exp
 end
 
 describe("nominal native storage checking", function()
@@ -320,6 +326,180 @@ describe("nominal native storage checking", function()
             assert.equal("value", bindings[1]._nominal_storage.kind)
             assert.equal("Type.CPointer", bindings[2]._type._tag)
             assert.equal("fixed_aggregate", bindings[2]._nominal_storage.kind)
+        end)
+    end)
+
+    it("retains direct fresh array plans through positional adjustment and surplus effects",
+    function()
+        local ok, err, ast = h.run_checker([[
+            local record NativeIntArray
+                const length: integer
+                local const array: foreign int[]
+            end
+            local function effect(): integer return 17 end
+            local function create(count: integer): NativeIntArray
+                return NativeIntArray.new(count,
+                    foreign int.new_array(count), effect())
+            end
+        ]], probe_session)
+        assert.truthy(ok, err)
+        local call = uncast(declaration(ast, "create").block.stats[1].exps[1])
+        local constructor = assert(call._nominal_constructor)
+        assert.equal("record", constructor.kind)
+        assert.same({ 0, 1 }, constructor.field_indices)
+        local allocation = constructor.allocation_plans[2]
+        assert.equal("nominal_tail", allocation.storage)
+        assert.equal("Type.CPointer", allocation.result_type._tag)
+        assert.equal(2, allocation.nominal_slot_index)
+        local source = uncast(call._arg_adjustment.fixed[2])
+        assert.same(source._c_allocation_plan, allocation)
+        assert.same(source._arg_adjustment.fixed[1], allocation.count_expression)
+        assert.equal(1, #call._arg_adjustment.discards)
+        assert.equal(3, #call._arg_adjustment.exps)
+    end)
+
+    it("retains named and generic constructor plans in lexical argument order",
+    function()
+        local ok, err, ast = h.run_checker([[
+            local record Mixed<|T|>
+                value: T
+                const first: foreign int[]
+                const second: foreign long double[]
+            end
+            local function count(value: integer): integer return value end
+            local function create(): Mixed<|integer|>
+                return Mixed.new{
+                    second = foreign long double.new_array(count(0)),
+                    value = 21,
+                    first = foreign int.new_array(count(4)),
+                }
+            end
+        ]], probe_session)
+        assert.truthy(ok, err)
+        local call = uncast(declaration(ast, "create").block.stats[1].exps[1])
+        assert.same({ 3, 1, 2 }, call._named_arg_order)
+        local constructor = assert(call._nominal_constructor)
+        assert.equal("Type.Value", constructor.slots[1].type._tag)
+        assert.equal("Type.Value", constructor.owner.fields[1].type._tag)
+        assert.is_nil(constructor.allocation_plans[1])
+        for _, index in ipairs({ 2, 3 }) do
+            local allocation = constructor.allocation_plans[index]
+            assert.equal("nominal_tail", allocation.storage)
+            assert.same(allocation, uncast(call.args.args[index])._c_allocation_plan)
+            assert.equal("Ast.ExpCall", allocation.count_expression._tag)
+        end
+    end)
+
+    it("plans fixed object and fixed-array initialization without an owned intermediate",
+    function()
+        with_header(function(check)
+            local ok, err, ast = check([[
+                local record Fixed
+                    point: foreign ns_point
+                    first: foreign ns_row
+                    second: foreign ns_row
+                    symbolic: foreign ns_symbolic_row
+                end
+                local function create(): Fixed
+                    return Fixed.new(foreign ns_point.new(),
+                        foreign ns_row.new(), foreign int.new_array(3),
+                        foreign int.new_array(3))
+                end
+            ]])
+            assert.truthy(ok, err)
+            local call = uncast(declaration(ast, "create").block.stats[1].exps[1])
+            for index, allocation in ipairs(call._nominal_constructor.allocation_plans) do
+                assert.equal("nominal_fixed", allocation.storage)
+                assert.same(call._nominal_constructor.slots[index].type,
+                    allocation.result_type)
+                assert.is_false(types.has_tvalue_representation(allocation.result_type))
+                assert.same(allocation, uncast(call._arg_adjustment.fixed[index])._c_allocation_plan)
+            end
+            assert.equal(4, #call._nominal_constructor.allocation_plans)
+        end)
+    end)
+
+    it("plans array and FAM union tails without changing immutable part descriptors",
+    function()
+        with_header(function(check)
+            local ok, err, ast = check([[
+                local union Native
+                    pair(array: foreign const *int, packet: foreign *ns_packet)
+                end
+                local function create(count: integer): Native
+                    return Native.pair(foreign int.new_array(0),
+                        foreign ns_packet.new(count))
+                end
+            ]])
+            assert.truthy(ok, err)
+            local call = uncast(declaration(ast, "create").block.stats[1].exps[1])
+            local constructor = assert(call._nominal_constructor)
+            assert.equal("union", constructor.kind)
+            assert.equal("pair", constructor.variant.name)
+            assert.same({ 1, 2 }, constructor.field_indices)
+            assert.is_false(constructor.slots[1].isconst)
+            local array, fam = constructor.allocation_plans[1], constructor.allocation_plans[2]
+            assert.equal("nominal_tail", array.storage)
+            assert.equal(0, array.array_count_literal)
+            assert.is_true(types.c_pointer_has_qual(array.result_type, "const"))
+            assert.equal("nominal_tail", fam.storage)
+            assert.is_true(fam.fam)
+            assert.equal("data", fam.fam_field.name)
+        end)
+    end)
+
+    it("does not infer freshness through callable aliases, returned owners, or mutable fields",
+    function()
+        local ok, err, ast = h.run_checker([[
+            local record Buffer const data: foreign int[] end
+            local record Mutable data: foreign int[] end
+            local function allocate(count: integer): owned int[]
+                return foreign int.new_array(count)
+            end
+            local function create(count: integer)
+                local constructor = Buffer.new
+                local aliased = constructor(foreign int.new_array(count))
+                local mutable = Mutable.new(foreign int.new_array(count))
+                local indirect = Buffer.new(allocate(count))
+                local owner: owned int[] = foreign int.new_array(count)
+                local borrowed = Buffer.new(owner)
+            end
+        ]], probe_session)
+        assert.truthy(ok, err)
+        local stats = declaration(ast, "create").block.stats
+        local aliased = uncast(stats[2].exps[1])
+        assert.is_nil(aliased._nominal_constructor)
+        assert.equal("owned", uncast(aliased._arg_adjustment.fixed[1])._c_allocation_plan.storage)
+        for _, index in ipairs({ 3, 4, 6 }) do
+            local call = uncast(stats[index].exps[1])
+            assert.is_nil(next(call._nominal_constructor.allocation_plans))
+        end
+        local mutable = uncast(stats[3].exps[1])
+        assert.equal("owned", uncast(mutable._arg_adjustment.fixed[1])._c_allocation_plan.storage)
+    end)
+
+    it("rejects unproven fixed allocation extents and GC-bearing fused tails",
+    function()
+        with_header(function(check)
+            for _, count in ipairs({ "2", "0", "length" }) do
+                local ok, err = check([[
+                    local record Fixed row: foreign ns_row end
+                    local function create(length: integer): Fixed
+                        return Fixed.new(foreign int.new_array(]] .. count .. [[))
+                    end
+                ]])
+                assert.is_false(ok)
+                assert.match("fixed nominal C array", err, 1, true)
+            end
+            local ok, err = check([[
+                local record Hidden const data: foreign ns_gc_value[] end
+                local function create(length: integer): Hidden
+                    return Hidden.new(foreign ns_gc_value.new_array(length))
+                end
+            ]])
+            assert.is_false(ok)
+            assert.match("fused nominal tail", err, 1, true)
+            assert.match("GC-bearing FFI storage", err, 1, true)
         end)
     end)
 end)
