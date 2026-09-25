@@ -724,6 +724,82 @@ function report_incomplete_c_object(typ, st, subject, loc, errors)
     return true
 end
 
+-- A nominal member owns fixed C bytes, but observing those bytes borrows an
+-- interior address. Keep this separate from TValue representation: admitting
+-- an embedded aggregate must not make it boxable in containers or calls.
+function checker._nominal_storage_plan(typ, written_array_view)
+    local projection = typ
+    local kind = written_array_view and "borrowed_array_view" or "value"
+    if types.is_c_aggregate(typ) and not types.is_c_tvalue(typ) then
+        local resolved = c_resolve(typ)
+        kind = "fixed_aggregate"
+        if resolved._tag == "Type.CArray" then
+            projection = types.CPointer(
+                resolved.elem, types.c_type_qualifiers(typ))
+        else
+            -- Retaining the declared pointee also retains typedef qualifiers;
+            -- the Titan member's binding constness never adds C qualifiers.
+            projection = types.CPointer(typ, {})
+        end
+    end
+    return {
+        kind = kind,
+        storage_type = typ,
+        projection_type = projection,
+    }
+end
+
+function checker._nominal_member_type(written, typ)
+    if written and written._tag == "Ast.TypeCArray"
+       and not written.length then
+        local resolved = c_resolve(typ)
+        if resolved and resolved._tag == "Type.CArray" then
+            return types.CPointer(
+                resolved.elem, types.c_type_qualifiers(typ)), true
+        end
+    end
+    return typ, false
+end
+
+local function nominal_embedded_object_error(typ, st, seen)
+    typ = c_resolve(typ)
+    if not typ or seen[typ] then return nil end
+    seen[typ] = true
+    local incomplete = incomplete_c_object_error(
+        typ, st, "embedded nominal storage")
+    if incomplete then return incomplete end
+    if typ._tag == "Type.CStruct" or typ._tag == "Type.CUnion" then
+        if typ.has_fam then
+            return string.format(
+                "embedded nominal storage cannot contain C type '%s' with a flexible array member",
+                types.tostring(typ))
+        end
+        for _, field in ipairs(typ.fields or {}) do
+            local err = nominal_embedded_object_error(field.type, st, seen)
+            if err then return err end
+        end
+    elseif typ._tag == "Type.CArray" then
+        return nominal_embedded_object_error(typ.elem, st, seen)
+    end
+end
+
+function checker._nominal_storage_error(typ, st)
+    if types.has_tvalue_representation(typ) then return nil end
+    if not types.is_c_aggregate(typ) then
+        return string.format(
+            "type '%s' has no nominal storage representation",
+            types.tostring(typ))
+    end
+    local err = nominal_embedded_object_error(typ, st, {})
+    if err then return err end
+    local bearing, offender = types.c_automatic_gc_bearing(typ)
+    if bearing then
+        return string.format(
+            "embedded nominal storage of type '%s' transitively contains GC-bearing FFI storage '%s', which payload bytes do not trace",
+            types.tostring(typ), types.tostring(offender))
+    end
+end
+
 -- C allocation pseudo-members are syntax-bound checker declarations, not
 -- boxed callable values. The singleton context lets VarDot expose their narrow
 -- call signature only while it is the direct callee of an ExpCall; every other

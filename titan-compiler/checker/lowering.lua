@@ -661,6 +661,11 @@ function generic_lower_field_read(node, state)
     local surface_type = node._type
     var._decl = carrier
     var._type = carrier.type
+    if var._nominal_storage then
+        var._nominal_storage = checker._nominal_storage_plan(carrier.type)
+        var._nominal_projection_type =
+            var._nominal_storage.projection_type
+    end
     if var._interface_field then
         var._interface = state.erased_registry[surface_field.fqtn]
         var._interface_field = carrier
@@ -682,6 +687,11 @@ function generic_lower_field_write(var, exp, state)
     exp = generic_peel_generic_ingress(exp, surface.type)
     var._decl = carrier
     var._type = carrier.type
+    if var._nominal_storage then
+        var._nominal_storage = checker._nominal_storage_plan(carrier.type)
+        var._nominal_projection_type =
+            var._nominal_storage.projection_type
+    end
     return generic_erased_boundary_expression(
         exp, carrier.type, state,
         "write to erased generic field '" .. carrier.name .. "'")
@@ -1109,7 +1119,8 @@ function generic_lower_case(node, state)
             local part = carrier and carrier.parts[binding._part_index]
             if part then
                 local target = types.erase(binding._type)
-                local source = part.type
+                local storage = checker._nominal_storage_plan(part.type)
+                local source = storage.projection_type
                 binding._part = part
                 if not types.equals(source, target) then
                     state.hidden_case = state.hidden_case + 1
@@ -1117,6 +1128,8 @@ function generic_lower_case(node, state)
                     local hidden = hidden_decl(arm.loc,
                         "__generic_case_payload_" .. state.hidden_case, source)
                     hidden._part, hidden._part_index = part, part.index
+                    hidden._nominal_storage = storage
+                    hidden._nominal_projection_type = source
                     arm.bindings[index] = hidden
                     local value = hidden_exp(arm.loc, hidden)
                     local projection = generic_erased_boundary_expression(
@@ -1128,6 +1141,8 @@ function generic_lower_case(node, state)
                     projections[#projections + 1] = declaration
                 else
                     binding._type = source
+                    binding._nominal_storage = storage
+                    binding._nominal_projection_type = source
                 end
             end
         end
