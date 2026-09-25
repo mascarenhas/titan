@@ -144,3 +144,6 @@ exercise GC during accepted operations, cancellation and close, while reflection
 and JSON tests preserve public schema behavior. See `spec/coder/nominal_storage_spec.lua`,
 `spec/coder/native_optional_storage_spec.lua`, `spec/native_record_fields_spec.lua`,
 and `spec/nominal_layout_spec.lua`.
+
+The reproducible [allocation audit](nominal-allocation-audit.md) records isolated
+storage measurements and checks the actual generated stdlib construction paths.
