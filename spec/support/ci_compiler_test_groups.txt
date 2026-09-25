@@ -6,9 +6,11 @@
 # the least-loaded shard, breaking ties by shard number. Rebalance when costs
 # change materially. Recorded file times exclude process/startup overhead.
 1 spec/abi_spec.lua 2.661
+1 spec/binary_compatibility_spec.lua 0.100
 3 spec/cdeclarator_spec.lua 0.034
 1 spec/cdefines_spec.lua 0.045
 2 spec/cdriver_spec.lua 184.496
+1 spec/checker/binary_compatibility_spec.lua 1.000
 3 spec/checker/c_ffi_declaration_compatibility_spec.lua 36.115
 3 spec/checker/c_ffi_operators_spec.lua 13.669
 4 spec/checker/c_ffi_owned_types_spec.lua 21.550
@@ -53,6 +55,7 @@
 1 spec/checker/variadic_spec.lua 0.357
 4 spec/coder/adapter_registry_elimination_spec.lua 1.860
 2 spec/coder/backtrace_spec.lua 1.220
+1 spec/coder/binary_compatibility_spec.lua 42.000
 2 spec/coder/bound_methods_spec.lua 2.018
 3 spec/coder/c_ffi_allocation_constructors_spec.lua 6.215
 3 spec/coder/c_ffi_operators_spec.lua 8.727

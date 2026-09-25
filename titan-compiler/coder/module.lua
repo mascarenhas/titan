@@ -47,11 +47,12 @@ Udata *$INITNAME(lua_State *L) {
     titan_ensure_stack(L, 10);
     lua_getfield(L, LUA_REGISTRYINDEX, $MODNAMESTR);
     if(lua_isnil(L, -1)) {
-        _initialized = 1;
         lua_pop(L, 1);
         Udata *_mod = luaS_newudata(L, 0, $NUPVALS);
+        /* Root privately until every dependency check succeeds. A failed
+         * require must not publish a partial module that bypasses the check
+         * when Lua catches the error and retries. */
         titan_pushmodule(L, _mod);
-        lua_setfield(L, LUA_REGISTRYINDEX, $MODNAMESTR);
         Table *_titan_metatables = titan_ensure_metatables_table(L);
         (void)_titan_metatables; // in case this module does not publish any types
         $INITSOURCEIDENTITY
@@ -59,6 +60,8 @@ Udata *$INITNAME(lua_State *L) {
         $LOADMODULES1
         $INITMODULES
         $LOADGLOBALS
+        lua_setfield(L, LUA_REGISTRYINDEX, $MODNAMESTR);
+        _initialized = 1;
         $INITRECORDS
         $INITFUNCTAGS
         $INITPAIRS
@@ -74,10 +77,10 @@ Udata *$INITNAME(lua_State *L) {
         Udata *_mod = uvalue(s2v(L->top.p - 1));
         lua_pop(L, 1);
         if(!_initialized) {
-            _initialized = 1;
             /* set up function-type tags and functions from shared libraries */
             $LOADMODULES2
             $LOADGLOBALS
+            _initialized = 1;
             $INITFUNCTAGS
             $INITPAIRS
             $INITNAMES
@@ -136,7 +139,7 @@ end
 -- Generates the code for importing the module, and storing it
 -- in the corresponding local state slot
 function import_module(loadmods, initmods, sigs, mprefixes,
-                       dynamic, node)
+                       dynamic, node, tlcontext)
     local modname = node.modname
     local upvalue = node._upvalue
     local mprefix = mangle_qn(modname) .. "_"
@@ -169,18 +172,18 @@ function import_module(loadmods, initmods, sigs, mprefixes,
         -- container. Its transient file field records that physical provider;
         -- logical symbol names remain derived from modname below.
         local file = node._type.file
-        local expected_type = rawget(node, "_declared_type") or node._type
-        local expected_types = types.serialize(expected_type)
+        tlcontext.binary_modules[modname] = tlcontext.binary_modules[modname]
+            or rawget(node, "_declared_type") or node._type
         table.insert(loadmods, render([[
             void *$HANDLE = loadlib(L, $FILE);
             titan_check_abi(L, $HANDLE, "$ABI", $FILE);
-            titan_check_types(L, $HANDLE, "$TYPES", $FILE, $EXPECTED);
+            $COMPATIBILITY
         ]], {
             HANDLE = mprefix .. "handle",
             FILE = c_string_literal(file),
             ABI = mprefix .. "abi",
-            TYPES = mprefix .. "types",
-            EXPECTED = c_string_literal(expected_types),
+            COMPATIBILITY = coder._binary_check(tlcontext, modname,
+                mprefix .. "handle", file),
         }))
         table.insert(initmods, render([[
             {

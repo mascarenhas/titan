@@ -1312,7 +1312,7 @@ describe(".so-only cross-module imports", function()
         assert.truthy(rok, out)
     end)
 
-    it("aborts when the loaded .so has an incompatible type manifest", function()
+    it("aborts when the loaded .so has an incompatible used signature", function()
         local ok, err = build_so_chain({
             { name = "manifest_provider", src = [[
                 function get(): integer return 42 end
@@ -1336,16 +1336,16 @@ describe(".so-only cross-module imports", function()
         })
         assert.truthy(ok, err)
 
-        -- Loading the consumer now must fail with manifest mismatch
+        -- Loading the consumer now must fail the selective compatibility check
         rok, out = call("string", [[
             local ok, err = pcall(require, "manifest_consumer")
             assert(not ok, "expected require to fail")
-            assert(err:find("type manifest mismatch", 1, true), err)
+            assert(err:find("compatibility mismatch", 1, true), err)
         ]])
         assert.truthy(rok, out)
     end)
 
-    it("aborts when the loaded .so is missing the types symbol", function()
+    it("aborts when the loaded .so is missing the compatibility symbol", function()
         local ok, err = build_so_chain({
             { name = "notype_provider", src = [[
                 function answer(): integer return 1 end
@@ -1357,7 +1357,7 @@ describe(".so-only cross-module imports", function()
         })
         assert.truthy(ok, err)
 
-        -- Replace notype_provider.so with a DSO providing ABI marker but no types symbol
+        -- Replace provider with an ABI marker but no compatibility entry
         local f = assert(io.open("notype_provider.c", "w"))
         f:write([[
             typedef struct lua_State lua_State;
@@ -1373,12 +1373,12 @@ describe(".so-only cross-module imports", function()
         local cok = os.execute(table.concat({
             driver.CC, "-fPIC", shared, "-o", "notype_provider.so", "notype_provider.c"
         }, " "))
-        assert.truthy(cok, "could not compile fake provider without types")
+        assert.truthy(cok, "could not compile fake provider without compatibility")
 
         local rok, out = call("string", [[
             local ok, err = pcall(require, "notype_consumer")
             assert(not ok, "expected require to fail")
-            assert(err:find("missing types symbol", 1, true), err)
+            assert(err:find("compatibility", 1, true), err)
         ]])
         assert.truthy(rok, out)
     end)

@@ -84,6 +84,7 @@ function coder._assert_erased_boundary(ast)
                 if not (skip_declared_type and
                         (key == "_declared_type" or
                             key == "_declared_registry" or
+                            key == "_binary_modules" or
                             key == "_erased_registry" or
                             key == "_surface_typeparams" or
                             key == "_surface_typeargs" or
@@ -119,6 +120,11 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     local tlcontext = {
         module = modname,
         prefix = mangle_qn(modname) .. "_",
+        static_deps = static_deps,
+        external_slots = {},
+        binary_usage = ast._binary_usage or {},
+        binary_modules = ast._binary_modules or {},
+        binary_registry = ast._declared_registry or types.registry,
         variables = {},
         metatables = {},
         owned_c_metatables = {},
@@ -214,7 +220,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
             local tag = node._tag
             if tag == "Ast.TopLevelImport" then
                 import_module(loadmods, initmods, sigs, mprefixes,
-                    static_deps[node.modname] ~= true, node)
+                    static_deps[node.modname] ~= true, node, tlcontext)
                 if node._foreign_header then
                     tlcontext.source_foreign_headers[#tlcontext.source_foreign_headers + 1] =
                         node._foreign_header
@@ -742,6 +748,8 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         ABINAME = tlcontext.prefix .. "abi",
     }))
 
+    coder._binary_exports(tlcontext, ast, code)
+    coder._binary_imports(tlcontext, includes, loadmods, loadglobals, mprefixes)
     init_data_from_other_modules(tlcontext, includes, loadmods, loadglobals,
         initrecs, mprefixes, static_deps)
 
@@ -857,7 +865,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         PRELOADMODNAME = c_string_literal(modname),
         INITMODULES = table.concat(initmods, "\n"),
         LOADMODULES1 = table.concat(loadmods, "\n"),
-        LOADMODULES2 = #loadmods > 1 and table.concat(loadmods, "\n") or "",
+        LOADMODULES2 = table.concat(loadmods, "\n"),
         LOADGLOBALS = table.concat(loadglobals, "\n"),
         INITFUNCTAGS = table.concat(initfunctags, "\n"),
         INITPAIRS = table.concat(interface_pair_inits, "\n"),
@@ -954,6 +962,14 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
             or (mprefixes[name] and "handle" or "global")
     end
     for name in pairs(mprefixes) do remember_binding(name) end
+    for _, info in pairs(tlcontext.external_slots) do
+        remember_binding(info.module)
+    end
+    for name in pairs(tlcontext.binary_usage) do
+        if name ~= modname and static_deps[name] ~= true then
+            remember_binding(name)
+        end
+    end
     for _, func in pairs(tlcontext.functions) do
         remember_binding(func.module)
         if static_deps[func.module] == true then

@@ -876,7 +876,8 @@ function codeassignment(ctx, var, cexp, etype, lvalue)
                 BARRIER = types.is_gc(var._type)
                           and "luaC_barrierback(L, obj2gco(_imod), _varslot);" or "",
                 MODINDEX = c_integer_literal(var.exp.var._decl._upvalue),
-                VARINDEX = c_integer_literal(var._decl._upvalue)
+                VARINDEX = coder._imported_slot(ctx, var._decl.modname,
+                    "variable", var._decl)
             })
         elseif var._decl._tag == "Ast.TopLevelVar" then
             local cset = setslot(var._type, var._decl._slot, cexp)

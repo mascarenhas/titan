@@ -1189,7 +1189,7 @@ void titan_check_abi(lua_State *L, void *lib, const char *sym,
     int nresults;
     const char *actual;
     dlerror();  /* clear stale error */
-    raw = dlsym(lib, sym);
+    raw = dlsym(lib != NULL ? lib : RTLD_DEFAULT, sym);
     if (raw == NULL) {
         const char *err = dlerror();
         luaL_error(L,
@@ -1249,6 +1249,76 @@ void titan_check_types(lua_State *L, void *lib, const char *sym,
             "than the one this module was compiled against",
             file, sym);
     }
+    lua_settop(L, top);
+}
+
+/* The generated verifier uses only these three primitives. Do not resolve
+** them through mutable Lua globals: ordinary Lua code may replace error/next
+** without changing the checks needed before entering native Titan code. */
+static int titan_compatibility_type(lua_State *L) {
+    lua_pushstring(L, lua_typename(L, lua_type(L, 1)));
+    return 1;
+}
+
+static int titan_compatibility_next(lua_State *L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    lua_settop(L, 2);
+    if (lua_next(L, 1)) return 2;
+    lua_pushnil(L);
+    return 1;
+}
+
+static int titan_compatibility_error(lua_State *L) {
+    lua_settop(L, 1);
+    return lua_error(L);
+}
+
+static void titan_load_compatibility_chunk(lua_State *L, const char *source,
+                                          size_t size, const char *name) {
+    if (luaL_loadbufferx(L, source, size, name, "t") != LUA_OK)
+        lua_error(L);
+    lua_createtable(L, 0, 3);
+    lua_pushcfunction(L, titan_compatibility_type);
+    lua_setfield(L, -2, "type");
+    lua_pushcfunction(L, titan_compatibility_next);
+    lua_setfield(L, -2, "next");
+    lua_pushcfunction(L, titan_compatibility_error);
+    lua_setfield(L, -2, "error");
+    if (lua_setupvalue(L, -2, 1) == NULL) lua_pop(L, 1);
+}
+
+void titan_check_compatibility(lua_State *L, void *lib, const char *sym,
+                              const char *file, const char *verifier,
+                              size_t verifier_size) {
+    typedef int (*titan_metadata_fn)(lua_State *);
+    int top = lua_gettop(L);
+    void *raw;
+    const char *source;
+    size_t size;
+    luaL_checkstack(L, 10, "loading Titan compatibility metadata");
+    dlerror();
+    raw = dlsym(lib != NULL ? lib : RTLD_DEFAULT, sym);
+    if (raw == NULL) {
+        const char *err = dlerror();
+        luaL_error(L, "Titan compiled module '%s' is missing compatibility "
+            "symbol '%s': %s", file, sym, err ? err : "symbol not found");
+    }
+    titan_metadata_fn fn = titan_cast_func(titan_metadata_fn, raw);
+    if (fn(L) != 1 || lua_gettop(L) != top + 1
+        || lua_type(L, -1) != LUA_TSTRING) {
+        lua_settop(L, top);
+        luaL_error(L, "Titan compiled module '%s' has invalid compatibility "
+            "metadata '%s'", file, sym);
+    }
+    source = lua_tolstring(L, -1, &size);
+    titan_load_compatibility_chunk(L, source, size, sym);
+    lua_call(L, 0, 1);
+    lua_remove(L, top + 1); /* source remains rooted until evaluation finishes */
+    titan_load_compatibility_chunk(L, verifier, verifier_size,
+        "Titan dependency compatibility verifier");
+    lua_call(L, 0, 1);
+    lua_insert(L, -2); /* verifier function, provider metadata */
+    lua_call(L, 1, 0);
     lua_settop(L, top);
 }
 
