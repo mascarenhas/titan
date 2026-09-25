@@ -23,6 +23,10 @@ full payload struct; private native members follow it. A binary consumer emits
 only the compatible public prefix. It never fabricates producer-private types
 or casts an unrelated shorter struct over flattened members. `getudatamem(u)`
 uses the object's actual `nuvalue`, including its private traced slots.
+Generated C names for public native members depend on public field names rather
+than private-interleaved logical indices. This keeps the consumer's emitted
+prefix stable when private fields move without changing semantic index or
+layout-metadata formats.
 
 A variant payload starts with an actual `_titan_union_header` subobject holding
 an unsigned tag, followed by that variant's native members. Only the active
@@ -37,6 +41,9 @@ Constructors root the final userdata before any operation that can collect it.
 Records with private fields cannot be constructed by incomplete binary clients: their
 synthesized constructor is private, and literal checks retain the total logical
 field count even when private descriptors are omitted.
+For replacement DSOs, record literals also record a public `new` compatibility
+dependency. This rejects a newly private constructor before an old consumer
+can perform an inlined allocation using the earlier complete layout.
 
 ## Fixed objects and borrowed projections
 
@@ -107,7 +114,11 @@ consumers build full plans; binary consumers reconstruct exported public plans.
 
 Semantic `_types` serialization, analysis catalogs, and the language-server API
 remain independent. Analysis can inspect ABI/types without requiring native
-layout decoding. Native consumers require compatible complete physical metadata.
+layout decoding. Native compilation requires complete physical metadata;
+replacement DSO loading uses the separate [selective compatibility
+projection](binary-compatibility.md). Public record field order, erased types,
+and constness determine the stable prefix, while private traced/native storage
+may change for consumers that do not construct the record.
 The prerelease ABI marker remains 2 and the compiler version remains 0.6.0.
 Rebuild code, providers and cached objects with the matching compiler and SDK;
 no adapter reads the old all-UV layout. Native imports require the new separate

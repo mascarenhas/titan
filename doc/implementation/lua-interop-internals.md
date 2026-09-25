@@ -834,8 +834,8 @@ Generated code loads that exact selected provider through
 ```c
 void *some_dep_handle = loadlib(L, "some/provider.so");
 titan_check_abi(L, some_dep_handle, "some_dep_abi", "some/provider.so");
-titan_check_types(L, some_dep_handle, "some_dep_types", "some/provider.so",
-    "Module(...)");
+titan_check_compatibility(L, some_dep_handle, "some_dep_compatibility",
+    "some/provider.so", verifier_source, verifier_length);
 Udata* (*some_dep_init)(lua_State *L) =
     titan_cast_func(Udata* (*)(lua_State*),
         loadsym(L, some_dep_handle, "some_dep_init"));
@@ -846,11 +846,18 @@ Udata* (*some_dep_init)(lua_State *L) =
 ordinary default. It maps `dir/file` with `RTLD_LAZY | RTLD_GLOBAL`, caches
 the handle by relative provider for the state, invalidates native backtrace
 state, and never calls `dlclose`. Two logical modules in one image reuse the
-handle and resolve different mangled entries. `titan_check_abi` and
-`titan_check_types` validate the logical ABI marker and complete type/layout
-manifest before native use; `loadsym` resolves handle-local symbols;
+handle and resolve different mangled entries. `titan_check_abi` runs before
+`titan_check_compatibility`, which checks the consumer's required erased
+signatures and nominal shapes through separate Lua metadata/verifier chunks.
+Compilation still validates semantic types and physical layouts through their
+own protocols. `loadsym` resolves handle-local symbols;
 `loadglobalsym` uses `RTLD_DEFAULT` only after explicit providers initialize,
-for entries owned through re-exported record aliases.
+for entries owned through re-exported nominal aliases. Those transitive owners
+receive the same ABI-first compatibility checks before their native entries
+are used. Required variable and canonical first-class callable slots are
+resolved as provider-owned data symbols; direct calls still use native function
+symbols. Same-binary dependencies retain direct, constant-slot access. See
+[Selective binary dependency verification](binary-compatibility.md).
 
 Lazy binding permits an imported extension to initialize a provider before
 its ordinary unresolved function calls bind. Global visibility lets that

@@ -251,13 +251,18 @@ interface guarantees.
 The existing three code-generation paths remain:
 
 * `direct`: `extern` declarations and direct `_init`/function/method calls;
-* `handle`: load the selected `Type.Module.file`, check ABI, and use
-  handle-scoped `loadsym`; and
+* `handle`: load the selected `Type.Module.file`, check ABI followed by the
+  consumer's selective compatibility requirements, and use handle-scoped
+  `loadsym`; and
 * `global`: initialize the exposing DSO and recover a transitive owner with
-  `loadglobalsym`.
+  ABI-first compatibility checks and `loadglobalsym`.
 
 Static archive selection changes an import to `direct`; it does not introduce
-a runtime archive reader.
+a runtime archive reader. Finalized same-binary provenance also bypasses runtime
+compatibility verification and keeps provider slot indices constant. Separate
+DSO variable/closure slots use exported data symbols through their existing
+handle/global path. The [compatibility projection](binary-compatibility.md)
+does not alter archive metadata or the direct/handle/global ownership rules.
 
 ## Native composition
 

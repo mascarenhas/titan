@@ -394,10 +394,13 @@ The compiler and runtime therefore agree on:
 Every generated module also exports `<mangled>_abi`, a Lua C function
 returning `TITAN_ABI_VERSION`. DSO rehydration checks that marker before trusting
 `<mangled>_types`, and generated dynamic imports call `titan_check_abi` and
-`titan_check_types` after `loadlib` and before `dlsym`ing native entries.
+`titan_check_compatibility` after `loadlib` and before using native entries.
 Static-provider rehydration checks the same ABI value in the canonical
 embedded metadata before decoding its types. A missing DSO marker, missing
-exact archive entry, or type manifest mismatch is rejected; this protects the
+exact archive entry, or failed required compatibility contract is rejected;
+the runtime check compares only the consumer's used erased interface, through a
+separate metadata protocol. See [Selective binary dependency
+verification](binary-compatibility.md). These checks protect the
 unversioned `.` component of the default path from silently loading stale build
 artifacts.
 

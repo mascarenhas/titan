@@ -1677,7 +1677,9 @@ runtime edits can be tested before reinstalling.
 
 It also declares the dynamic-loading and error functions exported by
 `titan.c`: `loadlib`, `loadsym`, `loadglobalsym`,
-`titan_check_abi`, `titan_check_types`, and `errorhandler`.
+`titan_check_abi`, `titan_check_compatibility`, and `errorhandler`. The retained
+`titan_check_types` helper implements exact serialized comparison; generated
+separate-DSO imports use the selective compatibility protocol instead.
 
 ### `titan.c`: the dynamic loader
 

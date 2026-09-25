@@ -1064,9 +1064,10 @@ prefix entirely from the serialized interface:
 3. exported static closures for each public record or union, with owners in
    module-member order and statics in bytewise name order.
 
-The producer stamps the corresponding AST declarations and an importer walks
-the same layout, so an imported constructor or nominal function is the exact
-canonical first-class closure. The unconditional mutable and const Array
+The producer stamps the corresponding AST declarations. A same-binary importer
+walks the same layout; a separate dynamic importer resolves the producer's
+exported closure slot symbol. Both read the exact canonical first-class closure
+for an imported constructor or nominal function. The unconditional mutable and const Array
 metatable caches occupy the first two private slots. One fixed lightuserdata
 slot containing the source producer's immutable physical-provider token
 follows them, before the
@@ -1094,14 +1095,17 @@ provider-identity token, come *after* the importer-visible public prefix. Their
 fixed header is part of the current ABI, while later inventory/first-use slots remain
 coder-private and do not perturb the public importer slot math.
 
-An importing module never sees this module's AST: it recomputes the complete
-prefix from the `Type.Module` interface. Cross-module variable access then
-compiles to a direct
-slot read, `uvalue(&_mod->uv[MOD].uv)->uv[VAR].uv`, with no name lookup;
-if local variables or imports could claim earlier slots, the importer's
-numbering would diverge from reality. (The module metatable's name→slot
-member map, serving the same variables to Lua, bakes in the same
-indices.) A nominal owner's type identity is its per-Lua-state metatable
+An importing module never sees this module's AST. The `Type.Module` interface
+reconstructs the public prefix at compilation, but a separately loaded provider
+may later reorder compatible declarations. Cross-module variable access still
+uses `uvalue(&_mod->uv[MOD].uv)->uv[VAR].uv`: `MOD` is the constant consumer-owned
+import slot, while `VAR` comes from the provider's exported variable-slot symbol
+for a dynamic dependency and remains constant for a same-binary dependency.
+Canonical callable slots use the same rule; direct native calls bypass them.
+The module metatable's name-to-slot map serves Lua using the producer's own
+current indices. See [Selective binary dependency
+verification](binary-compatibility.md#provider-owned-slots-and-direct-calls).
+A nominal owner's type identity is its per-Lua-state metatable
 pointer, so record and union metatables must live in module user values and are
 recovered through the Lua registry for imported owners. Function-type tags use
 a separate registry-published C-static mechanism before any variable

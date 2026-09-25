@@ -9,7 +9,8 @@ The language contract is in [Unions](../language/unions.md). The important
 cross-cutting invariants are:
 
 * `Type.Union` is a nominal owner; `Type.Variant` is owner metadata only;
-* every variant has an absolute, zero-based declaration-order tag;
+* every variant has a zero-based tag, public variants first and private
+  variants afterward, preserving relative source order within each group;
 * each active variant has a native tag header and native members, plus dense
   uservalues only for GC-bearing parts;
 * `case` coverage is optional, while complete coverage of the closed static
@@ -127,7 +128,10 @@ count, including private variants. `Type.Variant.parts` is a dense ordered
 list of `Type.Field(fqtn, name, type, index, false)` descriptors. Here the
 field index is the **1-based logical payload-part index**, and names are unique
 within the variant. Parts have no independent locality or const qualifier.
-The variant index remains the absolute zero-based source-order tag.
+The variant index is the zero-based runtime tag. Public variants occupy the
+initial range in relative source order; private variants follow in relative
+source order. The dense array itself remains in source order, so its position
+must not be confused with the tag.
 
 `Type.Nominal(fqtn)` remains the source-level value type for both records and
 unions. A `Type.Variant` is never returned by `typefromnode` as a legal source
@@ -175,9 +179,11 @@ nested inside a lambda evaluated by the initializer. A type alias may bridge
 to a later import because alias resolution is a placement-independent type
 frontier.
 
-Private unions and variants remain in the local registry and keep their
-absolute tag positions. Serialization omits them while preserving public
-variant indices and the owner's total `nvariants`.
+Private unions and variants remain in the local registry. Tag assignment
+counts public variants first without reordering declarations or payload
+checking. Serialization omits private variants while preserving public variant
+indices and the owner's total `nvariants`. A private addition therefore cannot
+shift a public tag.
 
 Before locality metadata is discarded, the producer calls
 `types.validate_union_source_projection` over the exact
@@ -237,6 +243,14 @@ require case coverage or diagnose omitted variants. The coder consumes the
 shared decoration for direct terminators and compound `StatBlock`, `StatIf`,
 `StatTry`, and `StatCase` nodes rather than re-deriving reachability from their
 immediate tags.
+
+When complete coverage supplies the proof and an explicit `else` does not
+independently terminate, the checker also records `_binary_closed_union`.
+Per-consumer compatibility requirements then include that union's total
+inventory count. An added private variant rejects the unchanged consumer at
+load time. Ordinary cases still fall through on no match; no trap or coverage
+requirement is introduced. See [Selective binary dependency
+verification](binary-compatibility.md#construction-and-closed-union-proofs).
 
 The case checker annotates:
 
@@ -373,7 +387,8 @@ Variant(fqtn, name, { Field(fqtn, part_name, type, part_index, false)... },
 
 Variants retain source order. Static and method maps are serialized in
 `util.bytewise_less` name order. Private variants and members are omitted,
-while `absolute_index` and `total_nvariants` preserve logical ordinals. A separate
+while `absolute_index` preserves the public-first tag and `total_nvariants`
+preserves the full inventory count. A separate
 native layout inventory carries physical storage plans. The recursive compiled-interface validator accepts these constructors
 only as fields of a valid module/nominal schema; it does not make
 `Type.Variant` a source type.
@@ -411,12 +426,19 @@ Private slots follow that prefix. This lets a consumer obtain an imported
 record constructor, union constructor, or user nominal static as the exact
 canonical first-class closure without loading a Lua namespace table or
 inventing another identity.
+Separate dynamic consumers resolve the required canonical closure slot from a
+provider-owned data symbol; they do not embed the earlier producer's prefix
+index. Self-owned and same-binary slots retain constant indices, and direct
+native calls do not read closure slots.
 
 The union schemas, userdata/tag protocol, and public-prefix layout are part of
 ABI 2 together with Array and function representations, Interface and generic
 metadata, source-private provider identity, callable symbol hierarchy, and
 serialized const/member state. A mismatched interface is rejected before type
-rehydration or native linking.
+rehydration or native linking. This schema validation is separate from
+load-time compatibility: a replacement DSO checks only used concrete callables,
+the referenced union's public variant shape, and any relied-upon closed
+inventory proof. Its unrelated methods or private variants may change.
 
 `TITAN_VERSION` is `0.6.0`; its derived `0.6` library version selects
 `TITAN_PATH_0_6`, `lib/titan/0.6`, and `stdlib_0_6`. Build preparation replaces

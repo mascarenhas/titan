@@ -397,6 +397,10 @@ identity. Their canonical closures are part of the reconstructible
 public module-state prefix: exported variables, exported top-level function
 closures, then public nominal static closures in module-member and bytewise
 static-name order. Variants remain metadata and are not first-class types.
+Separate shared-library consumers resolve the provider's current slots when
+loading, so compatible declaration reordering preserves these references and
+their canonical identity. Direct `geom.norm(p)` calls use the native function
+entry independently of the first-class closure.
 
 Modules are not first-class values: the alias can only be used as a
 prefix. Reading it as a value (`local m2 = geom`) is the compile-time
@@ -668,7 +672,10 @@ Module dependencies are resolved *compiled first*:
 
 * If an imported module is found in a shared provider, the compiler recovers
   its callable type metadata and generated code **dlopens** that selected
-  provider at run time.
+  provider at run time. Loading checks its ABI and the declarations this
+  consumer depends on. Unused exports and compatible private storage may
+  change without rebuilding the consumer; see
+  [Replacing shared-library dependencies](binary-compatibility.md).
 * If it is found in a self-describing static provider, the compiler recovers
   the equivalent metadata from the archive and links that archive into the
   result; cross-module calls are direct C calls. The default prefers the DSO

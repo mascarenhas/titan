@@ -230,6 +230,14 @@ wrappers. Consumer-private closure adjustment wrappers add no provider symbol,
 schema, or module-state slot. A mismatched provider is rejected rather than
 adapted.
 
+Within that ABI, a separate shared provider may be replaced while preserving
+only the declarations each compiled consumer requires. Used callable
+signatures, variable contracts, and public nominal shapes are checked at load
+time; unrelated exports need not match. Source and archive dependencies already
+linked into the same binary retain their fixed implementation. See
+[Replacing shared-library dependencies](binary-compatibility.md) for private
+record changes, constructors, aliases, and union control-flow requirements.
+
 The release version is independently `TITAN_VERSION` `0.6.0`; its derived
 `0.6` library version selects `TITAN_PATH_0_6` and `lib/titan/0.6`. Earlier
 Titan installations are neither migrated nor cleaned up.

@@ -120,17 +120,16 @@ constructed. Rehydration overwrites it with the selected relative provider.
 It is intentionally omitted from `types.serialize`: physical deployment is a
 property of this lookup, not part of the module's public type interface.
 
-## Runtime imports remain exact
+## Runtime imports retain the selected provider
 
 The coder reads `node._type.file`; it does not repeat candidate probing in
-generated C. An import of `a.b.c` selected from `a/b.so` emits the existing
-exact sequence:
+generated C. An import of `a.b.c` selected from `a/b.so` emits:
 
 ```c
 void *a_b_c_handle = loadlib(L, "a/b.so");
 titan_check_abi(L, a_b_c_handle, "a_b_c_abi", "a/b.so");
-titan_check_types(L, a_b_c_handle, "a_b_c_types", "a/b.so",
-    "Module(...)");
+titan_check_compatibility(L, a_b_c_handle, "a_b_c_compatibility", "a/b.so",
+    verifier_source, verifier_length);
 ```
 
 It then resolves `a_b_c_init` and the used native entries from that handle.
@@ -139,6 +138,12 @@ maps with `RTLD_LAZY | RTLD_GLOBAL`, and invalidates the backtrace image cache.
 Two logical imports in one provider therefore reuse one handle but request
 different fully mangled symbols. Transitive record-alias method lookup still
 uses `loadglobalsym` only after explicit providers have initialized.
+The compatibility verifier checks this consumer's required erased contracts,
+not equality of the full semantic interface. Transitive owner checks also run
+ABI-first before their global native entries are used. Required imported
+variable and canonical-closure slot symbols follow the same handle/global
+provenance. See [Selective binary dependency
+verification](binary-compatibility.md).
 
 This separation is important: candidate membership is a compiler concern;
 the selected relative file makes generated runtime loading exact and
@@ -184,7 +189,8 @@ code generation instead of as an opaque duplicate-symbol linker error.
 Both native provider forms contain independent copies of every logical
 protocol:
 
-* `<mangled>_abi`, semantic `<mangled>_types`, and physical `<mangled>_layouts`;
+* `<mangled>_abi`, semantic `<mangled>_types`, physical `<mangled>_layouts`, and
+  the separate `<mangled>_compatibility` projection;
 * `<mangled>_init` and `luaopen_<mangled>`;
 * a file-local `_initialized` wiring flag;
 * a distinct registry-owned module `Udata`, variables, canonical closures,
