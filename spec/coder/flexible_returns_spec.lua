@@ -75,7 +75,7 @@ describe("flexible return code generation", function()
             csrc)
         assert.match("test_\\u2133_values_titan%([^;]-, &_flexdesc_%d+, 1%)", csrc)
         assert.match("if %(_flexdesc_%d+%.n_args >= 1%)", csrc)
-        assert.match("setnilvalue%(&_tmp_%d+%);", csrc)
+        assert.match("setnilvalue%(&%(_tmp_%d+%)%);", csrc)
     end)
 
     it("initializes an empty flexible fallthrough", function()

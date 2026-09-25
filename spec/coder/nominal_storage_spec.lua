@@ -156,17 +156,21 @@ describe("native nominal storage", function()
                 second: integer?
             end
             effects: integer = 0
-            local function none()
+            local function absent(): integer?
                 effects = effects + 1
+                return nil
             end
             local function mark(): integer
                 effects = effects + 1
                 return 99
             end
             local function values(): (integer, integer) return 20, 22 end
-            function padded(): Pair return Pair.new(none()) end
+            function padded(): Pair return Pair.new(absent()) end
             function expanded(): Pair return Pair.new(values()) end
-            function spread(items: {integer}): Pair return Pair.new(...items) end
+            function spread(): Pair
+                local items: {integer} = {42}
+                return Pair.new(...items)
+            end
             function forwarded(...: integer): Pair return Pair.new(...) end
             function discarded()
                 Pair.new(1, 2, mark())
@@ -180,7 +184,7 @@ describe("native nominal storage", function()
             assert(p.first == nil and p.second == nil and test.effects == 1)
             p = test.expanded()
             assert(p.first == 20 and p.second == 22)
-            p = test.spread({42})
+            p = test.spread()
             assert(p.first == 42 and p.second == nil)
             p = test.forwarded(10, 11, 12)
             assert(p.first == 10 and p.second == 11)
@@ -494,6 +498,137 @@ describe("native nominal storage", function()
                     end
                 end
             ]], [[ for n = 0, 17 do assert(test.run(n) == 42) end ]])
+        end))
+        os.remove(header)
+        assert.truthy(outcome[1], outcome[2])
+    end)
+
+    it("checks dynamic FAM extents and cumulative tail limits before later effects", function()
+        local header = os.tmpname() .. ".h"
+        local file = assert(io.open(header, "w"))
+        file:write([[
+            #include "lua.h"
+            #include <stddef.h>
+            #include <stdint.h>
+            typedef struct padded_packet {
+                double header;
+                char tag;
+                char bytes[];
+            } padded_packet;
+            static int packet_extent(padded_packet *packet, int count, char *after) {
+                size_t extent = offsetof(padded_packet, bytes) + (size_t)count;
+                if (extent < sizeof(padded_packet)) extent = sizeof(padded_packet);
+                if ((uintptr_t)after - (uintptr_t)packet != extent
+                    || (uintptr_t)packet % _Alignof(padded_packet) != 0
+                    || packet->header != 0 || packet->tag != 0) return 0;
+                for (int i = 0; i < count; i++) {
+                    if (packet->bytes[i] != 0) return 0;
+                    packet->bytes[i] = (char)(i + 1);
+                }
+                return 1;
+            }
+            static lua_Integer nominal_half_limit(void) {
+                size_t limit = sizeof(size_t) < sizeof(lua_Integer)
+                    ? (size_t)-1 : (size_t)LUA_MAXINTEGER;
+                return (lua_Integer)(limit / 2);
+            }
+        ]])
+        file:close()
+        local outcome = table.pack(pcall(function()
+            local source = 'foreign import "' .. header .. '"\n' .. [[
+                local record Packet
+                    const packet: foreign *padded_packet
+                    const after: foreign *char
+                end
+                local record Limited
+                    const first: foreign *char
+                    const second: foreign *char
+                    const effect: integer
+                end
+                effects: integer = 0
+                local function count(n: integer): integer
+                    effects = effects * 10 + 1
+                    return n
+                end
+                local function later(): integer
+                    effects = effects * 10 + 2
+                    return 0
+                end
+                function run(n: integer): boolean
+                    local owner = Packet.new(foreign padded_packet.new(n),
+                        foreign char.new_array(0))
+                    return ffi.packet_extent(owner.packet, n, owner.after) ~= 0
+                end
+                function rejected(n: integer)
+                    effects = 0
+                    Packet.new(foreign padded_packet.new(count(n)),
+                        foreign char.new_array(later()))
+                end
+                function cumulative()
+                    effects = 0
+                    local n = ffi.nominal_half_limit()
+                    Limited.new(foreign char.new_array(count(n)),
+                        foreign char.new_array(count(n)), later())
+                end
+            ]]
+            h.compile_and_read_c(source)
+            local before = source:sub(1, assert(source:find(
+                "foreign padded_packet.new(count(n))", 1, true)))
+            local _, line = before:gsub("\n", "")
+            local ok, err = h.call("test", string.format([[
+                for _, n in ipairs({0, 1, 7, 8, 17}) do assert(test.run(n)) end
+                for _, case in ipairs({{-1, 'count cannot be negative'},
+                                      {math.maxinteger, 'size overflow'}}) do
+                    local ok, message = pcall(test.rejected, case[1])
+                    assert(not ok and message:find(case[2], 1, true), message)
+                    assert(message:find('test.titan:%d:', 1, true), message)
+                    assert(test.effects == 1)
+                end
+                local ok, message = pcall(test.cumulative)
+                assert(not ok and message:find('size overflow', 1, true), message)
+                assert(test.effects == 11)
+            ]], line + 1))
+            assert.truthy(ok, err)
+        end))
+        os.remove(header)
+        assert.truthy(outcome[1], outcome[2])
+    end)
+
+    it("rejects native members and tails aligned beyond Lua userdata", function()
+        local header = os.tmpname() .. ".h"
+        local file = assert(io.open(header, "w"))
+        file:write([[
+            #include "titan/ffi.h"
+            typedef struct over_aligned { int value; } over_aligned
+                __attribute__((aligned(2 * _Alignof(UValue))));
+        ]])
+        file:close()
+        local outcome = table.pack(pcall(function()
+            for _, definition in ipairs({
+                [[local record Owner
+                    const object: foreign over_aligned
+                  end
+                  function make(): value
+                    return Owner.new(foreign over_aligned.new())
+                  end]],
+                [[local record Owner
+                    const objects: foreign *over_aligned
+                  end
+                  function make(): value
+                    return Owner.new(foreign over_aligned.new_array(1))
+                  end]],
+            }) do
+                local checked, errors, ast = h.run_checker(
+                    'foreign import "' .. header .. '"\n' .. definition)
+                assert.truthy(checked, errors)
+                local compiled = h.compile("test", ast)
+                assert.falsy(compiled)
+                local generated = assert(io.open("test.c", "r"))
+                local source = generated:read("a")
+                generated:close()
+                assert.truthy(source:find("_alignment[(_Alignof(", 1, true))
+                assert.truthy(source:find("<= _Alignof(UValue)) ? 1 : -1]", 1, true))
+            end
         end))
         os.remove(header)
         assert.truthy(outcome[1], outcome[2])

@@ -891,9 +891,15 @@ describe(".so-only cross-module imports", function()
         bf:close()
         assert.match(
             'loadlib%s*%(%s*L,%s*"alias_provider%.so"%s*%)', facade_c)
-        assert.match(
+        -- A direct synthesized constructor uses the reconstructed public
+        -- payload and the owner's metatable instead of loading a call entry.
+        assert.not_match(
             'loadsym%s*%(%s*L,%s*alias_provider_handle,%s*'
                 .. '"alias_provider_\\u2133_Foo_\\u2131_new_titanstatic"%s*%)',
+            facade_c)
+
+        assert.match(
+            'luaL_getmetatable%s*%(%s*L,%s*"Titan record alias_provider%.Foo metatable"%s*%)',
             facade_c)
 
         local cf = assert(io.open("alias_consumer.c", "r"))

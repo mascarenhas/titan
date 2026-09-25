@@ -171,6 +171,43 @@ describe("nominal layout provider boundaries", function()
         assert.is_true(ok, output)
     end)
 
+    it("reconstructs a public prefix from a DSO after deleting all producer sources and headers", function()
+        local name = "nominal_dso_fixture"
+        local stem = provider(name)
+        compiled(name)
+        for _, suffix in ipairs({ ".titan", ".c", ".o", ".ffi.h", ".titan.h" }) do
+            remove(stem .. suffix)
+        end
+        remove(source_root .. "/private.h")
+        remove(name .. ".a")
+        remove(name .. ".lua")
+        write(source_root .. "/dso_app.titan", [[
+            local provider = import "nominal_dso_fixture"
+            foreign import "lua.h"
+            function main(args: {string}): integer
+                local state = provider.make()
+                state.count = 42
+                state.label = "public"
+                ffi.lua_gc(L, ffi.LUA_GCCOLLECT)
+                if provider.check(state) ~= 61 then return 1 end
+                local box = provider.Box<|integer|>.new(19, 2)
+                if box.item + box.count ~= 21 then return 2 end
+                case provider.choice()
+                when ready(count, label) then
+                    if count + #label ~= 10 then return 3 end
+                else return 4
+                end
+                return 0
+            end
+        ]])
+        compiled("dso_app")
+        local consumer = read(source_root .. "/dso_app.c")
+        assert.falsy(consumer:find("nominal_private_native", 1, true))
+        assert.falsy(consumer:find("private.h", 1, true))
+        local ok, output = run({ "./dso_app" })
+        assert.is_true(ok, output)
+    end)
+
     it("restores source-object layouts and private native projections without recompiling the producer", function()
         local name = "nominal_incremental_fixture"
         local stem = provider(name)

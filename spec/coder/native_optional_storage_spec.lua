@@ -180,6 +180,49 @@ describe("native numeric optional storage", function()
         ]])
     end)
 
+    it("checks native Interface snapshots without changing their source fields", function()
+        h.run_coder([[
+            foreign import "limits.h"
+            interface WideView
+                item: foreign unsigned long long
+            end
+            interface OptionalView
+                item: (foreign unsigned long long)?
+            end
+            record WideSource
+                const item: foreign unsigned long long
+            end
+            record OptionalSource
+                const item: (foreign unsigned long long)?
+            end
+            function wide(): WideSource return WideSource.new(ffi.ULLONG_MAX) end
+            function optional(): OptionalSource return OptionalSource.new(ffi.ULLONG_MAX) end
+            function wide_view(source: WideSource): WideView return source end
+            function optional_view(source: OptionalSource): OptionalView return source end
+            function exact(wide: WideSource, optional: OptionalSource): boolean
+                return wide.item == ffi.ULLONG_MAX
+                    and (optional.item as foreign unsigned long long) == ffi.ULLONG_MAX
+            end
+            function small(): (WideView, OptionalView, OptionalView)
+                return WideSource.new(42), OptionalSource.new(17), OptionalSource.new(nil)
+            end
+        ]], [[
+            local wide, optional = test.wide(), test.optional()
+            for _, request in ipairs({
+                function() return test.wide_view(wide) end,
+                function() return test.optional_view(optional) end,
+            }) do
+                local ok, err = pcall(request)
+                assert(not ok and tostring(err):find(
+                    'C scalar is outside its Titan carrier range', 1, true))
+                collectgarbage('collect')
+                assert(test.exact(wide, optional))
+            end
+            local small, present, absent = test.small()
+            assert(small.item == 42 and present.item == 17 and absent.item == nil)
+        ]])
+    end)
+
     it("retains exact optional function signatures across source-free providers", function()
         local ok, err = h.build_so_chain({{
             name = "optional_provider",

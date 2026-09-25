@@ -4,11 +4,17 @@ local assert = require "luassert"
 local checker = require "titan-compiler.checker"
 local completion = require "titan-compiler.completion"
 local driver = require "titan-compiler.driver"
+local nominallayout = require "titan-compiler.nominallayout"
 local parser = require "titan-compiler.parser"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local types = require "titan-compiler.types"
 local util = require "titan-compiler.util"
 local titan = require "titan"
+
+-- These fixtures exercise provider identity without generating field accesses.
+local function empty_layouts(modname)
+    return (assert(nominallayout.encode(modname, {})))
+end
 
 local function write_file(path, contents)
     local file = assert(io.open(path, "wb"))
@@ -617,6 +623,11 @@ end
             chain_leaf = types.serialize(leaf),
             chain_mid = types.serialize(mid),
         }
+        local layouts = {
+            chain_api = empty_layouts("chain.api"),
+            chain_leaf = empty_layouts("chain.leaf"),
+            chain_mid = empty_layouts("chain.mid"),
+        }
         titan._loadlib = function(filename, symbol)
             assert.equal(dynamic, filename)
             local prefix = symbol:match("^(.*)_abi$")
@@ -626,6 +637,10 @@ end
             prefix = symbol:match("^(.*)_types$")
             if prefix and protocols[prefix] then
                 return function() return protocols[prefix] end
+            end
+            prefix = symbol:match("^(.*)_layouts$")
+            if prefix and layouts[prefix] then
+                return function() return layouts[prefix] end
             end
             return nil, "undefined symbol: " .. symbol, "init"
         end
@@ -675,13 +690,15 @@ end
                 return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "dyn_facade_types" then
                 return function() return facade_types end
+            elseif symbol == "dyn_facade_layouts" then
+                return function() return empty_layouts("dyn.facade") end
             end
             return nil, "undefined symbol: " .. symbol, "init"
         end
 
         local loader = driver.defaultloader({}, { context = context })
         local modtype, errors = checker.checkimport("dyn.facade", loader)
-        assert.truthy(modtype)
+        assert.truthy(modtype, errors)
         assert.equal(0, #errors)
         assert.equal("dynamic", driver.imported["dyn.facade"].kind)
         assert.is_nil(driver.imported["dyn.owner"])
@@ -744,6 +761,8 @@ end
                 return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "identity_owner_types" then
                 return function() return serialized_owner end
+            elseif symbol == "identity_owner_layouts" then
+                return function() return empty_layouts("identity.owner") end
             end
             return nil, "undefined symbol: " .. symbol, "init"
         end
@@ -998,10 +1017,14 @@ end
             [left_dso] = {
                 left_facade_types = types.serialize(left_facade),
                 views_owner_types = types.serialize(old_owner),
+                left_facade_layouts = empty_layouts("left.facade"),
+                views_owner_layouts = empty_layouts("views.owner"),
             },
             [right_dso] = {
                 right_facade_types = types.serialize(right_facade),
                 views_owner_types = types.serialize(current_owner),
+                right_facade_layouts = empty_layouts("right.facade"),
+                views_owner_layouts = empty_layouts("views.owner"),
             },
         }
         titan._loadlib = function(filename, symbol)
