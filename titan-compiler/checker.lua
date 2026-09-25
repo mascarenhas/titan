@@ -1,6 +1,7 @@
 local core = require "titan-compiler.checker.core"
 require "titan-compiler.checker.c_types"
 require "titan-compiler.checker.common"
+require "titan-compiler.checker.binary_usage"
 require "titan-compiler.checker.interfaces"
 require "titan-compiler.checker.type_syntax"
 require "titan-compiler.checker.expression_lists"

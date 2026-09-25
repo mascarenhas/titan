@@ -685,6 +685,7 @@ function checker.checkimport(modname, loader, request)
             and type_or_error._source == true,
         request and request.reference_seen)
     if not registered then return nil, register_error end
+    binary_remember_module(type_or_error)
     return type_or_error, errors, import_info
 end
 

@@ -129,8 +129,8 @@ function types.StaticMethod(fqtn, name, params, rettypes, varargtype,
         flexrettype, paramnames, scope, typeparams)
 end
 
--- A union's variants retain source order for their stable integer tags while
--- also supporting namespace lookup by name. Keep both views on the same
+-- A union's variants retain source order; their tags put public variants before
+-- private ones. Also support namespace lookup by name, keeping both views on the same
 -- descriptor objects, like Type.Module's member list/map.
 local raw_Union = types.Union
 function types.Union(name, variants, functions, methods, nvariants,
