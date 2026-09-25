@@ -130,27 +130,43 @@ fixtures without isolated copies.
 
 ## Implementation progress and reviews
 
-Milestones committed through native codegen and all enumerated stdlib owner
-migrations. ABI remains 2 and compiler remains 0.6.0 by the maintainer's later
-explicit instruction; an intermediate ABI-3 development build was stopped and
-its isolated validation prefix is being rebuilt with unchanged version markers.
+Implementation and all enumerated stdlib owner migrations are complete. The
+matching compiler, native SDK, and bundled provider were rebuilt and published
+in `/tmp/titan-174-validation`. ABI remains 2, compiler remains 0.6.0, and the
+language-server API remains 1 by the maintainer's explicit instruction. The
+public-prefix representation above supersedes the earlier reconstruction detour.
 
-Independent code review identified const-qualified aggregate initialization,
-const numeric copy carriers and fixed-array assignment snapshots; all were fixed
-with focused regressions. Cross-review approved the scalar and array fixes.
-Separate code reviews covered source-free/incremental metadata, publication
-layout comparisons, native options, and every migrated callback lifetime.
+Independent code review covered nominal layout/codegen, source-free and
+incremental metadata, publication checks, native Options, and every migrated
+callback lifetime. Findings on const aggregate initialization, const numeric
+copy carriers, fixed-array assignment snapshots, and allocation evidence were
+fixed and cross-reviewed. The final acceptance review added DSO imports after
+all producer source/header removal, dynamic/zero/erroring FAMs, cumulative
+allocation limits, over-alignment rejection, Interface boxing failures, and
+private aggregate/array reflection.
 
-Human language docs and examples received independent audience review; examples
-compiled. Agent skills and implementation docs received separate independent
-reviews, correcting a TValue-by-value description and stale logical-index terms.
-Native reflect/JSON/provider regressions received independent review as well.
+Human language docs and their four examples received independent audience-aware
+review; all examples compiled. Agent skills and implementation docs received
+separate independent reviews, including a final sweep of older layout claims.
+All six updated skills passed validation. The final code, test, documentation,
+and allocation-evidence reviews have no remaining findings.
 
-Focused evidence so far: nominal storage 11 cases passed (one additional call
-adjustment case added for the full suite); native numeric options 6 cases passed
-plus alias-type-test regression; callback intrinsic 6 cases passed; source-free
-archive and incremental provider tests 2 cases passed; installer32 cases passed.
-The complete matching-provider mixed test run is still pending, logged at
-`/tmp/titan-174-full-test.log`. Do not treat this intermediate evidence as delivery.
-Allocation audit script and target-specific report are in preparation. No push,
-PR or Linux CI has been performed yet, and macOS remains waived.
+Full local validation passed using the current installed compiler/SDK/provider:
+`luarocks test` ran 155 retained build/runtime/packaging tests, all four compiler
+shards (844 + 638 + 904 + 1218 = 3604 tests), and all 468 native tests. Log:
+`/tmp/titan-174-mixed-verified.log`. Earlier full runs exposed stale assertions
+and synthetic fixtures, which were corrected, reviewed, and included in this
+successful rerun. No compiler defect was needed to resolve those suite failures.
+
+The reproducible allocation audit passed all 19 storage groups and checks actual
+generated stdlib factories as well as measured storage replicas. NativeIntArray
+uses one userdata and zero UVs, requesting 52/112/4144 bytes at lengths 0/16/1024
+on the measured Linux x86_64 target. Evidence and scope are documented in
+`doc/implementation/nominal-allocation-audit.md`; local outputs are in
+`/tmp/titan-174-allocation-evidence-2` and
+`/tmp/titan-174-canonical-audit-final`.
+
+Publication gate: push the reviewed commits, obtain green Linux CI including
+sanitizer for the final head, and only then create the completed unmerged PR via
+`gh` and attach it to this task. Record the CI URL and completion in the PR and
+final task report. macOS is waived and must not be manually dispatched.
