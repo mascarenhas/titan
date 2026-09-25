@@ -38,22 +38,19 @@ traps without duplicating the manuals wholesale.
 - Keep existing Runtime/Task lifetime protocols; initialize native objects only
   after their final nominal owner exists, never copy initialized native handles.
 
-## Pending architecture decision
+## Physical reconstruction decision
 
-The issue asks source-free consumers to reconstruct anonymous payload structs,
-including private foreign members. Equal offsets alone do not make two C
-aggregate types compatible. A private producer member declared as `struct X`
-cannot be replaced with an anonymous/renamed struct and then accessed through
-an incompatible enclosing payload pointer. Original tags may also collide with
-unrelated consumer declarations. Both nominal payload definitions can themselves
-use anonymous typedefs, but this does not solve their private member types.
+The reconstructed C struct includes private fields, although the public Titan
+interface does not make them accessible. Preserve the complete compatible C
+definitions, including nested private member declarations and original tags,
+separately from type-checking metadata. Producer and consumer nominal payloads
+use anonymous struct typedefs; binary consumers can use ordinary lexical C
+scopes to isolate private C tags from unrelated consumer declarations. Native
+access remains direct member access, without layout-only surrogates or memcpy.
+The initial question about offset-based access was premature: full private
+physical definitions are already part of the issue's intended design.
 
-Maintainer question is pending: may binary consumers use their reconstructed
-layout only for `sizeof`/`offsetof`, then access public native members via byte
-addresses and `memcpy`, or must the implementation preserve C-compatible types
-for direct member access? The former avoids treating layout surrogates as live
-objects; the latter requires a design for original C tag/declaration scopes.
-No implementation or durable goal has been started before that answer.
+The durable implementation goal is active after this clarification.
 
 A separate necessary implementation fact: current semantic C descriptors lose
 physical information. `c-parser/ctypes.lua:add_to_fields` flattens anonymous
