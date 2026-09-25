@@ -40,32 +40,39 @@ traps without duplicating the manuals wholesale.
 
 ## Physical reconstruction decision
 
-The reconstructed C struct includes private fields, although the public Titan
-interface does not make them accessible. Preserve the complete compatible C
-definitions, including nested private member declarations and original tags,
-separately from type-checking metadata. Producer and consumer nominal payloads
-use anonymous struct typedefs; binary consumers can use ordinary lexical C
-scopes to isolate private C tags from unrelated consumer declarations. Native
-access remains direct member access, without layout-only surrogates or memcpy.
-The initial question about offset-based access was premature: full private
-physical definitions are already part of the issue's intended design.
+The maintainer proposed public-first physical storage so consumers need only the
+public prefix. Use an actual public-prefix C struct as the first subobject of a
+producer's complete record payload, followed by private native members. Binary
+consumers reconstruct only the compatible anonymous public-prefix type and read
+it directly. Merely casting a flat full struct to an unrelated shorter struct
+is not the selected design. Logical Titan field indices and visibility remain
+unchanged; compiled layout metadata supplies the dense UV mapping separately.
 
-The durable implementation goal is active after this clarification.
+Private C declarations and layout details stay producer-owned. No supplemental
+private C declaration graph, tag-name isolation, layout-only surrogate, or memcpy
+access is necessary. Omit a public payload prefix when there are no public native
+members; GC-only public access needs only the UV mapping and actual nuvalue.
 
-A separate necessary implementation fact: current semantic C descriptors lose
-physical information. `c-parser/ctypes.lua:add_to_fields` flattens anonymous
-unions; `foreigntypes.lua:populate_struct_or_union` omits unnamed bitfields;
-preprocessing/grammar discard attributes. Reconstructing these descriptors as
-ordinary structs is unsound. Physical metadata must retain the required
-information independently and validate the supported alignment/layout boundary.
-Do not infer offsets in Lua, discover provider headers, or add identity hashes.
+Records with any private field have a private synthesized constructor. Binary
+record literals reject missing private fields using nfields versus visible fields,
+including generic literals. Thus binary consumers never allocate these full
+private payloads. Public factories and escaped first-class constructors allocate
+inside the producer. Explicit source imports retain full descriptors and headers.
+For unions, use the real common tag-header first subobject; public variants
+expose all parts, and private variants remain accessible through producer-owned
+reflection accessors without exporting their private physical layout.
+
+The complete-definition/offset discussion above was a research detour, not an
+additional implementation requirement. The durable goal remains the full issue
+174 delivery under this newer maintainer-directed representation.
 
 ## Implementation stages
 
 1. Define checked nominal storage and separate physical metadata; implement
    producer/consumer reconstruction and ABI/cache/publication updates. Test
-   source-free DSO/archive consumers with interleaved private fields, private
-   foreign aggregates, sizes, offsets, alignment, and analysis-only imports.
+   source-free DSO/archive consumers with interleaved logical private fields,
+   private foreign aggregates in producer-only tails, public prefix offsets and
+   alignment, and analysis-only imports.
 2. Migrate record/union constructors, reads/stores, cases, Interface snapshots,
    generated Lua/reflection accessors, and native scalar/Option boundaries.
    Add topical compiler tests for raw/GC/mixed/generic and private layouts.
