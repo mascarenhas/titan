@@ -117,7 +117,7 @@ local function diagnostic_value(value)
     return "<" .. type(value) .. ":" .. tostring(value) .. ">"
 end
 
-function staticmetadata.render(modname, abi, serialized_types)
+function staticmetadata.render(modname, abi, serialized_types, serialized_layouts)
     if not valid_module_name(modname) then
         return nil, "invalid logical Titan module name " ..
             diagnostic_value(modname)
@@ -128,11 +128,16 @@ function staticmetadata.render(modname, abi, serialized_types)
     if type(serialized_types) ~= "string" then
         return nil, "serialized module types must be a string"
     end
+    if serialized_layouts ~= nil and type(serialized_layouts) ~= "string" then
+        return nil, "serialized nominal layouts must be a string"
+    end
     return staticmetadata.BANNER ..
         "return {\n" ..
         "    [" .. format("%q", modname) .. "] = {\n" ..
         "        abi = " .. format("%q", abi) .. ",\n" ..
         "        types = " .. format("%q", serialized_types) .. ",\n" ..
+        (serialized_layouts ~= nil and
+            "        layouts = " .. format("%q", serialized_layouts) .. ",\n" or "") ..
         "    },\n" ..
         "}\n"
 end
@@ -200,7 +205,9 @@ end
 
 -- validate_types, when supplied, is intentionally a driver-owned semantic
 -- hook. It receives (module_name, serialized_types, origin) and returns a
--- non-nil decoded/canonical value, or nil/false plus an error.
+-- non-nil decoded/canonical value, or nil/false plus an error. Physical layout
+-- bytes are a separate optional field. Native consumers require/validate them;
+-- semantic-only consumers do not need to load the layout codec.
 function staticmetadata.validate(payload, origin, options)
     options = options or {}
     origin = origin or public_origin("<metadata>")
@@ -256,7 +263,7 @@ function staticmetadata.validate(payload, origin, options)
     local field_count = 0
     for key in next, entry do
         field_count = field_count + 1
-        if key ~= "abi" and key ~= "types" then
+        if key ~= "abi" and key ~= "types" and key ~= "layouts" then
             return payload_error(origin, "metadata entry for " ..
                 format("%q", module_name) .. " has unknown field " ..
                 diagnostic_value(key))
@@ -264,20 +271,26 @@ function staticmetadata.validate(payload, origin, options)
     end
     local abi = rawget(entry, "abi")
     local serialized_types = rawget(entry, "types")
-    if field_count ~= 2 or type(abi) ~= "string" or
-       type(serialized_types) ~= "string" then
+    local serialized_layouts = rawget(entry, "layouts")
+    if (field_count ~= 2 and field_count ~= 3) or type(abi) ~= "string" or
+       type(serialized_types) ~= "string" or
+       (serialized_layouts ~= nil and type(serialized_layouts) ~= "string") then
         return payload_error(origin, "metadata entry for " ..
             format("%q", module_name) ..
-            " must contain exactly string fields 'abi' and 'types'")
+            " must contain string fields 'abi' and 'types', and optional string 'layouts'")
     end
     if options.expected_abi ~= nil and abi ~= options.expected_abi then
         return payload_error(origin, "metadata ABI mismatch for " ..
             format("%q", module_name) .. ": expected " ..
             tostring(options.expected_abi) .. " but found " .. tostring(abi))
     end
+    if options.require_layouts and serialized_layouts == nil then
+        return payload_error(origin, "missing nominal layout metadata for " ..
+            format("%q", module_name))
+    end
 
     local canonical, render_error =
-        staticmetadata.render(module_name, abi, serialized_types)
+        staticmetadata.render(module_name, abi, serialized_types, serialized_layouts)
     if not canonical then
         return payload_error(origin, render_error)
     end
@@ -305,11 +318,29 @@ function staticmetadata.validate(payload, origin, options)
         decoded_types = decoded[2] == true and nil or decoded[2]
     end
 
+    local decoded_layouts
+    if serialized_layouts ~= nil and options.validate_layouts ~= nil then
+        if type(options.validate_layouts) ~= "function" then
+            return payload_error(origin, "validate_layouts option is not a function")
+        end
+        local decoded = pack(pcall(
+            options.validate_layouts, module_name, serialized_layouts, origin))
+        if not decoded[1] or decoded.n < 2 or not decoded[2] then
+            return payload_error(origin, "invalid nominal layout metadata for " ..
+                format("%q", module_name) .. ": " ..
+                tostring(decoded[1] and (decoded[3] or "validator rejected it")
+                    or decoded[2]))
+        end
+        decoded_layouts = decoded[2] == true and nil or decoded[2]
+    end
+
     return {
         module = module_name,
         abi = abi,
         types = serialized_types,
         decoded_types = decoded_types,
+        layouts = serialized_layouts,
+        decoded_layouts = decoded_layouts,
         payload = payload,
         origin = origin,
     }
@@ -1208,7 +1239,8 @@ local function maps_agree(first, other, first_origin, other_origin)
             fail(right.origin, "universal metadata payload for " ..
                 format("%q", key) .. " differs from " .. left.origin)
         end
-        if left.abi ~= right.abi or left.types ~= right.types then
+        if left.abi ~= right.abi or left.types ~= right.types or
+           left.layouts ~= right.layouts then
             fail(right.origin, "universal decoded metadata for " ..
                 format("%q", key) .. " differs from " .. left.origin)
         end

@@ -842,6 +842,8 @@ function driver.new_resolver_context(options)
         contextual_types = {},
         contextual_resolutions = {},
         native_interface_types = {},
+        nominal_layouts = {},
+        nominal_layout_inventories = {},
         native_constraints = {},
         source_modules = {},
         embedded_interface_provider = embedded_interface_provider,
@@ -3178,10 +3180,31 @@ function driver.decode_module_interface(serialized, modname, origin)
     return decoded[2]
 end
 
+-- Physical nominal layout is deliberately absent from the semantic metadata
+-- graph and analysis inventories. Only native provider selection loads it.
+local function decode_nominal_layouts(modname, serialized)
+    return require("titan-compiler.nominallayout").decode(serialized, modname)
+end
+
+local function remember_nominal_layouts(context, inventory, filename)
+    if not context or context.analysis_only or not inventory then return end
+    if filename then
+        local provider = context.nominal_layout_inventories[filename]
+        if not provider then
+            provider = {}
+            context.nominal_layout_inventories[filename] = provider
+        end
+        provider[inventory.module] = inventory
+    end
+    for name, plan in pairs(inventory.layouts) do
+        context.nominal_layouts[name] = plan
+    end
+end
+
 -- Probe one existing container for a logical module. A missing dlsym entry is
 -- a membership absence; an open failure is terminal. Callers decide whether a
 -- clean nonclaim is skippable (ancestor) or an error (exact candidate).
-local function probe_compiled_interface(modname, binf)
+local function probe_compiled_interface(modname, binf, options)
     local prefix = driver.mangle_module_name(modname)
     local loadlib = require("titan")._loadlib
     local abiname = prefix .. "_abi"
@@ -3227,10 +3250,34 @@ local function probe_compiled_interface(modname, binf)
             "' has invalid metadata for module '" .. modname .. "': " ..
             validation_err
     end
+    local serialized_layouts, layout_inventory
+    if not (options and options.analysis_only) then
+        local layoutsname = prefix .. "_layouts"
+        local layoutsf, layoutserr = loadlib(binf, layoutsname)
+        if not layoutsf then
+            return "error", "compiled container '" .. binf ..
+                "' claims module '" .. modname ..
+                "' but is missing metadata symbol '" .. layoutsname ..
+                "': " .. tostring(layoutserr)
+        end
+        local layouts_call_err
+        serialized_layouts, layouts_call_err = one_metadata_result(
+            layoutsf, "compiled module layout metadata '" .. layoutsname .. "'")
+        if not serialized_layouts then return "error", layouts_call_err end
+        local layout_err
+        layout_inventory, layout_err = decode_nominal_layouts(modname, serialized_layouts)
+        if not layout_inventory then
+            return "error", "compiled container '" .. binf ..
+                "' has invalid nominal layout metadata for module '" ..
+                modname .. "': " .. tostring(layout_err)
+        end
+    end
     return "valid", modt_or_err, {
         module = modname,
         abi = abi_or_err,
         types = types_or_err,
+        layouts = serialized_layouts,
+        layout_inventory = layout_inventory,
         type = modt_or_err,
         origin = binf,
     }
@@ -3273,11 +3320,11 @@ function driver.find_dynamic_interface(paths, modname, context)
                         filename .. "': " .. tostring(attribute_error)
                 elseif attributes then
                     occupied[relative] = true
-                    local status, value =
-                        probe_compiled_interface(modname, filename)
+                    local status, value, metadata =
+                        probe_compiled_interface(modname, filename, context)
                     if status == "valid" then
                         value.file = relative
-                        return value, filename, relative
+                        return value, filename, relative, metadata
                     elseif status == "error" then
                         return nil, value
                     elseif index == #candidates then
@@ -3308,6 +3355,8 @@ local function inspect_static_provider(context, filename, relative)
     local provider, scan_err = staticmetadata.scan_archive(filename, {
         io = context.io,
         expected_abi = driver.TITAN_ABI_VERSION,
+        require_layouts = not context.analysis_only,
+        validate_layouts = not context.analysis_only and decode_nominal_layouts or nil,
         validate_types = function(name, serialized, origin)
             return driver.decode_module_interface(
                 serialized, name, origin)
@@ -3337,6 +3386,7 @@ local function inspect_static_provider(context, filename, relative)
             return nil, err
         end
         entry.type = modtype
+        entry.layout_inventory = entry.decoded_layouts
     end
     context.provider_cache[filename] = provider
     return provider
@@ -3464,14 +3514,17 @@ function driver.find_dependency_interface(paths, modname, context)
 
     for _, format in ipairs(formats) do
         if format == "dynamic" then
-            local modtype, filename, relative =
+            local modtype, filename, relative, metadata =
                 driver.find_dynamic_interface(paths, modname, context)
             if modtype then
+                remember_nominal_layouts(context, metadata.layout_inventory, filename)
                 return {
                     kind = "dynamic",
                     type = modtype,
                     filename = filename,
                     relative = relative,
+                    layouts = metadata.layouts,
+                    layout_inventory = metadata.layout_inventory,
                 }
             elseif filename then
                 return nil, filename
@@ -3480,6 +3533,8 @@ function driver.find_dependency_interface(paths, modname, context)
             local modtype, filename, relative, provider =
                 driver.find_static_interface(paths, modname, context)
             if modtype then
+                local metadata = provider.entries[modname]
+                remember_nominal_layouts(context, metadata.layout_inventory, filename)
                 return {
                     kind = "static",
                     type = modtype,
@@ -3487,6 +3542,8 @@ function driver.find_dependency_interface(paths, modname, context)
                     relative = relative,
                     static_archive = filename,
                     static_provider = provider,
+                    layouts = metadata.layouts,
+                    layout_inventory = metadata.layout_inventory,
                 }
             elseif filename then
                 return nil, filename
@@ -4175,6 +4232,9 @@ function driver.defaultloader(static_deps, options)
         local entry, metadata_error = objectmetadata.read(bytes, object_path)
         if not entry then return miss(metadata_error) end
         local native = entry.object_metadata
+        if not native or not native.layouts then
+            return miss("missing nominal layout metadata")
+        end
         -- A valid record is compiler-owned data. Build-system prerequisites
         -- own dependency/configuration freshness; replay only its link inputs.
         driver.imported[modname] = CIRCULAR_MARK
@@ -4456,13 +4516,19 @@ function driver.defaultloader(static_deps, options)
         if cached then
             if cached.error then return false, cached.error end
             context.native_interface_types[modname] = cached.type
+            remember_nominal_layouts(context, cached.layout_inventory)
             remember_used_compiled_interface(
                 context, modname, cached.type)
             return true, cached.type, {}
         end
 
-        local function remember_type(modtype, resolved, ordinary_lookup)
-            context.contextual_types[cache_key] = { type = modtype }
+        local function remember_type(modtype, resolved, ordinary_lookup, inventory)
+            inventory = inventory or resolved.layout_inventory
+            context.contextual_types[cache_key] = {
+                type = modtype, layout_inventory = inventory,
+            }
+            remember_nominal_layouts(context, inventory,
+                resolved.static_archive or resolved.filename)
             context.native_interface_types[modname] = modtype
             remember_used_compiled_interface(context, modname, modtype)
             remember_contextual_resolution(
@@ -4480,15 +4546,15 @@ function driver.defaultloader(static_deps, options)
                     add_native_constraint(context, modname, "direct-carried",
                         exposing.static_archive, exposing_name)
                 end
-                return remember_type(entry.type, exposing, false)
+                return remember_type(entry.type, exposing, false, entry.layout_inventory)
             end
         elseif exposing.kind == "dynamic" then
-            local status, value =
-                probe_compiled_interface(modname, exposing.filename)
+            local status, value, metadata =
+                probe_compiled_interface(modname, exposing.filename, context)
             if status == "valid" then
                 add_native_constraint(context, modname, "dynamic-global",
                     exposing.filename, exposing_name)
-                return remember_type(value, exposing, false)
+                return remember_type(value, exposing, false, metadata.layout_inventory)
             elseif status == "error" then
                 context.contextual_types[cache_key] = { error = value }
                 return false, value
@@ -4688,6 +4754,39 @@ function driver.defaultloader(static_deps, options)
         end
         if driver.imported[modname] then
             local mod = driver.imported[modname]
+            if not context.analysis_only then
+                -- A semantic-only selection may survive in the process cache.
+                -- Native compilation must acquire the separate physical plan
+                -- from that exact provider before reusing its interface.
+                if mod.kind == "dynamic" and not mod.layout_inventory then
+                    local status, value, metadata =
+                        probe_compiled_interface(modname, mod.filename)
+                    if status ~= "valid" then
+                        return false, status == "error" and value or
+                            ("cached provider no longer claims module '" .. modname .. "'")
+                    end
+                    if types.serialize(value) ~= types.serialize(mod.type) then
+                        return false, "cached compiled interface for module '" ..
+                            modname .. "' changed before native compilation"
+                    end
+                    mod.layouts, mod.layout_inventory =
+                        metadata.layouts, metadata.layout_inventory
+                elseif mod.kind == "static" and not mod.layout_inventory then
+                    local provider, provider_error = inspect_static_provider(
+                        context, mod.static_archive, mod.relative)
+                    if not provider then return false, provider_error end
+                    local metadata = provider.entries[modname]
+                    if not metadata or types.serialize(metadata.type) ~= types.serialize(mod.type) then
+                        return false, "cached compiled interface for module '" ..
+                            modname .. "' changed before native compilation"
+                    end
+                    mod.static_provider = provider
+                    mod.layouts, mod.layout_inventory =
+                        metadata.layouts, metadata.layout_inventory
+                end
+                remember_nominal_layouts(context, mod.layout_inventory,
+                    mod.static_archive or mod.filename)
+            end
             local retained, retain_error = remember_dependency_closure(modname)
             if not retained then return false, retain_error end
             remember_direct_dependency(modname)
@@ -5212,6 +5311,22 @@ function driver.finalize_resolver_context(context)
         end
     end
     context.contextual_resolutions = contextual_resolutions
+
+    -- Rebuild the codegen-only map from surviving physical provenance. In
+    -- particular, a source replacement must not inherit stale binary plans.
+    context.nominal_layouts = {}
+    for _, provider in ipairs(selected_static_providers) do
+        for _, entry in pairs(provider.entries) do
+            remember_nominal_layouts(context, entry.layout_inventory)
+        end
+    end
+    for _, mod in pairs(dynamic_names) do
+        remember_nominal_layouts(context, mod.layout_inventory)
+    end
+    for _, resolution in pairs(contextual_resolutions) do
+        local provider = context.nominal_layout_inventories[resolution.provider_file]
+        remember_nominal_layouts(context, provider and provider[resolution.owner])
+    end
 
     if #errors ~= 0 then return nil, errors end
     return context
@@ -5938,9 +6053,21 @@ local function prepare_compile(
             header_plan, verbose, options and options.pretty_print)
         if not header_ok then return nil, header_err end
     end
-    local code, native_references, _, native_bindings =
+    local imported_layouts = options and options.nominal_layouts
+    if not imported_layouts then
+        imported_layouts = {}
+        for _, imported in pairs(driver.imported) do
+            local inventory = imported ~= CIRCULAR_MARK and imported.layout_inventory
+            if inventory then
+                for name, plan in pairs(inventory.layouts) do
+                    imported_layouts[name] = plan
+                end
+            end
+        end
+    end
+    local code, native_references, _, native_bindings, encoded_layouts =
         coder.generate(modname, ast, static_deps, driver.TITAN_ABI_VERSION,
-            driver.EMIT_LINE_DIRECTIVES)
+            driver.EMIT_LINE_DIRECTIVES, { nominal_layouts = imported_layouts })
     local imports, deps, providers = {}, {}, {}
     for _, node in ipairs(ast) do
         if not node._ignore and node._tag == "Ast.TopLevelImport" then
@@ -5965,6 +6092,7 @@ local function prepare_compile(
         external_symbols = coder.external_symbols(modname, ast),
         native_references = native_references,
         foreign_header = ast._foreign_header_recipe,
+        layouts = encoded_layouts,
     })
     if not payload then return nil, metadata_error end
     code = code .. "\n" .. objectmetadata.render(payload,
@@ -6900,6 +7028,8 @@ local function metadata_scan_options(target)
     return {
         target = target,
         expected_abi = driver.TITAN_ABI_VERSION,
+        require_layouts = true,
+        validate_layouts = decode_nominal_layouts,
         validate_types = function(name, serialized, origin)
             return driver.decode_module_interface(serialized, name, origin)
         end,
@@ -6917,6 +7047,8 @@ local function scan_native_file(filename, target, validate_types)
         expected_abi = driver.TITAN_ABI_VERSION,
     }
     if validate_types then
+        options.require_layouts = true
+        options.validate_layouts = decode_nominal_layouts
         options.validate_types = function(name, serialized, origin)
             return driver.decode_module_interface(serialized, name, origin)
         end
@@ -7103,6 +7235,10 @@ function driver.compare_archive_entries(actual, expected, subject)
         if found.types ~= wanted.types then
             return nil, subject .. " type metadata for module '" .. name ..
                 "' differs"
+        end
+        if found.layouts ~= wanted.layouts then
+            return nil, subject .. " nominal layout metadata for module '" ..
+                name .. "' differs"
         end
         if found.payload and wanted.payload and
            found.payload ~= wanted.payload then
@@ -7788,8 +7924,8 @@ function driver.validate_library_image_fresh(
     for _, modname in ipairs(module_names) do
         local entry = assert(expected_entries[modname])
         expected[#expected + 1] = string.format(
-            "[%q] = { abi = %q, types = %q }",
-            modname, entry.abi, entry.types)
+            "[%q] = { abi = %q, types = %q, layouts = %q }",
+            modname, entry.abi, entry.types, entry.layouts)
     end
     local script_source = [[
 local image, result = ...
@@ -7805,7 +7941,7 @@ end
 local support = require "titan"
 for name, entry in pairs(expected) do
     local prefix = name:gsub("[.]", "_")
-    for _, field in ipairs({ "abi", "types" }) do
+    for _, field in ipairs({ "abi", "types", "layouts" }) do
         local symbol = prefix .. "_" .. field
         local fn, load_error = support._loadlib(image, symbol)
         if not fn then
@@ -8626,17 +8762,20 @@ local function standalone_archive_probe_source(
         local prefix = driver.mangle_module_name(modname)
         local abi_bytes = assert(staticmetadata.c_initializer(entry.abi))
         local types_bytes = assert(staticmetadata.c_initializer(entry.types))
+        local layouts_bytes = assert(staticmetadata.c_initializer(entry.layouts))
         declarations[#declarations + 1] = string.format([[
 extern int %s_abi(lua_State *L);
 extern int %s_types(lua_State *L);
+extern int %s_layouts(lua_State *L);
 extern void *%s_init(lua_State *L);
 extern int luaopen_%s(lua_State *L);
 static void *(*volatile keep_init_%d)(lua_State *) = %s_init;
 static int (*volatile keep_open_%d)(lua_State *) = luaopen_%s;
 static const unsigned char expected_abi_%d[] = %s;
 static const unsigned char expected_types_%d[] = %s;
-]], prefix, prefix, prefix, prefix, index, prefix, index, prefix,
-            index, abi_bytes, index, types_bytes)
+static const unsigned char expected_layouts_%d[] = %s;
+]], prefix, prefix, prefix, prefix, prefix, index, prefix, index, prefix,
+            index, abi_bytes, index, types_bytes, index, layouts_bytes)
         checks[#checks + 1] = string.format([[
     if (keep_init_%d == NULL || keep_open_%d == NULL) return 20;
     lua_settop(L, 0);
@@ -8647,7 +8786,12 @@ static const unsigned char expected_types_%d[] = %s;
     if (%s_types(L) != 1 || lua_type(L, -1) != LUA_TSTRING) return 23;
     value = lua_tolstring(L, -1, &length);
     if (length != %d || memcmp(value, expected_types_%d, length) != 0) return 24;
-]], index, index, prefix, #entry.abi, index, prefix, #entry.types, index)
+    lua_settop(L, 0);
+    if (%s_layouts(L) != 1 || lua_type(L, -1) != LUA_TSTRING) return 25;
+    value = lua_tolstring(L, -1, &length);
+    if (length != %d || memcmp(value, expected_layouts_%d, length) != 0) return 26;
+]], index, index, prefix, #entry.abi, index, prefix, #entry.types, index,
+            prefix, #entry.layouts, index)
     end
     local support_declaration = validate_titan_support and [[
 extern int luaopen_titan(lua_State *L);
