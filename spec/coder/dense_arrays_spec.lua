@@ -212,8 +212,8 @@ describe("dense Array code generation and boundaries", function()
         assert.is_true(raw_probe < boxed_probe)
         assert.not_match("LUA_REGISTRYINDEX", nested)
 
-        local module_init = csrc:sub(assert(csrc:find(
-            "Udata *test_init(lua_State *L) {", 1, true)))
+        local module_init = generated_function(
+            csrc, "Udata *test_init(lua_State *L)")
         local private_root = assert(module_init:find(
             "titan_pushmodule(L, _mod);", 1, true))
         local registry_anchor = assert(module_init:find(
