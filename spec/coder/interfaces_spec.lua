@@ -540,7 +540,7 @@ describe("interfaces (end-to-end)", function()
                 "test_\\u2133_Box_\\u2131_numbers_fieldaccessor(")
             local interface_getter = generated_function(csrc,
                 "test_\\u2133_View_\\u2131_numbers_fieldaccessor(")
-            assert.truthy(record_getter:find("_rec->uv[1].uv", 1, true))
+            assert.truthy(record_getter:find("(_rec)->uv[0].uv", 1, true))
             assert.truthy(interface_getter:find("_interface->uv[3].uv", 1, true))
 
             local ok, err = h.call("test", [[

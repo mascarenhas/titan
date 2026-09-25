@@ -184,7 +184,7 @@ function coder._store_flex_result(flex, index, value)
     end
     local cases = {}
     for i, save in ipairs(flex.slots) do
-        local write = setslot(flex.elem, "&" .. save.cvar, value)
+        local write = coder._optional_result_store(save.typ, flex.elem, save.cvar, value)
         if save.slot then
             write = write .. "\n"
                 .. setslot(save.typ, slotat(save.slot), save.cvar)
@@ -227,9 +227,9 @@ function coder._finish_immediate_return(ctx, pending)
         local flex = destination.flex
         for i, save in ipairs(destination.projections) do
             table.insert(lines, "if (" .. flex.count .. " >= " .. i .. ") {\n"
-                .. setslot(flex.elem, "&" .. save.cvar,
+                .. coder._optional_result_store(save.typ, flex.elem, save.cvar,
                     flex.args .. "[" .. (i - 1) .. "]")
-                .. "\n} else { setnilvalue(&" .. save.cvar .. "); }")
+                .. "\n} else { " .. coder._option_nil(save.typ, save.cvar) .. " }")
             if save.slot then
                 table.insert(lines, setslot(save.typ, slotat(save.slot), save.cvar))
             end

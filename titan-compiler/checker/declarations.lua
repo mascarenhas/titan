@@ -629,9 +629,13 @@ function check_foreign_environment(module_ast, st, errors)
     st.ffi_namespace, module_ast._ffi_namespace = namespace, namespace
     if not st:find_symbol("ffi") then st:add_symbol("ffi", namespace) end
     local nodes, names, has_source = {}, {}, false
+    st._native_record_fields_enabled = false
     for _, node in ipairs(module_ast) do
         if not node._ignore and node._tag == "Ast.TopLevelForeignImport" then
             nodes[#nodes + 1], names[#names + 1] = node, node.headername
+            if node.headername == "titan/ffi.h" then
+                st._native_record_fields_enabled = true
+            end
         elseif not node._ignore and node._tag == "Ast.TopLevelImport"
                and node._source_import then
             has_source = true

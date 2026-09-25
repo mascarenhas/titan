@@ -180,11 +180,14 @@ function codevar(ctx, node)
                 -- record's physical field order.
                 index = 2 + index
             end
-            return cstats,
-                getslot(node._type, nil, render("&(($EXP)->uv[$INDEX].uv)", {
-                    EXP = cexp,
-                    INDEX = c_integer_literal(index),
-                }))
+            if node._interface_field then
+                return cstats, getslot(node._type, nil,
+                    "&((" .. cexp .. ")->uv[" .. index .. "].uv)")
+            end
+            local plan = coder._nominal_plan(ctx, node.exp._type)
+            local reads, value = coder._nominal_read(ctx, plan,
+                assert(plan.by_index[index]), node._decl.type, cexp)
+            return cstats .. "\n" .. reads, value
         elseif node._decl._tag == "Type.CField" then
             return codecfield(ctx, node)
         elseif node._decl._tag == "Type.CPseudoSize" then
@@ -758,112 +761,66 @@ function coderecord(ctx, node, target)
     else
         ctmp, tmpname, tmpslot = newtmp(ctx, node._type, true)
     end
-    -- The record value IS the Udata: one allocation, fields in user values
-    -- uv[0..N-1] (0-based), type identity is the udata's metatable (no raw
-    -- payload), metatable straight on the udata. luaS_newudata returns the
-    -- object already nil-filled and white, and we anchor it via setuvalue
-    -- immediately, so the half-built record is reachable before any field is
-    -- evaluated; each gc field store uses the back barrier to keep it honest.
+    local plan = coder._nominal_plan(ctx, record)
     cinit = render([[
         $CTMP
-        $TMPNAME = luaS_newudata(L, 0, $NUSERVALUES);
+        $TMPNAME = luaS_newudata(L, $SIZE, $NUV);
         $TMPNAME->metatable = hvalue(&_mod->uv[$META].uv);
         setuvalue(L, $TMPSLOT, $TMPNAME);
     ]], {
         CTMP = ctmp,
         TMPNAME = tmpname,
         TMPSLOT = tmpslot,
-        NUSERVALUES = record.nfields or #record.fields,
-        META = c_integer_literal(type2metatable(ctx, node._type))
+        SIZE = coder._nominal_size(plan),
+        NUV = plan.nuv,
+        META = c_integer_literal(type2metatable(ctx, node._type)),
     })
     table.insert(stats, cinit)
     for _, field in ipairs(node.fields) do
-        local exp = field.exp
-        local cstats, cexp = codeexp(ctx, exp)
-        local ctmpe, tmpename, tmpeslot = newtmp(ctx, field._field.type, true)
-        local code = render([[
-            $CSTATS
-            $CTMPE
-            $TMPENAME = $CEXP;
-            $SETSLOT;
-            setobj2t(L, &($RECORD->uv[$INDEX].uv), $SLOT);
-        ]], {
-            CSTATS = cstats,
-            CTMPE = ctmpe,
-            TMPENAME = tmpename,
-            CEXP = cexp,
-            SETSLOT = setslot(field._field.type, tmpeslot, tmpename),
-            SLOT = tmpeslot,
-            RECORD = tmpname,
-            INDEX = field._field.index
-        })
-        table.insert(stats, code)
-        if types.is_gc(field._field.type) then
-            table.insert(stats, render([[
-                luaC_barrierback(L, obj2gco($TMPNAME), $SLOT);
-            ]], {
-                TMPNAME = tmpname,
-                SLOT = tmpeslot,
-            }))
-        end
+        local cstats, cexp = codeexp(ctx, field.exp)
+        local slot = assert(plan.by_index[field._field.index])
+        table.insert(stats, cstats)
+        table.insert(stats, coder._nominal_store(ctx, plan, slot,
+            field._field.type, tmpname, cexp))
     end
     return table.concat(stats, "\n"), tmpname
 end
 
--- Lower the internal expression synthesized for one union-variant
--- constructor. The union userdata is rooted immediately; its absolute tag and
--- opaque payload parts then use ordinary internal TValue slots.
+-- Constructors use the active variant's size and dense traced slots. The
+-- shared tag is the first real subobject of every variant payload.
 function coder._codeunioninit(ctx, node, target)
     local union = assert(node._union)
     local variant = assert(node._variant)
-    assert(union._tag == "Type.Union" and variant._tag == "Type.Variant")
-    assert(node._type._tag == "Type.Nominal"
-        and node._type.fqtn == union.name)
-
+    local plan = coder._nominal_plan(ctx, union, variant)
     local ctmp, tmpname, tmpslot
     if target and target._cvar then
         ctmp, tmpname, tmpslot = "", target._cvar, target._slot
     else
         ctmp, tmpname, tmpslot = newtmp(ctx, node._type, true)
     end
-
-    local stats = {
-        render([[
-            $CTMP
-            $TMPNAME = luaS_newudata(L, 0, $NUSERVALUES);
-            $TMPNAME->metatable = hvalue(&_mod->uv[$META].uv);
-            setuvalue(L, $TMPSLOT, $TMPNAME);
-            setivalue(&$TMPNAME->uv[0].uv, $TAG);
-        ]], {
-            CTMP = ctmp,
-            TMPNAME = tmpname,
-            TMPSLOT = tmpslot,
-            NUSERVALUES = c_integer_literal(#variant.parts + 1),
-            META = c_integer_literal(type2metatable(ctx, node._type)),
-            TAG = c_integer_literal(variant.index),
-        }),
-    }
-
-    assert(#node.values == #variant.parts,
-        "union initializer payload count differs from variant")
+    local stats = { render([[
+        $CTMP
+        $TMPNAME = luaS_newudata(L, $SIZE, $NUV);
+        $TMPNAME->metatable = hvalue(&_mod->uv[$META].uv);
+        setuvalue(L, $TMPSLOT, $TMPNAME);
+        $TAG = $INDEX;
+    ]], {
+        CTMP = ctmp,
+        TMPNAME = tmpname,
+        TMPSLOT = tmpslot,
+        SIZE = coder._nominal_size(plan),
+        NUV = plan.nuv,
+        META = c_integer_literal(type2metatable(ctx, node._type)),
+        TAG = coder._nominal_tag(tmpname),
+        INDEX = variant.index,
+    }) }
+    assert(#node.values == #variant.parts)
     for i, part in ipairs(variant.parts) do
         local cstats, cexp = codeexp(ctx, node.values[i])
-        local payloadslot = "&" .. tmpname .. "->uv[" .. i .. "].uv"
-        table.insert(stats, render([[
-            $CSTATS
-            $SETSLOT
-            $BARRIER
-        ]], {
-            CSTATS = cstats,
-            SETSLOT = setslot(part.type, payloadslot, cexp),
-            BARRIER = types.is_gc(part.type)
-                and render("luaC_barrierback(L, obj2gco($UNION), $SLOT);", {
-                    UNION = tmpname,
-                    SLOT = payloadslot,
-                }) or "",
-        }))
+        table.insert(stats, cstats)
+        table.insert(stats, coder._nominal_store(ctx, plan,
+            assert(plan.by_index[part.index]), part.type, tmpname, cexp))
     end
-
     return table.concat(stats, "\n"), tmpname
 end
 
@@ -1446,7 +1403,7 @@ function codebinaryop(ctx, node, _)
                 $LSTATS
                 $CTMP
                 if(!($COND)) {
-                    setnilvalue(&$TMPNAME);
+                    $NIL
                 } else {
                     $RSTATS;
                     $TMPNAME = $RCODE;
@@ -1456,6 +1413,7 @@ function codebinaryop(ctx, node, _)
                 CTMP = ctmp,
                 TMPNAME = tmpname,
                 COND = toboolean(node.lhs._type, lcode),
+                NIL = coder._option_nil(node._type, tmpname),
                 LSTATS = lstats,
                 RSTATS = rstats,
                 RCODE = rcode,
@@ -1516,7 +1474,7 @@ function codebinaryop(ctx, node, _)
                 RSTATS = rstats,
                 RCODE = rcode,
                 TMPSET = tmpset,
-                GETL = getslot(node._type, tmpname, "&" .. lcode),
+                GETL = coder._option_get(node.lhs._type, tmpname, lcode),
             })
             return code, tmpname
         else
@@ -1626,6 +1584,30 @@ function codebinaryop(ctx, node, _)
         end
     elseif (op == "==" or op == "!=") and mapcomparison then
         return code_map_equality(ctx, node, op, mapcomparison)
+    elseif (op == "==" or op == "!=")
+           and (coder._is_native_option(node.lhs._type)
+                or coder._is_native_option(node.rhs._type)) then
+        local lstats, left = materialize(ctx, node.lhs)
+        local rstats, right = materialize(ctx, node.rhs)
+        local stats = lstats .. rstats
+        local equal
+        if coder._is_native_option(node.lhs._type)
+           and coder._is_native_option(node.rhs._type) then
+            equal = render([[
+                (($LEFT.present == $RIGHT.present)
+                    && (!$LEFT.present || $LEFT.value == $RIGHT.value))
+            ]], { LEFT = left, RIGHT = right })
+        else
+            -- A gradual operand is a genuine boxed comparison boundary.
+            -- Keep its checked conversion before the Lua equality operation.
+            local ldecl, lboxed = newtmp(ctx, types.Value())
+            local rdecl, rboxed = newtmp(ctx, types.Value())
+            stats = stats .. ldecl .. rdecl
+                .. setboxed(ctx, node.lhs._type, "&" .. lboxed, left)
+                .. setboxed(ctx, node.rhs._type, "&" .. rboxed, right)
+            equal = "luaV_rawequalobj(&" .. lboxed .. ", &" .. rboxed .. ")"
+        end
+        return stats, op == "!=" and "!(" .. equal .. ")" or equal
     elseif (op == "==" or op == "!=") and
             coder._raw_ctype(node.lhs._type) == "TValue" and
             coder._raw_ctype(node.rhs._type) == "TValue" then
@@ -2007,8 +1989,7 @@ function codedotsindex(ctx, node)
             CSET = cset,
         }), tmpname
     else
-        -- optional: out-of-range -> nil; in-range -> wrap the element into a t?
-        -- TValue. node._type is the option type; elem is its base.
+        -- Optional: out-of-range yields nil; in-range retains the exact element.
         local opttype = node._type
         local ctmp, tmpname = newtmp(ctx, opttype)
         return render([[
@@ -2018,7 +1999,7 @@ function codedotsindex(ctx, node)
                 $CIDX
                 $IDX = $CIEXP;
                 if ($IDX < 1 || $IDX > $LEN) {
-                    setnilvalue(&$TMPNAME);
+                    $NIL
                 } else {
                     $SETSLOT
                 }
@@ -2031,7 +2012,8 @@ function codedotsindex(ctx, node)
             CIEXP = ciexp,
             LEN = lenexp,
             TMPNAME = tmpname,
-            SETSLOT = setslot(elem, "&" .. tmpname, elemexp),
+            NIL = coder._option_nil(opttype, tmpname),
+            SETSLOT = coder._optional_result_store(opttype, elem, tmpname, elemexp),
         }), tmpname
     end
 end
@@ -2116,12 +2098,12 @@ local function code_spread_array_read(
                 if ($AVAILABLE) {
                     $BODY
                 } else {
-                    setnilvalue(&$RESULT);
+                    $NIL
                 }
             ]], {
                 AVAILABLE = available,
                 BODY = body,
-                RESULT = result,
+                NIL = coder._option_nil(typ, result),
             })
         else
             body = render([[
@@ -2195,12 +2177,12 @@ local function code_spread_map_projection(ctx, node, state, ordinal)
             if ($AVAILABLE) {
                 $LOOKUP
             } else {
-                setnilvalue(&$RESULT);
+                $NIL
             }
         ]], {
             AVAILABLE = available,
             LOOKUP = lookup,
-            RESULT = result,
+            NIL = coder._option_nil(typ, result),
         })
     else
         body = render([[
@@ -2248,12 +2230,12 @@ local function code_spread_dots_projection(ctx, node, state, ordinal)
             if ($INBOUNDS) {
                 $STORE
             } else {
-                setnilvalue(&$RESULT);
+                $NIL
             }
         ]], {
             INBOUNDS = inbounds,
-            STORE = setslot(va.elem, "&" .. result, raw),
-            RESULT = result,
+            STORE = coder._optional_result_store(typ, va.elem, result, raw),
+            NIL = coder._option_nil(typ, result),
         })
     else
         body = render([[
@@ -3061,12 +3043,12 @@ function codeexp_dispatch(ctx, node, iscondition, target)
             $CSTATS
             (void)($CEXP);
             $CTMP
-            setnilvalue(&$TMPNAME);
+            $NIL
         ]], {
             CSTATS = cstats,
             CEXP = cexp,
             CTMP = ctmp,
-            TMPNAME = tmpname
+            NIL = coder._option_nil(node._type, tmpname),
         }), tmpname
     elseif tag == "Ast.ExpCast" and node._type._tag == "Type.Option"
            and node.exp._type._tag == "Type.Option" then
@@ -3099,8 +3081,8 @@ function codeexp_dispatch(ctx, node, iscondition, target)
             $CSRC
             $SRCNAME = $CEXP;
             $CDST
-            if (TITAN_UNLIKELY(ttisnil(&$SRCNAME))) {
-                setnilvalue(&$DSTNAME);
+            if (TITAN_UNLIKELY(!($PRESENT))) {
+                $NIL
             } else {
                 $CBASE
                 $GETBASE;
@@ -3113,11 +3095,13 @@ function codeexp_dispatch(ctx, node, iscondition, target)
             SRCNAME = srcname,
             CEXP = cexp,
             CBASE = cbase,
-            GETBASE = getslot(sbase, basename, "&" .. srcname),
+            PRESENT = coder._option_present(node.exp._type, srcname),
+            NIL = coder._option_nil(node._type, dstname),
+            GETBASE = coder._option_get(node.exp._type, basename, srcname),
             CONVSTATS = convstats,
             CDST = cdst,
             DSTNAME = dstname,
-            SETDST = setslot(tbase, "&" .. dstname, convexp),
+            SETDST = coder._option_wrap(node._type, dstname, convexp),
         }), dstname
     elseif tag == "Ast.ExpCast" and node._type._tag == "Type.Option" then
         -- Cast from S to T?. The checker records one outer option_wrap plan;
@@ -3142,7 +3126,7 @@ function codeexp_dispatch(ctx, node, iscondition, target)
                 _adjustment = inner_adjustment,
             }
         else
-            assert(types.equals(node.exp._type, tbase),
+            assert(types.equals(types.normalize(node.exp._type), types.normalize(tbase)),
                 "identity Option injection changes its base type")
         end
         local cstats, cexp = codeexp(ctx, converted)
@@ -3154,7 +3138,7 @@ function codeexp_dispatch(ctx, node, iscondition, target)
         ]], {
             CSTATS = cstats,
             CTMP = ctmp,
-            SETSLOT = setslot(tbase, "&" .. tmpname, cexp)
+            SETSLOT = coder._option_wrap(node._type, tmpname, cexp)
         }), tmpname
     elseif tag == "Ast.ExpCast" and node.exp._type._tag == "Type.Option" then
         -- Cast from S? to T. Preserve nil failure, then lower the checker
@@ -3168,7 +3152,7 @@ function codeexp_dispatch(ctx, node, iscondition, target)
         local inner_adjustment =
             coder._inner_assignment(sbase, node._type, inner)
         local cstats, cexp = codeexp(ctx, node.exp)
-        -- Materialize the option value into a TValue temp first: the operand
+        -- Materialize the option value first: the operand
         -- may be a non-lvalue (e.g. a direct call returning t?), so we cannot
         -- take its address directly.
         local csrc, srcname = newtmp(ctx, node.exp._type)
@@ -3190,7 +3174,7 @@ function codeexp_dispatch(ctx, node, iscondition, target)
                 _adjustment = inner_adjustment,
             }
         else
-            assert(types.equals(sbase, node._type),
+            assert(types.equals(types.normalize(sbase), types.normalize(node._type)),
                 "identity Option projection changes its base type")
         end
         local convstats, convexp = codeexp(ctx, converted)
@@ -3200,7 +3184,7 @@ function codeexp_dispatch(ctx, node, iscondition, target)
             $CSRC
             $SRCNAME = $CEXP;
             $CTMP
-            if(TITAN_UNLIKELY(ttisnil(&$SRCNAME))) {
+            if(TITAN_UNLIKELY(!($PRESENT))) {
                 $THROW_WRONG_CAST
             } else {
                 $CBASE
@@ -3214,7 +3198,8 @@ function codeexp_dispatch(ctx, node, iscondition, target)
             SRCNAME = srcname,
             CEXP = cexp,
             CBASE = cbase,
-            GETBASE = getslot(sbase, basename, "&" .. srcname),
+            PRESENT = coder._option_present(node.exp._type, srcname),
+            GETBASE = coder._option_get(node.exp._type, basename, srcname),
             CONVSTATS = convstats,
             CONVEXP = convexp,
             CTMP = ctmp,

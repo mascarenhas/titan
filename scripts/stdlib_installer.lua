@@ -21,6 +21,7 @@ end
 local lfs = require "lfs"
 local driver = require "titan-compiler.driver"
 local staticmetadata = require "titan-compiler.staticmetadata"
+local nominallayout = require "titan-compiler.nominallayout"
 
 local installer = {}
 
@@ -241,6 +242,11 @@ for _, modname in ipairs(modules) do
         finish(false, "image is missing " .. prefix .. "_types: " ..
             tostring(type_error))
     end
+    local layoutfn, layout_error = loadlib(image, prefix .. "_layouts")
+    if not layoutfn then
+        finish(false, "image is missing " .. prefix .. "_layouts: " ..
+            tostring(layout_error))
+    end
     for _, symbol in ipairs({
         prefix .. "_init",
         "luaopen_" .. prefix,
@@ -254,6 +260,7 @@ for _, modname in ipairs(modules) do
     entries[modname] = {
         abi = one_string(abi, prefix .. "_abi"),
         types = one_string(typefn, prefix .. "_types"),
+        layouts = one_string(layoutfn, prefix .. "_layouts"),
     }
 end
 
@@ -263,7 +270,8 @@ for _, modname in ipairs(modules) do
     local entry = entries[modname]
     out:write("[", string.format("%q", modname), "]={abi=",
         string.format("%q", entry.abi), ",types=",
-        string.format("%q", entry.types), "},\n")
+        string.format("%q", entry.types), ",layouts=",
+        string.format("%q", entry.layouts), "},\n")
 end
 out:write("}\n")
 out:close()
@@ -321,7 +329,7 @@ local function inspect_image(image, module_names, options)
     for _, name in ipairs(module_names) do
         local entry = entries[name]
         if type(entry) ~= "table" or type(entry.abi) ~= "string" or
-           type(entry.types) ~= "string" then
+           type(entry.types) ~= "string" or type(entry.layouts) ~= "string" then
             return nil, "native image inspection omitted module '" ..
                 name .. "'"
         end
@@ -336,6 +344,11 @@ local function inspect_image(image, module_names, options)
             return nil, "native image types for module '" .. name ..
                 "' are invalid: " .. tostring(decode_err)
         end
+        local layout, layout_error = nominallayout.decode(entry.layouts, name)
+        if not layout then
+            return nil, "native image layouts for module '" .. name ..
+                "' are invalid: " .. tostring(layout_error)
+        end
     end
     for name in pairs(entries) do
         if not MODULE_SET[name] then
@@ -349,6 +362,10 @@ end
 local function scan_archive(archive)
     return staticmetadata.scan_archive(archive, {
         expected_abi = driver.TITAN_ABI_VERSION,
+        require_layouts = true,
+        validate_layouts = function(name, serialized)
+            return nominallayout.decode(serialized, name)
+        end,
         validate_types = function(name, serialized, origin)
             return driver.decode_module_interface(serialized, name, origin)
         end,
@@ -386,6 +403,10 @@ local function compare_entries(actual, expected, subject)
         end
         if found.types ~= wanted.types then
             return nil, subject .. " type metadata for module '" .. name ..
+                "' differs"
+        end
+        if found.layouts ~= wanted.layouts then
+            return nil, subject .. " layout metadata for module '" .. name ..
                 "' differs"
         end
     end

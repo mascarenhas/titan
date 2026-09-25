@@ -109,7 +109,8 @@ function newforeigntmp(ctx --[[:table]], typ --[[:table]],
         fdecl = "char* " .. tmpname
         finit = " = NULL"
     elseif types.is_direct_c(typ) then
-        fdecl = coder._render_c_declaration(typ, tmpname)
+        fdecl = coder._render_c_declaration(coder._c_value_type(
+            cdeclarator.adjust_parameter_type(typ)), tmpname)
         if typ._tag == "Type.COwned"
             or rtyp._tag == "Type.CPointer" then
             finit = " = NULL"
@@ -1313,6 +1314,16 @@ function coder._code_adjustment_value(
         assert(adjustment.guard
             and adjustment.guard.op == "option",
             "structural Option view lacks its strict guard plan")
+        if coder._is_native_option(source_type)
+            and coder._is_native_option(target)
+            and coder._native_option_ctype(source_type)
+                == coder._native_option_ctype(target) then
+            -- A typedef can give an otherwise identical foreign scalar a
+            -- structural Option view. Its already-typed native carrier proves
+            -- the same scalar category; converting through TValue here would
+            -- manufacture a narrower boundary that the source never asked for.
+            return "", raw
+        end
         -- Most successful guards only borrow the existing payload. A present
         -- Interface leaf may dynamically construct a wrapper. Ordinarily this
         -- cast owns one traced temporary; a runtime-sized enclosing sink can
@@ -1323,10 +1334,18 @@ function coder._code_adjustment_value(
         local cdst, dstname, dstslot =
             newtmp(ctx, target, needs_anchor and not result_root)
         local anchor_root = needs_anchor and (result_root or dstslot) or nil
+        local boxed_source, box_stats = "&" .. srcname, ""
+        if coder._is_native_option(source_type) then
+            local boxed_name = fresh_lowering_name(ctx, "_option_view_box_")
+            box_stats = "TValue " .. boxed_name .. ";\n"
+                .. coder._native_option_box(source_type, "&" .. boxed_name, srcname)
+            boxed_source = "&" .. boxed_name
+        end
         return render([[
             $CSRC
             $SRCNAME = $RAW;
             $CDST
+            $BOX
             $CHECK
             $REBASE
             $ANCHOR
@@ -1335,8 +1354,9 @@ function coder._code_adjustment_value(
             SRCNAME = srcname,
             RAW = raw,
             CDST = cdst,
+            BOX = box_stats,
             CHECK = coder._strictcheckandget(
-                ctx, adjustment.guard, target, dstname, "&" .. srcname,
+                ctx, adjustment.guard, target, dstname, boxed_source,
                 loc, "structural Option view"),
             REBASE = coder._rebase_after_interface_discovery(ctx, target),
             ANCHOR = anchor_root
@@ -1830,14 +1850,14 @@ function codevaluecall(ctx, node)
                 if ($DESC.n_args >= $INDEX) {
                     $SETPRESENT;
                 } else {
-                    setnilvalue(&$VISIBLE);
+                    $SETNIL
                 }
             ]], {
                 DESC = flexrun.desc,
                 INDEX = c_integer_literal(source.index),
-                SETPRESENT = setslot(flexrun.elem, "&" .. name,
+                SETPRESENT = coder._optional_result_store(visible_types[i], flexrun.elem, name,
                     flexrun.args .. "[" .. c_integer_literal(source.index - 1) .. "]"),
-                VISIBLE = name,
+                SETNIL = coder._option_nil(visible_types[i], name),
             }))
         end
     end
@@ -2204,6 +2224,9 @@ function codevaluecall(ctx, node)
 end
 
 function codecall(ctx, node)
+    if node._nominal_constructor then
+        return coder._codenominalcall(ctx, node)
+    end
     if coder._immediate_function(node) then
         return codeimmediatecall(ctx, node)
     end
@@ -2492,14 +2515,14 @@ function codecall(ctx, node)
                 if ($DESC.n_args >= $INDEX) {
                     $SETPRESENT;
                 } else {
-                    setnilvalue(&$VISIBLE);
+                    $SETNIL
                 }
             ]], {
                 DESC = flexrun.desc,
                 INDEX = c_integer_literal(source.index),
-                SETPRESENT = setslot(flexrun.elem, "&" .. name,
+                SETPRESENT = coder._optional_result_store(typ, flexrun.elem, name,
                     flexrun.args .. "[" .. c_integer_literal(source.index - 1) .. "]"),
-                VISIBLE = name,
+                SETNIL = coder._option_nil(typ, name),
             }))
         end
     end

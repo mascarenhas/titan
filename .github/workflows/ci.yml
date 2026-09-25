@@ -12,7 +12,7 @@ on:
 env:
   MAKEFLAGS: "-j2"
   TITAN_JOBS: "2"
-  TITAN_ABI_VERSION: "2"
+  TITAN_ABI_VERSION: "3"
 
 jobs:
   # Build and install the regular Linux tree once, run every uncovered
@@ -954,6 +954,13 @@ jobs:
           bash spec/support/ci_sanitizer_capture.sh immediate-functions \
             env TITAN_PROBE_CACHE_DISABLE=1 .lua/bin/busted -o gtest -v spec/coder/immediate_functions_spec.lua
 
+      - name: Run native nominal storage sanitizer gate
+        run: |
+          bash spec/support/ci_sanitizer_capture.sh nominal-storage \
+            env TITAN_PROBE_CACHE_DISABLE=1 .lua/bin/busted -o gtest -v \
+              spec/coder/nominal_storage_spec.lua \
+              spec/coder/native_optional_storage_spec.lua
+
       - name: Run native coroutine sanitizer gate
         run: |
           bash spec/support/ci_sanitizer_capture.sh coroutine-gc \
@@ -982,6 +989,8 @@ jobs:
             make titan-stdlib-test-run TITAN_FILTER='^uv%.runtime_tests%.'
           bash spec/support/ci_sanitizer_capture.sh foreign-work-tests \
             make titan-stdlib-test-run TITAN_FILTER='test_run_foreign_'
+          bash spec/support/ci_sanitizer_capture.sh signal-owner-tests \
+            make titan-stdlib-test-run TITAN_FILTER='test_signal_watcher_'
 
       - name: Run native TLS/HTTP sanitizer gate
         run: |
