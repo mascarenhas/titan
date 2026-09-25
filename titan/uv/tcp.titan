@@ -35,20 +35,19 @@ local record TcpAcceptCall
   local tcp: uv_tcp_t
 end
 
--- The foreign callback reads the callback from field 2. Everything after it
--- is the exact state owned by that callback-taking libuv operation.
+-- Each request owns inline native storage and its exact traced callback.
 local record uv_getaddrinfo_t
-  local native: owned *uv_getaddrinfo_t
+  local native: foreign uv_getaddrinfo_t
   local callback: function (uv_getaddrinfo_t, integer, foreign *void): ()
 end
 
 local record uv_connect_t
-  local native: owned *uv_connect_t
+  local native: foreign uv_connect_t
   local callback: function (uv_connect_t, integer): ()
 end
 
 local record uv_shutdown_t
-  local native: owned *uv_shutdown_t
+  local native: foreign uv_shutdown_t
   local callback: function (uv_shutdown_t, integer): ()
 end
 
@@ -57,7 +56,8 @@ foreign function uv_getaddrinfo_cb(req: *uv_getaddrinfo_t,
                                    result: *addrinfo)
   local owner = ffi.uv_req_get_data(
       req as foreign *uv_req_t) as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "uv_getaddrinfo_t", "callback"))
   local L = ffi.uv_loop_get_data(req.loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
@@ -72,7 +72,8 @@ foreign function uv_connect_cb(req: *uv_connect_t,
                                status: int)
   local owner = ffi.uv_req_get_data(
       req as foreign *uv_req_t) as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "uv_connect_t", "callback"))
   local handle = req.handle as foreign *uv_handle_t
   local loop = ffi.uv_handle_get_loop(handle)
   local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
@@ -88,7 +89,8 @@ foreign function uv_shutdown_cb(req: *uv_shutdown_t,
                                 status: int)
   local owner = ffi.uv_req_get_data(
       req as foreign *uv_req_t) as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "uv_shutdown_t", "callback"))
   local handle = req.handle as foreign *uv_handle_t
   local loop = ffi.uv_handle_get_loop(handle)
   local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
@@ -104,7 +106,8 @@ foreign function uv_connection_cb(server: *uv_stream_t,
                                    status: int)
   local handle = server as foreign *uv_handle_t
   local owner = ffi.uv_handle_get_data(handle) as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[3].uv)
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "uv_tcp_t", "connection_callback"))
   local loop = ffi.uv_handle_get_loop(handle)
   local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
@@ -138,10 +141,10 @@ local union TcpRole
 end
 
 -- Persistent TCP handles own their exact long-lived stream state directly.
--- The foreign callbacks read alloc, read, and connection closures from fields
--- 2, 3, and 4. Libuv, not Titan, tracks and orders concurrent write requests.
+-- Foreign callbacks resolve their closure fields by name. Libuv, not Titan,
+-- tracks and orders concurrent write requests.
 local record uv_tcp_t
-  local native: owned *uv_tcp_t
+  local native: foreign uv_tcp_t
   local alloc_callback: function (uv_tcp_t, foreign size_t, foreign *void): ()
   local read_callback: function (uv_tcp_t, integer): ()
   local connection_callback: function (uv_tcp_t, integer): ()
@@ -322,9 +325,8 @@ local function new_server_role(): TcpRole
 end
 
 local function new_tcp(runtime: Runtime, role: TcpRole): uv_tcp_t
-  local native: owned *uv_tcp_t = foreign uv_tcp_t.new()
-  local tcp: uv_tcp_t = {
-    native = native,
+  local tcp = uv_tcp_t.new {
+    native = foreign uv_tcp_t.new(),
     alloc_callback = tcp_alloc_dispatch,
     read_callback = tcp_read_dispatch,
     connection_callback = tcp_connection_dispatch,
@@ -332,7 +334,7 @@ local function new_tcp(runtime: Runtime, role: TcpRole): uv_tcp_t
     role = role,
     root_index = 0,
   }
-  local exact_native: foreign *uv_tcp_t = native
+  local exact_native = tcp.native
   tcp.root_index = root_handle(runtime, tcp)
   local status = ffi.uv_tcp_init(runtime.loop, exact_native)
   if status < 0 then
@@ -347,8 +349,8 @@ end
 
 local function start_tcp_read(tcp: uv_tcp_t): integer
   return ffi.uv_read_start(
-      tcp_stream(tcp), uv_alloc_cb,
-      uv_read_cb)
+      tcp_stream(tcp), uv_tcp_alloc_cb,
+      uv_tcp_read_cb)
 end
 
 local function begin_tcp_close(tcp: uv_tcp_t, closer: Task?): boolean
@@ -509,9 +511,6 @@ catch
 end
 
 local function GetaddrinfoCall:dispatch(task: Task): Immediate?
-  local native: owned *uv_getaddrinfo_t =
-      foreign uv_getaddrinfo_t.new()
-  local request: foreign *uv_getaddrinfo_t = native
   local hints = foreign addrinfo.new()
   hints.ai_family = ffi.AF_UNSPEC
   hints.ai_socktype = ffi.SOCK_STREAM
@@ -521,7 +520,8 @@ local function GetaddrinfoCall:dispatch(task: Task): Immediate?
                              pointer: foreign *void)
     complete_getaddrinfo(task, status, pointer)
   end
-  local owner = uv_getaddrinfo_t.new(native, callback)
+  local owner = uv_getaddrinfo_t.new(foreign uv_getaddrinfo_t.new(), callback)
+  local request = owner.native
   task.pending = owner
   ffi.uv_req_set_data(request as foreign *uv_req_t,
                         owner as foreign *void)
@@ -539,12 +539,11 @@ local function GetaddrinfoCall:dispatch(task: Task): Immediate?
 end
 
 local function TcpConnectCall:dispatch(task: Task): Immediate?
-  local native: owned *uv_connect_t = foreign uv_connect_t.new()
-  local request: foreign *uv_connect_t = native
   local callback = function (_owner: uv_connect_t, status: integer)
     complete_status(task, status, "net.connect")
   end
-  local owner = uv_connect_t.new(native, callback)
+  local owner = uv_connect_t.new(foreign uv_connect_t.new(), callback)
+  local request = owner.native
   task.pending = owner
   ffi.uv_req_set_data(request as foreign *uv_req_t,
                         owner as foreign *void)
@@ -593,12 +592,11 @@ local function TcpWriteCall:dispatch(task: Task): Immediate?
 end
 
 local function TcpShutdownCall:dispatch(task: Task): Immediate?
-  local native: owned *uv_shutdown_t = foreign uv_shutdown_t.new()
-  local request: foreign *uv_shutdown_t = native
   local callback = function (_owner: uv_shutdown_t, status: integer)
     complete_status(task, status, "net.shutdown")
   end
-  local owner = uv_shutdown_t.new(native, callback)
+  local owner = uv_shutdown_t.new(foreign uv_shutdown_t.new(), callback)
+  local request = owner.native
   task.pending = owner
   ffi.uv_req_set_data(request as foreign *uv_req_t,
                         owner as foreign *void)

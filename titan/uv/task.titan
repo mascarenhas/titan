@@ -149,7 +149,7 @@ end
 -- The callback closure retains the Task and result through the timer's close
 -- callback, which is the completion point for every one-shot timer.
 local record TimerOwner
-  local handle: owned *uv_timer_t
+  local const handle: foreign uv_timer_t
   local callback: function (TimerOwner): ()
   local root_index: integer
 end
@@ -157,7 +157,8 @@ end
 foreign function uv_timer_cb(timer: *uv_timer_t)
   local handle = timer as foreign *uv_handle_t
   local owner = ffi.uv_handle_get_data(handle) as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "TimerOwner", "callback"))
   local loop = ffi.uv_handle_get_loop(handle)
   local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
@@ -170,12 +171,27 @@ end
 
 -- A repeating timer retains only its latest tick and at most one waiter.
 local record uv_timer_t
-  local handle: owned *uv_timer_t
+  local const handle: foreign uv_timer_t
   local callback: function (uv_timer_t): ()
   local runtime: Runtime
   local waiting: Task?
   local fired: boolean
   local root_index: integer
+end
+
+foreign function uv_ticker_cb(timer: *uv_timer_t)
+  local handle = timer as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(handle) as foreign *Udata
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "uv_timer_t", "callback"))
+  local loop = ffi.uv_handle_get_loop(handle)
+  local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry = ffi.lmacro_pvalue(
+      callback.upvalue[2]) as foreign UvNoargCallbackEntry
+  local top = ffi.lua_gettop(L)
+  entry(L, module, callback, owner)
+  ffi.lua_settop(L, top)
 end
 
 local record TerminalRegistration<|A, B|>
@@ -517,7 +533,8 @@ local function ticker_callback(ticker: uv_timer_t)
 end
 
 local function activate_timer(runtime: Runtime,
-                              native: owned *uv_timer_t,
+                              native: foreign *uv_timer_t,
+                              callback: foreign uv_timer_cb,
                               owner: value,
                               owner_pointer: foreign *void,
                               milliseconds: integer,
@@ -535,7 +552,7 @@ local function activate_timer(runtime: Runtime,
       timer_handle as foreign *uv_handle_t,
       owner_pointer)
   status = ffi.uv_timer_start(
-      native, uv_timer_cb,
+      native, callback,
       milliseconds as foreign uint64_t,
       repeat_time as foreign uint64_t)
   if status < 0 then
@@ -553,7 +570,6 @@ local function start_timer(task: Task, milliseconds: integer,
                            failed: boolean,
                            payload: value): TimerOwner
   local runtime = task.runtime
-  local native: owned *uv_timer_t = foreign uv_timer_t.new()
   local completion = function ()
     if terminal(task.state) then
       task.resume_token = nil
@@ -577,9 +593,9 @@ local function start_timer(task: Task, milliseconds: integer,
       fail_task_at_callback_boundary(task, error, traceback)
     end
   end
-  local owner = TimerOwner.new(native, callback, 0)
+  local owner = TimerOwner.new(foreign uv_timer_t.new(), callback, 0)
   owner.root_index = activate_timer(
-      runtime, native, owner, owner as foreign *void,
+      runtime, owner.handle, uv_timer_cb, owner, owner as foreign *void,
       milliseconds, 0)
   return owner
 end
@@ -609,11 +625,10 @@ end
 local function start_ticker(task: Task,
                             milliseconds: integer): uv_timer_t
   local runtime = task.runtime
-  local native: owned *uv_timer_t = foreign uv_timer_t.new()
-  local ticker = uv_timer_t.new(native, ticker_callback, runtime,
-                                nil, false, 0)
+  local ticker = uv_timer_t.new(
+      foreign uv_timer_t.new(), ticker_callback, runtime, nil, false, 0)
   ticker.root_index = activate_timer(
-      runtime, native, ticker, ticker as foreign *void,
+      runtime, ticker.handle, uv_ticker_cb, ticker, ticker as foreign *void,
       milliseconds, milliseconds)
   return ticker
 end

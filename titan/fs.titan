@@ -25,7 +25,7 @@ foreign type FsNoargCallbackEntry = function (*lua_State, *Udata, *CClosure, *Ud
 foreign type FsEventCallbackEntry = function (*lua_State, *Udata, *CClosure, *Udata, const *char, lua_Integer, lua_Integer): void
 
 local record RealpathRequest
-  local handle: owned *uv_fs_t
+  local const handle: foreign uv_fs_t
   local callback: function (RealpathRequest): ()
   local waiter: uv.Task?
   local failed: boolean
@@ -33,7 +33,7 @@ local record RealpathRequest
 end
 
 local record WatchRegistration
-  local handle: owned *uv_fs_event_t
+  local const handle: foreign uv_fs_event_t
   local callback: function (WatchRegistration, foreign const *char, integer, integer): ()
   local runtime: uv.Runtime
   local path: string
@@ -55,7 +55,8 @@ local realpath_roots: {RealpathRequest: boolean} = {}
 foreign function fs_realpath_cb(request: *uv_fs_t)
   local owner = ffi.uv_req_get_data(
       request as foreign *uv_req_t) as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "RealpathRequest", "callback"))
   local L = ffi.uv_loop_get_data(request.loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry = ffi.lmacro_pvalue(
@@ -71,7 +72,8 @@ foreign function fs_watcher_event_cb(handle: *uv_fs_event_t,
                                       status: int)
   local native_handle = handle as foreign *uv_handle_t
   local owner = ffi.uv_handle_get_data(native_handle) as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "WatchRegistration", "callback"))
   local loop = ffi.uv_handle_get_loop(native_handle)
   local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
@@ -310,12 +312,12 @@ function realpath(path: string): string
   uv.accepting_work(runtime, "resolve a filesystem path")
   local checked = uv.checked_text(path, "fs.realpath")
   local resume_token = uv.ResumeToken.new("fs.realpath")
-  local native: owned *uv_fs_t = foreign uv_fs_t.new()
   local callback = function (request: RealpathRequest)
     request:finish()
   end
   local request = RealpathRequest.new(
-      native, callback, task, false, nil)
+      foreign uv_fs_t.new(), callback, task, false, nil)
+  local native = request.handle
   local cancel_action = function ()
     if request.waiter == task then request.waiter = nil end
   end
@@ -446,7 +448,6 @@ end
 local function Watcher:new_registration(
     path: string, directory: boolean): WatchRegistration
   local runtime = self.runtime
-  local native: owned *uv_fs_event_t = foreign uv_fs_event_t.new()
   local callback = function (registration: WatchRegistration,
                              filename: foreign const *char,
                              events: integer, status: integer)
@@ -457,7 +458,7 @@ local function Watcher:new_registration(
     end
   end
   local registration = WatchRegistration.new {
-    handle = native,
+    handle = foreign uv_fs_event_t.new(),
     callback = callback,
     runtime = runtime,
     path = path,
@@ -465,6 +466,7 @@ local function Watcher:new_registration(
     index = 0,
     runtime_root_index = 0,
   }
+  local native = registration.handle
   registration.runtime_root_index = uv.root_handle(runtime, registration)
   local init_status = ffi.uv_fs_event_init(runtime.loop, native)
   if init_status < 0 then

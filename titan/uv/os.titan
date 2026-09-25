@@ -5,7 +5,7 @@ local record SignalWaitCall
 end
 
 local record uv_signal_t
-  local handle: owned *uv_signal_t
+  local const handle: foreign uv_signal_t
   local callback: function (uv_signal_t, integer): ()
   local root_index: integer
 end
@@ -14,7 +14,8 @@ foreign function uv_signal_cb(signal: *uv_signal_t,
                               signum: int)
   local handle = signal as foreign *uv_handle_t
   local owner = ffi.uv_handle_get_data(handle) as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local callback = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "uv_signal_t", "callback"))
   local loop = ffi.uv_handle_get_loop(handle)
   local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
@@ -199,7 +200,6 @@ end
 local function SignalWaitCall:dispatch(task: Task): Immediate?
   local runtime = task.runtime
   accepting_work(runtime, "wait for a signal")
-  local native: owned *uv_signal_t = foreign uv_signal_t.new()
   local callback = function (owner: uv_signal_t, result: integer)
     local signal_handle: foreign *uv_signal_t = owner.handle
     close_handle(runtime,
@@ -210,7 +210,8 @@ local function SignalWaitCall:dispatch(task: Task): Immediate?
   catch
     fail_task_at_callback_boundary(task, error, traceback)
   end
-  local owner = uv_signal_t.new(native, callback, 0)
+  local owner = uv_signal_t.new(foreign uv_signal_t.new(), callback, 0)
+  local native = owner.handle
   owner.root_index = root_handle(runtime, owner)
   local status = ffi.uv_signal_init(runtime.loop, native)
   if status < 0 then

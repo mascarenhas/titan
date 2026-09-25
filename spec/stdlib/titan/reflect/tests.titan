@@ -3,6 +3,8 @@ local test = import "test"
 local reflect = import "reflect"
 local gc = import "gc"
 local lua = import "lua"
+local string = import "string"
+foreign import "limits.h"
 foreign import "stdlib.h"
 foreign import "lua.h"
 foreign import "titan/ffi.h"
@@ -1190,6 +1192,47 @@ record ForeignFields
   ratio: foreign double
   pointer: foreign *int
   storage: owned int[]
+end
+
+record NativeNumberFields
+  count: foreign unsigned long long
+  optional: (foreign unsigned long long)?
+  label: string
+end
+
+local function expect_native_number_boxing_failure(action: function (): ())
+  local failed = false
+  do
+    action()
+  catch
+    failed = true
+    test.assert(error is string)
+    test.assert(string.find(error as string,
+        "C scalar is outside its Titan carrier range", 1, true) ~= nil)
+  end
+  test.assert(failed, "reflection should check a native number when boxing it")
+end
+
+function test_native_numbers_are_checked_only_when_reflection_boxes_them(_context: test.Context)
+  local candidate = NativeNumberFields.new(ffi.ULLONG_MAX, ffi.ULLONG_MAX, "retained")
+  local rv = record_value(candidate)
+  test.assert(rv.n_fields == 3)
+  gc.collect()
+  test.assert(rv:get(3) == "retained")
+  expect_native_number_boxing_failure(function() rv:get(1) end)
+  expect_native_number_boxing_failure(function() rv:get(2) end)
+  test.assert(candidate.count == ffi.ULLONG_MAX)
+  test.assert((candidate.optional as foreign unsigned long long) == ffi.ULLONG_MAX)
+
+  expect_failure(function() rv:set(1, -1) end)
+  expect_failure(function() rv:set(2, "invalid") end)
+  test.assert(candidate.count == ffi.ULLONG_MAX)
+  test.assert((candidate.optional as foreign unsigned long long) == ffi.ULLONG_MAX)
+  rv:set(1, 42)
+  rv:set(2, nil)
+  test.assert(rv:get(1) == 42 and rv:get(2) == nil)
+  rv:set(2, 17)
+  test.assert(rv:get(2) == 17)
 end
 
 function test_foreign_field_accessors_check_and_box_values(_context: test.Context)

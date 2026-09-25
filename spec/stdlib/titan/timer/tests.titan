@@ -3,6 +3,7 @@ local runtime_test = import "support.runtime.titan"
 local async = import "async"
 local stream = import "io"
 local timer = import "timer"
+local gc = import "gc"
 local task_support = import "support.async.titan"
 
 function test_timer_yield_and_sleep(_context: test.Context)
@@ -32,7 +33,9 @@ function test_timer_ticker_waited_and_retained_ticks(
 
     local count = 0
     for _ = 1, 3 do
+      gc.collect()
       if ticker:tick() then count = count + 1 end
+      gc.collect()
     end
     test.assert(count == 3, "Ticker lost a waited tick")
 
@@ -73,7 +76,9 @@ function test_timer_ticker_pending_close_and_invalid_period(
     test.assert(competing_waiter_rejected,
                 "Ticker accepted a second waiting Task")
 
+    gc.collect()
     ticker:close()
+    gc.collect()
     while task_support.active(waiter) do timer.yield() end
     test.assert(waiter:status():as_string() == "succeeded",
                 "closing Ticker failed its waiter")
@@ -86,5 +91,28 @@ function test_timer_ticker_pending_close_and_invalid_period(
       invalid = true
     end
     test.assert(invalid, "Ticker accepted a nonpositive interval")
+  end)
+end
+
+function test_timer_sleep_owner_survives_collection_until_close(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local resumed = false
+    local sleeper = async.run<|value, value|>(function (): value
+      timer.sleep(60000)
+      resumed = true
+      return nil
+    end)
+    task_support.cleanup_task(sleeper, "collected timer owner cleanup")
+    while sleeper:status():as_string() == "ready" do timer.yield() end
+    test.assert(sleeper:status():as_string() == "waiting",
+                "one-shot timer did not suspend")
+
+    gc.collect()
+    sleeper:cancel(async.CancellationReason.simple("close collected timer"))
+    gc.collect()
+    async.join(sleeper)
+    test.assert(sleeper:status():has_cancelled() and not resumed,
+                "collected timer owner lost its close continuation")
   end)
 end

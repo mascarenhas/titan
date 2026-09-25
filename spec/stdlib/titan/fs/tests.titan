@@ -2,6 +2,7 @@ local test = import "test"
 local runtime_test = import "support.runtime.titan"
 local async = import "async"
 local fs = import "fs"
+local gc = import "gc"
 local stream = import "io"
 local timer = import "timer"
 local support = import "fs.test_support.titan"
@@ -121,6 +122,65 @@ function test_fs_binary_delimiters_and_close(context: test.Context)
     end, "closed File accepted a flush")
 
     fs.unlink(binary_path)
+  end)
+end
+
+function test_fs_concurrent_reads_preserve_buffers_through_gc_and_cancellation(
+    context: test.Context)
+  runtime_test.run(function ()
+    local root = support.new_workspace(context)
+    local path = root .. "/concurrent-reads.dat"
+    support.cleanup_path(context, path)
+    local expected = support.make_boundary_payload()
+    fs.write_file(path, expected)
+    local first = fs.open(path, "rb")
+    defer first:close()
+    local second = fs.open(path, "rb")
+    defer second:close()
+    local token = async.ResumeToken.new("filesystem read start")
+    local first_ready, second_ready = false, false
+    local cancelled_delivered = false
+    local received: string? = nil
+    local cancelled = async.run<|value, value|>(function (): value
+      first_ready = true
+      async.suspend(token)
+      first:read(65536)
+      cancelled_delivered = true
+      return nil
+    end)
+    task_support.cleanup_task(cancelled, "cancelled filesystem read cleanup")
+    local survivor = async.run<|value, value|>(function (): value
+      second_ready = true
+      async.suspend(token)
+      local contents = ""
+      while true do
+        local chunk? = second:read()
+        if not chunk then break end
+        contents = contents .. chunk
+        gc.collect()
+      end
+      received = contents
+      return nil
+    end)
+    task_support.cleanup_task(survivor, "surviving filesystem read cleanup")
+    while not first_ready or not second_ready do timer.yield() end
+
+    -- resume runs synchronously until each read submits and suspends. No
+    -- event-loop turn can deliver either completion before cancellation/GC.
+    cancelled:resume(token)
+    survivor:resume(token)
+    test.assert(cancelled:status():as_string() == "waiting" and
+                survivor:status():as_string() == "waiting",
+                "filesystem reads did not suspend after submission")
+    cancelled:cancel(async.CancellationReason.simple("cancel pending read"))
+    gc.collect()
+    gc.collect()
+    async.join(cancelled)
+    async.join(survivor)
+    test.assert(cancelled:status():has_cancelled() and not cancelled_delivered,
+                "cancelled filesystem read delivered a result")
+    test.assert(survivor:status():has_succeeded() and received == expected,
+                "concurrent filesystem read lost its owner buffer")
   end)
 end
 
@@ -428,8 +488,11 @@ function test_fs_independent_continuations(context: test.Context)
                 cancelled_realpath == nil,
                 "an unrelated token changed the one-shot realpath wait")
 
+    gc.collect()
     cancelled:cancel(async.CancellationReason.simple(
         "cancel pending realpath"))
+    -- Accepted native work keeps its request alive after the waiter detaches.
+    gc.collect()
     async.join(cancelled)
     test.assert(cancelled:status():has_cancelled() and
                 cancelled_realpath == nil,
@@ -467,6 +530,7 @@ function test_fs_condition_waiter_tokens_and_callback_progress(
       async.suspend(gate_token)
       watcher_phase = 2
       watcher_events = watcher:poll()
+      gc.collect()
       return nil
     end)
     task_support.cleanup_task(
@@ -488,6 +552,7 @@ function test_fs_condition_waiter_tokens_and_callback_progress(
                 watcher_task:status():as_string() == "waiting",
                 "stale gate token changed the watcher poll")
 
+    gc.collect()
     support.write_file_synchronously(watcher_path, "watcher")
     async.join(watcher_task)
     test.assert(watcher_task:status():has_succeeded() and

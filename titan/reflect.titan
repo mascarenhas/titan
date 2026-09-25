@@ -873,16 +873,15 @@ local function init_brand_handlers()
     when is_union(desc) then
       local tv: foreign TValue = v
       local u = ffi.lmacro_uvalue(tv)
-      local uv_ptr = u.uv as foreign *UValue
-      local tag: integer = 0
-      local tag_val: value = uv_ptr[0].uv
-      if tag_val is integer then
-        tag = tag_val as integer
-      end
+      local descriptor: foreign TValue = nil
+      desc.payload_reader(L, u, 0, descriptor)
+      local tag = descriptor as integer
+      desc.payload_reader(L, u, -1, descriptor)
+      local arity = descriptor as integer
       return Value.is_union({
         tag = tag,
         udata = u,
-        n_parts = (u.nuvalue as integer) - 1,
+        n_parts = arity,
         value = v,
         type = desc
       })
