@@ -341,7 +341,8 @@ Interface identity. Its opaque payload is a declaration-order array of
 `TitanInterfaceMethod` function-pointer storage, while its `2 + field_count`
 traced user values retain the concrete owner's module Udata, the concrete
 record/union receiver, and target-typed field snapshots in Interface field
-order. The payload is copied from a nonempty process-static pair array and is
+order. The payload is copied from a nonempty pair array in the emitting module's
+per-state native payload and is
 not a GC graph; every collectable user-value store needs an ordinary Udata
 backward barrier. Field-only wrappers have zero payload bytes and no pair-array
 copy.
@@ -384,12 +385,20 @@ Module state uses the same representation family as nominal values: each module
 instance is one `Udata`, `_mod`, passed as the second argument to every
 generated function (`Udata *_mod` in every native signature). It is the
 value `require` returns directly — there is **no separate Lua-facing
-module table** — and it is allocated in `_init` with zero raw bytes and
-`NUPVALS` user values:
+module table** — and it is allocated in `_init` with its generated native payload
+and `NUPVALS` user values. For a module named `counter`:
 
 ```c
-Udata *_mod = luaS_newudata(L, 0, $NUPVALS);
+Udata *_mod = luaS_newudata(L, sizeof(counter_native_data), NUPVALS);
 ```
+
+The payload begins with `TitanModuleData`, whose immutable export callback
+identifies the code supplying this canonical logical module. The remaining
+native fields cache dependency function pointers, public slot numbers,
+canonical callable tags, and Interface implementation arrays for this Lua
+state. They contain no collectable values; dependency modules and metatables
+remain in traced uservalues. Mutable bindings are never shared in file-global
+C storage between Lua states.
 
 There is **no reserved user value**: the module table was removed
 entirely, so member slots are 0-based. The user values hold, in
@@ -398,8 +407,9 @@ variables, ordinary-function canonical closures, then public nominal statics),
 then the consecutive mutable/const Array-metatable cache, one immutable lightuserdata
 physical-provider identity token, and fixed AST-order private slots for
 locals/imports, remaining canonical closures, and nominal namespace tables.
-An explicit source importer verifies that token against its exact linked producer
-before reading any of those source-private slots. The remaining Array-writer,
+Every direct importer verifies that token against its exact linked producer
+before using the module; explicit source imports additionally rely on fixed
+source-private slots. The remaining Array-writer,
 nominal/owned-C metatable, and transitive-owner
 module slots are allocated in inventory/first-use order and may interleave.
 That private order is a coder detail and is not serialized. Array writers are

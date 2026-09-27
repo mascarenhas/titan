@@ -227,3 +227,8 @@ native number may fail conversion when JSON requests its Lua carrier.
 Rebuild compiled providers and consumers together when changing compiler ABI.
 Separate compilation preserves public access without making a producer's
 private C headers part of the consumer's interface.
+Within a matching ABI, [shared-provider replacement](binary-compatibility.md)
+allows private record storage to change while public fields retain their
+ordered names, erased types, and constness. Imported record literals depend on
+public `new`, so adding the first private field rejects old construction
+consumers while compatible accessor-only consumers can continue to load.

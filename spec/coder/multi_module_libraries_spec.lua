@@ -1,5 +1,7 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
+local coder_core = require "titan-compiler.coder.core"
+local coder_names = require "titan-compiler.coder.names"
 local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
 local staticmetadata = require "titan-compiler.staticmetadata"
@@ -489,7 +491,7 @@ end
         end
 
         local left_c = read_file(source_root .. "/pkg/left.c")
-        assert.falsy(left_c:find("loadlib(L,", 1, true), left_c)
+        assert.falsy(left_c:find("titan_module_provider(L,", 1, true), left_c)
         assert.truthy(left_c:find("extern Udata *pkg_shared_init", 1, true),
             left_c)
     end)
@@ -878,15 +880,20 @@ end
         assert_provider_pair(workspace, "consumer", { "consumer" })
 
         local generated = read_file(source_root .. "/consumer.c")
-        -- The module protocol renders the import setup in its two initialization
-        -- paths, so each of the two logical imports appears twice.
-        assert.equal(4, count_plain(generated, 'loadlib(L, "pkg.so")'))
-        assert.falsy(generated:find('loadlib(L, "pkg/left.so")', 1, true))
-        assert.falsy(generated:find('loadlib(L, "pkg/right.so")', 1, true))
+        -- Each logical import retains the selected physical provider as its
+        -- fallback. Existing-state initialization does not repeat native wiring.
+        assert.equal(1, count_plain(generated,
+            'titan_module_provider(L, "pkg.left", "pkg.so")'))
+        assert.equal(1, count_plain(generated,
+            'titan_module_provider(L, "pkg.right", "pkg.so")'))
+        assert.falsy(generated:find(
+            'titan_module_provider(L, "pkg.left", "pkg/left.so")', 1, true))
+        assert.falsy(generated:find(
+            'titan_module_provider(L, "pkg.right", "pkg/right.so")', 1, true))
         assert.truthy(generated:find('"pkg_left_abi"', 1, true), generated)
         assert.truthy(generated:find('"pkg_right_abi"', 1, true), generated)
-        assert.truthy(generated:find('"pkg_left_types"', 1, true), generated)
-        assert.truthy(generated:find('"pkg_right_types"', 1, true), generated)
+        assert.truthy(generated:find('"pkg_left_compatibility"', 1, true), generated)
+        assert.truthy(generated:find('"pkg_right_compatibility"', 1, true), generated)
 
         ok, output = run_lua(workspace, [[
 local consumer = require "consumer"
@@ -895,7 +902,7 @@ assert(consumer.run() == 1224)
         assert.truthy(ok, output)
     end)
 
-    it("aborts when a multi-module DSO has a manifest mismatch for one of its members",
+    it("aborts when a multi-module DSO changes a used member signature",
        function()
         -- Recompile pkg.so with an incompatible type interface for pkg.left while keeping pkg.right
         write_file(source_root .. "/pkg/left.titan", [[
@@ -910,13 +917,12 @@ end
             tostring(code) .. ")")
 
         -- Attempting to run consumer (which was compiled expecting integer from left.read())
-        -- must fail with manifest mismatch on pkg_left_types from pkg.so.
+        -- must identify the required pkg.left.read contract that changed.
         ok, output = run_lua(workspace, [[
 local ok, err = pcall(require, "consumer")
 assert(not ok, "expected require to fail")
-assert(err:find("type manifest mismatch", 1, true), err)
-assert(err:find("pkg.so", 1, true), err)
-assert(err:find("pkg_left_types", 1, true), err)
+assert(err:find("binary compatibility mismatch importing 'pkg.left'", 1, true), err)
+assert(err:find("functions.read", 1, true), err)
 ]])
         assert.truthy(ok, output)
     end)
@@ -1211,13 +1217,19 @@ end
         assert_provider_pair(workspace, "consumer", { "consumer" })
 
         local generated = read_file(source_root .. "/consumer.c")
-        assert.truthy(generated:find('loadlib(L, "shape.so")', 1, true),
+        assert.truthy(generated:find('titan_module_provider(L, "shape.facade", "shape.so")', 1, true),
             generated)
         assert.falsy(generated:find(
-            'loadlib(L, "shape/facade.so")', 1, true), generated)
+            'titan_module_provider(L, "shape.facade", "shape/facade.so")', 1, true), generated)
+        assert.truthy(generated:find(
+            'titan_module_provider(L, "shape.provider", NULL)', 1, true),
+            generated)
+        local plus_symbol = coder_core.c_string_literal(
+            coder_names._linkage_symbol_name(
+                "shape_provider_\\u2133_Foo_\\u2131_plus_titanmethod"))
         assert.match(
-            'loadglobalsym%s*%(%s*L,%s*"shape_provider_' ..
-                '\\u2133_Foo_\\u2131_plus_titanmethod"%s*%)',
+            'titan_module_symbol%s*%(%s*L,%s*shape_provider_provider,%s*' ..
+                plus_symbol .. '%s*%)',
             generated)
         assert.falsy(generated:find(
             "shape_api_init", 1, true), generated)
@@ -1254,7 +1266,7 @@ end
             tostring(code) .. ")")
         local static_generated = read_file(source_root .. "/shape_app.c")
         assert.falsy(static_generated:find(
-            'loadlib(L, "shape.so")', 1, true), static_generated)
+            'titan_module_provider(L, "shape.facade", "shape.so")', 1, true), static_generated)
         assert.truthy(static_generated:find(
             "extern Udata *shape_facade_init", 1, true), static_generated)
         assert.falsy(static_generated:find(
@@ -1387,9 +1399,9 @@ end
         local generated =
             read_file(source_root .. "/exact_iface/bridge.c")
         assert.falsy(generated:find(
-            'loadlib(L, "exact_iface/api.so")', 1, true), generated)
+            'titan_module_provider(L, "exact_iface.api", "exact_iface/api.so")', 1, true), generated)
         assert.falsy(generated:find(
-            'loadlib(L, "exact_iface/provider.so")', 1, true), generated)
+            'titan_module_provider(L, "exact_iface.provider", "exact_iface/provider.so")', 1, true), generated)
         assert.truthy(generated:find(
             "extern Udata *exact_iface_api_init", 1, true), generated)
         assert.truthy(generated:find(

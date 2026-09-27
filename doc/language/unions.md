@@ -47,8 +47,9 @@ end
 
 A union must declare at least one variant. Variant names are unique within the
 union. A `local union` and a `local` variant are visible only inside their
-declaring module. Local variants still consume their declaration-order tag:
-making a variant local does not renumber the public variants around it.
+declaring module. Public variants receive tags first in their relative source
+order; local variants follow in their relative source order. Adding or moving
+a local variant therefore does not renumber existing public variants.
 
 Part names are unique within each variant and may be reserved words. The
 single unnamed form `write(string)` is shorthand for `write(value: string)`.
@@ -297,6 +298,15 @@ cannot be named by the importer, so listing every visible variant is not
 complete coverage there. Such a consumer needs a non-fallthrough `else` to
 prove that the case cannot fall through.
 
+For a separately loaded shared dependency, a consumer that relies on complete
+coverage records that closed-inventory assumption. Adding a private variant
+then rejects the unchanged consumer at load time, including when a redundant
+falling-through `else` had been ignored because coverage was complete. An
+independently terminating `else` needs no such assumption. Other consumers
+continue to accept compatible private-variant changes, with ordinary
+unmatched-case fallthrough preserved. See
+[Replacing shared-library dependencies](binary-compatibility.md#private-union-variants-and-control-flow).
+
 ## Option scrutinees
 
 The ordinary option auto-unwrapping rule applies to case scrutinees. A
@@ -411,5 +421,8 @@ Unions retain these boundaries:
 The compiled-module interface carries union and variant metadata so imported
 modules preserve constructor, method, visibility, and tag information. That
 interface and the corresponding run-time layout are part of the compiled-module
-ABI. Rebuild incompatible providers and consumers together; there is no layout
+ABI. Public variant tags keep their relative order independently of private
+variants. A separate shared provider may change private variants subject to
+the selective compatibility and control-flow rules above. Rebuild affected
+consumers when a required public shape or ABI changes; there is no layout
 adapter.

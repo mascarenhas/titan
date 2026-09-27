@@ -1676,8 +1676,12 @@ runtime edits can be tested before reinstalling.
   the same number, byte for byte.
 
 It also declares the dynamic-loading and error functions exported by
-`titan.c`: `loadlib`, `loadsym`, `loadglobalsym`,
-`titan_check_abi`, `titan_check_types`, and `errorhandler`.
+`titan.c`: `loadlib`, `loadsym`, `loadglobalsym`, `titan_module_provider`,
+`titan_module_symbol`, the ABI/compatibility check helpers, and `errorhandler`.
+Generated imports use `titan_check_module_abi` and
+`titan_check_module_compatibility` with the selected logical provider. The retained
+`titan_check_types` helper implements exact serialized comparison; generated
+separate-DSO imports use the selective compatibility protocol instead.
 
 ### `titan.c`: the dynamic loader
 
@@ -1714,8 +1718,8 @@ It also declares the dynamic-loading and error functions exported by
   present; otherwise walks the path `;`-entry by entry, builds
   `dir "/" file` (the coder passes the relative provider selected into the
   imported `Type.Module.file`), and tries
-  `dlopen(filename, RTLD_LAZY | RTLD_GLOBAL)`. Every generated runtime import
-  uses these same flags; there is no libuv-specific filename case. Lazy binding
+  `dlopen(filename, RTLD_LAZY | RTLD_GLOBAL)`. Newly needed runtime providers
+  use these same flags; there is no libuv-specific filename case. Lazy binding
   lets a module's initializer load a provider before the module's unresolved
   function calls bind, while global visibility lets that later provider
   satisfy the calls. The first success is
@@ -1727,10 +1731,17 @@ It also declares the dynamic-loading and error functions exported by
   table's separate `_loadlibglobal` helper to map/promote that provider with
   lazy/global flags and resolve `luaopen_titan_uv`. The same template serves
   every logical module; `titan.c` has no shim-specific or libuv-specific case.
-* **`loadsym(L, lib, sym)`** — `dlsym` with `luaL_error(L, dlerror())`
-  on `NULL`. The generated `_init` of a module with dynamic
-  dependencies uses `loadlib` + `loadsym` + `titan_cast_func` to wire
-  cross-module function pointers
+* **`titan_module_provider(L, module, file)`** — first reads the canonical
+  logical module from the registry and uses the export callback in its native
+  payload. Only an absent logical module loads `file`; a null filename requires
+  an already initialized transitive owner. Executable-embedded, archive-linked,
+  and locally loaded modules publish the same callback.
+* **`titan_module_symbol(L, provider, sym)`** — resolves a symbol through the
+  canonical callback or, for a newly opened provider, through `loadsym`.
+  `loadsym(L, lib, sym)` is `dlsym` with `luaL_error(L, dlerror())` on `NULL`.
+  Generated initialization verifies ABI and consumer requirements before calling
+  a newly loaded dependency's initializer, then retains resolved native pointers
+  and slot indices in its own per-state module payload
   ([static vs dynamic wiring](codegen-overview.md)).
 * **`errorhandler(L)`** — the message handler that every generated Lua
   entry wrapper ensures is active in `L->errfunc` around the native call

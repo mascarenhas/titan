@@ -154,8 +154,9 @@ Ordinary collection subsets without a spread remain invalid scalar expressions.
 
 Record declarations retain an adjacent synthesized `new` function. Union
 variants written `empty()` or `payload(T)` retain their adjacent positional
-constructors and source-order tags. Visibility and constructor markers are
-unchanged. Short standard-library imports normalize to their `titan.*` logical
+constructors. The checker assigns public-first tags without reordering the
+source declarations. Visibility and constructor markers are unchanged. Short
+standard-library imports normalize to their `titan.*` logical
 names; the `.titan` source-required marker remains independent of that identity.
 
 `defer` is lowered within its owning statement-list block into nested `StatTry`

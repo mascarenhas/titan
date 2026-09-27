@@ -129,10 +129,11 @@ without allocating an owned copy or Titan Array.
 An empty variant has zero parts; a one-part variant containing nil still has
 one. The retained `value` keeps the union and its parts alive.
 
-The inspected union's `.type.variants` contains public variants in declaration order. Their
-`VariantType.tag` values retain the original tags, including gaps left by
-private variants. Find an entry by comparing its `tag` with `UnionValue.tag`;
-the tag is not an index into the descriptor Array. A private active variant
+The inspected union's `.type.variants` contains public variants in declaration
+order. Their `VariantType.tag` values occupy the dense zero-based range before
+all private variants; interleaved private declarations do not leave gaps in
+the public tags. Compare an entry's `tag` with `UnionValue.tag` when finding its
+schema, and account for a tag outside the public range. A private active variant
 has no public variant descriptor, although inspection still exposes its
 runtime tag, part count, and readable payload parts.
 

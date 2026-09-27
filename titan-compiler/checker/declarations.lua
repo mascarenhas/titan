@@ -1089,7 +1089,14 @@ toplevel_visitor = util.make_visitor({
                 checker.typeerror(errors, node.loc,
                     "union '%s' must declare at least one variant", node.name)
             end
-            for index, variant in ipairs(node.variants) do
+            local public_count = 0
+            for _, variant in ipairs(node.variants) do
+                if not (node.islocal or variant.islocal) then
+                    public_count = public_count + 1
+                end
+            end
+            local public_tag, private_tag = 0, public_count
+            for _, variant in ipairs(node.variants) do
                 if nameset[variant.name] then
                     checker.typeerror(errors, variant.loc,
                         "redeclaration of variant '%s' in union '%s'",
@@ -1120,10 +1127,14 @@ toplevel_visitor = util.make_visitor({
                         tpart._nominal_storage = part._nominal_storage
                         parts[part_index] = tpart
                     end
+                    local islocal = (node.islocal or variant.islocal) and true or false
+                    local tag = islocal and private_tag or public_tag
+                    if islocal then private_tag = private_tag + 1
+                    else public_tag = public_tag + 1 end
                     local tvariant = types.Variant(
-                        fqtn, variant.name, parts, index - 1)
+                        fqtn, variant.name, parts, tag)
                     tvariant.islocal =
-                        (node.islocal or variant.islocal) and true or false
+                        islocal
                     variant._type = tvariant
                     variant._decl = tvariant
                     variants[#variants + 1] = tvariant

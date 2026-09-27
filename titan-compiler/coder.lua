@@ -14,6 +14,7 @@ require "titan-compiler.coder.expressions"
 require "titan-compiler.coder.declarations"
 require "titan-compiler.coder.native_record_fields"
 require "titan-compiler.coder.module"
+require "titan-compiler.coder.binary"
 require "titan-compiler.coder.generate"
 
 local implementation = core.coder

@@ -118,6 +118,7 @@ Two facts shape everything downstream of the checker:
 | [Folder modules](folder-modules.md) | Tagged flat/folder source resolution, independent parsing into one dense AST, shared checking/codegen identity, deterministic ordering, artifacts, and the `titan.uv` source ensemble. |
 | [Multi-module libraries](multi-module-libraries.md) | Prefix-container discovery, strict DSO ABI/types membership claims, transient `Type.Module.file`, one-object-per-module linking, generated Lua shims, the lazy/global support helper, and paired standard-library publication. |
 | [Static compiled modules](static-compiled-modules.md) | Canonical object-section metadata, bounded ar/ELF/Mach-O/fat parsing, static-provider resolution and native provenance, deterministic archive flattening, three-way protocol validation, and paired publication. |
+| [Selective binary dependency verification](binary-compatibility.md) | Separate erased compatibility metadata, checker-owned per-consumer usage, ABI-first runtime verification, stable public union tags, and provider-owned variable/closure slot resolution. |
 
 ## Lua-version migration reports
 

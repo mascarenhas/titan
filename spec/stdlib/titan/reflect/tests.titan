@@ -1127,10 +1127,10 @@ function test_private_union_native_parts_project_borrowed_interior_addresses(_co
   row[2] = 11
   local owner = NativeAggregatePayloads.hidden(pair, row)
   local inspected = union_value(owner)
-  test.assert(inspected.tag == 0 and inspected.n_parts == 2)
+  test.assert(inspected.tag == 1 and inspected.n_parts == 2)
   test.assert(#inspected.type.variants == 1)
   test.assert(inspected.type.variants[1].name == "empty")
-  test.assert(inspected.type.variants[1].tag == 1)
+  test.assert(inspected.type.variants[1].tag == 0)
   local pair_pointer = inspected:get(1) as foreign *titan_reflect_pair
   local row_pointer = inspected:get(2) as foreign *int
   case owner
@@ -1159,24 +1159,24 @@ function test_private_union_native_parts_project_borrowed_interior_addresses(_co
   end
 end
 
-function test_union_payload_readers_box_arrays_and_preserve_sparse_tags(_context: test.Context)
+function test_union_payload_readers_box_arrays_and_preserve_public_first_tags(_context: test.Context)
   local values: {integer} = {21, 34}
   local mutable = union_value(ArrayPayloads.mutable(values))
-  test.assert(mutable.tag == 1)
+  test.assert(mutable.tag == 0)
   test.assert(mutable:get(1) == values as value)
   local roundtrip = mutable:get(1) as {integer}
   roundtrip[1] = 55
   test.assert(values[1] == 55)
   test.assert(#mutable.type.variants == 4)
   test.assert(mutable.type.variants[1].name == "mutable")
-  test.assert(mutable.type.variants[1].tag == 1)
+  test.assert(mutable.type.variants[1].tag == 0)
   test.assert(mutable.type.variants[4].name == "empty")
-  test.assert(mutable.type.variants[4].tag == 4)
+  test.assert(mutable.type.variants[4].tag == 3)
 
   local present = union_value(ArrayPayloads.optional(values))
   test.assert(present:get(1) == values as value)
   local absent = union_value(ArrayPayloads.optional(nil))
-  test.assert(absent:get(1) == nil and absent.tag == 2)
+  test.assert(absent:get(1) == nil and absent.tag == 1)
   local snapshot = values as const {integer}
   local frozen = union_value(ArrayPayloads.frozen(snapshot))
   test.assert(frozen:get(1) == snapshot as value)
@@ -1188,7 +1188,7 @@ function test_union_payload_readers_box_arrays_and_preserve_sparse_tags(_context
   -- Value inspection still reports a private active payload, while the public
   -- declaration projection retains only visible variants and their real tags.
   local hidden = union_value(ArrayPayloads.private_array(values))
-  test.assert(hidden.tag == 0)
+  test.assert(hidden.tag == 4)
   test.assert(hidden:get(1) == values as value)
   test.assert(hidden.type == mutable.type)
   local generic = union_value(GenericUnion<|{integer}|>.item(values))
@@ -1419,9 +1419,9 @@ function test_named_union_parts_descriptors_access_and_construction(_context: te
   local items = {17, 23}
   local original = NamedPayloads<|integer|>.pieces{count = 2, type = "numbers", values = items}
   local inspected = union_value(original)
-  test.assert(inspected.tag == 3 and inspected.n_parts == 4)
+  test.assert(inspected.tag == 2 and inspected.n_parts == 4)
   local variants = inspected.type.variants
-  test.assert(#variants == 3 and variants[1].tag == 1)
+  test.assert(#variants == 3 and variants[1].tag == 0)
   test.assert(#variants[1].parts == 0)
   test.assert(variants[2].parts[1].name == "value")
   local variant = variants[3]
@@ -1448,7 +1448,7 @@ function test_named_union_parts_descriptors_access_and_construction(_context: te
   end
   expect_failure(function() variant.callable("bad", "made", items, nil) end)
   local hidden = union_value(NamedPayloads<|integer|>.private_value(items))
-  test.assert(hidden.tag == 0 and hidden.n_parts == 2)
+  test.assert(hidden.tag == 3 and hidden.n_parts == 2)
   gc.collect()
   test.assert(hidden:get(1) == "hidden")
   test.assert((hidden:get(2) as {integer})[2] == 23)

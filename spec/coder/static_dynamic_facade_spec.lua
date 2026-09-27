@@ -1,5 +1,7 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
+local coder_core = require "titan-compiler.coder.core"
+local coder_names = require "titan-compiler.coder.names"
 local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
 local staticmetadata = require "titan-compiler.staticmetadata"
@@ -118,6 +120,11 @@ local function metadata_options()
     }
 end
 
+local function symbol_literal(c_spelling)
+    return coder_core.c_string_literal(
+        coder_names._linkage_symbol_name(c_spelling))
+end
+
 describe("static facade with a producer-dynamic nominal owner", function()
     local workspace
     local source_root
@@ -174,10 +181,11 @@ end
 
         local facade_c = read_file(source_root .. "/dynamic/facade.c")
         assert.truthy(facade_c:find(
-            'loadlib(L, "dynamic/owner.so")', 1, true), facade_c)
+            'titan_module_provider(L, "dynamic.owner", "dynamic/owner.so")', 1, true), facade_c)
         assert.truthy(facade_c:find(
-            'loadsym%s*%(%s*L%s*,%s*dynamic_owner_handle%s*,%s*' ..
-                '"dynamic_owner_\\u2133_Box_\\u2131_make_titanstatic"%s*%)'), facade_c)
+            'titan_module_symbol%s*%(%s*L%s*,%s*dynamic_owner_provider%s*,%s*' ..
+                symbol_literal("dynamic_owner_\\u2133_Box_\\u2131_make_titanstatic") ..
+                '%s*%)'), facade_c)
         local facade_archive = workspace .. "/dynamic/facade.a"
         local facade, facade_err =
             staticmetadata.scan_archive(facade_archive, metadata_options())
@@ -187,7 +195,7 @@ end
         assert.truthy(facade.entries["dynamic.facade"].types:find(
             "dynamic.owner.Box", 1, true))
 
-        -- The facade has already committed to its producer's DSO identity.
+        -- The facade records its producer-selected DSO fallback for this edge.
         -- Leave only the same-interface owner archive visible while compiling
         -- the consumer: neither the producer DSO nor source may accidentally
         -- satisfy contextual type recovery. The archive must still remain a
@@ -224,9 +232,13 @@ end
             tostring(code) .. ")")
 
         local generated = read_file(source_root .. "/app.c")
+        assert.truthy(generated:find(
+            'titan_module_provider(L, "dynamic.owner", NULL)', 1, true),
+            generated)
         assert.match(
-            'loadglobalsym%s*%(%s*L,%s*"dynamic_owner_' ..
-                '\\u2133_Box_\\u2131_add_titanmethod"%s*%)',
+            'titan_module_symbol%s*%(%s*L,%s*dynamic_owner_provider,%s*' ..
+                symbol_literal("dynamic_owner_\\u2133_Box_\\u2131_add_titanmethod") ..
+                '%s*%)',
             generated)
         assert.truthy(generated:find(
             'lua_getfield(L, LUA_REGISTRYINDEX, "Titan module dynamic.owner")',
@@ -246,7 +258,8 @@ end
         assert.falsy(final_link:find(owner_dso, 1, true), final_link)
         assert.falsy(output:find(owner_archive, 1, true), output)
 
-        -- The executable must need the producer-chosen owner DSO at runtime.
+        -- This fresh executable has no canonical owner, so it needs the
+        -- producer-selected DSO fallback at runtime.
         -- Neither the type-only archive, sibling facade DSO, nor any shim may
         -- have smuggled in a fallback implementation.
         assert.truthy(os.remove(owner_archive))

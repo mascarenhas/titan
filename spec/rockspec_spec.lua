@@ -1154,7 +1154,7 @@ end
         assert_file(workspace .. "/installed")
         local generated = read_file(workspace .. "/installed.c")
         assert.truthy(generated:find(
-            'loadlib(L, "titan.so")', 1, true), generated)
+            'titan_module_provider(L, "titan.timer", "titan.so")', 1, true), generated)
         assert.falsy(generated:find("/titan/timer.so", 1, true), generated)
         assert.falsy(generated:find("/titan/ssl.so", 1, true), generated)
         assert.falsy(generated:find("/titan/url.so", 1, true), generated)
@@ -1228,7 +1228,7 @@ end
         assert_file(workspace .. "/direct_uv.so")
         local direct_c = read_file(workspace .. "/direct_uv.c")
         assert.truthy(direct_c:find(
-            'loadlib(L, "titan.so")', 1, true), direct_c)
+            'titan_module_provider(L, "titan.uv", "titan.so")', 1, true), direct_c)
         assert.falsy(direct_c:find("/titan/uv.so", 1, true), direct_c)
 
         ok, output, why, code = run(clean_environment({
@@ -1272,7 +1272,7 @@ end
             tostring(code) .. ")")
         local consumer_c = read_file(workspace .. "/consumer.c")
         assert.truthy(consumer_c:find(
-            'loadlib(L, "direct_uv.so")', 1, true), consumer_c)
+            'titan_module_provider(L, "direct_uv", "direct_uv.so")', 1, true), consumer_c)
         ok, output, why, code = run(clean_environment({
             "TITAN_PATH_0_6=.;" .. TITAN_LIBDIR, "./consumer",
         }), workspace)

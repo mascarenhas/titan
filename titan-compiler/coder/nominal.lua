@@ -31,7 +31,7 @@ function coder._nominal_member(plan, slot, object)
         -- The public prefix is an actual first subobject, not a shorter cast
         -- over a flat private struct. getudatamem uses the object's true UV
         -- count, which can include producer-private traced slots.
-        typename, path = plan.prefix_cname, slot.member
+        typename, path = plan.prefix_cname, "_field_" .. slot.name
     end
     return "((" .. typename .. " *)getudatamem(" .. object .. "))->" .. path
 end
@@ -40,19 +40,20 @@ function coder._nominal_uv(slot, object)
     return "&((" .. object .. ")->uv[" .. slot.uv_index .. "].uv)"
 end
 
-local function payload_declaration(slot)
+local function payload_declaration(slot, member)
+    member = member or slot.member
     if slot.kind == "option" then
         local base = slot.base and slot.base.type or slot.type.base
         local value = types.is_direct_c(base)
             and cdeclarator.render_declaration(coder._c_value_type(base), "value")
             or ctype(base) .. " value"
-        return "struct { int present; " .. value .. "; } " .. slot.member .. ";"
+        return "struct { int present; " .. value .. "; } " .. member .. ";"
     end
     if types.is_direct_c(slot.type) then
         return cdeclarator.render_declaration(
-            coder._c_value_type(slot.type), slot.member) .. ";"
+            coder._c_value_type(slot.type), member) .. ";"
     end
-    return ctype(slot.type) .. " " .. slot.member .. ";"
+    return ctype(slot.type) .. " " .. member .. ";"
 end
 
 function coder._nominal_declarations(tl)
@@ -64,7 +65,11 @@ function coder._nominal_declarations(tl)
         if plan.kind == "record" then
             if #plan.public_members > 0 then
                 for _, slot in ipairs(plan.public_members) do
-                    members[#members + 1] = payload_declaration(slot)
+                    -- Compatible structs across translation units must agree
+                    -- on member names as well as order and types. Logical
+                    -- field indices can change when private fields move.
+                    members[#members + 1] = payload_declaration(slot,
+                        "_field_" .. slot.name)
                 end
                 declarations[#declarations + 1] = "typedef struct {\n"
                     .. table.concat(members, "\n") .. "\n} "

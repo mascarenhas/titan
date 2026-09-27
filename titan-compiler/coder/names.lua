@@ -339,6 +339,29 @@ function module_initializer_name(tlcontext)
     return tlcontext.prefix .. TITAN_ENTRY_TAG .. "_module_initializer"
 end
 
+local function add_binary_slot_symbols(symbols, modname, modtype)
+    -- Use the producer's exact public slot inventory. Private source entries
+    -- and type-only aliases do not publish provider-owned slot symbols.
+    for _, entry in ipairs(coder._public_prefix_layout(modtype)) do
+        local declaration = entry.value
+        local owner
+        if entry.kind == "variable" then
+            owner = "variable '" .. modname .. "." .. declaration.name .. "' slot"
+        elseif entry.kind == "function" then
+            owner = "function '" .. modname .. "." .. declaration.name
+                .. "' closure slot"
+        else
+            local kind = entry.owner._tag == "Type.Union" and "union" or "record"
+            owner = kind .. " function '" .. declaration.fqtn .. "."
+                .. declaration.name .. "' closure slot"
+        end
+        symbols[#symbols + 1] = {
+            symbol = coder._binary_slot_name(modname, entry.kind, declaration),
+            owner = owner,
+        }
+    end
+end
+
 -- Return the externally visible C symbols this source module will define.
 -- Library-mode preflight uses the coder's own naming helpers so collisions are
 -- rejected before code generation instead of being discovered by the linker.
@@ -351,6 +374,7 @@ function coder.external_symbols(modname, ast)
         { symbol = mangled .. "_abi", owner = "module ABI entry" },
         { symbol = mangled .. "_types", owner = "module type entry" },
         { symbol = mangled .. "_layouts", owner = "module layout entry" },
+        { symbol = mangled .. "_compatibility", owner = "module compatibility entry" },
         { symbol = mangled .. "_init", owner = "module initializer entry" },
         { symbol = "luaopen_" .. mangled, owner = "module Lua entry" },
         { symbol = coder._source_module_identity_name(modname),
@@ -400,6 +424,7 @@ function coder.external_symbols(modname, ast)
         end
     end
 
+    add_binary_slot_symbols(symbols, modname, ast._type)
     return symbols
 end
 
@@ -412,6 +437,7 @@ function coder.interface_external_symbols(modname, modtype)
         { symbol = mangled .. "_abi", owner = "module ABI entry" },
         { symbol = mangled .. "_types", owner = "module type entry" },
         { symbol = mangled .. "_layouts", owner = "module layout entry" },
+        { symbol = mangled .. "_compatibility", owner = "module compatibility entry" },
         { symbol = mangled .. "_init", owner = "module initializer entry" },
         { symbol = "luaopen_" .. mangled, owner = "module Lua entry" },
         { symbol = coder._source_module_identity_name(modname),
@@ -425,7 +451,7 @@ function coder.interface_external_symbols(modname, modtype)
     for _, member in ipairs(modtype.members or {}) do
         local typ = member.type
         if member._tag == "Type.ModuleMember" and typ then
-            if typ._tag == "Type.Function" then
+            if typ._tag == "Type.Function" or typ._tag == "Type.FunctionScheme" then
                 add(func_name(modname, member.name),
                     "function '" .. modname .. "." .. member.name .. "'")
             elseif typ._tag == "Type.Record" or typ._tag == "Type.Union" then
@@ -476,6 +502,7 @@ function coder.interface_external_symbols(modname, modtype)
                 owner .. " bound strict entry")
         end
     end
+    add_binary_slot_symbols(symbols, modname, modtype)
     return symbols
 end
 
@@ -637,7 +664,7 @@ function function_type_tag(tlcontext, ftype --[[:table]])
         tlcontext.functags[key] = entry
         table.insert(tlcontext.functag_list, entry)
     end
-    return entry.id
+    return coder._module_native_ref(tlcontext, entry.id)
 end
 
 return core.coder

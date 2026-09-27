@@ -2,6 +2,7 @@ require "titan-compiler.coder.core"
 local h = require "spec.support.helpers"
 local coder = require "titan-compiler.coder"
 local coder_names = require "titan-compiler.coder.names"
+local types = require "titan-compiler.types"
 
 local MODULE = "symbol.case"
 local CFILE = "symbol/case.c"
@@ -22,6 +23,57 @@ end
 
 describe("native callable symbol separators", function()
     after_each(clean)
+
+    it("inventories compatibility and public slot exports from source and recovered interfaces", function()
+        local ok, err, ast, modtype = h.run_checker([[
+            state: integer = 0
+            local secret: integer = 1
+            function identity<|T|>(item: T): T return item end
+            local function hidden(): integer return secret end
+
+            record Item
+                count: integer
+            end
+            type ItemAlias = Item
+            function Item.make(count: integer): Item return Item.new(count) end
+            local function Item.private(): integer return 0 end
+            function Item:read(): integer return self.count end
+
+            union Choice
+                local hidden()
+                ready()
+            end
+            local record Hidden
+            end
+            interface Reader
+                function read(): integer
+            end
+        ]])
+        assert.truthy(ok, err)
+        local recovered = assert(load("return " .. types.serialize(modtype),
+            "recovered symbol interface", "t", types))()
+        local expected = {
+            test_compatibility = "module compatibility entry",
+            ["test_\\u2133_state_variable_slot"] = "variable 'test.state' slot",
+            ["test_\\u2133_identity_closure_slot"] = "function 'test.identity' closure slot",
+            ["test_\\u2133_Item_\\u2131_new_closure_slot"] = "record function 'test.Item.new' closure slot",
+            ["test_\\u2133_Item_\\u2131_make_closure_slot"] = "record function 'test.Item.make' closure slot",
+            ["test_\\u2133_Choice_\\u2131_ready_closure_slot"] = "union function 'test.Choice.ready' closure slot",
+        }
+        for _, inventory in ipairs({coder.external_symbols("test", ast),
+            coder.interface_external_symbols("test", recovered)}) do
+            local actual, seen = {}, {}
+            for _, entry in ipairs(inventory) do
+                assert.is_nil(seen[entry.symbol], entry.symbol)
+                seen[entry.symbol] = true
+                if entry.symbol:match("_slot$") or entry.symbol == "test_compatibility" then
+                    actual[entry.symbol] = entry.owner
+                end
+            end
+            assert.same(expected, actual)
+            assert.is_true(seen["test_\\u2133_identity_titan"])
+        end
+    end)
 
     it("separates module, nominal owner, member, and metamethod roles", function()
         local csrc, ast = h.compile_and_read_c([[

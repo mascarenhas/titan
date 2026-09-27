@@ -84,6 +84,7 @@ function coder._assert_erased_boundary(ast)
                 if not (skip_declared_type and
                         (key == "_declared_type" or
                             key == "_declared_registry" or
+                            key == "_binary_modules" or
                             key == "_erased_registry" or
                             key == "_surface_typeparams" or
                             key == "_surface_typeargs" or
@@ -119,6 +120,12 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     local tlcontext = {
         module = modname,
         prefix = mangle_qn(modname) .. "_",
+        static_deps = static_deps,
+        external_slots = {},
+        native_fields = {},
+        binary_usage = ast._binary_usage or {},
+        binary_modules = ast._binary_modules or {},
+        binary_registry = ast._declared_registry or types.registry,
         variables = {},
         metatables = {},
         owned_c_metatables = {},
@@ -214,7 +221,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
             local tag = node._tag
             if tag == "Ast.TopLevelImport" then
                 import_module(loadmods, initmods, sigs, mprefixes,
-                    static_deps[node.modname] ~= true, node)
+                    static_deps[node.modname] ~= true, node, tlcontext)
                 if node._foreign_header then
                     tlcontext.source_foreign_headers[#tlcontext.source_foreign_headers + 1] =
                         node._foreign_header
@@ -467,11 +474,11 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         end
     end
 
-    -- Interface method payloads are process-static function-pointer arrays.
+    -- Interface method arrays live in this Lua state's module native payload.
     -- Exact slots point at concrete methods; adjusted slots point at private
     -- relation-free adapters emitted from checker-frozen action graphs. They
     -- are filled only after imported native symbols have been recovered, on
-    -- both module-initialization branches, and before user initializers can
+    -- fresh module initialization, and before user initializers can
     -- construct a wrapper. Field-only Interfaces need no zero-length C array;
     -- their wrapper payload is empty and their snapshots live in uservalues.
     local interface_pair_inits = {}
@@ -500,12 +507,12 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
             end
         end
         if #pair.methods > 0 then
-            table.insert(sigs, render([[
-                static TitanInterfaceMethod $ID[$COUNT];
+            tlcontext.native_fields[pair.id] = render([[
+                TitanInterfaceMethod $ID[$COUNT];
             ]], {
                 ID = pair.id,
                 COUNT = c_integer_literal(#pair.methods),
-            }))
+            })
         end
         local wrapper_sig, wrapper_body =
             coder._emit_interface_pair_wrapper(pair)
@@ -515,11 +522,15 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
             local entry = mapping.slot_kind == "adapter"
                 and assert(pair.adapter_ids[index])
                 or method_name(mapping.concrete)
+            if mapping.slot_kind ~= "adapter" then
+                local module = mapping.concrete.fqtn:match("^(.*)[.]")
+                entry = coder._external_reference(tlcontext, module, entry)
+            end
             table.insert(interface_pair_inits, render([[
                 $ID[$INDEX] = titan_cast_func(
                     TitanInterfaceMethod, $METHOD);
             ]], {
-                ID = pair.id,
+                ID = coder._module_native_ref(tlcontext, pair.id),
                 INDEX = c_integer_literal(index - 1),
                 METHOD = entry,
             }))
@@ -742,6 +753,8 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         ABINAME = tlcontext.prefix .. "abi",
     }))
 
+    coder._binary_exports(tlcontext, ast, code)
+    coder._binary_imports(tlcontext, includes, loadmods, loadglobals, mprefixes)
     init_data_from_other_modules(tlcontext, includes, loadmods, loadglobals,
         initrecs, mprefixes, static_deps)
 
@@ -789,27 +802,26 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         }))
     end
 
-    -- Function-type tags: a per-library `static const void*` each, declared up
-    -- front (in $SIGS, ahead of any function body that references it) and set up
-    -- in _init by publish-or-recover through the Lua registry. C-free function
+    -- Function-type tags are published/recovered through the Lua registry and
+    -- retained in the module's per-state native payload. C-free function
     -- types share registry keys across modules. Portable C-bearing graphs use
     -- their structural metadata identity; header-defined graphs remain scoped
     -- to the defining module because imported C type identity is module-local.
     local initfunctags = {}
     for _, entry in ipairs(tlcontext.functag_list) do
+        tlcontext.native_fields[entry.id] = "const char *" .. entry.id .. ";"
         table.insert(sigs, render([[
             static const char $TAGNAME[] = $TAG;
-            static const char *$ID = $TAGNAME;
         ]], {
             TAGNAME = entry.id .. "_tag",
             TAG = c_string_literal(entry.tag),
-            ID = entry.id,
         }))
         table.insert(initfunctags, render([[
-            $ID = titan_publish_function_type_tag(L, $KEYSTR, $ID);
+            $ID = titan_publish_function_type_tag(L, $KEYSTR, $TAGNAME);
         ]], {
             KEYSTR = c_string_literal("Titan function type " .. entry.key .. " tag"),
-            ID = entry.id,
+            ID = coder._module_native_ref(tlcontext, entry.id),
+            TAGNAME = entry.id .. "_tag",
         }))
     end
 
@@ -852,12 +864,13 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         :format(modname, tlcontext.upvalue, 0xFFFF))
     table.insert(code, render(init, {
         INITNAME = tlcontext.prefix .. 'init',
+        NATIVETYPE = tlcontext.prefix .. 'native_data',
+        NATIVERESOLVER = tlcontext.prefix .. 'native_symbol',
         LUAOPEN_NAME = 'luaopen_' .. mangle_qn(modname),
         PRELOADNAME = tlcontext.prefix .. 'register_preload',
         PRELOADMODNAME = c_string_literal(modname),
         INITMODULES = table.concat(initmods, "\n"),
         LOADMODULES1 = table.concat(loadmods, "\n"),
-        LOADMODULES2 = #loadmods > 1 and table.concat(loadmods, "\n") or "",
         LOADGLOBALS = table.concat(loadglobals, "\n"),
         INITFUNCTAGS = table.concat(initfunctags, "\n"),
         INITPAIRS = table.concat(interface_pair_inits, "\n"),
@@ -903,6 +916,8 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         LUAOPEN_NAME = 'luaopen_' .. mangle_qn(modname),
         INITNAME = tlcontext.prefix .. 'init',
     }))
+    table.insert(code, coder._binary_resolver(tlcontext, ast))
+    table.insert(code, "#if defined(__ELF__)\n#pragma GCC visibility pop\n#endif")
 
     -- The runtime prefix comes first; this module's checked C environment
     -- precedes every generated Titan declaration header.
@@ -930,6 +945,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
             .. "\n" .. coder._native_option_declarations(),
         INCLUDES = table.concat(includes, "\n"),
         SIGS = coder._nominal_declarations(tlcontext) .. "\n"
+            .. coder._binary_payload(tlcontext) .. "\n"
             .. table.concat(sigs, "\n"),
     }
     local foreignimports_begin, foreignimports_end =
@@ -954,6 +970,14 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
             or (mprefixes[name] and "handle" or "global")
     end
     for name in pairs(mprefixes) do remember_binding(name) end
+    for _, info in pairs(tlcontext.external_slots) do
+        remember_binding(info.module)
+    end
+    for name in pairs(tlcontext.binary_usage) do
+        if name ~= modname and static_deps[name] ~= true then
+            remember_binding(name)
+        end
+    end
     for _, func in pairs(tlcontext.functions) do
         remember_binding(func.module)
         if static_deps[func.module] == true then

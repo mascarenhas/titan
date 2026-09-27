@@ -1398,6 +1398,9 @@ checkstat_visitor = util.make_visitor({
         end
         local variants_exhausted = union ~= nil
             and covered_variants == union.nvariants
+        if all_arms_return and variants_exhausted and not else_returns then
+            node._binary_closed_union = union.name
+        end
         return all_arms_return and (variants_exhausted or else_returns)
     end,
 

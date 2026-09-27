@@ -74,7 +74,9 @@ describe("contextual calls through value (code generation)", function()
                 "lua_pushlightuserdata(L, TITAN_BRAND)",
                 1, true))
             assert.truthy(generated:find(
-                "pvalue(&_fn->upvalue[1]) != test_functag_", 1, true))
+                "pvalue(&_fn->upvalue[1]) != " ..
+                "((test_native_data *)getudatamem(_mod))->test_functag_",
+                1, true))
         end)
 
     it("calls static and constructor closures through widened signatures",

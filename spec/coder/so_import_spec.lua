@@ -2,11 +2,11 @@
 -- only as a compiled shared library, not as `.titan` source. This path differs
 -- from source linking (which the cross-module tests in coder_spec exercise):
 -- the importer recovers the dependency's interface from its compiled
--- `<mangled>_types` symbol, the dependency is dlopened at run time, and its
--- native functions are reached through dlsym'd `static` pointers (rather than
--- statically-linked `extern`s). Records and function/variable slots are
--- reconstructed purely from the serialized interface, and record/function type
--- tags must be recovered from the registry the dependency's `.so` published.
+-- `<mangled>_types` symbol. At run time it reuses the canonical provider when
+-- present, otherwise loads the selected DSO. Native pointers and public slot
+-- indices are resolved from that provider and stored in the importer's
+-- per-state native payload. Record interfaces and layouts are recovered without
+-- source, and record/function type tags come from the canonical state.
 --
 -- Each dependency is compiled to a `.so` straight from its AST, so its
 -- `.titan` source never touches the source path and the default loader is
@@ -14,9 +14,16 @@
 -- one can itself be a `.so`-only dependency of a later one (transitive case).
 local h = require 'spec.support.helpers'
 local lfs = require 'lfs'
+local coder_core = require 'titan-compiler.coder.core'
+local coder_names = require 'titan-compiler.coder.names'
 local driver = require 'titan-compiler.driver'
 local call = h.call
 local generated_modules = {}
+
+local function symbol_literal(c_spelling)
+    return coder_core.c_string_literal(
+        coder_names._linkage_symbol_name(c_spelling))
+end
 
 local function remove_tree(path)
     local mode = lfs.symlinkattributes(path, "mode")
@@ -812,12 +819,13 @@ describe(".so-only cross-module imports", function()
         local generated = f:read("*a")
         f:close()
         assert.match(
-            'loadlib%s*%(%s*L,%s*"tbaz%.so"%s*%)', generated)
+            'titan_module_provider%s*%(%s*L,%s*"tbaz",%s*"tbaz%.so"%s*%)', generated)
         assert.not_match(
-            'loadlib%s*%(%s*L,%s*"tfoo%.so"%s*%)', generated)
+            'titan_module_provider%s*%(%s*L,%s*"tfoo",%s*"tfoo%.so"%s*%)', generated)
         assert.match(
-            'loadglobalsym%s*%(%s*L,%s*'
-                .. '"tfoo_\\u2133_Point_\\u2131_move_titanmethod"%s*%)',
+            'titan_module_symbol%s*%(%s*L,%s*tfoo_provider,%s*'
+                .. symbol_literal("tfoo_\\u2133_Point_\\u2131_move_titanmethod")
+                .. '%s*%)',
             generated)
         local rok, out = call("tbar",
             "local x,y = tbar.bar(); assert(x == 4.0 and y == 6.0)")
@@ -890,12 +898,13 @@ describe(".so-only cross-module imports", function()
         local facade_c = bf:read("*a")
         bf:close()
         assert.match(
-            'loadlib%s*%(%s*L,%s*"alias_provider%.so"%s*%)', facade_c)
+            'titan_module_provider%s*%(%s*L,%s*"alias_provider",%s*"alias_provider%.so"%s*%)', facade_c)
         -- A direct synthesized constructor uses the reconstructed public
         -- payload and the owner's metatable instead of loading a call entry.
         assert.not_match(
-            'loadsym%s*%(%s*L,%s*alias_provider_handle,%s*'
-                .. '"alias_provider_\\u2133_Foo_\\u2131_new_titanstatic"%s*%)',
+            'titan_module_symbol%s*%(%s*L,%s*alias_provider_provider,%s*'
+                .. symbol_literal("alias_provider_\\u2133_Foo_\\u2131_new_titanstatic")
+                .. '%s*%)',
             facade_c)
 
         assert.match(
@@ -906,31 +915,36 @@ describe(".so-only cross-module imports", function()
         local consumer_c = cf:read("*a")
         cf:close()
         assert.match(
-            'loadlib%s*%(%s*L,%s*"alias_facade%.so"%s*%)', consumer_c)
+            'titan_module_provider%s*%(%s*L,%s*"alias_facade",%s*"alias_facade%.so"%s*%)', consumer_c)
         assert.not_match(
-            'loadlib%s*%(%s*L,%s*"alias_provider%.so"%s*%)', consumer_c)
-        assert.not_match("alias_provider_handle", consumer_c)
+            'titan_module_provider%s*%(%s*L,%s*"alias_provider",%s*"alias_provider%.so"%s*%)', consumer_c)
         assert.match(
-            'loadglobalsym%s*%(%s*L,%s*'
-                .. '"alias_provider_\\u2133_Foo_\\u2131_plus_titanmethod"%s*%)',
+            'titan_module_provider%s*%(%s*L,%s*"alias_provider",%s*NULL%s*%)',
             consumer_c)
         assert.match(
-            'loadglobalsym%s*%(%s*L,%s*'
-                .. '"alias_provider_\\u2133_Foo_\\u2131_plus_boundmethod"%s*%)',
+            'titan_module_symbol%s*%(%s*L,%s*alias_provider_provider,%s*'
+                .. symbol_literal("alias_provider_\\u2133_Foo_\\u2131_plus_titanmethod")
+                .. '%s*%)',
+            consumer_c)
+        assert.match(
+            'titan_module_symbol%s*%(%s*L,%s*alias_provider_provider,%s*'
+                .. symbol_literal("alias_provider_\\u2133_Foo_\\u2131_plus_boundmethod")
+                .. '%s*%)',
             consumer_c)
         local merged_consumer_c = consumer_c:gsub('"%s*"', '')
         for _, role in ipairs({
             "boundlua", "boundstrict",
         }) do
             assert.match(
-                'loadglobalsym%s*%(%s*L,%s*"alias_provider_' ..
-                    '\\u2133_Foo_\\u2131_plus_titanentry_' ..
-                    role .. '"%s*%)',
+                'titan_module_symbol%s*%(%s*L,%s*alias_provider_provider,%s*' ..
+                    symbol_literal("alias_provider_\\u2133_Foo_\\u2131_plus_titanentry_" ..
+                        role) .. '%s*%)',
                 merged_consumer_c)
         end
         assert.match(
-            'loadglobalsym%s*%(%s*L,%s*'
-                .. '"alias_provider_\\u2133_Foo_\\u2131_make_titanstatic"%s*%)',
+            'titan_module_symbol%s*%(%s*L,%s*alias_provider_provider,%s*'
+                .. symbol_literal("alias_provider_\\u2133_Foo_\\u2131_make_titanstatic")
+                .. '%s*%)',
             consumer_c)
         assert.match(
             'lua_getfield%s*%(%s*L,%s*LUA_REGISTRYINDEX,%s*'
@@ -1312,7 +1326,7 @@ describe(".so-only cross-module imports", function()
         assert.truthy(rok, out)
     end)
 
-    it("aborts when the loaded .so has an incompatible type manifest", function()
+    it("aborts when the loaded .so has an incompatible used signature", function()
         local ok, err = build_so_chain({
             { name = "manifest_provider", src = [[
                 function get(): integer return 42 end
@@ -1336,16 +1350,16 @@ describe(".so-only cross-module imports", function()
         })
         assert.truthy(ok, err)
 
-        -- Loading the consumer now must fail with manifest mismatch
+        -- Loading the consumer now must fail the selective compatibility check
         rok, out = call("string", [[
             local ok, err = pcall(require, "manifest_consumer")
             assert(not ok, "expected require to fail")
-            assert(err:find("type manifest mismatch", 1, true), err)
+            assert(err:find("compatibility mismatch", 1, true), err)
         ]])
         assert.truthy(rok, out)
     end)
 
-    it("aborts when the loaded .so is missing the types symbol", function()
+    it("aborts when the loaded .so is missing the compatibility symbol", function()
         local ok, err = build_so_chain({
             { name = "notype_provider", src = [[
                 function answer(): integer return 1 end
@@ -1357,7 +1371,7 @@ describe(".so-only cross-module imports", function()
         })
         assert.truthy(ok, err)
 
-        -- Replace notype_provider.so with a DSO providing ABI marker but no types symbol
+        -- Replace provider with an ABI marker but no compatibility entry
         local f = assert(io.open("notype_provider.c", "w"))
         f:write([[
             typedef struct lua_State lua_State;
@@ -1373,12 +1387,12 @@ describe(".so-only cross-module imports", function()
         local cok = os.execute(table.concat({
             driver.CC, "-fPIC", shared, "-o", "notype_provider.so", "notype_provider.c"
         }, " "))
-        assert.truthy(cok, "could not compile fake provider without types")
+        assert.truthy(cok, "could not compile fake provider without compatibility")
 
         local rok, out = call("string", [[
             local ok, err = pcall(require, "notype_consumer")
             assert(not ok, "expected require to fail")
-            assert(err:find("missing types symbol", 1, true), err)
+            assert(err:find("compatibility", 1, true), err)
         ]])
         assert.truthy(rok, out)
     end)

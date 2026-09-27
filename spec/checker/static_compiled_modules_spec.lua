@@ -518,7 +518,7 @@ end
         assert.equal(3, union.nvariants)
         assert.equal(2, #union.variants)
         assert.equal(0, union.variants.none.index)
-        assert.equal(2, union.variants.box.index)
+        assert.equal(1, union.variants.box.index)
         assert.is_nil(union.variants.hidden)
         assert.is_nil(union.functions.hidden)
         assert.same({"value"}, union.functions.box.paramnames)

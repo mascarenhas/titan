@@ -210,7 +210,8 @@ function codevar(ctx, node)
             return "", getslot(node._type, nil, render(
                 "&(uvalue(&_mod->uv[$MODINDEX].uv)->uv[$FNINDEX].uv)", {
                 MODINDEX = c_integer_literal(node.exp.var._decl._upvalue),
-                FNINDEX = c_integer_literal(node._decl._closure_upvalue),
+                FNINDEX = coder._imported_slot(ctx, node._decl.modname,
+                    "function", node._decl),
             }))
         elseif node._decl._tag == "Type.StaticMethod"
                and ctx.tlcontext.static_slots[node._decl.fqtn .. "." .. node._decl.name] then
@@ -232,7 +233,8 @@ function codevar(ctx, node)
             return "", getslot(node._type, nil, render(
                 "&(($OWNER)->uv[$FNINDEX].uv)", {
                 OWNER = owner,
-                FNINDEX = c_integer_literal(node._decl._closure_upvalue),
+                FNINDEX = coder._imported_slot(ctx,
+                    node._decl.fqtn:match("^(.*)[.]"), "static", node._decl),
             }))
         elseif node._decl._tag == "Type.StaticMethod"
                and node._import_decl then
@@ -242,7 +244,8 @@ function codevar(ctx, node)
             return "", getslot(node._type, nil, render(
                 "&(uvalue(&_mod->uv[$MODINDEX].uv)->uv[$FNINDEX].uv)", {
                 MODINDEX = c_integer_literal(node._import_decl._upvalue),
-                FNINDEX = c_integer_literal(node._decl._closure_upvalue),
+                FNINDEX = coder._imported_slot(ctx,
+                    node._decl.fqtn:match("^(.*)[.]"), "static", node._decl),
             }))
         else
             assert(node._decl._tag == "Type.ModuleVariable")
@@ -253,7 +256,8 @@ function codevar(ctx, node)
             }
             local slot = render("&(uvalue(&_mod->uv[$MODINDEX].uv)->uv[$VARINDEX].uv)", {
                 MODINDEX = c_integer_literal(node.exp.var._decl._upvalue),
-                VARINDEX = c_integer_literal(node._decl._upvalue)
+                VARINDEX = coder._imported_slot(ctx, node._decl.modname,
+                    "variable", node._decl)
             })
             return "", getslot(node._type, nil, slot)
         end

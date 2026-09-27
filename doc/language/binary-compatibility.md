@@ -1,0 +1,161 @@
+# Replacing shared-library dependencies
+
+A compiled Titan consumer can load a replacement shared provider without being
+rebuilt when the replacement preserves the declarations that consumer depends
+on. Adding an unused function, removing an unused variable, or changing private
+record storage does not by itself invalidate the consumer.
+
+These checks apply to dependencies loaded from **separate shared objects**.
+Source modules and static archives linked into the same library or executable
+are fixed parts of that binary. Replacing an archive or source file on disk
+does not replace its already-linked code. See [Modules](modules.md) and
+[Static compiled modules](static-compiled-modules.md) for dependency selection.
+
+Within one Lua state, the first initialized provider of a logical module is
+canonical. A later dynamic import uses that module and checks its own requirements
+against it before using its native entries. It does not open a second provider
+just because a different file was selected when the consumer was compiled.
+This also applies when the canonical module was linked into the executable,
+loaded from an archive, or initialized through Lua's `package.loadlib`.
+For example, a dynamically loaded plugin importing a module already supplied
+by its host executable uses the host's initialized module.
+
+## What a consumer requires
+
+Titan first checks the provider's compiled-code ABI. If that matches, it checks
+the consumer's required interface before using the provider's native entries.
+An incompatible replacement fails while loading the consumer, even if the
+affected consumer function would not have been called in that execution.
+
+| Referenced declaration | What must remain the same |
+| --- | --- |
+| Function | Erased parameter and result types, parameter names, variadic input, and flexible-result shape. |
+| Module variable | Erased type and mutable/const status. Declaration order may change. |
+| Record | Nominal identity and the complete ordered list of public field names, erased types, and constness. |
+| Union | Nominal identity and the complete ordered list of public variant names and named payload signatures. |
+| Interface | Nominal identity and every ordered field and method signature, including method parameter names. |
+| Concrete record/union method or static function | Its signature and parameter names, when the consumer uses that member. |
+
+The record and union rules apply to the whole public data shape, even when a
+consumer reads only one field or matches one variant. Concrete methods and
+static functions are checked individually; adding or changing an unused method
+does not invalidate a consumer. Interfaces instead require their complete
+declared shape because compiled wrappers depend on it.
+
+"Uses" includes reads, writes, direct calls, first-class function references,
+bound-method references, and nominal types in annotations or inferred values.
+It also includes dependencies introduced by implicit conversions: converting
+a record to an Interface relies on the concrete methods used to implement that
+Interface even without a written concrete method call.
+
+The comparison uses Titan's ordinary generic erasure. It compares a generic
+declaration's runtime signature, rather than specializing compatibility to
+one call's type arguments. Generic source parameter names such as `T` may
+change without changing that erased contract; callable parameter names such
+as `input` remain part of the contract.
+
+Nominal aliases preserve both the exposing name and the original owner. If a
+consumer names `api.Item`, removing that alias or redirecting it to another
+record is incompatible even when the two records have identical fields.
+Types and methods reached through another module's signatures retain their
+canonical owner requirements as well.
+
+## Reordering module declarations
+
+Used functions and variables can move relative to other module declarations.
+For example, this consumer continues to work when the provider adds variables
+or changes the position of `count` and `advance`:
+
+```titan
+local counter = import "counter"
+
+function tick(): integer
+    counter.count = counter.count + 1
+    local advance = counter.advance
+    return advance(counter.count)
+end
+```
+
+The replacement must preserve the used variable and function contracts. A
+direct `counter.advance(...)` call still invokes the native function directly.
+A `counter.advance` value still denotes the provider's canonical function
+value; repeated exact references keep their identity. The same applies to
+first-class public record/union constructors and static functions.
+
+## Private record fields and construction
+
+A replacement can add, remove, reorder, or change private fields while
+preserving a referenced record's public shape. Consumers that receive the
+record and access its public fields can continue to use it.
+
+Construction has an additional dependency. A record's synthesized `new` is
+public only when its fields are all public. Constructing an imported record
+with a literal counts as using that `new` constructor:
+
+```titan
+local model = import "model"
+
+function make(): model.Point
+    return { x = 1.0, y = 2.0 }
+end
+```
+
+Adding the first private field to `model.Point` therefore rejects this old
+consumer at load time. It removes the public construction operation on which
+the consumer relies. A consumer that only receives a `Point` from a provider
+function and reads `x` or `y` can remain compatible. See
+[Native storage](nominal-storage.md) for storage and ownership rules.
+
+## Private union variants and control flow
+
+Private variants may change while the ordered public variants remain the same.
+Public tags stay stable when private variants are added or reordered.
+An unmatched `case` with no `else` continues after the case; a replacement does
+not introduce an implicit exception or a coverage requirement.
+
+There is one additional requirement when the compiler used complete variant
+coverage to prove that control cannot fall through:
+
+```titan
+local events = import "events"
+
+function describe(event: events.Event): string
+    case event
+    when started() then return "started"
+    when stopped() then return "stopped"
+    end
+end
+```
+
+If `started` and `stopped` were the complete original inventory, adding a
+private variant invalidates that proof. Loading this unchanged consumer fails.
+The same applies to a redundant, falling-through `else` whose unreachability
+was established by complete coverage. An independently terminating `else`
+does not depend on the inventory and permits private additions.
+
+This preserves [ordinary non-exhaustive case
+behavior](unions.md#non-exhaustiveness-and-control-flow-analysis). Consumers
+whose cases do not rely on complete coverage accept otherwise compatible
+private-variant changes.
+
+## Build and deployment boundaries
+
+Compatibility is a per-consumer check of compiled assumptions, not a promise
+that a replacement preserves application behavior. A function can return a
+different value while retaining its signature. Changes to required signatures,
+public nominal data shapes, or ABI require rebuilding affected consumers.
+
+The compiler continues to read complete type and physical-layout metadata when
+building a consumer. The load-time compatibility protocol is separate from
+those formats. A provider missing that protocol is rejected when used as a
+separate shared dependency. Build providers and consumers with a matching
+Titan compiler/runtime; the current compiler version remains `0.6.0` and the
+compiled-code ABI remains `2`.
+
+Checks occur during loading. Replacing a file does not hot-reload a provider
+already initialized in a running Lua state. Each Lua state owns its module
+instances and native bindings independently. Dependencies linked directly into
+a binary must use that binary's own provider; finding a different initialized
+provider for such a dependency is an error. Test a replacement deployment using
+a fresh process and the unchanged consumer binary, and test plugin integration
+with the host's modules already initialized.

@@ -101,6 +101,12 @@ A Titan executable can run without a Titan provider DSO when every imported
 Titan dependency selected source or a suitable archive. This does not imply a
 static libc or an executable with no operating-system dynamic libraries.
 
+Replacing a static archive later does not change code already linked from it.
+The per-consumer [replacement-provider checks](binary-compatibility.md) apply
+only to dependencies loaded from separate shared objects. A program that
+selects some archives and some DSOs retains those checks for its separate DSO
+dependencies.
+
 ## What a static provider contains
 
 Every generated Titan module object contains one canonical metadata section:

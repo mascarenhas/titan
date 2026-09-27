@@ -212,11 +212,16 @@ describe("dense Array code generation and boundaries", function()
         assert.is_true(raw_probe < boxed_probe)
         assert.not_match("LUA_REGISTRYINDEX", nested)
 
-        local registry_anchor = assert(csrc:find(
+        local module_init = generated_function(
+            csrc, "Udata *test_init(lua_State *L)")
+        local private_root = assert(module_init:find(
+            "titan_pushmodule(L, _mod);", 1, true))
+        local registry_anchor = assert(module_init:find(
             "lua_setfield(L, LUA_REGISTRYINDEX", 1, true))
-        local cache_init = assert(csrc:find(
+        local cache_init = assert(module_init:find(
             "titan_array_metatables(", 1, true))
-        assert.is_true(registry_anchor < cache_init)
+        assert.is_true(private_root < cache_init)
+        assert.is_true(cache_init < registry_anchor)
     end)
 
     it("passes exact fixed and open produced counts to Array construction",

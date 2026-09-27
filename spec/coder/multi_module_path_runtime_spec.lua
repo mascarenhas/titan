@@ -212,7 +212,7 @@ end
         local generated = read_file(
             consumer_source .. "/path_consumer.c")
         assert.truthy(generated:find(
-            'loadlib(L, "route/item.so")', 1, true), generated)
+            'titan_module_provider(L, "route.item", "route/item.so")', 1, true), generated)
         assert.falsy(generated:find(root_one, 1, true), generated)
         assert.falsy(generated:find(root_two, 1, true), generated)
         -- root_one_only exists only in R1, so successful checking proves that
@@ -286,9 +286,9 @@ end
         local generated = read_file(
             consumer_source .. "/later_consumer.c")
         assert.truthy(generated:find(
-            'loadlib(L, "later.so")', 1, true), generated)
+            'titan_module_provider(L, "later.branch.item", "later.so")', 1, true), generated)
         assert.falsy(generated:find(
-            'loadlib(L, "later/branch/item.so")', 1, true), generated)
+            'titan_module_provider(L, "later.branch.item", "later/branch/item.so")', 1, true), generated)
 
         local ok, output = run_lua(
             consumer_root, titan_path, consumer_root, { consumer_root }, [[
@@ -331,7 +331,7 @@ end
         local generated = read_file(
             consumer_source .. "/static_array_consumer.c")
         assert.falsy(generated:find(
-            'loadlib(L, "staticarray/api.so")', 1, true), generated)
+            'titan_module_provider(L, "staticarray.api", "staticarray/api.so")', 1, true), generated)
         assert.truthy(generated:find(
             "extern Udata *staticarray_api_init", 1, true), generated)
 
@@ -409,7 +409,7 @@ end
         local generated = read_file(
             consumer_source .. "/static_entry_consumer.c")
         assert.falsy(generated:find(
-            'loadlib(L, "staticentry/api.so")', 1, true), generated)
+            'titan_module_provider(L, "staticentry.api", "staticentry/api.so")', 1, true), generated)
         assert.truthy(generated:find(
             "extern Udata *staticentry_api_init", 1, true), generated)
 
@@ -526,11 +526,11 @@ end
         local generated = read_file(
             consumer_source .. "/prefix_union_consumer.c")
         assert.falsy(generated:find(
-            'loadlib(L, "prefix.so")', 1, true), generated)
+            'titan_module_provider(L, "prefix.messages", "prefix.so")', 1, true), generated)
         assert.truthy(generated:find(
             "extern Udata *prefix_messages_init", 1, true), generated)
         assert.truthy(generated:find(
-            "case%s+2:%s+goto%s+_case_"), generated)
+            "case%s+1:%s+goto%s+_case_"), generated)
 
         local ok, output = run_lua(
             consumer_root, root_one, consumer_root, { consumer_root }, [[

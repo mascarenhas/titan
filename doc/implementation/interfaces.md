@@ -253,12 +253,14 @@ Method-only wrappers therefore retain the old two-user-value layout.
 Field-only wrappers request a zero-byte payload; code generation does not emit
 a zero-length C pair array or call `memcpy` with one.
 
-One process-static pair array is emitted per used concrete/Interface pair that
-has at least one method.
+One pair array is allocated in the emitting module's per-state native payload
+per used concrete/Interface pair that has at least one method.
 After imported native symbols have been recovered, initialization fills each
 slot with either the exact concrete method or the private adjustment entry.
-This happens on both module-initialization branches and before a user module
-initializer can construct a wrapper. Each method-bearing wrapper copies the
+This happens while creating the canonical module and before a user module
+initializer can construct a wrapper. Returning an existing canonical module
+does not initialize another image's caches. Each Lua state's array uses that
+state's selected native providers. Each method-bearing wrapper copies the
 complete array with `memcpy`; pair arrays and wrappers are not interned.
 
 The same pair emits one private `lua_CFunction` witness. It captures the

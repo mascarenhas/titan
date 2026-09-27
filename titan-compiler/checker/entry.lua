@@ -25,6 +25,7 @@ function checker.check(modname, ast, subject, filename, loader, options)
     loop_depth = 0
     loop_frames = {}
     local st = symtab.new(modname)
+    st.binary_usage, st.binary_modules = {}, {}
     st.completion_request = options.completion
     st.cache_adapter = options.cache_adapter
     st.prepare_ffi_header = options.prepare_ffi_header
@@ -89,6 +90,7 @@ function checker.check(modname, ast, subject, filename, loader, options)
             end
         end
         if #errors == 0 then
+            binary_collect_usage(ast, st, types.registry)
             if options.analysis_only then
                 -- Semantic clients need the checked source terms, including
                 -- applied call signatures and original case binders. Publish
@@ -100,8 +102,11 @@ function checker.check(modname, ast, subject, filename, loader, options)
                 result_type, st._surface_registry =
                     generic_lower_erased_core(
                         modname, ast, st, errors)
+                binary_collect_usage(ast, st, ast._erased_registry)
             end
         end
+        ast._binary_usage = st.binary_usage
+        ast._binary_modules = st.binary_modules
         completion_finish(st, ast, errors)
         return result_type, errors
     end
