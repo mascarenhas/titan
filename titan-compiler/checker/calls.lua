@@ -23,7 +23,7 @@ function checker._direct_nominal_constructor(node)
     return {
         kind = variant and "union" or "record",
         owner = owner,
-        variant = variant or false,
+        variant = variant or nil,
         slots = slots,
         field_indices = indices,
         allocation_plans = {},
@@ -124,7 +124,7 @@ function check_named_args(
             if adjustment then
                 exp = coerce_and_check(exp, ptype,
                     "omitted named argument '" .. name .. "' of " .. fname,
-                    errors, loc, adjustment)
+                    errors, loc, maybe3.from_optional(adjustment))
             else
                 checker.typeerror(errors, loc,
                     "parameter '%s' of type %s cannot be omitted because it does not accept nil",
@@ -143,7 +143,7 @@ function is_direct_c_bitfield_expression(exp)
        and exp.var
        and exp.var._decl
        and exp.var._decl._tag == "Type.CField"
-       and exp.var._decl.bitfield ~= false
+       and exp.var._decl.bitfield ~= nil
 end
 
 function reject_direct_c_bitfield(node, operands, errors)
@@ -361,13 +361,13 @@ function check_explicit_cast_relation(node, st, errors)
     local target = node.target
     if source._tag == "Type.Invalid" or target._tag == "Type.Invalid" then
         node._written_cast_failed = true
-        node._written_cast = false
+        node._written_cast = maybe3.none()
         return target
     end
     if reject_const_c_mutable_address(
             node.exp, target, errors, "explicit C cast") then
         node._written_cast_failed = true
-        node._written_cast = false
+        node._written_cast = maybe3.none()
         return target
     end
     local cast_plan
@@ -383,7 +383,7 @@ function check_explicit_cast_relation(node, st, errors)
         if inner_applied then
             applied_application = true
             application_plan = inner_plan and types.written_cast(
-                types.erase(source), types.erase(target)) or false
+                types.erase(source), types.erase(target)) or nil
         end
     end
     local rigid_source = generic_rigid_parameter_carrier(source)
@@ -510,19 +510,20 @@ function check_explicit_cast_relation(node, st, errors)
             .. "expression of type '%s'",
             types.tostring(source))
         node._written_cast_failed = true
+        node._written_cast = maybe3.none()
         return target
     elseif not cast_plan then
         if report_interface_failure(
                 errors, node.loc, interface_failure) then
             node._written_cast_failed = true
-            node._written_cast = false
+            node._written_cast = maybe3.none()
             return target
         end
         -- Unsafe object-pointer reinterpretation and mutable local address
         -- taking depend on expression shape and, for the former, the active C
         -- toolchain. They are deliberately absent from the type-only written
         -- relation and become complete plans only here.
-        local conversion = checker._unsafe_c_pointer_conversion(
+        local conversion, rejected = checker._unsafe_c_pointer_conversion(
             node.exp, target, errors, "explicit C cast")
         if conversion then
             node._c_conversion = conversion
@@ -533,14 +534,15 @@ function check_explicit_cast_relation(node, st, errors)
                 target = target,
                 conversion = conversion,
             }
-        elseif conversion == false then
+        elseif rejected then
             -- The conversion helper already emitted the more precise
             -- category/qualifier/probe diagnostic.
             node._written_cast_failed = true
+            node._written_cast = maybe3.none()
             return target
         end
     end
-    node._written_cast = cast_plan or false
+    node._written_cast = maybe3.from_optional(cast_plan)
     if node._tag == "Ast.ExpCast"
        and cast_plan and cast_plan.op == "callable" then
         node._callable_adapter = checker.freeze_callable_adapter(
@@ -592,7 +594,7 @@ end
 
 function generic_callable_function_type(callable)
     return types.Function(callable.params, callable.rettypes, false,
-        callable.varargtype or false, callable.flexrettype or false)
+        callable.varargtype or nil, callable.flexrettype or nil)
 end
 
 function generic_inference_scope_entry(scope, typeparams, parameters)
@@ -606,15 +608,14 @@ function generic_inference_scope_entry(scope, typeparams, parameters)
         local parameter = entry.parameters[index]
         if not parameter then
             parameter = types.Parameter(scope, index, typeparam.name,
-                typeparam.constraint == false and false
-                    or types.erase_constraint(typeparam.constraint))
+                typeparam.constraint and types.erase_constraint(typeparam.constraint))
         end
         entry.parameters[index] = parameter
         local cell = {
             name = typeparam.name,
             parameter = parameter,
-            binding = false,
-            evidence = false,
+            binding = nil,
+            evidence = nil,
             invalid = false,
             recursive_inference = false,
             conflicts = {},
@@ -634,7 +635,7 @@ function generic_new_inference_context(subject, scopes, st, errors, loc)
         loc = loc,
         closed = false,
         roots = {},
-        active_use = false,
+        active_use = nil,
         scope_entries = {},
         constraint_queue = {},
         constraint_queued = {},
@@ -686,13 +687,13 @@ function generic_freshen_inference_entries(
             local source = entry.source_parameters[index]
             local parameter = types.Parameter(
                 entry.scope, index, typeparam.name,
-                source and source.erased_constraint or false)
+                source and source.erased_constraint or nil)
             entry.parameters[index] = parameter
             local cell = {
                 name = typeparam.name,
                 parameter = parameter,
-                binding = false,
-                evidence = false,
+                binding = nil,
+                evidence = nil,
                 invalid = false,
                 recursive_inference = false,
                 conflicts = {},
@@ -708,15 +709,15 @@ function generic_freshen_inference_entries(
         local fresh_typeparams = {}
         for index, typeparam in ipairs(entry.source_typeparams) do
             local constraint = typeparam.constraint
-            if constraint ~= false then
+            if constraint ~= nil then
                 constraint = generic_freshen_inference_type(
                     context, constraint, entries, subject, loc)
             end
             fresh_typeparams[index] =
                 types.TypeParameter(typeparam.name, constraint)
             local source = entry.source_parameters[index]
-            local erased = source and source.erased_constraint or false
-            if erased ~= false then
+            local erased = source and source.erased_constraint or nil
+            if erased ~= nil then
                 entry.parameters[index].erased_constraint =
                     generic_freshen_inference_type(
                         context, erased, entries, subject, loc)
@@ -738,7 +739,7 @@ function generic_register_inference_use(
         finalizers = {},
         derived_nodes = {},
         context = context,
-        parent = context.active_use or false,
+        parent = context.active_use or nil,
         owns_context = owns_context and true or false,
     }
     if use.parent then
@@ -777,7 +778,7 @@ function generic_acquire_inference_context(
         context.scopes[#context.scopes + 1] = entry
         context.scope_entries[entry.scope] = entry
         for index, typeparam in ipairs(entry.typeparams) do
-            if typeparam.constraint ~= false then
+            if typeparam.constraint ~= nil then
                 context.next_constraint_sequence =
                     context.next_constraint_sequence + 1
                 local record = {
@@ -985,7 +986,7 @@ end
 -- remain acyclic before the fixed-point substitution path can expand them.
 function generic_inference_type_occurs(
         context, target, typ, seen_types, seen_roots)
-    if typ == false or typ == nil or type(typ) ~= "table" then return false end
+    if type(typ) ~= "table" then return false end
     target = generic_inference_root(target)
     seen_types = seen_types or {}
     seen_roots = seen_roots or {}
@@ -1245,8 +1246,8 @@ function generic_unify_inference(context, pattern, evidence,
     elseif ptag == "Type.Function" and etag == "Type.Function"
        and #pattern.params == #evidence.params
        and #pattern.rettypes == #evidence.rettypes
-       and (pattern.varargtype == false) == (evidence.varargtype == false)
-       and (pattern.flexrettype == false) == (evidence.flexrettype == false) then
+       and (pattern.varargtype == nil) == (evidence.varargtype == nil)
+       and (pattern.flexrettype == nil) == (evidence.flexrettype == nil) then
         local ok = true
         for index, parameter in ipairs(pattern.params) do
             ok = generic_unify_inference(context, parameter,
@@ -1256,12 +1257,12 @@ function generic_unify_inference(context, pattern, evidence,
             ok = generic_unify_inference(context, result,
                 evidence.rettypes[index], term, loc, seen) and ok
         end
-        if pattern.varargtype ~= false then
+        if pattern.varargtype ~= nil then
             ok = generic_unify_inference(context,
                 pattern.varargtype, evidence.varargtype,
                 term, loc, seen) and ok
         end
-        if pattern.flexrettype ~= false then
+        if pattern.flexrettype ~= nil then
             ok = generic_unify_inference(context,
                 pattern.flexrettype, evidence.flexrettype,
                 term, loc, seen) and ok
@@ -1357,7 +1358,7 @@ function generic_substitute_inference(context, typ, recover)
 end
 
 function generic_inference_type_has_unresolved(context, typ, seen)
-    if typ == false or typ == nil or type(typ) ~= "table" then return false end
+    if type(typ) ~= "table" then return false end
     seen = seen or {}
     if seen[typ] then return false end
     seen[typ] = true
@@ -1435,16 +1436,16 @@ function generic_infer_constraint_evidence(context)
         local root = cell and generic_inference_root(cell)
         local argument = root and root.binding
         if argument and argument._tag == "Type.Parameter"
-           and not root.invalid and typeparam.constraint ~= false then
-            local surface = types.parameter_surface_constraint(
+           and not root.invalid and typeparam.constraint ~= nil then
+            local surface, surface_valid = types.parameter_surface_constraint(
                 argument, context.st and context.st.generic_scope_bindings)
             local required = generic_substitute_inference(
                 context, typeparam.constraint, false)
-            local surface_owner = surface and surface ~= false
+            local surface_owner = surface_valid and surface
                 and generic_owner_type(surface)
             local required_owner = required
                 and generic_owner_type(required)
-            if surface and surface ~= false
+            if surface_valid and surface
                and surface._tag == "Type.Nominal"
                and required and required._tag == "Type.Nominal"
                and surface.fqtn == required.fqtn
@@ -1543,7 +1544,7 @@ function generic_default_inference_cells(context)
                     index = index,
                     typeparam = entry.typeparams[index],
                 }
-                if entry.typeparams[index].constraint ~= false then
+                if entry.typeparams[index].constraint ~= nil then
                     class.constrained = true
                 end
             end
@@ -1560,7 +1561,7 @@ function generic_default_inference_cells(context)
             if not root.binding then
                 for _, member in ipairs(class.members) do
                     local constraint = member.typeparam.constraint
-                    if constraint ~= false then
+                    if constraint ~= nil then
                         constraint = generic_substitute_inference(
                             context, constraint, false)
                         if not generic_inference_type_has_unresolved(
@@ -1688,7 +1689,7 @@ function generic_close_inference_context(context)
     for _, entry in ipairs(context.scopes) do
         for index, typeparam in ipairs(entry.typeparams) do
             local root = generic_inference_root(entry.cells[index])
-            if not root.invalid and typeparam.constraint ~= false then
+            if not root.invalid and typeparam.constraint ~= nil then
                 local constraint = generic_substitute_inference(
                     context, typeparam.constraint, true)
                 local argument = generic_substitute_inference(
@@ -1787,7 +1788,7 @@ end
 function generic_lambda_full_explicit_type(node)
     local nparams = #node.params
     local vararg = node.params[nparams]
-    local has_vararg = vararg and vararg.name == false
+    local has_vararg = vararg and vararg.name == nil
     local nfixed = has_vararg and nparams - 1 or nparams
     local params = {}
     for index = 1, nfixed do
@@ -1795,7 +1796,7 @@ function generic_lambda_full_explicit_type(node)
         if not typ then return nil end
         params[index] = typ
     end
-    local varargtype = false
+    local varargtype = nil
     if has_vararg then
         varargtype = vararg._generic_inference_type
         if not varargtype then return nil end
@@ -1812,7 +1813,7 @@ function generic_prepare_lambda_inference(node, pattern,
                                                    context, st, errors)
     local nparams = #node.params
     local vararg = node.params[nparams]
-    local has_vararg = vararg and vararg.name == false
+    local has_vararg = vararg and vararg.name == nil
     local nfixed = has_vararg and nparams - 1 or nparams
     for index = 1, nfixed do
         local parameter = node.params[index]
@@ -1836,7 +1837,7 @@ function generic_prepare_lambda_inference(node, pattern,
         node._generic_inference_flexrettype = node.flexrettype
             and check_varg_elem(typefromnode(node.flexrettype, st, errors),
                 node.flexrettype.loc or node.loc, errors, "return")
-            or false
+            or nil
     end
 
     local current = generic_substitute_inference(
@@ -1865,7 +1866,7 @@ function generic_prepare_lambda_inference(node, pattern,
         end
     end
     if has_vararg and vararg._generic_inference_type
-       and current.varargtype ~= false then
+       and current.varargtype ~= nil then
         generic_unify_inference(context,
             current.varargtype, vararg._generic_inference_type,
             "lambda variadic parameter", vararg.loc)
@@ -1877,8 +1878,8 @@ function generic_prepare_lambda_inference(node, pattern,
                 current.rettypes[index], actual,
                 "lambda result " .. index, node.loc)
         end
-        if node._generic_inference_flexrettype ~= false
-           and current.flexrettype ~= false then
+        if node._generic_inference_flexrettype ~= nil
+           and current.flexrettype ~= nil then
             generic_unify_inference(context,
                 current.flexrettype, node._generic_inference_flexrettype,
                 "lambda flexible result", node.loc)
@@ -1894,9 +1895,9 @@ end
 function generic_expression_result_types(exp)
     if exp._tag == "Ast.ExpCall" then
         return exp._visible_types or exp._types or {},
-            exp._open_results and exp._open_results.source_type or false
+            exp._open_results and exp._open_results.source_type or nil
     end
-    return { exp._type }, false
+    return { exp._type }, nil
 end
 
 function generic_contextual_record_constructor_evidence(
@@ -1977,9 +1978,9 @@ function generic_discovery_demand(context, signature, first, original)
         fixed[offset] = closed or UNKNOWN_SLOT
         inference_fixed[offset] = pattern and
             generic_substitute_inference(context, pattern, false)
-            or false
+            or nil
     end
-    local tail, inference_tail = false, false
+    local tail, inference_tail = nil, nil
     if original.tail then
         local pattern = signature.varargtype
         local closed = pattern and
@@ -1987,7 +1988,7 @@ function generic_discovery_demand(context, signature, first, original)
         tail = closed or INFER_OPEN
         inference_tail = pattern and
             generic_substitute_inference(context, pattern, false)
-            or false
+            or nil
     end
     return result_demand(fixed, tail, {
         term = original.term,
@@ -2102,13 +2103,13 @@ function generic_finish_generic_open_arguments(adjusted, target, st, errors,
         checker_assignment_adjustment(adjusted.open_type, target, st, {
             allow_coercion = allow,
         })
-    adjusted.open_adjustment = adjustment or false
+    adjusted.open_adjustment = adjustment or nil
     adjusted.open_callable_adapter = adjustment
         and adjustment.kind == "callable"
         and checker.freeze_callable_adapter(adjustment,
             adjusted.open_type, target, adjusted.open_source.loc)
-        or false
-    adjusted.open_interface_conversion = interface_conversion or false
+        or nil
+    adjusted.open_interface_conversion = interface_conversion or nil
     local open = open_source_descriptor(adjusted.open_source)
     if open then
         open.target_type = target
@@ -2220,7 +2221,7 @@ function generic_infer_positional_call(context, signature, args,
     for index = 1, #signature.params do fixed[index] = UNKNOWN_SLOT end
     local adjusted = adjust_explist(args,
         result_demand(fixed,
-            signature.varargtype and INFER_OPEN or false, {
+            signature.varargtype and INFER_OPEN or nil, {
             term = term,
             open_term = term,
             loc = context.loc,
@@ -2393,7 +2394,7 @@ function generic_infer_named_call(context, signature, fields,
             else
                 local provisional = not expected and
                     generic_substitute_inference(
-                        context, pattern, false) or false
+                        context, pattern, false) or nil
                 checkexp(field.exp, st, errors, expected,
                     checker._nominal_argument_demand(result_demand(
                         { expected or UNKNOWN_SLOT }, false, {

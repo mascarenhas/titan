@@ -20,7 +20,7 @@ local schemas = {
     },
     ["Type.ModuleMember"] = {
         _c_integer_constant = "string?",
-        modname = "string", name = "string", type = "type", paramnames = "names_or_false",
+        modname = "string", name = "string", type = "type", paramnames = "names?",
         islocal = "boolean?", _foreign_source = "boolean?",
     },
     ["Type.ModuleVariable"] = {
@@ -28,42 +28,42 @@ local schemas = {
         islocal = "boolean?",
     },
     ["Type.GenericScope"] = {
-        modname = "string", owner_fqtn = "name", callable_name = "name",
+        modname = "string", owner_fqtn = "string?", callable_name = "string?",
         role = "string", declaration_kind = "string",
     },
-    ["Type.TypeParameter"] = { name = "string", constraint = "maybe_type" },
+    ["Type.TypeParameter"] = { name = "string", constraint = "type?" },
     ["Type.Parameter"] = {
         scope = "type", index = "integer", diagnostic_name = "string",
-        erased_constraint = "maybe_type",
+        erased_constraint = "type?",
     },
     ["Type.FunctionScheme"] = {
         scope = "type", typeparams = "types", signature = "type", _generic_parameters = "types?",
     },
     ["Type.GenericAlias"] = {
-        module = "string", name = "string", locality = "atom",
-        target_owner_fqtn = "string", target_alias_fqtn = "name",
+        module = "string", name = "string", locality = "boolean",
+        target_owner_fqtn = "string", target_alias_fqtn = "string?",
         target_scope = "type", typeparams = "types",
     },
     ["Type.Function"] = {
         params = "types", rettypes = "types", vararg = "boolean",
-        varargtype = "maybe_type", flexrettype = "maybe_type",
+        varargtype = "type?", flexrettype = "type?",
     },
-    ["Type.Array"] = { elem = "type", isconst = "atom" },
+    ["Type.Array"] = { elem = "type", isconst = "array_constness" },
     ["Type.Map"] = { keys = "type", values = "type" },
     ["Type.Nominal"] = { fqtn = "string", args = "types" },
     ["Type.Option"] = { base = "type" },
     ["Type.Record"] = {
         name = "string", fields = "members", functions = "type_map", methods = "type_map",
-        nfields = "integer", scope = "maybe_type", typeparams = "types", islocal = "boolean?",
+        nfields = "integer", scope = "type?", typeparams = "types", islocal = "boolean?",
         _source_complete = "boolean?", _generic_parameters = "types?",
     },
     ["Type.Union"] = {
         name = "string", variants = "members", functions = "type_map", methods = "type_map",
-        nvariants = "integer", scope = "maybe_type", typeparams = "types", islocal = "boolean?",
+        nvariants = "integer", scope = "type?", typeparams = "types", islocal = "boolean?",
         _source_complete = "boolean?", _generic_parameters = "types?",
     },
     ["Type.Interface"] = {
-        name = "string", fields = "members", methods = "members", scope = "maybe_type",
+        name = "string", fields = "members", methods = "members", scope = "type?",
         typeparams = "types", islocal = "boolean?", _source_complete = "boolean?",
         _generic_parameters = "types?",
     },
@@ -76,20 +76,20 @@ local schemas = {
     },
     ["Type.Method"] = {
         fqtn = "string", name = "string", params = "types", rettypes = "types",
-        varargtype = "maybe_type", flexrettype = "maybe_type", paramnames = "names_or_false",
-        scope = "maybe_type", typeparams = "types", islocal = "boolean?",
+        varargtype = "type?", flexrettype = "type?", paramnames = "names?",
+        scope = "type?", typeparams = "types", islocal = "boolean?",
     },
     ["Type.StaticMethod"] = {
         fqtn = "string", name = "string", params = "types", rettypes = "types",
-        varargtype = "maybe_type", flexrettype = "maybe_type", paramnames = "names_or_false",
-        scope = "maybe_type", typeparams = "types", islocal = "boolean?",
+        varargtype = "type?", flexrettype = "type?", paramnames = "names?",
+        scope = "type?", typeparams = "types", islocal = "boolean?",
     },
     -- Keep semantic C declarations, including recursive aggregate fields and
     -- exact extents. Do not retain raw C declarations, macro environments,
     -- converted namespaces, parser annotations or checker plans.
     ["Type.CVoid"] = {},
     ["Type.CInteger"] = {
-        spelling = "string", signed = "boolean", rank = "integer", bits = "atom",
+        spelling = "string", signed = "boolean", rank = "integer?", bits = "integer?",
         _c_enum_identity = "string?", _c_declaration_spelling = "string?",
         _c_enum_enumerator = "string?", _c_enum_probe_spelling = "string?",
         _c_enum_unspellable = "boolean?", _c_enum_owner = "type?",
@@ -100,7 +100,7 @@ local schemas = {
     ["Type.CPointer"] = { pointee = "type", quals = "names" },
     ["Type.CArray"] = { elem = "type", len = "extent?", quals = "names" },
     ["Type.CFunction"] = {
-        params = "types", ret = "type", vararg = "boolean", abi = "atom",
+        params = "types", ret = "type", vararg = "boolean", abi = "string?",
         _paramstyle = "string?", _return_declaration_qualifiers = "names?",
     },
     ["Type.CStruct"] = {
@@ -113,7 +113,7 @@ local schemas = {
         fields = "members", complete = "boolean", _c_tag_scope = "string?", _definition_order = "integer?",
     },
     ["Type.CField"] = {
-        owner = "type", name = "string", type = "type", bitfield = "extent", flexible_array = "boolean",
+        owner = "type?", name = "string", type = "type", bitfield = "extent?", flexible_array = "boolean",
     },
     ["Type.CTypedef"] = { name = "c_name", target = "type", quals = "names" },
     ["Type.COwned"] = { pointee = "type", count = "boolean" },

@@ -57,13 +57,13 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
             assert(strict_plans[index] ~= nil,
                 "strict Titan function parameter lacks its checker guard")
             return coder._strictcheckandget(
-                tlcontext, strict_plans[index], param, cvar, slot, loc,
+                tlcontext, maybe3.get_checked(strict_plans[index], "parameter guard"), param, cvar, slot, loc,
                 "strict Titan function parameter", true)
         end
         assert(dynamic_plans[index] ~= nil,
             "genuine Lua function parameter lacks its checker plan")
         return coder._dynamiccheckandget(
-            tlcontext, dynamic_plans[index], param, cvar, slot, loc,
+            tlcontext, maybe3.get_checked(dynamic_plans[index], "parameter conversion"), param, cvar, slot, loc,
             "genuine Lua function parameter", true)
     end
     local stats = {}
@@ -166,19 +166,19 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
         -- below has already ensured the arg count is >= nfixed.
         local readone
         if strict then
-            assert(options.strict_vararg_plan ~= nil,
-                "strict Titan variadic parameter lacks its checker guard")
+            local guard = maybe3.get_checked(options.strict_vararg_plan,
+                "strict Titan variadic parameter guard")
             readone = coder._strictcheckandget(
-                tlcontext, options.strict_vararg_plan, varargtype,
+                tlcontext, guard, varargtype,
                 "_varargs->args[_vj]",
                 "s2v(L->ci->func.p + " .. (nfixed + hidden)
                 .. " + 1 + _vj)",
                 loc, "strict Titan variadic parameter", true)
         else
-            assert(options.dynamic_vararg_plan ~= nil,
-                "genuine Lua variadic parameter lacks its checker plan")
+            local plan = maybe3.get_checked(options.dynamic_vararg_plan,
+                "genuine Lua variadic parameter conversion")
             readone = coder._dynamiccheckandget(
-                tlcontext, options.dynamic_vararg_plan, varargtype,
+                tlcontext, plan, varargtype,
                 "_varargs->args[_vj]",
                 "s2v(L->ci->func.p + " .. (nfixed + hidden)
                 .. " + 1 + _vj)",
@@ -869,12 +869,12 @@ function coder._foreign_raw_exp(ctx, node)
         if node._adjustment
             and node._adjustment.kind == "direct_coercion" then
             operation = node._adjustment.coercion.op
-        elseif node._written_cast then
-            if node._written_cast.op == "coercion" then
-                operation = node._written_cast.coercion.op
-            elseif node._written_cast.op == "explicit" then
-                operation = node._written_cast.conversion.op
-                    or node._written_cast.conversion.kind
+        elseif (node._written_cast and node._written_cast.tag == "just") then
+            if maybe3.get_checked(node._written_cast, "written cast").op == "coercion" then
+                operation = maybe3.get_checked(node._written_cast, "written cast").coercion.op
+            elseif maybe3.get_checked(node._written_cast, "written cast").op == "explicit" then
+                operation = maybe3.get_checked(node._written_cast, "written cast").conversion.op
+                    or maybe3.get_checked(node._written_cast, "written cast").conversion.kind
             end
         elseif node._c_conversion then
             operation = node._c_conversion.op or node._c_conversion.kind
@@ -1065,7 +1065,7 @@ function coder._foreign_function_signature(node)
     local params = {}
     local fixed_index = 1
     for _, param in ipairs(node.params) do
-        if param.name ~= false then
+        if param.name ~= nil then
             param._foreign_cname = "_param_" .. param.name
             local typ = cdeclarator.adjust_parameter_type(
                 node._type.params[fixed_index])
@@ -1140,7 +1140,7 @@ function codefuncdec(tlcontext, node)
     -- The declared return types, so a `return` routed through a finally
     -- (codetry/codereturn) can size + fill the per-try saved-return temps.
     ctx.rettypes = node._type.rettypes
-    ctx.flexrettype = node._type.flexrettype or false
+    ctx.flexrettype = node._type.flexrettype or nil
     local cparams = { "lua_State *L", "Udata *_mod", "CClosure *_fn" }
     if node._tag == "Ast.TopLevelMethod" then
         -- `self` is a real Decl that capture analysis can mark captured/assigned,
@@ -1726,7 +1726,7 @@ function codelambdadec(tlcontext, node)
     if ctx.has_try then analyze_try_spills(node.block) end
     -- The lambda's own return types (sizes finally saved-return temps).
     ctx.rettypes = node._type.rettypes
-    ctx.flexrettype = node._type.flexrettype or false
+    ctx.flexrettype = node._type.flexrettype or nil
 
     -- Build the capture map and bind each boxed capture's box pointer once at
     -- body entry. By-value captures are read directly from _fn (immutable).
@@ -1917,7 +1917,7 @@ function codevardec(ctx, initvars, switch_get, switch_set, gvar_map, node)
             ]], {
                 I = c_integer_literal(node._upvalue),
                 SETSLOT = coder._dynamiccheckandset(
-                    ctx, node._lua_write_dynamic_plan, node._type,
+                    ctx, maybe3.get_checked(node._lua_write_dynamic_plan, "_lua_write_dynamic_plan"), node._type,
                     node._slot, "_value", node.loc,
                     "Lua module-variable write"),
                 BARRIER = types.is_gc(node._type)

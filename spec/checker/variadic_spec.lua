@@ -135,7 +135,7 @@ describe("variadic parameters (typechecker)", function()
             assert.truthy(ok, err)
             local lst = ast[1].block.stats[1].exps[1]
             assert.same("Ast.ExpInitList", lst._tag)
-            assert.same(types.Array(types.String(), false), lst._type)
+            assert.same(types.Array(types.String(), {tag="no"}), lst._type)
             -- the `...` field is kept as a marker for codegen
             local last = lst.fields[#lst.fields]
             assert.same("Ast.ExpDots", last.exp._tag)
@@ -149,7 +149,7 @@ describe("variadic parameters (typechecker)", function()
             ]])
             assert.truthy(ok, err)
             local lst = ast[1].block.stats[1].exps[1]
-            assert.same(types.Array(types.Integer(), false), lst._type)
+            assert.same(types.Array(types.Integer(), {tag="no"}), lst._type)
         end)
 
         it("rejects `...` in a map constructor", function()

@@ -111,12 +111,16 @@ function defs.tofalse()
     return false
 end
 
+function defs.tonil()
+    return nil
+end
+
 function defs.rettypeopt(_, x)
     if not x then
         -- No return annotation means a zero-return `function(...): ()`, as
         -- in Lua where `function f() end` returns nothing. `return` (bare) is
         -- the only legal return; `: nil` is the explicit one-`nil` form.
-        return {}, false
+        return {}, nil
     else
         return x.rettypes, x.flexrettype
     end
@@ -126,8 +130,8 @@ function defs.lambdarettypeopt(_, x)
     if not x then
         -- No return annotation on a lambda means "infer the return type" — a
         -- distinct case from an explicit `: ()` (which is a zero-return `{}`).
-        -- We return `false` so the checker can tell the two apart.
-        return false, false
+        -- We return `nil` so the checker can tell the two apart.
+        return nil, nil
     else
         return x.rettypes, x.flexrettype
     end
@@ -143,7 +147,7 @@ end
 
 function defs.opt(x)
     if x == "" then
-        return false
+        return nil
     else
         return x
     end
@@ -198,7 +202,7 @@ function defs.trywrap(pos, block, catchblock)
     if not catchblock then
         return block
     end
-    return ast.StatTry(pos, block, catchblock, false)
+    return ast.StatTry(pos, block, catchblock, nil)
 end
 
 function defs.deferstat(pos, stat)
@@ -218,7 +222,7 @@ local function lower_defers(stats)
             tail._defer_tail = true
             local trynode = ast.StatTry(stat.loc,
                 tail,
-                false,
+                nil,
                 ast.StatBlock(stat.stat.loc, { stat.stat }))
             trynode._defer_tail = true
             current[#current + 1] = trynode
@@ -266,7 +270,7 @@ function defs.finish_curly_type(pos, firsttype, tail)
     if tail.kind == "map" then
         return ast.TypeMap(pos, firsttype, tail.valuestype)
     else
-        return ast.TypeArray(pos, firsttype, false)
+        return ast.TypeArray(pos, firsttype, { tag = "no" })
     end
 end
 
@@ -576,7 +580,7 @@ function defs.recorddecl(pos, islocal, name_loc, name, typeparams, fields,
         ast.TopLevelRecord(pos, name, fields, typeparams), name_loc), end_loc)
     record.islocal = islocal
     local new = ast.TopLevelStatic(pos, name, "new", params,
-        { applied_owner_type(pos, name, typeparams) }, false, body, {})
+        { applied_owner_type(pos, name, typeparams) }, nil, body, {})
     new.islocal = islocal or has_local_field(fields)
     new._record_constructor = true
     return { _tag = "Parser.Declarations", nodes = {record, new} }
@@ -609,7 +613,7 @@ function defs.uniondecl(pos, islocal, name_loc, name, typeparams, variants,
             variant.name,
             params,
             { applied_owner_type(pos, name, typeparams) },
-            false,
+            nil,
             body,
             {})
         constructor.islocal = islocal or variant.islocal or false
@@ -629,7 +633,7 @@ function defs.typeddecl(pos, name, type)
 end
 
 function defs.casebinding(pos, name)
-    return with_name_loc(ast.Decl(pos, name, false, false, false), pos)
+    return with_name_loc(ast.Decl(pos, name, nil, false, false), pos)
 end
 
 function defs.casepart(pos, name)
@@ -651,7 +655,7 @@ function defs.constlocalvardecl(pos, decls, exps)
 end
 
 function defs.varargdecl(pos, type)
-    return ast.Decl(pos, false, type or false, false, false)
+    return ast.Decl(pos, nil, type or nil, false, false)
 end
 
 function defs.returnshape(rettypes, flexrettype)
@@ -659,7 +663,7 @@ function defs.returnshape(rettypes, flexrettype)
 end
 
 function defs.singlereturn(type)
-    return { rettypes = { type }, flexrettype = false }
+    return { rettypes = { type }, flexrettype = nil }
 end
 
 function defs.checklist(list, loc)
@@ -757,17 +761,17 @@ function defs.finish_program(nodes, init)
 end
 
 function defs.declaration(pos, name, option, typ)
-    typ = typ or false
+    typ = typ or nil
     if option and typ then typ = ast.TypeOption(typ.loc, typ) end
     return with_name_loc(ast.Decl(pos, name, typ, option and not typ, false), pos)
 end
 
 function defs.topvartype(typ, value)
-    return { type = typ, value = value or false }
+    return { type = typ, value = value or nil }
 end
 
 function defs.topvarvalue(value)
-    return { type = false, value = value }
+    return { type = nil, value = value }
 end
 
 function defs.topvar(pos, islocal, isconst, name_loc, name, tail)
@@ -802,15 +806,15 @@ function defs.foreignname(pos, ...)
 end
 
 function defs.foreign_return(typ)
-    return { typ }, false
+    return { typ }, nil
 end
 
 function defs.foreign_void(pos)
-    return { ast.TypeForeignName(pos, "void") }, false
+    return { ast.TypeForeignName(pos, "void") }, nil
 end
 
 function defs.foreign_array(pos, subtype, isconst)
-    local node = ast.TypeCArray(pos, subtype, false)
+    local node = ast.TypeCArray(pos, subtype, nil)
     node.const = isconst
     return node
 end
@@ -839,7 +843,7 @@ function defs.split_types(types)
         types[#types] = nil
         return types, last.type
     end
-    return types, false
+    return types, nil
 end
 
 function defs.functiontype(pos, argtypes, varargtype, rettypes, flexrettype)
@@ -847,11 +851,11 @@ function defs.functiontype(pos, argtypes, varargtype, rettypes, flexrettype)
 end
 
 function defs.foreignfunctiontype(pos, argtypes, varargtype, rettype)
-    return ast.TypeForeignFunction(pos, argtypes, { rettype }, varargtype, false)
+    return ast.TypeForeignFunction(pos, argtypes, { rettype }, varargtype, nil)
 end
 
 function defs.const_array(pos, maybe, subtype)
-    return ast.TypeArray(pos, subtype, maybe and "maybe" or true)
+    return ast.TypeArray(pos, subtype, { tag = maybe and "maybe" or "yes" })
 end
 
 function defs.qualified_tail(name_loc, name, typeargs)
@@ -959,7 +963,7 @@ function defs.call_suffix(pos, args, named)
 end
 
 function defs.dots_or_spread(pos, subject)
-    if subject then return ast.ExpSpread(pos, subject, false, false) end
+    if subject then return ast.ExpSpread(pos, subject, nil, nil) end
     return ast.ExpDots(pos)
 end
 
@@ -992,12 +996,12 @@ function defs.check_expression_list(list, loc)
 end
 
 function defs.bracket_subset_to_desc_tail(last)
-    return { kind = "subset", first = false, last = last }
+    return { kind = "subset", first = nil, last = last }
 end
 
 function defs.bracket_first_tail(first, tail)
     if tail then return { kind = "subset", first = first, last = tail.last } end
-    return { kind = "index", first = first, last = false }
+    return { kind = "index", first = first, last = nil }
 end
 
 function defs.bracket_finish(pos, desc)
@@ -1295,7 +1299,7 @@ local grammar_source = [[
     field <- &(ANYNAME ASSIGN) (P ANYNAME ASSIGN exp^ExpFieldList) -> makefield
              / (P LBRACKET exp^ExpExpSuf RBRACKET^RBracketExpSuf
                 ASSIGN^AssignField exp^ExpFieldList) -> makefield
-             / &expstart (P ('' -> tofalse) exp^ExpFieldList) -> makefield
+             / &expstart (P ('' -> tonil) exp^ExpFieldList) -> makefield
     fieldsep <- COMMA / SEMICOLON
 
     P <- {} -> get_loc

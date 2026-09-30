@@ -21,8 +21,9 @@ Ast.TopLevelVar(loc, islocal, isconst, decl, value)
 Ast.TopLevelInterface(loc, name, members, fields, methods, typeparams)
 ```
 
-`TypeArray.isconst` is exactly `false`, `true`, or `"maybe"`; declaration
-`isconst` flags remain exact booleans. `TopLevelVar.value == false` preserves
+`TypeArray.isconst` is exactly `{tag="no"}`, `{tag="yes"}`, or
+`{tag="maybe"}`; declaration `isconst` flags remain exact booleans.
+`TopLevelVar.value == nil` preserves
 an omitted module initializer until the checker validates and normalizes it.
 `TopLevelInterface.members` retains source order, while `fields` and `methods`
 are independent ordered projections. Interface fields reuse `Ast.Decl` and are
@@ -65,10 +66,12 @@ Array qualifier equality is part of type equality, consistency, guard and
 dynamic-plan identity, rewriting, substitution, erasure, stringification, and
 serialization. `types.tostring` renders mutable `{ T }`, const
 `const { T }`, and maybe-const `const? { T }`. The Array constructor,
-serializer, and compiled-interface validator accept exactly `false`, `true`,
-and `"maybe"` for this axis, including Arrays nested in public fields,
+serializer, and compiled-interface validator accept exactly `{tag="no"}`,
+`{tag="yes"}`, and `{tag="maybe"}` for this axis, including Arrays nested in public fields,
 callable signatures, Options, and containers. An absent or otherwise malformed
-qualifier is rejected rather than defaulted. Decoding a maybe-const descriptor
+qualifier is rejected rather than defaulted. Compare the `tag` field, never
+wrapper identity or truthiness. Serialized constructors retain the tagged table,
+for example `Array(Integer(),{tag="maybe"})`. Decoding a maybe-const descriptor
 does not introduce another runtime Array representation or change the provider
 ABI.
 
@@ -108,7 +111,7 @@ rejected closure and direct writes from incorrectly selecting mutable capture
 storage.
 
 Every initializer-less `TopLevelVar` requires an explicit nil-bearing type;
-the checker replaces `value == false` with a checked `ExpNil`. A const one also
+the checker replaces `value == nil` with a checked `ExpNil`. A const one also
 receives `_initializerless_const` and its owning module name. `checkfuncbody` marks the
 synthetic root initializer frame with its owner module. Assignment to that
 module slot is authorized only when this marked frame is the current function
@@ -155,7 +158,8 @@ are equal. Strict and dynamic plans carry `isconst` and choose the exact
 qualified tag. General assignment never changes the qualifier.
 
 `types.written_cast` has one cross-qualifier operation,
-`array_freeze`, for mutable `Array(S, false)` to const `Array(T, true)` when
+`array_freeze`, for mutable `Array(S, {tag="no"})` to const
+`Array(T, {tag="yes"})` when
 the element types are equal or gradually consistent. Its default mode is
 `copy`; const-to-mutable and other cross-qualifier relations are absent. The
 matching static `is` is marked allocation-free and returns the admission result

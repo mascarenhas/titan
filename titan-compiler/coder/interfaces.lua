@@ -87,7 +87,7 @@ function coder._interface_frozen_value_equal(actual, expected)
 end
 
 function coder._interface_adapter_is_gc(typ)
-    if typ == false or typ == nil then return false end
+    if typ == nil then return false end
     local normalized = types.normalize(typ)
     return normalized ~= nil and types.is_gc(normalized) or false
 end
@@ -122,8 +122,8 @@ function coder._validate_interface_frozen_guard(
     local tag = target._tag
     if tag == "Type.Array" then
         assert(guard.op == "array"
-               and guard.isconst == target.isconst
-               and type(guard.isconst) == "boolean"
+               and guard.isconst.tag == target.isconst.tag
+               and (types.valid_array_constness(guard.isconst) and guard.isconst.tag ~= "maybe")
                and guard.element
                and guard.key == nil and guard.value == nil
                and guard.inner == nil and guard.name == nil,
@@ -399,7 +399,7 @@ function coder._validate_interface_callable_actions(
                 }, target.params[index], source.varargtype)
         else
             argument("ignore_argument",
-                target.params[index], false, {
+                target.params[index], nil, {
                     expected_index = index,
                     source_kind = "interface_fixed",
                     destination_kind = "discard",
@@ -419,7 +419,7 @@ function coder._validate_interface_callable_actions(
                 destination_open = true,
             }, target.varargtype, source.varargtype)
     elseif source.varargtype then
-        argument("empty_tail", false, source.varargtype, {
+        argument("empty_tail", nil, source.varargtype, {
             source_kind = "empty",
             destination_kind = "concrete_tail",
             source_gc = false,
@@ -427,7 +427,7 @@ function coder._validate_interface_callable_actions(
             count = 0,
         })
     elseif target.varargtype then
-        argument("ignore_tail", target.varargtype, false, {
+        argument("ignore_tail", target.varargtype, nil, {
             expected_tail_consumed =
                 math.max(0, #source.params - #target.params),
             source_kind = "interface_tail",
@@ -520,7 +520,7 @@ function coder._validate_interface_callable_actions(
                     destination_open = true,
                 }, source.rettypes[index], target.flexrettype)
         else
-            result("hide_result", source.rettypes[index], false, {
+            result("hide_result", source.rettypes[index], nil, {
                 actual_index = index,
                 source_kind = "concrete_fixed",
                 destination_kind = "discard",
@@ -541,7 +541,7 @@ function coder._validate_interface_callable_actions(
                 destination_open = true,
             }, source.flexrettype, target.flexrettype)
     elseif source.flexrettype then
-        result("hide_flex", source.flexrettype, false, {
+        result("hide_flex", source.flexrettype, nil, {
             actual_flex_consumed =
                 math.max(0,
                     #target.rettypes - #source.rettypes),
@@ -552,7 +552,7 @@ function coder._validate_interface_callable_actions(
             effect = "discard_run",
         })
     elseif target.flexrettype then
-        result("end_flex", false, target.flexrettype, {
+        result("end_flex", nil, target.flexrettype, {
             source_kind = "empty",
             destination_kind = "interface_flex",
             source_gc = false,
@@ -577,11 +577,11 @@ function coder._validate_callable_strict_slot(
            and types.equals(slot.type, normalized)
            and slot.guard ~= nil,
         use .. " has a mismatched boundary slot")
-    if slot.guard ~= false then
+    local guard = maybe3.get_checked(slot.guard, use .. " guard")
+    if guard then
         coder._validate_interface_frozen_guard(
-            slot.guard, normalized, use .. " guard", {})
-        coder._checked_gradual_guard(
-            slot.guard, normalized, use .. " guard")
+            guard, normalized, use .. " guard", {})
+        coder._checked_gradual_guard(guard, normalized, use .. " guard")
     end
 end
 
@@ -607,7 +607,7 @@ function coder._validate_callable_strict_relay(relay, target, use)
             relay.vararg, target.varargtype, "vararg",
             use .. " variadic boundary")
     else
-        assert(relay.vararg == false,
+        assert(relay.vararg == nil,
             use .. " has an unexpected variadic boundary")
     end
     assert(coder._interface_dense_list(
@@ -625,7 +625,7 @@ function coder._validate_callable_strict_relay(relay, target, use)
             relay.flexible_result, target.flexrettype,
             "flexible_result", use .. " flexible-result boundary")
     else
-        assert(relay.flexible_result == false,
+        assert(relay.flexible_result == nil,
             use .. " has an unexpected flexible-result boundary")
     end
 end
@@ -647,9 +647,7 @@ function coder._validate_callable_adapter_demand(
     local surplus = math.max(
         0, #source.rettypes - #target.rettypes)
     local source_has_flex = source.flexrettype ~= nil
-        and source.flexrettype ~= false
     local target_has_flex = target.flexrettype ~= nil
-        and target.flexrettype ~= false
     local expected = {
         kind = "callable_flexible_result_demand",
         abi_cap = 200,
@@ -663,9 +661,9 @@ function coder._validate_callable_adapter_demand(
             or (target_has_flex and "forward_target_demand"
                 or "fixed_prefix"),
         target_demand_parameter = target_has_flex
-            and "_flexwant" or false,
+            and "_flexwant" or nil,
         unlimited_demand = target_has_flex
-            and "LUA_MULTRET" or false,
+            and "LUA_MULTRET" or nil,
     }
     assert(coder._interface_frozen_value_equal(demand, expected),
         use .. " is not canonical")
@@ -871,7 +869,6 @@ end
 function coder._validate_interface_adapter_range(
         range, id, phase, side, element_type, lifetime, traced, use)
     local present = element_type ~= nil
-        and element_type ~= false
     local gc_bearing = present
         and coder._interface_adapter_is_gc(element_type) or false
     traced = gc_bearing and traced == true
@@ -881,12 +878,12 @@ function coder._validate_interface_adapter_range(
         phase = phase,
         side = side,
         present = present,
-        element_type = element_type or false,
+        element_type = element_type or nil,
         gc_bearing = gc_bearing,
         traced = traced,
-        storage = traced and "parallel_lua_stack_range" or false,
-        dynamic_start = present and "run_start" or false,
-        dynamic_count = present and "run_count" or false,
+        storage = traced and "parallel_lua_stack_range" or nil,
+        dynamic_start = present and "run_start" or nil,
+        dynamic_count = present and "run_count" or nil,
         retain_until = lifetime,
         raw_storage_is_root = false,
     }

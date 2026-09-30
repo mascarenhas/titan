@@ -227,10 +227,10 @@ describe("declared project manifests", function()
 
     it("projects deep recursive declaration graphs cooperatively without the Lua stack", function()
         local entry = load_module("deep_declaration", "function answer(): integer return 42 end")
-        local first = types.Array(types.Integer(), false)
+        local first = types.Array(types.Integer(), {tag="no"})
         local tail = first
         for _ = 1, 6000 do
-            tail.elem = types.Array(types.Integer(), false)
+            tail.elem = types.Array(types.Integer(), {tag="no"})
             tail = tail.elem
         end
         tail.elem = first
@@ -556,6 +556,29 @@ describe("declared project manifests", function()
         assert.equal(retained.provider, driver.imported.provider)
         assert.equal(retained.provider.ffi_header_descriptor.digest,
             retained.consumer.ffi_header_descriptor.dependencies[1].digest)
+    end)
+
+    it("rejects legacy false C extents while preserving absent extents", function()
+        local entry = load_module("optional_extents", "function answer(): integer return 42 end")
+        local array = types.CArray(types.CInteger("int", true, 3, 32), nil, {})
+        local field = types.CField(nil, "values", array, nil, false)
+        local owner = types.CStruct(nil, nil, nil, { field }, true, false)
+        field.owner = owner
+        entry.type.members.answer.type.params = { owner }
+        local payload = assert(driver.encode_project_entry(entry))
+        local restored = assert(driver.decode_project_entry(payload))
+        local restored_field = restored.type.members.answer.type.params[1].fields[1]
+        assert.is_nil(restored_field.bitfield)
+        assert.is_nil(restored_field.type.len)
+        for _, key in ipairs({ "len", "bitfield" }) do
+            local envelope = assert(cpp.decode_graph(payload))
+            local bad_field = envelope.entry.type.members.answer.type.params[1].fields[1]
+            if key == "len" then bad_field.type.len = false
+            else bad_field.bitfield = false end
+            local rejected, err = driver.decode_project_entry(assert(cpp.encode_graph(envelope)))
+            assert.is_nil(rejected)
+            assert.matches("expected C extent expression", err, 1, true)
+        end
     end)
 
     it("rejects incompatible project graph and ABI envelopes", function()

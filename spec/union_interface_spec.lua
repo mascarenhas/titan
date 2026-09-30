@@ -10,13 +10,13 @@ local function canonical_module()
     }, 2)
     local union = types.Union(fqtn, {quit, write}, {
         quit = types.StaticMethod(
-            fqtn, "quit", {}, {nominal}, false, false, {}),
+            fqtn, "quit", {}, {nominal}, nil, nil, {}),
         write = types.StaticMethod(
             fqtn, "write", {types.String()}, {nominal},
-            false, false, {"value"}),
+            nil, nil, {"value"}),
     }, {}, 3)
     return types.Module("sample", {
-        types.ModuleMember("sample", "Message", union, false),
+        types.ModuleMember("sample", "Message", union, nil),
     }), union
 end
 
@@ -38,13 +38,13 @@ local function canonical_record_module()
         fqtn, "second", types.String(), 1, false)
     local constructor = types.StaticMethod(
         fqtn, "new", {types.Integer(), types.String()}, {nominal},
-        false, false, {"first", "second"})
+        nil, nil, {"first", "second"})
     local inspect = types.StaticMethod(
         fqtn, "inspect", {}, {},
-        false, false, false)
+        nil, nil, nil)
     local show = types.Method(
         fqtn, "show", {}, {},
-        false, false, false)
+        nil, nil, nil)
     local record = types.Record(
         fqtn, {first, second}, {
             new = constructor,
@@ -54,7 +54,7 @@ local function canonical_record_module()
         }, 2)
     return types.Module("sample", {
         types.ModuleMember(
-            "sample", "Box", record, false),
+            "sample", "Box", record, nil),
     }), record
 end
 
@@ -63,10 +63,10 @@ local function canonical_interface_module()
     local read = types.Method(
         fqtn, "read", {types.Integer()},
         {types.Option(types.String())},
-        false, false, {"count"})
+        nil, nil, {"count"})
     local close = types.Method(
         fqtn, "close", {}, {},
-        false, false, {})
+        nil, nil, {})
     local interface = types.Interface(fqtn, {}, {read, close})
     return types.Module("sample", {}, {
         Stream = interface,
@@ -75,16 +75,16 @@ end
 
 local function canonical_generic_module()
     local show_scope = types.GenericScope(
-        "sample", "sample.Show", false, "owner", "interface")
+        "sample", "sample.Show", nil, "owner", "interface")
     local show_parameter = types.Parameter(
-        show_scope, 1, "E", false)
+        show_scope, 1, "E", nil)
     local show = types.Interface("sample.Show", {}, {
         types.Method("sample.Show", "show", {show_parameter},
-            {types.String()}, false, false, {"value"}),
-    }, show_scope, {types.TypeParameter("E", false)})
+            {types.String()}, nil, nil, {"value"}),
+    }, show_scope, {types.TypeParameter("E", nil)})
 
     local box_scope = types.GenericScope(
-        "sample", "sample.Box", false, "owner", "record")
+        "sample", "sample.Box", nil, "owner", "record")
     local erased_show = types.Nominal(
         "sample.Show", {types.String()})
     local box_parameter = types.Parameter(
@@ -101,7 +101,7 @@ local function canonical_generic_module()
             erased_show,
         }))
     local method = types.Method("sample.Box", "convert",
-        {method_parameter}, {box_nominal}, false, false, {"value"},
+        {method_parameter}, {box_nominal}, nil, nil, {"value"},
         method_scope, {
             types.TypeParameter("U",
                 types.Nominal("sample.Show", {box_parameter})),
@@ -110,7 +110,7 @@ local function canonical_generic_module()
         types.Field("sample.Box", "item", box_parameter, 0, false),
     }, {
         new = types.StaticMethod("sample.Box", "new", {box_parameter},
-            {box_nominal}, false, false, {"item"}),
+            {box_nominal}, nil, nil, {"item"}),
     }, {
         convert = method,
     }, 1, box_scope, {
@@ -118,19 +118,19 @@ local function canonical_generic_module()
     })
 
     local function_scope = types.GenericScope(
-        "sample", false, "id", "function", "function")
+        "sample", nil, "id", "function", "function")
     local function_parameter = types.Parameter(
-        function_scope, 1, "V", false)
+        function_scope, 1, "V", nil)
     local scheme = types.FunctionScheme(function_scope, {
-        types.TypeParameter("V", false),
+        types.TypeParameter("V", nil),
     }, types.Function({function_parameter}, {function_parameter},
-        false, false, false))
+        false, nil, nil))
     local alias = types.GenericAlias(
-        "sample", "Crate", false, "sample.Box", false,
+        "sample", "Crate", false, "sample.Box", nil,
         box_scope, {types.TypeParameter("T", box_constraint)})
 
     local module = types.Module("sample", {
-        types.ModuleMember("sample", "Box", box, false),
+        types.ModuleMember("sample", "Box", box, nil),
         types.ModuleMember("sample", "id", scheme, {"value"}),
     }, {
         Crate = alias,
@@ -219,7 +219,7 @@ describe("union module interfaces", function()
             end},
             {"is not valid in a value%-facing type graph", function(union)
                 union.variants.write.parts[2].type = types.Array(
-                    types.Field(union.name, "hidden", types.Integer(), 0, false), false)
+                    types.Field(union.name, "hidden", types.Integer(), 0, false), {tag="no"})
             end},
             {"union variant parts have an invalid schema", function(union)
                 union.variants.write.parts.extra = union.variants.write.parts[2]
@@ -238,7 +238,7 @@ describe("union module interfaces", function()
                 union.functions.write.paramnames[2] = "other"
             end},
             {"union constructor 'quit' does not match its variant", function(union)
-                union.functions.quit.paramnames = false
+                union.functions.quit.paramnames = nil
             end},
         }
         for index, case in ipairs(cases) do
@@ -254,7 +254,7 @@ describe("union module interfaces", function()
         local escaped = types.Variant(
             "sample.Message", "quit", {}, 0)
         local module = types.Module("sample", {
-            types.ModuleMember("sample", "quit", escaped, false),
+            types.ModuleMember("sample", "quit", escaped, nil),
         })
         local ok, err = driver.validate_module_interface(module, "sample")
         assert.falsy(ok)
@@ -332,10 +332,10 @@ describe("union module interfaces", function()
         local wrappers = {
             types.Field(fqtn, "field", escaped(), 0, false),
             types.Method(fqtn, "method", {escaped()}, {},
-                false, false, {"value"}),
+                nil, nil, {"value"}),
             types.StaticMethod(fqtn, "static", {escaped()}, {},
-                false, false, {"value"}),
-            types.ModuleMember("sample", "nested", escaped(), false),
+                nil, nil, {"value"}),
+            types.ModuleMember("sample", "nested", escaped(), nil),
             types.ModuleVariable("sample", "nested", escaped(), false),
         }
 
@@ -343,7 +343,7 @@ describe("union module interfaces", function()
             local module = types.Module("sample", {
                 types.ModuleMember(
                     "sample", "bad" .. index,
-                    types.Array(wrapper, false), false),
+                    types.Array(wrapper, {tag="no"}), nil),
             })
             local ok, err =
                 driver.validate_module_interface(module, "sample")
@@ -357,7 +357,7 @@ describe("union module interfaces", function()
         local module, union = canonical_module()
         union.functions.inspect = types.StaticMethod(
             union.name, "inspect", {types.Integer()}, {},
-            false, false, {"value", "extra"})
+            nil, nil, {"value", "extra"})
         local ok, err = driver.validate_module_interface(module, "sample")
         assert.falsy(ok)
         assert.match("callable member has an invalid schema", err)
@@ -365,7 +365,7 @@ describe("union module interfaces", function()
         module, union = canonical_module()
         union.methods.inspect = types.Method(
             union.name, "inspect", {types.Integer(), types.Integer()}, {},
-            false, false, {"value", "value"})
+            nil, nil, {"value", "value"})
         ok, err = driver.validate_module_interface(module, "sample")
         assert.falsy(ok)
         assert.match("callable member has an invalid schema", err)
@@ -380,7 +380,7 @@ describe("union module interfaces", function()
 
         module = types.Module("sample", {
             types.ModuleMember(
-                "sample", "$line", types.Integer(), false),
+                "sample", "$line", types.Integer(), nil),
         })
         ok, err = driver.validate_module_interface(module, "sample")
         assert.falsy(ok)
@@ -397,16 +397,16 @@ describe("union module interfaces", function()
     it("rejects collisions in a decoded union member namespace", function()
         local module, union = canonical_module()
         union.methods.quit = types.Method(
-            union.name, "quit", {}, {}, false, false, {})
+            union.name, "quit", {}, {}, nil, nil, {})
         local ok, err = driver.validate_module_interface(module, "sample")
         assert.falsy(ok)
         assert.match("nominal function and method maps collide", err)
 
         module, union = canonical_module()
         union.functions.inspect = types.StaticMethod(
-            union.name, "inspect", {}, {}, false, false, {})
+            union.name, "inspect", {}, {}, nil, nil, {})
         union.methods.inspect = types.Method(
-            union.name, "inspect", {}, {}, false, false, {})
+            union.name, "inspect", {}, {}, nil, nil, {})
         ok, err = driver.validate_module_interface(module, "sample")
         assert.falsy(ok)
         assert.match("nominal function and method maps collide", err)
@@ -414,7 +414,7 @@ describe("union module interfaces", function()
         module, union = canonical_module()
         union.functions.quit = nil
         union.methods.quit = types.Method(
-            union.name, "quit", {}, {}, false, false, false)
+            union.name, "quit", {}, {}, nil, nil, nil)
         ok, err = driver.validate_module_interface(module, "sample")
         assert.falsy(ok)
         assert.match("union variant and method maps collide", err)
@@ -439,7 +439,7 @@ describe("union module interfaces", function()
                 mutate = function(union)
                     union.methods.alias = types.Method(
                         union.name, "different", {}, {},
-                        false, false, false)
+                        nil, nil, nil)
                 end,
             },
             {
@@ -492,15 +492,15 @@ describe("union module interfaces", function()
                 pattern = "function type has an invalid schema",
                 member = types.ModuleMember(
                     "sample", "bad_function",
-                    types.Function({}, {}, "not boolean", false, false),
-                    false),
+                    types.Function({}, {}, "not boolean", nil, nil),
+                    nil),
             },
             {
                 pattern = "function type has an invalid schema",
                 member = types.ModuleMember(
                     "sample", "nonfalse_reserved_function",
-                    types.Function({}, {}, true, false, false),
-                    false),
+                    types.Function({}, {}, true, nil, nil),
+                    nil),
             },
             {
                 pattern = "module function 'bad_names' has invalid "
@@ -508,7 +508,7 @@ describe("union module interfaces", function()
                 member = types.ModuleMember(
                     "sample", "bad_names",
                     types.Function(
-                        {types.Integer()}, {}, false, false, false),
+                        {types.Integer()}, {}, false, nil, nil),
                     {"value", "extra"}),
             },
             {
@@ -547,7 +547,7 @@ describe("union module interfaces", function()
 
         module = types.Module("sample", {
             types.ModuleMember(
-                "sample", "ordinary", types.Integer(), false),
+                "sample", "ordinary", types.Integer(), nil),
         })
         ok, err = driver.validate_module_interface(module, "sample")
         assert.falsy(ok)
@@ -578,7 +578,7 @@ describe("union module interfaces", function()
         local record = types.Record(record_name, {item}, {
             new = types.StaticMethod(record_name, "new", {
                 types.Integer(),
-            }, {record_nominal}, false, false, {"item"}),
+            }, {record_nominal}, nil, nil, {"item"}),
         }, {}, 1)
         local interface_name = "sample.BoxView"
         local interface = types.Interface(interface_name, {
@@ -586,9 +586,9 @@ describe("union module interfaces", function()
                 interface_name, "item", types.Integer(), 0, true),
         }, {})
         local module = types.Module("sample", {
-            types.ModuleMember("sample", "Box", record, false),
+            types.ModuleMember("sample", "Box", record, nil),
             types.ModuleVariable("sample", "frozen",
-                types.Array(types.String(), true), true),
+                types.Array(types.String(), {tag="yes"}), true),
         }, {
             BoxView = interface,
         })
@@ -600,7 +600,7 @@ describe("union module interfaces", function()
         assert.truthy(rebuilt, decode_error)
         assert.is_true(rebuilt.members.Box.type.fields[1].isconst)
         assert.is_true(rebuilt.members.frozen.isconst)
-        assert.is_true(rebuilt.members.frozen.type.isconst)
+        assert.equal("yes", rebuilt.members.frozen.type.isconst.tag)
         assert.is_true(rebuilt.type_members.BoxView.fields.item.isconst)
     end)
 
@@ -625,7 +625,7 @@ describe("union module interfaces", function()
                 make = function()
                     return types.Module("sample", {
                         types.ModuleVariable("sample", "items",
-                            types.Array(types.Integer(), false), false),
+                            types.Array(types.Integer(), {tag="no"}), false),
                     })
                 end,
                 mutate = function(module)
@@ -689,7 +689,7 @@ describe("union module interfaces", function()
                 decorate = function(_, union)
                     union.methods.inspect = types.Method(
                         union.name, "inspect", {}, {},
-                        false, false, false)
+                        nil, nil, nil)
                     union.methods.inspect.islocal = true
                 end,
             },
@@ -793,7 +793,7 @@ describe("union module interfaces", function()
         local module, record = canonical_record_module()
         record.methods.first = types.Method(
             record.name, "first", {}, {},
-            false, false, {})
+            nil, nil, {})
         local ok, err =
             driver.validate_module_interface(module, "sample")
         assert.falsy(ok)
@@ -802,7 +802,7 @@ describe("union module interfaces", function()
         module, record = canonical_record_module()
         record.functions.second = types.StaticMethod(
             record.name, "second", {}, {},
-            false, false, {})
+            nil, nil, {})
         ok, err = driver.validate_module_interface(module, "sample")
         assert.falsy(ok)
         assert.match(
@@ -818,7 +818,7 @@ describe("union module interfaces", function()
             fqtn, {shown}, {}, {}, 2)
         local module = types.Module("sample", {
             types.ModuleMember(
-                "sample", "Partial", record, false),
+                "sample", "Partial", record, nil),
         })
         local ok, err =
             driver.validate_module_interface(module, "sample")
@@ -906,7 +906,7 @@ describe("union module interfaces", function()
                     mutate = function(interface)
                         local method = types.Method(
                             interface.name, "name", {}, {},
-                            false, false, {})
+                            nil, nil, {})
                         interface.methods[1] = method
                         interface.methods.name = method
                     end,
@@ -1020,7 +1020,7 @@ describe("union module interfaces", function()
             local _, interface = canonical_interface_module()
             local module = types.Module("sample", {
                 types.ModuleMember(
-                    "sample", "bad", interface, false),
+                    "sample", "bad", interface, nil),
             })
             local ok, err =
                 driver.validate_module_interface(module, "sample")
@@ -1031,7 +1031,7 @@ describe("union module interfaces", function()
 
             _, interface = canonical_interface_module()
             module = types.Module("sample", {}, {
-                Alias = types.Array(interface, false),
+                Alias = types.Array(interface, {tag="no"}),
             })
             ok, err = driver.validate_module_interface(module, "sample")
             assert.falsy(ok)
@@ -1159,9 +1159,9 @@ describe("generic compiled module metadata", function()
                 pattern = "free scope reference",
                 mutate = function(parts)
                     parts.box.fields[1].type = types.Parameter(
-                        types.GenericScope("sample", false, "other",
+                        types.GenericScope("sample", nil, "other",
                             "function", "function"),
-                        1, "T", false)
+                        1, "T", nil)
                 end,
             },
             {
@@ -1254,8 +1254,8 @@ describe("generic compiled module metadata", function()
     it("rejects noncanonical and cyclic GenericAlias projections", function()
         local module, parts = canonical_generic_module()
         parts.alias.target_scope = types.GenericScope(
-            "sample", "sample.Box", false, "owner", "union")
-        parts.alias.typeparams = {types.TypeParameter("T", false)}
+            "sample", "sample.Box", nil, "owner", "union")
+        parts.alias.typeparams = {types.TypeParameter("T", nil)}
         local ok, err = driver.validate_module_interface(module, "sample")
         assert.falsy(ok)
         assert.match("projection does not match its target owner", err)

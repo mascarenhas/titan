@@ -787,11 +787,11 @@ describe("unions (typechecker)", function()
             box_name, "item", types.Integer(), 0, false)
         local box_constructor = types.StaticMethod(
             box_name, "new", {types.Integer()}, {box_nominal},
-            false, false, {"item"})
+            nil, nil, {"item"})
         local box = types.Record(
             box_name, {field}, {new = box_constructor}, {}, 1)
         local box_module = types.Module(box_module_name, {
-            types.ModuleMember(box_module_name, "Box", box, false),
+            types.ModuleMember(box_module_name, "Box", box, nil),
         })
 
         local provider_name = "union_map_provider"
@@ -801,11 +801,11 @@ describe("unions (typechecker)", function()
             union_name, "values", {types.Field(union_name, "value", payload, 1, false)}, 0)
         local constructor = types.StaticMethod(
             union_name, "values", {payload}, {types.Nominal(union_name)},
-            false, false, {"value"})
+            nil, nil, {"value"})
         local union = types.Union(
             union_name, {variant}, {values = constructor}, {}, 1)
         local provider = types.Module(provider_name, {
-            types.ModuleMember(provider_name, "Payload", union, false),
+            types.ModuleMember(provider_name, "Payload", union, nil),
         })
 
         local requested_box_owner = false

@@ -488,7 +488,7 @@ function is_foreign_ordinary_identifier(name, ftype)
 end
 
 function copy_foreign_paramnames(names)
-    if names == false then return false end
+    if names == nil then return nil end
     local out = {}
     for _, name in ipairs(names) do
         out[#out + 1] = name
@@ -612,8 +612,8 @@ function call_signature(callable)
             callable = callable,
             params = callable.params,
             rettypes = ret._tag == "Type.CVoid" and {} or { callable.ret },
-            varargtype = false,
-            flexrettype = false,
+            varargtype = nil,
+            flexrettype = nil,
             c_vararg = callable.vararg and true or false,
         }
     elseif tag == "Checker.CPseudoNew" then
@@ -623,8 +623,8 @@ function call_signature(callable)
             callable = callable,
             params = callable.params,
             rettypes = callable.rettypes,
-            varargtype = false,
-            flexrettype = false,
+            varargtype = nil,
+            flexrettype = nil,
             c_vararg = false,
             description = callable.name == "new_array"
                 and "C allocation pseudo-function (integer)"
@@ -642,8 +642,8 @@ function call_signature(callable)
             callable = callable,
             params = callable.params,
             rettypes = callable.rettypes,
-            varargtype = callable.varargtype or false,
-            flexrettype = callable.flexrettype or false,
+            varargtype = callable.varargtype or nil,
+            flexrettype = callable.flexrettype or nil,
             c_vararg = false,
         }
     end
@@ -704,7 +704,7 @@ function incomplete_c_object_error(typ, st, subject, seen)
                 types.tostring(typ))
         end
     elseif typ._tag == "Type.CArray" then
-        if typ.len == nil or typ.len == false or typ.len == "" then
+        if typ.len == nil or typ.len == "" then
             return string.format(
                 "%s requires a complete C array type, but '%s' has no "
                 .. "known extent",
@@ -1237,8 +1237,8 @@ function checker._allocation_integer_literal(exp, st)
     while exp and (exp._tag == "Ast.ExpCast"
                    or exp._tag == "Ast.ExpAdjust") do
         if exp._tag == "Ast.ExpCast" and not exp._implicit_coercion then
-            local identity = exp._written_cast
-                and exp._written_cast.op == "identity"
+            local identity = exp._written_cast.tag == "just"
+                and maybe3.get_checked(exp._written_cast, "written cast").op == "identity"
             local integer_target = exp.target and
                 (exp.target._tag == "Type.Integer"
                  or exp.target._tag == "Ast.TypeInteger")

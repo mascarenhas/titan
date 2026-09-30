@@ -650,6 +650,52 @@ local function variadic_echo(head: integer, ...: string): (integer, ...: string)
   return head, ...
 end
 
+local function empty_signature()
+end
+
+function test_empty_callable_metadata_has_no_fixed_parameters_results_or_tails(
+    _context: test.Context)
+  local descriptor = function_type(empty_signature)
+  test.assert(#descriptor.param_descriptors == 0)
+  test.assert(#descriptor.return_descriptors == 0,
+              "zero results became an optional nil result")
+  test.assert(descriptor.vararg_descriptor == nil and
+              descriptor.flexret_descriptor == nil,
+              "absent callable tails were not nil")
+end
+
+local function optional_boolean_echo(flag: boolean?): boolean?
+  return flag
+end
+
+function test_nullable_boolean_callable_metadata_preserves_false(
+    _context: test.Context)
+  local descriptor = function_type(optional_boolean_echo)
+  test.assert(#descriptor.param_descriptors == 1 and
+              #descriptor.return_descriptors == 1)
+  local positions = {descriptor.param_descriptors[1], descriptor.return_descriptors[1]}
+  for index = 1, #positions do
+    case positions[index]
+    when is_option(base) then
+      case base
+      when is_boolean() then
+      else raise "expected a boolean option payload"
+      end
+    else raise "expected an optional boolean descriptor"
+    end
+  end
+  test.assert(descriptor.vararg_descriptor == nil and
+              descriptor.flexret_descriptor == nil)
+  case reflect.inspect(optional_boolean_echo)
+  when is_titan_function{callable = value} then
+    local present: value = callable(false)
+    local absent: value = callable(nil)
+    test.assert(present == false and absent == nil,
+                "reflected optional boolean conflated false with absence")
+  else raise "expected a reflected Titan function"
+  end
+end
+
 function test_callable_descriptors_and_invocation(_context: test.Context)
   local desc = required_record("reflect.tests.CallableRecord")
   test.assert(#desc.methods == 1)
@@ -665,6 +711,10 @@ function test_callable_descriptors_and_invocation(_context: test.Context)
   test.assert(desc.statics[1].name == "alpha")
   test.assert(desc.statics[2].name == "new")
   test.assert(desc.statics[3].name == "zero")
+  test.assert(#desc.statics[3].param_names == 0 and
+              #desc.statics[3].param_descriptors == 0 and
+              desc.statics[3].vararg_descriptor == nil and
+              desc.statics[3].flexret_descriptor == nil)
   local alpha: value = desc.statics[1].callable(8)
   test.assert(alpha as integer == 18)
   local made: value = desc.statics[3].callable()
@@ -1014,7 +1064,7 @@ function test_owned_struct_describes_public_c_fields(_context: test.Context)
       test.assert(aggregate.fields[1].name == "quot")
       test.assert(aggregate.fields[2].name == "rem")
       test.assert(not aggregate.fields[1].is_flexible_array)
-      test.assert(aggregate.fields[1].bitfield == false)
+      test.assert(aggregate.fields[1].bitfield == nil)
       case without_typedef(aggregate.fields[1].type)
       when is_foreign_integer{scalar_is_signed = is_signed, scalar_bits = bits} then
         test.assert(scalar_is_signed)

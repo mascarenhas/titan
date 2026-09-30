@@ -197,6 +197,68 @@ describe("Titan parser", function()
 
     assert:set_parameter("TableFormatLevel", -1)
 
+    it("uses nil for absent syntax without losing false values or list positions", function()
+        local tree = assert_parses_successfuly([[
+            local enabled = false
+            local pending: integer?
+            function f<|T|>(first: integer, ...: string)
+                local inferred = 1
+                for i = 1, 2 do end
+                if enabled then end
+                local values = {false, 2}
+            end
+            local implicit = function(x, ...) end
+            local explicit = function(): () end
+        ]])
+        assert.is_nil(tree[1].decl.type)
+        assert.is_false(tree[1].value.value)
+        assert.is_nil(tree[2].value)
+        local declaration = tree[3]
+        assert.is_nil(declaration.typeparams[1].constraint)
+        assert.equal(2, #declaration.params)
+        assert.equal("first", declaration.params[1].name)
+        assert.is_nil(declaration.params[2].name)
+        assert.equal("Ast.TypeString", declaration.params[2].type._tag)
+        assert.is_nil(declaration.flexrettype)
+        local stats = declaration.block.stats
+        assert.is_nil(stats[1].decls[1].type)
+        assert.is_nil(stats[2].inc)
+        assert.is_nil(stats[3].elsestat)
+        assert.equal(2, #stats[4].exps[1].fields)
+        assert.is_nil(stats[4].exps[1].fields[1].name)
+        assert.is_false(stats[4].exps[1].fields[1].exp.value)
+        local implicit, explicit = tree[4].value, tree[5].value
+        assert.equal(2, #implicit.params)
+        assert.is_nil(implicit.params[2].name)
+        assert.is_nil(implicit.params[2].type)
+        assert.is_nil(implicit.rettypes)
+        assert.is_nil(implicit.flexrettype)
+        assert.same({}, explicit.rettypes)
+        assert.is_nil(explicit.flexrettype)
+    end)
+
+    it("initializes computed plans independently as unknown", function()
+        local tree = assert_parses_successfuly([[
+            local count = 0
+            function f(x: value): boolean
+                local cast = x as integer
+                local predicate = x is integer
+                return cast == 1
+            end
+        ]])
+        assert.same({tag="unknown"}, tree[1]._lua_write_dynamic_plan)
+        local declaration = tree[2]
+        assert.same({tag="unknown"}, declaration._lua_vararg_dynamic_plan)
+        assert.same({tag="unknown"}, declaration._strict_vararg_guard_plan)
+        assert.same({tag="unknown"}, declaration.params[1]._dynamic_plan)
+        local stats = declaration.block.stats
+        assert.same({tag="unknown"}, stats[1].exps[1]._written_cast)
+        assert.same({tag="unknown"}, stats[2].exps[1]._written_cast)
+        assert.same({tag="unknown"}, stats[3].exps[1]._comparison)
+        assert.is_false(rawequal(stats[1].exps[1]._written_cast,
+            stats[2].exps[1]._written_cast))
+    end)
+
     it("can parse programs starting with whitespace or comments", function()
         -- (This is easy to get wrong in hand-written LPeg grammars)
         local ast = assert_parses_successfuly("--hello\n--bla\n  ")
@@ -292,11 +354,11 @@ describe("Titan parser", function()
         ]], {
             { _tag = "Ast.TopLevelVar",
                 islocal = true,
-                decl = { name = "x", type = false, option = false } },
+                decl = { name = "x", type = nil, option = false } },
             { _tag = "Ast.StatBlock",
                 stats = {
                     { _tag = "Ast.StatDecl",
-                        decls = { { name = "y", type = false, option = false } } },
+                        decls = { { name = "y", type = nil, option = false } } },
                     { _tag = "Ast.StatReturn", exps = {} },
                 } },
         })
@@ -471,11 +533,11 @@ end
             local const hidden: value
         ]])
         assert_is_subset({
-            {islocal=true, decl={name="x",type=false,option=false}},
-            {islocal=false, decl={name="y",type=false}},
+            {islocal=true, decl={name="x",type=nil,option=false}},
+            {islocal=false, decl={name="y",type=nil}},
             {decl={name="maybe",type={_tag="Ast.TypeOption"}}},
-            {isconst=true,value=false,decl={name="later"}},
-            {islocal=true,isconst=true,value=false,decl={name="hidden"}},
+            {isconst=true,value=nil,decl={name="later"}},
+            {islocal=true,isconst=true,value=nil,decl={name="hidden"}},
         }, program)
         for _,source in ipairs({"x", "local x", "const x", "local x? = 1"}) do
             assert.falsy(parser.parse("invalid.titan",source))
@@ -511,13 +573,13 @@ end
                     isconst = true,
                     type = { _tag = "Ast.TypeOption" },
                 },
-                value = false,
+                value = nil,
             },
             {
                 _tag = "Ast.TopLevelVar",
                 islocal = false,
                 isconst = true,
-                decl = { name = "inferred", isconst = true, type = false },
+                decl = { name = "inferred", isconst = true, type = nil },
                 value = { _tag = "Ast.ExpVar" },
             },
         }, program)
@@ -526,12 +588,12 @@ end
     it("can parse local var declarations", function()
         assert_statements_ast([[ local x=17 ]], {
             { _tag = "Ast.StatDecl",
-                decls = { { name = "x", type = false, option = false } } }
+                decls = { { name = "x", type = nil, option = false } } }
         })
 
         assert_statements_ast([[ local x?=17 ]], {
             { _tag = "Ast.StatDecl",
-                decls = { { name = "x", type = false, option = true } } }
+                decls = { { name = "x", type = nil, option = true } } }
         })
 
         assert_statements_ast([[ local x: integer=17 ]], {
@@ -563,7 +625,7 @@ end
             {
                 _tag = "Ast.StatDecl",
                 decls = {
-                    { name = "x", isconst = true, type = false },
+                    { name = "x", isconst = true, type = nil },
                     { name = "y", isconst = true,
                         type = { _tag = "Ast.TypeInteger" } },
                 },
@@ -596,10 +658,10 @@ end
             end
         ]])
         local stats=program[1].block.stats
-        assert.is_false(stats[1].decls[1].type)
+        assert.is_nil(stats[1].decls[1].type)
         assert.equal("Ast.ExpForeignType",stats[1].exps[1].exp.var.exp._tag)
         assert.equal("Ast.TypeCArray",stats[2].decls[1].type._tag)
-        assert.is_false(stats[2].decls[1].type.length)
+        assert.is_nil(stats[2].decls[1].type.length)
         assert.equal("Ast.TypeOwned",stats[3].decls[1].type._tag)
     end)
 
@@ -641,7 +703,7 @@ end
             "foreign type Items = Item[3]",
             "record R item: foreign Item[3] end",
         }) do assert_program_syntax_error(source,"RBracketCArray") end
-        assert_type_ast("foreign Item[]",{_tag="Ast.TypeCArray",length=false,
+        assert_type_ast("foreign Item[]",{_tag="Ast.TypeCArray",length=nil,
             base={_tag="Ast.TypeForeignName",name="Item"}})
     end)
 
@@ -802,9 +864,9 @@ end
             end
         ]], {
             { _tag = "Ast.TopLevelFunc", name = "foo", rettypes = {},
-              flexrettype = false },
+              flexrettype = nil },
             { _tag = "Ast.TopLevelFunc", name = "bar", rettypes = {},
-              flexrettype = false },
+              flexrettype = nil },
         })
     end)
 
@@ -821,10 +883,10 @@ end
                         exps = {
                             { _tag = "Ast.ExpFunction",
                                 params = {
-                                    { _tag = "Ast.Decl", name = "x", type = false },
+                                    { _tag = "Ast.Decl", name = "x", type = nil },
                                 },
-                                rettypes = false,
-                                flexrettype = false,
+                                rettypes = nil,
+                                flexrettype = nil,
                                 block = { _tag = "Ast.StatBlock" } },
                         } },
                 } } },
@@ -849,7 +911,7 @@ end
                                 rettypes = {
                                     { _tag = "Ast.TypeInteger" },
                                 },
-                                flexrettype = false },
+                                flexrettype = nil },
                         } },
                 } } },
         })
@@ -875,9 +937,9 @@ end
                         exps = {
                             { _tag = "Ast.ExpFunction",
                                 params = {
-                                    { _tag = "Ast.Decl", name = "a", type = false },
+                                    { _tag = "Ast.Decl", name = "a", type = nil },
                                     { _tag = "Ast.Decl", name = "b" },
-                                    { _tag = "Ast.Decl", name = "c", type = false },
+                                    { _tag = "Ast.Decl", name = "c", type = nil },
                                 } },
                         } },
                 } } },
@@ -896,7 +958,7 @@ end
                     { _tag = "Ast.StatDecl",
                         exps = {
                             { _tag = "Ast.ExpFunction", rettypes = {},
-                              flexrettype = false },
+                              flexrettype = nil },
                         } },
                 } } },
         })
@@ -1109,43 +1171,43 @@ end
 
     it("can parse array types", function()
         assert_type_ast("{int}",
-            { _tag = "Ast.TypeArray", isconst = false, subtype =
+            { _tag = "Ast.TypeArray", isconst = { tag = "no" }, subtype =
                 {_tag = "Ast.TypeName", name = "int" } } )
 
         assert_type_ast("{{int}}",
-            { _tag = "Ast.TypeArray", isconst = false, subtype =
-                { _tag = "Ast.TypeArray", isconst = false, subtype =
+            { _tag = "Ast.TypeArray", isconst = { tag = "no" }, subtype =
+                { _tag = "Ast.TypeArray", isconst = { tag = "no" }, subtype =
                     {_tag = "Ast.TypeName", name = "int" } } } )
 
         assert_type_ast("const {int}", {
             _tag = "Ast.TypeArray",
-            isconst = true,
+            isconst = { tag = "yes" },
             subtype = { _tag = "Ast.TypeName", name = "int" },
         })
         assert_type_ast("const {{int}}", {
             _tag = "Ast.TypeArray",
-            isconst = true,
+            isconst = { tag = "yes" },
             subtype = {
                 _tag = "Ast.TypeArray",
-                isconst = false,
+                isconst = { tag = "no" },
                 subtype = { _tag = "Ast.TypeName", name = "int" },
             },
         })
         assert_type_ast("{const {int}}", {
             _tag = "Ast.TypeArray",
-            isconst = false,
+            isconst = { tag = "no" },
             subtype = {
                 _tag = "Ast.TypeArray",
-                isconst = true,
+                isconst = { tag = "yes" },
                 subtype = { _tag = "Ast.TypeName", name = "int" },
             },
         })
         assert_type_ast("const {const {int}}", {
             _tag = "Ast.TypeArray",
-            isconst = true,
+            isconst = { tag = "yes" },
             subtype = {
                 _tag = "Ast.TypeArray",
-                isconst = true,
+                isconst = { tag = "yes" },
                 subtype = { _tag = "Ast.TypeName", name = "int" },
             },
         })
@@ -1154,8 +1216,8 @@ end
     it('keeps const Array, Option, and C pointer qualifiers independent', function()
 
         assert_type_ast("const {integer}?", {_tag="Ast.TypeOption",basetype={
-            _tag="Ast.TypeArray",isconst=true,subtype={_tag="Ast.TypeInteger"}}})
-        assert_type_ast("const? {foreign const *int}",{_tag="Ast.TypeArray",isconst="maybe",
+            _tag="Ast.TypeArray",isconst={ tag = "yes" },subtype={_tag="Ast.TypeInteger"}}})
+        assert_type_ast("const? {foreign const *int}",{_tag="Ast.TypeArray",isconst={ tag = "maybe" },
             subtype={_tag="Ast.TypeCPointer",const=true}})
         assert_type_ast("foreign const int[]",{_tag="Ast.TypeCArray",const=true})
         assert_type_ast("(foreign const *int)?",{_tag="Ast.TypeOption",
@@ -1165,15 +1227,15 @@ end
     it("can parse const? (maybe-const) Array types", function()
         assert_type_ast("const? {int}", {
             _tag = "Ast.TypeArray",
-            isconst = "maybe",
+            isconst = { tag = "maybe" },
             subtype = { _tag = "Ast.TypeName", name = "int" },
         })
         assert_type_ast("const? {{int}}", {
             _tag = "Ast.TypeArray",
-            isconst = "maybe",
+            isconst = { tag = "maybe" },
             subtype = {
                 _tag = "Ast.TypeArray",
-                isconst = false,
+                isconst = { tag = "no" },
                 subtype = { _tag = "Ast.TypeName", name = "int" },
             },
         })
@@ -1181,13 +1243,13 @@ end
             _tag = "Ast.TypeOption",
             basetype = {
                 _tag = "Ast.TypeArray",
-                isconst = "maybe",
+                isconst = { tag = "maybe" },
                 subtype = { _tag = "Ast.TypeInteger" },
             },
         })
         assert_type_ast("const? {integer?}", {
             _tag = "Ast.TypeArray",
-            isconst = "maybe",
+            isconst = { tag = "maybe" },
             subtype = {
                 _tag = "Ast.TypeOption",
                 basetype = { _tag = "Ast.TypeInteger" },
@@ -1297,7 +1359,7 @@ end
             })
             assert_type_ast("(const? {(T)})?", {
                 _tag = "Ast.TypeOption",
-                basetype = { _tag = "Ast.TypeArray", isconst = "maybe",
+                basetype = { _tag = "Ast.TypeArray", isconst = { tag = "maybe" },
                     subtype = { _tag = "Ast.TypeName", name = "T" } },
             })
             assert_type_ast("mod.Box<|{T}?|>", {
@@ -1327,14 +1389,14 @@ end
                     basetype = { _tag = "Ast.TypeName", name = "T" } } },
                 rettypes = { { _tag = "Ast.TypeOption",
                     basetype = { _tag = "Ast.TypeName", name = "U" } } },
-                varargtype = false, flexrettype = false,
+                varargtype = nil, flexrettype = nil,
             })
             assert_type_ast("(function (T): (U))?", {
                 _tag = "Ast.TypeOption",
                 basetype = { _tag = "Ast.TypeFunction",
                     argtypes = { { _tag = "Ast.TypeName", name = "T" } },
                     rettypes = { { _tag = "Ast.TypeName", name = "U" } },
-                    varargtype = false, flexrettype = false },
+                    varargtype = nil, flexrettype = nil },
             })
             assert_type_ast("function (function (T): (U)): (V?)", {
                 _tag = "Ast.TypeFunction",
@@ -1370,11 +1432,11 @@ end
                 { _tag = "Ast.TopLevelFunc", name = "one",
                     rettypes = { { _tag = "Ast.TypeOption",
                         basetype = { _tag = "Ast.TypeName", name = "T" } } },
-                    flexrettype = false },
+                    flexrettype = nil },
                 { _tag = "Ast.TopLevelFunc", name = "callback",
                     rettypes = { { _tag = "Ast.TypeOption",
                         basetype = { _tag = "Ast.TypeFunction" } } },
-                    flexrettype = false },
+                    flexrettype = nil },
                 { _tag = "Ast.TopLevelFunc", name = "many",
                     rettypes = {
                         { _tag = "Ast.TypeName", name = "T" },
@@ -1617,7 +1679,7 @@ end
                 thens = {
                     { _tag = "Ast.Then", condition = { value = 10 } },
                 },
-              elsestat = false }
+              elsestat = nil }
         })
 
         assert_statements_ast("if 20 then else end", {
@@ -1634,7 +1696,7 @@ end
                     { _tag = "Ast.Then", condition = { value = 30 } },
                     { _tag = "Ast.Then", condition = { value = 40 } },
                 },
-                elsestat = false }
+                elsestat = nil }
         })
 
         assert_statements_ast("if 50 then elseif 60 then else end", {
@@ -1660,8 +1722,8 @@ end
                 _tag = "Ast.StatCase",
                 arms = {
                     { named = false, bindings = {
-                        { name = "first", type = false },
-                        { name = "second", type = false },
+                        { name = "first", type = nil },
+                        { name = "second", type = nil },
                     } },
                     { named = false, bindings = {{ name = "first" }} },
                     { named = true, bindings = {
@@ -1749,7 +1811,7 @@ end]])
                             bindings = {{
                                 _tag = "Ast.Decl",
                                 name = "delta",
-                                type = false,
+                                type = nil,
                                 option = false,
                             }},
                             named = false,
@@ -1995,7 +2057,7 @@ end]])
                   { _tag = "Ast.StatAssign",
                     exps = {{ var = { _tag = "Ast.VarName", name = "i" }} },
                     vars = {{ _tag = "Ast.VarName", name = "x" }} } } },
-              decl = { _tag = "Ast.Decl", name = "i", type = false },
+              decl = { _tag = "Ast.Decl", name = "i", type = nil },
               finish = { _tag = "Ast.ExpInteger", value = 2 },
               inc =    { _tag = "Ast.ExpInteger", value = 3 },
               start =  { _tag = "Ast.ExpInteger", value = 1 } },
@@ -2009,7 +2071,7 @@ end]])
             end
         ]], {
             { _tag = "Ast.StatForIn",
-              decls = {{ _tag = "Ast.Decl", name = "x", type = false }},
+              decls = {{ _tag = "Ast.Decl", name = "x", type = nil }},
               exps = {{ var = { _tag = "Ast.VarName", name = "iter" }}},
               block = {
                 stats = {
@@ -2509,8 +2571,8 @@ end]])
             { name = "x", exp = { value = 1 } },
         }))
         assert_expression_ast([[ f({ 1, 2 }) ]], positional_constructor({
-            { name = false, exp = { value = 1 } },
-            { name = false, exp = { value = 2 } },
+            { name = nil, exp = { value = 1 } },
+            { name = nil, exp = { value = 2 } },
         }))
         assert_expression_ast([[ f({ [k] = v }) ]], positional_constructor({
             { name = { var = { name = "k" } },
@@ -3005,7 +3067,7 @@ end]])
                         name = "ping",
                         params = {},
                         rettypes = {},
-                        flexrettype = false,
+                        flexrettype = nil,
                     },
                 },
             },
@@ -3036,14 +3098,14 @@ end]])
                                 basetype = { _tag = "Ast.TypeString" },
                             },
                         },
-                        flexrettype = false,
+                        flexrettype = nil,
                     },
                     {
                         _tag = "Ast.InterfaceMethod",
                         name = "flush",
                         params = {},
                         rettypes = {},
-                        flexrettype = false,
+                        flexrettype = nil,
                     },
                     {
                         _tag = "Ast.InterfaceMethod",
@@ -3067,7 +3129,7 @@ end]])
                             { _tag = "Ast.TypeString" },
                             { _tag = "Ast.TypeInteger" },
                         },
-                        flexrettype = false,
+                        flexrettype = nil,
                     },
                     {
                         _tag = "Ast.InterfaceMethod",
@@ -3080,7 +3142,7 @@ end]])
                             },
                             {
                                 _tag = "Ast.Decl",
-                                name = false,
+                                name = nil,
                                 type = { _tag = "Ast.TypeInteger" },
                             },
                         },
@@ -3235,7 +3297,7 @@ end]])
                     _tag = "Ast.TopLevelRecord",
                     name = "Pair",
                     typeparams = {
-                        { _tag = "Ast.TypeParam", name = "T", constraint = false },
+                        { _tag = "Ast.TypeParam", name = "T", constraint = nil },
                         {
                             _tag = "Ast.TypeParam",
                             name = "U",
@@ -3276,8 +3338,8 @@ end]])
                     _tag = "Ast.TopLevelUnion",
                     name = "Result",
                     typeparams = {
-                        { name = "T", constraint = false },
-                        { name = "E", constraint = false },
+                        { name = "T", constraint = nil },
+                        { name = "E", constraint = nil },
                     },
                 },
                 {
@@ -3302,7 +3364,7 @@ end]])
                 {
                     _tag = "Ast.TopLevelInterface",
                     name = "Stack",
-                    typeparams = { { name = "E", constraint = false } },
+                    typeparams = { { name = "E", constraint = nil } },
                     methods = { {
                         _tag = "Ast.InterfaceMethod",
                         name = "push",
@@ -3319,19 +3381,19 @@ end]])
                 {
                     _tag = "Ast.TopLevelFunc",
                     name = "id",
-                    typeparams = { { name = "T", constraint = false } },
+                    typeparams = { { name = "T", constraint = nil } },
                 },
                 {
                     _tag = "Ast.TopLevelMethod",
                     class = "Pair",
                     name = "map",
-                    typeparams = { { name = "V", constraint = false } },
+                    typeparams = { { name = "V", constraint = nil } },
                 },
                 {
                     _tag = "Ast.TopLevelStatic",
                     class = "Pair",
                     name = "make",
-                    typeparams = { { name = "V", constraint = false } },
+                    typeparams = { { name = "V", constraint = nil } },
                 },
             }, program)
 
@@ -3617,7 +3679,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
                     name = "foo",
                     params = {
                         { _tag = "Ast.Decl", name = "a" },
-                        { _tag = "Ast.Decl", name = false,
+                        { _tag = "Ast.Decl", name = nil,
                           type = { _tag = "Ast.TypeInteger" } },
                     } },
             })
@@ -3631,7 +3693,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
                 { _tag = "Ast.TopLevelFunc",
                     name = "foo",
                     params = {
-                        { _tag = "Ast.Decl", name = false,
+                        { _tag = "Ast.Decl", name = nil,
                           type = { _tag = "Ast.TypeString" } },
                     } },
             })
@@ -3647,7 +3709,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
                     name = "m",
                     params = {
                         { _tag = "Ast.Decl", name = "a" },
-                        { _tag = "Ast.Decl", name = false,
+                        { _tag = "Ast.Decl", name = nil,
                           type = { _tag = "Ast.TypeInteger" } },
                     } },
             })
@@ -3665,7 +3727,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
             ]], {
                 { _tag = "Ast.TopLevelRecord", name = "Point" },
                 { _tag = "Ast.TopLevelStatic", name = "new",
-                    flexrettype = false,
+                    flexrettype = nil,
                     params = {
                         { _tag = "Ast.Decl", name = "x" },
                         { _tag = "Ast.Decl", name = "y" },
@@ -3687,7 +3749,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
                                 { _tag = "Ast.ExpFunction",
                                     params = {
                                         { _tag = "Ast.Decl", name = "a" },
-                                        { _tag = "Ast.Decl", name = false,
+                                        { _tag = "Ast.Decl", name = nil,
                                           type = { _tag = "Ast.TypeInteger" } },
                                     } } } } } } },
             })
@@ -3739,7 +3801,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
 
         it("accepts an UNTYPED vararg lambda parameter `function (a, ...)`", function()
             -- A lambda's `...` may omit the element type (inferred from context).
-            -- The vararg Decl carries name == false AND type == false.
+            -- The vararg Decl carries name == nil AND type == nil.
             assert_program_ast([[
                 function f(): integer
                     local g = function(a, ...) return a end
@@ -3753,9 +3815,9 @@ function f(x: Choice) case x when some(v) then return end end]]))
                                 { _tag = "Ast.ExpFunction",
                                     params = {
                                         { _tag = "Ast.Decl", name = "a",
-                                          type = false },
-                                        { _tag = "Ast.Decl", name = false,
-                                          type = false },
+                                          type = nil },
+                                        { _tag = "Ast.Decl", name = nil,
+                                          type = nil },
                                     } } } } } } },
             })
         end)
@@ -3773,8 +3835,8 @@ function f(x: Choice) case x when some(v) then return end end]]))
                             exps = {
                                 { _tag = "Ast.ExpFunction",
                                     params = {
-                                        { _tag = "Ast.Decl", name = false,
-                                          type = false },
+                                        { _tag = "Ast.Decl", name = nil,
+                                          type = nil },
                                     } } } } } } },
             })
         end)
@@ -3795,8 +3857,8 @@ function f(x: Choice) case x when some(v) then return end end]]))
                             exps = {
                                 { _tag = "Ast.ExpFunction",
                                     params = {
-                                        { _tag = "Ast.Decl", name = false,
-                                          type = false },
+                                        { _tag = "Ast.Decl", name = nil,
+                                          type = nil },
                                     },
                                     rettypes = { { _tag = "Ast.TypeInteger" } },
                                 } } } } } },
@@ -3816,7 +3878,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
                             exps = {
                                 { _tag = "Ast.ExpFunction",
                                     params = {
-                                        { _tag = "Ast.Decl", name = false,
+                                        { _tag = "Ast.Decl", name = nil,
                                           type = { _tag = "Ast.TypeInteger" } },
                                     } } } } } } },
             })
@@ -3839,7 +3901,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
                 { _tag = "Ast.TopLevelFunc",
                     name = "foo",
                     params = {
-                        { _tag = "Ast.Decl", name = false,
+                        { _tag = "Ast.Decl", name = nil,
                           type = { _tag = "Ast.TypeFunction",
                                    argtypes = {},
                                    rettypes = { { _tag = "Ast.TypeInteger" } } } },
@@ -3853,11 +3915,11 @@ function f(x: Choice) case x when some(v) then return end end]]))
                 end
             ]], {
                 { _tag = "Ast.TopLevelFunc", name = "foo",
-                    params = { { _tag = "Ast.Decl", name = false,
+                    params = { { _tag = "Ast.Decl", name = nil,
                         type = { _tag = "Ast.TypeFunction",
                             argtypes = {},
                             rettypes = { { _tag = "Ast.TypeInteger" } },
-                            varargtype = false, flexrettype = false } } } },
+                            varargtype = nil, flexrettype = nil } } } },
             })
         end)
     end)
@@ -3879,7 +3941,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
                     varargtype = { _tag = "Ast.TypeInteger" } })
         end)
 
-        it("a non-variadic function type carries varargtype = false", function()
+        it("a non-variadic function type carries varargtype = nil", function()
             assert_type_ast("function (integer, string): (integer)",
                 { _tag = "Ast.TypeFunction",
                     argtypes = {
@@ -3887,8 +3949,8 @@ function f(x: Choice) case x when some(v) then return end end]]))
                         { _tag = "Ast.TypeString" },
                     },
                     rettypes = { { _tag = "Ast.TypeInteger" } },
-                    varargtype = false,
-                    flexrettype = false })
+                    varargtype = nil,
+                    flexrettype = nil })
         end)
     end)
 
@@ -3949,14 +4011,14 @@ function f(x: Choice) case x when some(v) then return end end]]))
                     flexrettype = { _tag = "Ast.TypeValue" } })
             assert_type_ast("function (): (...: integer)",
                 { _tag = "Ast.TypeFunction", argtypes = {}, rettypes = {},
-                    varargtype = false,
+                    varargtype = nil,
                     flexrettype = { _tag = "Ast.TypeInteger" } })
             assert_type_ast("function (): (...: function (): (integer))",
                 { _tag = "Ast.TypeFunction", rettypes = {},
                     flexrettype = { _tag = "Ast.TypeFunction",
                         argtypes = {},
                         rettypes = { { _tag = "Ast.TypeInteger" } },
-                        flexrettype = false } })
+                        flexrettype = nil } })
         end)
 
         it("keeps an explicit fixed-empty lambda distinct from no annotation", function()
@@ -3969,12 +4031,12 @@ function f(x: Choice) case x when some(v) then return end end]]))
             ]], {
                 { _tag = "Ast.TopLevelFunc", block = { stats = {
                     { _tag = "Ast.StatDecl", exps = {
-                        { _tag = "Ast.ExpFunction", rettypes = false,
-                            flexrettype = false },
+                        { _tag = "Ast.ExpFunction", rettypes = nil,
+                            flexrettype = nil },
                     } },
                     { _tag = "Ast.StatDecl", exps = {
                         { _tag = "Ast.ExpFunction", rettypes = {},
-                            flexrettype = false },
+                            flexrettype = nil },
                     } },
                 } } },
             })
@@ -4036,7 +4098,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
             assert_expression_ast("items[, last]", {
                 _tag = "Ast.ExpSubset",
                 exp = { _tag = "Ast.ExpVar" },
-                first = false,
+                first = nil,
                 last = { _tag = "Ast.ExpVar" },
             })
         end)
@@ -4046,7 +4108,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
                 _tag = "Ast.ExpSubset",
                 exp = { _tag = "Ast.ExpVar" },
                 first = { _tag = "Ast.ExpVar" },
-                last = false,
+                last = nil,
             })
         end)
 
@@ -4087,8 +4149,8 @@ function f(x: Choice) case x when some(v) then return end end]]))
                     callexp = { args = { args = {
                         { _tag = "Ast.ExpSpread",
                           exp = { _tag = "Ast.ExpVar" },
-                          first = false,
-                          last = false },
+                          first = nil,
+                          last = nil },
                     } } } },
             }, stats)
         end)
@@ -4206,11 +4268,11 @@ function f(x: Choice) case x when some(v) then return end end]]))
                         fields = {
                             { _tag = "Ast.Field",
                               exp = { _tag = "Ast.ExpVar" } },
-                            { _tag = "Ast.Field", name = false,
+                            { _tag = "Ast.Field", name = nil,
                               exp = { _tag = "Ast.ExpSpread",
                                   exp = {
                                       _tag = "Ast.ExpSubset",
-                                      first = false,
+                                      first = nil,
                                       last = { _tag = "Ast.ExpVar" },
                                   } } },
                         } } } },
@@ -4251,8 +4313,8 @@ function f(x: Choice) case x when some(v) then return end end]]))
             assert.equal("Ast.ExpSubset",exp._tag)
             assert.equal("Ast.ExpDots",exp.exp._tag)
         end
-        assert.is_false(args[2].first)
-        assert.is_false(args[3].last)
+        assert.is_nil(args[2].first)
+        assert.is_nil(args[3].last)
     end)
 
         it("parses a bracketed vararg slice explicitly in scalar grammar",
@@ -4372,7 +4434,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
                 { _tag = "Ast.StatAssign",
                     exps = { { _tag = "Ast.ExpInitList",
                         fields = {
-                            { _tag = "Ast.Field", name = false,
+                            { _tag = "Ast.Field", name = nil,
                               exp = { _tag = "Ast.ExpDots" } },
                         } } } },
             }, stats)
@@ -4386,7 +4448,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
                         fields = {
                             { _tag = "Ast.Field",
                               exp = { _tag = "Ast.ExpVar" } },
-                            { _tag = "Ast.Field", name = false,
+                            { _tag = "Ast.Field", name = nil,
                               exp = { _tag = "Ast.ExpDots" } },
                         } } } },
             }, stats)
@@ -4398,7 +4460,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
                 { _tag = "Ast.StatAssign",
                     exps = { { _tag = "Ast.ExpInitList",
                         fields = {
-                            { _tag = "Ast.Field", name = false,
+                            { _tag = "Ast.Field", name = nil,
                               exp = { _tag = "Ast.ExpDotsIndex",
                                   exp = { _tag = "Ast.ExpInteger", value = 1 } } },
                         } } } },
@@ -4413,7 +4475,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
                         fields = {
                             { _tag = "Ast.Field",
                               exp = { _tag = "Ast.ExpVar" } },
-                            { _tag = "Ast.Field", name = false,
+                            { _tag = "Ast.Field", name = nil,
                               exp = { _tag = "Ast.ExpDotsIndex",
                                   exp = { _tag = "Ast.ExpVar" } } },
                         } } } },
@@ -4992,9 +5054,9 @@ function f(x: Choice) case x when some(v) then return end end]]))
             })
         end)
 
-        it("parses a bare `raise` (exp is false)", function()
+        it("parses a bare `raise` (exp is nil)", function()
             assert_statements_ast([[ raise ]], {
-                { _tag = "Ast.StatRaise", exp = false }
+                { _tag = "Ast.StatRaise", exp = nil }
             })
         end)
 
@@ -5010,7 +5072,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
                   block = { _tag = "Ast.StatBlock",
                             stats = { { _tag = "Ast.StatRaise" } } },
                   catchblock = { _tag = "Ast.StatBlock" },
-                  finallyblock = false }
+                  finallyblock = nil }
             })
         end)
 
@@ -5027,7 +5089,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
                   block = { _tag = "Ast.StatTry",
                             block = { _tag = "Ast.StatBlock" },
                             catchblock = { _tag = "Ast.StatBlock" },
-                            finallyblock = false } }
+                            finallyblock = nil } }
             })
         end)
 
@@ -5042,7 +5104,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
                 { _tag = "Ast.StatWhile",
                   block = { _tag = "Ast.StatTry",
                             catchblock = { _tag = "Ast.StatBlock" },
-                            finallyblock = false } }
+                            finallyblock = nil } }
             })
         end)
 
@@ -5072,7 +5134,7 @@ function f(x: Choice) case x when some(v) then return end end]]))
                           { _tag = "Ast.StatReturn" }
                       }
                   },
-                  catchblock = false,
+                  catchblock = nil,
                   finallyblock = {
                       _tag = "Ast.StatBlock",
                       stats = {

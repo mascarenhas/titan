@@ -181,7 +181,7 @@ function completion_members(node,receiver,typ,st,errors,mode)
     local result=begin(st,mode)
     if not typ or typ._tag=='Type.Invalid' then result.quality='unresolved'; return true end
     if typ._tag=='Type.Option' and typ.base._tag=='Type.Nominal' then typ=typ.base end
-    if typ._tag=='Type.Parameter' and typ.erased_constraint~=false then typ=typ.erased_constraint end
+    if typ._tag=='Type.Parameter' and typ.erased_constraint~=nil then typ=typ.erased_constraint end
     if mode=='dot' and typ._tag=='Type.Module' then
         local decl=receiver and receiver._tag=='Ast.ExpVar' and receiver.var._decl
         module_candidates(result,st,typ,decl and decl._source_import,false)

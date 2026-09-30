@@ -11,7 +11,7 @@ function coder._assert_erased_boundary(ast)
     local max_tables = 1000000
 
     local function nonempty(value)
-        if value == nil or value == false then return false end
+        if value == nil then return false end
         return type(value) ~= "table" or next(value) ~= nil
     end
 

@@ -373,7 +373,7 @@ compared.
 ### Array writes
 
 The checker rejects an indexed lvalue whose resolved Array type has
-`isconst == true`, before assignment bookkeeping. Generated mutation code is
+`isconst.tag == "yes"` or `isconst.tag == "maybe"`, before assignment bookkeeping. Generated mutation code is
 therefore reachable only for a mutable Array; the coder asserts this invariant.
 
 The generic `_materialize_assignment_lvalue` path handles both single and

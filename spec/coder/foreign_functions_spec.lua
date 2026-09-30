@@ -504,7 +504,7 @@ describe("source-defined foreign functions", function()
         assert.truthy(sizeof:find("sizeof", 1, true))
 
         local foreign = types.ModuleMember("other", "callback",
-            types.CFunction({}, cint, false, false), {})
+            types.CFunction({}, cint, false, nil), {})
         foreign._foreign_source = true
         local _, reference = coder_declarations._foreign_raw_var(ctx, {
             _tag = "Ast.VarDot",

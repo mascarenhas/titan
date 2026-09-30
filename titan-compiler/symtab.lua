@@ -1,4 +1,5 @@
 local symtab = {}
+local maybe3 = require "titan-compiler.maybe3"
 
 symtab.__index = symtab
 
@@ -243,12 +244,22 @@ end
 
 function symtab:find_cached_foreign_field_macro(name)
     local cached = self.foreign_field_macro_cache[name]
-    if cached == nil then return nil, false end
-    return cached ~= false and cached or nil, true
+    if cached == nil then
+        cached = maybe3.unknown()
+        self.foreign_field_macro_cache[name] = cached
+    end
+    assert(maybe3.validate(cached), "invalid cached foreign field macro state")
+    if cached.tag == "unknown" then return nil, false end
+    local projection = maybe3.get_checked(cached, "foreign field macro")
+    assert(projection == nil or type(projection) == "table",
+        "cached foreign field macro projection must be a table")
+    return projection, true
 end
 
 function symtab:cache_foreign_field_macro(name, projection)
-    self.foreign_field_macro_cache[name] = projection or false
+    assert(projection == nil or type(projection) == "table",
+        "foreign field macro projection must be a table")
+    self.foreign_field_macro_cache[name] = maybe3.from_optional(projection)
 end
 
 local function c_tag_provenance(provenance)

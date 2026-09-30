@@ -125,7 +125,7 @@ local function is_anonymous_aggregate(typ)
 end
 
 local function unknown_array_bound(bound)
-    return bound == nil or bound == false or bound == ""
+    return bound == nil
 end
 
 local function array_bounds_compatible(
@@ -808,9 +808,16 @@ local function qualify_array(base, quals)
         merged_qualifiers(resolved.quals, quals))
 end
 
+-- The C parser retains an empty spelling for an unsized dense dimension.
+-- Semantic Type.CArray descriptors use nil for the absent extent.
+local function semantic_array_extent(extent)
+    if extent == "" then return nil end
+    return extent
+end
+
 local function with_array_dims(base, idxs, quals)
     for i = #(idxs or {}), 1, -1 do
-        base = types.CArray(base, idxs[i])
+        base = types.CArray(base, semantic_array_extent(idxs[i]))
     end
     local resolved = types.resolve_c_typedef(base)
     if resolved and resolved._tag == "Type.CArray" then
@@ -849,7 +856,7 @@ local function populate_struct_or_union(st, owner, ftype)
             local ftyp, err = convert_type(st, field)
             if not ftyp then return nil, err end
             local cfield = types.CField(owner, field.name, ftyp,
-                field.bitfield and field.width or false,
+                field.bitfield and field.width or nil,
                 field.flexible_array and true or false)
             table.insert(fields, cfield)
             fields[field.name] = cfield
@@ -965,7 +972,7 @@ local function convert_enum(st, ftype)
             and st.c_profile.integers
             and st.c_profile.integers.int
             and st.c_profile.integers.int.type
-            or types.CInteger("int", true, 3, false)
+            or types.CInteger("int", true, 3, nil)
         enum_type = types.CInteger(
             provisional.spelling, provisional.signed,
             provisional.rank, provisional.bits)
@@ -1022,7 +1029,7 @@ local function convert_function_type(st, ftype)
         convert_type(st, ftype.ret)
     if not rt then return nil, err end
     local converted =
-        types.CFunction(ptypes, rt, ftype.vararg, false)
+        types.CFunction(ptypes, rt, ftype.vararg, nil)
     converted._paramstyle =
         ftype._paramstyle
     converted._return_declaration_qualifiers =
@@ -1097,7 +1104,7 @@ convert_parts = function(st, parts, idxs)
         if suffix.tag == "pointer" then
             base = types.CPointer(base, suffix.quals)
         elseif suffix.tag == "array" then
-            base = types.CArray(base, suffix.len)
+            base = types.CArray(base, semantic_array_extent(suffix.len))
         end
     end
 

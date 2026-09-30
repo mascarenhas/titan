@@ -341,8 +341,8 @@ function coderecorddec(ctx, code, initrecs, node)
                     FIELD = c_string_literal(field.name),
                     FQTN = c_string_literal(node._type.name),
                 })
-            elseif field.dynamic_plan == false then
-                write = coder._dynamiccheckandget(ctx, false, field.type,
+            elseif field.dynamic_plan.tag == "none" then
+                write = coder._dynamiccheckandget(ctx, nil, field.type,
                     "_unavailable", "tv", node.loc, "Lua record-field write")
             else
                 local converted = "_converted"
@@ -354,7 +354,7 @@ function coderecorddec(ctx, code, initrecs, node)
                     DECL = cvardecl(ctx, field.type, converted),
                     INIT = initval(field.type),
                     CHECK = coder._dynamiccheckandget(
-                        ctx, field.dynamic_plan, field.type, converted, "tv",
+                        ctx, maybe3.get_checked(field.dynamic_plan, "record field writer"), field.type, converted, "tv",
                         node.loc, "Lua record-field write"),
                     STORE = coder._nominal_store(ctx, plan, slot,
                         field.type, "_rec", converted),
@@ -450,7 +450,8 @@ function coderecorddec(ctx, code, initrecs, node)
             NEWINDEXNAME = coder._nominal_metamethod_name(
                 node._type.name, "newindex"),
             CHECKANDGET = coder._dynamiccheckandget(
-                ctx, node._dynamic_receiver_plan,
+                ctx, assert(node._dynamic_receiver_plan,
+                    "record receiver lacks its Lua boundary plan"),
                 types.Nominal(node._type.name), "_rec", "_recslot",
                 node.loc, "Lua record receiver"),
             FQTN = c_string_literal(node._type.name),
@@ -624,7 +625,8 @@ function coder._codeuniondec(ctx, code, initnominals, node)
         NEWINDEXNAME = coder._nominal_metamethod_name(
             node._type.name, "newindex"),
         CHECKANDGET = coder._dynamiccheckandget(
-            ctx, node._dynamic_receiver_plan,
+            ctx, assert(node._dynamic_receiver_plan,
+                "union receiver lacks its Lua boundary plan"),
             types.Nominal(node._type.name),
             "_union", "_unionslot", node.loc, "Lua union receiver"),
         FQTN = c_string_literal(node._type.name),

@@ -695,10 +695,10 @@ describe("typechecker rehydration of .so-only imports", function()
         h.reset(true)
 
         local owner_scope = types.GenericScope(
-            "generic_owner", "generic_owner.Box", false,
+            "generic_owner", "generic_owner.Box", nil,
             "owner", "record")
         local owner_parameter = types.Parameter(
-            owner_scope, 1, "T", false)
+            owner_scope, 1, "T", nil)
         local owner = types.Record("generic_owner.Box", {
             types.Field(
                 "generic_owner.Box", "item", owner_parameter, 0, false),
@@ -706,24 +706,24 @@ describe("typechecker rehydration of .so-only imports", function()
             new = types.StaticMethod("generic_owner.Box", "new",
                 {owner_parameter}, {
                     types.Nominal("generic_owner.Box", {owner_parameter}),
-                }, false, false, {"item"}),
-        }, {}, 1, owner_scope, {types.TypeParameter("T", false)})
+                }, nil, nil, {"item"}),
+        }, {}, 1, owner_scope, {types.TypeParameter("T", nil)})
         local owner_module = types.Module("generic_owner", {
-            types.ModuleMember("generic_owner", "Box", owner, false),
+            types.ModuleMember("generic_owner", "Box", owner, nil),
         })
 
         local alias = types.GenericAlias(
-            "generic_facade", "Crate", false, "generic_owner.Box", false,
-            owner_scope, {types.TypeParameter("T", false)})
+            "generic_facade", "Crate", false, "generic_owner.Box", nil,
+            owner_scope, {types.TypeParameter("T", nil)})
         local choice = types.GenericAlias(
             "generic_facade", "Choice", false, "generic_owner.Box",
             "generic_facade.Crate", owner_scope,
-            {types.TypeParameter("T", false)})
+            {types.TypeParameter("T", nil)})
         local facade = types.Module("generic_facade", {
             types.ModuleMember("generic_facade", "make",
                 types.Function({}, {
                     types.Nominal("generic_owner.Box", {types.Integer()}),
-                }, false, false, false), {}),
+                }, false, nil, nil), {}),
         }, {Crate = alias, Choice = choice})
 
         local requests = {}
@@ -755,9 +755,9 @@ describe("typechecker rehydration of .so-only imports", function()
         h.reset(true)
 
         local owner_scope = types.GenericScope(
-            "generic_bad_owner", "generic_bad_owner.Box", false,
+            "generic_bad_owner", "generic_bad_owner.Box", nil,
             "owner", "record")
-        local parameter = types.Parameter(owner_scope, 1, "T", false)
+        local parameter = types.Parameter(owner_scope, 1, "T", nil)
         local owner = types.Record("generic_bad_owner.Box", {
             types.Field(
                 "generic_bad_owner.Box", "item", parameter, 0, false),
@@ -765,17 +765,17 @@ describe("typechecker rehydration of .so-only imports", function()
             new = types.StaticMethod("generic_bad_owner.Box", "new",
                 {parameter}, {
                     types.Nominal("generic_bad_owner.Box", {parameter}),
-                }, false, false, {"item"}),
-        }, {}, 1, owner_scope, {types.TypeParameter("T", false)})
+                }, nil, nil, {"item"}),
+        }, {}, 1, owner_scope, {types.TypeParameter("T", nil)})
         local owner_module = types.Module("generic_bad_owner", {
-            types.ModuleMember("generic_bad_owner", "Box", owner, false),
+            types.ModuleMember("generic_bad_owner", "Box", owner, nil),
         })
 
         local facade = types.Module("generic_bad_facade", {
             types.ModuleMember("generic_bad_facade", "make",
                 types.Function({}, {
                     types.Nominal("generic_bad_owner.Box", {}),
-                }, false, false, false), {}),
+                }, false, nil, nil), {}),
         })
         local function loader(modname)
             if modname == "generic_bad_facade" then
@@ -793,10 +793,10 @@ describe("typechecker rehydration of .so-only imports", function()
         h.reset(true)
         local bad_alias = types.GenericAlias(
             "generic_bad_facade", "Crate", false,
-            "generic_bad_owner.Box", false,
+            "generic_bad_owner.Box", nil,
             types.GenericScope("generic_bad_owner", "generic_bad_owner.Box",
-                false, "owner", "union"),
-            {types.TypeParameter("T", false)})
+                nil, "owner", "union"),
+            {types.TypeParameter("T", nil)})
         facade = types.Module("generic_bad_facade", {}, {
             Crate = bad_alias,
         })

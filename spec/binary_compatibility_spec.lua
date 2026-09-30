@@ -4,7 +4,7 @@ local compat = require "titan-compiler.binarycompat"
 local function func(name, params, results, paramnames, tail, flexible)
     return types.ModuleMember("provider", name,
         types.Function(params or {}, results or {}, false,
-            tail or false, flexible or false), paramnames or {})
+            tail, flexible), paramnames or {})
 end
 
 local function field(owner, name, typ, index, private, const)
@@ -15,13 +15,13 @@ end
 
 local function method(owner, name, typ, parameter, private)
     local result = types.Method(owner, name, {typ}, {types.Integer()},
-        false, false, {parameter or "item"})
+        nil, nil, {parameter or "item"})
     result.islocal = private == true
     return result
 end
 
 local function owner_module(owner, extras, aliases)
-    local members = { types.ModuleMember("provider", "Item", owner, false) }
+    local members = { types.ModuleMember("provider", "Item", owner, nil) }
     for _, extra in ipairs(extras or {}) do members[#members + 1] = extra end
     return types.Module("provider", members, aliases or {})
 end
@@ -71,8 +71,8 @@ describe("binary dependency compatibility", function()
             func("used", {types.Integer()}, {types.String()}, {"number"}, types.String(), types.Integer()),
             func("used", {types.Float()}, {types.String()}, {"count"}, types.String(), types.Integer()),
             func("used", {types.Integer()}, {types.Integer()}, {"count"}, types.String(), types.Integer()),
-            func("used", {types.Integer()}, {types.String()}, {"count"}, false, types.Integer()),
-            func("used", {types.Integer()}, {types.String()}, {"count"}, types.String(), false),
+            func("used", {types.Integer()}, {types.String()}, {"count"}, nil, types.Integer()),
+            func("used", {types.Integer()}, {types.String()}, {"count"}, types.String(), nil),
         }) do
             reject(verify, check_metadata(module({replacement})), "functions.used")
         end
@@ -80,20 +80,20 @@ describe("binary dependency compatibility", function()
 
     it("retains variable mutability and nested container qualification", function()
         local original = module({types.ModuleVariable("provider", "state",
-            types.Array(types.Integer(), false), false)})
+            types.Array(types.Integer(), {tag="no"}), false)})
         local verify = checker(original, { variables = {state = true} })
         reject(verify, check_metadata(module({types.ModuleVariable("provider", "state",
-            types.Array(types.Integer(), false), true)})), "variables.state.const")
+            types.Array(types.Integer(), {tag="no"}), true)})), "variables.state.const")
         reject(verify, check_metadata(module({types.ModuleVariable("provider", "state",
-            types.Array(types.Integer(), true), false)})), "variables.state.type")
+            types.Array(types.Integer(), {tag="yes"}), false)})), "variables.state.type")
     end)
 
     it("erases generic binders and nominal applications without mutating the interface", function()
-        local scope = types.GenericScope("provider", false, "identity", "callable", "function")
-        local parameter = types.Parameter(scope, 1, "T", false)
-        local scheme = types.FunctionScheme(scope, {types.TypeParameter("T", false)},
+        local scope = types.GenericScope("provider", nil, "identity", "callable", "function")
+        local parameter = types.Parameter(scope, 1, "T", nil)
+        local scheme = types.FunctionScheme(scope, {types.TypeParameter("T", nil)},
             types.Function({parameter, types.Nominal("provider.Box", {parameter})},
-                {parameter}, false, false, false))
+                {parameter}, false, nil, nil))
         local original = module({types.ModuleMember("provider", "identity", scheme, {"item", "box"})})
         local before = types.serialize(original)
         local verify = checker(original, {functions = {identity = true}})
@@ -104,7 +104,7 @@ describe("binary dependency compatibility", function()
         local changed = types.FunctionScheme(scope,
             {types.TypeParameter("T", types.Nominal("provider.View"))},
             types.Function({constrained, types.Nominal("provider.Box")},
-                {constrained}, false, false, false))
+                {constrained}, false, nil, nil))
         reject(verify, check_metadata(module({types.ModuleMember("provider", "identity", changed,
             {"item", "box"})})), "functions.identity.type")
     end)
@@ -139,7 +139,7 @@ describe("binary dependency compatibility", function()
     it("selects only referenced concrete methods and statics", function()
         local name = "provider.Item"
         local original = types.Record(name, {}, {
-            new = types.StaticMethod(name, "new", {}, {types.Nominal(name)}, false, false, {}),
+            new = types.StaticMethod(name, "new", {}, {types.Nominal(name)}, nil, nil, {}),
         }, {
             used = method(name, "used", types.Integer()),
             unused = method(name, "unused", types.String()),
@@ -164,7 +164,7 @@ describe("binary dependency compatibility", function()
         local name = "provider.Item"
         local original = types.Record(name, {field(name, "count", types.Integer(), 0)}, {
             new = types.StaticMethod(name, "new", {types.Integer()},
-                {types.Nominal(name)}, false, false, {"count"}),
+                {types.Nominal(name)}, nil, nil, {"count"}),
         }, {}, 1)
         local accessor = checker(owner_module(original), {records = {Item = {}}})
         local constructor = checker(owner_module(original), {
@@ -218,12 +218,12 @@ describe("binary dependency compatibility", function()
 
     it("puts direct and generic nominal aliases in their owner categories", function()
         local name = "owner.Box"
-        local scope = types.GenericScope("owner", name, false, "owner", "record")
-        local parameter = types.Parameter(scope, 1, "T", false)
+        local scope = types.GenericScope("owner", name, nil, "owner", "record")
+        local parameter = types.Parameter(scope, 1, "T", nil)
         local owner = types.Record(name, {field(name, "item", parameter, 0)}, {}, {}, 1,
-            scope, {types.TypeParameter("T", false)})
-        local alias = types.GenericAlias("provider", "Alias", false, name, false,
-            scope, {types.TypeParameter("U", false)})
+            scope, {types.TypeParameter("T", nil)})
+        local alias = types.GenericAlias("provider", "Alias", false, name, nil,
+            scope, {types.TypeParameter("U", nil)})
         local original = module({}, {Alias = alias, Concrete = types.Nominal(name, {types.String()}),
             Count = types.Integer()})
         local registry = {[name] = owner}

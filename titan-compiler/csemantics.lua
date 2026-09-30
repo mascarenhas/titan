@@ -974,13 +974,11 @@ local function canonical_integer(profile, typ)
         return nil, "C integer type '" .. resolved.spelling ..
             "' disagrees with the target profile's signedness"
     end
-    if resolved.rank ~= nil and resolved.rank ~= false
-       and resolved.rank ~= canonical.rank then
+    if resolved.rank ~= nil and resolved.rank ~= canonical.rank then
         return nil, "C integer type '" .. resolved.spelling ..
             "' disagrees with the target profile's rank"
     end
-    if resolved.bits ~= nil and resolved.bits ~= false
-       and resolved.bits ~= canonical.bits then
+    if resolved.bits ~= nil and resolved.bits ~= canonical.bits then
         return nil, "C integer type '" .. resolved.spelling ..
             "' disagrees with the target profile's storage width"
     end
@@ -2248,7 +2246,9 @@ local function is_complete_object(typ, seen)
        or tag == "Type.CPointer" then
         return true
     elseif tag == "Type.CArray" then
-        return typ.len ~= nil and typ.len ~= false
+        local extent = type(typ.len)
+        return (extent == "number" or extent == "table"
+                or (extent == "string" and typ.len ~= ""))
             and is_complete_object(typ.elem, seen)
     elseif tag == "Type.CStruct" or tag == "Type.CUnion" then
         return typ.complete == true

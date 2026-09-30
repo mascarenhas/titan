@@ -84,7 +84,7 @@ provenance analysis, and wrapper interning.
 `ast.lua` uses the following positional constructors for generic syntax:
 
 ```lua
-Ast.TypeParam(loc, name, constraint_or_false)
+Ast.TypeParam(loc, name, optional_constraint)
 Ast.TypeName(loc, name, typeargs)
 Ast.TypeQualName(loc, module, name, typeargs)
 Ast.ExpCall(loc, exp, args, typeargs)
@@ -104,9 +104,8 @@ Ast.InterfaceMethod(loc, name, params, rettypes, flexrettype, typeparams)
 Interface fields reuse `Ast.Decl` with `isconst == true`; the `members` list
 keeps their source order relative to `Ast.InterfaceMethod` children.
 
-Every absent `typeparams` or public `ExpCall.typeargs` list is `{}`. The only
-false sentinel is an absent `TypeParam.constraint`; no downstream visitor
-distinguishes nil from an empty list. `TypeParam` is syntax, not a value `Decl`.
+Every absent `typeparams` or public `ExpCall.typeargs` list is `{}`. An absent
+`TypeParam.constraint` is nil. `TypeParam` is syntax, not a value `Decl`.
 An `ExpCall` has one callable-local `typeargs` list regardless of whether its
 ordinary argument carrier is `ArgsFunc`, `ArgsNamedFunc`, `ArgsMethod`, or
 `ArgsNamedMethod`; generics do not add another `Args` tag. Explicit owner
@@ -181,15 +180,15 @@ Generic-aware checking uses declaration descriptors that never reach ordinary
 coder dispatch:
 
 ```text
-Type.GenericScope(modname, owner_fqtn_or_false,
-                  callable_name_or_false, role, declaration_kind)
-Type.TypeParameter(name, constraint_or_false)
+Type.GenericScope(modname, optional_owner_fqtn,
+                  optional_callable_name, role, declaration_kind)
+Type.TypeParameter(name, optional_constraint)
 Type.Parameter(scope, index, diagnostic_name,
-               erased_interface_application_or_false)
+               optional_erased_interface_application)
 Type.Nominal(fqtn, args)
 Type.FunctionScheme(scope, typeparams, signature)
 Type.GenericAlias(module, name, locality, target_owner_fqtn,
-                  target_alias_fqtn_or_false, target_scope, typeparams)
+                  optional_target_alias_fqtn, target_scope, typeparams)
 
 Type.Record(name, fields, functions, methods, nfields, scope, typeparams)
 Type.Union(name, variants, functions, methods, nvariants, scope, typeparams)
@@ -207,7 +206,7 @@ source name exists for diagnostics and is ignored by alpha-equivalence.
 declaration kind—not a filename or Lua table identity. Serialization therefore
 has deterministic identities across source checking and interface recovery.
 
-The `Parameter` stores false for the implicit unconstrained `value` carrier, or
+The `Parameter` stores nil for the implicit unconstrained `value` carrier, or
 the recursively erased ordinary Interface application for a constrained
 binder. Owner descriptors own owner binders. Method and static descriptors own
 only callable-local binders, although their signatures can refer to owner
@@ -216,6 +215,11 @@ binders followed by local binders; receiver methods have their owner arguments
 fixed and instantiate only local binders. A top-level `FunctionScheme` wraps one
 ordinary function signature. Ordinary first-class function types are never
 schemes.
+
+All optional names and scopes use nil as well. When a consumer needs to recover
+a binder's surface constraint, `parameter_surface_constraint` returns the
+optional constraint plus a validity boolean. A valid unconstrained binder is
+`nil, true`; missing or malformed binder evidence is `nil, false`.
 
 ### Applications, aliases, and identity
 

@@ -77,6 +77,7 @@ build = {
    install = {
       lua = {
       ["titan-compiler.ast"] = "titan-compiler/ast.lua",
+      ["titan-compiler.maybe3"] = "titan-compiler/maybe3.lua",
       ["titan-compiler.cdeclarator"] = "titan-compiler/cdeclarator.lua",
       ["titan-compiler.cpreamble"] = "titan-compiler/cpreamble.lua",
       ["titan-compiler.cprobe"] = "titan-compiler/cprobe.lua",

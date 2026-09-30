@@ -581,9 +581,9 @@ function array_metatable(ctx, typ)
     typ = assert(types.normalize(typ),
         "Array metatable lookup has an unnormalizable type")
     assert(typ._tag == "Type.Array"
-           and type(typ.isconst) == "boolean",
+           and types.valid_array_constness(typ.isconst) and typ.isconst.tag ~= "maybe",
         "Array metatable lookup requires a qualified Array type")
-    return array_metatable_kind(ctx, typ.isconst)
+    return array_metatable_kind(ctx, typ.isconst.tag == "yes")
 end
 
 -- Return the module-local Lua-writer entry for an Array element type,
@@ -594,7 +594,7 @@ function coder._array_writer(ctx, elem, plan)
     local tlcontext = ctx.tlcontext or ctx
     assert(elem and plan ~= nil,
         "Array construction is missing its checker writer annotation")
-    assert(plan ~= false,
+    assert(type(plan) == "table",
         "rejected Array writer plan reached code generation")
     coder._checked_dynamic_plan(plan, elem, "Array writer inventory")
     for _, entry in ipairs(tlcontext.array_writer_list) do

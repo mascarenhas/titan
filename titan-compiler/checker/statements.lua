@@ -127,7 +127,7 @@ function checkfor(node, st, errors)
 end
 
 function hidden_decl(loc, name, typ)
-    local decl = ast.Decl(loc, name, false, false, false)
+    local decl = ast.Decl(loc, name, nil, false, false)
     decl._type = typ
     decl._used = true
     return decl
@@ -251,7 +251,7 @@ function synthesize_forin_close_type(exps)
     if exps[2]._type._tag ~= "Type.Nil" then
         table.insert(params, exps[2]._type)
     end
-    return types.Function(params, {}, false, false, false)
+    return types.Function(params, {}, false, nil, nil)
 end
 
 function forin_nil_capable_control(typ)
@@ -298,10 +298,10 @@ function make_forin_call(loc, iter_decl, args, ftype, nresults, cfunc,
         fixed = args,
         tail_scalars = {},
         discards = {},
-        open_source = false,
+        open_source = nil,
     }
     call._npassed_args = #args
-    call._open_args = false
+    call._open_args = nil
     return call
 end
 
@@ -334,7 +334,7 @@ function generic_infer_forin_scheme(
         context.scopes[#context.scopes + 1] = entry
         context.scope_entries[entry.scope] = entry
         for index, typeparam in ipairs(entry.typeparams) do
-            if typeparam.constraint ~= false then
+            if typeparam.constraint ~= nil then
                 context.next_constraint_sequence =
                     context.next_constraint_sequence + 1
                 local record = {
@@ -394,7 +394,7 @@ function generic_infer_forin_scheme(
                                 context, signature.params[1], false)
                         end
                         local expected = types.Function(
-                            params, {}, false, false, false)
+                            params, {}, false, nil, nil)
                         checkexp(actual, est, eerrors, expected,
                             result_demand({ expected }, false, {
                                 term = "generic for close function",
@@ -508,7 +508,7 @@ function checkforin(node, st, errors)
                         params[1] = state._type
                     end
                     local expected = types.Function(
-                        params, {}, false, false, false)
+                        params, {}, false, nil, nil)
                     checkexp(exp, est, eerrors, expected,
                         result_demand({ expected }, false, {
                             term = "generic for close function",
@@ -554,7 +554,7 @@ function checkforin(node, st, errors)
             "generic for iterator must be a function, value, or C function pointer but found %s",
             types.tostring(exps[1]._type))
         ftype = call_signature(
-            types.Function({}, { types.Invalid() }, false, false, false))
+            types.Function({}, { types.Invalid() }, false, nil, nil))
     end
 
     if ftype.c_vararg or ftype.varargtype then
@@ -580,7 +580,7 @@ function checkforin(node, st, errors)
         checker.typeerror(errors, exps[1].loc,
             "generic for iterator must return at least one value")
         ftype = call_signature(types.Function(
-            ftype.params, { types.Invalid() }, false, false, false))
+            ftype.params, { types.Invalid() }, false, nil, nil))
         effective_results = { types.Invalid() }
     else
         local ctrltype = effective_results[1]
@@ -806,7 +806,7 @@ local function check_const_assignment(var, st, errors)
     elseif var._tag == "Ast.VarBracket"
        and var.exp1 and var.exp1._type
        and var.exp1._type._tag == "Type.Array"
-       and var.exp1._type.isconst then
+       and var.exp1._type.isconst.tag ~= "no" then
         checker.typeerror(errors, var.loc,
             "cannot assign to an element of const Array '%s'",
             types.tostring(var.exp1._type))
@@ -858,7 +858,7 @@ checkstat_visitor = util.make_visitor({
                 fixed = nils,
                 tail_scalars = {},
                 discards = {},
-                open_source = false,
+                open_source = nil,
             }
             return
         end
@@ -1070,13 +1070,13 @@ checkstat_visitor = util.make_visitor({
             -- live in a fresh sibling scope so the body's locals are out of
             -- view. Mark them `_used` so the unused-local analysis ignores them.
             st:open_block(node.catchblock)
-            local errdecl = ast.Decl(node.loc, "error", false, false, false)
+            local errdecl = ast.Decl(node.loc, "error", nil, false, false)
             errdecl._type = types.Value()
             errdecl._used = true
             errdecl._catch_implicit = true
             declare(errdecl, st, errors)
             local tbdecl = ast.Decl(
-                node.loc, "traceback", false, false, false)
+                node.loc, "traceback", nil, false, false)
             tbdecl._type = types.String()
             tbdecl._used = true
             tbdecl._catch_implicit = true

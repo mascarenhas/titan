@@ -17,7 +17,7 @@ local function cint()
 end
 
 local function cstruct(name, fields, fam)
-    return types.CStruct(false, name, false, fields or {}, true, fam == true)
+    return types.CStruct(nil, name, nil, fields or {}, true, fam == true)
 end
 
 local function rejected(fn, fragment)
@@ -61,8 +61,8 @@ describe("nominal physical layouts", function()
         assert.equal(4, #raw.public_members)
         local gc = assert(layout.record(record({
             field("s", types.String(), 0),
-            field("a", types.Array(types.Integer(), false), 1),
-            field("f", types.Function({}, {}, false, false, false), 2),
+            field("a", types.Array(types.Integer(), {tag="no"}), 1),
+            field("f", types.Function({}, {}, false, nil, nil), 2),
         })))
         assert.equal(3, gc.nuv)
         assert.equal(0, #gc.members)
@@ -72,9 +72,9 @@ describe("nominal physical layouts", function()
     end)
 
     it("classifies the erased generic carrier rather than a concrete application", function()
-        local scope = types.GenericScope("sample", "sample.Record", false,
+        local scope = types.GenericScope("sample", "sample.Record", nil,
             "owner", "record")
-        local parameter = types.Parameter(scope, 1, "T", false)
+        local parameter = types.Parameter(scope, 1, "T", nil)
         local plan = assert(layout.record(record({field("item", parameter, 0)})))
         assert.equal("uv", plan.slots[1].storage)
         assert.equal("Type.Value", plan.slots[1].type._tag)
@@ -107,23 +107,23 @@ describe("nominal physical layouts", function()
 
     it("classifies fixed aggregates and typedef arrays while preserving their C declarations", function()
         local point = cstruct("point", {
-            types.CField(false, "x", cint(), false, false),
-            types.CField(false, "y", cint(), false, false),
+            types.CField(nil, "x", cint(), nil, false),
+            types.CField(nil, "y", cint(), nil, false),
         })
         local alias = types.CTypedef("int_four", types.CArray(cint(), 4))
         assert.equal("aggregate", assert(layout.classify(point)).kind)
         local array = assert(layout.classify(alias))
         assert.equal("array", array.kind)
         assert.equal(alias, array.type)
-        local union = types.CUnion(false, "choice", false, {
-            types.CField(false, "point", point, false, false),
-            types.CField(false, "bytes", alias, false, false),
+        local union = types.CUnion(nil, "choice", nil, {
+            types.CField(nil, "point", point, nil, false),
+            types.CField(nil, "bytes", alias, nil, false),
         }, true)
         assert.equal("aggregate", assert(layout.classify(union)).kind)
     end)
 
     it("normalizes uncounted array views without discarding C pointee constness", function()
-        local view = types.CTypedef("const_view", types.CArray(cint(), false, {"const"}))
+        local view = types.CTypedef("const_view", types.CArray(cint(), nil, {"const"}))
         local result = assert(layout.classify(view))
         assert.equal("scalar", result.kind)
         assert.equal("Type.CPointer", result.type._tag)
@@ -132,18 +132,18 @@ describe("nominal physical layouts", function()
     end)
 
     it("rejects incomplete, FAM, and recursively GC-bearing by-value objects", function()
-        local incomplete = types.CStruct(false, "opaque", false, {}, false, false)
+        local incomplete = types.CStruct(nil, "opaque", nil, {}, false, false)
         rejected(function() return layout.classify(incomplete) end, "incomplete")
         assert.equal("scalar", assert(layout.classify(types.CPointer(incomplete, {}))).kind)
         local fam = cstruct("packet", {
-            types.CField(false, "data", types.CArray(cint(), false), false, true),
+            types.CField(nil, "data", types.CArray(cint(), nil), nil, true),
         }, true)
-        local nested = types.CUnion(false, "nested", false, {
-            types.CField(false, "packet", fam, false, false),
+        local nested = types.CUnion(nil, "nested", nil, {
+            types.CField(nil, "packet", fam, nil, false),
         }, true)
         rejected(function() return layout.classify(nested) end, "FAM")
         local bearing = cstruct("bearing", {
-            types.CField(false, "values", types.CArray(cstruct("TValue"), 4), false, false),
+            types.CField(nil, "values", types.CArray(cstruct("TValue"), 4), nil, false),
         })
         rejected(function() return layout.classify(bearing) end, "GC-bearing")
         rejected(function() return layout.classify(types.CArray(cint(), 0)) end, "extent")
@@ -183,7 +183,7 @@ describe("nominal physical layouts", function()
 
     it("publishes only the public prefix and UV map of a record with private C members", function()
         local hidden = cstruct("secret_native_type", {
-            types.CField(false, "native", cint(), false, false),
+            types.CField(nil, "native", cint(), nil, false),
         })
         local plan = assert(layout.record(record({
             field("secret_field", hidden, 0, true),
@@ -210,7 +210,7 @@ describe("nominal physical layouts", function()
 
     it("round-trips portable native declarations and complete constructor layouts", function()
         local callback = types.CPointer(types.CFunction({cint()},
-            types.CVoid(), false, false), {})
+            types.CVoid(), false, nil), {})
         local plan = assert(layout.record(record({
             field("pointer", types.CPointer(cint(), {"const"}), 0),
             field("callback", callback, 1),

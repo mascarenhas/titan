@@ -70,8 +70,8 @@ describe("dense Array and positional integer-Map checking", function()
         assert.truthy(ok, err)
 
         local stats = find_function(tree, "use").block.stats
-        assert.same(types.Array(types.Integer(), false), stats[1].decls[1]._type)
-        assert.same(types.Array(types.Nil(), false), stats[2].decls[1]._type)
+        assert.same(types.Array(types.Integer(), {tag="no"}), stats[1].decls[1]._type)
+        assert.same(types.Array(types.Nil(), {tag="no"}), stats[2].decls[1]._type)
         assert.same(types.Map(types.Integer(), types.Integer()),
             stats[3].decls[1]._type)
         assert.truthy(local_initializer(stats[1])._positional_adjustment)
@@ -534,8 +534,8 @@ describe("dense Array and positional integer-Map checking", function()
 
         local use_stats = find_function(tree, "use").block.stats
         local cast = use_stats[1].exps[1]
-        assert.same("written_cast", cast._written_cast.kind)
-        assert.same("copy", cast._written_cast.mode)
+        assert.same("written_cast", cast._written_cast.value.kind)
+        assert.same("copy", cast._written_cast.value.mode)
     end)
 
     it("strips linear flag from first-class function values", function()

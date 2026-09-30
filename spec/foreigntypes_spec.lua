@@ -512,13 +512,13 @@ describe("foreign C type conversion", function()
         local int = st.c_profile.integers.int.type
         local first_prototype = types.CFunction({
             types.CPointer(first_tag, {}),
-        }, int, false, false)
+        }, int, false, nil)
         local second_prototype = types.CFunction({
             types.CPointer(second_tag, {}),
-        }, int, false, false)
+        }, int, false, nil)
         local repeated_prototype = types.CFunction({
             types.CPointer(first_tag, {}),
-        }, int, false, false)
+        }, int, false, nil)
 
         assert.falsy(foreigntypes.declarations_compatible(
             first_prototype, second_prototype))

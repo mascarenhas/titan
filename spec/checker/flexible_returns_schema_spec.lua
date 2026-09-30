@@ -72,7 +72,7 @@ describe("flexible return schemas (typechecker)", function()
         assert.same(types.Boolean(), inferred.rettypes[1])
         assert.same(types.Integer(), inferred.flexrettype)
         assert.same({}, explicit.rettypes)
-        assert.is_false(explicit.flexrettype)
+        assert.is_nil(explicit.flexrettype)
     end)
 
     it("uses a return-specific diagnostic for an invalid nil tail", function()
@@ -137,19 +137,19 @@ describe("flexible return schemas (typechecker)", function()
         local static_record = types.Record("owner.StaticR", {}, {}, {}, 0)
         local method_record = types.Record("owner.MethodR", {}, {}, {}, 0)
         local owner = types.Module("owner", {
-            types.ModuleMember("owner", "StaticR", static_record, false),
-            types.ModuleMember("owner", "MethodR", method_record, false),
+            types.ModuleMember("owner", "StaticR", static_record, nil),
+            types.ModuleMember("owner", "MethodR", method_record, nil),
         }, {})
 
         local box = types.Record("consumer.Box", {}, {
-            make = types.StaticMethod("consumer.Box", "make", {}, {}, false,
+            make = types.StaticMethod("consumer.Box", "make", {}, {}, nil,
                 types.Nominal("owner.StaticR"), {}),
         }, {
-            get = types.Method("consumer.Box", "get", {}, {}, false,
+            get = types.Method("consumer.Box", "get", {}, {}, nil,
                 types.Nominal("owner.MethodR"), {}),
         }, 0)
         local consumer = types.Module("consumer", {
-            types.ModuleMember("consumer", "Box", box, false),
+            types.ModuleMember("consumer", "Box", box, nil),
         }, {})
         local modules = { consumer = consumer, owner = owner }
         local loaded = {}

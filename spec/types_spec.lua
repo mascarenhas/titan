@@ -22,9 +22,9 @@ describe("Titan types", function()
                 or { "A", "z", "\195\169" }
             for _, name in ipairs(names) do
                 methods[name] = types.Method("sample.Box", name, {}, {},
-                    false, false, {})
+                    nil, nil, {})
                 functions[name] = types.StaticMethod("sample.Box", name,
-                    {}, {}, false, false, {})
+                    {}, {}, nil, nil, {})
             end
             return types.Record("sample.Box", {}, functions, methods, 0)
         end
@@ -80,8 +80,8 @@ describe("Titan types", function()
             types.Field("sample.Box", "A", types.Integer(), 1, false),
         }, {}, {}, 2)
         local module = types.Module("sample", {
-            types.ModuleMember("sample", "z", types.Integer(), false),
-            types.ModuleMember("sample", "A", types.Integer(), false),
+            types.ModuleMember("sample", "z", types.Integer(), nil),
+            types.ModuleMember("sample", "A", types.Integer(), nil),
         }, { Box = record })
 
         local serialized = types.serialize(module)
@@ -93,15 +93,15 @@ describe("Titan types", function()
 
     it("pretty-prints types", function()
         assert.same("{ integer }",
-            types.tostring(types.Array(types.Integer(), false)))
+            types.tostring(types.Array(types.Integer(), {tag="no"})))
         assert.same("const { integer }",
-            types.tostring(types.Array(types.Integer(), true)))
+            types.tostring(types.Array(types.Integer(), {tag="yes"})))
 
         local c_integer = types.CInteger("int", true, 3, 32)
         assert.same("{ foreign const *int }", types.tostring(types.Array(
-            types.CPointer(c_integer, {"const"}), false)))
+            types.CPointer(c_integer, {"const"}), {tag="no"})))
         assert.same("const { foreign *int }", types.tostring(types.Array(
-            types.CPointer(c_integer, {}), true)))
+            types.CPointer(c_integer, {}), {tag="yes"})))
     end)
 
     it("requires every serialized const qualifier explicitly", function()
@@ -119,7 +119,7 @@ describe("Titan types", function()
         for _, construct in ipairs(constructors) do
             local ok, err = pcall(construct)
             assert.is_false(ok)
-            assert.match("const qualifier must be a boolean", tostring(err))
+            assert.match("const qualifier must be", tostring(err))
         end
 
         local mutable = types.Field(
@@ -132,15 +132,35 @@ describe("Titan types", function()
             types.ModuleVariable("sample", "item", types.Integer(), true)))
     end)
 
+    it("accepts only exact tagged Array qualifiers", function()
+        for _, tag in ipairs({"no", "yes", "maybe"}) do
+            local original = types.Array(types.Integer(), {tag = tag})
+            local independent = types.Array(types.Integer(), {tag = tag})
+            assert.is_true(types.equals(original, independent))
+            assert.equal(tag, original.isconst.tag)
+        end
+        for _, qualifier in ipairs({
+            false, true, "maybe", {}, {tag = "other"},
+            {tag = "no", value = false},
+            setmetatable({tag = "yes"}, {}),
+        }) do
+            assert.is_false(types.valid_array_constness(qualifier))
+            assert.has_error(function()
+                types.Array(types.Integer(), qualifier)
+            end, "Array const qualifier must be a tagged no, yes, or maybe value")
+        end
+        assert.is_false(types.valid_array_constness(nil))
+    end)
+
     it("pretty-prints a function with multiple return types", function()
         local f = types.Function({types.Integer()},
-                                 {types.Integer(), types.String()}, false, false,
-                                 false)
+                                 {types.Integer(), types.String()}, false, nil,
+                                 nil)
         assert.same("function (integer): (integer, string)", types.tostring(f))
     end)
 
     it("pretty-prints flexible returns canonically without changing fixed-only forms", function()
-        local flexonly = types.Function({}, {}, false, false, types.Integer())
+        local flexonly = types.Function({}, {}, false, nil, types.Integer())
         local mixed = types.Function(
             {types.Integer()}, {types.Boolean()}, false, types.String(),
             types.Value())
@@ -150,13 +170,13 @@ describe("Titan types", function()
             "function (integer, ...: string): (boolean, ...: value)",
             types.tostring(mixed))
         assert.same("function (integer): boolean", types.tostring(types.Function(
-            {types.Integer()}, {types.Boolean()}, false, false, false)))
+            {types.Integer()}, {types.Boolean()}, false, nil, nil)))
     end)
 
     it("renders a function-typed flexible element without colliding with a fixed result", function()
-        local elem = types.Function({}, {types.Integer()}, false, false, false)
-        local fixed = types.Function({}, {elem}, false, false, false)
-        local flexible = types.Function({}, {}, false, false, elem)
+        local elem = types.Function({}, {types.Integer()}, false, nil, nil)
+        local fixed = types.Function({}, {elem}, false, nil, nil)
+        local flexible = types.Function({}, {}, false, nil, elem)
 
         assert.same("function (): (function (): integer)", types.tostring(fixed))
         assert.same("function (): (...: function (): integer)", types.tostring(flexible))
@@ -165,15 +185,15 @@ describe("Titan types", function()
 
     it("pretty-prints a method with one return type", function()
         local method = types.Method("sample.Box", "get",
-            {types.Integer()}, {types.String()}, false, false, {"index"})
+            {types.Integer()}, {types.String()}, nil, nil, {"index"})
         assert.same("sample.Box:get(integer): string", types.tostring(method))
     end)
 
     it("pretty-prints flexible method and record-function returns", function()
-        local method = types.Method("sample.Box", "items", {}, {}, false,
+        local method = types.Method("sample.Box", "items", {}, {}, nil,
             types.String(), {})
         local static = types.StaticMethod("sample.Box", "lookup", {},
-            {types.Boolean()}, false, types.Integer(), {})
+            {types.Boolean()}, nil, types.Integer(), {})
 
         assert.same("sample.Box:items(): (...: string)",
             types.tostring(method))
@@ -183,34 +203,34 @@ describe("Titan types", function()
 
     it("checks if a type is garbage collected", function()
         assert.truthy(types.is_gc(types.String()))
-        assert.truthy(types.is_gc(types.Array(types.Integer(), false)))
+        assert.truthy(types.is_gc(types.Array(types.Integer(), {tag="no"})))
         assert.truthy(types.is_gc(types.Map(types.Integer(), types.Integer())))
-        assert.truthy(types.is_gc(types.Function({}, {}, false, false, false)))
+        assert.truthy(types.is_gc(types.Function({}, {}, false, nil, nil)))
     end)
 
     it("compares identical functions", function()
-        local f1 = types.Function({types.String(), types.Integer()}, {types.Boolean()}, false, false, false)
-        local f2 = types.Function({types.String(), types.Integer()}, {types.Boolean()}, false, false, false)
+        local f1 = types.Function({types.String(), types.Integer()}, {types.Boolean()}, false, nil, nil)
+        local f2 = types.Function({types.String(), types.Integer()}, {types.Boolean()}, false, nil, nil)
         assert.truthy(types.equals(f1, f2))
     end)
 
     it("compares functions with different arguments", function()
-        local f1 = types.Function({types.String(), types.Boolean()}, {types.Boolean()}, false, false, false)
-        local f2 = types.Function({types.Integer(), types.Integer()}, {types.Boolean()}, false, false, false)
+        local f1 = types.Function({types.String(), types.Boolean()}, {types.Boolean()}, false, nil, nil)
+        local f2 = types.Function({types.Integer(), types.Integer()}, {types.Boolean()}, false, nil, nil)
         assert.falsy(types.equals(f1, f2))
     end)
 
     it("compares functions with different returns", function()
-        local f1 = types.Function({types.String(), types.Integer()}, {types.Boolean()}, false, false, false)
-        local f2 = types.Function({types.String(), types.Integer()}, {types.Integer()}, false, false, false)
+        local f1 = types.Function({types.String(), types.Integer()}, {types.Boolean()}, false, nil, nil)
+        local f2 = types.Function({types.String(), types.Integer()}, {types.Integer()}, false, nil, nil)
         assert.falsy(types.equals(f1, f2))
     end)
 
     it("includes flexible return presence and element type in function identity", function()
-        local fixed = types.Function({}, {}, false, false, false)
-        local ints1 = types.Function({}, {}, false, false, types.Integer())
-        local ints2 = types.Function({}, {}, false, false, types.Integer())
-        local strings = types.Function({}, {}, false, false, types.String())
+        local fixed = types.Function({}, {}, false, nil, nil)
+        local ints1 = types.Function({}, {}, false, nil, types.Integer())
+        local ints2 = types.Function({}, {}, false, nil, types.Integer())
+        local strings = types.Function({}, {}, false, nil, types.String())
 
         assert.truthy(types.equals(ints1, ints2))
         assert.falsy(types.equals(fixed, ints1))
@@ -240,8 +260,8 @@ describe("Titan types", function()
                 constructor("sample.Box", "items", {i}, {i}, i, b, {"count"}),
                 constructor("sample.Box", "items", {i}, {s}, s, b, {"count"}),
                 constructor("sample.Box", "items", {i}, {s}, i, s, {"count"}),
-                constructor("sample.Box", "items", {i}, {s}, false, b, {"count"}),
-                constructor("sample.Box", "items", {i}, {s}, i, false, {"count"}),
+                constructor("sample.Box", "items", {i}, {s}, nil, b, {"count"}),
+                constructor("sample.Box", "items", {i}, {s}, i, nil, {"count"}),
             }
             for _, descriptor in ipairs(different) do
                 assert.falsy(types.equals(base, descriptor))
@@ -259,26 +279,26 @@ describe("Titan types", function()
         local i = types.Integer()
         local function fn(params, results, varargtype, flexrettype)
             return types.Function(params or {}, results or {}, false,
-                varargtype or false, flexrettype or false)
+                varargtype, flexrettype)
         end
         local base = fn({i}, {i})
         assert.falsy(types.equals(base, fn({}, {i})))
         assert.falsy(types.equals(base, fn({i}, {i, i})))
         assert.falsy(types.equals(base, fn({i}, {i}, i)))
-        assert.falsy(types.equals(base, fn({i}, {i}, false, i)))
+        assert.falsy(types.equals(base, fn({i}, {i}, nil, i)))
     end)
 
     it("keeps the compiled Function vararg slot reserved false", function()
         local valid = types.Function(
-            { types.Integer() }, { types.Integer() }, false, false, false)
+            { types.Integer() }, { types.Integer() }, false, nil, nil)
         local malformed = types.Function(
-            { types.Integer() }, { types.Integer() }, true, false, false)
+            { types.Integer() }, { types.Integer() }, true, nil, nil)
 
         assert.is_false(types.equals(valid, malformed))
         -- Equality remains reflexive; boundary validation rejects the descriptor.
         assert.is_true(types.equals(malformed, malformed))
         assert.is_false(types.consistent(valid, malformed))
-        assert.is_false(types.callable_adjustment(valid, malformed))
+        assert.is_nil(types.callable_adjustment(valid, malformed))
         assert.is_false(types.has_sound_gradual_guard(malformed))
         assert.has_error(function()
             types.serialize(malformed)
@@ -297,8 +317,8 @@ describe("Titan types", function()
                 name,
                 params or {},
                 results or {},
-                varargtype or false,
-                flexrettype or false,
+                varargtype,
+                flexrettype,
                 paramnames or {})
         end
 
@@ -331,13 +351,13 @@ describe("Titan types", function()
                 types.has_tvalue_representation(interface))
             assert.is_false(types.consistent(
                 interface, interface))
-            assert.is_false(types.gradual_guard(interface))
-            assert.is_false(types.dynamic_coercion(interface))
-            assert.is_false(types.coercion(
+            assert.is_nil(types.gradual_guard(interface))
+            assert.is_nil(types.dynamic_coercion(interface))
+            assert.is_nil(types.coercion(
                 interface, types.Value()))
-            assert.is_false(types.assignment_adjustment(
+            assert.is_nil(types.assignment_adjustment(
                 interface, types.Value()))
-            assert.is_false(types.written_cast(
+            assert.is_nil(types.written_cast(
                 interface, types.Value()))
 
             local nominal = types.Nominal(owner)
@@ -374,7 +394,7 @@ describe("Titan types", function()
             constructor_fails(owner, {}, {
                 types.StaticMethod(
                     owner, "read", {}, {},
-                    false, false, {}),
+                    nil, nil, {}),
             }, "not a method descriptor")
         end)
 
@@ -442,7 +462,7 @@ describe("Titan types", function()
             concrete_name.isconst = false
             local matched, failure = types.interface_implementation(
                 record, interface, {visibility = "sample"})
-            assert.is_false(matched)
+            assert.is_nil(matched)
             assert.equal("mutable", failure.reason)
             assert.equal("field", failure.member_kind)
 
@@ -450,14 +470,14 @@ describe("Titan types", function()
             concrete_name.islocal = true
             matched, failure = types.interface_implementation(
                 record, interface, {visibility = "client"})
-            assert.is_false(matched)
+            assert.is_nil(matched)
             assert.equal("inaccessible", failure.reason)
 
             local union = types.Union(
                 "sample.Choice", {}, {}, {}, 0)
             matched, failure = types.interface_implementation(
                 union, interface, {visibility = "sample"})
-            assert.is_false(matched)
+            assert.is_nil(matched)
             assert.equal("fields_require_record", failure.reason)
         end)
 
@@ -506,24 +526,24 @@ describe("Titan types", function()
         it("substitutes owner-generic Interface fields before matching",
         function()
             local interface_scope = types.GenericScope(
-                "api", "api.BoxView", false, "owner", "interface")
+                "api", "api.BoxView", nil, "owner", "interface")
             local record_scope = types.GenericScope(
-                "sample", "sample.Box", false, "owner", "record")
+                "sample", "sample.Box", nil, "owner", "record")
             local interface_parameter = types.Parameter(
-                interface_scope, 1, "T", false)
+                interface_scope, 1, "T", nil)
             local record_parameter = types.Parameter(
-                record_scope, 1, "T", false)
+                record_scope, 1, "T", nil)
             local interface = types.Interface("api.BoxView", {
                 types.Field("api.BoxView", "item",
                     interface_parameter, 0, true),
             }, {}, interface_scope, {
-                types.TypeParameter("T", false),
+                types.TypeParameter("T", nil),
             })
             local record = types.Record("sample.Box", {
                 types.Field("sample.Box", "item",
                     record_parameter, 0, true),
             }, {}, {}, 1, record_scope, {
-                types.TypeParameter("T", false),
+                types.TypeParameter("T", nil),
             })
 
             local closed_interface = types.substitute(
@@ -760,14 +780,14 @@ describe("Titan types", function()
             local implementation, failure =
                 types.interface_implementation(
                     record, interface, {visibility = "sample"})
-            assert.is_false(implementation)
+            assert.is_nil(implementation)
             assert.equal("missing", failure.reason)
             assert.equal(1, failure.index)
             assert.equal("first", failure.name)
 
             implementation, failure =
                 types.interface_implementation(record, interface)
-            assert.is_false(implementation)
+            assert.is_nil(implementation)
             assert.equal("missing_visibility", failure.reason)
 
             local local_first = method(rname, "first")
@@ -782,7 +802,7 @@ describe("Titan types", function()
             implementation, failure =
                 types.interface_implementation(
                     record, interface, {visibility = "client"})
-            assert.is_false(implementation)
+            assert.is_nil(implementation)
             assert.equal("inaccessible", failure.reason)
             assert.equal("first", failure.name)
         end)
@@ -801,11 +821,11 @@ describe("Titan types", function()
             local fill = method(
                 rname, "fill",
                 {types.Integer(), types.Option(types.Integer())}, {},
-                {}, false, types.Integer())
+                {}, nil, types.Integer())
             local tail = method(
                 rname, "tail",
                 {types.Integer()}, {}, {},
-                types.Integer(), false)
+                types.Integer(), nil)
             local missing = method(rname, "missing", {}, {})
             local record = types.Record(
                 rname, {}, {}, {
@@ -857,7 +877,7 @@ describe("Titan types", function()
             local implementation, failure =
                 types.interface_implementation(
                     record, required, {visibility = "sample"})
-            assert.is_false(implementation)
+            assert.is_nil(implementation)
             assert.equal("incompatible", failure.reason)
 
             local field = types.Field(
@@ -868,20 +888,20 @@ describe("Titan types", function()
                 types.interface_implementation(
                     field_record, required,
                     {visibility = "sample"})
-            assert.is_false(implementation)
+            assert.is_nil(implementation)
             assert.equal("not_method", failure.reason)
             assert.is_true(failure.member == field)
 
             local static = types.StaticMethod(
                 rname, "convert", {}, {types.Float()},
-                false, false, {})
+                nil, nil, {})
             local static_record =
                 types.Record(rname, {}, {convert = static}, {}, 0)
             implementation, failure =
                 types.interface_implementation(
                     static_record, required,
                     {visibility = "sample"})
-            assert.is_false(implementation)
+            assert.is_nil(implementation)
             assert.equal("not_method", failure.reason)
             assert.is_true(failure.member == static)
         end)
@@ -903,7 +923,7 @@ describe("Titan types", function()
             local implementation, failure =
                 types.interface_implementation(
                     record, interface, {visibility = "sample"})
-            assert.is_false(implementation)
+            assert.is_nil(implementation)
             assert.equal("incompatible", failure.reason)
 
             local interface_result = method(
@@ -950,7 +970,7 @@ describe("Titan types", function()
                 types.Nominal(rname), types.Nominal(iname)
 
             assert.is_false(types.consistent(source, target))
-            assert.is_false(types.coercion(source, target))
+            assert.is_nil(types.coercion(source, target))
             local coercion = assert(types.coercion(
                 source, target, policy))
             assert.equal("interface_wrapper", coercion.op)
@@ -964,15 +984,15 @@ describe("Titan types", function()
                 assert(types.assignment_adjustment(
                     source, target, policy)).kind)
             assert.equal(2, calls)
-            assert.is_false(types.coercion(
+            assert.is_nil(types.coercion(
                 target, source, policy))
             assert.equal(3, calls)
-            assert.is_false(types.coercion(
-                types.Array(source, false),
-                types.Array(target, false), policy))
-            assert.is_false(types.callable_adjustment(
-                types.Function({}, {source}, false, false, false),
-                types.Function({}, {target}, false, false, false)))
+            assert.is_nil(types.coercion(
+                types.Array(source, {tag="no"}),
+                types.Array(target, {tag="no"}), policy))
+            assert.is_nil(types.callable_adjustment(
+                types.Function({}, {source}, false, nil, nil),
+                types.Function({}, {target}, false, nil, nil)))
             assert.equal(3, calls)
 
             local optional = assert(types.coercion(
@@ -987,7 +1007,7 @@ describe("Titan types", function()
     describe("separated type relations", function()
         local function fn(params, results, varargtype, flexrettype)
             return types.Function(params or {}, results or {}, false,
-                varargtype or false, flexrettype or false)
+                varargtype, flexrettype)
         end
 
         it("does not expose the retired aggregate relation APIs", function()
@@ -1044,7 +1064,7 @@ describe("Titan types", function()
             local alias_pointer = c_chain(raw_pointer)
             assert.equal("explicit",
                 assert(types.written_cast(v, alias_pointer)).op)
-            assert.is_false(types.dynamic_coercion(alias_pointer))
+            assert.is_nil(types.dynamic_coercion(alias_pointer))
         end)
 
         it("rejects cyclic alias graphs in every new relation", function()
@@ -1058,23 +1078,23 @@ describe("Titan types", function()
                 assert.is_false(
                     types.has_tvalue_representation(cycle))
                 assert.is_false(types.has_sound_gradual_guard(cycle))
-                assert.is_false(types.gradual_guard(cycle))
-                assert.is_false(types.dynamic_coercion(cycle))
+                assert.is_nil(types.gradual_guard(cycle))
+                assert.is_nil(types.dynamic_coercion(cycle))
                 assert.is_false(types.consistent(cycle, cycle))
                 assert.is_false(types.consistent(cycle, v))
                 assert.is_false(types.consistent(v, cycle))
-                assert.is_false(types.coercion(cycle, cycle))
-                assert.is_false(types.coercion(cycle, i))
-                assert.is_false(types.coercion(i, cycle))
-                assert.is_false(types.written_cast(cycle, cycle))
-                assert.is_false(types.written_cast(v, cycle))
-                assert.is_false(types.written_cast(cycle, v))
-                assert.is_false(types.comparable(cycle, v))
-                assert.is_false(
+                assert.is_nil(types.coercion(cycle, cycle))
+                assert.is_nil(types.coercion(cycle, i))
+                assert.is_nil(types.coercion(i, cycle))
+                assert.is_nil(types.written_cast(cycle, cycle))
+                assert.is_nil(types.written_cast(v, cycle))
+                assert.is_nil(types.written_cast(cycle, v))
+                assert.is_nil(types.comparable(cycle, v))
+                assert.is_nil(
                     types.assignment_adjustment(cycle, i))
-                assert.is_false(
+                assert.is_nil(
                     types.assignment_adjustment(cycle, cycle))
-                assert.is_false(types.callable_adjustment(
+                assert.is_nil(types.callable_adjustment(
                     fn({cycle}), fn({i})))
                 assert.is_false(types.consistent(
                     fn({}, {cycle}), fn({}, {i})))
@@ -1087,7 +1107,7 @@ describe("Titan types", function()
             local oi = types.Option(i)
             local samples = {
                 i, s, v, oi,
-                types.Array(i, false),
+                types.Array(i, {tag="no"}),
                 types.Map(s, i),
                 fn({i}, {s}),
                 types.Nominal("sample.Box"),
@@ -1099,7 +1119,7 @@ describe("Titan types", function()
 
             local pairs = {
                 {i, v},
-                {types.Array(i, false), types.Array(v, false)},
+                {types.Array(i, {tag="no"}), types.Array(v, {tag="no"})},
                 {types.Map(s, i), types.Map(v, v)},
                 {types.Option(i), types.Option(v)},
                 {fn({i}, {v}), fn({v}, {i})},
@@ -1124,11 +1144,11 @@ describe("Titan types", function()
             assert.is_true(types.consistent(v, s))
             assert.is_false(types.consistent(i, s))
             assert.is_true(types.consistent(
-                types.Array(i, false), types.Array(v, false)))
+                types.Array(i, {tag="no"}), types.Array(v, {tag="no"})))
             assert.is_true(types.consistent(
-                types.Array(v, false), types.Array(s, false)))
+                types.Array(v, {tag="no"}), types.Array(s, {tag="no"})))
             assert.is_false(types.consistent(
-                types.Array(i, false), types.Array(s, false)))
+                types.Array(i, {tag="no"}), types.Array(s, {tag="no"})))
             assert.is_true(types.consistent(
                 types.Map(i, i), types.Map(v, v)))
             assert.is_true(types.consistent(
@@ -1140,10 +1160,10 @@ describe("Titan types", function()
         it("keeps Array mutability invariant except for a written freeze",
         function()
             local i, f, v = types.Integer(), types.Float(), types.Value()
-            local mutable_i = types.Array(i, false)
-            local mutable_v = types.Array(v, false)
-            local const_i = types.Array(i, true)
-            local const_v = types.Array(v, true)
+            local mutable_i = types.Array(i, {tag="no"})
+            local mutable_v = types.Array(v, {tag="no"})
+            local const_i = types.Array(i, {tag="yes"})
+            local const_v = types.Array(v, {tag="yes"})
 
             assert.equal("{ integer }", types.tostring(mutable_i))
             assert.equal("const { integer }", types.tostring(const_i))
@@ -1151,37 +1171,37 @@ describe("Titan types", function()
             assert.is_false(types.consistent(mutable_i, const_i))
             assert.is_true(types.consistent(mutable_i, mutable_v))
             assert.is_true(types.consistent(const_i, const_v))
-            assert.is_false(types.assignment_adjustment(
+            assert.is_nil(types.assignment_adjustment(
                 mutable_i, const_i))
-            assert.is_false(types.assignment_adjustment(
+            assert.is_nil(types.assignment_adjustment(
                 const_i, mutable_i))
-            assert.is_false(types.comparable(mutable_i, const_i))
+            assert.is_nil(types.comparable(mutable_i, const_i))
 
             local freeze = assert(types.written_cast(mutable_i, const_i))
             assert.equal("array_freeze", freeze.op)
             assert.equal("copy", freeze.mode)
             assert.is_true(freeze.allocation_free_test)
-            assert.is_false(freeze.element_view)
+            assert.is_nil(freeze.element_view)
 
             local gradual = assert(types.written_cast(mutable_i, const_v))
             assert.equal("array_freeze", gradual.op)
             assert.equal("gradual_view", gradual.element_view.kind)
-            assert.is_false(types.written_cast(
-                mutable_i, types.Array(f, true)))
-            assert.is_false(types.written_cast(const_i, mutable_i))
+            assert.is_nil(types.written_cast(
+                mutable_i, types.Array(f, {tag="yes"})))
+            assert.is_nil(types.written_cast(const_i, mutable_i))
 
             local const_guard = assert(types.gradual_guard(const_i))
             assert.equal("array", const_guard.op)
-            assert.is_true(const_guard.isconst)
+            assert.equal("yes", const_guard.isconst.tag)
             local const_dynamic = assert(types.dynamic_coercion(const_i))
             assert.equal("array", const_dynamic.op)
-            assert.is_true(const_dynamic.isconst)
+            assert.equal("yes", const_dynamic.isconst.tag)
             local mutable_dynamic = assert(
                 types.dynamic_coercion(mutable_i))
-            assert.is_false(mutable_dynamic.isconst)
+            assert.equal("no", mutable_dynamic.isconst.tag)
 
             local serialized = types.serialize(const_i)
-            assert.equal("Array(Integer(),true)", serialized)
+            assert.equal('Array(Integer(),{tag="yes"})', serialized)
             local rebuilt = assert(load(
                 "return " .. serialized, "const-array", "t", types))()
             assert.is_true(types.equals(const_i, rebuilt))
@@ -1190,7 +1210,7 @@ describe("Titan types", function()
         it("keeps optional Array element views structural and qualifiers invariant",
         function()
             local i, v = types.Integer(), types.Value()
-            for _, qualifier in ipairs({false, true, "maybe"}) do
+            for _, qualifier in ipairs({{tag="no"}, {tag="yes"}, {tag="maybe"}}) do
                 local concrete = types.Option(types.Array(i, qualifier))
                 local erased = types.Option(types.Array(v, qualifier))
                 for _, pair in ipairs({
@@ -1206,13 +1226,13 @@ describe("Titan types", function()
                 end
             end
 
-            local mutable = types.Option(types.Array(i, false))
-            local frozen = types.Option(types.Array(v, true))
+            local mutable = types.Option(types.Array(i, {tag="no"}))
+            local frozen = types.Option(types.Array(v, {tag="yes"}))
             assert.is_false(types.consistent(mutable, frozen))
-            assert.is_false(types.assignment_adjustment(mutable, frozen))
-            assert.is_false(types.assignment_adjustment(frozen, mutable))
-            assert.is_false(types.assignment_adjustment(mutable,
-                types.Option(types.Array(types.Float(), false))))
+            assert.is_nil(types.assignment_adjustment(mutable, frozen))
+            assert.is_nil(types.assignment_adjustment(frozen, mutable))
+            assert.is_nil(types.assignment_adjustment(mutable,
+                types.Option(types.Array(types.Float(), {tag="no"}))))
         end)
 
         it("uses the exact missing-nil representation frontier", function()
@@ -1227,7 +1247,7 @@ describe("Titan types", function()
             end
             for _, typ in ipairs({
                     types.Boolean(), types.Integer(), types.String(),
-                    types.Array(types.Integer(), false),
+                    types.Array(types.Integer(), {tag="no"}),
                     types.COwned(cint, false),
                 }) do
                 assert.is_false(types.accepts_missing_nil(typ),
@@ -1244,8 +1264,8 @@ describe("Titan types", function()
             a.rettypes, b.rettypes = {y}, {x}
             x.rettypes, y.rettypes = {a}, {b}
 
-            assert.is_false(types.callable_adjustment(a, b))
-            assert.is_false(types.callable_adjustment(b, a))
+            assert.is_nil(types.callable_adjustment(a, b))
+            assert.is_nil(types.callable_adjustment(b, a))
             assert.is_false(types.consistent(a, b))
             assert.is_false(types.consistent(b, a))
 
@@ -1259,8 +1279,8 @@ describe("Titan types", function()
             assert.is_false(types.equals(p, q))
             assert.is_false(types.has_sound_gradual_guard(p))
             assert.is_false(types.consistent(p, types.Value()))
-            assert.is_false(types.callable_adjustment(p, q))
-            assert.is_false(types.callable_adjustment(q, p))
+            assert.is_nil(types.callable_adjustment(p, q))
+            assert.is_nil(types.callable_adjustment(q, p))
             assert.is_false(types.consistent(p, q))
             assert.is_false(types.consistent(q, p))
         end)
@@ -1298,8 +1318,8 @@ describe("Titan types", function()
             local rejected = {
                 {i, f},
                 {i, oi},
-                {types.Array(i, false), types.Array(f, false)},
-                {types.Array(f, false), types.Array(cf, false)},
+                {types.Array(i, {tag="no"}), types.Array(f, {tag="no"})},
+                {types.Array(f, {tag="no"}), types.Array(cf, {tag="no"})},
                 {types.Map(i, i), types.Map(i, f)},
                 {fn({}, {i}), fn({}, {oi})},
                 {fn({}, {i}), fn({}, {f})},
@@ -1338,7 +1358,7 @@ describe("Titan types", function()
             }
 
             assert.is_false(types.consistent(concrete, interface))
-            assert.is_false(types.coercion(concrete, interface))
+            assert.is_nil(types.coercion(concrete, interface))
             local coercion =
                 assert(types.coercion(concrete, interface, policy))
             assert.equal("interface_wrapper", coercion.op)
@@ -1347,10 +1367,10 @@ describe("Titan types", function()
             assert.is_true(coercion.methods == methods)
             assert.equal(1, calls)
 
-            assert.is_false(types.coercion(
-                types.Array(concrete, false),
-                types.Array(interface, false), policy))
-            assert.is_false(types.callable_adjustment(
+            assert.is_nil(types.coercion(
+                types.Array(concrete, {tag="no"}),
+                types.Array(interface, {tag="no"}), policy))
+            assert.is_nil(types.callable_adjustment(
                 fn({}, {concrete}), fn({}, {interface})))
             assert.equal(1, calls)
         end)
@@ -1369,8 +1389,8 @@ describe("Titan types", function()
             types.dynamic_coercion = forbidden
             types.written_cast = forbidden
             local ok, result = pcall(types.consistent,
-                types.Array(types.Integer(), false),
-                types.Array(types.Value(), false))
+                types.Array(types.Integer(), {tag="no"}),
+                types.Array(types.Value(), {tag="no"}))
             types.coercion = saved.coercion
             types.dynamic_coercion = saved.dynamic
             types.written_cast = saved.written
@@ -1408,12 +1428,12 @@ describe("Titan types", function()
             assert.equal("direct_coercion",
                 assert(types.assignment_adjustment(
                     raw_pointer, types.Value())).kind)
-            assert.is_false(
+            assert.is_nil(
                 types.coercion(types.Value(), raw_pointer))
-            assert.is_false(types.coercion(i, i))
-            assert.is_false(types.coercion(
-                types.Array(i, false), types.Array(f, false)))
-            assert.is_false(types.coercion(
+            assert.is_nil(types.coercion(i, i))
+            assert.is_nil(types.coercion(
+                types.Array(i, {tag="no"}), types.Array(f, {tag="no"})))
+            assert.is_nil(types.coercion(
                 fn({}, {i}), fn({}, {f})))
         end)
 
@@ -1445,13 +1465,13 @@ describe("Titan types", function()
             local raw_pointer = types.CPointer(
                 types.CInteger("int", true, 3, 32), {})
             assert.is_false(types.has_sound_gradual_guard(raw_pointer))
-            assert.is_false(types.gradual_guard(raw_pointer))
-            assert.is_false(types.dynamic_coercion(raw_pointer))
+            assert.is_nil(types.gradual_guard(raw_pointer))
+            assert.is_nil(types.dynamic_coercion(raw_pointer))
             assert.is_true(types.has_sound_gradual_guard(
                 types.Option(types.Integer())))
 
             assert.equal("array", assert(types.dynamic_coercion(
-                types.Array(types.Integer(), false))).op)
+                types.Array(types.Integer(), {tag="no"}))).op)
             assert.equal("map", assert(types.dynamic_coercion(
                 types.Map(types.String(), types.Integer()))).op)
             assert.equal("callable", assert(types.dynamic_coercion(
@@ -1459,26 +1479,26 @@ describe("Titan types", function()
 
             local blocked = {
                 types.Option(raw_pointer),
-                types.Array(raw_pointer, false),
-                types.Array(types.Array(raw_pointer, false), false),
+                types.Array(raw_pointer, {tag="no"}),
+                types.Array(types.Array(raw_pointer, {tag="no"}), {tag="no"}),
                 types.Map(raw_pointer, types.String()),
                 types.Map(types.String(), raw_pointer),
                 types.Map(types.String(),
-                    types.Array(raw_pointer, false)),
+                    types.Array(raw_pointer, {tag="no"})),
                 fn({raw_pointer}, {types.Integer()}),
                 fn({types.Integer()}, {raw_pointer}),
                 fn({}, {}, raw_pointer),
-                fn({}, {}, false, raw_pointer),
+                fn({}, {}, nil, raw_pointer),
             }
             for _, target in ipairs(blocked) do
                 assert.is_false(
                     types.has_sound_gradual_guard(target))
-                assert.is_false(types.gradual_guard(target))
-                assert.is_false(types.dynamic_coercion(target))
+                assert.is_nil(types.gradual_guard(target))
+                assert.is_nil(types.dynamic_coercion(target))
                 -- The unsafe written exception is deliberately limited to a
                 -- direct raw-pointer target; it must not tunnel through a
                 -- gradual container or callable plan.
-                assert.is_false(
+                assert.is_nil(
                     types.written_cast(types.Value(), target))
             end
         end)
@@ -1495,7 +1515,7 @@ describe("Titan types", function()
             assert.equal("integer_to_float", numeric.coercion.op)
 
             local gradual = assert(types.written_cast(
-                types.Array(i, false), types.Array(v, false)))
+                types.Array(i, {tag="no"}), types.Array(v, {tag="no"})))
             assert.equal("gradual", gradual.op)
             assert.equal("array", gradual.guard.op)
 
@@ -1519,7 +1539,7 @@ describe("Titan types", function()
             local nil_fill = assert(types.callable_adjustment(
                 fn({i, types.Option(i)}), fn({i})))
             assert.equal("nil_fill", nil_fill.arguments[2].kind)
-            assert.is_false(types.callable_adjustment(
+            assert.is_nil(types.callable_adjustment(
                 fn({i, i}), fn({i})))
 
             local tail = assert(types.callable_adjustment(
@@ -1528,7 +1548,7 @@ describe("Titan types", function()
             assert.equal("tail_to_tail", tail.arguments[3].kind)
 
             local projected = assert(types.callable_adjustment(
-                fn({}, {}, false, i),
+                fn({}, {}, nil, i),
                 fn({}, {types.Option(i)})))
             assert.equal(
                 "flex_to_optional_result", projected.results[1].kind)
@@ -1536,7 +1556,7 @@ describe("Titan types", function()
             assert.equal("hide_flex", projected.results[2].kind)
 
             local dynamic_projected = assert(types.callable_adjustment(
-                fn({}, {}, false, v),
+                fn({}, {}, nil, v),
                 fn({}, {types.Option(i)})))
             assert.falsy(
                 dynamic_projected.results[1].wrap_present)
@@ -1564,14 +1584,14 @@ describe("Titan types", function()
             -- type itself accepts nil; nil-fill is only for a genuinely ended
             -- result shape.
             local flexible = assert(types.callable_adjustment(
-                fn({}, {}, false, v), fn({}, {v})))
+                fn({}, {}, nil, v), fn({}, {v})))
             assert.equal("flex_to_result", flexible.results[1].kind)
 
-            assert.is_false(types.callable_adjustment(
+            assert.is_nil(types.callable_adjustment(
                 fn({}, {i}), fn({}, {types.Option(i)})))
-            assert.is_false(types.callable_adjustment(
+            assert.is_nil(types.callable_adjustment(
                 fn({}, {i}), fn({}, {types.Float()})))
-            assert.is_false(types.callable_adjustment(
+            assert.is_nil(types.callable_adjustment(
                 fn({types.Float()}), fn({i})))
         end)
 
@@ -1609,7 +1629,7 @@ describe("Titan types", function()
                 fn(),
             }
             for index, expected in ipairs(rejected) do
-                assert.is_false(types.callable_adjustment(
+                assert.is_nil(types.callable_adjustment(
                     fn(), fn({}, {expected})),
                     "required result case " .. tostring(index))
             end
@@ -1683,51 +1703,51 @@ describe("Titan types", function()
                 },
                 {
                     "flex result projects into an optional fixed slot",
-                    fn({}, {}, false, i), fn({}, {oi}), true,
+                    fn({}, {}, nil, i), fn({}, {oi}), true,
                 },
                 {
                     "partial flex result reaches a required fixed slot",
-                    fn({}, {}, false, i), fn({}, {i}), true,
+                    fn({}, {}, nil, i), fn({}, {i}), true,
                 },
                 {
                     "incompatible flex projection is rejected",
-                    fn({}, {}, false, i), fn({}, {s}), false,
+                    fn({}, {}, nil, i), fn({}, {s}), false,
                 },
                 {
                     "finite expected results hide the actual tail",
-                    fn({}, {i}, false, s), fn({}, {i}), true,
+                    fn({}, {i}, nil, s), fn({}, {i}), true,
                 },
                 {
                     "expected result tail consumes a fixed suffix",
-                    fn({}, {i, i}), fn({}, {i}, false, i), true,
+                    fn({}, {i, i}), fn({}, {i}, nil, i), true,
                 },
                 {
                     "expected result tail rejects a fixed suffix",
-                    fn({}, {i, s}), fn({}, {i}, false, i), false,
+                    fn({}, {i, s}), fn({}, {i}, nil, i), false,
                 },
                 {
                     "open expected results accept an empty fixed actual",
-                    fn(), fn({}, {}, false, i), true,
+                    fn(), fn({}, {}, nil, i), true,
                 },
                 {
                     "matching result tails",
-                    fn({}, {}, false, i),
-                    fn({}, {}, false, i), true,
+                    fn({}, {}, nil, i),
+                    fn({}, {}, nil, i), true,
                 },
                 {
                     "incompatible result tails",
-                    fn({}, {}, false, s),
-                    fn({}, {}, false, i), false,
+                    fn({}, {}, nil, s),
+                    fn({}, {}, nil, i), false,
                 },
                 {
                     "finite zero-result type hides the actual tail",
-                    fn({}, {}, false, s), fn(), true,
+                    fn({}, {}, nil, s), fn(), true,
                 },
             }
             for _, case in ipairs(cases) do
                 assert.equal(case[4],
                     types.callable_adjustment(
-                        case[2], case[3]) ~= false,
+                        case[2], case[3]) ~= nil,
                     case[1])
             end
         end)
@@ -1773,11 +1793,11 @@ describe("Titan types", function()
                     i, types.Option(i))).kind)
             assert.equal("gradual_view",
                 assert(types.assignment_adjustment(
-                    types.Array(i, false),
-                    types.Array(v, false))).kind)
-            assert.is_false(types.assignment_adjustment(
-                types.Array(i, false), types.Array(f, false)))
-            assert.is_false(types.assignment_adjustment(
+                    types.Array(i, {tag="no"}),
+                    types.Array(v, {tag="no"}))).kind)
+            assert.is_nil(types.assignment_adjustment(
+                types.Array(i, {tag="no"}), types.Array(f, {tag="no"})))
+            assert.is_nil(types.assignment_adjustment(
                 fn({}, {i}), fn({}, {types.Option(i)})))
             assert.equal("callable",
                 assert(types.assignment_adjustment(
@@ -1794,16 +1814,16 @@ describe("Titan types", function()
             assert.equal("inject", iv.left_adjustment.op)
             assert.equal("consistent", vi.op)
             assert.equal("inject", vi.right_adjustment.op)
-            assert.is_false(types.comparable(i, types.String()))
+            assert.is_nil(types.comparable(i, types.String()))
             local pointer = types.CPointer(
                 types.CInteger("int", true, 3, 32), {})
-            assert.is_false(types.comparable(pointer, v))
-            assert.is_false(types.comparable(v, pointer))
+            assert.is_nil(types.comparable(pointer, v))
+            assert.is_nil(types.comparable(v, pointer))
 
             local short = fn({i}, {i})
             local wide = fn({i, i}, {i})
             assert.is_truthy(types.callable_adjustment(short, wide))
-            assert.is_false(types.callable_adjustment(wide, short))
+            assert.is_nil(types.callable_adjustment(wide, short))
             local short_wide = assert(types.comparable(short, wide))
             local wide_short = assert(types.comparable(wide, short))
             assert.equal("consistent", short_wide.op)
@@ -1813,9 +1833,9 @@ describe("Titan types", function()
 
     it("compares functions of different input arity", function()
         local s = types.String()
-        local f1 = types.Function({}, {s}, false, false, false)
-        local f2 = types.Function({s}, {s}, false, false, false)
-        local f3 = types.Function({s, s}, {s}, false, false, false)
+        local f1 = types.Function({}, {s}, false, nil, nil)
+        local f2 = types.Function({s}, {s}, false, nil, nil)
+        local f3 = types.Function({s, s}, {s}, false, nil, nil)
         assert.falsy(types.equals(f1, f2))
         assert.falsy(types.equals(f2, f1))
         assert.falsy(types.equals(f2, f3))
@@ -1826,9 +1846,9 @@ describe("Titan types", function()
 
     it("compares functions of different output arity", function()
         local s = types.String()
-        local f1 = types.Function({s}, {}, false, false, false)
-        local f2 = types.Function({s}, {s}, false, false, false)
-        local f3 = types.Function({s}, {s, s}, false, false, false)
+        local f1 = types.Function({s}, {}, false, nil, nil)
+        local f2 = types.Function({s}, {s}, false, nil, nil)
+        local f3 = types.Function({s}, {s, s}, false, nil, nil)
         assert.falsy(types.equals(f1, f2))
         assert.falsy(types.equals(f2, f1))
         assert.falsy(types.equals(f2, f3))
@@ -1838,32 +1858,32 @@ describe("Titan types", function()
     end)
 
     it("pretty-prints zero results as function (): ()", function()
-        assert.same("function (): ()", types.tostring(types.Function({}, {}, false, false, false)))
+        assert.same("function (): ()", types.tostring(types.Function({}, {}, false, nil, nil)))
         assert.same("function (integer): ()",
-            types.tostring(types.Function({types.Integer()}, {}, false, false, false)))
+            types.tostring(types.Function({types.Integer()}, {}, false, nil, nil)))
     end)
 
     it("distinguishes a zero-return () function from a nil-returning one", function()
-        local void = types.Function({types.Integer()}, {}, false, false, false)
-        local nilret = types.Function({types.Integer()}, {types.Nil()}, false, false, false)
+        local void = types.Function({types.Integer()}, {}, false, nil, nil)
+        local nilret = types.Function({types.Integer()}, {types.Nil()}, false, nil, nil)
         assert.falsy(types.equals(void, nilret))
         assert.same("function (integer): nil", types.tostring(nilret))
     end)
 
     it("pretty-prints higher-order and function-returning-function types", function()
         local int = types.Integer()
-        local intfn = types.Function({int}, {int}, false, false, false)
+        local intfn = types.Function({int}, {int}, false, nil, nil)
         -- (integer -> integer, integer) -> integer
         assert.same("function (function (integer): integer, integer): integer",
-            types.tostring(types.Function({intfn, int}, {int}, false, false, false)))
+            types.tostring(types.Function({intfn, int}, {int}, false, nil, nil)))
         -- (integer) -> ((integer) -> integer)
         assert.same("function (integer): (function (integer): integer)",
-            types.tostring(types.Function({int}, {intfn}, false, false, false)))
+            types.tostring(types.Function({int}, {intfn}, false, nil, nil)))
     end)
 
     it("treats consistent-but-not-equal function types distinctly", function()
-        local exact = types.Function({types.Integer()}, {types.Integer()}, false, false, false)
-        local valued = types.Function({types.Value()}, {types.Integer()}, false, false, false)
+        local exact = types.Function({types.Integer()}, {types.Integer()}, false, nil, nil)
+        local valued = types.Function({types.Value()}, {types.Integer()}, false, nil, nil)
         assert.truthy(types.consistent(exact, valued))
         assert.truthy(types.consistent(valued, exact))
         -- but they are not equal (so a fast-path tag match must not be assumed)
@@ -1873,16 +1893,16 @@ describe("Titan types", function()
     it("round-trips nested function types through serialize/load", function()
         local int = types.Integer()
         local nested = types.Function(
-            {types.Function({int}, {int}, false, false, false), int},
-            {types.Function({}, {}, false, false, false)}, false, false, false)
+            {types.Function({int}, {int}, false, nil, nil), int},
+            {types.Function({}, {}, false, nil, nil)}, false, nil, nil)
         local s = types.serialize(nested)
         local rebuilt = load("return " .. s, "t", "t", types)()
         assert.truthy(types.equals(nested, rebuilt))
     end)
 
     it("serializes an explicit absent tail and round-trips a flexible tail", function()
-        local fixed = types.Function({}, {}, false, false, false)
-        assert.same("Function({},{},false,false,false)",
+        local fixed = types.Function({}, {}, false, nil, nil)
+        assert.same("Function({},{},false,nil,nil)",
             types.serialize(fixed))
 
         local flex = types.Function({types.String()}, {types.Boolean()}, false,
@@ -1895,8 +1915,8 @@ describe("Titan types", function()
 
     it("round-trips callable declaration parameter names", function()
         local ftype = types.Function(
-            {types.Integer(), types.String()}, {types.Boolean()}, false, false,
-            false)
+            {types.Integer(), types.String()}, {types.Boolean()}, false, nil,
+            nil)
         local member = types.ModuleMember(
             "sample", "choose", ftype, {"repeat", "label"})
         local rebuilt = load(
@@ -1907,10 +1927,10 @@ describe("Titan types", function()
     end)
 
     it("distinguishes known-empty and unavailable declaration names", function()
-        local ftype = types.Function({}, {}, false, false, false)
+        local ftype = types.Function({}, {}, false, nil, nil)
         local known = types.ModuleMember("sample", "known", ftype, {})
         local unavailable = types.ModuleMember(
-            "sample", "unavailable", ftype, false)
+            "sample", "unavailable", ftype, nil)
 
         local rebuilt_known = load(
             "return " .. types.serialize(known), "t", "t", types)()
@@ -1918,15 +1938,15 @@ describe("Titan types", function()
             "return " .. types.serialize(unavailable), "t", "t", types)()
 
         assert.same({}, rebuilt_known.paramnames)
-        assert.is_false(rebuilt_unavailable.paramnames)
+        assert.is_nil(rebuilt_unavailable.paramnames)
     end)
 
     it("round-trips record method and static parameter names", function()
         local int = types.Integer()
         local method = types.Method("sample.Box", "move",
-            {int, int}, {}, false, false, {"dx", "dy"})
+            {int, int}, {}, nil, nil, {"dx", "dy"})
         local static = types.StaticMethod("sample.Box", "new",
-            {int, int}, {types.Nominal("sample.Box")}, false, false,
+            {int, int}, {types.Nominal("sample.Box")}, nil, nil,
             {"x", "y"})
         local record = types.Record("sample.Box", {},
             {new = static}, {move = method}, 0)
@@ -1952,18 +1972,18 @@ describe("Titan types", function()
         }, 2)
 
         local quit_constructor = types.StaticMethod(
-            fqtn, "quit", {}, {result}, false, false, {})
+            fqtn, "quit", {}, {result}, nil, nil, {})
         local hidden_constructor = types.StaticMethod(
             fqtn, "hidden", {types.Integer()}, {result},
-            false, false, {"value"})
+            nil, nil, {"value"})
         hidden_constructor.islocal = true
         local write_constructor = types.StaticMethod(
             fqtn, "write", {types.String(), types.Option(types.Integer())}, {result},
-            false, false, {"value", "end"})
+            nil, nil, {"value", "end"})
         local inspect = types.Method(
-            fqtn, "inspect", {}, {types.String()}, false, false, {})
+            fqtn, "inspect", {}, {types.String()}, nil, nil, {})
         local private = types.Method(
-            fqtn, "private", {}, {}, false, false, {})
+            fqtn, "private", {}, {}, nil, nil, {})
         private.islocal = true
 
         local union = types.Union(fqtn, {quit, hidden, write}, {
@@ -2061,21 +2081,21 @@ describe("Titan types", function()
     it("rewrites every generic payload part and compares their ordered names", function()
         local fqtn = "sample.Pair"
         local scope = types.GenericScope(
-            "sample", fqtn, false, "owner", "union")
-        local parameter = types.Parameter(scope, 1, "T", false)
+            "sample", fqtn, nil, "owner", "union")
+        local parameter = types.Parameter(scope, 1, "T", nil)
         local variant = types.Variant(fqtn, "pair", {
             types.Field(fqtn, "first", types.Integer(), 1, false),
-            types.Field(fqtn, "second", types.Array(parameter, false), 2, false),
+            types.Field(fqtn, "second", types.Array(parameter, {tag="no"}), 2, false),
         }, 0)
         assert.truthy(types.contains_generic(variant))
         local applied = types.substitute(variant, scope, {types.String()})
         assert.falsy(types.contains_generic(applied))
         assert.equal("second", applied.parts[2].name)
         assert.equal(2, applied.parts[2].index)
-        assert.truthy(types.equals(types.Array(types.String(), false),
+        assert.truthy(types.equals(types.Array(types.String(), {tag="no"}),
             applied.parts[2].type))
         local erased = types.erase(variant)
-        assert.truthy(types.equals(types.Array(types.Value(), false),
+        assert.truthy(types.equals(types.Array(types.Value(), {tag="no"}),
             erased.parts[2].type))
         local rebuilt = assert(load(
             "return " .. types.serialize(applied), "parts", "t", types))()
@@ -2099,7 +2119,7 @@ describe("Titan types", function()
             local constructor = types.StaticMethod(
                 fqtn, "only",
                 payload == false and {} or {payload},
-                {types.Nominal(fqtn)}, false, false,
+                {types.Nominal(fqtn)}, nil, nil,
                 payload == false and {} or {"value"})
             return types.Union(
                 fqtn, {variant}, {only = constructor}, {}, 1),
@@ -2143,7 +2163,7 @@ describe("Titan types", function()
                     constructor.islocal = true
                     union.functions.inspect = types.StaticMethod(
                         union.name, "inspect", {}, {},
-                        false, false, false)
+                        nil, nil, nil)
                 end,
             },
             {
@@ -2154,7 +2174,7 @@ describe("Titan types", function()
                     constructor.islocal = true
                     union.methods.inspect = types.Method(
                         union.name, "inspect", {}, {},
-                        false, false, false)
+                        nil, nil, nil)
                 end,
             },
         }
@@ -2172,10 +2192,10 @@ describe("Titan types", function()
     end)
 
     it("round-trips record method and static flexible return tails", function()
-        local method = types.Method("sample.Box", "items", {}, {}, false,
+        local method = types.Method("sample.Box", "items", {}, {}, nil,
             types.String(), {"unused"})
         local static = types.StaticMethod("sample.Box", "lookup", {},
-            {types.Boolean()}, false, types.Integer(), {})
+            {types.Boolean()}, nil, types.Integer(), {})
         local record = types.Record("sample.Box", {},
             {lookup = static}, {items = method}, 0)
         local rebuilt = load(
@@ -2188,9 +2208,9 @@ describe("Titan types", function()
 
     it("keeps declaration names out of structural function identity", function()
         local left = types.ModuleMember("sample", "f",
-            types.Function({types.Integer()}, {}, false, false, false), {"left"})
+            types.Function({types.Integer()}, {}, false, nil, nil), {"left"})
         local right = types.ModuleMember("sample", "f",
-            types.Function({types.Integer()}, {}, false, false, false), {"right"})
+            types.Function({types.Integer()}, {}, false, nil, nil), {"right"})
 
         assert.truthy(types.equals(left.type, right.type))
         assert.equal(types.serialize(left.type), types.serialize(right.type))
@@ -2200,10 +2220,10 @@ describe("Titan types", function()
     it("reports nested function types as garbage collected", function()
         local int = types.Integer()
         local hof = types.Function(
-            {types.Function({int}, {int}, false, false, false)},
-            {int}, false, false, false)
+            {types.Function({int}, {int}, false, nil, nil)},
+            {int}, false, nil, nil)
         assert.truthy(types.is_gc(hof))
-        assert.truthy(types.is_gc(types.Function({}, {}, false, false, false)))
+        assert.truthy(types.is_gc(types.Function({}, {}, false, nil, nil)))
     end)
 
     describe("C FFI types", function()
@@ -2228,11 +2248,11 @@ describe("Titan types", function()
             assert.same("foreign function (int, ...): double", types.tostring(
                 types.CFunction({int}, types.CFloat("double"), true, "cdecl")))
             assert.same("foreign point", types.tostring(
-                types.CStruct("struct point", "point", false, {}, true, false)))
+                types.CStruct("struct point", "point", nil, {}, true, false)))
             assert.same("foreign value", types.tostring(
-                types.CUnion("union value", "value", false, {}, true)))
+                types.CUnion("union value", "value", nil, {}, true)))
             assert.same("x: foreign int", types.tostring(
-                types.CField(false, "x", int, false, false)))
+                types.CField(nil, "x", int, nil, false)))
             assert.same("foreign size_t", types.tostring(types.CTypedef("size_t", int)))
             assert.same("owned *int",
                 types.tostring(types.COwned(int, false)))
@@ -2317,10 +2337,10 @@ describe("Titan types", function()
             owner._c_origin_header = h2
             local pointer = types.CPointer(owner, {})
             owner.fields[1] = types.CField(
-                owner, "next", pointer, false, false)
+                owner, "next", pointer, nil, false)
             local callback = types.CFunction(
                 { types.CPointer(alias, {}) },
-                types.CPointer(owner, {}), false, false)
+                types.CPointer(owner, {}), false, nil)
 
             local includes = types.c_ffi_includes(callback)
             assert.equal(2, #includes)
@@ -2333,7 +2353,7 @@ describe("Titan types", function()
             local hidden_type = types.CTypedef("hidden_field", int)
             hidden_type._c_origin_header = h3
             hidden.fields[1] = types.CField(
-                hidden, "field", hidden_type, false, false)
+                hidden, "field", hidden_type, nil, false)
             assert.same({ h2 }, types.c_ffi_includes(hidden))
 
             local owned = types.COwned(hidden, false)
@@ -2341,7 +2361,7 @@ describe("Titan types", function()
             assert.same({}, types.c_ffi_includes(owned))
 
             local function_type = types.Function(
-                { int }, { int }, false, false, false)
+                { int }, { int }, false, nil, nil)
             types.mark_c_ffi_include(function_type, h1)
             assert.is_nil(function_type._c_origin_header)
             assert.is_nil(int._c_origin_header)
@@ -2432,17 +2452,17 @@ describe("Titan types", function()
 
             local first_value =
                 types.Function({first_int}, {first_int},
-                    false, false, false)
+                    false, nil, nil)
             local second_value =
                 types.Function({second_int}, {second_int},
-                    false, false, false)
+                    false, nil, nil)
             -- Titan/Lua function identity follows its callable value shape; it
             -- does not borrow C declaration compatibility or qualifiers.
             assert.is_false(types.equals(first_value, second_value))
             assert.is_false(types.equals(first, first_value))
             assert.is_false(types.consistent(first, first_value))
-            assert.is_false(types.callable_adjustment(first, first_value))
-            assert.is_false(types.callable_adjustment(first_value, first))
+            assert.is_nil(types.callable_adjustment(first, first_value))
+            assert.is_nil(types.callable_adjustment(first_value, first))
             assert.equal("foreign function (): void", types.tostring(const_void))
 
             local unknown_array =
@@ -2506,10 +2526,10 @@ describe("Titan types", function()
         it("distinguishes structural C provenance from direct C values",
         function()
             local owner = types.COwned(cint(), false)
-            local owners = types.Array(owner, false)
+            local owners = types.Array(owner, {tag="no"})
             local by_name = types.Map(types.String(), owner)
             local callback = types.Function(
-                { owner }, { owner }, false, false, false)
+                { owner }, { owner }, false, nil, nil)
 
             assert.truthy(types.is_c(owners))
             assert.truthy(types.is_c(by_name))
@@ -2538,7 +2558,7 @@ describe("Titan types", function()
             local owner = types.COwned(int, false)
             local object_pointer = types.CPointer(int, {})
             local aggregate = types.CStruct(
-                "struct point", "point", false, {}, true, false)
+                "struct point", "point", nil, {}, true, false)
             local direct_function = types.CFunction(
                 { int }, int, false, "cdecl")
             local function_pointer =
@@ -2547,7 +2567,7 @@ describe("Titan types", function()
             assert.truthy(types.has_tvalue_representation(owner))
             assert.truthy(types.has_tvalue_representation(object_pointer))
             assert.truthy(types.has_tvalue_representation(
-                types.Array(owner, false)))
+                types.Array(owner, {tag="no"})))
             assert.truthy(types.has_tvalue_representation(
                 types.Option(owner)))
             assert.falsy(types.has_tvalue_representation(aggregate))
@@ -2576,7 +2596,7 @@ describe("Titan types", function()
             local ptr = types.CPointer(int, {})
             local arr = types.CArray(int, 4)
             local owned = types.COwned(int, true)
-            local aggregate = types.CStruct("struct point", "point", false, {}, true, false)
+            local aggregate = types.CStruct("struct point", "point", nil, {}, true, false)
 
             assert.truthy(types.consistent(int, types.Value()))
             assert.truthy(types.consistent(types.Value(), int))
@@ -2619,7 +2639,7 @@ describe("Titan types", function()
             local const_void_pointer =
                 types.CPointer(types.CVoid(), {"const"})
             local tvalue = types.CStruct(
-                "TValue", "TValue", false, {}, true, false)
+                "TValue", "TValue", nil, {}, true, false)
             local const_tvalue_pointer =
                 types.CPointer(tvalue, {"const"})
             local dynamic = types.Value()
@@ -2630,9 +2650,9 @@ describe("Titan types", function()
                 dynamic, const_tvalue_pointer))
             -- Keep the earlier direct-coercion rejection authoritative even
             -- if addressability grows new C cases later.
-            assert.is_false(types.coercion(
+            assert.is_nil(types.coercion(
                 dynamic, const_void_pointer))
-            assert.is_false(types.coercion(
+            assert.is_nil(types.coercion(
                 dynamic, const_tvalue_pointer))
         end)
 
@@ -2693,7 +2713,7 @@ describe("Titan types", function()
             local integer = types.CInteger("int", true, 3, 32)
             local floating = types.CFloat("double")
             local aggregate = types.CStruct(
-                "struct ffi_item", "ffi_item", false, {}, true, false)
+                "struct ffi_item", "ffi_item", nil, {}, true, false)
             local aggregate_pointer = types.CPointer(aggregate, {})
             local integer_pointer = types.CPointer(integer, {})
             local floating_pointer = types.CPointer(floating, {})
@@ -2711,10 +2731,10 @@ describe("Titan types", function()
         it("allows explicit stable GC identities and pointer kinds as C void pointers",
         function()
             local record = types.Nominal("test.Owner")
-            local array = types.Array(record, false)
+            local array = types.Array(record, {tag="no"})
             local map = types.Map(types.String(), record)
             local callback =
-                types.Function({}, {}, false, false, false)
+                types.Function({}, {}, false, nil, nil)
             local void_pointer =
                 types.CPointer(types.CVoid(), {})
             local object_pointer =
@@ -2769,22 +2789,22 @@ describe("Titan types", function()
             assert.truthy(types.is_c(types.CPointer(cint(), {})))
             assert.truthy(types.is_c(types.Option(types.CPointer(cint(), {}))))
             assert.truthy(types.is_c(types.ModuleMember(
-                "m", "x", types.CFloat("float"), false)))
+                "m", "x", types.CFloat("float"), nil)))
             assert.falsy(types.is_c(types.Function(
-                {types.Integer()}, {types.String()}, false, false, false)))
+                {types.Integer()}, {types.String()}, false, nil, nil)))
             assert.falsy(types.is_c(types.Function(
-                {types.CPointer(cint(), {})}, {}, false, false, false)))
+                {types.CPointer(cint(), {})}, {}, false, nil, nil)))
             assert.truthy(types.contains_c_ffi_type(
-                types.Function({types.CPointer(cint(), {})}, {}, false, false,
-                    false)))
+                types.Function({types.CPointer(cint(), {})}, {}, false, nil,
+                    nil)))
             assert.truthy(types.contains_c_ffi_type(types.Function(
-                {}, {}, false, false, types.CPointer(cint(), {}))))
+                {}, {}, false, nil, types.CPointer(cint(), {}))))
         end)
 
         it("serializes the portable C surface recursively", function()
             local callback = types.CPointer(types.CFunction(
                 {cint(), types.CPointer(types.CVoid(), {"const"})},
-                types.CFloat("double"), false, false), {})
+                types.CFloat("double"), false, nil), {})
             local owner = types.COwned(callback, true)
             local serialized = types.serialize(owner)
             local rebuilt = assert(load(
@@ -2802,10 +2822,10 @@ describe("Titan types", function()
             local alias = types.CTypedef("ffi_int", cint())
             assert.equal(alias, types.first_non_exportable_type(alias))
             assert.equal(alias, types.first_non_exportable_type(
-                types.Array(alias, false)))
+                types.Array(alias, {tag="no"})))
 
             local oldstyle = types.CFunction(
-                {}, types.CVoid(), false, false)
+                {}, types.CVoid(), false, nil)
             oldstyle._paramstyle = "oldstyle"
             local cyclic = types.CPointer(types.CVoid(), {})
             cyclic.pointee = cyclic
@@ -2813,17 +2833,17 @@ describe("Titan types", function()
             for _, malformed in ipairs({
                 types.CPointer(cint(), {"volatile"}),
                 types.CArray(cint(), 2),
-                types.CFunction({types.CVoid()}, types.CVoid(), false, false),
+                types.CFunction({types.CVoid()}, types.CVoid(), false, nil),
                 types.CFunction({types.COwned(cint(), false)},
-                    types.CVoid(), false, false),
-                types.CFunction({cint()}, types.CVoid(), true, false),
+                    types.CVoid(), false, nil),
+                types.CFunction({cint()}, types.CVoid(), true, nil),
                 types.COwned(types.CVoid(), false),
                 types.CPointer(types.Integer(), {}),
                 types.CPointer(types.COwned(cint(), false), {}),
                 types.COwned(types.Integer(), false),
                 types.CPointer(types.CFunction(
-                    {types.Integer()}, types.CVoid(), false, false), {}),
-                types.CFunction({cint()}, types.Integer(), false, false),
+                    {types.Integer()}, types.CVoid(), false, nil), {}),
+                types.CFunction({cint()}, types.Integer(), false, nil),
                 oldstyle,
                 cyclic,
                 types.CModule("ffi", {}, {}),
@@ -2837,9 +2857,9 @@ describe("Titan types", function()
             local ptr = types.CPointer(int, {"const"})
             local arr = types.CArray(int, 4, {})
             local func = types.CFunction({int, ptr}, types.CFloat("double"), true, "cdecl")
-            local st = types.CStruct("struct point", "point", false, {}, true, false)
-            local un = types.CUnion("union data", "data", false, {}, true)
-            local field = types.CField(false, "x", int, false, false)
+            local st = types.CStruct("struct point", "point", nil, {}, true, false)
+            local un = types.CUnion("union data", "data", nil, {}, true)
+            local field = types.CField(nil, "x", int, nil, false)
             local alias = types.CTypedef("ffi_int", int, {"const"})
             local owned_ptr = types.COwned(int, false)
             local owned_arr = types.COwned(int, true)
@@ -2890,7 +2910,7 @@ describe("Titan types", function()
             local recovered_int = cint()
             local recovered_float = types.CFloat("double")
             local graph = types.Function(
-                {recovered_int}, {recovered_float}, false, false, false)
+                {recovered_int}, {recovered_float}, false, nil, nil)
 
             assert.truthy(types.normalize_portable_c_numeric_types(
                 graph, profile))
@@ -2920,7 +2940,7 @@ describe("Titan types", function()
     describe("generic surface type algebra", function()
         local function scope(callable, role, kind, owner)
             return types.GenericScope(
-                "sample", owner or false, callable or false,
+                "sample", owner, callable,
                 role or "function", kind or "function")
         end
 
@@ -2931,18 +2951,18 @@ describe("Titan types", function()
         end
 
         it("builds structural scopes and deterministic diagnostics", function()
-            local owner_scope = scope(false, "owner", "record", "sample.Pair")
+            local owner_scope = scope(nil, "owner", "record", "sample.Pair")
             local callable_scope = scope("map", "method", "method", "sample.Pair")
-            local tparam = types.TypeParameter("T", false)
+            local tparam = types.TypeParameter("T", nil)
             local uparam = types.TypeParameter(
                 "U", types.Nominal("sample.Show", {types.Value()}))
-            local rigid = types.Parameter(callable_scope, 1, "U", false)
+            local rigid = types.Parameter(callable_scope, 1, "U", nil)
             local scheme = types.FunctionScheme(callable_scope, {uparam},
-                types.Function({rigid}, {rigid}, false, false, false))
+                types.Function({rigid}, {rigid}, false, nil, nil))
 
             assert.equal(types.generic_scope_key(owner_scope),
                 types.generic_scope_key(scope(
-                    false, "owner", "record", "sample.Pair")))
+                    nil, "owner", "record", "sample.Pair")))
             assert.equal("T", types.tostring(tparam))
             assert.equal("U: sample.Show<|value|>", types.tostring(uparam))
             assert.equal("<|U: sample.Show<|value|>|>function (U): U",
@@ -2958,30 +2978,30 @@ describe("Titan types", function()
             local first_scope = scope("id")
             local renamed_scope = scope("id")
             local first = types.FunctionScheme(first_scope,
-                {types.TypeParameter("T", false)},
+                {types.TypeParameter("T", nil)},
                 types.Function(
-                    {types.Parameter(first_scope, 1, "T", false)},
-                    {types.Parameter(first_scope, 1, "T", false)},
-                    false, false, false))
+                    {types.Parameter(first_scope, 1, "T", nil)},
+                    {types.Parameter(first_scope, 1, "T", nil)},
+                    false, nil, nil))
             local renamed = types.FunctionScheme(renamed_scope,
-                {types.TypeParameter("Element", false)},
+                {types.TypeParameter("Element", nil)},
                 types.Function(
-                    {types.Parameter(renamed_scope, 1, "Element", false)},
-                    {types.Parameter(renamed_scope, 1, "Element", false)},
-                    false, false, false))
+                    {types.Parameter(renamed_scope, 1, "Element", nil)},
+                    {types.Parameter(renamed_scope, 1, "Element", nil)},
+                    false, nil, nil))
 
             assert.is_true(types.equals(first, renamed))
             assert.is_true(types.alpha_equals(first, renamed))
             assert.is_true(types.equals(
-                types.Parameter(first_scope, 1, "T", false),
+                types.Parameter(first_scope, 1, "T", nil),
                 types.Parameter(first_scope, 1, "Renamed",
                     types.Nominal("sample.Show"))))
             assert.is_false(types.equals(
-                types.Parameter(first_scope, 1, "T", false),
-                types.Parameter(first_scope, 2, "T", false)))
+                types.Parameter(first_scope, 1, "T", nil),
+                types.Parameter(first_scope, 2, "T", nil)))
             assert.is_false(types.equals(
-                types.Parameter(first_scope, 1, "T", false),
-                types.Parameter(scope("other"), 1, "T", false)))
+                types.Parameter(first_scope, 1, "T", nil),
+                types.Parameter(scope("other"), 1, "T", nil)))
         end)
 
         it("alpha-compares corresponding binders from different declaration scopes",
@@ -2991,18 +3011,18 @@ describe("Titan types", function()
             local right_scope = types.GenericScope(
                 "sample", "sample.R", "map", "method", "record")
             local left = types.Method("sample.I", "map", {
-                types.Parameter(left_scope, 1, "T", false),
+                types.Parameter(left_scope, 1, "T", nil),
             }, {
-                types.Parameter(left_scope, 1, "T", false),
-            }, false, false, {"x"}, left_scope, {
-                types.TypeParameter("T", false),
+                types.Parameter(left_scope, 1, "T", nil),
+            }, nil, nil, {"x"}, left_scope, {
+                types.TypeParameter("T", nil),
             })
             local right = types.Method("sample.I", "map", {
-                types.Parameter(right_scope, 1, "U", false),
+                types.Parameter(right_scope, 1, "U", nil),
             }, {
-                types.Parameter(right_scope, 1, "U", false),
-            }, false, false, {"x"}, right_scope, {
-                types.TypeParameter("U", false),
+                types.Parameter(right_scope, 1, "U", nil),
+            }, nil, nil, {"x"}, right_scope, {
+                types.TypeParameter("U", nil),
             })
 
             assert.is_false(types.equals(left, right))
@@ -3030,19 +3050,19 @@ describe("Titan types", function()
         it("keeps applied owners invariant while allowing shallow value consistency",
         function()
             local cell_scope = types.GenericScope(
-                "sample", "sample.Cell", false, "owner", "record")
+                "sample", "sample.Cell", nil, "owner", "record")
             types.registry["sample.Cell"] = types.Record(
                 "sample.Cell", {}, {}, {}, 0, cell_scope, {
-                    types.TypeParameter("T", false),
+                    types.TypeParameter("T", nil),
                 })
             local precise = types.Nominal("sample.Cell", {types.Integer()})
             local erased = types.Nominal("sample.Cell", {types.Value()})
             local wrong = types.Nominal("sample.Cell", {types.String()})
             local nested = types.Nominal("sample.Cell", {
-                types.Array(types.Integer(), false),
+                types.Array(types.Integer(), {tag="no"}),
             })
             local nested_view = types.Nominal("sample.Cell", {
-                types.Array(types.Value(), false),
+                types.Array(types.Value(), {tag="no"}),
             })
 
             assert.is_false(types.equals(precise, erased))
@@ -3051,12 +3071,12 @@ describe("Titan types", function()
             assert.is_false(types.consistent(precise, wrong))
             assert.is_false(types.consistent(nested, nested_view))
             assert.is_true(types.consistent(nested, erased))
-            assert.is_false(types.assignment_adjustment(precise, wrong))
-            assert.is_false(types.assignment_adjustment(precise, erased))
+            assert.is_nil(types.assignment_adjustment(precise, wrong))
+            assert.is_nil(types.assignment_adjustment(precise, erased))
             assert.is_truthy(types.generic_owner_view(precise, erased))
 
             local box_scope = types.GenericScope(
-                "sample", "sample.Box", false, "owner", "record")
+                "sample", "sample.Box", nil, "owner", "record")
             types.registry["sample.Box"] = types.Record(
                 "sample.Box", {}, {}, {}, 0, box_scope, {
                     types.TypeParameter("T", types.Nominal("sample.Show")),
@@ -3076,15 +3096,15 @@ describe("Titan types", function()
         it("relates each rigid parameter only to its erased constraint carrier",
         function()
             local owner_scope = scope(
-                false, "owner", "record", "sample.Box")
+                nil, "owner", "record", "sample.Box")
             local unconstrained = types.Parameter(
-                owner_scope, 1, "T", false)
+                owner_scope, 1, "T", nil)
             local constrained = types.Parameter(owner_scope, 2, "U",
                 types.Nominal("sample.Show", {unconstrained}))
             local another_scope = scope(
-                false, "other", "record", "sample.Other")
+                nil, "other", "record", "sample.Other")
             local another = types.Parameter(
-                another_scope, 1, "V", false)
+                another_scope, 1, "V", nil)
 
             assert.is_true(types.consistent(
                 unconstrained, types.Value()))
@@ -3100,25 +3120,25 @@ describe("Titan types", function()
                 types.Option(unconstrained),
                 types.Option(types.Value())))
             assert.is_true(types.consistent(
-                types.Array(unconstrained, false),
-                types.Array(types.Value(), false)))
+                types.Array(unconstrained, {tag="no"}),
+                types.Array(types.Value(), {tag="no"})))
             assert.is_true(types.consistent(
                 types.Function({unconstrained}, {unconstrained},
-                    false, false, false),
+                    false, nil, nil),
                 types.Function({types.Value()}, {types.Value()},
-                    false, false, false)))
+                    false, nil, nil)))
         end)
 
         it("smart-substitutes owner and callable scopes independently",
         function()
             local owner_scope = scope(
-                false, "owner", "record", "sample.Pair")
+                nil, "owner", "record", "sample.Pair")
             local method_scope = scope(
                 "convert", "method", "method", "sample.Pair")
-            local t = types.Parameter(owner_scope, 1, "T", false)
-            local u = types.Parameter(method_scope, 1, "U", false)
+            local t = types.Parameter(owner_scope, 1, "T", nil)
+            local u = types.Parameter(method_scope, 1, "U", nil)
             local method = types.Method("sample.Pair", "convert", {
-                types.Array(types.Option(t), false),
+                types.Array(types.Option(t), {tag="no"}),
                 types.Map(types.String(), types.Option(t)),
                 u,
             }, {
@@ -3137,7 +3157,7 @@ describe("Titan types", function()
 
             local local_closed = types.substitute(
                 method, method_scope, {types.String()})
-            assert.is_false(local_closed.scope)
+            assert.is_nil(local_closed.scope)
             assert.same({}, local_closed.typeparams)
             assert.equal("string", types.tostring(local_closed.params[3]))
             assert.equal("T", types.tostring(local_closed.params[1].elem))
@@ -3164,21 +3184,21 @@ describe("Titan types", function()
 
         it("closes schemes and constructor-preserving aliases", function()
             local fn_scope = scope("choose")
-            local t = types.Parameter(fn_scope, 1, "T", false)
+            local t = types.Parameter(fn_scope, 1, "T", nil)
             local scheme = types.FunctionScheme(fn_scope,
-                {types.TypeParameter("T", false)},
-                types.Function({t, t}, {t}, false, false, false))
+                {types.TypeParameter("T", nil)},
+                types.Function({t, t}, {t}, false, nil, nil))
             local closed = types.apply_scheme(scheme, {types.Integer()})
             assert.equal("function (integer, integer): integer",
                 types.tostring(closed))
 
             local owner_scope = scope(
-                false, "owner", "record", "sample.Pair")
+                nil, "owner", "record", "sample.Pair")
             local alias = types.GenericAlias(
-                "sample", "Either", false, "sample.Pair", false,
+                "sample", "Either", false, "sample.Pair", nil,
                 owner_scope, {
-                    types.TypeParameter("A", false),
-                    types.TypeParameter("B", false),
+                    types.TypeParameter("A", nil),
+                    types.TypeParameter("B", nil),
                 })
             local applied = types.apply_generic_alias(alias,
                 {types.Integer(), types.String()})
@@ -3196,8 +3216,8 @@ describe("Titan types", function()
         it("erases rigid carriers throughout declaration descriptors",
         function()
             local owner_scope = scope(
-                false, "owner", "record", "sample.Box")
-            local t = types.Parameter(owner_scope, 1, "T", false)
+                nil, "owner", "record", "sample.Box")
+            local t = types.Parameter(owner_scope, 1, "T", nil)
             local constrained = types.Parameter(owner_scope, 2, "S",
                 types.Nominal("sample.Show", {t}))
             local record = types.Record("sample.Box", {
@@ -3207,16 +3227,16 @@ describe("Titan types", function()
             }, {
                 make = types.StaticMethod("sample.Box", "make", {t}, {
                     types.Nominal("sample.Box", {t, constrained}),
-                }, false, false, {}),
+                }, nil, nil, {}),
             }, {}, 2, owner_scope, {
-                types.TypeParameter("T", false),
+                types.TypeParameter("T", nil),
                 types.TypeParameter("S",
                     types.Nominal("sample.Show", {t})),
             })
 
             assert.is_true(types.alpha_equals(record, reload(record)))
             local erased = types.erase(record)
-            assert.is_false(erased.scope)
+            assert.is_nil(erased.scope)
             assert.same({}, erased.typeparams)
             assert.equal("value", types.tostring(erased.fields[1].type))
             assert.equal("sample.Show",
@@ -3232,7 +3252,7 @@ describe("Titan types", function()
         it("retains recursively erased constraint applications before core erasure",
         function()
             local owner_scope = scope(
-                false, "owner", "record", "sample.Box")
+                nil, "owner", "record", "sample.Box")
             local constrained = types.Parameter(owner_scope, 1, "C",
                 types.Nominal("sample.J"))
             local dependent = types.Parameter(owner_scope, 2, "B",
@@ -3247,22 +3267,22 @@ describe("Titan types", function()
             local cinteger = types.CInteger("int", true, 3, 32)
             local cfloat = types.CFloat("double")
             local point = types.CStruct(
-                "point", "point", false, {}, true, false)
+                "point", "point", nil, {}, true, false)
             local incomplete = types.CStruct(
-                "opaque", "opaque", false, {}, false, false)
+                "opaque", "opaque", nil, {}, false, false)
             local flexible = types.CStruct(
-                "flexible", "flexible", false, {}, true, true)
+                "flexible", "flexible", nil, {}, true, true)
             local tvalue = types.CStruct(
-                "TValue", "TValue", false, {}, false, false)
+                "TValue", "TValue", nil, {}, false, false)
             local rigid_scope = scope("rigid")
-            local rigid = types.Parameter(rigid_scope, 1, "T", false)
+            local rigid = types.Parameter(rigid_scope, 1, "T", nil)
             local constrained = types.Parameter(rigid_scope, 2, "S",
                 types.Nominal("sample.Show", {rigid}))
 
             local positive = {
                 types.Nil(), types.Boolean(), types.Integer(), types.Float(),
                 types.String(), types.Value(), types.Option(types.Integer()),
-                types.Array(types.String(), false),
+                types.Array(types.String(), {tag="no"}),
                 types.Map(types.String(), types.Integer()),
                 types.Function({types.Integer()}, {types.String()},
                     false, types.Value(), types.Boolean()),
@@ -3285,21 +3305,21 @@ describe("Titan types", function()
                 types.COwned(incomplete, false),
                 types.COwned(flexible, false),
                 types.COwned(flexible, true),
-                types.CInteger("enum pending", true, 3, false),
+                types.CInteger("enum pending", true, 3, nil),
                 types.CModule("ffi", {}, {}),
-                types.Option(pointer), types.Array(pointer, false),
+                types.Option(pointer), types.Array(pointer, {tag="no"}),
                 types.Map(types.String(), pointer),
                 types.Function({types.Integer()}, {pointer},
-                    false, false, false),
+                    false, nil, nil),
                 types.Function({}, {}, false,
-                    types.Nil(), false),
+                    types.Nil(), nil),
                 types.Function({}, {}, false,
-                    false, cinteger),
+                    nil, cinteger),
                 types.Nominal("sample.Phantom", {pointer}),
                 types.Map(types.Option(types.Integer()), types.String()),
                 types.Option(types.Value()),
                 types.Option(types.Option(types.Integer())),
-                types.Array(types.Option(types.Integer()), false),
+                types.Array(types.Option(types.Integer()), {tag="no"}),
                 types.Map(types.String(), types.Option(types.Integer())),
             }
             for _, typ in ipairs(negative) do
@@ -3323,11 +3343,11 @@ describe("Titan types", function()
             assert.equal("scope[" .. types.generic_scope_key(first_scope) ..
                 "]", types.tostring(first_scope))
             assert.is_false(types.equals(
-                types.TypeParameter("T", false),
+                types.TypeParameter("T", nil),
                 types.TypeParameter("T", types.Integer())))
 
             local signature = types.Function(
-                {}, {}, false, false, false)
+                {}, {}, false, nil, nil)
             local integer_scheme = types.FunctionScheme(first_scope, {
                 types.TypeParameter("T", types.Integer()),
             }, signature)
@@ -3348,16 +3368,24 @@ describe("Titan types", function()
             local rigid = types.Parameter(
                 first_scope, 1, "T", types.Nominal("sample.Erased"))
             local key = types.generic_scope_key(first_scope)
-            assert.is_nil(types.parameter_surface_constraint(false, {}))
-            assert.is_nil(types.parameter_surface_constraint(rigid, {}))
-            assert.is_nil(types.parameter_surface_constraint(rigid, {
+            local missing, valid = types.parameter_surface_constraint(false, {})
+            assert.is_nil(missing)
+            assert.is_false(valid)
+            missing, valid = types.parameter_surface_constraint(rigid, {})
+            assert.is_nil(missing)
+            assert.is_false(valid)
+            missing, valid = types.parameter_surface_constraint(rigid, {
                 [key] = {
                     types.TypeParameter("T", "not a constraint"),
                 },
-            }))
-            assert.is_false(types.parameter_surface_constraint(rigid, {
-                [key] = {types.TypeParameter("T", false)},
-            }))
+            })
+            assert.is_nil(missing)
+            assert.is_false(valid)
+            missing, valid = types.parameter_surface_constraint(rigid, {
+                [key] = {types.TypeParameter("T", nil)},
+            })
+            assert.is_nil(missing)
+            assert.is_true(valid)
             local constraint = types.Nominal("sample.Show")
             assert.is_true(constraint ==
                 types.parameter_surface_constraint(rigid, {
@@ -3366,7 +3394,7 @@ describe("Titan types", function()
 
             assert.has_error(function()
                 types.serialize(types.GenericScope(
-                    "sample", false, false, "function", 7))
+                    "sample", nil, nil, "function", 7))
             end, "cannot serialize generic metadata literal 7")
         end)
 
@@ -3393,7 +3421,7 @@ describe("Titan types", function()
 
             local generic_scope = scope("id")
             local rigid = types.Parameter(
-                generic_scope, 1, "T", false)
+                generic_scope, 1, "T", nil)
             local pointer = types.CPointer(
                 types.CInteger("int", true, 3, 32), {})
             assert.has_error(function()
@@ -3410,7 +3438,7 @@ describe("Titan types", function()
             end, "missing type argument 1 for " ..
                 types.generic_scope_key(generic_scope))
 
-            local typeparams = {types.TypeParameter("T", false)}
+            local typeparams = {types.TypeParameter("T", nil)}
             local valid, argument_error =
                 types.validate_type_arguments(typeparams, {7})
             assert.is_nil(valid)
@@ -3426,13 +3454,13 @@ describe("Titan types", function()
             local generic_scope = scope("id")
             local unrelated_scope = scope("other")
             local rigid = types.Parameter(
-                generic_scope, 1, "T", false)
+                generic_scope, 1, "T", nil)
             local scheme = types.FunctionScheme(generic_scope, {
-                types.TypeParameter("T", false),
-            }, types.Function({rigid}, {rigid}, false, false, false))
+                types.TypeParameter("T", nil),
+            }, types.Function({rigid}, {rigid}, false, nil, nil))
             local alias = types.GenericAlias(
-                "sample", "Boxed", false, "sample.Box", false,
-                generic_scope, {types.TypeParameter("T", false)})
+                "sample", "Boxed", false, "sample.Box", nil,
+                generic_scope, {types.TypeParameter("T", nil)})
 
             local rewritten_scheme = types.substitute(
                 scheme, unrelated_scope, {types.Integer()})
@@ -3445,7 +3473,7 @@ describe("Titan types", function()
             assert.is_true(types.same_generic_scope(
                 types.erase(generic_scope), generic_scope))
             assert.equal("value", types.tostring(types.erase(
-                types.TypeParameter("T", false))))
+                types.TypeParameter("T", nil))))
             assert.equal("sample.Show", types.tostring(types.erase(
                 types.TypeParameter(
                     "T", types.Nominal("sample.Show")))))
@@ -3455,24 +3483,24 @@ describe("Titan types", function()
             local pointer = types.CPointer(
                 types.CInteger("int", true, 3, 32), {})
             assert.has_error(function()
-                types.canonical_function({}, {}, false, pointer)
+                types.canonical_function({}, {}, nil, pointer)
             end, "a flexible return cannot have a foreign pointer type")
             assert.has_error(function()
-                types.canonical_function({}, {}, false, types.CVoid())
+                types.canonical_function({}, {}, nil, types.CVoid())
             end, "a flexible return cannot use type foreign void because it has " ..
                 "no supported variadic-value representation")
 
             assert.has_error(function()
                 types.erase("not a type")
             end, "generic type rewrite expected a Type descriptor")
-            local cycle = types.Array(types.Integer(), false)
+            local cycle = types.Array(types.Integer(), {tag="no"})
             cycle.elem = cycle
             assert.has_error(function()
                 types.erase(cycle)
             end, "cyclic structural type in generic type rewrite")
             assert.has_error(function()
                 types.erase(types.Function(
-                    {}, {}, true, false, false))
+                    {}, {}, true, nil, nil))
             end, "Type.Function reserved vararg field must be false")
         end)
 
@@ -3480,9 +3508,9 @@ describe("Titan types", function()
         function()
             local cinteger = types.CInteger("int", true, 3, 32)
             local complete_union = types.CUnion(
-                "number", "number", false, {}, true)
+                "number", "number", nil, {}, true)
             local incomplete_union = types.CUnion(
-                "opaque", "opaque", false, {}, false)
+                "opaque", "opaque", nil, {}, false)
             assert.is_true(types.transient_roundtrip(
                 types.COwned(complete_union, false)))
             assert.is_false(types.transient_roundtrip(
@@ -3500,16 +3528,16 @@ describe("Titan types", function()
 
             local generic_scope = scope("tail")
             local rigid = types.Parameter(
-                generic_scope, 1, "T", false)
+                generic_scope, 1, "T", nil)
             local tvalue = types.CStruct(
-                "TValue", "TValue", false, {}, false, false)
+                "TValue", "TValue", nil, {}, false, false)
             for _, tail in ipairs({
                 rigid,
                 types.Option(types.Integer()),
                 tvalue,
             }) do
                 assert.is_true(types.transient_roundtrip(
-                    types.Function({}, {}, false, tail, false)))
+                    types.Function({}, {}, false, tail, nil)))
             end
             assert.is_false(types.transient_roundtrip(
                 types.Nominal("sample.Malformed", {false})))
@@ -3526,10 +3554,10 @@ describe("Titan types", function()
             assert.is_true(types.consistent(first_record, second_record))
 
             local short_scope = types.GenericScope(
-                "sample", "sample.Short", false, "owner", "record")
+                "sample", "sample.Short", nil, "owner", "record")
             types.registry["sample.Short"] = types.Record(
                 "sample.Short", {}, {}, {}, 0, short_scope, {
-                    types.TypeParameter("T", false),
+                    types.TypeParameter("T", nil),
                 })
             assert.is_false(types.consistent(
                 types.Nominal("sample.Short", {
@@ -3545,7 +3573,7 @@ describe("Titan types", function()
             assert.is_false(types.consistent(types.Value(), constrained))
             assert.is_true(types.consistent(
                 types.Nominal("sample.Show"), constrained))
-            assert.is_false(types.generic_owner_view(
+            assert.is_nil(types.generic_owner_view(
                 types.Nominal("sample.Left", {types.Integer()}),
                 types.Nominal("sample.Right", {types.Integer()})))
         end)
@@ -3561,13 +3589,13 @@ describe("Titan types", function()
                 for index = 1, binder_count do
                     local name = "T" .. index
                     params[index] = types.Parameter(
-                        generic_scope, index, name, false)
+                        generic_scope, index, name, nil)
                     paramnames[index] = "value" .. index
                     typeparams[index] = types.TypeParameter(
-                        name, index == 1 and constraint or false)
+                        name, index == 1 and constraint or nil)
                 end
                 return types.Method(owner, "map", params, {params[1]},
-                    false, false, paramnames, generic_scope, typeparams)
+                    nil, nil, paramnames, generic_scope, typeparams)
             end
 
             local required_scope = method_scope("sample.Mapper")
@@ -3598,7 +3626,7 @@ describe("Titan types", function()
                 local matched, failure =
                     types.generic_interface_implementation(
                         candidate, interface, {visibility = "sample"})
-                assert.is_false(matched)
+                assert.is_nil(matched)
                 assert.equal("interface_mismatch", failure.kind)
                 assert.equal("incompatible", failure.reason)
                 assert.equal("map", failure.name)
@@ -3624,13 +3652,13 @@ describe("Titan types", function()
         function()
             local generic_scope = scope("id")
             local parameter = types.Parameter(
-                generic_scope, 1, "T", false)
+                generic_scope, 1, "T", nil)
             local module = types.Module("sample.child", {
                 types.ModuleMember("sample.child", "id",
                     types.FunctionScheme(generic_scope, {
-                        types.TypeParameter("T", false),
+                        types.TypeParameter("T", nil),
                     }, types.Function({parameter}, {parameter},
-                        false, false, false)), {"x"}),
+                        false, nil, nil)), {"x"}),
             }, {})
             module.file = "/selected/provider.so"
             module.prefix = "selected_prefix_"
@@ -3647,29 +3675,29 @@ describe("Titan types", function()
         it("serializes generic metadata deterministically and round-trips it",
         function()
             local fn_scope = scope("id")
-            local t = types.Parameter(fn_scope, 1, "T", false)
+            local t = types.Parameter(fn_scope, 1, "T", nil)
             local scheme = types.FunctionScheme(fn_scope,
-                {types.TypeParameter("T", false)},
+                {types.TypeParameter("T", nil)},
                 types.Function({t}, {types.Option(t)},
                     false, t, t))
             local owner_scope = scope(
-                false, "owner", "record", "sample.Pair")
+                nil, "owner", "record", "sample.Pair")
             local first_alias = types.GenericAlias(
-                "sample", "Either", false, "sample.Pair", false,
+                "sample", "Either", false, "sample.Pair", nil,
                 owner_scope, {
-                    types.TypeParameter("A", false),
-                    types.TypeParameter("B", false),
+                    types.TypeParameter("A", nil),
+                    types.TypeParameter("B", nil),
                 })
             local second_alias = types.GenericAlias(
                 "sample", "Choice", false, "sample.Pair",
                 "sample.Either", owner_scope, {
-                    types.TypeParameter("A", false),
-                    types.TypeParameter("B", false),
+                    types.TypeParameter("A", nil),
+                    types.TypeParameter("B", nil),
                 })
             local result_scope = scope(
-                false, "owner", "union", "sample.Result")
+                nil, "owner", "union", "sample.Result")
             local result_t = types.Parameter(
-                result_scope, 1, "T", false)
+                result_scope, 1, "T", nil)
             local ok_variant = types.Variant(
                 "sample.Result", "ok", {
                     types.Field("sample.Result", "value", result_t, 1, false),
@@ -3679,17 +3707,17 @@ describe("Titan types", function()
                     result_t,
                 }, {
                     types.Nominal("sample.Result", {result_t}),
-                }, false, false, {"value"}),
+                }, nil, nil, {"value"}),
             }, {}, 1, result_scope, {
-                types.TypeParameter("T", false),
+                types.TypeParameter("T", nil),
             })
             local show_scope = scope(
-                false, "owner", "interface", "sample.Show")
-            local show_t = types.Parameter(show_scope, 1, "T", false)
+                nil, "owner", "interface", "sample.Show")
+            local show_t = types.Parameter(show_scope, 1, "T", nil)
             local show = types.Interface("sample.Show", {}, {
                 types.Method("sample.Show", "show", {show_t},
-                    {types.String()}, false, false, {"value"}),
-            }, show_scope, {types.TypeParameter("T", false)})
+                    {types.String()}, nil, nil, {"value"}),
+            }, show_scope, {types.TypeParameter("T", nil)})
             local module = types.Module("sample", {
                 types.ModuleMember("sample", "id", scheme, {"value"}),
             }, {
@@ -3716,21 +3744,21 @@ describe("Titan types", function()
         end)
 
         it("serializes and rehydrates const? Array types", function()
-            local maybe_arr = types.Array(types.Integer(), "maybe")
+            local maybe_arr = types.Array(types.Integer(), {tag="maybe"})
             assert.equal("const? { integer }", types.tostring(maybe_arr))
             local serialized = types.serialize(maybe_arr)
             assert.match('"maybe"', serialized)
             local rehydrated = assert(load(
                 "return " .. serialized, "test", "t", types))()
             assert.is_true(types.equals(maybe_arr, rehydrated))
-            assert.equal("maybe", rehydrated.isconst)
+            assert.equal("maybe", rehydrated.isconst.tag)
         end)
 
         it("validates assignment adjustment rules for const? and linear arrays", function()
-            local mutable_int = types.Array(types.Integer(), false)
-            local const_int = types.Array(types.Integer(), true)
-            local maybe_int = types.Array(types.Integer(), "maybe")
-            local linear_int = types.Array(types.Integer(), false)
+            local mutable_int = types.Array(types.Integer(), {tag="no"})
+            local const_int = types.Array(types.Integer(), {tag="yes"})
+            local maybe_int = types.Array(types.Integer(), {tag="maybe"})
+            local linear_int = types.Array(types.Integer(), {tag="no"})
             linear_int.linear = true
 
             -- mutable, const, and maybe to maybe-const target

@@ -38,7 +38,7 @@ Ast.ExpUnionInit(loc, owner, variant, values)
 ```
 
 `parts`, `bindings`, and `values` are dense lists, empty when absent.
-`elseblock` uses `false` for absence. Each part and binder is an `Ast.Decl`;
+`elseblock` uses `nil` for absence. Each part and binder is an `Ast.Decl`;
 a named binder carries `.part`, the selected source part name. The arm
 records `.named` even when its braces are empty.
 

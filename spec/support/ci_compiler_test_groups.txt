@@ -42,6 +42,7 @@
 1 spec/checker/interfaces_spec.lua 7.153
 3 spec/checker/named_arguments_spec.lua 7.783
 4 spec/checker/nominal_storage_spec.lua 1.000
+4 spec/checker/optional_metadata_spec.lua 0.100
 1 spec/checker/optional_parameters_spec.lua 4.212
 1 spec/checker/semantic_metadata_spec.lua 3.385
 2 spec/checker/so_rehydration_spec.lua 4.535
@@ -99,6 +100,7 @@
 4 spec/coder/nominal_provider_spec.lua 3.000
 4 spec/coder/nominal_storage_spec.lua 1.000
 4 spec/coder/numeric_semantics_spec.lua 4.142
+4 spec/coder/optional_metadata_spec.lua 0.100
 3 spec/coder/optional_parameters_spec.lua 1.178
 4 spec/coder/parallel_compilation_spec.lua 23.951
 4 spec/coder/so_import_spec.lua 6.191
@@ -130,6 +132,7 @@
 1 spec/installed_prefix_spec.lua 0.003
 4 spec/lexer_spec.lua 0.045
 2 spec/location_spec.lua 0.002
+4 spec/maybe3_spec.lua 0.010
 4 spec/native_record_fields_spec.lua 1.000
 4 spec/nominal_layout_spec.lua 0.100
 1 spec/parser_spec.lua 0.587

@@ -53,7 +53,7 @@ local function public_record(fqtn, fields)
     end
     local constructor = types.StaticMethod(
         fqtn, "new", params, { types.Nominal(fqtn) },
-        false, false, paramnames)
+        nil, nil, paramnames)
     return types.Record(
         fqtn, fields, { new = constructor }, {}, #fields)
 end
@@ -62,7 +62,7 @@ local function owner_interface(modname, record_name, fields)
     local fqtn = modname .. "." .. record_name
     local record = public_record(fqtn, fields or {})
     local member = types.ModuleMember(
-        modname, record_name, record, false)
+        modname, record_name, record, nil)
     return types.Module(modname, { member }), record
 end
 
@@ -540,11 +540,11 @@ end
                 types.Method(
                     "middle.bridge.BoxConsumer", "consume",
                     {types.Nominal("right.owner.Box")}, {},
-                    false, false, {"box"}),
+                    nil, nil, {"box"}),
             })
         local bridge = types.Module("middle.bridge", {
             types.ModuleMember(
-                "middle.bridge", "Link", bridge_record, false),
+                "middle.bridge", "Link", bridge_record, nil),
         }, {
             BoxConsumer = bridge_interface,
         })
@@ -605,14 +605,14 @@ end
         })
         local leaf = types.Module("chain.leaf", {
             types.ModuleMember(
-                "chain.leaf", "Box", leaf_record, false),
+                "chain.leaf", "Box", leaf_record, nil),
         })
         local mid_record = public_record("chain.mid.Link", {
             types.Field("chain.mid.Link", "box",
                 types.Nominal("chain.leaf.Box"), 0, false),
         })
         local mid = types.Module("chain.mid", {
-            types.ModuleMember("chain.mid", "Link", mid_record, false),
+            types.ModuleMember("chain.mid", "Link", mid_record, nil),
         })
         local api = facade_interface(
             "chain.api", "Link", "chain.mid.Link")

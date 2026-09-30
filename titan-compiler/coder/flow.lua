@@ -296,7 +296,7 @@ end
 
 collect_reads_stat = function(node, out)
     out = out or {}
-    if not node or node == false then return out end
+    if not node then return out end
     local tag = node._tag
     if tag == "Ast.StatBlock" then
         collect_reads_block(node, out)
@@ -349,7 +349,7 @@ end
 
 collect_writes_stat = function(node, out)
     out = out or {}
-    if not node or node == false then return out end
+    if not node then return out end
     local tag = node._tag
     if tag == "Ast.StatBlock" then
         collect_writes_block(node, out)
@@ -444,7 +444,7 @@ local function analyze_try_spills_exp(node, after)
 end
 
 function coder._analyze_try_spills_stat(stat, after, return_reads)
-    if not stat or stat == false then return end
+    if not stat then return end
     local tag = stat._tag
     if tag == "Ast.StatBlock" then
         analyze_try_spills_block(stat, after, return_reads)
@@ -616,14 +616,14 @@ function varg_struct_name(elemtype --[[:table]])
     return name
 end
 
--- The AST `node.params` keeps the trailing vararg marker Decl (`name == false`)
+-- The AST `node.params` keeps the trailing vararg marker Decl (`name == nil`)
 -- even after the checker lifts its element type onto the function type's
 -- `varargtype` slot. The coder's param loops generate per-name C parameters, so
 -- they must skip that marker (the vararg is emitted separately as the backing
 -- struct + start). Returns the fixed-parameter Decls only.
 function fixed_params(params)
     local n = #params
-    if n > 0 and params[n].name == false then
+    if n > 0 and params[n].name == nil then
         local out = {}
         for i = 1, n - 1 do out[i] = params[i] end
         return out

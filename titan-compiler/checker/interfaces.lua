@@ -50,7 +50,7 @@ function interface_relation_policy(st, options)
         return is_nominal_member_visible_from(st, field)
     end
     policy.interface_coercion = function(source, target, received)
-        policy.interface_failure = false
+        policy.interface_failure = nil
         local concrete = source._tag == "Type.Nominal"
             and generic_applied_owner_view(source) or nil
         local interface = target._tag == "Type.Nominal"
@@ -61,20 +61,20 @@ function interface_relation_policy(st, options)
            or not interface
            or interface._tag ~= "Type.Interface"
            or not is_nominal_visible_from(st, source.fqtn) then
-            return false
+            return nil
         end
 
         local implementation, failure =
             generic_interface_implementation(
                 concrete, interface, received)
-        policy.interface_failure = failure or false
+        policy.interface_failure = failure
         if implementation then
             implementation._surface_concrete = concrete
             implementation._surface_interface = interface
             implementation.cast_module = policy.visibility
             return implementation
         end
-        return false
+        return nil
     end
     return policy
 end
@@ -126,8 +126,8 @@ local function freeze_interface_guard(plan, target, seen)
     if tag == "Type.Array" then
         interface_adapter_assert(
             plan.op == "array"
-                and plan.isconst == target.isconst
-                and type(plan.isconst) == "boolean"
+                and plan.isconst.tag == target.isconst.tag
+                and (types.valid_array_constness(plan.isconst) and plan.isconst.tag ~= "maybe")
                 and plan.element,
             "Array guard has the wrong shape")
         frozen.isconst = target.isconst
@@ -508,7 +508,7 @@ freeze_callable_actions = function(raw, source, target, context)
                     source_kind = "interface_fixed",
                     destination_kind = "discard",
                     source_type = target.params[index],
-                    target_type = false,
+                    target_type = nil,
                     source_gc =
                         interface_adapter_is_gc(
                             target.params[index]),
@@ -545,7 +545,7 @@ freeze_callable_actions = function(raw, source, target, context)
                 phase = "argument",
                 source_kind = "empty",
                 destination_kind = "concrete_tail",
-                source_type = false,
+                source_type = nil,
                 target_type = source.varargtype,
                 source_gc = false,
                 destination_gc =
@@ -571,7 +571,7 @@ freeze_callable_actions = function(raw, source, target, context)
                 source_open = true,
                 destination_kind = "discard",
                 source_type = target.varargtype,
-                target_type = false,
+                target_type = nil,
                 source_gc =
                     interface_adapter_is_gc(
                         target.varargtype),
@@ -725,7 +725,7 @@ freeze_callable_actions = function(raw, source, target, context)
                     source_kind = "concrete_fixed",
                     destination_kind = "discard",
                     source_type = source.rettypes[index],
-                    target_type = false,
+                    target_type = nil,
                     source_gc =
                         interface_adapter_is_gc(
                             source.rettypes[index]),
@@ -768,7 +768,7 @@ freeze_callable_actions = function(raw, source, target, context)
                 source_open = true,
                 destination_kind = "discard",
                 source_type = source.flexrettype,
-                target_type = false,
+                target_type = nil,
                 source_gc =
                     interface_adapter_is_gc(
                         source.flexrettype),
@@ -786,7 +786,7 @@ freeze_callable_actions = function(raw, source, target, context)
                 phase = "result",
                 source_kind = "empty",
                 destination_kind = "interface_flex",
-                source_type = false,
+                source_type = nil,
                 target_type = target.flexrettype,
                 source_gc = false,
                 destination_gc =
@@ -807,7 +807,6 @@ end
 local function adapter_root_range(
         id, phase, side, element_type, lifetime, traced)
     local present = element_type ~= nil
-        and element_type ~= false
     local gc_bearing =
         present and interface_adapter_is_gc(
             element_type) or false
@@ -818,12 +817,12 @@ local function adapter_root_range(
         phase = phase,
         side = side,
         present = present,
-        element_type = element_type or false,
+        element_type = element_type or nil,
         gc_bearing = gc_bearing,
         traced = traced,
-        storage = traced and "parallel_lua_stack_range" or false,
-        dynamic_start = present and "run_start" or false,
-        dynamic_count = present and "run_count" or false,
+        storage = traced and "parallel_lua_stack_range" or nil,
+        dynamic_start = present and "run_start" or nil,
+        dynamic_count = present and "run_count" or nil,
         retain_until = lifetime,
         raw_storage_is_root = false,
     }
@@ -956,9 +955,8 @@ local function freeze_strict_guard_slot(typ, index)
     return {
         index = index,
         type = normalized,
-        guard = guard
-            and freeze_interface_guard(guard, normalized, {})
-            or false,
+        guard = maybe3.from_optional(guard
+            and freeze_interface_guard(guard, normalized, {}) or nil),
     }
 end
 
@@ -966,9 +964,9 @@ local function freeze_strict_relay(target)
     local relay = {
         kind = "callable_strict_relay",
         parameters = {},
-        vararg = false,
+        vararg = nil,
         results = {},
-        flexible_result = false,
+        flexible_result = nil,
     }
     for index, typ in ipairs(target.params) do
         relay.parameters[index] = freeze_strict_guard_slot(typ, index)
@@ -1049,9 +1047,7 @@ local function freeze_flexible_result_demand(source, target)
     local fixed_surplus = math.max(
         0, #source.rettypes - #target.rettypes)
     local source_has_flex = source.flexrettype ~= nil
-        and source.flexrettype ~= false
     local target_has_flex = target.flexrettype ~= nil
-        and target.flexrettype ~= false
     return {
         kind = "callable_flexible_result_demand",
         abi_cap = CALLABLE_ADAPTER_VARARG_CAP,
@@ -1066,9 +1062,9 @@ local function freeze_flexible_result_demand(source, target)
             or (target_has_flex and "forward_target_demand"
                 or "fixed_prefix"),
         target_demand_parameter = target_has_flex
-            and "_flexwant" or false,
+            and "_flexwant" or nil,
         unlimited_demand = target_has_flex
-            and "LUA_MULTRET" or false,
+            and "LUA_MULTRET" or nil,
     }
 end
 
@@ -1115,14 +1111,14 @@ freeze_callable_adapter_plan = function(raw, source, target, loc, context)
             types.tostring(source), types.tostring(target),
             frozen_location.filename, frozen_location.line,
             frozen_location.col),
-        callable = false,
-        arguments = false,
-        results = false,
-        dense = false,
-        strict_relay = false,
-        rooting = false,
-        rebase_points = false,
-        flexible_result_demand = false,
+        callable = nil,
+        arguments = nil,
+        results = nil,
+        dense = nil,
+        strict_relay = nil,
+        rooting = nil,
+        rebase_points = nil,
+        flexible_result_demand = nil,
         relation_free = true,
         no_nested_interface_conversions = true,
         uses_base_off = true,
@@ -1408,7 +1404,7 @@ end
 
 function generic_rigid_parameter_carrier(parameter)
     if not parameter or parameter._tag ~= "Type.Parameter" then return nil end
-    return parameter.erased_constraint ~= false
+    return parameter.erased_constraint ~= nil
         and parameter.erased_constraint or types.Value()
 end
 
@@ -1436,7 +1432,7 @@ function generic_surface_argument_consistent(
     -- consistency. One side must be this owner binder's exact erased carrier;
     -- recursively consistent arguments such as {integer} and {value} do not
     -- turn G<{integer}> and G<{value}> into the same application view.
-    if typeparam.constraint == false then
+    if typeparam.constraint == nil then
         return left._tag == "Type.Value" or right._tag == "Type.Value"
     end
 
@@ -1464,7 +1460,7 @@ function generic_applied_nominal_adjustment(source, target, st)
 
     local source_args, target_args = source.args or {}, target.args or {}
     if #source_args == 0 and #target_args == 0 then return false, nil end
-    if #source_args ~= #target_args then return true, false end
+    if #source_args ~= #target_args then return true, nil end
     if types.equals(source, target) then return false, nil end
 
     local owner = types.registry[source.fqtn]
@@ -1474,7 +1470,7 @@ function generic_applied_nominal_adjustment(source, target, st)
         local consistent = generic_surface_argument_consistent(
             source_args[index], target_args[index], typeparam, owner,
             source_args, target_args, st)
-        if not consistent then return true, false end
+        if not consistent then return true, nil end
     end
 
     return true, {
@@ -1635,11 +1631,11 @@ end
 
 function generic_parameter_arguments(owner)
     local arguments = {}
-    if owner and owner.scope ~= false then
+    if owner and owner.scope ~= nil then
         for index, typeparam in ipairs(owner.typeparams or {}) do
             arguments[index] = owner._generic_parameters
                 and owner._generic_parameters[index]
-                or types.Parameter(owner.scope, index, typeparam.name, false)
+                or types.Parameter(owner.scope, index, typeparam.name, nil)
         end
     end
     return arguments
@@ -1654,7 +1650,7 @@ end
 
 function generic_applied_owner_view(nominal, errors, loc)
     local owner = generic_owner_type(nominal)
-    if not owner or owner.scope == false then return owner end
+    if not owner or owner.scope == nil then return owner end
     local arguments = nominal.args or {}
     if #arguments ~= #(owner.typeparams or {}) then return owner end
     local ok, view = pcall(types.substitute, owner, owner.scope, arguments)
@@ -1677,8 +1673,8 @@ function generic_constraint_satisfied(
     if argument._tag == "Type.Parameter" then
         local bindings = policy and policy.generic_scope_bindings
             or (st and st.generic_scope_bindings)
-        local surface = types.parameter_surface_constraint(argument, bindings)
-        return surface ~= nil and surface ~= false
+        local surface, valid = types.parameter_surface_constraint(argument, bindings)
+        return valid and surface ~= nil
             and types.equals(surface, constraint)
     elseif argument._tag ~= "Type.Nominal" then
         return false
@@ -1712,7 +1708,7 @@ function generic_constraint_satisfied(
     end
     local implementation = generic_interface_implementation(
         concrete, interface, policy)
-    return implementation ~= false
+    return implementation ~= nil
 end
 
 function generic_defer_constraint_application(
@@ -1753,9 +1749,9 @@ function generic_validate_binder_arguments(scope, typeparams, arguments,
     local ok = true
     local deferred = false
     for index, typeparam in ipairs(typeparams or {}) do
-        if typeparam.constraint ~= false then
+        if typeparam.constraint ~= nil then
             local constraint = typeparam.constraint
-            if scope ~= false then
+            if scope ~= nil then
                 constraint = generic_substitute(
                     constraint, scope, arguments, errors, loc, subject)
                     or constraint
@@ -1797,7 +1793,7 @@ end
 
 function generic_validate_owner_reconstruction(
         owner, arguments, st, errors, loc, subject, allow_defer)
-    if owner.scope == false then return true end
+    if owner.scope == nil then return true end
     if allow_defer and (owner._generic_header
             or (st and st.generic_signatures_incomplete)) then
         st.pending_generic_reconstructions =
@@ -1886,7 +1882,7 @@ function generic_annotate_alias_namespace(node, alias_type, namespace)
     local owner, arguments, fixed
     if alias_type and alias_type._tag == "Type.GenericAlias" then
         owner = types.registry[alias_type.target_owner_fqtn]
-        arguments = false
+        arguments = nil
         fixed = false
     elseif alias_type and alias_type._tag == "Type.Nominal" then
         owner = types.registry[alias_type.fqtn]
@@ -1895,7 +1891,7 @@ function generic_annotate_alias_namespace(node, alias_type, namespace)
     end
     if not owner and namespace and (namespace._tag == "Type.Record"
             or namespace._tag == "Type.Union") then
-        owner = namespace.scope ~= false and namespace
+        owner = namespace.scope ~= nil and namespace
             or types.registry[namespace.name]
     end
     if owner then
@@ -1917,7 +1913,7 @@ function generic_apply_namespace_typeargs(exp, st, errors)
     local typ = exp._type
     if not owner and typ and (typ._tag == "Type.Record"
             or typ._tag == "Type.Union") then
-        owner = typ.scope ~= false and typ or types.registry[typ.name]
+        owner = typ.scope ~= nil and typ or types.registry[typ.name]
     end
 
     if not variable or not owner
@@ -2012,7 +2008,7 @@ function checker._foreign_function_signature(
             rettypenodes[1], st, errors,
             "return type of " .. subject, true)
     end
-    return types.CFunction(params, ret, false, false)
+    return types.CFunction(params, ret, false, nil)
 end
 
 return core.checker

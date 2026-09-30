@@ -125,7 +125,7 @@ local function is_fresh_mutable_array_exp(exp)
         exp = exp.exp
     end
     if not exp or not exp._type or exp._type._tag ~= "Type.Array"
-       or exp._type.isconst ~= false then
+       or exp._type.isconst.tag ~= "no" then
         return false
     end
     if exp._tag == "Ast.ExpInitList" then
@@ -144,7 +144,7 @@ local function fresh_mutable_array_declaration(stat)
     end
     local decl = stat.decls[1]
     local typ = decl._type
-    if not typ or typ._tag ~= "Type.Array" or typ.isconst ~= false
+    if not typ or typ._tag ~= "Type.Array" or typ.isconst.tag ~= "no"
        or decl._captured then
         return nil
     end
@@ -161,9 +161,9 @@ local function sole_consuming_cast(stat, decl)
     end
     local cast = stat.exps[1]
     if cast._tag ~= "Ast.ExpCast"
-       or not cast._written_cast
-       or cast._written_cast.op ~= "array_freeze"
-       or cast._written_cast.mode ~= "copy" then
+       or not (cast._written_cast and cast._written_cast.tag == "just")
+       or maybe3.get_checked(cast._written_cast, "written cast").op ~= "array_freeze"
+       or maybe3.get_checked(cast._written_cast, "written cast").mode ~= "copy" then
         return nil
     end
     local source = cast.exp
@@ -192,7 +192,7 @@ local function select_block_linear_array_freezes(block)
                         end
                     end
                     if not later_use then
-                        cast._written_cast.mode = "freeze"
+                        maybe3.get_checked(cast._written_cast, "written cast").mode = "freeze"
                         cast._linear_array_freeze = true
                     end
                     break
@@ -214,7 +214,7 @@ local function is_linear_returned_value(block, ret_stat, exp)
         exp = exp.exp
     end
     if not exp or not exp._type or exp._type._tag ~= "Type.Array"
-       or exp._type.isconst ~= false then
+       or exp._type.isconst.tag ~= "no" then
         return false
     end
 
@@ -271,7 +271,7 @@ function annotate_linear_function_returns(node)
 
     for ret_idx = 1, #node._signature.rettypes do
         local rettype = node._signature.rettypes[ret_idx]
-        if rettype._tag == "Type.Array" and rettype.isconst == false then
+        if rettype._tag == "Type.Array" and rettype.isconst.tag == "no" then
             local all_linear = true
             for _, ret_stat in ipairs(returns) do
                 local exp = ret_stat.exps and ret_stat.exps[ret_idx]
@@ -281,7 +281,7 @@ function annotate_linear_function_returns(node)
                 end
             end
             if all_linear then
-                local linear_array = types.Array(rettype.elem, false)
+                local linear_array = types.Array(rettype.elem, { tag = "no" })
                 linear_array.linear = true
                 node._signature.rettypes[ret_idx] = linear_array
                 if node._type and node._type._tag == "Type.FunctionScheme"

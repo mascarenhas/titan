@@ -113,9 +113,9 @@ local FIXED_SOURCE = [[
 describe("closure adjustment wrappers (end-to-end)", function()
     it("rejects a C declaration at the callable-plan codegen boundary", function()
         local cint = types.CInteger("int", true, 3, 32)
-        local cfunc = types.CFunction({ cint }, cint, false, false)
+        local cfunc = types.CFunction({ cint }, cint, false, nil)
         local titan = types.Function(
-            { types.Integer() }, { types.Integer() }, false, false, false)
+            { types.Integer() }, { types.Integer() }, false, nil, nil)
         local plan = {
             kind = "callable",
             source = cfunc,

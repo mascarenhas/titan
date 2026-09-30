@@ -73,7 +73,7 @@ function checker._native_record_field_call(node, st, errors, demand)
     local function_node = st:find_symbol("$function")
     assert(function_node and function_node._tag == "Ast.TopLevelForeignFunc")
     function_node._native_record_fields = true
-    local signature = types.CFunction({ args[1]._type }, typ, false, false)
+    local signature = types.CFunction({ args[1]._type }, typ, false, nil)
     name._decl, name._type = st.ffi_namespace, st.ffi_namespace._type
     base._type = name._type
     var._decl = { _tag = "Checker.NativeRecordField", _type = signature }

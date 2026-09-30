@@ -186,7 +186,7 @@ function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:string]
         -- Lua/value boundaries carry the canonical Array proxy, while the
         -- exact/native representation remains its backing Table*. Use the
         -- module's cached metatable pointer; never query the registry here.
-        if typ.isconst == "maybe" then
+        if typ.isconst.tag == "maybe" then
             return render([[
                 {
                     Table *_titan_array =
@@ -466,18 +466,16 @@ coder._dynamic_op_for_tag = {
 }
 
 -- Validate the checker-owned dynamic decision before emitting any operation.
--- `false` is an explicit unavailable policy at the annotated root (currently
--- raw C pointers and compounds that contain one); nil means a checker
--- annotation was lost. A nonfalse Option plan is inductive and therefore must
--- contain one complete, nonfalse child plan.
+-- Callers unwrap a checked Maybe3 state first. A nil payload is an explicit
+-- unavailable policy at the annotated root (currently raw C pointers and
+-- compounds containing one). A present Option plan must contain a complete
+-- present child plan.
 function coder._checked_dynamic_plan_impl(plan, typ, use, seen, root)
-    assert(plan ~= nil,
-        (use or "dynamic boundary") .. " is missing its checker plan")
-    if plan == false then
+    if plan == nil then
         assert(root,
             (use or "dynamic boundary")
                 .. " contains an unavailable recursive plan")
-        return false
+        return nil
     end
     assert(plan.kind == "dynamic_coercion",
         (use or "dynamic boundary") .. " has unknown plan kind "
@@ -511,8 +509,8 @@ function coder._checked_dynamic_plan_impl(plan, typ, use, seen, root)
         (use or "dynamic boundary") .. " has unknown/mismatched operation "
             .. tostring(plan.op))
     if plan.op == "array" then
-        assert(plan.isconst == target.isconst
-               and (type(plan.isconst) == "boolean" or plan.isconst == "maybe"),
+        assert(plan.isconst.tag == target.isconst.tag
+               and types.valid_array_constness(plan.isconst),
             (use or "dynamic boundary")
                 .. " has a mismatched Array const qualifier")
     elseif plan.op == "option" then
@@ -730,7 +728,7 @@ function coder._dynamiccheckandget(
         ctx, plan, typ, cvar, exp, loc, use,
         retain_interface_result)
     plan = coder._checked_dynamic_plan(plan, typ, use)
-    if plan == false then
+    if plan == nil then
         return render([[
             (void)($EXP);
             $THROW
@@ -825,7 +823,7 @@ function coder._planned_value_projection_get(ctx, node, cvar, source)
             node.loc, "Option-composed value projection")
     end
 
-    local cast = assert(node._written_cast,
+    local cast = assert(maybe3.get_checked(node._written_cast, "written cast"),
         "value projection is missing its checker written-cast plan")
     if cast.op == "dynamic" then
         return coder._dynamiccheckandget(
@@ -869,10 +867,9 @@ coder._gradual_op_for_tag = {
 
 function checked_gradual_guard(plan, typ, use, seen, root)
     use = use or "strict gradual observation"
-    assert(plan ~= nil, use .. " is missing its checker guard plan")
-    if plan == false then
+    if plan == nil then
         assert(root, use .. " contains an unavailable recursive guard")
-        return false
+        return nil
     end
     assert(plan.kind == "gradual_guard",
         use .. " has unknown guard plan kind " .. tostring(plan.kind))
@@ -898,8 +895,8 @@ function checked_gradual_guard(plan, typ, use, seen, root)
         use .. " has unknown/mismatched guard operation "
             .. tostring(plan.op))
     if expected == "array" then
-        assert(plan.isconst == target.isconst
-               and (type(plan.isconst) == "boolean" or plan.isconst == "maybe"),
+        assert(plan.isconst.tag == target.isconst.tag
+               and types.valid_array_constness(plan.isconst),
             use .. " has a mismatched Array const qualifier")
         checked_gradual_guard(
             plan.element, target.elem, use .. " Array element", seen, false)
@@ -943,15 +940,15 @@ end
 
 function coder._checked_identity_plan(plan, source_type, target_type, use)
     assert(plan ~= nil, use .. " lacks its checker plan")
-    assert(plan ~= false, use .. " reached code generation after rejection")
+    assert(type(plan) == "table", use .. " reached code generation after rejection")
     assert(plan.kind == "identity",
         use .. " has unknown plan kind " .. tostring(plan.kind))
     local source, target =
         coder._checked_plan_pair(plan, source_type, target_type, use)
     assert(types.equals(source, target)
            or (source._tag == "Type.Array" and target._tag == "Type.Array"
-               and target.isconst == "maybe"
-               and (source.isconst == false or source.isconst == true or source.isconst == "maybe")
+               and target.isconst.tag == "maybe"
+               and (source.isconst.tag == "no" or source.isconst.tag == "yes" or source.isconst.tag == "maybe")
                and types.equals(source.elem, target.elem)),
         use .. " identity plan changes its operand type")
     return plan
@@ -974,7 +971,7 @@ function coder._checked_coercion_plan_impl(
         coercion, source_type, target_type, use, seen)
     use = use or "direct coercion"
     assert(coercion ~= nil, use .. " lacks its checker plan")
-    assert(coercion ~= false,
+    assert(type(coercion) == "table",
         use .. " reached code generation after rejection")
     if coercion.kind == "identity" then
         return coder._checked_identity_plan(
@@ -1138,7 +1135,7 @@ function coder._checked_callable_plan_impl(
         callable, source_type, target_type, use, seen)
     use = use or "callable adjustment"
     assert(callable ~= nil, use .. " lacks its checker plan")
-    assert(callable ~= false,
+    assert(type(callable) == "table",
         use .. " reached code generation after rejection")
     assert(callable.kind == "callable",
         use .. " has unknown plan kind " .. tostring(callable.kind))
@@ -1375,7 +1372,7 @@ function coder._checked_adjustment_plan_impl(
         adjustment, source_type, target_type, use, seen)
     use = use or "assignment adjustment"
     assert(adjustment ~= nil, use .. " lacks its checker plan")
-    assert(adjustment ~= false,
+    assert(type(adjustment) == "table",
         use .. " reached code generation after rejection")
     local kind = adjustment.kind
     if kind == "identity" then
@@ -1456,7 +1453,7 @@ function coder._checked_explicit_conversion_plan(
         conversion, source_type, target_type, use)
     use = use or "written explicit conversion"
     assert(conversion ~= nil, use .. " lacks its checker plan")
-    assert(conversion ~= false,
+    assert(type(conversion) == "table",
         use .. " reached code generation after rejection")
     local source = assert(types.normalize(source_type),
         use .. " has an unnormalizable source")
@@ -1553,7 +1550,7 @@ function coder._checked_written_cast_plan(
         cast, source_type, target_type, use)
     use = use or "written cast"
     assert(cast ~= nil, use .. " lacks its checker plan")
-    assert(cast ~= false, use .. " reached code generation after rejection")
+    assert(type(cast) == "table", use .. " reached code generation after rejection")
     assert(cast.kind == "written_cast",
         use .. " has unknown plan kind " .. tostring(cast.kind))
     local source, target =
@@ -1601,13 +1598,13 @@ function coder._checked_written_cast_plan(
     elseif cast.op == "array_freeze" then
         assert(source._tag == "Type.Array"
                and target._tag == "Type.Array"
-               and source.isconst == false
-               and target.isconst == true
+               and source.isconst.tag == "no"
+               and target.isconst.tag == "yes"
                and (cast.mode == "copy" or cast.mode == "freeze")
                and cast.allocation_free_test == true,
             use .. " has a malformed Array freeze operation")
         if types.equals(source.elem, target.elem) then
-            assert(cast.element_view == false,
+            assert(cast.element_view == nil,
                 use .. " exact Array freeze has an element view")
         else
             coder._checked_adjustment_plan(
@@ -1615,16 +1612,16 @@ function coder._checked_written_cast_plan(
                 use .. " Array element view")
         end
     elseif cast.op == "maybe_array_cast_mutable" then
-        assert(source._tag == "Type.Array" and source.isconst == "maybe"
-               and target._tag == "Type.Array" and target.isconst == false,
+        assert(source._tag == "Type.Array" and source.isconst.tag == "maybe"
+               and target._tag == "Type.Array" and target.isconst.tag == "no",
             use .. " has a malformed maybe-array cast to mutable")
     elseif cast.op == "maybe_array_cast_const" then
-        assert(source._tag == "Type.Array" and source.isconst == "maybe"
-               and target._tag == "Type.Array" and target.isconst == true,
+        assert(source._tag == "Type.Array" and source.isconst.tag == "maybe"
+               and target._tag == "Type.Array" and target.isconst.tag == "yes",
             use .. " has a malformed maybe-array cast to const")
     elseif cast.op == "maybe_array_cast_upcast" then
         assert(source._tag == "Type.Array" and target._tag == "Type.Array"
-               and target.isconst == "maybe",
+               and target.isconst.tag == "maybe",
             use .. " has a malformed maybe-array upcast")
     else
         error(use .. " has unknown operation " .. tostring(cast.op))
@@ -1635,7 +1632,7 @@ end
 function coder._checked_comparison_plan(plan, left, right, use)
     use = use or "equality comparison"
     assert(plan ~= nil, use .. " is missing its checker comparison plan")
-    assert(plan ~= false, use .. " reached code generation after rejection")
+    assert(type(plan) == "table", use .. " reached code generation after rejection")
     assert(plan.kind == "comparison",
         use .. " has unknown comparison plan kind " .. tostring(plan.kind))
     left, right = types.normalize(left), types.normalize(right)
@@ -1709,7 +1706,7 @@ function coder._strictcheckandget(
         ctx, plan, typ, cvar, exp, loc, use,
         retain_interface_result)
     plan = coder._checked_gradual_guard(plan, typ, use)
-    if plan == false then
+    if plan == nil then
         return render([[
             (void)($EXP);
             $THROW
@@ -1854,13 +1851,13 @@ function coder._strictcheckandgetmixed(
         ctx, plan, typ, cvar, exp, loc, use,
         retain_interface_result)
     plan = coder._checked_gradual_guard(plan, typ, use)
-    if plan == false then
+    if plan == nil then
         return coder._strictcheckandget(
             ctx, plan, typ, cvar, exp, loc, use,
             retain_interface_result)
     end
     if typ._tag == "Type.Array" then
-        if typ.isconst == "maybe" then
+        if typ.isconst.tag == "maybe" then
             return render([[
                 {
                     Table *_titan_array = NULL;
@@ -2005,7 +2002,7 @@ function coder._emit_array_writers(tlcontext, sigs, code, initfuncs)
     for _, entry in ipairs(tlcontext.array_writer_list) do
         local loc = {
             filename = "<Lua write to "
-                .. types.tostring(types.Array(entry.elem, false)) .. ">",
+                .. types.tostring(types.Array(entry.elem, { tag = "no" })) .. ">",
             line = 1,
             col = 1,
         }

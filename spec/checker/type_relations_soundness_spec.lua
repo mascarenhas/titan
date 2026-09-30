@@ -338,14 +338,14 @@ describe("type-relation soundness (checker)", function()
         assert.is_true(ok, err)
 
         local returned = tree[2].block.stats[3].exps
-        assert.equal("option", returned[1].exp.var._read_guard.op)
+        assert.equal("option", returned[1].exp.var._read_guard.value.op)
         assert.equal("integer",
-            returned[1].exp.var._read_guard.inner.op)
-        assert.equal("option", returned[2].exp.var._read_guard.op)
+            returned[1].exp.var._read_guard.value.inner.op)
+        assert.equal("option", returned[2].exp.var._read_guard.value.op)
         assert.equal("integer",
-            returned[2].exp.var._read_guard.inner.op)
-        assert.equal("consistent", returned[3]._comparison.op)
-        assert.equal("consistent", returned[4]._comparison.op)
+            returned[2].exp.var._read_guard.value.inner.op)
+        assert.equal("consistent", returned[3]._comparison.value.op)
+        assert.equal("consistent", returned[4]._comparison.value.op)
     end)
 
     for _, op in ipairs({"==", "~="}) do
@@ -378,7 +378,7 @@ describe("type-relation soundness (checker)", function()
         assert.equal("Ast.ExpNil", comparison.rhs.exp._tag)
         assert.equal("direct_coercion", comparison.rhs._adjustment.kind)
         assert.equal("option_nil", comparison.rhs._adjustment.coercion.op)
-        assert.equal("identity", comparison._comparison.op)
+        assert.equal("identity", comparison._comparison.value.op)
     end)
 
     it("does not make a non-option boolean comparable with nil", function()

@@ -445,7 +445,7 @@ describe("contextual unsafe C object-pointer conversions", function()
         with_header(declarations .. [[
             extern ffi_source ffi_make_source(void);
         ]], function(header)
-            local ok, err = fake_check(header, [[
+            local ok, err, tree = fake_check(header, [[
                 local function bad(): foreign *ffi_source
                     return ffi.ffi_make_source() as foreign *ffi_source
                 end
@@ -455,6 +455,22 @@ describe("contextual unsafe C object-pointer conversions", function()
             assert.match(
                 "non%-addressable expression of type '.-ffi_source'",
                 err)
+            assert.same({tag="none"},
+                tree[2].block.stats[1].exps[1]._written_cast)
+        end)
+    end)
+
+    it("completes a rejected written pointer conversion with none", function()
+        with_header(declarations, function(header)
+            local ok, err, tree = fake_check(header, [[
+                local function bad(p: foreign *ffi_source): foreign *ffi_target
+                    return p as foreign *ffi_target
+                end
+            ]], "reject")
+            assert.falsy(ok)
+            assert.match("configured C compiler rejected conversion", err)
+            assert.same({tag="none"},
+                tree[2].block.stats[1].exps[1]._written_cast)
         end)
     end)
 
@@ -625,13 +641,13 @@ describe("contextual unsafe C object-pointer conversions", function()
                 assert.equal(calls[2].key,
                     conversion._c_conversion.probe_key)
                 assert.equal("explicit",
-                    conversion._written_cast.op)
+                    conversion._written_cast.value.op)
                 assert.equal(conversion._c_conversion,
-                    conversion._written_cast.conversion)
+                    conversion._written_cast.value.conversion)
                 assert.equal("unsafe_object_pointer",
-                    conversion._written_cast.conversion.kind)
+                    conversion._written_cast.value.conversion.kind)
                 assert.equal(calls[2].key,
-                    conversion._written_cast.conversion.probe_key)
+                    conversion._written_cast.value.conversion.probe_key)
             end
         end)
     end)

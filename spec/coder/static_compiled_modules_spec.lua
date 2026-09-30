@@ -714,7 +714,7 @@ exec %s "$@"
         local embedded = assert(built.archive.entries["fixture.target"])
         assert.truthy(embedded.types:find(
             'Interface("fixture.target.Dynamic"', 1, true))
-        assert.truthy(embedded.types:find('Array(Integer(),"maybe")', 1, true))
+        assert.truthy(embedded.types:find('Array(Integer(),{tag="maybe"})', 1, true))
         local image = workspace .. "/archive validation.so"
         local linked, link_err =
             driver.compile_archive_validation_image(

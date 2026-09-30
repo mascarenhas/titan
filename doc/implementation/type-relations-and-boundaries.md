@@ -24,28 +24,28 @@ types.consistent(left, right)
     --> boolean
 
 types.coercion(source, target, policy)
-    --> false | CoercionPlan
+    --> nil | CoercionPlan
 
 types.gradual_guard(target)
-    --> false | GuardPlan
+    --> nil | GuardPlan
 
 types.has_sound_gradual_guard(target)
     --> boolean
 
 types.callable_adjustment(source_actual, target_expected, policy)
-    --> false | CallablePlan
+    --> nil | CallablePlan
 
 types.assignment_adjustment(source, target, policy)
-    --> false | AdjustmentPlan
+    --> nil | AdjustmentPlan
 
 types.dynamic_coercion(target)
-    --> false | DynamicCoercionPlan
+    --> nil | DynamicCoercionPlan
 
 types.written_cast(source, target, policy)
-    --> false | WrittenCastPlan
+    --> nil | WrittenCastPlan
 
 types.comparable(left, right)
-    --> false | ComparisonPlan
+    --> nil | ComparisonPlan
 ```
 
 The retired `compatible`, `coerceable`, and `explicitly_coerceable`
@@ -387,7 +387,8 @@ written/Lua boundary but fails an implicit gradual projection to boolean.
   carry their parallel GuardPlan annotations;
 - Lua function formals, variadic elements, module/record write slots, Array
   constructors, and non-Titan Lua-callable results carry their target
-  `DynamicCoercionPlan` (or an explicit `false` when unavailable); and
+  `DynamicCoercionPlan`, stored in a `Maybe3` wrapper (`none` when unavailable);
+  and
 - each Array constructor records its final context-adjusted element type and
   writer plan.
 
@@ -416,10 +417,13 @@ exactly once and stores that same plan on the sink and producer annotation.
 The coder validates the complete stored plan kind, operation, normalized
 source/target, action lists, and recursive children before lowering. This
 includes Adjustment, Callable, WrittenCast, Guard, DynamicCoercion, Coercion,
-and Comparison plans. A root `false` Guard or DynamicCoercion annotation is
-the deliberate unavailable-policy sentinel: its lowering raises a normal
-run-time type error. Missing annotations, `false` in every other plan family,
-an unavailable recursive child, and unknown or mismatched operations are
+and Comparison plans. Computed annotation wrappers initialize as
+`{tag="unknown"}`, then hold `{tag="none"}` or `{tag="just",value=plan}`.
+The coder unwraps them only after requiring a completed state. A checked
+`none` Guard or DynamicCoercion annotation is the deliberate unavailable-policy
+state: its lowering raises a normal run-time type error. Missing or unknown
+annotations, an unavailable plan in every other plan family, an unavailable
+recursive child, and unknown or mismatched operations are
 compiler-integrity errors. Representation-specific emitters are not
 authorization oracles: they run only after this validation, must not call a
 semantic relation, and must not synthesize an unannotated semantic

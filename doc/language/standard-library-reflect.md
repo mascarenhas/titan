@@ -313,6 +313,11 @@ directly carries the descriptor of its nonnil base.
 variadic input or flexible output. An empty result Array with no flexible
 tail means zero results, not one nil result.
 
+Compiler metadata uses the same nil-only absence convention before hydration;
+reflection does not interpret false as a missing descriptor. Array qualifiers
+cross that boundary as explicit `no`, `yes`, and `maybe` tags and become the
+corresponding `ArrayTypeConstness` variants.
+
 `is_foreign_function` instead carries `param_descriptors`, `is_vararg`, and
 one `return_descriptor`, which may be `is_foreign_void`.
 

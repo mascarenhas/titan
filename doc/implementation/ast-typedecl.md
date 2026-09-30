@@ -59,6 +59,29 @@ flattening; nothing in the compiler can ask "is this an expression?"
 except by enumerating tags. They exist solely to organize the source
 file (and this chapter follows the same grouping below).
 
+Ordinary optional fields use Lua `nil`; `false` is a boolean value, never a
+missing node, type, name, or list. Explicit nil arguments still count toward
+constructor arity. Parser captures retain these nil positions, so no placeholder
+sentinel is necessary. Empty lists remain distinct from absent lists where that
+distinction is meaningful, such as an explicitly zero-result lambda.
+
+Computed annotations that distinguish an unchecked operation from a completed
+miss use the shared `titan-compiler.maybe3` representation:
+
+```lua
+{ tag = "unknown" }                 -- initialized, not computed
+{ tag = "none" }                    -- completed without a result
+{ tag = "just", value = result }    -- completed with a result
+```
+
+The relevant AST constructors initialize scalar annotations with fresh
+`unknown` values. Dense plan lists retain one wrapper per slot, including
+unavailable plans. `maybe3.get_checked` rejects unknown or malformed state;
+only a checked `none` unwraps to nil. A `just` payload may itself be false.
+This wrapper is separate from `_tag`-dispatched AST/type nodes. Array constness
+is another tagged value: `{tag="no"}`, `{tag="yes"}`, or `{tag="maybe"}`.
+Its tags are compared structurally; all three wrapper tables are truthy.
+
 The same factory builds the checker's semantic types:
 `types.lua` calls `typedecl("Type", ...)`, producing tags like
 `"Type.Integer"` and `"Type.Record"`. Some type values are
@@ -135,16 +158,16 @@ omitted from the field lists for brevity.
 | Constructor | Fields | Produced by |
 | --- | --- | --- |
 | `TypeNil`, `TypeBoolean`, `TypeInteger`, `TypeFloat`, `TypeString`, `TypeValue` | — | the primitive type keywords |
-| `TypeParam` | `name`, `constraint` | declaration binder syntax; `constraint` is a named Interface type or `false` |
+| `TypeParam` | `name`, `constraint` | declaration binder syntax; `constraint` is a named Interface type or nil |
 | `TypeName` | `name`, `typeargs` | a bare or applied Titan type name |
 | `TypeForeignName` | `name` | an unqualified foreign name or contextual C primitive, including multiword names such as `unsigned long` |
 | `TypeQualName` | `module`, `name`, `typeargs` | `mod.Name` or `mod.Name<\|...\|>` in the Titan type namespace |
 | `TypeCPointer` | `subtype`, `const` | `*T` or `const *T` inside foreign syntax; nested pointer constructors require grouping |
-| `TypeCArray` | `base`, `length` | `T[]` inside foreign syntax; parsed `length` is `false`, and `.const` records the array element qualifier; fixed extents are inferred semantic types rather than written annotations |
+| `TypeCArray` | `base`, `length` | `T[]` inside foreign syntax; parsed `length` is nil, and `.const` records the array element qualifier; fixed extents are inferred semantic types rather than written annotations |
 | `TypeOwned` | `subtype` | Titan `owned foreigntype`; the checker resolves the complete operand to a foreign pointer or array and selects scalar/counting ownership |
-| `TypeArray` | `subtype`, `isconst` | `{T}`, `const { T }`, or `const? { T }`; `isconst` is `false`, `true`, or `"maybe"` |
+| `TypeArray` | `subtype`, `isconst` | `{T}`, `const { T }`, or `const? { T }`; `isconst.tag` is `"no"`, `"yes"`, or `"maybe"` |
 | `TypeMap` | `keystype`, `valuestype` | `{K: V}` |
-| `TypeFunction` | `argtypes`, `rettypes`, `varargtype`, `flexrettype` | dense fixed lists plus independent optional input/output tail element types (`false` when absent) |
+| `TypeFunction` | `argtypes`, `rettypes`, `varargtype`, `flexrettype` | dense fixed lists plus independent optional input/output tail element types (nil when absent) |
 | `TypeForeignFunction` | `argtypes`, `rettypes`, `varargtype`, `flexrettype` | raw foreign signature syntax, resolved to a C function pointer; unsupported source variadics are rejected semantically |
 | `TypeOption` | `basetype` | the `?` suffix, `T?` |
 
@@ -155,7 +178,7 @@ omitted from the field lists for brevity.
 | `TopLevelFunc` | `islocal`, `name`, `params`, `rettypes`, `flexrettype`, `block`, `typeparams` | fixed result list plus a separate optional output tail |
 | `TopLevelMethod` | `class`, `name`, `params`, `rettypes`, `flexrettype`, `block`, `typeparams` | `function Class:name(...)`; parser decorates `islocal` |
 | `TopLevelStatic` | `class`, `name`, `params`, `rettypes`, `flexrettype`, `block`, `typeparams` | `function Class.name(...)`, synthesized record `Class.new`, and synthesized union variant constructors; parser decorates `islocal` and marks synthesized forms |
-| `TopLevelVar` | `islocal`, `isconst`, `decl`, `value` | module variable; `value == false` preserves an omitted initializer until checking |
+| `TopLevelVar` | `islocal`, `isconst`, `decl`, `value` | module variable; `value == nil` preserves an omitted initializer until checking |
 | `TopLevelTypeAlias` | `islocal`, `name`, `type` | compile-time-only `[local] type Name = T` |
 | `TopLevelForeignTypeAlias` | `name`, `type` | always-local raw C alias; emits a typedef in the module's generated FFI header |
 | `TopLevelForeignFunc` | `name`, `params`, `rettypes`, `flexrettype`, `block` | source foreign function with raw C parameters/results and a restricted body |
@@ -210,7 +233,7 @@ checker turns these nodes into ordered `Type.Method` metadata; see
 `Decl = {loc, name, type, option, isconst}` is used for locals, numeric and
 generic `for` control variables, function parameters, record fields, and
 `TopLevelVar`. The
-`type` field is an `Ast.Type*` node *or `false`* (type to be inferred),
+`type` field is an `Ast.Type*` node or nil (type to be inferred),
 `option` is a boolean marking the bare-`?` inference form, and `isconst` is an
 exact boolean for ordinary declarations:
 
@@ -218,8 +241,8 @@ exact boolean for ordinary declarations:
 | --- | --- | --- |
 | `x: integer` | `TypeInteger` node | `false` |
 | `x?: integer` | `TypeOption(TypeInteger)` node | `false` |
-| `x?` | `false` | `true` |
-| `x` | `false` | `false` |
+| `x?` | nil | `true` |
+| `x` | nil | `false` |
 
 That is, `x?: T` is eagerly desugared into an option *annotation*,
 while a bare `x?` defers to the checker, which infers the initializer's
@@ -240,9 +263,9 @@ const module variables alike.
 | `StatBlock` | `stats` | also used for `do ... end` and every block body |
 | `StatWhile` | `condition`, `block` | |
 | `StatRepeat` | `block`, `condition` | note the field order: block first |
-| `StatIf` | `thens`, `elsestat` | `thens` is a flat list of `Then {condition, block}` (one per `if`/`elseif`); `elsestat` is a `StatBlock` or `false` |
-| `StatCase` | `exp`, `arms`, `elseblock` | `arms` is a list of `CaseArm {name, bindings, block, named}`; `bindings` is a dense `Decl` list and `named` distinguishes braces from positional parentheses; absent `elseblock` is `false` |
-| `StatFor` | `decl`, `start`, `finish`, `inc`, `block` | `inc` is `false` when the step is omitted; the checker fills in a literal `1`/`1.0` |
+| `StatIf` | `thens`, `elsestat` | `thens` is a flat list of `Then {condition, block}` (one per `if`/`elseif`); `elsestat` is a `StatBlock` or nil |
+| `StatCase` | `exp`, `arms`, `elseblock` | `arms` is a list of `CaseArm {name, bindings, block, named}`; `bindings` is a dense `Decl` list and `named` distinguishes braces from positional parentheses; absent `elseblock` is nil |
+| `StatFor` | `decl`, `start`, `finish`, `inc`, `block` | `inc` is nil when the step is omitted; the checker fills in a literal `1`/`1.0` |
 | `StatForIn` | `decls`, `exps`, `block` | generic `for decllist in explist`; the checker pads/elaborates `exps` as the iterator tuple |
 | `StatAssign` | `vars`, `exps` | parser candidates have expression nodes in `vars` and `_parsed_candidates = true`; checking validates and extracts their `Var*` nodes |
 | `StatDecl` | `decls`, `exps` | mutable `local` may have an empty `exps` list for checked nil synthesis; const declarations always have a nonempty initializer list |
@@ -272,10 +295,10 @@ to use it as an expression.
 | `ExpIs` | `exp`, `target` | written `is` type test; the checker resolves `target` and gives the expression type `boolean` |
 | `ExpAdjust` | `exp` | parenthesized call, varargs, spread, or subset; checking requests one result, including nil padding for an empty run |
 | `ExpExtra` | `exp`, `index`, `_type` | synthesized by the checker only: the index-th (> 1) value of a multi-return call |
-| `ExpSubset` | `exp`, `first`, `last` | parser-built comma-bearing bracket suffix; either bound may be `false`, and checking accepts it only as spread range syntax |
+| `ExpSubset` | `exp`, `first`, `last` | parser-built comma-bearing bracket suffix; either bound may be nil, and checking accepts it only as spread range syntax |
 | `ExpSpread` | `exp`, `first`, `last` | unique parser/checker carrier for one collection or ranged-vararg spread; owns subject/bound evaluation |
 | `ExpSpreadIndex` | `spread`, `index`, `_type` | checker-synthesized finite projection; every projection points to the same `ExpSpread` carrier |
-| `ExpFunction` | `params`, `rettypes`, `flexrettype`, `block` | anonymous function; the raw AST keeps an omitted result annotation as `rettypes = false`, distinct from explicit `: ()`; a matching expected Function may supply missing fixed/bare-variadic inputs and the complete result shape |
+| `ExpFunction` | `params`, `rettypes`, `flexrettype`, `block` | anonymous function; the raw AST keeps an omitted result annotation as `rettypes = nil`, distinct from explicit `: ()`; a matching expected Function may supply missing fixed/bare-variadic inputs and the complete result shape |
 | `ExpUnionInit` | `owner`, `variant`, `values` | parser-synthesized variant-constructor result; `values` is a dense expression list in payload declaration order, empty for an empty variant |
 
 For `Owner<|T|>.member(...)`, the parser temporarily decorates the namespace
@@ -348,7 +371,7 @@ encodes three field forms:
 
 | Source form | `name` |
 | --- | --- |
-| `exp` (positional) | `false` |
+| `exp` (positional) | nil |
 | `name = exp` | the name string |
 | `[keyexp] = exp` | the key *expression node* |
 
@@ -369,6 +392,18 @@ Passes communicate by adding underscore-prefixed fields to nodes. Most are
 decorations assigned after construction; `_type` is also a declared constructor
 field on `ExpExtra` and `ExpSpreadIndex`. This table inventories the durable
 cross-pass fields (short-lived state used wholly inside one pass is omitted).
+
+The computed scalar annotations `_read_guard`, `_array_writer_plan`,
+`_spread_optional_guard`, `_spread_open_guard`, `_lua_write_dynamic_plan`,
+`_dynamic_plan`, `_lua_vararg_dynamic_plan`, `_strict_vararg_guard_plan`,
+`_bound_strict_vararg_guard_plan`, `_lua_open_result_dynamic_plan`,
+`_strict_open_result_guard_plan`, `_written_cast`, and `_comparison` carry
+`Maybe3` wrappers. Their constructors initialize `unknown`; successful checking
+publishes `none` or `just`, and consumers unwrap through `get_checked`.
+Parallel fixed-parameter/result plan arrays use one wrapper per slot, preserving
+arity even when a slot has no plan. `Type.Field.dynamic_plan` and frozen strict
+relay slot guards follow the same contract. Genuine boolean facts such as
+`_always_returns` and `_nilfill` remain booleans.
 
 | Field | On | Written by | Read by | Meaning |
 | --- | --- | --- | --- | --- |
@@ -561,7 +596,7 @@ cares about:
 ```lua
 assert_program_ast([[ local x = 17 ]], {
     { _tag = "Ast.TopLevelVar", islocal = true,
-      decl = { name = "x", type = false },
+      decl = { name = "x" },
       value = { _tag = "Ast.ExpInteger", value = 17 } }
 })
 ```

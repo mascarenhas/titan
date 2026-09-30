@@ -95,7 +95,7 @@ local SCHEMAS = {
         { "flexrettype", "maybe_type" },
     },
     ["Type.Array"] = {
-        { "elem", "type" }, { "isconst", "atom" },
+        { "elem", "type" }, { "isconst", "array_constness" },
     },
     ["Type.Map"] = {
         { "keys", "type" }, { "values", "type" },
@@ -118,14 +118,14 @@ local SCHEMAS = {
         { "fqtn", "atom" }, { "name", "atom" },
         { "params", "type_list" }, { "rettypes", "type_list" },
         { "varargtype", "maybe_type" }, { "flexrettype", "maybe_type" },
-        { "paramnames", "string_list_or_false" }, { "scope", "maybe_type" },
+        { "paramnames", "optional_string_list" }, { "scope", "maybe_type" },
         { "typeparams", "type_list_default" }, { "islocal", "flag" },
     },
     ["Type.StaticMethod"] = {
         { "fqtn", "atom" }, { "name", "atom" },
         { "params", "type_list" }, { "rettypes", "type_list" },
         { "varargtype", "maybe_type" }, { "flexrettype", "maybe_type" },
-        { "paramnames", "string_list_or_false" }, { "scope", "maybe_type" },
+        { "paramnames", "optional_string_list" }, { "scope", "maybe_type" },
         { "typeparams", "type_list_default" }, { "islocal", "flag" },
     },
     ["Type.Record"] = {
@@ -147,7 +147,7 @@ local SCHEMAS = {
     },
     ["Type.ModuleMember"] = {
         { "modname", "atom" }, { "name", "atom" }, { "type", "type" },
-        { "paramnames", "string_list_or_false" }, { "islocal", "flag" },
+        { "paramnames", "optional_string_list" }, { "islocal", "flag" },
         { "_foreign_source", "flag" },
     },
     ["Type.ModuleVariable"] = {
@@ -193,7 +193,7 @@ local SCHEMAS = {
         { "_ffi_scope", "atom" }, { "_c_origin_header", "header" },
     },
     ["Type.CField"] = {
-        { "owner", "type" }, { "name", "atom" }, { "type", "type" },
+        { "owner", "maybe_type" }, { "name", "atom" }, { "type", "type" },
         { "bitfield", "extent" }, { "flexible_array", "atom" },
         { "_ffi_scope", "atom" }, { "_c_origin_header", "header" },
     },
@@ -317,7 +317,7 @@ function Encoder:field(value, spec, owner_tag)
     elseif kind == "type" then
         return self:descriptor(field, label)
     elseif kind == "maybe_type" then
-        return field == false and "f" or self:descriptor(field, label)
+        return field == nil and "n" or self:descriptor(field, label)
     elseif kind == "type_list" then
         return self:type_list(field, label)
     elseif kind == "type_list_default" then
@@ -328,19 +328,22 @@ function Encoder:field(value, spec, owner_tag)
         return self:type_map(field, label)
     elseif kind == "string_list_default" then
         return self:string_list(field or {}, label)
-    elseif kind == "string_list_or_false" then
-        return field == false and "f" or self:string_list(field, label)
+    elseif kind == "optional_string_list" then
+        return field == nil and "n" or self:string_list(field, label)
+    elseif kind == "array_constness" then
+        if not types.valid_array_constness(field) then fail(label .. " has invalid constness") end
+        return atom(field.tag, label)
     elseif kind == "parameter_style" then
         return atom(field or "prototype", label)
     elseif kind == "extent" then
         return atom(cdeclarator.render_array_extent(field), label)
     elseif kind == "name" then
-        if field == nil or field == false or type(field) == "string" then
+        if field == nil or type(field) == "string" then
             return atom(field, label)
         end
         return self:string_list(field, label)
     elseif kind == "header" then
-        if field == nil or field == false then return "n" end
+        if field == nil then return "n" end
         if type(field) ~= "table" or type(field.rendered) ~= "string"
            or field.rendered == "" then
             fail(label .. " has no stable rendered spelling")

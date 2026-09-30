@@ -3,6 +3,8 @@ local h = require "spec.support.helpers"
 local coder = require "titan-compiler.coder"
 local coder_values = require "titan-compiler.coder.values"
 local coder_numerics = require "titan-compiler.coder.numerics"
+local driver = require "titan-compiler.driver"
+local maybe3 = require "titan-compiler.maybe3"
 local types = require "titan-compiler.types"
 
 local run_coder = h.run_coder
@@ -1911,8 +1913,8 @@ describe("type-relation soundness (end-to-end)", function()
         local c_char = types.CInteger("char", true, 1, 8)
         local char_pointer = types.CPointer(c_char, {})
         local function_pointer = types.CPointer(
-            types.CFunction({}, types.CVoid(), false, false), {})
-        local gc_array = types.Array(types.Integer(), false)
+            types.CFunction({}, types.CVoid(), false, nil), {})
+        local gc_array = types.Array(types.Integer(), {tag="no"})
         local counted_char = types.COwned(c_char, true)
         local counted_int = types.COwned(c_integer, true)
 
@@ -2092,11 +2094,36 @@ describe("type-relation soundness (end-to-end)", function()
                 "test checked C pointer conversion"))
     end)
 
-    it("asserts missing and unknown boundary lowering plans", function()
+    local function generate_with_parameter_plan(state)
+        local ok, err, tree = h.run_checker([[
+            function identity(x: integer): integer
+                return x
+            end
+        ]])
+        assert.is_true(ok, err)
+        tree[1]._lua_dynamic_plans[1] = state
+        return coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION)
+    end
+
+    it("rejects a missing dense parameter plan slot", function()
+        local ok, err = pcall(generate_with_parameter_plan, nil)
+        assert.is_false(ok)
+        assert.matches("genuine Lua function parameter lacks its checker plan", err, 1, true)
+    end)
+
+    it("rejects an uncomputed dense parameter plan slot", function()
+        local ok, err = pcall(generate_with_parameter_plan, maybe3.unknown())
+        assert.is_false(ok)
+        assert.matches("parameter conversion has not been computed", err, 1, true)
+    end)
+
+    it("rejects false as a present typed parameter plan payload", function()
+        local ok = pcall(generate_with_parameter_plan, maybe3.just(false))
+        assert.is_false(ok)
+    end)
+
+    it("validates checked boundary plans and rejects unknown operations", function()
         local integer = types.Integer()
-        assert.has_error(function()
-            coder_values._checked_dynamic_plan(nil, integer, "test boundary")
-        end, "test boundary is missing its checker plan")
         assert.has_error(function()
             coder_values._checked_dynamic_plan({
                 kind = "dynamic_coercion",
@@ -2107,8 +2134,8 @@ describe("type-relation soundness (end-to-end)", function()
 
         local pointer = types.CPointer(
             types.CInteger("int", true, 3, 32), {})
-        assert.is_false(coder_values._checked_dynamic_plan(
-            false, pointer, "test unavailable boundary"))
+        assert.is_nil(coder_values._checked_dynamic_plan(
+            maybe3.get_checked(maybe3.none()), pointer, "test unavailable boundary"))
 
         local option = types.Option(integer)
         assert.has_error(function()
@@ -2128,13 +2155,10 @@ describe("type-relation soundness (end-to-end)", function()
                 kind = "dynamic_coercion",
                 op = "option",
                 target = option,
-                inner = false,
+                inner = nil,
             }, option, "test boundary")
         end, "test boundary Option present value contains an unavailable recursive plan")
 
-        assert.has_error(function()
-            coder_values._checked_gradual_guard(nil, integer, "test observation")
-        end, "test observation is missing its checker guard plan")
         assert.has_error(function()
             coder_values._checked_gradual_guard({
                 kind = "gradual_guard",
@@ -2142,8 +2166,8 @@ describe("type-relation soundness (end-to-end)", function()
                 target = integer,
             }, integer, "test observation")
         end, "test observation has unknown/mismatched guard operation mystery")
-        assert.is_false(coder_values._checked_gradual_guard(
-            false, pointer, "test unavailable observation"))
+        assert.is_nil(coder_values._checked_gradual_guard(
+            maybe3.get_checked(maybe3.none()), pointer, "test unavailable observation"))
 
         assert.has_error(function()
             coder_values._checked_gradual_guard({
@@ -2162,7 +2186,7 @@ describe("type-relation soundness (end-to-end)", function()
                 kind = "gradual_guard",
                 op = "option",
                 target = option,
-                inner = false,
+                inner = nil,
             }, option, "test observation")
         end, "test observation Option present value contains an unavailable recursive guard")
 
@@ -2260,9 +2284,9 @@ describe("type-relation soundness (end-to-end)", function()
         end, "test adjustment identity plan changes its operand type")
 
         local source_callable = types.Function(
-            { float }, {}, false, false, false)
+            { float }, {}, false, nil, nil)
         local target_callable = types.Function(
-            { integer }, {}, false, false, false)
+            { integer }, {}, false, nil, nil)
         assert.has_error(function()
             coder_values._checked_callable_plan({
                 kind = "callable",

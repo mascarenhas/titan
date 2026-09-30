@@ -51,9 +51,9 @@ checkvar = util.make_visitor({
             node._type = decl._type
             if node._type and (node._type._tag == "Type.Record"
                     or node._type._tag == "Type.Union") then
-                node._generic_namespace_owner = node._type.scope ~= false
+                node._generic_namespace_owner = node._type.scope ~= nil
                     and node._type or types.registry[node._type.name]
-                node._generic_namespace_arguments = false
+                node._generic_namespace_arguments = nil
                 node._generic_namespace_fixed = false
             end
             if checker._foreign_function_depth > 0 then
@@ -136,7 +136,7 @@ checkvar = util.make_visitor({
         node.exp = tryforce(node.exp)
         local ltype = node.exp._type
         if ltype._tag == "Type.Parameter"
-           and ltype.erased_constraint ~= false
+           and ltype.erased_constraint ~= nil
            and ltype.erased_constraint._tag == "Type.Nominal" then
             local constraint = generic_applied_owner_view(
                 ltype.erased_constraint, errors, node.loc)
@@ -177,9 +177,9 @@ checkvar = util.make_visitor({
                 if ltype._tag == "Type.Module"
                    and (node._type._tag == "Type.Record"
                         or node._type._tag == "Type.Union") then
-                    node._generic_namespace_owner = node._type.scope ~= false
+                    node._generic_namespace_owner = node._type.scope ~= nil
                         and node._type or types.registry[node._type.name]
-                    node._generic_namespace_arguments = false
+                    node._generic_namespace_arguments = nil
                     node._generic_namespace_fixed = false
                 end
             elseif type_member then
@@ -234,7 +234,7 @@ checkvar = util.make_visitor({
                         decl.varargtype, decl.flexrettype)
                     node._generic_owner = owner
                     node._generic_owner_arguments = namespace
-                        and namespace._generic_namespace_arguments or false
+                        and namespace._generic_namespace_arguments or nil
                     node._generic_owner_fixed = namespace
                         and namespace._generic_namespace_fixed or false
                     node._generic_owner_explicit = namespace
@@ -463,7 +463,7 @@ checkvar = util.make_visitor({
                 keystype = provisional.keys
                 term = "map indexing"
             end
-            node._read_guard = false
+            node._read_guard = maybe3.unknown()
             node._generic_read_type = nil
 
             local expected = generic_closed_inference_pattern(
@@ -499,16 +499,16 @@ checkvar = util.make_visitor({
                         -- invariant unification; retain finite recovery if an
                         -- earlier conflict made the context invalid.
                         node._type = types.Invalid()
-                        node._read_guard = false
+                        node._read_guard = maybe3.none()
                         return
                     end
                     node._type = optionize(elem)
                     local read_type = generic_runtime_carrier(
                         node._type)
-                    node._read_guard = types.gradual_guard(read_type) or false
+                    node._read_guard = maybe3.from_optional(types.gradual_guard(read_type))
                     node._generic_read_type = read_type ~= node._type
                         and node._type or nil
-                    if mode ~= "write" and not node._read_guard then
+                    if mode ~= "write" and node._read_guard.tag == "none" then
                         if closed._tag == "Type.Array" then
                             checker.typeerror(errors, node.loc,
                                 "cannot read array elements of type '%s' "
@@ -547,11 +547,11 @@ checkvar = util.make_visitor({
             local elem = node.exp1._type.elem
             node._type = optionize(elem)
             local read_type = generic_runtime_carrier(node._type)
-            node._read_guard = types.gradual_guard(read_type) or false
+            node._read_guard = maybe3.from_optional(types.gradual_guard(read_type))
             if read_type ~= node._type then
                 node._generic_read_type = node._type
             end
-            if mode ~= "write" and not node._read_guard then
+            if mode ~= "write" and node._read_guard.tag == "none" then
                 checker.typeerror(errors, node.loc,
                     "cannot read array elements of type '%s' because the type has no sound runtime guard",
                     types.tostring(elem))
@@ -562,11 +562,11 @@ checkvar = util.make_visitor({
             local values = node.exp1._type.values
             node._type = optionize(values)
             local read_type = generic_runtime_carrier(node._type)
-            node._read_guard = types.gradual_guard(read_type) or false
+            node._read_guard = maybe3.from_optional(types.gradual_guard(read_type))
             if read_type ~= node._type then
                 node._generic_read_type = node._type
             end
-            if mode ~= "write" and not node._read_guard then
+            if mode ~= "write" and node._read_guard.tag == "none" then
                 checker.typeerror(errors, node.loc,
                     "cannot read map values of type '%s' because the type has no sound runtime guard",
                     types.tostring(values))
@@ -674,7 +674,7 @@ function checkargs(callable, args, loc, fname, st, errors,
     local fixed = {}
     for i, ptype in ipairs(signature.params) do fixed[i] = ptype end
     local tail = signature.varargtype
-        or (signature.c_vararg and INFER_OPEN) or false
+        or (signature.c_vararg and INFER_OPEN) or nil
     local original_count = #args
     local adjusted = adjust_explist(args,
         result_demand(fixed, tail, {
@@ -729,7 +729,7 @@ function annotate_call_arguments(node, adjusted)
         target_type = adjusted.open_target,
         start = adjusted.open_start,
         adjustment = adjusted.open_adjustment,
-    } or false
+    } or nil
 end
 
 -- Return the direct automatic object whose address/decay is passed to a
@@ -751,9 +751,9 @@ function mutable_c_call_argument_decl(exp, target)
         elseif (exp._adjustment
                 and exp._adjustment.kind == "direct_coercion"
                 and exp._adjustment.coercion.op == "mutable_c_address")
-           or (exp._written_cast
-                and exp._written_cast.op == "coercion"
-                and exp._written_cast.coercion.op == "mutable_c_address") then
+           or (exp._written_cast.tag == "just"
+                and maybe3.get_checked(exp._written_cast, "written cast").op == "coercion"
+                and maybe3.get_checked(exp._written_cast, "written cast").coercion.op == "mutable_c_address") then
             -- An inner explicit cast may take the exact local address before
             -- an outer unsafe pointer reinterpretation reaches the parameter.
             direct_address_source = exp.exp
@@ -779,7 +779,7 @@ function mutable_c_call_argument_decl(exp, target)
 
     local planned_conversion = adjusted._adjustment
         or adjusted._assignment_adjustment
-        or adjusted._written_cast
+        or (adjusted._written_cast and adjusted._written_cast.tag == "just")
         or adjusted._c_conversion
     if source and source._tag == "Type.CArray"
        and (unsafe_array_decay
@@ -850,7 +850,7 @@ function annotate_c_call_mutations(node, cfunc)
             observe(arg, target)
         end
     end
-    node._c_mutated_decls = #mutated > 0 and mutated or false
+    node._c_mutated_decls = #mutated > 0 and mutated or nil
 end
 
 -- Return the expressions carried by either positional or named call syntax.
@@ -920,7 +920,7 @@ function synthesize_value_call_inputs(args, loc, st, errors)
         table.insert(args, exp)
     end
 
-    return params, adjusted.open_source and adjusted.open_type or false,
+    return params, adjusted.open_source and adjusted.open_type or nil,
         adjusted
 end
 
@@ -967,18 +967,18 @@ annotate_call_results = function(node, callable, demand, errors)
         "result checking requires a callable signature")
     node._callee_type = signature.callable
     node._types = signature.rettypes
-    node._flexrettype = signature.flexrettype or false
+    node._flexrettype = signature.flexrettype or nil
     node._visible_types = {}
     node._result_sources = {}
     -- A function value may turn out to be an ordinary Lua callable at run
     -- time.  Record the target-directed conversion for every result that such
-    -- a callable can place into a Titan result slot.  `false` is deliberate:
+    -- a callable can place into a Titan result slot. A `none` state is deliberate:
     -- it means this result type has no sound dynamic conversion (notably a raw
     -- C pointer), so the generated Lua-callable branch must reject rather than
     -- rediscovering a permissive category check.
     node._lua_result_dynamic_plans = {}
     node._strict_result_guard_plans = {}
-    node._open_results = false
+    node._open_results = nil
     node._finite_flex_prefix = 0
 
     local nfixed = #signature.rettypes
@@ -987,9 +987,9 @@ annotate_call_results = function(node, callable, demand, errors)
         table.insert(node._visible_types, typ)
         table.insert(node._result_sources, source)
         table.insert(node._lua_result_dynamic_plans,
-            types.dynamic_coercion(typ) or false)
+            maybe3.from_optional(types.dynamic_coercion(typ)))
         table.insert(node._strict_result_guard_plans,
-            types.gradual_guard(typ) or false)
+            maybe3.from_optional(types.gradual_guard(typ)))
     end
 
     for i = 1, math.min(ndemand, nfixed) do
@@ -1024,9 +1024,9 @@ annotate_call_results = function(node, callable, demand, errors)
                 start = start,
             }
             node._lua_open_result_dynamic_plan =
-                types.dynamic_coercion(signature.flexrettype) or false
+                maybe3.from_optional(types.dynamic_coercion(signature.flexrettype))
             node._strict_open_result_guard_plan =
-                types.gradual_guard(signature.flexrettype) or false
+                maybe3.from_optional(types.gradual_guard(signature.flexrettype))
             node._flex_result_demand = "open"
         end
     elseif signature.flexrettype then
@@ -1041,7 +1041,7 @@ end
 -- Named syntax is deliberately declaration-only. Structural function values
 -- do not carry parameter labels, so provenance -- not merely Type.Function --
 -- decides eligibility. Returns (paramnames, lowering_kind, recognized_ffi),
--- where lowering_kind is "titan" or "foreign" and paramnames may be false for
+-- where lowering_kind is "titan" or "foreign" and paramnames may be nil for
 -- a direct foreign declaration whose prototypes did not publish one complete,
 -- unambiguous list.
 function named_function_metadata(node)

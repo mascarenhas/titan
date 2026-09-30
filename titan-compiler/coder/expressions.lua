@@ -386,15 +386,15 @@ function codearray(ctx, node, target)
         "Array construction lacks its normalized checker element type")
     assert(types.equals(writer_elem, types.normalize(elemtype)),
         "Array construction writer element disagrees with final Array type")
-    assert(type(node._type.isconst) == "boolean",
+    assert(types.valid_array_constness(node._type.isconst) and node._type.isconst.tag ~= "maybe",
         "Array construction lacks a const qualifier")
     local writer
-    if not node._type.isconst then
+    if node._type.isconst.tag == "no" then
         writer = coder._array_writer(
-            ctx, writer_elem, node._array_writer_plan)
+            ctx, writer_elem, maybe3.get_checked(node._array_writer_plan, "_array_writer_plan"))
     end
     local function initarray(capacity)
-        if node._type.isconst then
+        if node._type.isconst.tag == "yes" then
             return render([[
                 $TMPNAME = titan_const_array_new(
                     L, $META, $CAPACITY, $TMPSTACKSLOT);
@@ -1342,7 +1342,7 @@ function codebinaryop(ctx, node, _)
     local comparison
     local mapcomparison
     if op == "==" or op == "!=" then
-        local plan = node._comparison
+        local plan = maybe3.get_checked(node._comparison, "comparison")
         local function original_operand_type(exp, adjustment, side)
             if not adjustment then return exp._type end
             assert(exp._tag == "Ast.ExpCast"
@@ -1677,7 +1677,7 @@ function codeindexarray(ctx, node)
     local ctmp, tmpname, tmpslot = newtmp(ctx, typ, types.is_gc(typ))
     local cset = ""
     local ccheck = coder._strictcheckandgetmixed(
-        ctx, node._read_guard, typ, tmpname, "_s", node.loc,
+        ctx, maybe3.get_checked(node._read_guard, "_read_guard"), typ, tmpname, "_s", node.loc,
         "typed Array read")
     local crebase = coder._rebase_after_interface_discovery(ctx, typ)
     if types.is_gc(typ) then
@@ -1729,7 +1729,7 @@ function codeindexmap(ctx, node)
     local ctmp, tmpname, tmpslot = newtmp(ctx, typ, types.is_gc(typ))
     local cset = ""
     local ccheck = coder._strictcheckandgetmixed(
-        ctx, node._read_guard, typ, tmpname, "_s", node.loc,
+        ctx, maybe3.get_checked(node._read_guard, "_read_guard"), typ, tmpname, "_s", node.loc,
         "typed Map read")
     local crebase = coder._rebase_after_interface_discovery(ctx, typ)
     if types.is_gc(typ) then
@@ -2349,10 +2349,10 @@ local function code_spread_carrier(ctx, node)
         "spread carrier lacks its checked element type")
     assert(node._spread_optional_type,
         "spread carrier lacks its checked optional projection type")
-    assert(node._spread_optional_guard ~= nil,
-        "spread carrier lacks its checked optional read guard")
-    assert(node._spread_open_guard ~= nil,
-        "spread carrier lacks its checked open read guard")
+    local optional_guard = maybe3.get_checked(node._spread_optional_guard,
+        "spread carrier optional read guard")
+    local open_guard = maybe3.get_checked(node._spread_open_guard,
+        "spread carrier open read guard")
 
     local stats = {}
     local subject
@@ -2431,8 +2431,8 @@ local function code_spread_carrier(ctx, node)
         last = last,
         count = count,
         optional_type = node._spread_optional_type,
-        optional_guard = node._spread_optional_guard,
-        open_guard = node._spread_open_guard,
+        optional_guard = optional_guard,
+        open_guard = open_guard,
     }
     node._coder_spread = state
 
@@ -2446,7 +2446,7 @@ local function code_spread_carrier(ctx, node)
                 SKIP = c_integer_literal(skip),
             }),
             start = c_integer_literal(skip),
-            capacity = false,
+            capacity = nil,
             isopen = true,
             ownership = "borrowed",
             count_unsigned = true,
@@ -2515,7 +2515,7 @@ local function code_spread_index(ctx, node)
 end
 
 function coder._cast_coercion(node)
-    local plan = node._adjustment or node._written_cast
+    local plan = node._adjustment or maybe3.get_checked(node._written_cast, "written cast")
     local coercion = plan and plan.coercion
     if not coercion then return nil end
     return coder._checked_coercion_plan(
@@ -2541,7 +2541,7 @@ end
 
 function coder._code_array_freeze(ctx, node)
     local cast = coder._checked_written_cast_plan(
-        node._written_cast, node.exp._type, node._type,
+        maybe3.get_checked(node._written_cast, "written cast"), node.exp._type, node._type,
         "mutable-to-const Array cast")
     assert(cast.op == "array_freeze"
            and (cast.mode == "copy" or cast.mode == "freeze"),
@@ -2580,7 +2580,7 @@ end
 
 function coder._code_maybe_array_cast(ctx, node)
     local cast = coder._checked_written_cast_plan(
-        node._written_cast, node.exp._type, node._type,
+        maybe3.get_checked(node._written_cast, "written cast"), node.exp._type, node._type,
         "maybe-array cast")
     local op = cast.op
     local source_stats, source = materialize(ctx, node.exp)
@@ -2663,9 +2663,10 @@ function codeexp_dispatch(ctx, node, iscondition, target)
                 node._adjustment, node.exp._type, node._type,
                 "expression adjustment")
         end
-        if node._written_cast then
+        if not node._implicit_coercion
+           or (node._written_cast and node._written_cast.tag ~= "unknown") then
             coder._checked_written_cast_plan(
-                node._written_cast, node.exp._type, node._type,
+                maybe3.get_checked(node._written_cast, "written cast"), node.exp._type, node._type,
                 "written expression cast")
         end
         if node._c_conversion then
@@ -2674,8 +2675,8 @@ function codeexp_dispatch(ctx, node, iscondition, target)
                 "checked expression C conversion")
         end
     end
-    if tag == "Ast.ExpCast" and node._written_cast
-       and node._written_cast.op == "current_module" then
+    if tag == "Ast.ExpCast" and (node._written_cast and node._written_cast.tag == "just")
+       and maybe3.get_checked(node._written_cast, "written cast").op == "current_module" then
         return "", "_mod"
     elseif tag == "Ast.VarDot" and node.exp._type._tag == "Type.CModule" then
         local fstats, fexp = codeforeignvar(ctx, node)
@@ -2748,23 +2749,23 @@ function codeexp_dispatch(ctx, node, iscondition, target)
     elseif tag == "Ast.ExpCast" and node._interface_downcast then
         return coder._code_interface_downcast(ctx, node, false)
     elseif tag == "Ast.ExpCast"
-           and node._written_cast
-           and node._written_cast.op == "array_freeze" then
+           and (node._written_cast and node._written_cast.tag == "just")
+           and maybe3.get_checked(node._written_cast, "written cast").op == "array_freeze" then
         return coder._code_array_freeze(ctx, node)
     elseif tag == "Ast.ExpCast"
-           and node._written_cast
-           and (node._written_cast.op == "maybe_array_cast_mutable"
-                or node._written_cast.op == "maybe_array_cast_const"
-                or node._written_cast.op == "maybe_array_cast_upcast") then
+           and (node._written_cast and node._written_cast.tag == "just")
+           and (maybe3.get_checked(node._written_cast, "written cast").op == "maybe_array_cast_mutable"
+                or maybe3.get_checked(node._written_cast, "written cast").op == "maybe_array_cast_const"
+                or maybe3.get_checked(node._written_cast, "written cast").op == "maybe_array_cast_upcast") then
         return coder._code_maybe_array_cast(ctx, node)
     elseif tag == "Ast.ExpCast" and types.equals(node.exp._type, node._type) then
         return codeexp(ctx, node.exp, iscondition, target)
     elseif tag == "Ast.ExpCast"
            and ((node._adjustment
                     and node._adjustment.kind == "callable")
-                or (node._written_cast
-                    and (node._written_cast.op == "gradual"
-                        or node._written_cast.op == "callable"))) then
+                or (node._written_cast.tag == "just"
+                    and (maybe3.get_checked(node._written_cast, "written cast").op == "gradual"
+                        or maybe3.get_checked(node._written_cast, "written cast").op == "callable"))) then
         -- A finite callable edge is an allocating target view; a written
         -- structural gradual cast remains the existing representation view.
         -- Both consume only the checker-owned plan attached to this cast.
@@ -2772,7 +2773,7 @@ function codeexp_dispatch(ctx, node, iscondition, target)
         if node._adjustment then
             adjustment = node._adjustment
         else
-            local cast = node._written_cast
+            local cast = maybe3.get_checked(node._written_cast, "written cast")
             adjustment = cast.op == "gradual"
                 and assert(cast.view,
                     "written gradual cast lacks its checker view plan")
@@ -3076,6 +3077,7 @@ function codeexp_dispatch(ctx, node, iscondition, target)
         local inner_adjustment =
             coder._inner_assignment(sbase, tbase, inner)
         local synthcast = { _tag = "Ast.ExpCast", loc = node.loc,
+                            _written_cast = maybe3.unknown(),
                             exp = synthvar, target = tbase, _type = tbase,
                             _implicit_coercion = true,
                             _adjustment = inner_adjustment }
@@ -3122,6 +3124,7 @@ function codeexp_dispatch(ctx, node, iscondition, target)
         if inner.kind ~= "identity" then
             converted = {
                 _tag = "Ast.ExpCast",
+                _written_cast = maybe3.unknown(),
                 loc = node.loc,
                 exp = node.exp,
                 target = tbase,
@@ -3170,6 +3173,7 @@ function codeexp_dispatch(ctx, node, iscondition, target)
         if inner.kind ~= "identity" then
             converted = {
                 _tag = "Ast.ExpCast",
+                _written_cast = maybe3.unknown(),
                 loc = node.loc,
                 exp = synthvar,
                 target = node._type,
@@ -3322,8 +3326,8 @@ end
 
 function codeforeignexp(ctx, node, target)
     local tag = node._tag
-    if tag == "Ast.ExpCast" and node._written_cast
-       and node._written_cast.op == "current_module" then
+    if tag == "Ast.ExpCast" and (node._written_cast and node._written_cast.tag == "just")
+       and maybe3.get_checked(node._written_cast, "written cast").op == "current_module" then
         -- The marker is not an ordinary first-class source value. Preserve
         -- the checker-owned cast instead of peeling it for C operand lowering.
         return codeexp(ctx, node)

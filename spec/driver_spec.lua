@@ -837,13 +837,13 @@ describe("Array compiled-interface validation", function()
     end
 
     it("round-trips all three canonical Array qualifiers", function()
-        for _, qualifier in ipairs({ false, true, "maybe" }) do
-            local array = types.Array(types.Boolean(), qualifier)
+        for _, qualifier in ipairs({ "no", "yes", "maybe" }) do
+            local array = types.Array(types.Boolean(), { tag = qualifier })
             for _, typ in ipairs({
                 array,
                 types.Option(array),
                 types.Map(types.String(), array),
-                types.Array(array, false),
+                types.Array(array, {tag="no"}),
             }) do
                 local original = variable_module(typ)
                 assert.is_true(driver.validate_module_interface(
@@ -882,16 +882,16 @@ describe("Array compiled-interface validation", function()
             types.serialize(original), "test", "checked maybe-const metadata")
         assert.truthy(decoded, decode_error)
         assert.is_true(types.equals(original, decoded))
-        assert.equal("maybe", decoded.members.Box.type.fields[1].type.isconst)
-        assert.equal("maybe", decoded.type_members.View.fields[1].type.isconst)
-        assert.equal("maybe", decoded.members.identity.type.params[1].isconst)
-        assert.equal("maybe", decoded.members.optional.type.rettypes[1].base.isconst)
+        assert.equal("maybe", decoded.members.Box.type.fields[1].type.isconst.tag)
+        assert.equal("maybe", decoded.type_members.View.fields[1].type.isconst.tag)
+        assert.equal("maybe", decoded.members.identity.type.params[1].isconst.tag)
+        assert.equal("maybe", decoded.members.optional.type.rettypes[1].base.isconst.tag)
     end)
 
     it("rejects absent and malformed Array qualifiers in raw metadata", function()
         for _, qualifier in ipairs({
-            "nil", "0", "1", '"false"', '"true"', '"Maybe"',
-            '"mutable"', "{}",
+            "nil", "false", "true", '"maybe"', "0", "1", '"false"', '"true"', '"Maybe"',
+            '"mutable"', "{}", '{tag="unknown"}', '{tag="no", extra=true}',
         }) do
             -- Raw descriptor tables bypass Array's constructor check and must
             -- still be rejected by the compiled-interface validator.
@@ -913,7 +913,7 @@ describe("Array compiled-interface validation", function()
     end)
 
     it("keeps module-variable const qualifiers boolean", function()
-        local modtype = variable_module(types.Array(types.Boolean(), "maybe"))
+        local modtype = variable_module(types.Array(types.Boolean(), {tag="maybe"}))
         modtype.members.items.isconst = "maybe"
         local ok, err = driver.validate_module_interface(modtype, modname)
         assert.is_nil(ok)
@@ -937,7 +937,7 @@ describe("portable C99 compiled-interface validation", function()
                 types.Function(
                     param and { param } or {},
                     rettype and { rettype } or {},
-                    false, false, false),
+                    false, nil, nil),
                 param and { "item" } or {}),
         })
     end
@@ -954,7 +954,7 @@ describe("portable C99 compiled-interface validation", function()
         local callback = types.CPointer(types.CFunction({
             types.CPointer(types.CVoid(), { "const" }),
             cint,
-        }, types.CVoid(), false, false), {})
+        }, types.CVoid(), false, nil), {})
         assert.is_true(driver.validate_module_interface(
             function_module(callback, callback), modname))
         assert.is_true(driver.validate_module_interface(
@@ -971,7 +971,7 @@ describe("portable C99 compiled-interface validation", function()
     it("round-trips C function pointers in TValue-backed slots", function()
         local cint = types.CInteger("int", true, 3, 32)
         local callback = types.CPointer(types.CFunction(
-            { cint }, cint, false, false), {})
+            { cint }, cint, false, nil), {})
 
         local modules = { variable_module(callback) }
 
@@ -981,7 +981,7 @@ describe("portable C99 compiled-interface validation", function()
         local record = types.Record(
             record_name, { record_field }, {}, {}, 2)
         modules[#modules + 1] = types.Module(modname, {
-            types.ModuleMember(modname, "Box", record, false),
+            types.ModuleMember(modname, "Box", record, nil),
         })
 
         local union_name = modname .. ".Choice"
@@ -992,10 +992,10 @@ describe("portable C99 compiled-interface validation", function()
         local union = types.Union(union_name, { variant }, {
             present = types.StaticMethod(
                 union_name, "present", { callback },
-                { types.Nominal(union_name) }, false, false, {"value"}),
+                { types.Nominal(union_name) }, nil, nil, {"value"}),
         }, {}, 1)
         modules[#modules + 1] = types.Module(modname, {
-            types.ModuleMember(modname, "Choice", union, false),
+            types.ModuleMember(modname, "Choice", union, nil),
         })
 
         local interface_name = modname .. ".View"
@@ -1024,7 +1024,7 @@ describe("portable C99 compiled-interface validation", function()
         local cint = types.CInteger("int", true, 3, 32)
         local function callback(param)
             return variable_module(types.CPointer(types.CFunction(
-                { param }, cint, false, false), {}))
+                { param }, cint, false, nil), {}))
         end
         reject(callback(types.CVoid()),
             "portable C function parameter has an invalid shape")
@@ -1033,7 +1033,7 @@ describe("portable C99 compiled-interface validation", function()
         reject(callback(types.Integer()),
             "portable C function parameter has an invalid shape")
         reject(variable_module(types.CPointer(types.CFunction(
-            { cint }, types.Integer(), false, false), {})),
+            { cint }, types.Integer(), false, nil), {})),
             "portable C function return has an invalid shape")
         reject(variable_module(types.CPointer(types.Integer(), {})),
             "portable C pointer has a noncanonical shape")
@@ -1061,7 +1061,7 @@ describe("portable C99 compiled-interface validation", function()
         reject(variable_module(private),
             "type graph contains compiler-only source state")
 
-        local oldstyle = types.CFunction({}, types.CVoid(), false, false)
+        local oldstyle = types.CFunction({}, types.CVoid(), false, nil)
         oldstyle._paramstyle = "oldstyle"
         reject(variable_module(types.CPointer(oldstyle, {})),
             'Type.CFunction contains unexpected field "_paramstyle"')
@@ -2303,12 +2303,12 @@ describe("compiler module loader", function()
 
     local function numeric_embedded_module(name, profile)
         local lua_state = types.CPointer(types.CStruct(
-            "lua_State", "lua_State", false, {}, false, false), {})
+            "lua_State", "lua_State", nil, {}, false, false), {})
         local callback = types.CPointer(types.CFunction(
-            { lua_state }, profile.integers.int.type, false, false), {})
+            { lua_state }, profile.integers.int.type, false, nil), {})
         local function member(member_name, result)
             return types.ModuleMember(name, member_name,
-                types.Function({}, { result }, false, false, false), {})
+                types.Function({}, { result }, false, nil, nil), {})
         end
         return types.Module(name, {
             member("callback", callback),
@@ -2320,7 +2320,7 @@ describe("compiler module loader", function()
     local function result_module(name, result_type)
         return types.Module(name, {
             types.ModuleMember(name, "answer",
-                types.Function({}, { result_type }, false, false, false),
+                types.Function({}, { result_type }, false, nil, nil),
                 {}),
         })
     end
@@ -4068,8 +4068,8 @@ describe("compiler module loader", function()
             return {
                 _tag = "Type.CStruct",
                 cname = { "outer", "inner" },
-                tagname = false,
-                typedef = false,
+                tagname = nil,
+                typedef = nil,
                 _c_tag_scope = "source_manifest_internal",
                 _ffi_scope = "source_manifest_internal",
                 _c_origin_header = origin,
@@ -4315,7 +4315,7 @@ end
             local second = shared and first or { _tag = "Type.Integer" }
             local member = types.ModuleMember(name, "hidden",
                 types.Function({ first, second }, { first },
-                    false, false, false), { "left", "right" })
+                    false, nil, nil), { "left", "right" })
             member.islocal = true
             return source_manifest(source_entry(name,
                 source_module(name, {}, {}, { member })))
@@ -4327,7 +4327,7 @@ end
     function()
         local name = "source_manifest_aggregate_origin"
         local aggregate = types.CStruct(
-            "struct hidden", "hidden", false, {}, true, false)
+            "struct hidden", "hidden", nil, {}, true, false)
         local entry = source_entry(name,
             source_module(name, {}, {}, {}, { Hidden = aggregate }))
         local manifest, err = driver.serialize_source_interface(entry)
@@ -4380,18 +4380,18 @@ end
             local cvoid = cmetadata(types.CVoid())
             local aggregate_fields = {}
             local aggregate = cmetadata(types.CStruct(
-                "struct source_node", "source_node", false,
+                "struct source_node", "source_node", nil,
                 aggregate_fields, true, false))
             aggregate._c_tag_scope = name
             local aggregate_pointer = cmetadata(types.CPointer(
                 aggregate, { "const" }))
             local recursive_field = cmetadata(types.CField(
-                aggregate, "next", aggregate_pointer, false, false))
+                aggregate, "next", aggregate_pointer, nil, false))
             aggregate_fields[1] = recursive_field
             aggregate_fields.next = recursive_field
 
             local aggregate_union = cmetadata(types.CUnion(
-                "union source_choice", "source_choice", false,
+                "union source_choice", "source_choice", nil,
                 {}, true))
             aggregate_union._c_tag_scope = name
             local carray = cmetadata(types.CArray(cint, {
@@ -4403,30 +4403,30 @@ end
                 "source_count", cint, { "const" }))
             local cowned = cmetadata(types.COwned(aggregate, false))
             local cfunction = cmetadata(types.CFunction(
-                { aggregate_pointer, carray, ctypedef }, cint, false, false))
+                { aggregate_pointer, carray, ctypedef }, cint, false, nil))
             cfunction._paramstyle = "prototype"
             cfunction._return_declaration_qualifiers = { "const" }
 
             local callable_scope = types.GenericScope(
-                name, false, "identity", "callable", "function")
+                name, nil, "identity", "callable", "function")
             local callable_parameter = types.Parameter(
-                callable_scope, 1, "T", false)
-            local callable_type_parameter = types.TypeParameter("T", false)
+                callable_scope, 1, "T", nil)
+            local callable_type_parameter = types.TypeParameter("T", nil)
             local generic_callable = types.ModuleMember(
                 name, "identity",
                 types.FunctionScheme(callable_scope,
                     { callable_type_parameter },
                     types.Function(
                         { callable_parameter }, { callable_parameter },
-                        false, false, false)),
+                        false, nil, nil)),
                 { "item" })
 
             local nominal_name = name .. ".Hidden"
             local nominal_scope = types.GenericScope(
-                name, nominal_name, false, "owner", "record")
+                name, nominal_name, nil, "owner", "record")
             local nominal_parameter = types.Parameter(
-                nominal_scope, 1, "T", false)
-            local nominal_type_parameter = types.TypeParameter("T", false)
+                nominal_scope, 1, "T", nil)
+            local nominal_type_parameter = types.TypeParameter("T", nil)
             local field = types.Field(
                 nominal_name, "payload", nominal_parameter, 0, false)
             field.islocal = true
@@ -4435,20 +4435,20 @@ end
             local build = types.StaticMethod(
                 nominal_name, "build", { nominal_parameter },
                 { types.Nominal(nominal_name, { nominal_parameter }) },
-                false, false, { "payload" })
+                nil, nil, { "payload" })
             build.islocal = true
             local create = types.StaticMethod(
                 nominal_name, "create", {},
                 { types.Nominal(nominal_name, { nominal_parameter }) },
-                false, false, {})
+                nil, nil, {})
             create.islocal = true
             local read = types.Method(
                 nominal_name, "read", {}, { nominal_parameter },
-                false, false, {})
+                nil, nil, {})
             read.islocal = true
             local replace = types.Method(
                 nominal_name, "replace", { nominal_parameter },
-                { nominal_parameter }, false, false, { "payload" })
+                { nominal_parameter }, nil, nil, { "payload" })
             replace.islocal = true
             local functions, methods = {}, {}
             if reverse then
@@ -4467,7 +4467,7 @@ end
                 nominal_scope, { nominal_type_parameter })
             nominal.islocal = true
             local nominal_member = types.ModuleMember(
-                name, "Hidden", nominal, false)
+                name, "Hidden", nominal, nil)
 
             local visible_name = name .. ".Visible"
             local visible_field = types.Field(
@@ -4481,7 +4481,7 @@ end
             local visible = types.Record(
                 visible_name, visible_fields, {}, {}, 2)
             local public_members = {
-                types.ModuleMember(name, "Visible", visible, false),
+                types.ModuleMember(name, "Visible", visible, nil),
             }
 
             local foreign = types.ModuleMember(
@@ -4490,7 +4490,7 @@ end
             foreign._foreign_source = true
 
             local alias = types.GenericAlias(
-                name, "Alias", true, nominal_name, false,
+                name, "Alias", true, nominal_name, nil,
                 nominal_scope, { nominal_type_parameter })
             local aliases = {}
             local alias_entries = {
@@ -5285,7 +5285,7 @@ end
     function()
         local compiled_provider = types.Module("provider", {
             types.ModuleMember("provider", "answer",
-                types.Function({}, { types.Integer() }, false, false, false),
+                types.Function({}, { types.Integer() }, false, nil, nil),
                 {}),
         })
         cache_dynamic_provider(binary .. "/provider.so", {
@@ -5583,7 +5583,7 @@ end
         local provider_type = types.Module("provider", {
             types.ModuleMember("provider", "answer",
                 types.Function({}, { types.Integer() },
-                    false, false, false), {}),
+                    false, nil, nil), {}),
         })
         local filename = root .. "/dirty.titan"
         local descriptor = {
@@ -5653,7 +5653,7 @@ end
         local cached = types.Module("provider", {
             types.ModuleMember("provider", "cached_answer",
                 types.Function({}, { types.Integer() },
-                    false, false, false), {}),
+                    false, nil, nil), {}),
         })
         local filename = root .. "/provider-generated.titan"
         local loader = driver.defaultloader({}, {
@@ -7883,7 +7883,7 @@ end
     function()
         local compiled = types.Module("cached", {
             types.ModuleMember("cached", "answer",
-                types.Function({}, { types.Integer() }, false, false, false),
+                types.Function({}, { types.Integer() }, false, nil, nil),
                 {}),
         })
         local imported = {

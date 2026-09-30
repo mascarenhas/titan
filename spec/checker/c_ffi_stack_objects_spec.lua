@@ -366,9 +366,9 @@ describe("automatic C objects and fixed arrays", function()
                 stats[4].callexp._c_mutated_decls)
             assert.same({vector},
                 stats[5].callexp._c_mutated_decls)
-            assert.is_false(
+            assert.is_nil(
                 stats[6].callexp._c_mutated_decls)
-            assert.is_false(
+            assert.is_nil(
                 stats[7].callexp._c_mutated_decls)
             assert.same({point},
                 stats[8].callexp._c_mutated_decls)

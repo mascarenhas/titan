@@ -36,7 +36,7 @@ describe("contextual calls through value (typechecker)", function()
         local expected = types.Function(
             { types.Integer(), types.String() },
             { types.Integer(), types.Option(types.String()) },
-            false, false, false)
+            false, nil, nil)
 
         assert.truthy(call._contextual_value_call)
         assert.same("Ast.ExpCast", call.exp._tag)
@@ -133,7 +133,7 @@ describe("contextual calls through value (typechecker)", function()
         local array = find_function(tree, "collect").block.stats[1]
             ._result_adjustment.fixed[1]
         local collect_call = array._positional_adjustment.open_source
-        assert.same(types.Function({}, {}, false, false, types.Integer()),
+        assert.same(types.Function({}, {}, false, nil, types.Integer()),
             collect_call._callee_type)
         assert.same("open", collect_call._flex_result_demand)
         assert.same(types.Integer(), collect_call._open_results.source_type)
@@ -157,7 +157,7 @@ describe("contextual calls through value (typechecker)", function()
         local stat = find_function(tree, "collect").block.stats[1]
         local array = stat._result_adjustment.fixed[1]
         local call = array._positional_adjustment.open_source
-        assert.same(types.Array(types.Value(), false), stat.decls[1]._type)
+        assert.same(types.Array(types.Value(), {tag="no"}), stat.decls[1]._type)
         assert.same(types.Value(), call._callee_type.flexrettype)
         assert.same("open", call._flex_result_demand)
     end)
@@ -295,7 +295,7 @@ describe("contextual calls through value (typechecker)", function()
         end
 
         local scalar = types.Function({}, { types.Integer() },
-            false, false, false)
+            false, nil, nil)
         for _, name in ipairs({
             "left", "right", "named", "parenthesized", "map", "boxed",
         }) do
@@ -307,11 +307,11 @@ describe("contextual calls through value (typechecker)", function()
 
         local fixed = contextual_call("fixed")
         assert.same(types.Function({},
-            { types.Integer(), types.Integer() }, false, false, false),
+            { types.Integer(), types.Integer() }, false, nil, nil),
             fixed._callee_type)
         for _, name in ipairs({ "open", "array" }) do
             local open = contextual_call(name)
-            assert.same(types.Function({}, {}, false, false, types.Integer()),
+            assert.same(types.Function({}, {}, false, nil, types.Integer()),
                 open._callee_type)
             assert.same("open", open._flex_result_demand)
             assert.same(types.Integer(), open._open_results.source_type)
@@ -361,20 +361,20 @@ describe("contextual calls through value (typechecker)", function()
         local paren = array._positional_adjustment.tail_scalars[1]
         assert.equal("Ast.ExpAdjust", paren._tag)
         assert.same(types.Function({}, { types.Integer() },
-            false, false, false), paren.exp._callee_type)
+            false, nil, nil), paren.exp._callee_type)
 
         local keyed = peel(find_function(tree, "key")
             .block.stats[1].exps[1])
         local index = peel(keyed.args.args[1])
         local key_call = index.var.exp2
         assert.same(types.Function({}, { types.String() },
-            false, false, false), key_call._callee_type)
+            false, nil, nil), key_call._callee_type)
 
         local open = peel(find_function(tree, "open_input")
             .block.stats[1].exps[1])
         local callback = peel(open.args.args[1])
         assert.same(types.Function({}, { types.Integer() },
-            false, types.Value(), false), callback._callee_type)
+            false, types.Value(), nil), callback._callee_type)
         assert.is_true(callback._open_args.source ==
             callback._arg_adjustment.open_source)
         assert.same(types.Value(), callback._open_args.source_type)
@@ -467,7 +467,7 @@ describe("contextual calls through value (typechecker)", function()
         local outer = find_function(tree, "use").block.stats[1].exps[1]
         local inner = outer._arg_adjustment.open_source
 
-        assert.same(types.Function({}, {}, false, false, types.Value()),
+        assert.same(types.Function({}, {}, false, nil, types.Value()),
             inner._callee_type)
         assert.same("open", inner._flex_result_demand)
         assert.same(types.Value(), outer._callee_type.varargtype)
@@ -595,8 +595,8 @@ describe("contextual calls through value (typechecker)", function()
         local call = array._positional_adjustment.tail_scalars[1]
         assert.same("Ast.ExpCall", call._tag)
         assert.falsy(call._contextual_value_call)
-        assert.same(types.Function({}, { types.Integer() }, false, false,
-            false), call._callee_type)
+        assert.same(types.Function({}, { types.Integer() }, false, nil,
+            nil), call._callee_type)
         assert.same({ types.Integer() }, call._visible_types)
         assert.falsy(call._open_results)
         assert.falsy(array._positional_adjustment.open_source)
